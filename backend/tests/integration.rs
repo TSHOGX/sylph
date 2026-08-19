@@ -3,7 +3,7 @@
 mod common;
 
 use axum::http::{header, StatusCode};
-use common::{body_string, json_body, MockRunner, TestBackend};
+use common::{body_string, json_body, MockRunner, MockTraceDb, TestBackend};
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------- auth
@@ -656,4 +656,113 @@ async fn sse_reconnection_replays_journal_after_turn_finishes() {
         replayed_seqs.iter().all(|&seq| seq > 0),
         "reconnection included the bootstrap event (seq=0)"
     );
+}
+
+// -------------------------------------------------------------- search
+
+#[tokio::test]
+async fn search_requires_auth() {
+    let backend = TestBackend::start().await;
+
+    let response = backend.get("/api/v1/search?q=refactor").await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn search_reports_the_archive_unavailable_instead_of_failing() {
+    // The default harness points at a nonexistent binary, which is the same
+    // state as a machine without TraceDB installed. That is normal locally, so
+    // the route answers 200 and lets the UI say so rather than 5xx.
+    let backend = TestBackend::start().await;
+
+    let response = backend.get_authed("/api/v1/search?q=refactor").await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["available"], false);
+    assert_eq!(body["results"].as_array().unwrap().len(), 0);
+    assert!(
+        body["detail"].as_str().is_some_and(|d| !d.is_empty()),
+        "unavailable response carried no reason: {body}"
+    );
+}
+
+#[tokio::test]
+async fn search_surfaces_a_tracedb_error_as_unavailable() {
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::failing()).await;
+
+    let response = backend.get_authed("/api/v1/search?q=refactor").await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["available"], false);
+    assert!(
+        body["detail"].as_str().unwrap().contains("index is locked"),
+        "error detail lost: {body}"
+    );
+}
+
+#[tokio::test]
+async fn search_without_a_query_returns_empty_and_available() {
+    // An empty box is not an error, and it must not spawn TraceDB at all.
+    let backend = TestBackend::start().await;
+
+    for path in ["/api/v1/search?q=", "/api/v1/search?q=%20%20", "/api/v1/search"] {
+        let response = backend.get_authed(path).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+
+        let body = json_body(response).await;
+        assert_eq!(body["available"], true, "{path}");
+        assert_eq!(body["results"].as_array().unwrap().len(), 0, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn search_returns_hits_and_drops_ranking_internals() {
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_hits(json!([
+        {
+            "id": "claude:abc-123/main",
+            "agent": "claude",
+            "ask": "refactor the store layer",
+            "cwd": "/tmp/project",
+            "outcome": "completed",
+            "bestMatch": {"kind": "assistant", "snippet": "moved queries into store.rs"},
+            "hits": 4,
+            "startedAtMs": 1_700_000_000_000i64,
+            "lineageRootId": "claude:abc-123",
+            // Ranking mechanics TraceDB owns; the API must not leak them.
+            "score": 12.5,
+            "scoreBreakdown": {"bm25": 3.2}
+        }
+    ])))
+    .await;
+
+    let response = backend.get_authed("/api/v1/search?q=refactor").await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["available"], true);
+
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+
+    let hit = &results[0];
+    assert_eq!(hit["id"], "claude:abc-123/main");
+    assert_eq!(hit["agent"], "claude");
+    assert_eq!(hit["ask"], "refactor the store layer");
+    assert_eq!(hit["bestMatch"]["snippet"], "moved queries into store.rs");
+    assert_eq!(hit["lineageRootId"], "claude:abc-123");
+    assert!(hit["score"].is_null(), "leaked TraceDB scoring: {hit}");
+    assert!(hit["scoreBreakdown"].is_null(), "leaked breakdown: {hit}");
+    // Nothing local mirrors this archived session yet.
+    assert!(hit["sessionId"].is_null(), "unexpected sessionId: {hit}");
+}
+
+#[tokio::test]
+async fn search_clamps_an_absurd_limit() {
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_hits(json!([]))).await;
+
+    let response = backend.get_authed("/api/v1/search?q=a&limit=100000").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["available"], true);
 }

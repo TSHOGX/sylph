@@ -40,6 +40,18 @@ impl TestBackend {
 
     /// Start a backend whose runners directory contains exactly `runners`.
     pub async fn start_with_runners(runners: &[MockRunner]) -> Self {
+        Self::start_with(runners, None).await
+    }
+
+    /// Start a backend wired to a stub `trace-db api` process.
+    ///
+    /// The stub speaks the real line protocol so the client stays on its
+    /// production path: one JSON request per line in, one response line out.
+    pub async fn start_with_tracedb(tracedb: MockTraceDb) -> Self {
+        Self::start_with(&[MockRunner::success("mock")], Some(tracedb)).await
+    }
+
+    async fn start_with(runners: &[MockRunner], tracedb: Option<MockTraceDb>) -> Self {
         let temp = TempDir::new().expect("failed to create temp dir");
         let root = temp.path();
 
@@ -60,9 +72,12 @@ impl TestBackend {
             database_path: data_dir.join("live.db").display().to_string(),
             data_dir,
             runners_dir,
-            // Deliberately absent: TraceDB-dependent paths must degrade rather
-            // than make every test depend on an external binary.
-            tracedb_bin: root.join("nonexistent-trace-db"),
+            // Absent unless a test opts in: TraceDB-dependent paths must
+            // degrade rather than make every test depend on an external binary.
+            tracedb_bin: match &tracedb {
+                Some(stub) => stub.install(root),
+                None => root.join("nonexistent-trace-db"),
+            },
             cookie_secret: "test-secret-token".to_string(),
         };
 
@@ -351,6 +366,69 @@ fi
 # Consume stdin so the writer never blocks on a full pipe.
 cat >/dev/null
 {turn}"#
+        )
+    }
+}
+
+// ------------------------------------------------------------- mock TraceDB
+
+/// A stub `trace-db` binary for exercising archive-backed routes.
+pub struct MockTraceDb {
+    /// Emitted verbatim as the `result` of every `search` request.
+    search_result: String,
+    /// When true, answer `{"ok": false, ...}` instead of a result.
+    fails: bool,
+}
+
+impl MockTraceDb {
+    /// Returns `hits` (a JSON array literal) for any search query.
+    pub fn with_hits(hits: Value) -> Self {
+        Self {
+            search_result: hits.to_string(),
+            fails: false,
+        }
+    }
+
+    /// Answers every request with a protocol-level error.
+    pub fn failing() -> Self {
+        Self {
+            search_result: "[]".to_string(),
+            fails: true,
+        }
+    }
+
+    fn install(&self, root: &Path) -> PathBuf {
+        let path = root.join("mock-trace-db");
+        std::fs::write(&path, self.script()).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+
+        path
+    }
+
+    /// A line-protocol server: read a request line, write a response line.
+    /// Long-lived, because the client reuses the process across calls.
+    fn script(&self) -> String {
+        let response = if self.fails {
+            r#"{"ok": false, "result": {"error": "index is locked"}}"#.to_string()
+        } else {
+            format!(r#"{{"ok": true, "result": {}}}"#, self.search_result)
+        };
+
+        format!(
+            r#"#!/bin/sh
+set -eu
+
+while IFS= read -r _line; do
+  printf '%s\n' '{response}'
+done
+"#
         )
     }
 }

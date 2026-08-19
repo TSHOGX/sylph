@@ -47,6 +47,52 @@ struct Response {
     result: serde_json::Value,
 }
 
+/// The snippet TraceDB judged most relevant within a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BestMatch {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub snippet: Option<String>,
+}
+
+/// One lineage-collapsed search hit.
+///
+/// Deliberately a subset of what TraceDB returns: scoring internals
+/// (`score`, `scoreBreakdown`, `bm25`) are ranking mechanics with no meaning in
+/// the UI, and passing them through would couple this API to TraceDB's scoring
+/// implementation. Unknown fields are ignored, per the protocol's rule that new
+/// fields are additive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    /// TraceDB session id, e.g. `claude:uuid/agent-suffix`.
+    pub id: String,
+    pub agent: String,
+    /// Human-authored title when the agent recorded one; often absent.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The opening user request, which is what makes a hit recognizable.
+    #[serde(default)]
+    pub ask: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub outcome: Option<String>,
+    #[serde(default)]
+    pub best_match: Option<BestMatch>,
+    #[serde(default)]
+    pub hits: Option<u32>,
+    #[serde(default)]
+    pub started_at_ms: Option<i64>,
+    #[serde(default)]
+    pub ended_at_ms: Option<i64>,
+    /// Root of the fork lineage this session belongs to.
+    #[serde(default)]
+    pub lineage_root_id: Option<String>,
+}
+
 impl Client {
     pub fn new(bin_path: PathBuf) -> Self {
         Self {
@@ -69,6 +115,20 @@ impl Client {
     /// Stats: archive health and per-agent session counts.
     pub async fn stats(&self) -> Result<serde_json::Value, String> {
         self.call("stats", None, None, None).await
+    }
+
+    /// Search: lineage-collapsed session hits, best match first.
+    ///
+    /// `result` is a bare JSON array of hits (not an object), matching
+    /// `trace-db api`'s `{"op":"search"}` response.
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
+        let raw = self.call("search", Some(query), Some(limit), None).await?;
+        serde_json::from_value(raw).map_err(|e| format!("Unexpected search payload: {}", e))
+    }
+
+    /// Show: metadata and the normalized event stream for one session.
+    pub async fn show(&self, id: &str) -> Result<serde_json::Value, String> {
+        self.call("show", None, None, Some(id)).await
     }
 
     /// Unified call path: spawn the process if absent, serialize the request,

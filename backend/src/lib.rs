@@ -135,6 +135,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/sessions/{id}/turns",
             get(api::sessions::history).post(api::turns::create),
         )
+        .route("/api/v1/search", get(api::search::search))
         .route("/api/v1/turns/{id}", get(api::turns::get))
         .route("/api/v1/turns/{id}/events", get(api::turns::events))
         .route("/api/v1/turns/{id}/stop", post(api::turns::stop))
