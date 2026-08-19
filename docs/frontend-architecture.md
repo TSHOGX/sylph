@@ -4,6 +4,23 @@ Sylph Web frontend is a Next.js 16 application providing a local-first UI for mu
 
 ## Design Philosophy
 
+**PRIMARY DIRECTIVE: DeepSeek Harness is the Reference Implementation**
+
+When implementing Phase 2, **directly reference DeepSeek Harness source code**:
+
+```
+/Users/hsw/Workspace/oss/deepseek-harness/repo/apps/web/
+/Users/hsw/Workspace/oss/deepseek-harness/repo/packages/web/
+```
+
+**Implementation rules:**
+1. **When uncertain about UI/UX details** → Read DSH source code, do not guess
+2. **After implementing a feature** → Compare with DSH source to verify approach
+3. **Only deviate from DSH** when you are **highly confident** your design is superior
+4. **Default to DSH's patterns** — component structure, state management, event handling, styling
+
+**Rationale:** DSH is a proven, production-ready coding-agent interface. Reinventing patterns wastes time and introduces risk. Copy what works, optimize only what Sylph requires differently (dual-origin sessions, TraceDB integration, lifecycle indicators).
+
 **Core principles:**
 1. **Origin-aware UI** — Visual distinction between Sylph-managed and native sessions
 2. **Real-time first** — SSE-driven updates with optimistic rendering
@@ -11,20 +28,25 @@ Sylph Web frontend is a Next.js 16 application providing a local-first UI for mu
 4. **Accessibility** — WCAG 2.1 AA compliance, keyboard navigation, screen reader support
 5. **Performance** — Virtual scrolling for large trajectories, code splitting, <200KB bundle
 
-**Reference inspiration from DeepSeek Harness:**
-- Clean conversation canvas with message bubbles
-- Left rail for session/conversation list
-- Inline tool call results with syntax highlighting
-- Thinking blocks (collapsible)
-- Streaming text with smooth incremental rendering
-- Input area with attachment support
+**What to copy from DeepSeek Harness:**
+- Overall layout structure (left rail + canvas)
+- Conversation canvas component hierarchy
+- Message bubble rendering (user/assistant/thinking/tool_call)
+- Streaming text animation patterns
+- Input area with attachment handling
+- Thinking block collapse/expand behavior
+- Tool call result formatting
+- Code block syntax highlighting setup
+- Error state UI patterns
+- Loading skeleton designs
 
-**Sylph-specific optimizations:**
-- Dual-origin session indicators (green for Sylph, violet for native)
+**Sylph-specific additions (not in DSH):**
+- Dual-origin session indicators (🟢 Sylph / 🟣 Native)
 - Preservation policy warnings for native sessions
-- Per-session agent/model/effort display
-- Workspace context in session cards
-- TraceDB search integration
+- Lifecycle indicators (24h idle, 04:00 reset timing)
+- Per-session agent/model/effort flags in header
+- TraceDB search with deduplication
+- Session incarnation history (backend lifecycle tracking)
 
 ## Technology Stack
 
@@ -1110,6 +1132,53 @@ npm run dev
 Frontend: `http://localhost:3000`  
 Backend: `http://localhost:4317`
 
+### Implementation Checklist
+
+Before implementing any UI component or feature:
+
+1. **[ ] Read DSH source code first**
+   - Locate equivalent component in `/Users/hsw/Workspace/oss/deepseek-harness/repo/apps/web/`
+   - Study its structure, props, state management
+   - Note styling patterns and interaction handlers
+
+2. **[ ] Implement following DSH patterns**
+   - Copy component hierarchy if applicable
+   - Use similar state management approach
+   - Match animation/transition timing
+   - Mirror accessibility attributes
+
+3. **[ ] After implementation, compare with DSH**
+   - Open DSH source side-by-side
+   - Verify you haven't missed key patterns
+   - Check if DSH handles edge cases you missed
+   - Confirm styling consistency
+
+4. **[ ] Only deviate with justification**
+   - Document why your approach is better
+   - Verify Sylph-specific requirement (e.g., origin badges)
+   - Ensure no regression in UX quality
+
+**Example: Implementing ThinkingBlock**
+
+```sh
+# 1. Read DSH implementation
+code /Users/hsw/Workspace/oss/deepseek-harness/repo/apps/web/
+# Find thinking block component
+
+# 2. Note patterns:
+# - Collapse/expand with smooth animation
+# - Icon rotation on toggle
+# - Fade-in for content
+# - Keyboard accessibility (Space/Enter to toggle)
+
+# 3. Implement with same patterns in Sylph Web
+
+# 4. Compare after completion
+# - DSH uses framer-motion for animation
+# - Keyboard handler matches
+# - ARIA attributes present
+```
+
 ### API Proxy
 
 Next.js proxy routes to avoid CORS:
@@ -1161,23 +1230,45 @@ npm run start
 
 ### Week 4: Foundation
 
+- [ ] **Before starting: Read DSH `/apps/web/` structure**
 - [ ] Next.js project setup with TypeScript
-- [ ] Tailwind + Radix UI configuration
+- [ ] Tailwind + Radix UI configuration (match DSH color tokens)
 - [ ] API client with type safety
-- [ ] Session list page (`/`)
-- [ ] Conversation page (`/sessions/[id]`)
-- [ ] Basic layout (left rail + main canvas)
-- [ ] Session card components
+- [ ] Session list page (`/`) — **verify against DSH conversation list**
+- [ ] Conversation page (`/sessions/[id]`) — **verify against DSH chat page**
+- [ ] Basic layout (left rail + main canvas) — **match DSH layout proportions**
+- [ ] Session card components — **verify card structure with DSH**
 - [ ] TanStack Query setup
+- [ ] **Week 4 checkpoint: Compare all components with DSH source**
 
 ### Week 5: Streaming & Interaction
 
-- [ ] SSE connection manager
-- [ ] Event stream rendering
-- [ ] Message input with attachments
-- [ ] Create session dialog
-- [ ] Thinking block (collapsible)
-- [ ] Tool call rendering with syntax highlighting
+- [ ] SSE connection manager — **check DSH SSE/WebSocket handling**
+- [ ] Event stream rendering — **verify delta accumulation matches DSH**
+- [ ] Message input with attachments — **match DSH input area behavior**
+- [ ] Create session dialog — **verify form validation with DSH**
+- [ ] Thinking block (collapsible) — **MUST match DSH animation timing**
+- [ ] Tool call rendering with syntax highlighting — **verify Shiki config with DSH**
+- [ ] Origin badges and warnings (Sylph-specific)
+- [ ] Error boundaries — **match DSH error fallback UI**
+- [ ] Loading states — **verify skeleton design with DSH**
+- [ ] **Week 5 checkpoint: Side-by-side comparison with running DSH instance**
+
+### Final Verification (Before Phase 2 Exit)
+
+- [ ] **Open DSH web app locally and Sylph Web side-by-side**
+- [ ] **Verify UI patterns match:**
+  - [ ] Layout proportions (rail width, header height, input area)
+  - [ ] Message bubble styling and spacing
+  - [ ] Thinking block collapse/expand animation
+  - [ ] Tool call result formatting
+  - [ ] Code syntax highlighting theme
+  - [ ] Loading skeleton structure
+  - [ ] Error state illustrations
+  - [ ] Input area behavior (focus, resize, attachment preview)
+- [ ] **Document any deviations with justification**
+- [ ] **If uncertain whether deviation is improvement, revert to DSH pattern**
+
 - [ ] Origin badges and warnings
 - [ ] Error boundaries
 - [ ] Loading states
