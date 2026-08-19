@@ -80,6 +80,116 @@ Before implementation:
 2. Verify behavior against source or a spike. Never turn an unverified assumption into an invariant.
 3. If several materially different shapes remain viable, research reference repositories, dependency source, and prior art. Ask subagents for independent and contradictory reads when useful; measure with a disposable spike where behavior is uncertain.
 
+## Design Decision Process
+
+**As Sylph Web enters continuous development, any uncertain design decision requires research:**
+
+### When to Research
+
+Research is required when you encounter:
+- Architectural patterns (state management, error handling, caching strategies)
+- Performance optimization (database indexing, query patterns, streaming protocols)
+- Security considerations (authentication flows, input validation, rate limiting)
+- User experience patterns (loading states, error recovery, accessibility)
+- Protocol implementations (SSE reconnection, WebSocket fallbacks, HTTP retries)
+- Third-party integrations (TraceDB protocol, runner discovery, external APIs)
+
+**Do NOT research:** basic language syntax, standard library usage, or trivial implementation details.
+
+### Research Workflow
+
+1. **Define the problem clearly**
+   - What are you trying to solve?
+   - What are the constraints (performance, compatibility, security)?
+   - What is the expected outcome?
+
+2. **Search for established patterns:**
+   - **GitHub:** repos with high stars in the relevant domain (Rust web frameworks, Next.js apps, SQLite patterns)
+   - **Crates.io / npm:** popular, actively-maintained libraries
+   - **Official documentation:** Rust docs, Next.js docs, Axum guides, SQLx examples
+   - **Production implementations:** read source code of mature projects (e.g., how does Zed handle IPC? How does Linear handle optimistic updates?)
+
+3. **Study mature open-source practices:**
+   - How does Axum recommend structuring error types?
+   - How does TanStack Query handle cache invalidation?
+   - How does SQLite's own documentation recommend indexing for this query pattern?
+   - How does TraceDB implement its JSON protocol?
+
+4. **Document findings in code or specs:**
+   - Add comments explaining why you chose approach X
+   - Reference the source (link to GitHub repo, docs, article)
+   - Note tradeoffs considered
+
+5. **Implement based on proven patterns:**
+   - Prefer battle-tested libraries over custom implementations
+   - Adopt community conventions unless strong evidence suggests otherwise
+   - Default to the simplest solution that meets requirements
+
+### Example: Rust Backend Research
+
+```rust
+// Problem: How to handle database connection pooling?
+
+// Research:
+// 1. Read SQLx documentation on connection pools
+// 2. Check Axum examples for pool management with state
+// 3. Search GitHub for "axum sqlx pool" → find common patterns
+// 4. Study realworld-axum-sqlx example repo
+
+// Decision: Use SQLx's built-in Pool, shared via Axum's State
+// Rationale: Proven pattern, minimal dependencies, good performance
+// Reference: https://github.com/tokio-rs/axum/blob/main/examples/sqlx-postgres/src/main.rs
+
+pub type DbPool = sqlx::SqlitePool;
+
+pub async fn create_pool(database_url: &str) -> Result<DbPool> {
+    SqlitePoolOptions::new()
+        .max_connections(5)  // Conservative for single-user local app
+        .connect(database_url)
+        .await
+        .map_err(|e| Error::Database(e.to_string()))
+}
+```
+
+### Example: Frontend Research
+
+```typescript
+// Problem: How to handle optimistic updates with rollback?
+
+// Research:
+// 1. TanStack Query docs: "Optimistic Updates" section
+// 2. GitHub: search "tanstack query optimistic rollback"
+// 3. Real apps: how does Linear handle failed mutations?
+// 4. Articles: Kent C. Dodds on optimistic UI patterns
+
+// Decision: Use TanStack Query's onMutate + onError rollback
+// Rationale: Built-in pattern, handles edge cases, well-tested
+// Reference: https://tanstack.com/query/latest/docs/react/guides/optimistic-updates
+
+const sendMessage = useMutation({
+  mutationFn: api.turns.create,
+  onMutate: async (variables) => {
+    await queryClient.cancelQueries(['sessions', sessionId])
+    const previous = queryClient.getQueryData(['sessions', sessionId])
+    queryClient.setQueryData(['sessions', sessionId], /* optimistic state */)
+    return { previous }  // Context for rollback
+  },
+  onError: (err, variables, context) => {
+    queryClient.setQueryData(['sessions', sessionId], context.previous)
+  }
+})
+```
+
+### When NOT to Follow Established Patterns
+
+Deviate from common patterns only when:
+- Sylph's unique requirements (dual-origin sessions, TraceDB integration) demand it
+- Performance profiling reveals a bottleneck the standard pattern doesn't address
+- Security considerations require a stricter approach
+- You have benchmarks showing measurable improvement
+
+**Document the deviation clearly** — future maintainers need to understand why you went off the beaten path.
+
 ## Language Requirements
 
 **Code, documentation, and commit messages: English only.**

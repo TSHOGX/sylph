@@ -21,6 +21,67 @@ When implementing Phase 2, **directly reference DeepSeek Harness source code**:
 
 **Rationale:** DSH is a proven, production-ready coding-agent interface. Reinventing patterns wastes time and introduces risk. Copy what works, optimize only what Sylph requires differently (dual-origin sessions, TraceDB integration, lifecycle indicators).
 
+---
+
+**GENERAL PRINCIPLE: Research Before Designing**
+
+As Sylph Web enters continuous development, **any uncertain design decision requires a research phase**:
+
+1. **Identify the problem domain** — What are you trying to solve? (e.g., "efficient virtual scrolling", "SSE reconnection strategy", "toast notification UX")
+
+2. **Search for established patterns:**
+   - GitHub: search repos with high stars in the relevant domain
+   - NPM/npm trends: find popular, actively-maintained libraries
+   - Articles: Dev.to, Medium, official docs for best practices
+   - Real implementations: read source code of production apps
+
+3. **Study mature open-source practices:**
+   - How does TanStack Query handle cache invalidation?
+   - How does Radix UI implement accessible dialogs?
+   - How does Vercel's Next.js app structure its API routes?
+   - How does Linear/GitHub handle optimistic updates?
+
+4. **Document your findings:**
+   - What patterns did you find?
+   - Which libraries/approaches are production-proven?
+   - What are the tradeoffs?
+
+5. **Refine your design** based on research:
+   - Adopt proven patterns unless you have strong evidence for deviation
+   - Prefer libraries over custom implementations when quality is equal
+   - Document why you chose approach X over Y
+
+**Example research workflow:**
+
+```
+Problem: "How should we handle SSE reconnection with exponential backoff?"
+
+Research:
+1. Search: "SSE reconnection pattern" + "EventSource reconnection"
+2. Find: eventsource library on npm (3M weekly downloads)
+3. Read: source code shows exponential backoff with jitter
+4. Find: Mozilla MDN docs on EventSource best practices
+5. Check: How does DSH handle reconnection? (read their code)
+
+Conclusion: Use exponential backoff (1s, 2s, 4s, 8s, max 30s) with
+UI feedback after 3s. Pattern proven in both eventsource lib and DSH.
+```
+
+**When to research:**
+- ❌ Don't research: "How to create a React component" (too basic)
+- ✅ Do research: "How to virtualize 10K+ items efficiently"
+- ✅ Do research: "Best pattern for optimistic mutations with rollback"
+- ✅ Do research: "How to handle file upload progress with SSE"
+- ✅ Do research: "Accessible keyboard navigation in complex lists"
+
+**Why this matters:**
+- Saves time by avoiding reinventing solved problems
+- Reduces bugs by using battle-tested patterns
+- Improves quality by learning from mature implementations
+- Builds team knowledge through documented research
+
+---
+
 **Core principles:**
 1. **Origin-aware UI** — Visual distinction between Sylph-managed and native sessions
 2. **Real-time first** — SSE-driven updates with optimistic rendering
