@@ -36,8 +36,6 @@ pub struct HealthResponse {
 #[serde(rename_all = "camelCase")]
 pub struct TraceDbHealth {
     available: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
 }
 
 /// GET /api/v1/health
@@ -47,16 +45,13 @@ pub struct TraceDbHealth {
 /// reports only availability, never counts or paths.
 pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>> {
     let schema_version = state.store.schema_version().await.unwrap_or(0);
-    let tracedb = state.tracedb.probe().await;
+    let available = state.tracedb.probe().await;
 
     Ok(Json(HealthResponse {
         ok: true,
         api_version: "1".to_string(),
         schema_version,
-        tracedb: TraceDbHealth {
-            available: tracedb.is_some(),
-            version: tracedb,
-        },
+        tracedb: TraceDbHealth { available },
     }))
 }
 
@@ -70,6 +65,10 @@ pub struct DiagnosticsResponse {
     turns: HashMap<String, i64>,
     agents: Vec<String>,
     broken_runners: HashMap<String, String>,
+    /// Archive-wide totals, or `null` when TraceDB is unreachable. Present
+    /// here rather than in `/health` because it is a count, and `/health` is
+    /// unauthenticated.
+    tracedb: Option<crate::tracedb::ArchiveCounts>,
     /// Turns with a live child process right now. May be lower than the journal's
     /// running count if a process died without the reaper having recorded it yet.
     active_processes: usize,
@@ -115,6 +114,7 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         turns,
         agents,
         broken_runners,
+        tracedb: state.tracedb.archive_counts().await,
         active_processes: state.supervisor.active_turn_count().await,
     }))
 }

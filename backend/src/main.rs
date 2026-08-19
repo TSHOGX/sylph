@@ -25,12 +25,16 @@ async fn main() -> anyhow::Result<()> {
     let port = config.port;
     let state = AppState::build(config).await?;
 
-    if let Some(version) = state.tracedb.probe().await {
-        tracing::info!("TraceDB available: {}", version);
-    } else {
-        tracing::warn!(
-            "TraceDB unavailable; native session import and cross-agent search will fail"
-        );
+    match state.tracedb.archive_counts().await {
+        Some(counts) => tracing::info!(
+            "TraceDB available: {} archived sessions, {} events",
+            counts.sessions.unwrap_or(0),
+            counts.events.unwrap_or(0)
+        ),
+        None => tracing::warn!(
+            "TraceDB unavailable; native session import and archive search will return \
+             no results. Set TRACEDB_BIN if trace-db is installed elsewhere."
+        ),
     }
 
     let app = router(state);
@@ -38,7 +42,21 @@ async fn main() -> anyhow::Result<()> {
     // Loopback only. Binding elsewhere requires the authentication and
     // threat-model change described in docs/architecture.md.
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        // A hand-started local server hits this constantly: an instance from an
+        // earlier run is still holding the port. The bare OS message ("Address
+        // already in use (os error 48)") does not say which port or what to do
+        // about it.
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            anyhow::anyhow!(
+                "Port {port} is already in use. Another Sylph Web backend is probably \
+                 still running — check with `lsof -ti :{port}`, then stop it or start \
+                 this one on a different port with SYLPH_WEB_PORT."
+            )
+        } else {
+            anyhow::anyhow!("Could not bind {addr}: {e}")
+        }
+    })?;
     tracing::info!("Listening on http://{}", addr);
 
     axum::serve(listener, app).await?;

@@ -995,3 +995,55 @@ async fn session_list_rejects_an_unknown_origin() {
         assert_eq!(response.status(), StatusCode::OK, "{origin} rejected");
     }
 }
+
+// ------------------------------------------------- archive availability
+
+#[tokio::test]
+async fn health_reports_the_archive_available_when_it_answers() {
+    // Regression: availability was keyed on a `version` field that the TraceDB
+    // protocol does not define, so a reachable archive always reported
+    // unavailable and /health contradicted a search that was working. The stub
+    // returns no version field, which is exactly the real payload's shape.
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_hits(json!([]))).await;
+
+    let health = json_body(backend.get("/api/v1/health").await).await;
+    assert_eq!(
+        health["tracedb"]["available"], true,
+        "reachable archive reported unavailable: {health}"
+    );
+
+    // The unauthenticated endpoint must not leak counts or paths.
+    assert!(health["tracedb"].get("sessions").is_none());
+    assert!(health["tracedb"].get("path").is_none());
+
+    let search = json_body(backend.get_authed("/api/v1/search?q=x").await).await;
+    assert_eq!(
+        search["available"], health["tracedb"]["available"],
+        "health and search disagree about the same archive"
+    );
+}
+
+#[tokio::test]
+async fn health_reports_the_archive_unavailable_when_absent() {
+    let backend = TestBackend::start().await;
+
+    let health = json_body(backend.get("/api/v1/health").await).await;
+    assert_eq!(health["ok"], true, "backend must stay healthy without TraceDB");
+    assert_eq!(health["tracedb"]["available"], false);
+
+    let search = json_body(backend.get_authed("/api/v1/search?q=x").await).await;
+    assert_eq!(search["available"], false);
+}
+
+#[tokio::test]
+async fn diagnostics_carries_archive_counts() {
+    let backend = TestBackend::start().await;
+
+    let body = json_body(backend.get_authed("/api/v1/diagnostics").await).await;
+    // Null rather than absent: an unreachable archive is a reportable state,
+    // distinct from a field the response forgot to include.
+    assert!(
+        body.get("tracedb").is_some() && body["tracedb"].is_null(),
+        "expected a null tracedb field: {body}"
+    );
+}

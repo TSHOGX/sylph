@@ -47,6 +47,16 @@ struct Response {
     result: serde_json::Value,
 }
 
+/// Archive-wide totals. Each count is optional because the protocol's fields
+/// are additive and a future server may omit or rename one; a missing count
+/// must not turn a reachable archive into an unreachable one.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveCounts {
+    pub sessions: Option<i64>,
+    pub events: Option<i64>,
+}
+
 /// The snippet TraceDB judged most relevant within a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,9 +117,27 @@ impl Client {
     /// A failed spawn or a failed stats request leaves the connection absent,
     /// so the next operation will try again. This implements lazy startup: if
     /// TraceDB is misconfigured, the backend still boots and serves sessions.
-    pub async fn probe(&self) -> Option<String> {
+    /// Whether the archive answers a `stats` request right now.
+    ///
+    /// Reachability is the successful round trip itself, not the presence of
+    /// any particular field. An earlier version keyed this on a `version` field
+    /// in the stats payload, which the protocol does not define — so a
+    /// perfectly healthy archive always reported unavailable, and the health
+    /// endpoint contradicted a search that was working.
+    pub async fn probe(&self) -> bool {
+        self.stats().await.is_ok()
+    }
+
+    /// Archive-wide counts for the authenticated diagnostics endpoint.
+    ///
+    /// Returns `None` when the archive is unreachable, which is the same
+    /// meaning [`Self::probe`] carries.
+    pub async fn archive_counts(&self) -> Option<ArchiveCounts> {
         let stats = self.stats().await.ok()?;
-        stats.get("version").and_then(|v| v.as_str()).map(str::to_string)
+        Some(ArchiveCounts {
+            sessions: stats.get("totalSessions").and_then(|v| v.as_i64()),
+            events: stats.get("totalEvents").and_then(|v| v.as_i64()),
+        })
     }
 
     /// Stats: archive health and per-agent session counts.
