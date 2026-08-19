@@ -132,7 +132,7 @@
 Before each phase completion:
 1. All deliverables implemented and tested
 2. Documentation updated
-3. ADRs written for major decisions
+3. Design decisions documented in relevant spec files
 4. Demo to stakeholders
 5. Commit history shows incremental progress
 

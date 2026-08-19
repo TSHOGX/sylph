@@ -124,9 +124,9 @@ cargo clippy
 - `docs/roadmap.md` — Product roadmap and release plan
 - `docs/api-design.md` — API design principles and endpoints
 - `docs/database-schema.md` — Database schema and migrations
-- `docs/adr/` — Architecture Decision Records
+- `docs/frontend-architecture.md` — Frontend architecture and UI design (Phase 2)
 
-Progress is tracked through commit messages and ADRs, not separate progress documents.
+Progress is tracked through commit messages, not separate progress documents.
 
 ## Implementation Guidance
 
@@ -140,7 +140,7 @@ When implementing a feature:
 6. Stage files explicitly and commit with a detailed message
 
 When encountering ambiguity:
-- Check ADRs for existing decisions
+- Check existing documentation in `docs/` for design decisions
 - Propose and document the decision before implementing
 - Prefer simple, maintainable solutions over clever abstractions
 

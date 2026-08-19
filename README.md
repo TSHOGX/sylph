@@ -58,7 +58,7 @@ npm run dev
 - [**Roadmap**](docs/roadmap.md) — Release phases and milestones
 - [**API Design**](docs/api-design.md) — REST endpoints and SSE streaming
 - [**Database Schema**](docs/database-schema.md) — SQLite schema and migrations
-- [**ADRs**](docs/adr/) — Architecture Decision Records
+- [**Frontend Architecture**](docs/frontend-architecture.md) — UI design and implementation (Phase 2)
 
 ## Project Status
 
