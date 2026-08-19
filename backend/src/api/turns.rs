@@ -14,7 +14,7 @@ use tokio_stream::{self as stream, StreamExt};
 use crate::{
     attachments,
     error::{Error, Result},
-    events::StreamEvent,
+    events::{Attachment, StreamEvent},
     models::{CreateTurnRequest, Incarnation, Turn},
     supervisor::TurnRequest,
     AppState,
@@ -175,7 +175,9 @@ pub async fn events(
     Path(turn_id): Path<String>,
     query: axum::extract::Query<EventsQuery>,
 ) -> Result<Sse<impl Stream<Item = std::result::Result<Event, Infallible>>>> {
-    let turn = state
+    // Existence check only: a stream for an unknown turn must 404 rather
+    // than hang on an empty subscription.
+    let _turn = state
         .store
         .get_turn(&turn_id)
         .await?
@@ -192,14 +194,13 @@ pub async fn events(
         .map(|row| StreamEvent::from_row(&row))
         .collect();
 
-    let stream = if let Some(attachment) = state.hub.attach(&turn_id, after_seq).await.live {
-        // Merge journal replay with ephemeral tail and the live subscription.
-        let projection: Vec<StreamEvent> = state
-            .hub
-            .attach(&turn_id, after_seq)
-            .await
-            .replay;
+    // One attach() call: it snapshots the ephemeral projection and subscribes
+    // under a single lock. Calling it twice (once for `live`, once for `replay`)
+    // reintroduces the gap it exists to close — an event published between the
+    // two calls is both replayed and broadcast, so the client sees it twice.
+    let Attachment { replay: projection, live, .. } = state.hub.attach(&turn_id, after_seq).await;
 
+    let stream = if let Some(attachment) = live {
         // BroadcastStream wraps errors; unwrap them because this adapter is
         // infallible — a lagged receiver is disconnected, not surfaced.
         let live = BroadcastStream::new(attachment).filter_map(|r| r.ok());

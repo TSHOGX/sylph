@@ -433,9 +433,7 @@ impl TurnSupervisor {
         session_id: &str,
         turn_id: &str,
     ) -> Option<RunnerEnvelope> {
-        let Some(stdout) = child.stdout.take() else {
-            return None;
-        };
+        let stdout = child.stdout.take()?;
 
         let mut lines = BufReader::new(stdout).lines();
         let mut envelope = None;

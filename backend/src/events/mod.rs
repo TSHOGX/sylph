@@ -69,10 +69,7 @@ impl StreamEvent {
     /// server-authored (status, error, the user's own request) and are always
     /// stable.
     pub fn is_stable(&self) -> bool {
-        match self.phase.as_deref() {
-            Some("completed") | None => true,
-            _ => false,
-        }
+        matches!(self.phase.as_deref(), Some("completed") | None)
     }
 
     /// Convert into a persistable row.
