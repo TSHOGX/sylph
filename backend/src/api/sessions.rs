@@ -6,7 +6,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use crate::{
     error::{Error, Result},
-    models::{CreateSessionRequest, Session},
+    events::StreamEvent,
+    models::{CreateSessionRequest, Session, Turn},
     AppState,
 };
 
@@ -48,6 +49,72 @@ pub async fn get(
         .await?
         .ok_or(Error::SessionNotFound)?;
     Ok(Json(SessionResponse { session }))
+}
+
+/// One turn together with its durable events, oldest event first.
+#[derive(Serialize)]
+pub struct TurnWithEvents {
+    turn: Turn,
+    events: Vec<StreamEvent>,
+}
+
+#[derive(Serialize)]
+pub struct HistoryResponse {
+    turns: Vec<TurnWithEvents>,
+}
+
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    #[serde(default = "default_history_limit")]
+    limit: i64,
+}
+
+fn default_history_limit() -> i64 {
+    100
+}
+
+/// GET /api/v1/sessions/{id}/turns — durable conversation history.
+///
+/// The SSE endpoint covers a single turn, which is enough to watch work happen
+/// but loses everything on reload. This returns the whole session so the
+/// conversation survives a refresh.
+///
+/// Only journal rows are read, never the ephemeral projection: `delta` events
+/// are transient by protocol and their text is already contained in the
+/// matching `completed` event, so replaying both would duplicate every token.
+pub async fn history(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<HistoryResponse>> {
+    // 404 rather than an empty list, so a mistyped id is distinguishable from
+    // a session that genuinely has no turns yet.
+    state
+        .store
+        .get_session(&id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+
+    let limit = query.limit.clamp(1, 500);
+
+    // `list_turns` orders newest-first for the session list; a transcript reads
+    // oldest-first.
+    let mut turns = state.store.list_turns(&id, limit).await?;
+    turns.reverse();
+
+    let mut out = Vec::with_capacity(turns.len());
+    for turn in turns {
+        let events = state
+            .store
+            .turn_events_after(&turn.id, -1)
+            .await?
+            .iter()
+            .map(StreamEvent::from_row)
+            .collect();
+        out.push(TurnWithEvents { turn, events });
+    }
+
+    Ok(Json(HistoryResponse { turns: out }))
 }
 
 pub async fn create(

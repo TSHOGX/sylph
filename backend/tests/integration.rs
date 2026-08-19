@@ -168,6 +168,88 @@ async fn broken_runners_are_reported_not_fatal() {
     );
 }
 
+#[tokio::test]
+async fn session_history_returns_turns_oldest_first_with_events() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    // An empty session has no turns, but is still a 200 rather than a 404.
+    let response = backend
+        .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["turns"], json!([]));
+
+    for text in ["first question", "second question"] {
+        let response = backend
+            .post_authed(
+                &format!("/api/v1/sessions/{session_id}/turns"),
+                json!({"text": text}),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let turn_id = json_body(response).await["turn"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Serialize the turns: one session runs one turn at a time.
+        backend.await_turn(&turn_id).await;
+    }
+
+    let response = backend
+        .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let turns = body["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 2);
+
+    // A transcript reads oldest-first, the opposite of the session list order.
+    assert_eq!(turns[0]["turn"]["requestText"], "first question");
+    assert_eq!(turns[1]["turn"]["requestText"], "second question");
+    assert_eq!(turns[0]["turn"]["status"], "completed");
+
+    // Each turn carries its own durable events, in sequence order.
+    for turn in turns {
+        let events = turn["events"].as_array().unwrap();
+        assert!(!events.is_empty(), "turn has no events: {turn}");
+
+        let seqs: Vec<i64> = events
+            .iter()
+            .map(|e| e["seq"].as_i64().unwrap())
+            .collect();
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        assert_eq!(seqs, sorted, "events out of order: {seqs:?}");
+
+        // Deltas are transient by protocol; history must expose only the
+        // stable record, or replayed text would be duplicated.
+        for event in events {
+            assert_ne!(
+                event["phase"], "delta",
+                "delta event leaked into history: {event}"
+            );
+        }
+
+        assert!(
+            events.iter().any(|e| e["kind"] == "assistant"),
+            "no assistant event in history: {turn}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_history_404s_for_an_unknown_session() {
+    let backend = TestBackend::start().await;
+
+    let response = backend.get_authed("/api/v1/sessions/no-such-id/turns").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "SESSION_NOT_FOUND"
+    );
+}
+
 // ---------------------------------------------------------------- turns
 
 #[tokio::test]
