@@ -1,65 +1,203 @@
 /**
- * API client for Sylph Web backend.
+ * API client for the Sylph Web backend.
  *
- * All requests go through the Next.js rewrite (`/api/v1/*` → backend on 4317).
- * Auth is cookie-based: the bootstrap token endpoint sets `sylph_session`, which
- * the browser sends on every subsequent request. No explicit Authorization header.
+ * All requests go through the Next.js rewrite (`/api/v1/*` -> backend on 4317).
+ * Auth is cookie-based: `GET /api/v1/auth/token` sets `sylph_session`, which the
+ * browser then sends on every subsequent request. No explicit Authorization
+ * header is needed.
+ *
+ * The backend serializes every model with `#[serde(rename_all = "camelCase")]`,
+ * so wire fields are `createdAtMs`, `identityMode`, `requestText` and so on.
+ * These interfaces mirror the wire shape exactly; do not "tidy" them into
+ * snake_case, because that silently yields `undefined` at runtime rather than a
+ * type error.
  */
 
 const API_BASE = "/api/v1";
 
+export type SessionOrigin = "sylph" | "native";
+export type SessionStatus = "idle" | "running";
+
 export interface Session {
   id: string;
+  origin: SessionOrigin;
+  /** Identity policy: `sylph` injects SOUL.md, `native` preserves the agent. */
+  identityMode: string;
+  /** Lifecycle policy: governs reset and compaction eligibility. */
+  lifecycleMode: string;
   agent: string;
   workdir: string;
-  title: string;
-  origin: "sylph" | "native";
-  created_at: string;
-  updated_at: string;
-  status: "idle" | "running";
+  /** Nullable: the backend stores title as an optional column. */
+  title: string | null;
+  flagsJson: string;
+  status: SessionStatus;
+  createdAtMs: number;
+  updatedAtMs: number;
 }
+
+export type TurnStatus =
+  | "queued"
+  | "running"
+  | "stopping"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
 
 export interface Turn {
   id: string;
-  session_id: string;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
-  created_at: string;
-  started_at?: string;
-  completed_at?: string;
+  sessionId: string;
+  incarnationId: string | null;
+  status: TurnStatus;
+  requestText: string;
+  commandInvocationId: string | null;
+  idempotencyKey: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  runnerExitCode: number | null;
+  createdAtMs: number;
+  startedAtMs: number | null;
+  completedAtMs: number | null;
+  stoppedAtMs: number | null;
+}
+
+/** A normalized journal/stream event. Mirrors the backend `StreamEvent`. */
+export interface StreamEvent {
+  seq: number;
+  kind: string;
+  phase?: string;
+  streamId?: string;
+  name?: string;
+  text?: string;
+  data?: unknown;
+  isError?: boolean;
+  stability: string;
+  source: string;
+  createdAtMs: number;
+}
+
+/** One turn plus its durable events, as returned by the history endpoint. */
+export interface TurnWithEvents {
+  turn: Turn;
+  events: StreamEvent[];
+}
+
+/** A flag declared by a runner's `--describe` output. */
+export interface AgentFlag {
+  choices: string[];
+  description?: string;
+}
+
+export interface AgentCommand {
+  description?: string;
+  args?: Record<string, { type: string; required?: boolean; description?: string }>;
+}
+
+/**
+ * Runner descriptors are passed through from `--describe` verbatim, so unlike
+ * the database models these keep the runner protocol's snake_case spelling.
+ */
+export interface Agent {
+  name: string;
+  description?: string;
+  session_key?: string;
+  flags?: Record<string, AgentFlag>;
+  commands?: Record<string, AgentCommand>;
 }
 
 export interface CreateSessionRequest {
   agent: string;
   workdir: string;
-  title: string;
-  origin?: "sylph" | "native";
+  title?: string;
+  origin?: SessionOrigin;
+  /** Flag values (model, effort) applied to every turn in this session. */
+  flags?: Record<string, string>;
+  /** TraceDB session id to adopt when importing a native session. */
+  traceSessionId?: string;
+}
+
+/** Attachment payload. `type` is the MIME type; `data` is base64, no data: prefix. */
+export interface AttachmentPayload {
+  name: string;
+  type: string;
+  data: string;
 }
 
 export interface CreateTurnRequest {
-  model: Record<string, unknown>;
-  message: {
-    role: "user";
-    content: Array<{ type: "text"; text: string }>;
-  };
-  attachments: Array<unknown>;
+  text?: string;
+  attachments?: AttachmentPayload[];
+  idempotencyKey?: string;
+  /** Named command from the agent's `--describe` output. */
+  command?: string;
+  args?: Record<string, string>;
+}
+
+export interface SearchResult {
+  sessionId: string;
+  agent?: string;
+  title?: string;
+  snippet?: string;
+  workdir?: string;
+  updatedAtMs?: number;
+  /** True when a live session already mirrors this TraceDB session. */
+  imported?: boolean;
+}
+
+/**
+ * An API failure carrying the backend's stable error code.
+ *
+ * The backend answers errors as `{error: {code, message}}` with UPPER_SNAKE
+ * codes; keeping `code` lets callers branch on machine-readable causes (for
+ * example `SESSION_ALREADY_RUNNING`) instead of matching on prose.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
 }
 
 async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    credentials: "include", // Send cookies
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: response.statusText }));
-    throw new Error(error.message || `API error: ${response.status}`);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...init?.headers,
+      },
+    });
+  } catch {
+    // fetch only rejects on transport failure, which locally means the backend
+    // is not listening. Say so, instead of surfacing "Failed to fetch".
+    throw new ApiError(
+      0,
+      "backend_unreachable",
+      "Cannot reach the Sylph Web backend on port 4317. Start it with `cd backend && cargo run`.",
+    );
   }
 
-  return response.json();
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    const error = body?.error ?? {};
+    throw new ApiError(
+      response.status,
+      error.code ?? `http_${response.status}`,
+      error.message ?? response.statusText ?? `Request failed (${response.status})`,
+    );
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  return response.json() as Promise<T>;
 }
 
 export const api = {
@@ -71,6 +209,9 @@ export const api = {
         method: "POST",
         body: JSON.stringify(req),
       }),
+    /** Full durable history: every turn in the session with its events. */
+    history: (id: string) =>
+      fetchAPI<{ turns: TurnWithEvents[] }>(`/sessions/${id}/turns`),
   },
   turns: {
     create: (sessionId: string, req: CreateTurnRequest) =>
@@ -79,6 +220,22 @@ export const api = {
         body: JSON.stringify(req),
       }),
     get: (turnId: string) => fetchAPI<{ turn: Turn }>(`/turns/${turnId}`),
+    stop: (turnId: string) =>
+      fetchAPI<{ turn: Turn }>(`/turns/${turnId}/stop`, { method: "POST" }),
   },
-  health: () => fetchAPI<{ ok: boolean; apiVersion: string }>("/health"),
+  agents: {
+    list: () => fetchAPI<{ agents: Agent[] }>("/agents"),
+    refresh: () => fetchAPI<{ agents: Agent[] }>("/agents", { method: "POST" }),
+  },
+  search: (query: string) =>
+    fetchAPI<{ results: SearchResult[]; available: boolean }>(
+      `/search?q=${encodeURIComponent(query)}`,
+    ),
+  health: () =>
+    fetchAPI<{
+      ok: boolean;
+      apiVersion: string;
+      schemaVersion: number;
+      tracedb: { available: boolean; version?: string };
+    }>("/health"),
 };
