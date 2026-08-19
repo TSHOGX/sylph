@@ -1,0 +1,44 @@
+# Rust
+/backend/target/
+
+# Next.js / Node.js (coming in Phase 2)
+/frontend/.next/
+/frontend/out/
+/frontend/node_modules/
+/frontend/.turbo/
+node_modules/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# SQLite databases
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Runtime data directories
+data/
+.sylph-web/
+attachments/
+
+# Test coverage
+coverage/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.*.local
