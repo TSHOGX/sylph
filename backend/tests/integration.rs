@@ -581,6 +581,99 @@ async fn malformed_base64_attachment_is_rejected() {
     );
 }
 
+#[tokio::test]
+async fn attachments_over_the_total_cap_are_rejected() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    // Three 3.5 MiB files: each is under the 8 MiB per-attachment cap, but
+    // they total 10.5 MiB, over the 10 MiB per-turn cap. The cap is across the
+    // turn, so this must fail even though no single file is oversized.
+    //
+    // The size is chosen to land inside a narrow window. base64 inflates by
+    // 4/3, so 10.5 MiB of payload is 14 MiB on the wire, still under the
+    // 16 MiB body limit — the request has to reach the handler for the
+    // attachment cap, rather than the transport limit, to be what rejects it.
+    let chunk = base64_of_zeros(7 * 512 * 1024);
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({
+                "text": "three files",
+                "attachments": [
+                    {"name": "a.bin", "type": "application/octet-stream", "data": chunk},
+                    {"name": "b.bin", "type": "application/octet-stream", "data": chunk},
+                    {"name": "c.bin", "type": "application/octet-stream", "data": chunk},
+                ],
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "ATTACHMENT_INVALID");
+    // The message drives the UI's failure text, so it must name the limit
+    // rather than just saying the request was invalid.
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("total"),
+        "message does not identify the total cap: {message}"
+    );
+}
+
+#[tokio::test]
+async fn a_grossly_oversized_body_is_rejected_by_the_transport_limit() {
+    // Above the attachment cap there is a second, coarser boundary: the 16 MiB
+    // request body limit, which rejects before any handler runs and therefore
+    // returns a bare 413 with no ATTACHMENT_INVALID body. A client must handle
+    // both, so the two paths are pinned separately: modest overage yields a
+    // 400 naming the limit, gross overage yields 413.
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let chunk = base64_of_zeros(7 * 1024 * 1024);
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({
+                "text": "far too much",
+                "attachments": [
+                    {"name": "a.bin", "type": "application/octet-stream", "data": chunk},
+                    {"name": "b.bin", "type": "application/octet-stream", "data": chunk},
+                    {"name": "c.bin", "type": "application/octet-stream", "data": chunk},
+                ],
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn too_many_attachments_are_rejected() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    // Six tiny files, over the documented cap of 5 per turn.
+    let tiny = base64_of_zeros(16);
+    let attachments: Vec<Value> = (0..6)
+        .map(|i| json!({"name": format!("f{i}.txt"), "type": "text/plain", "data": tiny}))
+        .collect();
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "too many", "attachments": attachments}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "ATTACHMENT_INVALID"
+    );
+}
+
 fn base64_of_zeros(len: usize) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(vec![0u8; len])
