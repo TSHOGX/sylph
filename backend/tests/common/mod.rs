@@ -1,0 +1,356 @@
+//! Shared test harness.
+//!
+//! Each test gets an isolated backend: a fresh temp directory holding the
+//! SQLite journal, staged attachments, and a mock runners directory. The router
+//! is driven in-process via `oneshot`, so no port is bound and tests can run
+//! concurrently.
+//!
+//! The mock runner is a real script implementing the runner protocol, which
+//! keeps the supervisor under test on its production path — spawning a process,
+//! reading NDJSON from its stdout, parsing the final envelope — without paying
+//! for a model call.
+
+#![allow(dead_code)]
+
+use std::path::{Path, PathBuf};
+
+use axum::body::Body;
+use axum::http::{header, Request, Response, StatusCode};
+use axum::Router;
+use serde_json::{json, Value};
+use sylph_web_backend::{config::Config, router, AppState};
+use tempfile::TempDir;
+use tower::ServiceExt;
+
+pub struct TestBackend {
+    router: Router,
+    /// Held for the lifetime of the test: dropping it deletes the journal and
+    /// every staged attachment.
+    _temp: TempDir,
+    workdir: PathBuf,
+    cookie: String,
+}
+
+impl TestBackend {
+    /// Start a backend with the default mock runner (`mock`), which streams a
+    /// short thinking/assistant sequence and exits successfully.
+    pub async fn start() -> Self {
+        Self::start_with_runners(&[MockRunner::success("mock")]).await
+    }
+
+    /// Start a backend whose runners directory contains exactly `runners`.
+    pub async fn start_with_runners(runners: &[MockRunner]) -> Self {
+        let temp = TempDir::new().expect("failed to create temp dir");
+        let root = temp.path();
+
+        let data_dir = root.join("data");
+        let runners_dir = root.join("runners");
+        let workdir = root.join("workspace");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&runners_dir).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+
+        for runner in runners {
+            runner.install(&runners_dir);
+        }
+
+        let config = Config {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            database_path: data_dir.join("live.db").display().to_string(),
+            data_dir,
+            runners_dir,
+            // Deliberately absent: TraceDB-dependent paths must degrade rather
+            // than make every test depend on an external binary.
+            tracedb_bin: root.join("nonexistent-trace-db"),
+            cookie_secret: "test-secret-token".to_string(),
+        };
+
+        let state = AppState::build(config).await.expect("failed to build state");
+        let cookie = format!("sylph_session={}", state.config.cookie_secret);
+
+        Self {
+            router: router(state),
+            _temp: temp,
+            workdir,
+            cookie,
+        }
+    }
+
+    pub fn workdir(&self) -> &Path {
+        &self.workdir
+    }
+
+    /// A Cookie header value that passes auth.
+    pub fn cookie(&self) -> &str {
+        &self.cookie
+    }
+
+    async fn send(&self, request: Request<Body>) -> Response<Body> {
+        self.router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("router call failed")
+    }
+
+    pub async fn get(&self, path: &str) -> Response<Body> {
+        self.send(
+            Request::builder()
+                .uri(path)
+                .header(header::HOST, "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    pub async fn get_authed(&self, path: &str) -> Response<Body> {
+        self.send(
+            Request::builder()
+                .uri(path)
+                .header(header::HOST, "127.0.0.1")
+                .header(header::COOKIE, &self.cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    pub async fn post_authed(&self, path: &str, body: Value) -> Response<Body> {
+        self.send(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::HOST, "127.0.0.1")
+                .header(header::COOKIE, &self.cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// POST with an explicit `Idempotency-Key` header.
+    pub async fn post_authed_with_key(
+        &self,
+        path: &str,
+        body: Value,
+        key: &str,
+    ) -> Response<Body> {
+        self.send(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::HOST, "127.0.0.1")
+                .header(header::COOKIE, &self.cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("Idempotency-Key", key)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// Create a session and return its id, asserting the call succeeded.
+    ///
+    /// The status is captured before the body is consumed, so one request
+    /// serves both the assertion and the id. Issuing a second request to
+    /// recover the id would leave an orphan session behind and make any
+    /// session-counting assertion silently wrong.
+    pub async fn create_session(&self, agent: &str) -> String {
+        let response = self
+            .post_authed(
+                "/api/v1/sessions",
+                json!({
+                    "agent": agent,
+                    "workdir": self.workdir.display().to_string(),
+                    "title": "Test session",
+                }),
+            )
+            .await;
+
+        let status = response.status();
+        let body = json_body(response).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "session creation failed: {body}"
+        );
+
+        body["session"]["id"]
+            .as_str()
+            .expect("session id missing from response")
+            .to_string()
+    }
+
+    /// Poll a turn until it reaches a terminal status, or panic on timeout.
+    ///
+    /// Turns run detached from the request that created them, so tests must
+    /// wait for the supervisor rather than assuming completion.
+    pub async fn await_turn(&self, turn_id: &str) -> Value {
+        for _ in 0..100 {
+            let response = self.get_authed(&format!("/api/v1/turns/{}", turn_id)).await;
+            let body = json_body(response).await;
+            let status = body["turn"]["status"].as_str().unwrap_or("");
+            if matches!(
+                status,
+                "completed" | "failed" | "cancelled" | "interrupted"
+            ) {
+                return body;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("turn {} did not reach a terminal state within 5s", turn_id);
+    }
+}
+
+pub async fn body_string(response: Response<Body>) -> String {
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("failed to read body");
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+pub async fn json_body(response: Response<Body>) -> Value {
+    let text = body_string(response).await;
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("body was not JSON ({}): {}", e, text))
+}
+
+/// A generated runner script conforming to the runner protocol.
+pub struct MockRunner {
+    name: String,
+    behavior: Behavior,
+}
+
+enum Behavior {
+    /// Stream events, then a successful envelope.
+    Success,
+    /// Stream nothing, return a failure envelope.
+    Failure,
+    /// Emit no final envelope at all — a protocol violation.
+    NoEnvelope,
+    /// Sleep long enough for a stop request to arrive.
+    Slow,
+    /// Fail `--describe`, so discovery marks the runner broken.
+    BrokenDescribe,
+}
+
+impl MockRunner {
+    pub fn success(name: &str) -> Self {
+        Self { name: name.to_string(), behavior: Behavior::Success }
+    }
+
+    pub fn failure(name: &str) -> Self {
+        Self { name: name.to_string(), behavior: Behavior::Failure }
+    }
+
+    pub fn no_envelope(name: &str) -> Self {
+        Self { name: name.to_string(), behavior: Behavior::NoEnvelope }
+    }
+
+    pub fn slow(name: &str) -> Self {
+        Self { name: name.to_string(), behavior: Behavior::Slow }
+    }
+
+    pub fn broken_describe(name: &str) -> Self {
+        Self { name: name.to_string(), behavior: Behavior::BrokenDescribe }
+    }
+
+    fn install(&self, runners_dir: &Path) {
+        let dir = runners_dir.join(&self.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script_path = dir.join("runner.sh");
+        std::fs::write(&script_path, self.script()).unwrap();
+
+        // Discovery only considers executable runners.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+    }
+
+    fn script(&self) -> String {
+        let describe = if matches!(self.behavior, Behavior::BrokenDescribe) {
+            r#"  echo "describe is broken" >&2
+  exit 1"#
+                .to_string()
+        } else {
+            format!(
+                r#"  cat <<'JSON'
+{{
+  "name": "{}",
+  "description": "Mock runner for tests",
+  "session_key": "{}",
+  "flags": {{
+    "model": {{"choices": ["fast", "slow"], "description": "Mock model"}}
+  }},
+  "commands": {{
+    "noop": {{"description": "Does nothing", "args": {{}}}}
+  }}
+}}
+JSON
+  exit 0"#,
+                self.name, self.name
+            )
+        };
+
+        // The turn body mirrors what a real runner emits: stream lines only
+        // when SYLPH_STREAM_FORMAT requests them, then the final envelope.
+        let turn = match self.behavior {
+            Behavior::Success | Behavior::BrokenDescribe => {
+                r#"
+if [ "${SYLPH_STREAM_FORMAT:-}" = "ndjson-v1" ]; then
+  echo '{"stream":"sylph.runner.v1","event":{"kind":"thinking","phase":"started","id":"t1"}}'
+  echo '{"stream":"sylph.runner.v1","event":{"kind":"thinking","phase":"delta","id":"t1","text":"think"}}'
+  echo '{"stream":"sylph.runner.v1","event":{"kind":"thinking","phase":"completed","id":"t1","text":"thinking done"}}'
+  echo '{"stream":"sylph.runner.v1","event":{"kind":"tool_call","phase":"completed","id":"c1","name":"Read","data":{"path":"/tmp/x"}}}'
+  echo '{"stream":"sylph.runner.v1","event":{"kind":"assistant","phase":"delta","id":"a1","text":"mock "}}'
+  echo '{"stream":"sylph.runner.v1","event":{"kind":"assistant","phase":"completed","id":"a1","text":"mock reply"}}'
+  echo '{"stream":"sylph.runner.v1","event":{"kind":"usage","phase":"completed","data":{"inputTokens":10,"outputTokens":3}}}'
+fi
+printf '%s\n' '{"ok":true,"text":"mock reply","session_id":"mock-session-1"}'
+exit 0
+"#
+            }
+            Behavior::Failure => {
+                r#"
+printf '%s\n' '{"ok":false,"error":"mock runner failed on purpose"}'
+exit 1
+"#
+            }
+            Behavior::NoEnvelope => {
+                r#"
+echo "this runner forgot its envelope" >&2
+exit 3
+"#
+            }
+            Behavior::Slow => {
+                r#"
+if [ "${SYLPH_STREAM_FORMAT:-}" = "ndjson-v1" ]; then
+  echo '{"stream":"sylph.runner.v1","event":{"kind":"status","phase":"started","text":"working"}}'
+fi
+sleep 30
+printf '%s\n' '{"ok":true,"text":"should not be reached","session_id":"slow-1"}'
+exit 0
+"#
+            }
+        };
+
+        format!(
+            r#"#!/usr/bin/env bash
+set -u
+
+if [ "${{1:-}}" = "--describe" ]; then
+{describe}
+fi
+
+# Consume stdin so the writer never blocks on a full pipe.
+cat >/dev/null
+{turn}"#
+        )
+    }
+}
