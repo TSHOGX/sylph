@@ -1,4 +1,5 @@
 use axum::{
+    middleware as axum_middleware,
     routing::{get, post},
     Router,
 };
@@ -28,6 +29,7 @@ use crate::runners::Registry;
 
 use crate::events::EventHub;
 use crate::supervisor::TurnSupervisor;
+use crate::tracedb::Client as TraceDbClient;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -36,6 +38,7 @@ pub struct AppState {
     pub registry: Arc<Mutex<Registry>>,
     pub hub: EventHub,
     pub supervisor: TurnSupervisor,
+    pub tracedb: TraceDbClient,
 }
 
 #[tokio::main]
@@ -52,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config = Config::from_env()?;
     tracing::info!("Starting Sylph Web backend on {}:{}", config.host, config.port);
+    api::health::mark_start();
 
     // Initialize database
     let store = LiveStore::new(&config.database_path).await?;
@@ -78,6 +82,14 @@ async fn main() -> anyhow::Result<()> {
         .filter(|p| !p.is_empty())
         .map(PathBuf::from);
 
+    // TraceDB client for native session import and search.
+    let tracedb = TraceDbClient::new(config.tracedb_bin.clone());
+    if let Some(version) = tracedb.probe().await {
+        tracing::info!("TraceDB available: version {}", version);
+    } else {
+        tracing::warn!("TraceDB unavailable or misconfigured; native session import will fail");
+    }
+
     // Event hub for SSE, and supervisor to run turns detached from HTTP.
     let hub = EventHub::new();
     let supervisor = TurnSupervisor::new(store.clone(), registry.clone(), hub.clone(), soul_path);
@@ -89,11 +101,13 @@ async fn main() -> anyhow::Result<()> {
         registry: registry.clone(),
         hub,
         supervisor,
+        tracedb,
     };
 
     // Build router
     let app = Router::new()
         .route("/api/v1/health", get(api::health::health))
+        .route("/api/v1/auth/token", get(middleware::auth::bootstrap_token))
         .route("/api/v1/diagnostics", get(api::health::diagnostics))
         .route("/api/v1/agents", get(api::agents::list).post(api::agents::refresh))
         .route("/api/v1/sessions", get(api::sessions::list).post(api::sessions::create))
@@ -102,7 +116,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/turns/{id}", get(api::turns::get))
         .route("/api/v1/turns/{id}/events", get(api::turns::events))
         .route("/api/v1/turns/{id}/stop", post(api::turns::stop))
-                .layer(TraceLayer::new_for_http())
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            middleware::auth::auth_middleware,
+        ))
+        .layer(TraceLayer::new_for_http())
         .with_state(state);
 
     // Start server

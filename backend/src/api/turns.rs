@@ -61,9 +61,7 @@ pub async fn create(
 
     // One turn at a time per session.
     if state.supervisor.session_busy(&session_id).await {
-        return Err(Error::InvalidRequest(
-            "Session already has an active turn".to_string(),
-        ));
+        return Err(Error::SessionAlreadyRunning);
     }
 
     let text = req.text.unwrap_or_default();
@@ -240,16 +238,13 @@ pub async fn stop(
         .ok_or(Error::TurnNotFound)?;
 
     if turn.is_terminal() {
-        return Err(Error::InvalidRequest(format!(
-            "Turn is already {}",
-            turn.status
-        )));
+        return Err(Error::StopAlreadyCompleted);
     }
 
     if !state.supervisor.stop(&turn_id).await? {
         // No live process; the turn finished between the is_terminal check and
-        // now, which is a benign race.
-        return Err(Error::InvalidRequest("Turn has no live process".to_string()));
+        // now, which is a benign race with the same meaning for the client.
+        return Err(Error::StopAlreadyCompleted);
     }
 
     state.store.mark_turn_stopping(&turn_id).await?;

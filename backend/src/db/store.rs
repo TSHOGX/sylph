@@ -563,6 +563,18 @@ impl LiveStore {
         Ok(())
     }
 
+    /// Schema version recorded in `app_meta`, or 0 when unset.
+    ///
+    /// Reported by `/health` so a client can detect that it is talking to a
+    /// backend whose journal shape it does not understand.
+    pub async fn schema_version(&self) -> Result<i64> {
+        let value: Option<String> =
+            sqlx::query_scalar("SELECT value FROM app_meta WHERE key = 'schema_version'")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(value.and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
     /// Journaled events for one turn after `after_seq`, in sequence order.
     pub async fn turn_events_after(&self, turn_id: &str, after_seq: i32) -> Result<Vec<Event>> {
         sqlx::query_as::<_, Event>(
