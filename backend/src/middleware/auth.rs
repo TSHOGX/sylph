@@ -120,26 +120,53 @@ fn is_mutation(method: &str) -> bool {
 
 /// Whether a Host header value is loopback.
 ///
-/// Accepts `127.0.0.1`, `localhost`, `[::1]`, with optional port.
+/// Accepts `127.0.0.1`, `localhost`, and `[::1]`, each with an optional port.
+/// IPv6 literals are bracketed and contain colons, so the port cannot be split
+/// off with a naive `split(':')` — the brackets are matched first.
 fn is_loopback_host(host: &str) -> bool {
-    let host_without_port = host.split(':').next().unwrap_or(host);
-    matches!(
-        host_without_port,
-        "127.0.0.1" | "localhost" | "[::1]" | "::1"
-    )
+    let host = host.trim();
+
+    let hostname = if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6: take what is inside the brackets and ignore any
+        // `:port` that follows the closing one.
+        match rest.split_once(']') {
+            Some((inside, after)) if after.is_empty() || after.starts_with(':') => inside,
+            _ => return false,
+        }
+    } else {
+        // A bare IPv6 address (multiple colons) is not valid in a Host header
+        // without brackets, so anything with more than one colon is rejected.
+        match host.split_once(':') {
+            Some((name, port)) if !port.contains(':') => name,
+            Some(_) => return false,
+            None => host,
+        }
+    };
+
+    matches!(hostname, "127.0.0.1" | "localhost" | "::1")
 }
 
 /// Whether an Origin header value is loopback.
 ///
-/// Accepts `http://127.0.0.1`, `http://localhost`, `http://[::1]`, with
-/// optional port. HTTPS is not expected (no TLS on loopback), but is allowed.
+/// Accepts `http://127.0.0.1`, `http://localhost`, and `http://[::1]`, each with
+/// an optional port. HTTPS is not expected on loopback but is allowed.
+///
+/// The authority is parsed and compared through [`is_loopback_host`] rather than
+/// prefix-matched: `http://localhost.evil.com` shares a prefix with a legitimate
+/// origin but is a routable host the attacker controls.
 fn is_loopback_origin(origin: &str) -> bool {
-    origin.starts_with("http://127.0.0.1")
-        || origin.starts_with("https://127.0.0.1")
-        || origin.starts_with("http://localhost")
-        || origin.starts_with("https://localhost")
-        || origin.starts_with("http://[::1]")
-        || origin.starts_with("https://[::1]")
+    let authority = match origin.split_once("://") {
+        Some(("http" | "https", authority)) => authority,
+        _ => return false,
+    };
+
+    // An Origin carries no path, but a stray one must not smuggle the check
+    // past the authority comparison.
+    if authority.contains('/') {
+        return false;
+    }
+
+    is_loopback_host(authority)
 }
 
 /// Extract a named cookie from a Cookie header value.
@@ -210,18 +237,43 @@ mod tests {
         assert!(is_loopback_host("localhost:4317"));
         assert!(is_loopback_host("[::1]"));
         assert!(is_loopback_host("[::1]:4317"));
+
         assert!(!is_loopback_host("192.168.1.1"));
+        assert!(!is_loopback_host("192.168.1.1:4317"));
         assert!(!is_loopback_host("example.com"));
+        assert!(!is_loopback_host("evil.example.com:4317"));
+
+        // A rebinding attempt that embeds a loopback name in a routable host
+        // must not pass: only the hostname component is compared.
+        assert!(!is_loopback_host("localhost.evil.com"));
+        assert!(!is_loopback_host("127.0.0.1.evil.com"));
+
+        // Malformed or unbracketed IPv6 is rejected rather than guessed at.
+        assert!(!is_loopback_host("[::1"));
+        assert!(!is_loopback_host("::1"));
+        assert!(!is_loopback_host("[2001:db8::1]"));
     }
 
     #[test]
     fn loopback_origin_validation() {
         assert!(is_loopback_origin("http://127.0.0.1:3000"));
         assert!(is_loopback_origin("http://localhost:3000"));
+        assert!(is_loopback_origin("http://localhost"));
         assert!(is_loopback_origin("http://[::1]:3000"));
         assert!(is_loopback_origin("https://127.0.0.1:3000"));
+
         assert!(!is_loopback_origin("http://192.168.1.1:3000"));
         assert!(!is_loopback_origin("http://example.com"));
+
+        // Prefix matching would accept these: the attacker owns the real host.
+        assert!(!is_loopback_origin("http://localhost.evil.com"));
+        assert!(!is_loopback_origin("http://127.0.0.1.evil.com"));
+        assert!(!is_loopback_origin("http://localhost@evil.com"));
+
+        // Non-HTTP schemes and opaque origins are not loopback pages.
+        assert!(!is_loopback_origin("file://localhost"));
+        assert!(!is_loopback_origin("null"));
+        assert!(!is_loopback_origin(""));
     }
 
     #[test]
