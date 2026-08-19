@@ -1,51 +1,96 @@
 # Sylph Web
 
-Sylph Web is the local native UI for Sylph and the coding-agent sessions archived by TraceDB. It can create Sylph-managed sessions, stream tool/reasoning events, send local attachments, search stable cross-agent history, and resume sessions originally created in Claude Code, Codex, OpenCode, or Pi without changing their identity policy.
+Local-first native UI for Sylph and coding-agent sessions archived by TraceDB.
+
+Sylph Web can create Sylph-managed sessions, stream live tool/reasoning events, send local attachments, search stable cross-agent history, and resume sessions originally created in Claude Code, Codex, OpenCode, or Pi without changing their identity policy.
 
 ## Architecture
 
-**Frontend**: Next.js 16 + React 19 + TypeScript (in development)  
-**Backend**: Rust + Axum + SQLx + Tokio (Phase 1 in progress)  
-**Database**: SQLite via SQLx (live sessions) + TraceDB (stable history)
+- **Backend:** Rust + Axum + SQLx + Tokio (Phase 1 in progress)
+- **Frontend:** Next.js 16 + React 19 + TypeScript (Phase 2 starts week 4)
+- **Database:** SQLite (live sessions) + TraceDB (stable history)
+- **API:** REST + SSE streaming on `http://127.0.0.1:4317`
 
-## Development
+## Quick Start
 
-Requirements: 
+### Prerequisites
+
 - Rust 1.85+
-- Node.js 22.5+ (for Next.js frontend, coming in Phase 2)
+- Node.js 22.5+ (for frontend, Phase 2)
 - TraceDB built from `~/Workspace/trace-db`
 - Sylph runners under `~/.agents/skills/sylph/runners`
 
-### Backend
+### Development
+
+**Backend:**
 
 ```sh
 cd backend
-cargo build
 cargo run
 ```
 
-The backend runs on `http://127.0.0.1:4317`.
+The backend runs on `http://127.0.0.1:4317`. Check health:
 
-### Frontend
+```sh
+curl http://127.0.0.1:4317/api/v1/health
+```
 
-_Next.js frontend coming in Phase 2 (Week 4-5)._
+**Frontend (coming Phase 2):**
 
-## Storage
+```sh
+cd frontend
+npm install
+npm run dev
+```
 
-Runtime data is stored under `~/.agents/data/sylph/web/`.
+### Environment Variables
 
-Environment variables:
-
-- `SYLPH_WEB_HOST` and `SYLPH_WEB_PORT`
-- `SYLPH_WEB_DATA_DIR`
-- `SYLPH_RUNNERS_DIR`
-- `TRACEDB_BIN`
+- `SYLPH_WEB_HOST` — bind address (default: `127.0.0.1`)
+- `SYLPH_WEB_PORT` — port (default: `4317`)
+- `SYLPH_WEB_DATA_DIR` — data directory (default: `~/.agents/data/sylph/web`)
+- `SYLPH_RUNNERS_DIR` — runners directory (default: `~/.agents/skills/sylph/runners`)
+- `TRACEDB_BIN` — TraceDB binary path (default: `~/Workspace/trace-db/target/release/trace-db`)
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — storage ownership and session invariants
-- [Product design](docs/product.md) — release roadmap
-- [Refactor specifications](docs/refactor-specs.md) — greenfield refactor details
-- [API specification](docs/api-v1.openapi.json) — REST + SSE endpoints
+- [**AGENTS.md**](AGENTS.md) — Development guide and project rules
+- [**Architecture**](docs/architecture.md) — System design and data flow
+- [**Roadmap**](docs/roadmap.md) — Release phases and milestones
+- [**API Design**](docs/api-design.md) — REST endpoints and SSE streaming
+- [**Database Schema**](docs/database-schema.md) — SQLite schema and migrations
+- [**ADRs**](docs/adr/) — Architecture Decision Records
 
-Every commit uses Conventional Commits with an English subject and body.
+## Project Status
+
+**Phase 1 (in progress):** Rust backend core
+- ✅ Database layer with migrations
+- ✅ Session management API
+- ✅ Health and diagnostics
+- 🚧 Turn management and SSE streaming
+- 🚧 Runner discovery and process supervision
+- 🚧 Authentication middleware
+
+**Phase 2 (week 4-5):** Next.js frontend foundation
+
+**Phase 3 (week 6-7):** Feature completion (attachments, search, commands)
+
+**Phase 4 (week 8-9):** Testing and accessibility
+
+**Phase 5 (week 10):** Deployment and packaging
+
+See [roadmap](docs/roadmap.md) for details.
+
+## Contributing
+
+Read [AGENTS.md](AGENTS.md) for development guidelines.
+
+**Key rules:**
+- Code, docs, commits: English only
+- Conventional Commits with detailed messages
+- Never `git add -A` — stage files explicitly
+- Update specs before changing design
+- Test before committing
+
+## License
+
+Private project

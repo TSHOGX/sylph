@@ -1,71 +1,310 @@
-# Sylph Web architecture
+# Architecture
 
-## Product boundary
+Sylph Web is a local-first native UI for coding-agent sessions. It orchestrates multiple agent runtimes (Claude, Codex, Pi, OpenCode) through a unified interface while preserving their native identities and lifecycle policies.
 
-Sylph Web is a local control plane and renderer over existing coding-agent runtimes. It does not replace agent-native stores and does not make TraceDB responsible for orchestration. The first release binds to loopback and trusts the local OS account.
+## System Overview
 
-## Session classes
-
-Session origin is a durable policy decision, not a visual label.
-
-| Origin | Created by | Identity | Lifecycle | Durable history |
-|---|---|---|---|---|
-| `sylph` | WebApp or Sylph transport | Inject `SOUL.md` through the runner | Sylph expiry/reset policy | Native agent store, then TraceDB |
-| `native` | Agent TUI/CLI, later opened in WebApp | Preserve the native agent context | Preserve native session; no implicit reset/compact | Native agent store, then TraceDB |
-
-Importing a native trace creates a lightweight continuation record in the live journal. It does not copy the archived trajectory and it sets `identity_mode=preserve` and `lifecycle_mode=preserve`. The runner receives `SYLPH_SOUL=""`, which is the existing runner-protocol opt-out.
-
-## Storage ownership
-
-```text
-agent native store ──ingest──▶ TraceDB ──list/show/search──▶ stable rendering
-       ▲                                                        │
-       │ resume                                                 │ reference
-       │                                                        ▼
-Sylph runner ◀──────── Web service ◀──────── browser     live.sqlite3
-                                                   active turns + policy only
+```
+Browser (127.0.0.1:3000)
+    │
+    │ HTTP + SSE
+    ▼
+Next.js Frontend
+    │ API proxy
+    ▼
+Rust Backend (127.0.0.1:4317)
+    │
+    ├─► live.db (SQLite) ────────┐
+    │   Active sessions & turns  │
+    │                             ├─► Query & Search
+    ├─► TraceDB ─────────────────┘
+    │   Stable cross-agent history
+    │
+    └─► Runners (child processes)
+        claude, codex, pi, opencode
 ```
 
-`live.sqlite3` uses WAL and stores WebApp session policy plus user/assistant/error events needed immediately. Completed `thinking`, `tool_call`, `tool_result`, and `usage` runner events are also journaled; `started` and `delta` events exist only in the browser projection. The final runner envelope remains authoritative for assistant text. The journal is not a second long-term transcript archive. Once a native session is ingested, a later reconciliation job can map the live continuation to its TraceDB session and prune duplicate live event text after a retention window.
+**Components:**
+- **Frontend** — Next.js 16 + React 19, handles UI and real-time updates
+- **Backend** — Rust + Axum, REST API + SSE streaming, process supervision
+- **Live journal** — SQLite (live.db), active sessions and recent events
+- **TraceDB** — External durable store, cross-agent searchable history
+- **Runners** — Agent binaries discovered via `--describe`, managed as child processes
 
-TraceDB is accessed through its JSON protocol. Sylph Web never reads TraceDB tables, so schema and tokenizer changes remain owned by TraceDB.
+## Design Principles
 
-## Runtime flow
+1. **Local-first** — All data stored locally, no cloud dependencies
+2. **Origin as policy** — Session origin (`sylph` or `native`) determines identity and lifecycle
+3. **Runners own storage** — Agents write their native format; TraceDB ingests asynchronously
+4. **Bounded live journal** — Recent events in live.db; stable history in TraceDB
+5. **Durable turn supervision** — Turn execution independent of HTTP request lifecycle
 
-1. The server discovers `runners/*/runner.sh` through `--describe`.
-2. A WebApp-created session records Sylph identity and lifecycle modes.
-3. A native session is listed and rendered from TraceDB; continuing it creates a `native` bridge record.
-4. A durable turn is inserted into the live journal and the HTTP API returns `202 Accepted`; the `TurnSupervisor` owns the child process independently of the request.
-5. The service opts into `SYLPH_STREAM_FORMAT=ndjson-v1`. Runners project vendor JSONL into normalized reasoning, assistant, tool, usage, and status events while preserving the final-envelope contract.
-6. `GET /api/v1/turns/:id/events` is a reconnectable SSE stream. It replays journaled stable events, then the bounded live projection, then newly published events. `Last-Event-ID` and `after_seq` are supported.
-7. The agent writes its normal native session. TraceDB ingestion makes that history stable and cross-agent searchable.
+## Session Model
 
-The formal contract is described in [api-v1.openapi.json](api-v1.openapi.json). TypeScript type definitions are generated from the Rust backend's serialization schemas.
+### Session Origins
 
-### Durable execution model
+| Origin | Created by | Identity | Lifecycle | SOUL.md injection |
+|--------|-----------|----------|-----------|-------------------|
+| `sylph` | WebApp | Sylph-managed | 24h idle / 04:00 reset | Yes |
+| `native` | CLI/TUI import | Preserved | No implicit reset | Never |
 
-`sessions` represent product conversations; `backend_incarnations` represent opaque agent-native contexts; `turns` represent individual execution lifecycles; and `events` are the bounded live journal. Numbered migrations are applied transactionally and the service marks residual active turns as `interrupted` on restart. A per-session idempotency key prevents duplicate turn creation. Stop targets the detached process group with SIGTERM and escalates to SIGKILL after two seconds. Subscriber queues and live projections are bounded so a slow browser cannot apply backpressure to runner stdout.
+**Invariants:**
+- Origin is immutable after creation
+- Native sessions never receive SOUL.md or lifecycle resets
+- Sylph sessions follow managed lifecycle (24h idle, 04:00 cutoff)
 
-Before each managed turn, the service applies the same lazy lifecycle boundary as the Discord daemon: discard the opaque backend session after 24 hours idle or when local time crosses 04:00. The decision is never applied to a native session.
+### Backend Incarnations
 
-Agent commands are generated from each runner's `--describe` schema and validated server-side before invocation. They share process supervision and opaque session-id updates with turns, but their final text is an ephemeral status response: command prompts and results are not appended as conversation events, and commands do not trigger an implicit lifecycle reset.
+An **incarnation** is an opaque agent-native session ID. Sylph sessions may have multiple incarnations (after lifecycle resets); native sessions have exactly one.
 
-Browser attachments are base64-transported over the loopback API, decoded under `dataDir/attachments/<session>/<turn>/`, and forwarded to the runner as absolute `--attachment` paths. Basenames are sanitized and files are created with private modes. A turn accepts at most five files, 8 MiB per file and 10 MiB total; attachment metadata, not binary content or staging paths, is recorded in the live journal.
+Lifecycle triggers (Sylph only):
+- 24 hours since last turn
+- Local time crosses 04:00
+- User-initiated reset
 
-## Security
+On reset:
+1. Discard old `backend_session_id`
+2. Create new incarnation
+3. Next turn starts fresh agent context
 
-- The default listener is `127.0.0.1`.
-- Loading the root page issues a process-local, HttpOnly, SameSite=Strict cookie. API calls require it.
-- Requests with a Host outside the explicit loopback names are rejected to prevent DNS rebinding.
-- Mutations reject a mismatched `Origin`.
-- Workdirs must exist, and runner names must come from discovery.
-- Exposing the listener beyond loopback is unsupported until authenticated remote access, TLS termination, origin allowlists, attachment limits, and explicit permission policy are designed.
+Native sessions skip this entirely — one incarnation, never expires.
 
-## Planned seams
+## Turn Execution Model
 
-- `RunnerRegistry`: runner discovery and capability metadata.
-- `runTurn`: runner protocol v1 consumer with optional normalized NDJSON events.
-- `TraceDbClient`: durable session query interface.
-- `LiveStore`: transient turn journal and session policy.
-- Reconciler: maps live backend session IDs to TraceDB IDs, tracks ingestion watermarks, and prunes duplicated text.
-- Event normalization extensions: diffs, plans, approval requests, and richer status metadata.
+A **turn** is a durable execution resource:
+
+1. Client calls `POST /api/v1/sessions/{id}/turns` with idempotency key
+2. Backend returns `202 Accepted` with turn ID immediately
+3. `TurnSupervisor` spawns runner as detached process
+4. Client streams events via `GET /api/v1/turns/{id}/events` (SSE)
+5. Turn completes (or fails); exit code and status recorded
+
+**Properties:**
+- Turn creation is idempotent (via client-provided key)
+- HTTP request ≠ turn lifecycle (turn survives request failure)
+- Browser can reconnect to SSE stream using `Last-Event-ID`
+- Service restart marks in-flight turns as `interrupted`
+
+### Process Supervision
+
+`TurnSupervisor` manages runner child processes:
+
+- Spawns in new process group
+- Streams stdout/stderr (NDJSON protocol)
+- Forwards SIGTERM on stop request
+- Escalates to SIGKILL after 2 seconds
+- Reaps zombies on exit
+
+Concurrency: one turn per session at a time; queued turns wait.
+
+## Storage Architecture
+
+### Live Journal (live.db)
+
+SQLite database with WAL mode, stores:
+- Sessions (all sessions created/imported by WebApp)
+- Backend incarnations (lifecycle tracking)
+- Turns (execution records)
+- Events (stable completed events + bounded live projection)
+
+Events are **not** a second transcript archive. Stable events are pruned after TraceDB ingestion + retention window.
+
+### TraceDB
+
+Accessed only through JSON protocol, never direct SQLite queries.
+
+Operations:
+- `list` — list sessions with filters
+- `show` — fetch session trajectory
+- `search` — full-text search
+
+Sylph Web reads from TraceDB for:
+- Session list (merged with live sessions, deduplicated)
+- Native session import (creates lightweight continuation)
+- Cross-agent search
+
+TraceDB writes come from agent native stores (ingestion is external).
+
+### Reconciliation (Future)
+
+Planned reconciliation process:
+1. Map live `backend_session_id` to TraceDB session ID
+2. Track ingestion watermark
+3. Prune duplicated event text from live.db after retention period
+
+Until deployed: live.db grows unbounded (acceptable for development).
+
+## Event Streaming
+
+### NDJSON Protocol
+
+Runners output normalized events to stdout:
+
+```json
+{"kind":"thinking","phase":"started","seq":0}
+{"kind":"thinking","phase":"delta","seq":1,"text":"Analyzing"}
+{"kind":"thinking","phase":"completed","seq":2,"text":"Analyzing the codebase"}
+{"kind":"assistant","phase":"delta","seq":3,"text":"I'll"}
+{"kind":"assistant","phase":"completed","seq":4,"text":"I'll implement..."}
+{"kind":"tool_call","phase":"started","seq":5,"name":"Write","streamId":"tc_1"}
+{"kind":"tool_call","phase":"completed","seq":6,"name":"Write","text":"..."}
+{"kind":"usage","seq":7,"data":{"inputTokens":1234,"outputTokens":567}}
+```
+
+**Event types:**
+- `thinking` — reasoning/scratchpad
+- `assistant` — final assistant text
+- `tool_call` / `tool_result` — function calls
+- `usage` — token counts
+- `status` / `error` — system messages
+
+**Phases:**
+- `started` — event begins (ephemeral)
+- `delta` — incremental update (ephemeral)
+- `completed` — event finalized (stable, persisted)
+
+### SSE Streaming
+
+Backend normalizes NDJSON → SSE:
+
+```
+event: thinking
+data: {"seq":0,"phase":"started","text":""}
+
+event: thinking
+data: {"seq":2,"phase":"completed","text":"Analyzing the codebase"}
+```
+
+**Reconnection:**
+- Client sends `Last-Event-ID: N` or `?after_seq=N`
+- Server replays from journal + live projection
+- Stable events always available
+- Ephemeral events available if still in live projection (bounded)
+
+## Security Model
+
+**Loopback-only:**
+- Default bind: `127.0.0.1:4317`
+- Cookie: process-local, HttpOnly, SameSite=Strict
+- Host header validation (reject DNS rebinding)
+- Origin validation for mutations
+
+**Out of scope until auth redesign:**
+- Remote access
+- Multi-user
+- TLS termination
+
+Exposing beyond loopback requires:
+- Authenticated sessions
+- CSRF tokens
+- Origin allowlists
+- Attachment size enforcement
+- Explicit permission policy
+
+## Runner Discovery
+
+Runners live under `~/.agents/skills/sylph/runners/{name}/runner.sh`.
+
+Discovery:
+1. Backend scans runners on startup
+2. Calls `runner.sh --describe` for each
+3. Parses JSON capability descriptor
+4. Caches in memory (refresh via API)
+
+**Descriptor schema:**
+```json
+{
+  "name": "claude",
+  "version": "3.1.0",
+  "models": ["opus-5", "sonnet-5"],
+  "efforts": ["low", "medium", "high"],
+  "commands": [
+    {"name": "compact", "description": "Compact context"}
+  ]
+}
+```
+
+Turn invocation:
+```sh
+runner.sh \
+  --session-id {backend_session_id} \
+  --workdir {workdir} \
+  --model {flags.model} \
+  --effort {flags.effort} \
+  --message {text} \
+  --attachment {path}
+```
+
+Runners stream NDJSON to stdout; backend consumes incrementally.
+
+## Data Flow
+
+### Create Sylph Session
+
+1. Client: `POST /api/v1/sessions`
+2. Backend: generate UUID, insert into `sessions` table
+3. Backend: return `201` with session object
+4. Frontend: navigate to `/sessions/{id}`
+
+### Send Message
+
+1. Client: `POST /api/v1/sessions/{id}/turns` with idempotency key
+2. Backend: check idempotency, insert turn (status=queued)
+3. Backend: return `202` with turn ID
+4. Client: open SSE stream `GET /api/v1/turns/{id}/events`
+5. TurnSupervisor: spawn runner, set status=running
+6. Backend: stream NDJSON → SSE → client
+7. Runner exits: set status=completed, record exit code
+8. SSE stream closes
+
+### Import Native Session
+
+1. Client: `POST /api/v1/sessions/import` with TraceDB session ID
+2. Backend: query TraceDB for session metadata
+3. Backend: create session with origin=native, identity_mode=preserve
+4. Backend: return `201`
+5. Frontend: navigate to session, show preservation policy banner
+6. User sends first message: creates turn linked to imported session
+
+### Search
+
+1. Client: search input in session rail
+2. Frontend: query TraceDB via `/api/v1/search?q=...`
+3. Backend: forward to TraceDB JSON API
+4. Backend: merge results with live sessions, deduplicate by `trace_session_id`
+5. Frontend: render unified session list
+
+## Deployment Model
+
+**Development:**
+- `cargo run` for backend
+- `npm run dev` for frontend (Phase 2)
+- Live reload via cargo-watch and Turbopack
+
+**Production (Phase 5):**
+- Single Rust binary: `cargo build --release`
+- Static Next.js export (optional, or proxy)
+- LaunchAgent for macOS auto-start
+- Health checks on startup
+- Logging to `~/.agents/data/sylph/web/logs/`
+
+**Data directory:**
+- `~/.agents/data/sylph/web/live.db` — SQLite journal
+- `~/.agents/data/sylph/web/attachments/{session}/{turn}/` — staged files
+
+## Extension Points
+
+Future features should preserve these boundaries:
+
+1. **Runner protocol** — NDJSON events are additive; new kinds/phases OK
+2. **API versioning** — breaking changes increment `/api/v2/`
+3. **Database migrations** — numbered, transactional, append-only
+4. **TraceDB interface** — always via JSON protocol, never direct schema access
+5. **Session origin** — immutable policy decision, never silently changed
+
+Planned extensions:
+- Diff/plan event types
+- Approval requests (interactive prompts from agent)
+- Per-turn artifacts (screenshots, logs)
+- Session forking and reconstruction
+- Permission audit log
