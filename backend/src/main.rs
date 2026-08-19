@@ -12,9 +12,11 @@ mod api;
 mod config;
 mod db;
 mod error;
+mod events;
 mod middleware;
 mod models;
 mod runners;
+mod supervisor;
 mod tracedb;
 
 use crate::config::Config;
