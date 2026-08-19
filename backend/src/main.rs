@@ -3,6 +3,8 @@ use axum::{
     Router,
 };
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -17,11 +19,13 @@ mod tracedb;
 
 use crate::config::Config;
 use crate::db::LiveStore;
+use crate::runners::Registry;
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: LiveStore,
     pub config: Config,
+    pub registry: Arc<Mutex<Registry>>,
 }
 
 #[tokio::main]
@@ -43,16 +47,28 @@ async fn main() -> anyhow::Result<()> {
     let store = LiveStore::new(&config.database_path).await?;
     tracing::info!("Database initialized at {}", config.database_path);
 
+    // Discover runners
+    let registry = Registry::new(&config.runners_dir).await?;
+    let agent_count = registry.list_agents().len();
+    let broken_count = registry.broken_runners().len();
+    tracing::info!(
+        "Runner discovery: {} agents found, {} broken",
+        agent_count,
+        broken_count
+    );
+
     // Build application state
     let state = AppState {
         store,
         config: config.clone(),
+        registry: Arc::new(Mutex::new(registry)),
     };
 
     // Build router
     let app = Router::new()
         .route("/api/v1/health", get(api::health::health))
         .route("/api/v1/diagnostics", get(api::health::diagnostics))
+        .route("/api/v1/agents", get(api::agents::list).post(api::agents::refresh))
         .route("/api/v1/sessions", get(api::sessions::list).post(api::sessions::create))
         .route("/api/v1/sessions/{id}", get(api::sessions::get))
         .layer(TraceLayer::new_for_http())

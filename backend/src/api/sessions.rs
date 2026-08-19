@@ -54,6 +54,21 @@ pub async fn create(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<SessionResponse>)> {
+    // Validate agent exists
+    let registry = state.registry.lock().await;
+    if !registry.has_agent(&req.agent) {
+        return Err(Error::InvalidRequest(format!(
+            "Unknown agent: {}. Available agents: {:?}",
+            req.agent,
+            registry
+                .list_agents()
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+        )));
+    }
+    drop(registry);
+
     // Validate workdir exists
     if !std::path::Path::new(&req.workdir).exists() {
         return Err(Error::InvalidRequest(
