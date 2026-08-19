@@ -3,18 +3,25 @@
 ## Current State
 
 **Architecture:**
-- Backend: Rust + Axum + SQLx (Phase 1 in progress)
-- Frontend: Next.js 16 + React 19 (Phase 2 starts week 4)
+- Backend: Rust + Axum + SQLx (Phase 1 complete)
+- Frontend: Next.js 16 + React 19 + TanStack Query (Phase 2 complete)
 - Database: SQLite (live journal) + TraceDB (stable history)
 
 **Completed:**
-- Project structure and Rust dependencies
-- Database schema with SQLx migrations
-- Session API (create, list, get)
-- Health and diagnostics endpoints
-- Configuration and error handling
+- Phase 1: backend core on port 4317 — 11 routes, LiveStore, TurnSupervisor,
+  EventHub, auth middleware, runner discovery, TraceDB client, integration tests
+- Phase 2: frontend foundation — session list, create dialog, SSE conversation
+  view, reconnection from `after_seq`
 
-## Phase 1: Backend Core (Weeks 1-3, In Progress)
+**In progress:** Phase 3 (feature completion). See `PHASE3_HANDOFF.md`.
+
+**Runner protocol:** the backend consumes `sylph.runner.v1` NDJSON lines
+(`SYLPH_STREAM_FORMAT=ndjson-v1`) as specified in the Sylph skill's
+`references/runner-protocol.md`. Event kinds: `thinking`, `assistant`,
+`tool_call`, `tool_result`, `usage`, `status`; phases `started`/`delta`/
+`completed`, where only `completed` is durable.
+
+## Phase 1: Backend Core (Weeks 1-3) — Complete
 
 **Goal:** Production-ready Rust backend on port 4317 with all API endpoints.
 
@@ -40,19 +47,19 @@
 - `GET /api/v1/turns/{id}/events` (SSE)
 - `POST /api/v1/turns/{id}/stop`
 
-## Phase 2: Frontend Foundation (Weeks 4-5)
+## Phase 2: Frontend Foundation (Weeks 4-5) — Complete
 
 **Goal:** Next.js UI with session list, conversation canvas, and SSE integration.
 
 **Deliverables:**
-- Next.js 16 App Router setup
-- TypeScript strict mode
-- API proxy routes (`/api/*` → Rust backend)
-- Session list component
-- Conversation timeline with message types
-- SSE client with EventSource
-- TanStack Query for server state
-- Basic UI components (Radix + Tailwind)
+- ✅ Next.js 16 App Router setup
+- ✅ TypeScript strict mode
+- ✅ API proxy routes (`/api/*` → Rust backend)
+- ✅ Session list component
+- ✅ Conversation timeline with message types
+- ✅ SSE client with EventSource
+- ✅ TanStack Query for server state
+- ✅ Basic UI components (Tailwind)
 
 **Pages:**
 - `/` — Session list
