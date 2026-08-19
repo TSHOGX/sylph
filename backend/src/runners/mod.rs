@@ -7,21 +7,41 @@ use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
 /// Runner capability descriptor from `--describe` protocol
+/// This matches the actual format from runner.sh implementations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDescriptor {
     pub name: String,
-    pub version: String,
     #[serde(default)]
-    pub models: Vec<String>,
+    pub description: String,
     #[serde(default)]
-    pub efforts: Vec<String>,
+    pub session_key: String,
     #[serde(default)]
-    pub commands: Vec<AgentCommand>,
+    pub flags: HashMap<String, FlagSpec>,
+    #[serde(default)]
+    pub commands: HashMap<String, CommandSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentCommand {
-    pub name: String,
+pub struct FlagSpec {
+    #[serde(default)]
+    pub choices: Vec<String>,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandSpec {
+    pub description: String,
+    #[serde(default)]
+    pub args: HashMap<String, ArgSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArgSpec {
+    #[serde(rename = "type")]
+    pub arg_type: String,
+    pub required: bool,
+    #[serde(default)]
     pub description: String,
 }
 
@@ -87,8 +107,8 @@ impl Registry {
             match self.describe_runner(&runner_script).await {
                 Ok(descriptor) => {
                     info!(
-                        "Discovered runner: {} v{} at {:?}",
-                        descriptor.name, descriptor.version, runner_script
+                        "Discovered runner: {} at {:?}",
+                        descriptor.name, runner_script
                     );
                     self.agents.insert(
                         name.clone(),
