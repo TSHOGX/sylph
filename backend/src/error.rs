@@ -19,6 +19,9 @@ pub enum Error {
     #[error("Runner not found")]
     RunnerNotFound,
 
+    #[error("Attachment validation failed: {0}")]
+    AttachmentInvalid(String),
+
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
@@ -59,6 +62,11 @@ impl IntoResponse for Error {
                 StatusCode::NOT_FOUND,
                 "RUNNER_NOT_FOUND".to_string(),
                 "Runner not found".to_string(),
+            ),
+            Error::AttachmentInvalid(msg) => (
+                StatusCode::BAD_REQUEST,
+                "ATTACHMENT_INVALID".to_string(),
+                msg.clone(),
             ),
             Error::InvalidRequest(msg) => (
                 StatusCode::BAD_REQUEST,

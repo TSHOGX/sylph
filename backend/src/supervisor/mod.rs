@@ -140,7 +140,7 @@ impl TurnSupervisor {
     ///
     /// Returns false when the turn has no live process, in which case the caller
     /// reports `STOP_ALREADY_COMPLETED`.
-    pub async fn stop(&self, turn_id: &str) -> Result<bool> {
+    pub async fn stop(&self, turn_id: &str) -> crate::error::Result<bool> {
         let pgid = {
             let mut active = self.active.write().await;
             match active.get_mut(turn_id) {
@@ -174,7 +174,7 @@ impl TurnSupervisor {
     }
 
     /// Next sequence number for a session, seeded from the journal on first use.
-    async fn next_seq(&self, session_id: &str) -> Result<i32> {
+    async fn next_seq(&self, session_id: &str) -> crate::error::Result<i32> {
         let counter = {
             let counters = self.seq_counters.read().await;
             counters.get(session_id).cloned()
@@ -198,7 +198,7 @@ impl TurnSupervisor {
     }
 
     /// Assign a sequence number, journal the event if stable, and publish it.
-    async fn emit(&self, session_id: &str, turn_id: &str, mut event: StreamEvent) -> Result<()> {
+    async fn emit(&self, session_id: &str, turn_id: &str, mut event: StreamEvent) -> crate::error::Result<()> {
         event.seq = self.next_seq(session_id).await?;
 
         if event.is_stable() {
