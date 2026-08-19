@@ -4,7 +4,7 @@ mod common;
 
 use axum::http::{header, StatusCode};
 use common::{body_string, json_body, MockRunner, TestBackend};
-use serde_json::json;
+use serde_json::{json, Value};
 
 // ---------------------------------------------------------------- auth
 
@@ -502,4 +502,76 @@ async fn malformed_base64_attachment_is_rejected() {
 fn base64_of_zeros(len: usize) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(vec![0u8; len])
+}
+
+/// Reconnection replays stable journal events when the turn has finished.
+///
+/// This isolates the SSE handler's reconnection logic: when a client reconnects
+/// with `after_seq=N`, they receive every stable event where `seq > N` from the
+/// journal. The handler merges journal replay with the ephemeral projection when
+/// the turn is still live; this test checks the boundary case where the turn is
+/// finished and the projection is empty, so the handler must rely entirely on
+/// the journal.
+#[tokio::test]
+async fn sse_reconnection_replays_journal_after_turn_finishes() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    // Start a turn and wait for it to complete.
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{}/turns", session_id),
+            json!({
+                "model": {},
+                "message": { "role": "user", "content": [{ "type": "text", "text": "test" }] },
+                "attachments": [],
+            }),
+        )
+        .await;
+    let body = json_body(response).await;
+    let turn_id = body["turn"]["id"].as_str().unwrap();
+
+    backend.await_turn(turn_id).await;
+
+    // Fetch the full event stream once to learn the highest stable seq.
+    let response = backend
+        .get_authed(&format!("/api/v1/turns/{}/events?after_seq=-1", turn_id))
+        .await;
+    let stream = body_string(response).await;
+    let highest_seq: i32 = stream
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .filter_map(|event| event["seq"].as_i64())
+        .map(|seq| seq as i32)
+        .max()
+        .expect("no events in stream");
+
+    // Reconnect from after_seq=0 (replay everything except the seq=0 bootstrap).
+    let response = backend
+        .get_authed(&format!("/api/v1/turns/{}/events?after_seq=0", turn_id))
+        .await;
+    let stream = body_string(response).await;
+    let replayed_seqs: Vec<i32> = stream
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .filter_map(|event| event["seq"].as_i64())
+        .map(|seq| seq as i32)
+        .collect();
+
+    // The reconnected stream should contain every stable event > 0.
+    assert!(
+        !replayed_seqs.is_empty(),
+        "reconnection returned no events"
+    );
+    assert!(
+        replayed_seqs.contains(&highest_seq),
+        "reconnection missed the highest stable event (seq={})",
+        highest_seq
+    );
+    assert!(
+        replayed_seqs.iter().all(|&seq| seq > 0),
+        "reconnection included the bootstrap event (seq=0)"
+    );
 }
