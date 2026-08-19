@@ -13,7 +13,7 @@
     "/api/v1/agents": { "get": { "responses": { "200": { "description": "Discovered runner capabilities" } } } },
     "/api/v1/agents/refresh": { "post": { "responses": { "200": { "description": "Refreshed capabilities" } } } },
     "/api/v1/sessions": {
-      "get": { "responses": { "200": { "description": "Product sessions" } } },
+      "get": { "description": "Sessions newest-activity-first. Filters are applied in SQL, not by the client: the listing is capped by limit, so client-side filtering would only narrow the truncated page. A blank filter value means unfiltered.", "parameters": [{ "$ref": "#/components/parameters/Limit" }, { "$ref": "#/components/parameters/FilterAgent" }, { "$ref": "#/components/parameters/FilterOrigin" }, { "$ref": "#/components/parameters/FilterWorkdir" }, { "$ref": "#/components/parameters/UpdatedAfterMs" }, { "$ref": "#/components/parameters/UpdatedBeforeMs" }], "responses": { "200": { "description": "Product sessions" }, "400": { "$ref": "#/components/responses/Error" } } },
       "post": { "requestBody": { "$ref": "#/components/requestBodies/CreateSession" }, "responses": { "201": { "$ref": "#/components/responses/SessionCreated" }, "400": { "$ref": "#/components/responses/Error" } } }
     },
     "/api/v1/sessions/import": { "post": { "requestBody": { "$ref": "#/components/requestBodies/ImportSession" }, "responses": { "201": { "$ref": "#/components/responses/SessionCreated" }, "422": { "$ref": "#/components/responses/Error" } } } },
@@ -34,6 +34,11 @@
       "TurnId": { "name": "turnId", "in": "path", "required": true, "schema": { "type": "string" } },
       "Limit": { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 } },
       "Before": { "name": "before", "in": "query", "schema": { "type": "integer" } },
+      "FilterAgent": { "name": "agent", "in": "query", "description": "Exact agent name.", "schema": { "type": "string" } },
+      "FilterOrigin": { "name": "origin", "in": "query", "description": "Closed set; an unknown value is rejected with 400 rather than yielding an empty list.", "schema": { "type": "string", "enum": ["sylph", "native"] } },
+      "FilterWorkdir": { "name": "workdir", "in": "query", "description": "Case-insensitive substring of the working directory.", "schema": { "type": "string" } },
+      "UpdatedAfterMs": { "name": "updatedAfterMs", "in": "query", "schema": { "type": "integer" } },
+      "UpdatedBeforeMs": { "name": "updatedBeforeMs", "in": "query", "schema": { "type": "integer" } },
       "Query": { "name": "q", "in": "query", "description": "Free-text query; whitespace-only is treated as absent.", "schema": { "type": "string" } },
       "AfterSeq": { "name": "after_seq", "in": "query", "schema": { "type": "integer", "default": -1 } },
       "IdempotencyKey": { "name": "Idempotency-Key", "in": "header", "schema": { "type": "string", "maxLength": 200 } }

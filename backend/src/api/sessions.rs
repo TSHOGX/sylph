@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use crate::{
+    db::store::SessionFilter,
     error::{Error, Result},
     events::StreamEvent,
     models::{CreateSessionRequest, Session, Turn},
@@ -12,9 +13,15 @@ use crate::{
 };
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListQuery {
     #[serde(default = "default_limit")]
     limit: i64,
+    agent: Option<String>,
+    origin: Option<String>,
+    workdir: Option<String>,
+    updated_after_ms: Option<i64>,
+    updated_before_ms: Option<i64>,
 }
 
 fn default_limit() -> i64 {
@@ -26,11 +33,37 @@ pub struct SessionListResponse {
     sessions: Vec<Session>,
 }
 
+/// Blank text in a query string is the natural encoding of a cleared filter
+/// input, so it means "unfiltered" rather than "match the empty string".
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.trim().is_empty())
+}
+
 pub async fn list(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<SessionListResponse>> {
-    let sessions = state.store.list_sessions(query.limit).await?;
+    let origin = non_blank(query.origin);
+    if let Some(origin) = &origin {
+        // Origin is a closed set that drives identity and lifecycle policy;
+        // a typo must not silently return an empty list.
+        if origin != "sylph" && origin != "native" {
+            return Err(Error::InvalidRequest(format!(
+                "Unknown origin: {origin}. Expected \"sylph\" or \"native\"."
+            )));
+        }
+    }
+
+    let filter = SessionFilter {
+        limit: query.limit.clamp(1, 200),
+        agent: non_blank(query.agent),
+        origin,
+        workdir: non_blank(query.workdir),
+        updated_after_ms: query.updated_after_ms,
+        updated_before_ms: query.updated_before_ms,
+    };
+
+    let sessions = state.store.list_sessions(&filter).await?;
     Ok(Json(SessionListResponse { sessions }))
 }
 

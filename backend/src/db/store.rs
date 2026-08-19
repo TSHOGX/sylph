@@ -10,6 +10,33 @@ pub struct LiveStore {
     pool: SqlitePool,
 }
 
+/// Narrowing criteria for a session listing. `None` means "do not narrow on
+/// this field", which is distinct from matching an empty value.
+#[derive(Debug, Clone)]
+pub struct SessionFilter {
+    pub limit: i64,
+    pub agent: Option<String>,
+    pub origin: Option<String>,
+    /// Case-insensitive substring of the working directory, so a user can type
+    /// a project name without reproducing an absolute path.
+    pub workdir: Option<String>,
+    pub updated_after_ms: Option<i64>,
+    pub updated_before_ms: Option<i64>,
+}
+
+impl Default for SessionFilter {
+    fn default() -> Self {
+        Self {
+            limit: 50,
+            agent: None,
+            origin: None,
+            workdir: None,
+            updated_after_ms: None,
+            updated_before_ms: None,
+        }
+    }
+}
+
 impl LiveStore {
     pub async fn new(path: &str) -> Result<Self> {
         // Ensure parent directory exists
@@ -83,11 +110,32 @@ impl LiveStore {
             .map_err(Error::Database)
     }
 
-    pub async fn list_sessions(&self, limit: i64) -> Result<Vec<Session>> {
+    /// List sessions newest-activity-first, narrowed by `filter`.
+    ///
+    /// Filtering belongs in SQL rather than in the client: the query is capped
+    /// by `LIMIT`, so a client filtering the response would only ever filter
+    /// the truncated page and would silently miss older matches.
+    pub async fn list_sessions(&self, filter: &SessionFilter) -> Result<Vec<Session>> {
+        // Every predicate is a no-op when its bound value is NULL, which keeps
+        // one prepared statement covering all filter combinations.
         sqlx::query_as::<_, Session>(
-            "SELECT * FROM sessions ORDER BY updated_at_ms DESC LIMIT ?",
+            r#"
+            SELECT * FROM sessions
+            WHERE (?1 IS NULL OR agent = ?1)
+              AND (?2 IS NULL OR origin = ?2)
+              AND (?3 IS NULL OR instr(lower(workdir), lower(?3)) > 0)
+              AND (?4 IS NULL OR updated_at_ms >= ?4)
+              AND (?5 IS NULL OR updated_at_ms <= ?5)
+            ORDER BY updated_at_ms DESC
+            LIMIT ?6
+            "#,
         )
-        .bind(limit)
+        .bind(filter.agent.as_deref())
+        .bind(filter.origin.as_deref())
+        .bind(filter.workdir.as_deref())
+        .bind(filter.updated_after_ms)
+        .bind(filter.updated_before_ms)
+        .bind(filter.limit)
         .fetch_all(&self.pool)
         .await
         .map_err(Error::Database)
@@ -265,31 +313,6 @@ impl LiveStore {
             .map_err(Error::Database)
     }
 
-    /// List sessions with optional agent/origin filters, newest activity first.
-    pub async fn list_sessions_filtered(
-        &self,
-        limit: i64,
-        agent: Option<&str>,
-        origin: Option<&str>,
-    ) -> Result<Vec<Session>> {
-        // Both filters are optional, so the predicate is written to be a no-op
-        // when the bound value is NULL rather than branching into four queries.
-        sqlx::query_as::<_, Session>(
-            r#"
-            SELECT * FROM sessions
-            WHERE (?1 IS NULL OR agent = ?1)
-              AND (?2 IS NULL OR origin = ?2)
-            ORDER BY updated_at_ms DESC
-            LIMIT ?3
-            "#,
-        )
-        .bind(agent)
-        .bind(origin)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(Error::Database)
-    }
 
     pub async fn touch_session(&self, session_id: &str) -> Result<()> {
         sqlx::query("UPDATE sessions SET updated_at_ms = ? WHERE id = ?")

@@ -766,3 +766,139 @@ async fn search_clamps_an_absurd_limit() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(json_body(response).await["available"], true);
 }
+
+// ------------------------------------------------------- session filters
+
+#[tokio::test]
+async fn session_list_filters_by_agent() {
+    let backend =
+        TestBackend::start_with_runners(&[MockRunner::success("alpha"), MockRunner::success("beta")])
+            .await;
+
+    let alpha = backend.create_session("alpha").await;
+    let beta = backend.create_session("beta").await;
+
+    let ids = |body: &Value| -> Vec<String> {
+        body["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let all = json_body(backend.get_authed("/api/v1/sessions").await).await;
+    assert_eq!(ids(&all).len(), 2);
+
+    let only_alpha = json_body(backend.get_authed("/api/v1/sessions?agent=alpha").await).await;
+    assert_eq!(ids(&only_alpha), vec![alpha]);
+
+    let only_beta = json_body(backend.get_authed("/api/v1/sessions?agent=beta").await).await;
+    assert_eq!(ids(&only_beta), vec![beta]);
+
+    // An agent with no sessions is an empty list, not an error.
+    let response = backend.get_authed("/api/v1/sessions?agent=gamma").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(ids(&json_body(response).await).len(), 0);
+}
+
+#[tokio::test]
+async fn session_list_treats_a_blank_filter_as_unfiltered() {
+    // A cleared filter input serializes as an empty parameter; it must not be
+    // read as "match the empty string" and hide every session.
+    let backend = TestBackend::start().await;
+    backend.create_session("mock").await;
+
+    for path in [
+        "/api/v1/sessions?agent=",
+        "/api/v1/sessions?workdir=%20",
+        "/api/v1/sessions?agent=&origin=&workdir=",
+    ] {
+        let body = json_body(backend.get_authed(path).await).await;
+        assert_eq!(
+            body["sessions"].as_array().unwrap().len(),
+            1,
+            "{path} hid the session"
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_list_filters_by_workdir_substring_case_insensitively() {
+    let backend = TestBackend::start().await;
+    backend.create_session("mock").await;
+
+    let workdir = backend.workdir().display().to_string();
+    let fragment = workdir.rsplit('/').next().unwrap().to_uppercase();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions?workdir={fragment}"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["sessions"].as_array().unwrap().len(), 1);
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/sessions?workdir=definitely-not-a-real-path")
+            .await,
+    )
+    .await;
+    assert_eq!(body["sessions"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn session_list_filters_by_updated_time_range() {
+    let backend = TestBackend::start().await;
+    backend.create_session("mock").await;
+
+    let far_past = 1_000_000_000_000i64;
+    let far_future = 4_000_000_000_000i64;
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions?updatedAfterMs={far_past}"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["sessions"].as_array().unwrap().len(), 1);
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions?updatedBeforeMs={far_past}"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["sessions"].as_array().unwrap().len(), 0);
+
+    let body = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/sessions?updatedAfterMs={far_past}&updatedBeforeMs={far_future}"
+            ))
+            .await,
+    )
+    .await;
+    assert_eq!(body["sessions"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn session_list_rejects_an_unknown_origin() {
+    // Origin drives identity and lifecycle policy, so a typo must be loud
+    // rather than quietly yielding an empty list.
+    let backend = TestBackend::start().await;
+
+    let response = backend.get_authed("/api/v1/sessions?origin=sylf").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "INVALID_REQUEST");
+
+    for origin in ["sylph", "native"] {
+        let response = backend
+            .get_authed(&format!("/api/v1/sessions?origin={origin}"))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "{origin} rejected");
+    }
+}
