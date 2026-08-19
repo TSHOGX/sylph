@@ -22,12 +22,12 @@
 - ✅ Database layer with migrations
 - ✅ Session management (create, list, get)
 - ✅ Health and diagnostics
-- 🚧 Turn management API
-- 🚧 Runner discovery via `--describe`
-- 🚧 Process supervision (TurnSupervisor)
-- 🚧 SSE streaming with reconnection
-- 🚧 Authentication middleware
-- 🚧 Integration tests
+- ✅ Turn management API
+- ✅ Runner discovery via `--describe`
+- ✅ Process supervision (TurnSupervisor)
+- ✅ SSE streaming with reconnection
+- ✅ Authentication middleware
+- ✅ Integration tests
 
 **API Endpoints:**
 - `GET /api/v1/health`
