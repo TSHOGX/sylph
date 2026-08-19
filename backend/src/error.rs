@@ -37,6 +37,12 @@ pub enum Error {
     #[error("TraceDB unavailable: {0}")]
     TraceDbUnavailable(String),
 
+    #[error("Archived session not found: {0}")]
+    TraceSessionNotFound(String),
+
+    #[error("Archived session already imported")]
+    SessionAlreadyImported,
+
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
@@ -118,6 +124,18 @@ impl Error {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "TRACEDB_UNAVAILABLE",
                 msg.clone(),
+            ),
+            // The id is client-supplied and safe to echo, and seeing it is what
+            // makes a mistyped or stale archive id diagnosable.
+            Error::TraceSessionNotFound(id) => (
+                StatusCode::NOT_FOUND,
+                "TRACE_SESSION_NOT_FOUND",
+                format!("No archived session with id {id}"),
+            ),
+            Error::SessionAlreadyImported => (
+                StatusCode::CONFLICT,
+                "SESSION_ALREADY_IMPORTED",
+                "This archived session has already been imported".to_string(),
             ),
             Error::InvalidRequest(msg) => {
                 (StatusCode::BAD_REQUEST, "INVALID_REQUEST", msg.clone())
@@ -204,7 +222,42 @@ mod tests {
             Error::TraceDbUnavailable("x".into()).code(),
             "TRACEDB_UNAVAILABLE"
         );
+        assert_eq!(
+            Error::TraceSessionNotFound("x".into()).code(),
+            "TRACE_SESSION_NOT_FOUND"
+        );
+        assert_eq!(
+            Error::SessionAlreadyImported.code(),
+            "SESSION_ALREADY_IMPORTED"
+        );
         assert_eq!(Error::InvalidRequest("x".into()).code(), "INVALID_REQUEST");
+    }
+
+    /// A mistyped archive id must be distinguishable from an archive that is
+    /// down, and from a session that was already imported.
+    #[test]
+    fn import_failures_have_distinct_statuses() {
+        assert_eq!(
+            Error::TraceSessionNotFound("claude:abc".into()).status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            Error::SessionAlreadyImported.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            Error::TraceDbUnavailable("spawn failed".into()).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // The client-supplied id is echoed, since that is what makes the
+        // failure diagnosable.
+        let body = Error::TraceSessionNotFound("claude:abc".into()).to_response();
+        assert!(
+            body.error.message.contains("claude:abc"),
+            "id missing from message: {}",
+            body.error.message
+        );
     }
 
     /// Internal details must not reach the client: messages can carry SQL,
