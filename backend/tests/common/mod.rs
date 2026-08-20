@@ -396,11 +396,22 @@ cat >/dev/null
 /// per-operation spelling: `search` answers camelCase, `show` answers
 /// snake_case. A mock that normalized the two would let a real spelling
 /// mismatch pass the suite.
+/// An archive holding no sessions for the requested filter.
+const EMPTY_LIST: &str = r#"{"sessions": []}"#;
+
 pub struct MockTraceDb {
     /// Emitted verbatim as the `result` of every `search` request.
     search_result: String,
     /// Emitted verbatim as the `result` of every `show` request.
     show_result: String,
+    /// Emitted verbatim as the `result` of every `list` request.
+    ///
+    /// Separate from `search_result` because the two shapes differ: `search`
+    /// answers a bare array of hits, `list` answers
+    /// `{"sessions": [...], "nextCursor": ...}`. Sharing one field would let the
+    /// archive-browse endpoints pass their tests against a payload the real
+    /// `trace-db` never emits.
+    list_result: String,
     /// When true, answer `{"ok": false, ...}` instead of a result.
     fails: bool,
 }
@@ -411,8 +422,41 @@ impl MockTraceDb {
         Self {
             search_result: hits.to_string(),
             show_result: "null".to_string(),
+            list_result: EMPTY_LIST.to_string(),
             fails: false,
         }
+    }
+
+    /// Returns a `list` page for any archive listing request.
+    ///
+    /// `sessions` is a JSON array of `SessionSummary` rows in `list`'s camelCase
+    /// spelling. The same instance answers `show` with `show_session`, which the
+    /// listing path calls to derive a label for a row carrying no title.
+    pub fn with_listing(sessions: Value, next_cursor: Option<&str>) -> Self {
+        let mut page = json!({"sessions": sessions});
+        if let Some(cursor) = next_cursor {
+            page["nextCursor"] = json!(cursor);
+        }
+        Self {
+            search_result: "[]".to_string(),
+            show_result: "null".to_string(),
+            list_result: page.to_string(),
+            fails: false,
+        }
+    }
+
+    /// Answer `show` with this session, keeping whatever else is configured.
+    ///
+    /// Chained onto [`Self::with_listing`] when a test needs both a listing and
+    /// the transcript behind one of its rows.
+    pub fn and_session(mut self, metadata: Value, events: Value) -> Self {
+        let mut session = json!({"id": "mock:archived", "agent": "mock"});
+        for (key, value) in metadata.as_object().expect("metadata must be an object") {
+            session[key] = value.clone();
+        }
+        self.show_result =
+            json!({"session": session, "mode": "full", "events": events}).to_string();
+        self
     }
 
     /// Returns a `show` payload built from session metadata and events.
@@ -420,16 +464,13 @@ impl MockTraceDb {
     /// `metadata` supplies the fields the import path reads; `id` and `agent`
     /// are filled in because the real archive always reports them.
     pub fn with_session(metadata: Value, events: Value) -> Self {
-        let mut session = json!({"id": "mock:archived", "agent": "mock"});
-        for (key, value) in metadata.as_object().expect("metadata must be an object") {
-            session[key] = value.clone();
-        }
         Self {
             search_result: "[]".to_string(),
-            show_result: json!({"session": session, "mode": "full", "events": events})
-                .to_string(),
+            show_result: "null".to_string(),
+            list_result: EMPTY_LIST.to_string(),
             fails: false,
         }
+        .and_session(metadata, events)
     }
 
     /// Answers `show` with `null`, which is how the archive reports an id it
@@ -438,6 +479,7 @@ impl MockTraceDb {
         Self {
             search_result: "[]".to_string(),
             show_result: "null".to_string(),
+            list_result: EMPTY_LIST.to_string(),
             fails: false,
         }
     }
@@ -447,6 +489,7 @@ impl MockTraceDb {
         Self {
             search_result: "[]".to_string(),
             show_result: "null".to_string(),
+            list_result: EMPTY_LIST.to_string(),
             fails: true,
         }
     }
@@ -483,6 +526,7 @@ done
 
         let search = format!(r#"{{"ok": true, "result": {}}}"#, self.search_result);
         let show = format!(r#"{{"ok": true, "result": {}}}"#, self.show_result);
+        let list = format!(r#"{{"ok": true, "result": {}}}"#, self.list_result);
         let stats = r#"{"ok": true, "result": {"totalSessions": 2, "totalEvents": 9}}"#;
 
         format!(
@@ -492,6 +536,7 @@ set -eu
 while IFS= read -r line; do
   case "$line" in
     *'"show"'*) printf '%s\n' '{show}' ;;
+    *'"list"'*) printf '%s\n' '{list}' ;;
     *'"stats"'*) printf '%s\n' '{stats}' ;;
     *) printf '%s\n' '{search}' ;;
   esac
