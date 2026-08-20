@@ -21,14 +21,18 @@ export function Overlay({
   title,
   onClose,
   children,
-  /** Wider layout for settings, which is a panel rather than a picker. */
+  /**
+   * Wider layout for settings, which is a panel rather than a picker; `viewer`
+   * is for the full-screen file viewer, where the content is the point and the
+   * chrome should get out of its way.
+   */
   size = "picker",
   describedBy,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
-  size?: "picker" | "panel";
+  size?: "picker" | "panel" | "viewer";
   describedBy?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -95,7 +99,12 @@ export function Overlay({
 
   return (
     <div
-      className="fixed inset-0 z-40 flex items-start justify-center bg-gray-900/30 p-4 pt-[10vh] backdrop-blur-[1px]"
+      // A picker sits below the top of the viewport; the viewer is centred and
+      // near-full-bleed, because vertical space is exactly what a spreadsheet or
+      // a rendered page needs.
+      className={`fixed inset-0 z-40 flex justify-center bg-gray-900/30 p-4 backdrop-blur-[1px] ${
+        size === "viewer" ? "items-center" : "items-start pt-[10vh]"
+      }`}
       // The backdrop closes on click, which every picker convention supports.
       // `onMouseDown` on the backdrop only, so a drag that ends outside a text
       // selection inside the dialog does not dismiss it.
@@ -111,8 +120,10 @@ export function Overlay({
         aria-describedby={describedBy}
         tabIndex={-1}
         onKeyDown={onKeyDown}
-        className={`flex max-h-[80vh] w-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl outline-none ${
-          size === "panel" ? "max-w-3xl" : "max-w-xl"
+        className={`flex w-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl outline-none ${
+          size === "viewer"
+            ? "h-[92vh] max-h-[92vh] max-w-[95vw]"
+            : `max-h-[80vh] ${size === "panel" ? "max-w-3xl" : "max-w-xl"}`
         }`}
       >
         <h2 id={titleId} className="sr-only">
