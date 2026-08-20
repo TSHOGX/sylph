@@ -23,18 +23,9 @@ All five phases are complete.
 
 ### Open Decisions
 
-Two decisions that need a human call:
+One decision remaining:
 
-**1. Rebuild trace-db?** The installed binary and current source have diverged.
-Installed `show` returns a bare event array; current source returns
-`{session: {...metadata...}, mode, events}`. The backend reads both formats and
-degrades gracefully, but the archive-metadata code path stays inert against the
-old binary. Rebuilding would activate it and add a `list` operation, but: (a)
-verify `api --db` still works after trace-db's config refactor, (b) back up
-`trace.db` first — FTS/tokenizer migration behavior against an existing DB is
-unverified. See `PHASE5_HANDOFF.md` for detail.
-
-**2. Native→Sylph conversion endpoint shape:** `PATCH /api/v1/sessions/{id}`
+**Native→Sylph conversion endpoint shape:** `PATCH /api/v1/sessions/{id}`
 with `identityMode`/`lifecycleMode` fields vs. `POST
 /api/v1/sessions/{id}/convert`. The latter is recommended: conversion is the
 only legitimate way to inject `SOUL.md` into a native session, so it should be

@@ -114,11 +114,13 @@ design — do not "fix" it by persisting the token.
 tree, a compiler or linter can capture a half-written file and report an error
 whose line numbers do not match the source. Re-run before believing it.
 
-**TraceDB builds disagree on JSON shape.** Some emit camelCase, others
-snake_case, and older builds omit session metadata entirely. Every multi-word
-field we read carries a serde `alias` for both spellings; without it a field
-silently parses as `None` — a degradation with no error. Keep both paths when
-touching `backend/src/tracedb/mod.rs`.
+**TraceDB's API spellings are inconsistent per-operation.** `show` emits
+snake_case (`created_at_ms`, `started_at_ms`), while `stats`, `search`, and
+`list` emit camelCase (`totalSessions`, `startedAtMs`). The backend client
+(`backend/src/tracedb/mod.rs`) pins the exact spelling each operation emits so
+a spelling change fails a test rather than silently yielding `None`. Do not add
+dual-spelling aliases: they mask future renames and suppress parse errors that
+would catch breaking changes.
 
 ## Spec and Code Evolution
 

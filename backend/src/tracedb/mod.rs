@@ -4,6 +4,20 @@
 //! open for request/response pairs. Protocol: send one JSON line per request,
 //! read one JSON line per response. See
 //! `/Users/hsw/Workspace/trace-db/references/protocol.md`.
+//!
+//! This targets the current TraceDB build and nothing older. Verified against
+//! `trace-db` at `e84cb7c` on 2026-08-20 by driving `trace-db api` directly and
+//! reading its responses, so the field spellings below are observed rather than
+//! inferred:
+//!
+//! - `stats` and `search` serialize camelCase (`totalSessions`, `startedAtMs`).
+//! - `show` serializes snake_case (`created_at_ms`, `started_at_ms`), because
+//!   its payload is built from `model.rs` types that carry no `rename_all`.
+//!
+//! The inconsistency is TraceDB's, not ours, and each spelling is pinned to the
+//! operation that actually emits it. Do not add cross-spelling aliases: an
+//! alias would let a future rename pass silently as `None` instead of failing a
+//! test, which is exactly how the archive-metadata path went dead before.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -29,7 +43,9 @@ struct Connection {
     stdout: BufReader<ChildStdout>,
 }
 
-#[derive(Serialize)]
+/// One request in the line protocol. Fields are per-operation and omitted when
+/// absent, since TraceDB rejects an unparsable value but ignores a missing one.
+#[derive(Default, Serialize)]
 struct Request<'a> {
     op: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,6 +54,16 @@ struct Request<'a> {
     limit: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<&'a str>,
+    /// Inclusive event index bounds, used to fetch metadata without the whole
+    /// event stream.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<i64>,
+    /// Event kinds to keep. Applied before `from`/`to`, so the two cannot be
+    /// combined to fetch "the first event of this kind".
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    kind: &'a [&'a str],
 }
 
 #[derive(Deserialize)]
@@ -47,9 +73,7 @@ struct Response {
     result: serde_json::Value,
 }
 
-/// Archive-wide totals. Each count is optional because the protocol's fields
-/// are additive and a future server may omit or rename one; a missing count
-/// must not turn a reachable archive into an unreachable one.
+/// Archive-wide totals for the authenticated diagnostics endpoint.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchiveCounts {
@@ -57,116 +81,81 @@ pub struct ArchiveCounts {
     pub events: Option<i64>,
 }
 
-/// One normalized event from an archived session. Fields are all optional
-/// because the protocol's fields are additive and older sessions predate some
-/// of them.
+/// A `show` response: session metadata plus the requested slice of events.
 ///
-/// Multi-word fields carry a snake_case alias: TraceDB emits camelCase from
-/// some builds and snake_case from others, and reading the archive must not
-/// depend on which one is installed.
+/// `null` is a clean "no such session" rather than a protocol error, so it
+/// deserializes to `None` instead of failing.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TraceEvent {
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub subtype: Option<String>,
-    #[serde(default)]
-    pub text: Option<String>,
-    #[serde(default, alias = "created_at_ms")]
-    pub created_at_ms: Option<i64>,
-}
-
-/// A `show` response, accepted in either shape TraceDB may return.
-///
-/// Newer archives answer with an object carrying session-level metadata
-/// alongside the events; older ones answer with a bare event array and expose
-/// no metadata at all. Tolerating both keeps import working across archive
-/// versions instead of failing on whichever shape we did not expect.
-#[derive(Debug, Clone, Default)]
 pub struct SessionTrace {
-    /// Session-level metadata, absent on archives that do not report it.
-    pub session: Option<TraceSession>,
+    pub session: TraceSession,
     pub events: Vec<TraceEvent>,
 }
 
-impl<'de> Deserialize<'de> for SessionTrace {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            Object {
-                #[serde(default)]
-                session: Option<TraceSession>,
-                #[serde(default)]
-                events: Vec<TraceEvent>,
-            },
-            Events(Vec<TraceEvent>),
-            /// Archives that return an optional trace answer `null` for an
-            /// unknown session id. That is a clean "no such session", not a
-            /// protocol error, so it must not fail deserialization.
-            Missing,
-        }
-
-        Ok(match Raw::deserialize(deserializer)? {
-            Raw::Object { session, events } => SessionTrace { session, events },
-            Raw::Events(events) => SessionTrace {
-                session: None,
-                events,
-            },
-            Raw::Missing => SessionTrace::default(),
-        })
-    }
-}
-
-/// Session-level metadata as TraceDB reports it. Unknown fields are ignored so
-/// the archive can add its own without breaking us.
+/// Session-level metadata from `show`.
+///
+/// snake_case is `show`'s actual spelling. `cwd`, `title`, and `started_at_ms`
+/// are genuinely absent for many archived sessions — measured over a 400-session
+/// sample of the local archive: 19% have no `cwd` (almost all `pi`), and
+/// essentially none carry a `title` or `started_at_ms`. So these are `Option`
+/// because the data is sparse, not because the protocol is uncertain.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TraceSession {
+    pub id: String,
+    pub agent: String,
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
-    #[serde(default, alias = "started_at_ms")]
+    #[serde(default)]
     pub started_at_ms: Option<i64>,
 }
 
-/// Facts about an archived session, derived from its own event stream.
+/// One normalized event from an archived session.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TraceEvent {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub created_at_ms: Option<i64>,
+}
+
+/// Facts the import path needs about an archived session.
 #[derive(Debug, Clone)]
 pub struct SessionFacts {
-    /// Working directory recorded by the agent, when it recorded one.
+    /// Working directory recorded by the archive. `None` means unresumable.
     pub cwd: Option<String>,
-    /// The opening user turn, used as a fallback title.
+    /// A recognizable summary: the archive's title, else the opening user turn.
     pub first_ask: Option<String>,
     pub started_at_ms: Option<i64>,
-    pub event_count: usize,
 }
 
 /// The snippet TraceDB judged most relevant within a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BestMatch {
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub snippet: Option<String>,
+    pub kind: String,
+    pub snippet: String,
 }
 
 /// One lineage-collapsed search hit.
 ///
-/// Deliberately a subset of what TraceDB returns: scoring internals
-/// (`score`, `scoreBreakdown`, `bm25`) are ranking mechanics with no meaning in
-/// the UI, and passing them through would couple this API to TraceDB's scoring
-/// implementation. Unknown fields are ignored, per the protocol's rule that new
-/// fields are additive.
+/// Deliberately a subset of what TraceDB returns: scoring internals (`score`,
+/// `scoreBreakdown`, and `bestMatch.bm25`) are ranking mechanics with no meaning
+/// in the UI, and passing them through would couple this API to TraceDB's
+/// scoring implementation. Unknown fields are ignored, per the protocol's rule
+/// that new fields are additive.
+///
+/// The `Option` fields are the ones TraceDB itself declares optional; `id`,
+/// `agent`, `hits`, and `bestMatch` are always present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {
     /// TraceDB session id, e.g. `claude:uuid/agent-suffix`.
     pub id: String,
     pub agent: String,
-    /// Human-authored title when the agent recorded one; often absent.
+    /// Human-authored title when the agent recorded one; usually absent.
     #[serde(default)]
     pub title: Option<String>,
     /// The opening user request, which is what makes a hit recognizable.
@@ -176,17 +165,15 @@ pub struct SearchHit {
     pub cwd: Option<String>,
     #[serde(default)]
     pub outcome: Option<String>,
-    #[serde(default, alias = "best_match")]
-    pub best_match: Option<BestMatch>,
+    pub best_match: BestMatch,
+    /// How many events inside the session matched.
+    pub hits: i64,
     #[serde(default)]
-    pub hits: Option<u32>,
-    #[serde(default, alias = "started_at_ms")]
     pub started_at_ms: Option<i64>,
-    #[serde(default, alias = "ended_at_ms")]
+    #[serde(default)]
     pub ended_at_ms: Option<i64>,
     /// Root of the fork lineage this session belongs to.
-    #[serde(default, alias = "lineage_root_id")]
-    pub lineage_root_id: Option<String>,
+    pub lineage_root_id: String,
 }
 
 impl Client {
@@ -197,27 +184,22 @@ impl Client {
         }
     }
 
-    /// Probe TraceDB availability: try spawning the process and reading its
-    /// version via `stats`, returning `Some(version)` on success.
-    ///
-    /// A failed spawn or a failed stats request leaves the connection absent,
-    /// so the next operation will try again. This implements lazy startup: if
-    /// TraceDB is misconfigured, the backend still boots and serves sessions.
     /// Whether the archive answers a `stats` request right now.
     ///
-    /// Reachability is the successful round trip itself, not the presence of
-    /// any particular field. An earlier version keyed this on a `version` field
-    /// in the stats payload, which the protocol does not define — so a
-    /// perfectly healthy archive always reported unavailable, and the health
-    /// endpoint contradicted a search that was working.
+    /// Reachability is the successful round trip itself, not the presence of any
+    /// particular field. An earlier version keyed this on a `version` field the
+    /// protocol does not define, so a healthy archive always reported
+    /// unavailable and the health endpoint contradicted a working search.
+    ///
+    /// A failed spawn leaves the connection absent, so the next call retries.
+    /// That is deliberate: the backend boots and serves live sessions even when
+    /// TraceDB is missing.
     pub async fn probe(&self) -> bool {
         self.stats().await.is_ok()
     }
 
-    /// Archive-wide counts for the authenticated diagnostics endpoint.
-    ///
-    /// Returns `None` when the archive is unreachable, which is the same
-    /// meaning [`Self::probe`] carries.
+    /// Archive-wide counts. `None` when the archive is unreachable, which is the
+    /// same meaning [`Self::probe`] carries.
     pub async fn archive_counts(&self) -> Option<ArchiveCounts> {
         let stats = self.stats().await.ok()?;
         Some(ArchiveCounts {
@@ -228,71 +210,67 @@ impl Client {
 
     /// Stats: archive health and per-agent session counts.
     pub async fn stats(&self) -> Result<serde_json::Value, String> {
-        self.call("stats", None, None, None).await
+        self.call(Request {
+            op: "stats",
+            ..Default::default()
+        })
+        .await
     }
 
-    /// Search: lineage-collapsed session hits, best match first.
-    ///
-    /// `result` is a bare JSON array of hits (not an object), matching
-    /// `trace-db api`'s `{"op":"search"}` response.
+    /// Search: lineage-collapsed session hits, best match first. `result` is a
+    /// bare JSON array of hits.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
-        let raw = self.call("search", Some(query), Some(limit), None).await?;
+        let raw = self
+            .call(Request {
+                op: "search",
+                query: Some(query),
+                limit: Some(limit),
+                ..Default::default()
+            })
+            .await?;
         serde_json::from_value(raw).map_err(|e| format!("Unexpected search payload: {}", e))
     }
 
-    /// Show: the normalized event stream for one session.
-    ///
-    /// `result` is a bare array of events. Despite the protocol table's
-    /// wording, it carries no session metadata object — no agent, title, cwd,
-    /// or outcome. Those appear only on a search hit, so anything the import
-    /// path needs about the session itself has to be derived from the events
-    /// or from the id.
-    pub async fn show(&self, id: &str) -> Result<SessionTrace, String> {
-        let raw = self.call("show", None, None, Some(id)).await?;
+    /// Show: session metadata plus events, optionally narrowed to an inclusive
+    /// event index range. `Ok(None)` means the archive has no such session,
+    /// which is distinct from the archive being unreachable (`Err`).
+    pub async fn show(
+        &self,
+        id: &str,
+        range: Option<(i64, i64)>,
+    ) -> Result<Option<SessionTrace>, String> {
+        let (from, to) = match range {
+            Some((from, to)) => (Some(from), Some(to)),
+            None => (None, None),
+        };
+        let raw = self
+            .call(Request {
+                op: "show",
+                id: Some(id),
+                from,
+                to,
+                ..Default::default()
+            })
+            .await?;
         serde_json::from_value(raw).map_err(|e| format!("Unexpected show payload: {}", e))
     }
 
-    /// What the import path needs to know about an archived session, derived
-    /// from its event stream rather than taken from the client.
+    /// What the import path needs about an archived session, taken from the
+    /// archive rather than from whatever a client posts.
     ///
-    /// Returns `Ok(None)` when the archive has no such session, which is
-    /// distinct from the archive being unreachable (`Err`).
+    /// Two requests instead of one: the first reads metadata with a one-event
+    /// slice, and the second fetches user events only when the metadata carries
+    /// no title. Sessions here routinely hold thousands of events and the
+    /// largest exceed a megabyte of JSON, so pulling a whole stream to read two
+    /// fields off its header would dominate the cost of an import.
     pub async fn session_facts(&self, id: &str) -> Result<Option<SessionFacts>, String> {
-        let trace = self.show(id).await?;
-        if trace.events.is_empty() && trace.session.is_none() {
+        let Some(trace) = self.show(id, Some((0, 0))).await? else {
             return Ok(None);
-        }
+        };
 
-        let meta = trace.session.as_ref();
-
-        // Prefer the working directory the archive reports for the session.
-        // Some agents also embed it in an early event's JSON payload, which is
-        // the only source older archives expose -- but many sessions have no
-        // such event, so it is a fallback, not the rule. Either way the value
-        // comes from the archive rather than from whatever a client posts.
-        let cwd = meta.and_then(|s| s.cwd.clone()).or_else(|| {
-            trace.events.iter().find_map(|event| {
-                let text = event.text.as_deref()?;
-                let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
-                parsed
-                    .get("cwd")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            })
-        });
-
-        // The archive's own title when it has one, else the opening user turn as
-        // the session's recognizable summary.
-        let first_ask = meta.and_then(|s| s.title.clone()).or_else(|| {
-            trace
-                .events
-                .iter()
-                .find(|event| event.kind.as_deref() == Some("user"))
-                .and_then(|event| event.text.clone())
-        });
-
-        let started_at_ms = meta
-            .and_then(|s| s.started_at_ms)
+        let started_at_ms = trace
+            .session
+            .started_at_ms
             .filter(|ms| *ms > 0)
             .or_else(|| {
                 trace
@@ -302,23 +280,59 @@ impl Client {
                     .find(|ms| *ms > 0)
             });
 
+        // The archive's own title when it has one. Almost no session carries
+        // one, so the opening user turn is the usual path, not the exception.
+        let first_ask = match trace.session.title {
+            Some(title) => Some(title),
+            None => self.first_user_text(id).await?,
+        };
+
         Ok(Some(SessionFacts {
-            cwd,
+            cwd: trace.session.cwd,
             first_ask,
             started_at_ms,
-            event_count: trace.events.len(),
+        }))
+    }
+
+    /// Text of the session's opening user turn.
+    ///
+    /// `kind` filters before `from`/`to` apply, so the two cannot be combined to
+    /// request "the first user event" — `{"kind":["user"],"to":0}` returns
+    /// nothing, because index 0 is almost never a user event. So this asks for
+    /// user events and takes the first: a dozen rows on a session whose full
+    /// stream runs to thousands.
+    async fn first_user_text(&self, id: &str) -> Result<Option<String>, String> {
+        let raw = self
+            .call(Request {
+                op: "show",
+                id: Some(id),
+                kind: &["user"],
+                ..Default::default()
+            })
+            .await?;
+
+        // Deserializing only what is needed keeps a 1800-event stream from
+        // becoming 1800 fully-materialized structs.
+        #[derive(Deserialize)]
+        struct UserEvents {
+            events: Vec<TraceEvent>,
+        }
+
+        let trace: Option<UserEvents> = serde_json::from_value(raw)
+            .map_err(|e| format!("Unexpected show payload: {}", e))?;
+
+        Ok(trace.and_then(|trace| {
+            trace
+                .events
+                .into_iter()
+                .find(|event| event.kind.as_deref() == Some("user"))
+                .and_then(|event| event.text)
         }))
     }
 
     /// Unified call path: spawn the process if absent, serialize the request,
     /// read the response, and return the result.
-    async fn call(
-        &self,
-        op: &str,
-        query: Option<&str>,
-        limit: Option<usize>,
-        id: Option<&str>,
-    ) -> Result<serde_json::Value, String> {
+    async fn call(&self, req: Request<'_>) -> Result<serde_json::Value, String> {
         let mut guard = self.inner.lock().await;
 
         // Spawn if absent or if the child has exited.
@@ -331,12 +345,6 @@ impl Client {
         }
 
         let conn = guard.as_mut().unwrap();
-        let req = Request {
-            op,
-            query,
-            limit,
-            id,
-        };
 
         let req_json = serde_json::to_string(&req).map_err(|e| {
             error!("Failed to serialize TraceDB request: {}", e);
@@ -379,7 +387,13 @@ impl Client {
         }
     }
 
-    /// Spawn the TraceDB API process: `trace-db api --db ~/.../trace.db`.
+    /// Spawn the TraceDB API process.
+    ///
+    /// No `--db` argument: TraceDB resolves its own database through its config
+    /// layering (`TRACEDB_PATH`, then its config file, then the platform data
+    /// directory). Passing a path here would let this backend disagree with
+    /// every other TraceDB client on the machine about which archive is the
+    /// archive.
     async fn spawn(&self) -> Result<Option<Connection>, String> {
         debug!("Spawning TraceDB API process: {:?}", self.bin_path);
 
@@ -410,89 +424,99 @@ impl Client {
 mod tests {
     use super::*;
 
-    fn parse(raw: &str) -> SessionTrace {
-        serde_json::from_str(raw).expect("show payload should deserialize")
-    }
+    /// Payloads here are copied from live `trace-db api` output, so a spelling
+    /// change in TraceDB fails a test instead of silently yielding `None`.
 
     #[test]
-    fn show_accepts_a_session_object_with_metadata() {
-        let trace = parse(
-            r#"{"session":{"cwd":"/w/app","title":"Fix login","startedAtMs":17},
-                "mode":"full","events":[{"kind":"user","text":"hi"}]}"#,
-        );
+    fn show_parses_the_snake_case_payload_trace_db_emits() {
+        let trace: Option<SessionTrace> = serde_json::from_str(
+            r#"{"session":{"id":"claude:x","agent":"claude","cwd":"/w/app",
+                "title":"Fix login","started_at_ms":1787181939317,"git_branch":"main"},
+                "mode":"full",
+                "events":[{"idx":0,"kind":"user","text":"hi","created_at_ms":7}]}"#,
+        )
+        .expect("show payload should deserialize");
 
-        let session = trace.session.expect("session metadata should be present");
-        assert_eq!(session.cwd.as_deref(), Some("/w/app"));
-        assert_eq!(session.title.as_deref(), Some("Fix login"));
-        assert_eq!(session.started_at_ms, Some(17));
-        assert_eq!(trace.events.len(), 1);
-    }
-
-    #[test]
-    fn show_accepts_a_bare_event_array() {
-        let trace = parse(r#"[{"kind":"user","text":"hi"},{"kind":"assistant"}]"#);
-
-        assert!(trace.session.is_none());
-        assert_eq!(trace.events.len(), 2);
-    }
-
-    #[test]
-    fn show_accepts_null_for_an_unknown_session() {
-        let trace = parse("null");
-
-        assert!(trace.session.is_none());
-        assert!(trace.events.is_empty());
-    }
-
-    #[test]
-    fn show_accepts_snake_case_field_names() {
-        // Some TraceDB builds emit snake_case here and others camelCase, so
-        // both must parse rather than silently dropping to None.
-        let trace = parse(
-            r#"{"session":{"cwd":"/w","started_at_ms":42},
-                "events":[{"kind":"user","created_at_ms":7,"text":"hi"}]}"#,
-        );
-
-        assert_eq!(trace.session.and_then(|s| s.started_at_ms), Some(42));
+        let trace = trace.expect("a session object is not a missing session");
+        assert_eq!(trace.session.cwd.as_deref(), Some("/w/app"));
+        assert_eq!(trace.session.title.as_deref(), Some("Fix login"));
+        assert_eq!(trace.session.started_at_ms, Some(1787181939317));
         assert_eq!(trace.events[0].created_at_ms, Some(7));
     }
 
     #[test]
-    fn search_hits_accept_snake_case_field_names() {
-        let hit: SearchHit = serde_json::from_str(
-            r#"{"id":"claude:x","agent":"claude","started_at_ms":1,
-                "ended_at_ms":2,"lineage_root_id":"claude:root",
-                "best_match":{"snippet":"s"}}"#,
-        )
-        .expect("snake_case hit should deserialize");
+    fn show_reports_an_unknown_session_as_null() {
+        let trace: Option<SessionTrace> =
+            serde_json::from_str("null").expect("null is a valid show result");
 
-        assert_eq!(hit.started_at_ms, Some(1));
-        assert_eq!(hit.ended_at_ms, Some(2));
-        assert_eq!(hit.lineage_root_id.as_deref(), Some("claude:root"));
-        assert!(hit.best_match.is_some());
+        assert!(trace.is_none(), "null means no such session");
+    }
+
+    #[test]
+    fn show_tolerates_a_session_with_no_recorded_metadata() {
+        // 19% of the local archive has no cwd, and nearly none has a title or
+        // start time. Sparse metadata is the normal case, not a malformed one.
+        let trace: Option<SessionTrace> = serde_json::from_str(
+            r#"{"session":{"id":"pi:x","agent":"pi","cwd":null,"title":null,
+                "started_at_ms":null},"mode":"metadata","events":[]}"#,
+        )
+        .expect("sparse metadata should deserialize");
+
+        let session = trace.expect("present").session;
+        assert_eq!(session.agent, "pi");
+        assert!(session.cwd.is_none() && session.title.is_none());
+    }
+
+    #[test]
+    fn show_ignores_added_session_fields() {
+        let trace: Option<SessionTrace> = serde_json::from_str(
+            r#"{"session":{"id":"x","agent":"claude","cwd":"/w","future_field":1},
+                "events":[]}"#,
+        )
+        .expect("an added archive field must not break parsing");
+
+        assert_eq!(trace.unwrap().session.cwd.as_deref(), Some("/w"));
+    }
+
+    #[test]
+    fn search_parses_the_camel_case_payload_trace_db_emits() {
+        let hits: Vec<SearchHit> = serde_json::from_str(
+            r#"[{"id":"claude:x","agent":"claude","cwd":"/w","title":null,
+                "ask":"fix it","outcome":"done","hits":70,
+                "startedAtMs":1787181939317,"endedAtMs":1787194550318,
+                "lineageRootId":"claude:root",
+                "bestMatch":{"eventIdx":1573,"kind":"tool_call","bm25":-10.19,
+                             "snippet":"the match"},
+                "score":2.12,"scoreBreakdown":{"recency":0.99},
+                "relatedSessionIds":["claude:x/agent-1"]}]"#,
+        )
+        .expect("search payload should deserialize");
+
+        let hit = &hits[0];
+        assert_eq!(hit.started_at_ms, Some(1787181939317));
+        assert_eq!(hit.ended_at_ms, Some(1787194550318));
+        assert_eq!(hit.lineage_root_id, "claude:root");
+        assert_eq!(hit.hits, 70);
+        assert_eq!(hit.best_match.kind, "tool_call");
+        assert_eq!(hit.best_match.snippet, "the match");
     }
 
     #[test]
     fn search_hits_serialize_as_camel_case() {
-        // Our own API contract to the frontend must not drift just because we
-        // now accept snake_case on the way in.
-        let hit: SearchHit =
-            serde_json::from_str(r#"{"id":"claude:x","agent":"claude","started_at_ms":1}"#)
-                .expect("hit should deserialize");
-        let out = serde_json::to_string(&hit).expect("hit should serialize");
+        // Our own wire contract to the frontend, asserted independently of how
+        // we parse TraceDB's.
+        let hits: Vec<SearchHit> = serde_json::from_str(
+            r#"[{"id":"claude:x","agent":"claude","hits":1,
+                "lineageRootId":"claude:x","startedAtMs":1,
+                "bestMatch":{"kind":"user","snippet":"s"}}]"#,
+        )
+        .expect("hit should deserialize");
+        let out = serde_json::to_string(&hits[0]).expect("hit should serialize");
 
         assert!(out.contains("\"startedAtMs\":1"), "got {out}");
+        assert!(out.contains("\"lineageRootId\""), "got {out}");
         assert!(!out.contains("started_at_ms"), "got {out}");
-    }
-
-    #[test]
-    fn show_ignores_unknown_session_fields() {
-        let trace = parse(r#"{"session":{"cwd":"/w","gitBranch":"main"},"events":[]}"#);
-
-        assert_eq!(
-            trace.session.and_then(|s| s.cwd).as_deref(),
-            Some("/w"),
-            "an added archive field must not break parsing"
-        );
+        // Scoring internals stay out of our API surface.
+        assert!(!out.contains("score"), "got {out}");
     }
 }

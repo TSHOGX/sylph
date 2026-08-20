@@ -18,6 +18,31 @@ import type { NextConfig } from "next";
  */
 const backend = process.env.SYLPH_WEB_BACKEND ?? "http://localhost:4317";
 
+/**
+ * Dev origins from which `/_next/*` requests are allowed. Next 16 blocks
+ * cross-site requests to dev resources as DNS-rebinding defense; this permits
+ * requests from cpolar tunnels and LAN IPs.
+ *
+ * Comma-separated list of **hostnames only** (no protocol, no port):
+ *   "44fb4bb.r8.cpolar.cn,100.125.12.35"
+ *
+ * Omit when `NODE_ENV=production` or when running without a tunnel or LAN
+ * access scenario. localhost is always allowed.
+ */
+const allowedDevOrigins = process.env.SYLPH_WEB_DEV_ORIGINS
+  ? process.env.SYLPH_WEB_DEV_ORIGINS.split(",")
+      .map((s) => s.trim())
+      .map((s) => {
+        // Strip protocol and port if accidentally included
+        try {
+          const url = new URL(s.startsWith("http") ? s : `http://${s}`);
+          return url.hostname;
+        } catch {
+          return s;
+        }
+      })
+  : [];
+
 const config: NextConfig = {
   /**
    * Emit a self-contained server bundle under `.next/standalone`, so an
@@ -25,6 +50,7 @@ const config: NextConfig = {
    * excludes `.next/static` and `public`, which `scripts/install.sh` copies in.
    */
   output: "standalone",
+  ...(allowedDevOrigins.length > 0 && { allowedDevOrigins }),
   async rewrites() {
     return [
       {

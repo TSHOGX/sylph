@@ -14,8 +14,13 @@ Sylph Web can create Sylph-managed sessions, stream live tool/reasoning events, 
 ## Quick Start
 
 This runs Sylph Web from the checkout, which is what you want while developing.
-For a packaged install that starts at login and does not need the repo, see
-[**docs/installation.md**](docs/installation.md).
+
+- **For herdr-based deployment** (recommended for development with remote access):
+  see [**docs/development.md**](docs/development.md)
+- **For packaged production installs**: see [**docs/installation.md**](docs/installation.md)
+
+The two-terminal setup below is the simplest way to start, but doesn't cover
+cpolar tunnels or LAN access — use the development guide for those scenarios.
 
 ### Prerequisites
 
@@ -113,6 +118,7 @@ your archive, or your real agents. It needs no servers running beforehand.
 
 ## Documentation
 
+- [**Development**](docs/development.md) — herdr deployment, health checks, troubleshooting
 - [**Installation**](docs/installation.md) — Packaged install, upgrade, rollback
 - [**AGENTS.md**](AGENTS.md) — Development guide and project rules
 - [**Architecture**](docs/architecture.md) — System design and data flow

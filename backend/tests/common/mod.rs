@@ -391,6 +391,11 @@ cat >/dev/null
 // ------------------------------------------------------------- mock TraceDB
 
 /// A stub `trace-db` binary for exercising archive-backed routes.
+///
+/// Payload shapes mirror the current `trace-db api` exactly, including its
+/// per-operation spelling: `search` answers camelCase, `show` answers
+/// snake_case. A mock that normalized the two would let a real spelling
+/// mismatch pass the suite.
 pub struct MockTraceDb {
     /// Emitted verbatim as the `result` of every `search` request.
     search_result: String,
@@ -405,17 +410,34 @@ impl MockTraceDb {
     pub fn with_hits(hits: Value) -> Self {
         Self {
             search_result: hits.to_string(),
-            show_result: "[]".to_string(),
+            show_result: "null".to_string(),
             fails: false,
         }
     }
 
-    /// Returns `events` for any show request. An empty array is how the real
-    /// archive reports an unknown session id.
-    pub fn with_events(events: Value) -> Self {
+    /// Returns a `show` payload built from session metadata and events.
+    ///
+    /// `metadata` supplies the fields the import path reads; `id` and `agent`
+    /// are filled in because the real archive always reports them.
+    pub fn with_session(metadata: Value, events: Value) -> Self {
+        let mut session = json!({"id": "mock:archived", "agent": "mock"});
+        for (key, value) in metadata.as_object().expect("metadata must be an object") {
+            session[key] = value.clone();
+        }
         Self {
             search_result: "[]".to_string(),
-            show_result: events.to_string(),
+            show_result: json!({"session": session, "mode": "full", "events": events})
+                .to_string(),
+            fails: false,
+        }
+    }
+
+    /// Answers `show` with `null`, which is how the archive reports an id it
+    /// does not have.
+    pub fn without_session() -> Self {
+        Self {
+            search_result: "[]".to_string(),
+            show_result: "null".to_string(),
             fails: false,
         }
     }
@@ -424,7 +446,7 @@ impl MockTraceDb {
     pub fn failing() -> Self {
         Self {
             search_result: "[]".to_string(),
-            show_result: "[]".to_string(),
+            show_result: "null".to_string(),
             fails: true,
         }
     }

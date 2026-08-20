@@ -1050,15 +1050,22 @@ async fn diagnostics_carries_archive_counts() {
 
 // ------------------------------------------------- native session import
 
-/// An archived event stream shaped like the real `show` payload: a `system`
-/// event carrying the working directory as JSON, then the opening user turn.
-fn archived_events(workdir: &str, ask: &str) -> Value {
-    json!([
-        {"kind": "system", "subtype": "mode", "text": "{\"mode\":\"normal\"}", "createdAtMs": 0, "idx": 0},
-        {"kind": "system", "subtype": "system", "text": format!("{{\"cwd\":\"{workdir}\"}}"), "createdAtMs": 0, "idx": 1},
-        {"kind": "user", "subtype": null, "text": ask, "createdAtMs": 1_700_000_000_000i64, "idx": 2},
-        {"kind": "assistant", "subtype": null, "text": "done", "createdAtMs": 1_700_000_100_000i64, "idx": 3},
-    ])
+/// A `show` stub: session metadata and events in the shape the current release
+/// emits.
+fn archived_session(cwd: Option<&str>, title: Option<&str>, ask: &str) -> MockTraceDb {
+    let mut metadata = json!({});
+    if let Some(cwd) = cwd {
+        metadata["cwd"] = json!(cwd);
+    }
+    if let Some(title) = title {
+        metadata["title"] = json!(title);
+    }
+    let events = json!([
+        {"kind": "system", "text": "{}", "created_at_ms": 0, "idx": 0},
+        {"kind": "user", "text": ask, "created_at_ms": 1_700_000_000_000i64, "idx": 2},
+        {"kind": "assistant", "text": "done", "created_at_ms": 1_700_000_100_000i64, "idx": 3},
+    ]);
+    MockTraceDb::with_session(metadata, events)
 }
 
 /// Build a backend whose stubbed archive describes a session rooted in a
@@ -1072,10 +1079,8 @@ fn archived_events(workdir: &str, ask: &str) -> Value {
 async fn backend_with_archived_session(ask: &str) -> (TestBackend, TestBackend, String) {
     let host = TestBackend::start().await;
     let workdir = host.workdir().display().to_string();
-    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_events(archived_events(
-        &workdir, ask,
-    )))
-    .await;
+    let backend = TestBackend::start_with_tracedb(archived_session(Some(&workdir), None, ask))
+        .await;
     (backend, host, workdir)
 }
 
@@ -1112,26 +1117,22 @@ async fn importing_a_native_session_preserves_its_identity() {
 
 #[tokio::test]
 async fn importing_reads_the_workdir_from_session_metadata() {
-    // The bug this pins: a real 413-event session carried no event with parsable
-    // cwd JSON, so scanning events rejected a session the archive knew the
-    // directory for. Archives that report session-level metadata must be read
-    // there. No event here carries a cwd, so only the metadata can satisfy it.
+    // A session with no recorded cwd is unresumable (the import path rejects
+    // it), so to verify metadata reaches the import path we need a title. A
+    // session whose metadata carries a title never scans events to find the
+    // opening user text, so it is evidence that metadata was read and not
+    // merely constructed.
     let host = TestBackend::start().await;
     let workdir = host.workdir().display().to_string();
-    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_events(json!({
-        "session": {"cwd": workdir, "title": "Recorded title"},
-        "mode": "full",
-        "events": [
-            {"kind": "user", "text": "resume this", "createdAtMs": 1_700_000_000_000i64, "idx": 0},
-        ],
-    })))
+    let backend = TestBackend::start_with_tracedb(archived_session(
+        Some(&workdir),
+        Some("Recorded title"),
+        "the ask",
+    ))
     .await;
 
     let response = backend
-        .post_authed(
-            "/api/v1/sessions/import",
-            json!({"traceSessionId": "mock:f45ba2ed-3866-4dba-9769-801029b16aa3"}),
-        )
+        .post_authed("/api/v1/sessions/import", json!({"traceSessionId": "mock:archived"}))
         .await;
 
     assert_eq!(response.status(), StatusCode::CREATED);
@@ -1147,17 +1148,10 @@ async fn importing_an_archived_session_without_a_workdir_is_unprocessable() {
     // never recorded where it ran. That is not a client mistake, so it must not
     // report as INVALID_REQUEST, and the code has to be distinguishable so the
     // UI can explain the actual remedy.
-    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_events(json!([
-        {"kind": "user", "subtype": null, "text": "no cwd anywhere", "createdAtMs": 1, "idx": 0},
-        {"kind": "assistant", "subtype": null, "text": "done", "createdAtMs": 2, "idx": 1},
-    ])))
-    .await;
+    let backend = TestBackend::start_with_tracedb(archived_session(None, None, "no cwd")).await;
 
     let response = backend
-        .post_authed(
-            "/api/v1/sessions/import",
-            json!({"traceSessionId": "mock:f45ba2ed-3866-4dba-9769-801029b16aa3"}),
-        )
+        .post_authed("/api/v1/sessions/import", json!({"traceSessionId": "mock:archived"}))
         .await;
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -1165,10 +1159,7 @@ async fn importing_an_archived_session_without_a_workdir_is_unprocessable() {
     assert_eq!(body["error"]["code"], "TRACE_SESSION_NOT_RESUMABLE");
     // The id makes it clear which archived session is unusable.
     assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("mock:f45ba2ed-3866-4dba-9769-801029b16aa3"),
+        body["error"]["message"].as_str().unwrap().contains("mock:archived"),
         "id missing from message: {body}"
     );
 }
@@ -1191,8 +1182,8 @@ async fn importing_the_same_archived_session_twice_conflicts() {
 
 #[tokio::test]
 async fn importing_an_unknown_archived_session_is_not_found() {
-    // An empty event array is how the archive reports an id it does not have.
-    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_events(json!([]))).await;
+    // `null` is how the archive reports an id it does not have.
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::without_session()).await;
 
     let response = backend
         .post_authed("/api/v1/sessions/import", json!({"traceSessionId": "mock:nope"}))
@@ -1266,14 +1257,15 @@ async fn importing_reports_an_unreachable_archive() {
 
 #[tokio::test]
 async fn importing_rejects_an_archive_session_whose_workdir_is_gone() {
-    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_events(archived_events(
-        "/definitely/not/a/real/path",
+    let backend = TestBackend::start_with_tracedb(archived_session(
+        Some("/definitely/not/a/real/path"),
+        None,
         "hi",
-    )))
+    ))
     .await;
 
     let response = backend
-        .post_authed("/api/v1/sessions/import", json!({"traceSessionId": "mock:abc"}))
+        .post_authed("/api/v1/sessions/import", json!({"traceSessionId": "mock:archived"}))
         .await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
