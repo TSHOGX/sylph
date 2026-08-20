@@ -16,8 +16,11 @@
   server-side filters, error boundaries. See `PHASE3_HANDOFF.md`.
 - Phase 4: production readiness — 55 unit + 53 integration + 6 E2E tests,
   accessibility audit, first-load JS measured at 190.4 KB gzipped
+- Phase 5: deployment — `scripts/install.sh`, standalone frontend bundle,
+  LaunchAgent, reversible rollback, `docs/installation.md`
 
-**In progress:** Phase 5 (deployment). See `PHASE4_HANDOFF.md`.
+All five phases are complete. Open decisions and deferred work are recorded in
+`PHASE5_HANDOFF.md`.
 
 **Runner protocol:** the backend consumes `sylph.runner.v1` NDJSON lines
 (`SYLPH_STREAM_FORMAT=ndjson-v1`) as specified in the Sylph skill's
@@ -123,21 +126,33 @@ representative session rather than a synthetic page.
 
 ## Phase 5: Deployment (Week 10)
 
-**Goal:** Packaged release for local installation.
+**Goal:** Packaged release for local installation. **Status: complete.**
 
 **Deliverables:**
-- Binary packaging (`cargo build --release`)
-- Frontend production build
-- Data migration scripts
-- Installation guide
-- LaunchAgent configuration (macOS)
-- Health checks and logging
-- Rollback procedures
+- ✅ Binary packaging — `cargo build --release`, a 7.3 MB single binary
+- ✅ Frontend production build — `output: "standalone"`, a self-contained
+  bundle carrying its own `node_modules`, so an install needs neither the
+  repo nor `npm install` at runtime
+- ✅ Data migration scripts — **not needed, deliberately.** sqlx runs the
+  embedded migrations on startup and records them in the journal, so a
+  development database carries into a packaged install untouched. Verified
+  against a copy of the real dev journal.
+- ✅ Installation guide — `docs/installation.md`
+- ✅ LaunchAgent configuration (macOS) — `--launchagent`, with `RunAtLoad`
+  and `KeepAlive`
+- ✅ Health checks and logging — `/api/v1/health` unauthenticated for
+  probes, `/api/v1/diagnostics` behind auth for counts and uptime; launchd
+  logs rotate at 16 MB keeping one generation
+- ✅ Rollback procedures — `--rollback`, which restores both the previous
+  tree and its journal, and is itself reversible
 
 **Distribution:**
-- Single binary for backend
-- Static Next.js export (optional)
-- Setup script for first run
+- ✅ Single binary for backend
+- ⏸ Static Next.js export — not done and not wanted. It was optional, and
+  the app has a dynamic route (`/sessions/[id]`) plus a proxy rewrite to the
+  backend, neither of which survives a static export.
+- ✅ Setup script for first run — `scripts/install.sh`, which also handles
+  upgrade, rollback, uninstall, and purge
 
 ## Future Enhancements (Post-Launch)
 
@@ -181,8 +196,18 @@ Phase 4 exit criteria:
 - Performance targets met
 - Production-ready error handling
 
-Phase 5 exit criteria:
-- Installation works on clean machine
-- Migration from dev data succeeds
-- LaunchAgent starts on boot
-- Health checks report correctly
+Phase 5 exit criteria — all met, with how each was checked:
+- ✅ Installation works on clean machine — installed from a fresh `git clone`
+  into a throwaway prefix, including `npm ci`, on non-default ports. Short of
+  a VM this is the strongest available check: it proves the committed tree
+  contains everything the build needs.
+- ✅ Migration from dev data succeeds — a consistent read-only copy of the
+  real development journal was opened by the packaged install, which reported
+  schema version 1, served its sessions over the API, and logged no migration
+  error.
+- ✅ LaunchAgent starts on boot — `RunAtLoad` verified via `launchctl
+  bootstrap`, the plist passes `plutil -lint`, and `KeepAlive` was confirmed
+  to restart the pair after a `SIGKILL`. Not verified across an actual reboot.
+- ✅ Health checks report correctly — `/api/v1/health` answers 200 without a
+  cookie, directly and through the frontend proxy; `/api/v1/diagnostics`
+  returns 401 without one.
