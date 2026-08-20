@@ -7,10 +7,11 @@
 #
 #   ./scripts/install.sh                    # build and install, no autostart
 #   ./scripts/install.sh --launchagent      # also start at login
+#   ./scripts/install.sh --rollback         # restore the previous version
 #   ./scripts/install.sh --uninstall        # remove everything it installed
 #
-# Never touches the journal or the TraceDB archive. Uninstall leaves your data
-# directory alone; it is removed only by an explicit --purge.
+# Never reads or writes the TraceDB archive. Uninstall leaves your journal
+# alone; it is removed only by an explicit --purge.
 
 set -euo pipefail
 
@@ -28,13 +29,15 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WANT_LAUNCHAGENT=0
 DO_UNINSTALL=0
 DO_PURGE=0
+DO_ROLLBACK=0
 
 for arg in "$@"; do
   case "$arg" in
     --launchagent) WANT_LAUNCHAGENT=1 ;;
     --uninstall) DO_UNINSTALL=1 ;;
     --purge) DO_UNINSTALL=1; DO_PURGE=1 ;;
-    -h|--help) sed -n '3,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --rollback) DO_ROLLBACK=1 ;;
+    -h|--help) sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -50,12 +53,51 @@ unload_agent() {
   fi
 }
 
+if [ "$DO_ROLLBACK" -eq 1 ]; then
+  [ -d "$PREFIX.old" ] || die "No previous version at $PREFIX.old to roll back to."
+  say "Rolling back to the previous version"
+  unload_agent
+
+  # Swap current and previous, so a rollback is itself reversible: running
+  # --rollback again returns to the version you just left.
+  rm -rf "$PREFIX.rollback-tmp"
+  [ -d "$PREFIX" ] && mv "$PREFIX" "$PREFIX.rollback-tmp"
+  mv "$PREFIX.old" "$PREFIX"
+  [ -d "$PREFIX.rollback-tmp" ] && mv "$PREFIX.rollback-tmp" "$PREFIX.old"
+
+  if [ -d "$PREFIX/journal-backup" ] && [ -f "$PREFIX/journal-backup/live.db" ]; then
+    # The version being left may have migrated the schema past what this binary
+    # accepts, so restore the journal as it was when this version last ran.
+    # Its journal is set aside as the backup for the tree we just moved to
+    # $PREFIX.old, which makes rolling forward again restore it symmetrically.
+    say "Restoring the journal from this version's backup"
+    rm -rf "$PREFIX.old/journal-backup"
+    mkdir -p "$PREFIX.old/journal-backup"
+    for f in "$DATA_DIR"/live.db "$DATA_DIR"/live.db-wal "$DATA_DIR"/live.db-shm; do
+      [ -f "$f" ] && mv "$f" "$PREFIX.old/journal-backup/"
+    done
+    cp "$PREFIX/journal-backup"/live.db* "$DATA_DIR/"
+    say "The other version's journal is kept at $PREFIX.old/journal-backup"
+  else
+    warn "No journal backup found; keeping the current journal. If the version you are leaving migrated the schema, the restored binary may refuse to start."
+  fi
+
+  ln -sf "$PREFIX/start.sh" "$BIN_DIR/sylph-web"
+  ln -sf "$PREFIX/sylph-web-backend" "$BIN_DIR/sylph-web-backend"
+  if [ -f "$PLIST" ]; then
+    launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl load "$PLIST"
+    say "Restarted the LaunchAgent"
+  fi
+  say "Rolled back. Run --rollback again to return to the other version."
+  exit 0
+fi
+
 if [ "$DO_UNINSTALL" -eq 1 ]; then
   say "Removing LaunchAgent"
   unload_agent
   rm -f "$PLIST"
   say "Removing $PREFIX and launchers"
-  rm -rf "$PREFIX"
+  rm -rf "$PREFIX" "$PREFIX.old" "$PREFIX.new"
   rm -f "$BIN_DIR/sylph-web" "$BIN_DIR/sylph-web-backend"
   if [ "$DO_PURGE" -eq 1 ]; then
     warn "Purging the journal at $DATA_DIR"
@@ -141,12 +183,26 @@ EOF
 chmod +x "$PREFIX.new/start.sh" "$PREFIX.new/sylph-web-backend"
 
 # Swap in only once the new tree is complete, so a failed build cannot leave a
-# half-installed prefix behind.
+# half-installed prefix behind. The previous tree is kept as $PREFIX.old, which
+# is what --rollback restores.
 unload_agent
 rm -rf "$PREFIX.old"
-[ -d "$PREFIX" ] && mv "$PREFIX" "$PREFIX.old"
+if [ -d "$PREFIX" ]; then
+  mv "$PREFIX" "$PREFIX.old"
+  # A newer version may add a migration, and sqlx refuses to open a journal
+  # whose schema is ahead of the binary. So a rollback needs the journal as it
+  # was, not just the old binaries. Safe to copy directly: the agent is stopped
+  # and the WAL files come with it.
+  if [ -f "$DATA_DIR/live.db" ]; then
+    say "Backing up the journal for rollback"
+    rm -rf "$PREFIX.old/journal-backup"
+    mkdir -p "$PREFIX.old/journal-backup"
+    for f in "$DATA_DIR"/live.db "$DATA_DIR"/live.db-wal "$DATA_DIR"/live.db-shm; do
+      [ -f "$f" ] && cp "$f" "$PREFIX.old/journal-backup/"
+    done
+  fi
+fi
 mv "$PREFIX.new" "$PREFIX"
-rm -rf "$PREFIX.old"
 
 ln -sf "$PREFIX/start.sh" "$BIN_DIR/sylph-web"
 ln -sf "$PREFIX/sylph-web-backend" "$BIN_DIR/sylph-web-backend"
