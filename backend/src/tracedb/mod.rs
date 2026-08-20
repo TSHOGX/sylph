@@ -60,6 +60,10 @@ pub struct ArchiveCounts {
 /// One normalized event from an archived session. Fields are all optional
 /// because the protocol's fields are additive and older sessions predate some
 /// of them.
+///
+/// Multi-word fields carry a snake_case alias: TraceDB emits camelCase from
+/// some builds and snake_case from others, and reading the archive must not
+/// depend on which one is installed.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TraceEvent {
@@ -69,7 +73,7 @@ pub struct TraceEvent {
     pub subtype: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "created_at_ms")]
     pub created_at_ms: Option<i64>,
 }
 
@@ -124,7 +128,7 @@ pub struct TraceSession {
     pub cwd: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "started_at_ms")]
     pub started_at_ms: Option<i64>,
 }
 
@@ -172,16 +176,16 @@ pub struct SearchHit {
     pub cwd: Option<String>,
     #[serde(default)]
     pub outcome: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "best_match")]
     pub best_match: Option<BestMatch>,
     #[serde(default)]
     pub hits: Option<u32>,
-    #[serde(default)]
+    #[serde(default, alias = "started_at_ms")]
     pub started_at_ms: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "ended_at_ms")]
     pub ended_at_ms: Option<i64>,
     /// Root of the fork lineage this session belongs to.
-    #[serde(default)]
+    #[serde(default, alias = "lineage_root_id")]
     pub lineage_root_id: Option<String>,
 }
 
@@ -438,6 +442,47 @@ mod tests {
 
         assert!(trace.session.is_none());
         assert!(trace.events.is_empty());
+    }
+
+    #[test]
+    fn show_accepts_snake_case_field_names() {
+        // Some TraceDB builds emit snake_case here and others camelCase, so
+        // both must parse rather than silently dropping to None.
+        let trace = parse(
+            r#"{"session":{"cwd":"/w","started_at_ms":42},
+                "events":[{"kind":"user","created_at_ms":7,"text":"hi"}]}"#,
+        );
+
+        assert_eq!(trace.session.and_then(|s| s.started_at_ms), Some(42));
+        assert_eq!(trace.events[0].created_at_ms, Some(7));
+    }
+
+    #[test]
+    fn search_hits_accept_snake_case_field_names() {
+        let hit: SearchHit = serde_json::from_str(
+            r#"{"id":"claude:x","agent":"claude","started_at_ms":1,
+                "ended_at_ms":2,"lineage_root_id":"claude:root",
+                "best_match":{"snippet":"s"}}"#,
+        )
+        .expect("snake_case hit should deserialize");
+
+        assert_eq!(hit.started_at_ms, Some(1));
+        assert_eq!(hit.ended_at_ms, Some(2));
+        assert_eq!(hit.lineage_root_id.as_deref(), Some("claude:root"));
+        assert!(hit.best_match.is_some());
+    }
+
+    #[test]
+    fn search_hits_serialize_as_camel_case() {
+        // Our own API contract to the frontend must not drift just because we
+        // now accept snake_case on the way in.
+        let hit: SearchHit =
+            serde_json::from_str(r#"{"id":"claude:x","agent":"claude","started_at_ms":1}"#)
+                .expect("hit should deserialize");
+        let out = serde_json::to_string(&hit).expect("hit should serialize");
+
+        assert!(out.contains("\"startedAtMs\":1"), "got {out}");
+        assert!(!out.contains("started_at_ms"), "got {out}");
     }
 
     #[test]
