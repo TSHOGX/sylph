@@ -32,20 +32,18 @@ export default function SearchPage() {
   const archiveDown = data ? !data.available : false;
 
   return (
-    <div className="min-h-screen bg-white">
-      <header className="border-b">
-        <div className="container mx-auto flex flex-wrap items-center justify-between gap-3 px-4 py-4">
-          <h1 className="text-xl font-semibold">Search archive</h1>
-          <Link
-            href="/"
-            className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-          >
-            All sessions
-          </Link>
-        </div>
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-4 py-2">
+        <h1 className="text-sm font-semibold">Search archive</h1>
+        <Link
+          href="/"
+          className="rounded-md border border-gray-200 px-2.5 py-1 text-xs font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        >
+          All sessions
+        </Link>
       </header>
 
-      <main id="main" className="container mx-auto px-4 py-6">
+      <div className="mx-auto max-w-4xl px-4 py-6">
         <form role="search" onSubmit={(e) => e.preventDefault()}>
           <label htmlFor="archive-query" className="block text-sm font-medium">
             Find archived coding-agent sessions
@@ -102,7 +100,7 @@ export default function SearchPage() {
             </>
           )}
         </div>
-      </main>
+      </div>
     </div>
   );
 }

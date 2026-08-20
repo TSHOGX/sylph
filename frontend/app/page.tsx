@@ -73,28 +73,18 @@ export default function HomePage() {
   const visible = sessions;
 
   return (
-    <div className="min-h-screen bg-white">
-      <header className="border-b">
-        <div className="container mx-auto flex flex-wrap items-center justify-between gap-3 px-4 py-4">
-          <h1 className="text-xl font-semibold">Sylph Web</h1>
-          <nav className="flex items-center gap-2">
-            <Link
-              href="/search"
-              className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-            >
-              Search archive
-            </Link>
-            <Link
-              href="/sessions/new"
-              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-            >
-              New session
-            </Link>
-          </nav>
-        </div>
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-4 py-2">
+        <h1 className="text-sm font-semibold">All sessions</h1>
+        <Link
+          href="/search"
+          className="rounded-md border border-gray-200 px-2.5 py-1 text-xs font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        >
+          Search archive
+        </Link>
       </header>
 
-      <main id="main" className="container mx-auto px-4 py-6">
+      <div className="mx-auto max-w-4xl px-4 py-4">
         {isPending ? (
           <output
             aria-live="polite"
@@ -178,7 +168,7 @@ export default function HomePage() {
                         {session.agent} ·{" "}
                         <span className="font-mono text-xs">{session.workdir}</span>
                       </p>
-                      <p className="mt-1 text-xs text-gray-400">
+                      <p className="mt-1 text-xs text-gray-500">
                         updated {formatRelative(session.updatedAtMs)}
                       </p>
                     </Link>
@@ -188,7 +178,7 @@ export default function HomePage() {
             )}
           </>
         )}
-      </main>
+      </div>
     </div>
   );
 }

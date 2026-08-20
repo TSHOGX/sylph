@@ -1,15 +1,22 @@
 "use client";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { api, ApiError } from "@/lib/api";
+import { useSettings } from "@/lib/settings";
 
 export default function NewSessionPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const { settings } = useSettings();
+  const queryClient = useQueryClient();
   const [chosenAgent, setChosenAgent] = useState("");
-  const [workdir, setWorkdir] = useState("");
+  // Prefilled from `?workdir=`, which is how the sidebar's "New session here"
+  // hands over the workspace it was invoked from. Read once as the initial value
+  // rather than synced, so the user can then edit it freely.
+  const [workdir, setWorkdir] = useState(() => searchParams.get("workdir") ?? "");
   const [title, setTitle] = useState("");
   /**
    * Flag values tagged with the agent they were chosen for.
@@ -31,10 +38,14 @@ export default function NewSessionPage() {
 
   const agents = useMemo(() => agentsQuery.data?.agents ?? [], [agentsQuery.data]);
 
-  // Default to the first discovered runner instead of a hardcoded name: the
-  // list comes from `--describe`, so hardcoding "claude" would offer an agent
-  // that may not be installed.
-  const agent = chosenAgent || agents[0]?.name || "";
+  // Default to the configured agent, then the first discovered runner. Never a
+  // hardcoded name: the list comes from `--describe`, so hardcoding "claude"
+  // would offer an agent that may not be installed. The configured default is
+  // only honoured while it is actually present.
+  const configuredDefault = agents.some((a) => a.name === settings.defaultAgent)
+    ? settings.defaultAgent
+    : "";
+  const agent = chosenAgent || configuredDefault || agents[0]?.name || "";
   const selected = agents.find((a) => a.name === agent);
   const flags = flagState.agent === agent ? flagState.values : {};
 
@@ -46,7 +57,15 @@ export default function NewSessionPage() {
         title: title.trim() || undefined,
         flags: Object.keys(flags).length > 0 ? flags : undefined,
       }),
-    onSuccess: (result) => router.push(`/sessions/${result.session.id}`),
+    onSuccess: (result) => {
+      // The sidebar and the workspace roll-up both list this session. Without
+      // invalidating them, a new session is missing from the sidebar until its
+      // 10-second poll fires — long enough that the workspace it belongs to looks
+      // like it was not created.
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+      router.push(`/sessions/${result.session.id}`);
+    },
   });
 
   function setFlag(name: string, value: string) {
@@ -75,19 +94,19 @@ export default function NewSessionPage() {
   const noAgents = !agentsQuery.isPending && agents.length === 0;
 
   return (
-    <div className="min-h-screen bg-white">
-      <header className="border-b">
-        <div className="container mx-auto px-4 py-3">
-          <Link
-            href="/"
-            className="text-sm text-gray-500 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-          >
-            ← All sessions
-          </Link>
-        </div>
+    // The shell owns the page frame and `<main id="main">`, so this renders only
+    // its own scrolling content.
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <header className="border-b border-gray-200 px-4 py-2">
+        <Link
+          href="/"
+          className="text-xs text-gray-500 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        >
+          ← All sessions
+        </Link>
       </header>
 
-      <main id="main" className="container mx-auto max-w-lg px-4 py-8">
+      <div className="mx-auto max-w-lg px-4 py-8">
         <h1 className="text-2xl font-semibold">New session</h1>
         <p className="mt-1 text-sm text-gray-500">
           Creates a Sylph session: Sylph identity is injected and Sylph lifecycle policy
@@ -233,7 +252,7 @@ export default function NewSessionPage() {
             </div>
           </form>
         )}
-      </main>
+      </div>
     </div>
   );
 }
