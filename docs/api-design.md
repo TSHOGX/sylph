@@ -439,6 +439,146 @@ Errors: `FILE_NOT_FOUND` (404) for a missing path, `POLICY_VIOLATION` (403) for
 one outside the workdir, `INVALID_REQUEST` (400) when a directory is requested as
 content or vice versa.
 
+#### `GET /api/v1/sessions/{id}/files/document?path=&sheet=&row=&rows=`
+
+A parsed representation of a file that is neither plain text nor an image:
+spreadsheets, CSV, Word documents, and PowerPoint decks. Parsing is server-side
+so the browser receives structure rather than bytes it would need a megabyte of
+JavaScript to interpret.
+
+**Why the server parses.** The npm option (`xlsx`, SheetJS) is frozen at 0.18.5
+with two unpatched High CVEs reachable on exactly this "parse a file we did not
+write" path, and is 7.5 MB unpacked against a first-load budget with ~4 KB of
+headroom. `calamine` and `quick-xml` do the same work in the backend, where the
+cost is compile time rather than every page load.
+
+The response is a union discriminated on `kind`. `grid` covers
+`.xlsx/.xlsm/.xlsb/.xls/.ods/.csv/.tsv`; `blocks` covers `.docx/.pptx`.
+
+**Response 200** (`kind: "grid"`):
+```json
+{
+  "path": "reports/sales.xlsx",
+  "absolutePath": "/Users/you/proj/reports/sales.xlsx",
+  "size": 20480,
+  "modifiedAtMs": 1755600000000,
+  "kind": "grid",
+  "grid": {
+    "sheets": [{ "name": "Sales", "rows": 5000, "cols": 12 }],
+    "sheet": 0,
+    "row": 0,
+    "rows": [
+      [{ "v": "Region", "t": "text" }, { "v": "Q1", "t": "text" }],
+      [{ "v": "APAC", "t": "text" }, { "v": "1200", "t": "number", "n": 1200 }]
+    ],
+    "hasHeaderRow": true,
+    "truncated": true
+  }
+}
+```
+
+Each cell carries `v`, the string to display, and `t`, one of `text`, `number`,
+`bool`, `date`, `formula`, or `error`. Empty cells are `null` rather than an
+object, because sheets are sparse and the difference is most of the payload. `t`
+drives alignment — numbers and dates right, text left — and `n` carries the raw
+number for a `number` cell so the client need not re-parse a formatted string.
+
+Number formatting and date conversion happen server-side: `v` for a date cell is
+already an ISO-8601 string, never an Excel serial. Per-cell currency and percent
+formats are **not** reproduced — `calamine` folds the number format into the value
+and exposes no per-cell format string, so only date-vs-number survives the trip.
+
+`sheet` selects a worksheet by index (default 0). `row` and `rows` window the
+result: `rows` defaults to 200 and caps at 500, and an out-of-range window is
+clamped rather than refused, with the response echoing what was actually served.
+`sheets[]` always reports every sheet's true dimensions, so a client can say what
+it is not showing. Windowing is not cosmetic — a 50 000 × 30 sheet takes ~600 ms
+to materialize and would be a ~50 MB response.
+
+**Response 200** (`kind: "blocks"`):
+```json
+{
+  "path": "notes/roadmap.pptx",
+  "absolutePath": "/Users/you/proj/notes/roadmap.pptx",
+  "size": 41984,
+  "modifiedAtMs": 1755600000000,
+  "kind": "blocks",
+  "blocks": {
+    "sections": [
+      { "title": "Roadmap", "index": 0, "notes": "Mention the CVE research." }
+    ],
+    "blocks": [
+      { "type": "heading", "level": 1, "text": "Quarterly Report" },
+      { "type": "paragraph", "spans": [{ "text": "Revenue grew ", "bold": false },
+                                        { "text": "12%", "bold": true }] },
+      { "type": "listItem", "level": 0, "ordered": false, "text": "APAC led growth" },
+      { "type": "table", "rows": [["Region", "Revenue"], ["APAC", "1200"]] }
+    ],
+    "truncated": false
+  }
+}
+```
+
+Word and PowerPoint share this shape: a slide is a section whose blocks follow it,
+so one renderer serves both. Block `type` is `heading`, `paragraph`, `listItem`,
+or `table`.
+
+A structured block list is returned rather than Markdown or HTML. Markdown would
+mean escaping document prose containing `*`, `_`, or `|` on the way out and
+re-parsing it on the way in — two chances to corrupt text that was never Markdown.
+HTML would reintroduce an `innerHTML` path into a frontend whose Markdown renderer
+is built specifically to avoid one.
+
+PowerPoint slide order comes from `p:sldIdLst` in `ppt/presentation.xml`, resolved
+through `ppt/_rels/presentation.xml.rels`. Sorting slide filenames is wrong:
+`slide10.xml` sorts before `slide2.xml`, and a deleted-then-re-added slide breaks
+the correspondence entirely. Speaker notes come from the per-slide
+`ppt/notesSlides/` part and appear as `sections[].notes`. Shape geometry is not
+modelled; reading order is what a preview needs.
+
+**Limits.** A file over 25 MiB is refused before parsing — `MAX_PREVIEW_BYTES`
+(1 MiB) is the wrong bound here, since a legitimate spreadsheet is routinely
+several MiB. Because an OOXML container is attacker-influenced input, a declared
+part over the per-part cap is refused from the zip header before decompressing,
+and the read is *also* bounded: a 199 KB archive can declare a 200 MB part, and
+the declared figure is itself untrusted.
+
+Errors: `FILE_NOT_FOUND` (404), `POLICY_VIOLATION` (403), and `INVALID_REQUEST`
+(400) for a directory, an out-of-range sheet index, an extension this endpoint
+does not handle, a file that is too large, or a corrupt, encrypted, or truncated
+container. A client that receives `INVALID_REQUEST` for a mislabelled file may
+retry once against `/files/content`, which decides text-vs-binary from the bytes.
+
+#### `GET /api/v1/sessions/{id}/files/raw?path=`
+
+The file's bytes, for content a browser renders natively: images, HTML, and PDF.
+
+This is what the image viewer uses, replacing base64-through-JSON. Base64 costs
+33% inflation, a JSON parse before first paint, no progressive decode, and no
+HTTP caching, and cannot serve a PDF at all. The route is not a weakening of the
+model: it sits behind the same auth middleware and the same canonical-path
+containment check as the two endpoints above.
+
+**Response 200:** the raw bytes, with headers that are load-bearing rather than
+decorative. Serving workspace HTML from this origin without them lets a script in
+an agent-generated file read the `sylph_session` cookie — measured, not
+hypothetical.
+
+| Header | Value | Why |
+| --- | --- | --- |
+| `Content-Type` | from a strict inert allowlist | An unknown type becomes `application/octet-stream`, never a guess |
+| `X-Content-Type-Options` | `nosniff` | Stops an octet-stream payload being sniffed into `text/html` |
+| `Content-Security-Policy` | `sandbox` | Forces an opaque origin however the response is loaded, so even direct navigation reaches neither DOM nor cookie |
+| `Content-Disposition` | `inline` for allowlisted types, else `attachment` | A type we will not render is a download, not a page |
+| `ETag` / `Cache-Control` | mtime+size / `no-cache` | Re-viewing revalidates, so an agent's edit is still noticed |
+
+`.svg` is deliberately **not** served inline: an SVG from our own origin can
+execute script, whereas the same file inside an `<img>` element cannot. SVG stays
+on the `/files/content` base64 path for that reason.
+
+Errors: `FILE_NOT_FOUND` (404), `POLICY_VIOLATION` (403) — including a symlink
+resolving outside the workdir — and `INVALID_REQUEST` (400) for a directory.
+
 ## Error Responses
 
 Every failing response under `/api/v1/` carries this envelope, with no

@@ -367,6 +367,149 @@
           }
         }
       }
+    },
+    "/api/v1/sessions/{sessionId}/files/document": {
+      "get": {
+        "summary": "Read a spreadsheet, CSV, Word document, or PowerPoint deck as structure",
+        "description": "Parsed server-side, because the npm alternative (SheetJS 0.18.5) is unmaintained with two unpatched High CVEs on this exact parse-untrusted-input path and is 7.5 MB unpacked against a ~4 KB first-load budget. The response is a union on `kind`: `grid` for .xlsx/.xlsm/.xlsb/.xls/.ods/.csv/.tsv, `blocks` for .docx/.pptx. Spreadsheets are windowed — `rows` defaults to 200 and caps at 500, and an out-of-range window is clamped rather than refused, since a 50000x30 sheet takes ~600ms to materialize and would be a ~50 MB response. Files over 25 MiB are refused before parsing; a zip part is bounded both by its declared header size and by the actual read, because the declared figure is attacker-supplied.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "File relative to the session workdir."
+          },
+          {
+            "name": "sheet",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "description": "Worksheet index for grid formats. Out of range is INVALID_REQUEST."
+          },
+          {
+            "name": "row",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "description": "First row of the window, 0-based and absolute within the sheet."
+          },
+          {
+            "name": "rows",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 200
+            },
+            "description": "Rows to return. Clamped, not refused, and the response echoes what was served."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Parsed document structure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileDocumentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/files/raw": {
+      "get": {
+        "summary": "Read a file's bytes, for content the browser renders natively",
+        "description": "Serves images, HTML, and PDF as bytes rather than base64-in-JSON, which costs 33% inflation, a JSON parse before first paint, no progressive decode, and no HTTP caching, and cannot carry a PDF at all. Behind the same auth middleware and the same canonical-path containment check as the other file endpoints. The response headers are load-bearing: serving workspace HTML from this origin without `Content-Security-Policy: sandbox` lets a script in an agent-generated file read the sylph_session cookie. `Content-Type` comes from a strict inert allowlist and anything unrecognized becomes application/octet-stream with Content-Disposition: attachment. SVG is deliberately excluded and stays on the /files/content base64 path, because an SVG served from our origin can execute script whereas the same file inside an <img> element cannot.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "File relative to the session workdir."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's bytes, with inert-type and sandbox headers",
+            "headers": {
+              "Content-Security-Policy": {
+                "description": "Always `sandbox`, so the response occupies an opaque origin however it is loaded.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Content-Type-Options": {
+                "description": "Always `nosniff`, so an octet-stream payload cannot be sniffed into text/html.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Disposition": {
+                "description": "`inline` for allowlisted renderable types, `attachment` otherwise.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Derived from mtime and size, paired with Cache-Control: no-cache so a re-view revalidates and an agent's edit is noticed.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -977,6 +1120,276 @@
           "modifiedAtMs": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "FileDocumentResponse": {
+        "type": "object",
+        "description": "A parsed document. `kind` discriminates the payload: exactly one of `grid` or `blocks` is present, matching it.",
+        "required": [
+          "path",
+          "absolutePath",
+          "size",
+          "modifiedAtMs",
+          "kind"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "absolutePath": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "modifiedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "grid",
+              "blocks"
+            ]
+          },
+          "format": {
+            "type": "string",
+            "description": "The concrete container, so the header can say \"Excel workbook\" while the viewer switch stays a two-way branch.",
+            "enum": [
+              "xlsx",
+              "xlsm",
+              "xlsb",
+              "xls",
+              "ods",
+              "csv",
+              "tsv",
+              "docx",
+              "pptx"
+            ]
+          },
+          "grid": {
+            "$ref": "#/components/schemas/GridPayload"
+          },
+          "blocks": {
+            "$ref": "#/components/schemas/BlocksPayload"
+          }
+        }
+      },
+      "GridPayload": {
+        "type": "object",
+        "required": [
+          "sheets",
+          "sheet",
+          "row",
+          "rows",
+          "truncated"
+        ],
+        "properties": {
+          "sheets": {
+            "type": "array",
+            "description": "Every sheet with its true dimensions, so the client can report what it is not showing. A single entry for CSV and TSV.",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "rows",
+                "cols"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "rows": {
+                  "type": "integer"
+                },
+                "cols": {
+                  "type": "integer"
+                },
+                "exact": {
+                  "type": "boolean",
+                  "description": "False when the sheet declared no <dimension> element and the totals were counted rather than read."
+                }
+              }
+            }
+          },
+          "sheet": {
+            "type": "integer",
+            "description": "Index of the sheet actually served."
+          },
+          "row": {
+            "type": "integer",
+            "description": "First row of the window served, absolute within the sheet."
+          },
+          "rows": {
+            "type": "array",
+            "description": "The window. Each entry is one row of cells; a null cell is empty, which is most of a sparse sheet.",
+            "items": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/GridCell"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "hasHeaderRow": {
+            "type": "boolean",
+            "description": "Advisory: whether the first row of the sheet looks like headers."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the sheet holds rows beyond the window served."
+          }
+        }
+      },
+      "GridCell": {
+        "type": "object",
+        "required": [
+          "v",
+          "t"
+        ],
+        "properties": {
+          "v": {
+            "type": "string",
+            "description": "The string to display. Dates are already ISO-8601, never an Excel serial. Per-cell currency and percent formats are not reproduced: calamine folds the number format into the value and exposes no format string, so only date-vs-number survives."
+          },
+          "t": {
+            "type": "string",
+            "description": "Drives alignment — numbers and dates right, text left.",
+            "enum": [
+              "text",
+              "number",
+              "bool",
+              "date",
+              "formula",
+              "error"
+            ]
+          },
+          "n": {
+            "type": "number",
+            "description": "Raw value for a number cell, so the client need not re-parse a formatted string."
+          },
+          "f": {
+            "type": "string",
+            "description": "The formula expression, when t is formula."
+          }
+        }
+      },
+      "BlocksPayload": {
+        "type": "object",
+        "description": "Word and PowerPoint share this shape: a slide is a section whose blocks follow it, so one renderer serves both. A structured list rather than Markdown or HTML — Markdown would mean escaping prose containing * or _ or | on the way out and re-parsing it on the way in, and HTML would reintroduce an innerHTML path into a frontend built to avoid one.",
+        "required": [
+          "blocks",
+          "truncated"
+        ],
+        "properties": {
+          "sections": {
+            "type": "array",
+            "description": "Slides for pptx; empty for docx, which has no equivalent division.",
+            "items": {
+              "type": "object",
+              "required": [
+                "index"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "description": "From the shape whose placeholder type is title or ctrTitle."
+                },
+                "index": {
+                  "type": "integer",
+                  "description": "0-based position in presentation order, which comes from p:sldIdLst resolved through the presentation rels — not from sorting filenames, since slide10.xml sorts before slide2.xml."
+                },
+                "notes": {
+                  "type": "string",
+                  "description": "Speaker notes from the per-slide ppt/notesSlides part."
+                },
+                "firstBlock": {
+                  "type": "integer",
+                  "description": "Index into `blocks` where this section's content begins."
+                }
+              }
+            }
+          },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentBlock"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DocumentBlock": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "heading",
+              "paragraph",
+              "listItem",
+              "table"
+            ]
+          },
+          "level": {
+            "type": "integer",
+            "description": "Heading level 1-6, or list nesting depth for listItem."
+          },
+          "text": {
+            "type": "string",
+            "description": "Plain text, for headings and list items."
+          },
+          "spans": {
+            "type": "array",
+            "description": "Runs of text with inline formatting, for paragraphs.",
+            "items": {
+              "type": "object",
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "bold": {
+                  "type": "boolean"
+                },
+                "italic": {
+                  "type": "boolean"
+                },
+                "code": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "ordered": {
+            "type": "boolean",
+            "description": "For listItem: numbered rather than bulleted."
+          },
+          "rows": {
+            "type": "array",
+            "description": "For table: rows of cell text, first row being the header.",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           }
         }
       }
