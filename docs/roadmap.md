@@ -20,8 +20,10 @@
   LaunchAgent, reversible rollback, `docs/installation.md`
 - Phase 6: frontend redesign — three-pane agent workspace, tool-first timeline
   with inline diffs, file browser, `Cmd+K`/`Cmd+P`, settings panel
+- Phase 7 (Artifacts): file viewer taking the whole right pane, with fullscreen,
+  and previews for Excel, Word, PowerPoint, CSV, images, HTML, and PDF
 
-All six phases are complete.
+All six phases are complete; Phase 7 is in progress across several tracks.
 
 ### Open Decisions
 
@@ -347,3 +349,97 @@ now supersede. They describe a bundle allocation (~80 KB of new dependencies) th
 the measured budget did not permit, so following them now would be actively
 misleading. **They should be deleted;** they are left in place only because
 removing another author's untracked drafts is not this change's call to make.
+
+## Phase 7: Artifacts file viewer — Complete
+
+**Goal:** make the Artifacts pane answer "what did the agent do to my files?" for
+the formats an agent actually produces, not only for source code.
+
+Scoped to the file viewer. Other Phase 7 work (composer and interaction redesign)
+is tracked separately; this section covers only the Artifacts pane and the file
+endpoints behind it.
+
+### Delivered
+
+- **Tree and viewer swap.** Selecting a file gives the viewer the whole pane with a
+  back affordance, replacing a `max-h-[55%]` strip of a 320px pane. Both views stay
+  mounted and toggle with `hidden`, so expanded directories and scroll offset
+  survive a round trip.
+- **Fullscreen**, reusing `Overlay` with a `size="viewer"` variant rather than a
+  second modal implementation.
+- **Excel, Word, PowerPoint, CSV/TSV, images, HTML, and PDF**, from two new
+  endpoints: `GET /files/document` for parsed structure and `GET /files/raw` for
+  bytes the browser renders itself.
+- **Server-side parsing** via `calamine` and `quick-xml`, keeping ~7.5 MB of
+  unmaintained, CVE-carrying npm dependency out of the browser.
+- **Sandboxed HTML rendering**, default-on because `sandbox=""` removes script
+  execution outright rather than gating it.
+
+### Exit criteria — how each was checked
+
+- ✅ **Every requested format previews** — verified by driving the running app in a
+  browser against real files produced by Excel-compatible tooling, not only against
+  test fixtures. That distinction paid for itself three times: see below.
+- ✅ **First-load JS stays under budget** — measured 197.1 KB gzipped against
+  200 KB, +0.9 KB for the whole feature. Each viewer is a `next/dynamic` import
+  beneath the already-split pane; the grid viewer was confirmed absent from the
+  first-load chunk set and fetched on demand at 1.5 KB.
+- ✅ **Grid performance without a virtualization dependency** — measured in headless
+  Chromium: 46 ms to build the 200-row default window, and scroll cost flat at
+  ~0.2 ms/frame from 6 000 to 100 000 cells. Paging replaces the window rather than
+  accumulating, so the DOM stays at one window however far the user pages.
+- ✅ **Rendering untrusted HTML cannot reach the app** — pinned in a real browser:
+  markup renders and inline CSS applies, while inline `<script>` does not run,
+  `parent.document` is unreachable, and `document.cookie` inside the frame throws
+  `SecurityError`. The hardened response headers are asserted server-side too,
+  because dropping the CSP header silently reintroduces cookie disclosure — which
+  was measured, not assumed.
+- ✅ **Path containment holds on the new routes** — traversal and escaping-symlink
+  refusal are asserted per route rather than assumed inherited, plus 401 without
+  the session cookie.
+- ✅ **WCAG 2.1 AA maintained** — axe-core reports zero violations with the viewer
+  open in the pane and in the fullscreen dialog. It also caught a real focus bug:
+  closing fullscreen dropped focus to `<body>`, because the pane unmounts the
+  expand button while the dialog is up and `Overlay` correctly refuses to focus a
+  detached node.
+- ✅ **Test totals**: 96 backend unit (+35), 79 backend integration (+11), 156
+  frontend unit (+55), 31 E2E (+7). Plus three ignored-by-default tests that parse
+  files from real Office tooling.
+
+### What real files taught that fixtures did not
+
+Three bugs survived a green synthesized-fixture suite and were found by parsing
+output from openpyxl, python-docx, and python-pptx. All three shared a cause: a
+hand-written fixture can only encode what its author already believed.
+
+- **Formulas landed on the wrong cells.** calamine gives the formula range its own
+  origin, so indexing it with value-range coordinates shifted every formula — the
+  header cell "Region" was reported as a formula carrying `B2+C2`.
+- **Uncalculated formulas rendered blank.** Excel always caches a result; openpyxl
+  writes either no `<v>` or an empty one, which arrive as two different values and
+  both had to be handled. An entire computed column showed as empty cells.
+- **Style-marked list items became paragraphs.** python-docx marks bullets with a
+  `ListBullet` paragraph style and no `w:numPr` at all, so every bullet in a
+  generated document lost its list structure.
+
+Each now has a regression test, and for the first two I confirmed the test fails
+when the fix is reverted.
+
+### Carried forward
+
+- **Relative subresources in previewed HTML do not load.** `srcdoc` inherits the
+  parent's base URL, so `<img src="./chart.png">` resolves against the app's origin.
+  The viewer counts such references and says so rather than showing a silently
+  incomplete page. Inlining them through the authenticated endpoint is the fix if
+  evidence shows it matters.
+- **Per-cell number formats are not reproduced.** calamine folds the format into
+  the value and exposes no per-cell format string, so currency and percent
+  formatting is lost; only date-vs-number survives. Recovering it means parsing
+  `xl/styles.xml` directly.
+- **Slide geometry is not modelled** — shape positions, sizes, and z-order are
+  discarded in favour of reading order. Reproducing a layout engine is a different
+  project.
+- **Charts, images, and embedded objects inside documents** are not extracted; only
+  text structure and tables are.
+- **`.doc`, `.ppt`, and `.pages`** (the pre-OOXML and Apple formats) are not
+  supported. `.xls` is, because calamine reads it.

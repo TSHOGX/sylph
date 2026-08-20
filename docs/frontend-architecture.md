@@ -201,8 +201,14 @@ frontend/
 ├── components/
 │   ├── app-shell.tsx           # Three-pane frame, top bar, Quick Start
 │   ├── workspace-sidebar.tsx   # Left pane: sessions grouped by workdir
-│   ├── artifacts-pane.tsx      # Right pane: file tree
-│   ├── file-preview.tsx        # Right pane: one file
+│   ├── artifacts-pane.tsx      # Right pane: file tree, swapping to the viewer
+│   ├── file-viewer.tsx         # Right pane: one file, header and viewer choice
+│   ├── file-viewer-overlay.tsx # The same viewer, full screen
+│   ├── viewers/
+│   │   ├── grid-view.tsx       # Spreadsheets and CSV
+│   │   ├── document-view.tsx   # Word and PowerPoint
+│   │   ├── html-view.tsx       # Sandboxed page rendering
+│   │   └── media-view.tsx      # Images and PDF
 │   ├── timeline.tsx            # The conversation canvas itself
 │   ├── markdown.tsx            # Markdown parser and renderer
 │   ├── code-block.tsx          # Code and command output
@@ -226,6 +232,9 @@ frontend/
 │   ├── timeline-rows.test.ts   # (tests live beside the code they cover)
 │   ├── diff.ts                 # LCS line diff
 │   ├── tool-shape.ts           # Interprets tool_call payloads per agent
+│   ├── file-kind.ts            # Extension -> viewer family, in one table
+│   ├── grid-format.ts          # Column labels, alignment, paging arithmetic
+│   ├── sandbox-html.ts         # CSP injection for previewed HTML
 │   ├── fuzzy.ts                # Subsequence ranking
 │   ├── use-sse.ts              # EventSource with after_seq resume
 │   ├── use-debounced.ts
@@ -285,6 +294,129 @@ Flexbox with fixed sidebar widths, not a grid with `fr` units: sidebars must not
 shrink as conversation content grows, and only the centre pane scrolls. Panes
 toggle with `hidden`/`flex` rather than conditional rendering, so a hidden sidebar
 keeps its expanded groups and scroll position.
+
+### Artifacts pane: tree and viewer swap
+
+Selecting a file replaces the tree with a full-height viewer rather than splitting
+the pane:
+
+```
+browsing                            viewing
+┌─ Artifacts ─────────┐             ┌─ Artifacts ─────────┐
+│ Files      Reload   │             │ ‹ Files  auth.rs ⛶ ✕│
+│ /Users/you/proj     │             ├─────────────────────┤
+│ ▾ backend/          │  select     │                     │
+│   ▾ src/            │  ────────▶  │   full-height       │
+│     ▫ lib.rs        │             │   viewer            │
+│     ▫ auth.rs       │             │                     │
+│ ▦ sales.xlsx        │  ◀────────  │                     │
+└─────────────────────┘  ‹ Files    └─────────────────────┘
+```
+
+Locating a file and reading it are sequential, not simultaneous, and every mature
+tool treats them that way: VS Code's explorer hands off to a full-width editor,
+Finder's column view to a full-screen Quick Look, GitHub's tree collapses when a
+blob opens. The earlier layout gave the preview a `max-h-[55%]` strip of a 320px
+pane — roughly 350x300px — which no spreadsheet, document, or rendered page can be
+read in.
+
+**Both views stay mounted and toggle with `hidden`.** Expansion state lives in the
+tree component and scroll offset lives on the DOM node, so unmounting would
+discard both and every file you looked at would cost you your place. `hidden` also
+removes the tree from the accessibility tree and the tab order, so a keyboard user
+cannot tab into an invisible tree. `e2e/file-viewer.spec.ts` pins this by
+expanding a directory, opening a file, and asserting the directory is still
+expanded after Back.
+
+Back keeps the file *selected* rather than clearing it, because the tree derives
+its expanded ancestors from the selection — clearing would collapse the path the
+user navigated through.
+
+**Fullscreen reuses `Overlay`** with a `size="viewer"` variant, because the focus
+trap, opener restoration, and Escape-that-stops-propagating are WCAG 2.4.3
+obligations that are easy to get subtly wrong; there is one implementation rather
+than two. It is tracked by its own boolean on the shell rather than a fourth
+member of the `Overlay` union: the union answers "which overlay is up", while a
+viewer also needs to know *which file*, and that already lives beside it in
+`artifact`. `runAction` dismisses it alongside the overlays, keeping at most one
+modal surface up.
+
+One consequence worth knowing: while the dialog is open the pane shows a
+placeholder instead of a second copy of the viewer, so the expand button is
+unmounted and `Overlay` cannot restore focus to it — its `isConnected` guard
+correctly refuses a detached node. The pane holds a live reference and restores
+focus once React remounts the button.
+
+### File viewers
+
+| Family | Formats | Endpoint |
+| --- | --- | --- |
+| Text / code | anything UTF-8 | `files/content` |
+| Markdown | `.md` | `files/content` |
+| Image | png jpeg gif webp bmp ico avif | `files/raw` |
+| Image (SVG) | `.svg` | `files/content`, base64 |
+| Grid | xlsx xlsm xlsb xls ods csv tsv | `files/document` |
+| Blocks | docx pptx | `files/document` |
+| Web page | html htm | `files/content`, sandboxed |
+| PDF | pdf | `files/raw` |
+
+The endpoint is chosen before any request, from the `previewKind` the tree listing
+already carries, with an extension fallback for files opened from a tool call
+(which have no listing). A mislabelled file is the one case a table cannot settle,
+so `document` answering `INVALID_REQUEST` falls back to `content`, which decides
+text-vs-binary from the bytes.
+
+Five formats reduce to three viewers, which is what makes this affordable against
+the bundle budget: a spreadsheet and a CSV are both a grid of typed cells, and a
+Word document and a deck are both a sequence of blocks once a slide is modelled as
+a section whose blocks follow it.
+
+**SVG is deliberately not on the raw route.** Served as `image/svg+xml` from our
+own origin it can execute script; the same bytes inside an `<img>` cannot, so it
+keeps travelling the base64 path.
+
+### Rendering untrusted HTML
+
+Workspace HTML may be agent-generated. Rendered with our privileges it could read
+the DOM and issue same-origin fetches carrying the `sylph_session` cookie, which
+authorizes reads across the whole workdir — a real escalation, not a theoretical
+one. It was measured: serving such a file from a same-origin route with no
+hardening, a script in it read the cookie.
+
+Rendering is nonetheless the default, because the capability is *removed* rather
+than gated:
+
+```tsx
+<iframe sandbox="" referrerPolicy="no-referrer" srcDoc={sandboxed.html} />
+```
+
+An empty `sandbox` withholds every permission, including `allow-scripts` and
+`allow-same-origin`. Verified in a real browser, and pinned by
+`e2e/file-viewer.spec.ts`:
+
+| Check | Result |
+| --- | --- |
+| Markup renders, inline CSS applies | yes |
+| Inline `<script>` runs | no |
+| `parent.document` reachable | no |
+| `document.cookie` in the frame | throws `SecurityError` |
+
+`srcdoc` rather than a `src` URL: the bytes already arrive through the
+authenticated JSON endpoint, so no second route serving `text/html` from our
+origin needs to exist. A blob URL was rejected for inheriting the creating origin
+— a latent footgun the day someone adds `allow-same-origin` — and for needing
+revocation to avoid leaking.
+
+`lib/sandbox-html.ts` additionally injects `default-src 'none'` as defence in
+depth, so no fetch happens even though nothing can initiate one; it deliberately
+does **not** sanitize, because a hand-written sanitizer is a permanent liability
+whose bypass list never ends, and it is unnecessary once script execution is gone.
+
+The honest limitation: `srcdoc` inherits the parent's base URL, so
+`<img src="./chart.png">` resolves against the app's origin where nothing answers.
+The viewer counts such references and says so rather than showing a silently
+incomplete page. Inlining them through the authenticated endpoint is the follow-up
+if evidence shows it matters.
 
 ### Conversation canvas: agent-first, not chat-first
 
@@ -869,10 +1001,10 @@ function SessionSearch() {
 
 ### Bundle budget
 
-**Measured: 196.2 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
+**Measured: 197.1 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
 established the budget at 200 KB and measured 187.8 KB; Phase 6 added the shell,
 three overlays, the file browser, the Markdown renderer, the diff view, and the
-fuzzy ranker for **+8.4 KB**.
+fuzzy ranker for **+8.4 KB**; Phase 7's document viewers added **+0.9 KB**.
 
 That number is why this document lists so many "no dependency" decisions. The
 naive versions of these features — `react-markdown` + `remark-gfm` (~45 KB), Shiki
@@ -881,6 +1013,14 @@ or Prism (~35 KB), jsdiff (~30 KB), Radix (~30 KB for the primitives used), fuse
 Each replacement is a bounded, well-understood algorithm carrying unit tests; that
 is the trade, stated plainly, and it is a trade that stops being right the moment
 the budget rises or the feature set outgrows the subset implemented.
+
+**Office formats are parsed server-side**, which is the largest single instance of
+this. SheetJS (`xlsx`) is 7.5 MB unpacked, frozen at 0.18.5 on npm, and carries two
+unpatched High CVEs — prototype pollution (CVE-2023-30533) and ReDoS
+(CVE-2024-22363) — reachable on precisely the "parse a file we did not write" path
+this feature needs. `calamine` and `quick-xml` do the same work in Rust, where the
+cost is compile time rather than every page load, and the browser receives
+structure instead of bytes. See `docs/api-design.md`, Files.
 
 To measure:
 
@@ -896,6 +1036,11 @@ first-load bundle of *every* route. The three overlays and the Artifacts pane ar
 therefore `next/dynamic` with `ssr: false`: each is reached by a keypress or a
 toggle, by which point the chunk has fetched. Measured effect: **204.3 KB → 195.8
 KB**, which is the difference between over and under budget.
+
+The format viewers split again *beneath* the pane, so opening a `.ts` file never
+fetches the table or document code. With ~3 KB of headroom that is not an
+optimization but the condition for the feature existing: the grid viewer was
+confirmed absent from the first-load chunk set and fetched on demand at 1.5 KB.
 
 ### Render cost
 
@@ -920,6 +1065,42 @@ lines with "show all", command output 40, diffs elide unchanged runs to three li
 of context, and diff alignment above 2000 lines per side degrades to a wholesale
 replacement rather than allocating a quadratic table.
 
+### Document previews
+
+**A grid is not virtualized either, but for different reasons from the timeline,
+and they were measured directly.** A sticky-header table in headless Chromium:
+
+| Rows × cols | Cells | Build | Scroll |
+| --- | --- | --- | --- |
+| 200 × 30 (default window) | 6 231 | 46 ms | 0.06 ms/frame |
+| 500 × 30 (max per request) | 15 531 | 82 ms | 0.06 ms/frame |
+| 2000 × 30 | 62 031 | 302 ms | 0.22 ms/frame |
+| 2000 × 50 | 102 051 | 517 ms | 0.18 ms/frame |
+
+Neither axis behaves like the timeline's. A grid does not stream, so the
+re-render count that memoization solves there is not a factor. And **scroll cost
+is flat** across a 16× range of cell counts, because scrolling a sticky-header
+table is compositor work that does not scale with row count — so the DOM-size
+problem virtualization would fix does not appear at these sizes.
+
+What does scale is the initial build. Two things keep it bounded:
+
+- **The server windows the data** (200 rows by default, 500 max), so a 50 000-row
+  sheet never arrives whole — it would be a ~50 MB payload and a ~600 ms parse.
+- **Paging replaces the window rather than accumulating rows.** Accumulation was
+  the first design and is wrong twice over: it needs the previous window as state,
+  which forces either an effect that cascades a render or a ref read during
+  render, and it grows the DOM without bound while `table-layout: auto` re-measures
+  every cell in the table on each append. Replacing keeps the table at one
+  window — 46 ms — no matter how far the user pages.
+
+`table-layout: fixed` on wide sheets is load-bearing for the same reason: the
+default `auto` algorithm resolves column widths by measuring every cell, making
+layout cost global rather than proportional to what changed.
+
+The evidence that would reverse this: scroll jank within a single window while
+*idle*, the same signal named for the timeline above.
+
 ### File browsing
 
 The Artifacts tree fetches **one directory per expansion**. Walking the tree
@@ -929,7 +1110,12 @@ subtree is cached independently and collapsing does not discard it. Listings cap
 2000 entries per directory and report `truncated`.
 
 Previews cap at 1 MiB, truncating text to a 256 KiB prefix. Images are
-all-or-nothing, because a truncated image decodes to nothing.
+all-or-nothing, because a truncated image decodes to nothing. Documents have their
+own 25 MiB cap — a legitimate spreadsheet is routinely several MiB, so the 1 MiB
+text bound would refuse the files people most want to look at.
+
+Document queries are keyed on `(path, sheet, row)`, so switching back to a sheet
+already viewed is a cache hit rather than another parse.
 
 ## Accessibility
 
@@ -941,7 +1127,9 @@ checked.
 `e2e/accessibility.spec.ts` runs axe-core against four surfaces with real content —
 the session list, the create form, a conversation canvas holding tool calls, a
 diff, and a failed command with both sidebars open, and each of the three overlays
-while open. Tags: `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`. **Currently zero
+while open. `e2e/file-viewer.spec.ts` adds the file viewer in the pane and the
+fullscreen dialog, since a data table and an iframe are both new surface. Tags:
+`wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`. **Currently zero
 violations.**
 
 This is a floor, not a conformance claim. axe covers roughly a third of WCAG
@@ -1170,6 +1358,7 @@ archive, or agents.
 | `session-lifecycle.spec.ts` | Create, send, stream, reload-replay, sidebar grouping |
 | `timeline.spec.ts` | Tool calls as regions, inline diff, failure auto-expansion, Markdown, 1000-event render budget |
 | `workspace-shell.spec.ts` | Pane toggles and persistence, palette, search, focus restoration, settings round-trip, Artifacts tree |
+| `file-viewer.spec.ts` | Tree/viewer swap preserving expansion, fullscreen and focus return, single-modal invariant, CSV table, sandboxed HTML refusing script and cookie access, image zoom, axe over both scales |
 | `accessibility.spec.ts` | Skip link, focus trapping and restoration, axe-core audit of four surfaces |
 
 The mock runner (`e2e/fixtures/runners/e2e/runner.sh`) branches on its prompt to
