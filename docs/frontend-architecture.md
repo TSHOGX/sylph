@@ -220,6 +220,7 @@ frontend/
 │   ├── api.ts                  # Typed client; mirrors the wire shape exactly
 │   ├── providers.tsx           # QueryClient + AuthGate
 │   ├── settings.tsx            # Preferences over localStorage
+│   ├── create-session.ts       # Dialog-free session creation + default resolution
 │   ├── workspace-ui.tsx        # Pane visibility, overlays, artifact selection
 │   ├── shortcuts.ts            # Combo grammar and platform resolution
 │   ├── timeline-rows.test.ts   # (tests live beside the code they cover)
@@ -342,6 +343,41 @@ Session-scoped actions — stop turn, expand all, find — cannot be handled by 
 shell, which has no access to the open session's state. The session page registers
 a handler with `registerSessionActions` and the shell forwards to it; with no
 session open, those actions are simply ignored.
+
+### Creating a session: mutation or form
+
+Two paths exist, and which one a surface uses follows from one question — is the
+working directory already known?
+
+| Surface | Path | Why |
+| --- | --- | --- |
+| ⚡ Quick Start, `Mod+Shift+N`, palette | `useQuickCreateSession` | The directory is fixed: the backend-resolved `~/.agents`. |
+| Sidebar group → "New session here" | `useQuickCreateSession` | A group **is** a directory. The right-click already named it. |
+| Sidebar group → "New session here..." | `/sessions/new?workdir=` | Override the agent, model, or title; the directory is prefilled. |
+| `+ New session`, `Mod+N` | `/sessions/new` | No directory chosen yet, so the form's required field is the point. |
+
+The directory is the only field a session needs beyond an agent, and the agent
+has a configured default. So whenever the invocation already carries a directory,
+a form has nothing left to ask: it is a dialog the user must dismiss to get what
+they clicked. `lib/create-session.ts` is that mutation, and it is what makes
+"Quick Start" a special case of a general action rather than its own mechanism —
+before it, Quick Start had a private hook in the shell and the sidebar routed to
+the form, which is why right-clicking the fixed `~/.agents` group still asked for
+a working directory.
+
+One instance lives in the shell and is shared through `WorkspaceUIProvider` as
+`createSessionIn`, so every dialog-free path reports one pending state and one
+error banner. Its value is memoized and passes `mutate` by reference: it feeds the
+shell context's memo, which `runAction` closes over, so an unstable identity would
+re-register the document-level keydown listener on every shell render.
+
+`resolveSessionDefaults` checks both stored preferences against live `--describe`
+output. A `defaultAgent` whose runner was uninstalled would be rejected as an
+unknown agent, and a `defaultModels` entry the runner no longer declares would be
+passed as `--flag model=...` and fail at turn time — far from the setting that
+caused it. Both degrade to a silent, correct fallback instead, and only "no
+runners at all" surfaces as an error, because that is the one case with no
+sensible default.
 
 ### Component Design
 

@@ -269,6 +269,10 @@ shipped design.
 - ✅ Default agent and per-agent model, density, expansion defaults, shortcut
   recorder, workspace management
 - ✅ Quick Start creates a session in `~/.agents` with no dialog
+- ✅ Any known directory creates with no dialog: one shared mutation
+  (`lib/create-session.ts`) serves Quick Start and every sidebar group, so
+  "New session here" no longer re-asks for a directory the group already names.
+  The form remains for choosing a directory, or overriding agent/model/title.
 - ✅ Preferences over `localStorage` via `useSyncExternalStore`
 
 ### Exit criteria — how each was checked
@@ -285,7 +289,9 @@ shipped design.
 - ✅ **`Cmd+K` and `Cmd+P` keyboard-navigable** — both open, filter, and commit
   by keyboard in E2E, including focus restoration on close.
 - ✅ **Quick Start** — creates in the backend-resolved `~/.agents`; the directory
-  is asserted to end in `/.agents` in integration tests.
+  is asserted to end in `/.agents` in integration tests. Dialog-free creation from
+  a sidebar group is covered in `e2e/workspace-shell.spec.ts`, and default
+  resolution against installed runners in `lib/create-session.test.ts`.
 - ✅ **Settings configure agent and model** — round-trip through storage and into
   the timeline covered in E2E.
 - ✅ **First-load JS under 200 KB gzipped** — **measured 196.2 KB**, from a 187.8 KB
