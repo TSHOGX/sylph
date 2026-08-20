@@ -13,14 +13,33 @@
 - Phase 2: frontend foundation — session list, create dialog, SSE conversation
   view, reconnection from `after_seq`
 - Phase 3: feature completion — attachments, TraceDB search, native import,
-  server-side filters, error boundaries. See `PHASE3_HANDOFF.md`.
+  server-side filters, error boundaries
 - Phase 4: production readiness — 55 unit + 53 integration + 6 E2E tests,
   accessibility audit, first-load JS measured at 190.4 KB gzipped
 - Phase 5: deployment — `scripts/install.sh`, standalone frontend bundle,
   LaunchAgent, reversible rollback, `docs/installation.md`
 
-All five phases are complete. Open decisions and deferred work are recorded in
-`PHASE5_HANDOFF.md`.
+All five phases are complete.
+
+### Open Decisions
+
+Two decisions that need a human call:
+
+**1. Rebuild trace-db?** The installed binary and current source have diverged.
+Installed `show` returns a bare event array; current source returns
+`{session: {...metadata...}, mode, events}`. The backend reads both formats and
+degrades gracefully, but the archive-metadata code path stays inert against the
+old binary. Rebuilding would activate it and add a `list` operation, but: (a)
+verify `api --db` still works after trace-db's config refactor, (b) back up
+`trace.db` first — FTS/tokenizer migration behavior against an existing DB is
+unverified. See `PHASE5_HANDOFF.md` for detail.
+
+**2. Native→Sylph conversion endpoint shape:** `PATCH /api/v1/sessions/{id}`
+with `identityMode`/`lifecycleMode` fields vs. `POST
+/api/v1/sessions/{id}/convert`. The latter is recommended: conversion is the
+only legitimate way to inject `SOUL.md` into a native session, so it should be
+an explicit, auditable operation rather than a field on a general update. Not
+implemented either way yet.
 
 **Runner protocol:** the backend consumes `sylph.runner.v1` NDJSON lines
 (`SYLPH_STREAM_FORMAT=ndjson-v1`) as specified in the Sylph skill's
@@ -93,11 +112,6 @@ All five phases are complete. Open decisions and deferred work are recorded in
 - ✅ Copy/retry actions
 - ✅ Scroll anchoring during streaming (pin-to-bottom only when already pinned)
 
-**Carried forward:** the archive-metadata code path in `backend/src/tracedb/mod.rs`
-is inert against the currently installed `trace-db` build, which returns a bare
-event array from `show`. See `PHASE3_HANDOFF.md` for the divergence and the
-rebuild decision.
-
 ## Phase 4: Production Readiness (Weeks 8-9) — Complete
 
 **Goal:** Test coverage, accessibility, performance.
@@ -113,7 +127,7 @@ rebuild decision.
   - ⏸ Virtual scrolling deferred — a windowing library would consume most
     of the 9.6 KB of remaining budget, and profiling has not shown DOM
     size to be the bottleneck. Revisit if DOM count starts to dominate.
-- ✅ Documentation — README first-run path, `PHASE4_HANDOFF.md`
+- ✅ Documentation — README first-run path
 
 **Non-functional:**
 - ✅ Process crash recovery — restart reconciliation of in-flight turns

@@ -129,10 +129,11 @@ the archive, import a native session.
 - ✅ **Phase 1** — backend core: sessions, turns, SSE, runner discovery, auth
 - ✅ **Phase 2** — frontend foundation: session list, conversation view, resume
 - ✅ **Phase 3** — attachments, archive search, native import, filters
-- 🚧 **Phase 4** — production readiness: coverage, accessibility, performance
-- ⬜ **Phase 5** — packaging and deployment
+- ✅ **Phase 4** — production readiness: coverage, accessibility, performance
+- ✅ **Phase 5** — packaging and deployment
 
-See [PHASE4_HANDOFF.md](PHASE4_HANDOFF.md) for what is deferred and why.
+All five phases are complete. See [roadmap](docs/roadmap.md) for deliverables
+and [PHASE5_HANDOFF.md](PHASE5_HANDOFF.md) for open decisions.
 
 See [roadmap](docs/roadmap.md) for details.
 
