@@ -1480,3 +1480,308 @@ async fn a_restart_preserves_journalled_events() {
     );
     assert_eq!(after["turns"].as_array().unwrap().len(), 1);
 }
+
+// ---------------------------------------------------------- files (Phase 6.3)
+
+/// The Artifacts pane lists one directory level, directories first.
+#[tokio::test]
+async fn file_tree_lists_the_session_workdir() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let root = backend.workdir();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("README.md"), "# Title\n").unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/files"))
+            .await,
+    )
+    .await;
+
+    let entries = body["entries"].as_array().unwrap();
+    let names: Vec<&str> = entries.iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"src"), "directory missing: {names:?}");
+    assert!(names.contains(&"README.md"), "file missing: {names:?}");
+    // Directories sort ahead of files, which is what makes a tree scannable.
+    let src_at = names.iter().position(|n| *n == "src").unwrap();
+    let readme_at = names.iter().position(|n| *n == "README.md").unwrap();
+    assert!(src_at < readme_at, "directories must sort first: {names:?}");
+
+    assert_eq!(entries[src_at]["isDir"], true);
+    assert_eq!(entries[readme_at]["isDir"], false);
+    assert_eq!(entries[readme_at]["size"], 8);
+}
+
+/// Machine-generated directories are noise in an artifact browser, and `.git`
+/// additionally holds object data that has no business being served.
+#[tokio::test]
+async fn file_tree_omits_vcs_and_build_directories() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let root = backend.workdir();
+    for skipped in [".git", "node_modules", "target", ".next"] {
+        std::fs::create_dir_all(root.join(skipped)).unwrap();
+    }
+    std::fs::create_dir_all(root.join("src")).unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/files"))
+            .await,
+    )
+    .await;
+
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["src"], "only real source dirs belong: {names:?}");
+}
+
+/// The traversal defense. `..` must not escape the workdir, whatever spelling
+/// it arrives in.
+#[tokio::test]
+async fn file_access_refuses_paths_outside_the_workdir() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    // A real secret outside the root, so a successful escape would be visible
+    // rather than merely a 404 from a nonexistent target.
+    let outside = backend.workdir().parent().unwrap().join("outside-secret.txt");
+    std::fs::write(&outside, "do not serve me").unwrap();
+
+    for attempt in [
+        "../outside-secret.txt",
+        "./../outside-secret.txt",
+        "src/../../outside-secret.txt",
+        "/etc/hosts",
+    ] {
+        let response = backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{session_id}/files/content?path={}",
+                urlencoding(attempt)
+            ))
+            .await;
+        let status = response.status();
+        let body = json_body(response).await;
+        assert!(
+            status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+            "{attempt} was not refused: {status} {body}"
+        );
+        assert_ne!(
+            body["content"].as_str().unwrap_or_default(),
+            "do not serve me",
+            "{attempt} escaped the workdir"
+        );
+    }
+}
+
+/// A symlink is an escape that lives on disk, so pattern-matching the request
+/// cannot catch it. Canonicalization must.
+#[tokio::test]
+async fn symlinks_leaving_the_workdir_are_not_served() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let outside = backend.workdir().parent().unwrap().join("linked-secret.txt");
+    std::fs::write(&outside, "secret via symlink").unwrap();
+    let link = backend.workdir().join("escape.txt");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    let response = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{session_id}/files/content?path=escape.txt"
+        ))
+        .await;
+    let status = response.status();
+    let body = json_body(response).await;
+    assert_ne!(
+        body["content"].as_str().unwrap_or_default(),
+        "secret via symlink",
+        "a symlink served content from outside the workdir (status {status})"
+    );
+
+    // It is also hidden from the listing, so it is never offered in the tree.
+    let tree = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/files"))
+            .await,
+    )
+    .await;
+    let names: Vec<&str> = tree["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        !names.contains(&"escape.txt"),
+        "escaping symlink listed: {names:?}"
+    );
+}
+
+/// Text vs image vs binary is decided by the bytes, not the extension, so the
+/// client can pick a viewer without guessing.
+#[tokio::test]
+async fn file_content_reports_encoding_from_the_bytes() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let root = backend.workdir();
+    std::fs::write(root.join("notes.md"), "# Hello\n\nBody text.\n").unwrap();
+    // A `.log` holding invalid UTF-8: extension says text, content says binary.
+    std::fs::write(root.join("blob.log"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+    // 1x1 transparent GIF.
+    let gif: [u8; 14] = [
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00,
+    ];
+    std::fs::write(root.join("pixel.gif"), gif).unwrap();
+
+    let text = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{session_id}/files/content?path=notes.md"
+            ))
+            .await,
+    )
+    .await;
+    assert_eq!(text["encoding"], "text");
+    assert_eq!(text["mimeType"], "text/markdown");
+    assert!(text["content"].as_str().unwrap().contains("# Hello"));
+    assert_eq!(text["truncated"], false);
+
+    let binary = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{session_id}/files/content?path=blob.log"
+            ))
+            .await,
+    )
+    .await;
+    assert_eq!(binary["encoding"], "binary");
+    assert!(binary["content"].is_null(), "binary bytes must not be sent");
+
+    let image = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{session_id}/files/content?path=pixel.gif"
+            ))
+            .await,
+    )
+    .await;
+    assert_eq!(image["encoding"], "image");
+    assert_eq!(image["mimeType"], "image/gif");
+    // Base64 of the GIF header, so the client can build a data: URL.
+    assert!(image["content"].as_str().unwrap().starts_with("R0lGODlh"));
+}
+
+#[tokio::test]
+async fn missing_files_are_404_and_directories_are_not_content() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::create_dir_all(backend.workdir().join("src")).unwrap();
+
+    let missing = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{session_id}/files/content?path=nope.txt"
+        ))
+        .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(json_body(missing).await["error"]["code"], "FILE_NOT_FOUND");
+
+    let directory = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{session_id}/files/content?path=src"
+        ))
+        .await;
+    assert_eq!(directory.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn file_endpoints_require_auth_and_a_real_session() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let unauthed = backend
+        .get(&format!("/api/v1/sessions/{session_id}/files"))
+        .await;
+    assert_eq!(unauthed.status(), StatusCode::UNAUTHORIZED);
+
+    let unknown = backend
+        .get_authed("/api/v1/sessions/does-not-exist/files")
+        .await;
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        json_body(unknown).await["error"]["code"],
+        "SESSION_NOT_FOUND"
+    );
+}
+
+// ----------------------------------------------------- workspaces (Phase 6.1)
+
+/// The sidebar groups sessions by workdir, and Quick Start exists before any
+/// session is created in it.
+#[tokio::test]
+async fn workspaces_group_sessions_and_always_include_quick_start() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let first = backend.create_session("agent").await;
+    let second = backend.create_session("agent").await;
+    assert_ne!(first, second);
+
+    let body = json_body(backend.get_authed("/api/v1/workspaces").await).await;
+
+    let quick = body["quickStartDir"].as_str().unwrap();
+    assert!(
+        quick.ends_with("/.agents"),
+        "Quick Start must be ~/.agents, got {quick}"
+    );
+    assert!(!body["dataDir"].as_str().unwrap().is_empty());
+
+    let workspaces = body["workspaces"].as_array().unwrap();
+    let quick_row = workspaces
+        .iter()
+        .find(|w| w["isQuickStart"] == true)
+        .expect("Quick Start row missing");
+    assert_eq!(quick_row["path"], quick);
+
+    // Both sessions share one workdir, so they collapse into a single space.
+    let workdir = backend.workdir().display().to_string();
+    let row = workspaces
+        .iter()
+        .find(|w| w["path"].as_str().unwrap() == workdir)
+        .unwrap_or_else(|| panic!("workspace {workdir} missing from {workspaces:?}"));
+    assert_eq!(row["sessionCount"], 2);
+    assert_eq!(row["runningCount"], 0);
+    assert!(row["lastUsedMs"].as_i64().unwrap() > 0);
+    assert_eq!(row["isQuickStart"], false);
+}
+
+#[tokio::test]
+async fn workspaces_require_auth() {
+    let backend = TestBackend::start().await;
+    assert_eq!(
+        backend.get("/api/v1/workspaces").await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+/// Percent-encode a query value. Written inline because the traversal test needs
+/// to send paths that would otherwise be reinterpreted by the router.
+fn urlencoding(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}

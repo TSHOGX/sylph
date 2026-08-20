@@ -28,6 +28,15 @@ attachments/
 # Test coverage
 coverage/
 
+# Playwright output. `test-results/` is matched unanchored because Playwright
+# writes it relative to the process cwd, which is the backend directory when the
+# E2E harness shells out to cargo.
+test-results/
+/frontend/playwright-report/
+/frontend/blob-report/
+/frontend/.e2e-data/
+/frontend/test-results/
+
 # macOS
 .DS_Store
 

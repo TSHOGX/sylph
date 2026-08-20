@@ -19,6 +19,12 @@ pub enum Error {
     #[error("Runner not found")]
     RunnerNotFound,
 
+    /// A path inside a session's working directory does not exist. Carries no
+    /// path: the client already knows what it asked for, and echoing a resolved
+    /// absolute path would confirm filesystem layout to a probing caller.
+    #[error("File not found")]
+    FileNotFound,
+
     #[error("Session already has an active turn")]
     SessionAlreadyRunning,
 
@@ -103,6 +109,11 @@ impl Error {
                 StatusCode::NOT_FOUND,
                 "RUNNER_NOT_FOUND",
                 "Runner not found".to_string(),
+            ),
+            Error::FileNotFound => (
+                StatusCode::NOT_FOUND,
+                "FILE_NOT_FOUND",
+                "No such file or directory in this session's working directory".to_string(),
             ),
             // 409: the request was valid but conflicts with current state, and
             // the client may succeed by retrying after the active turn ends.
