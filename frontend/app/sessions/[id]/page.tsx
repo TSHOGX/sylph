@@ -82,10 +82,14 @@ export default function SessionPage() {
   }, [finished, queryClient, sessionId]);
 
   const sendTurn = useMutation({
-    mutationFn: () =>
+    // `override` carries a resent turn's text. Its attachments are deliberately
+    // not resent: they were staged from local files this tab no longer holds.
+    mutationFn: (override?: string) =>
       api.turns.create(sessionId, {
-        text: text.trim(),
-        attachments: attachments.map(({ name, type, data }) => ({ name, type, data })),
+        text: (override ?? text).trim(),
+        attachments: override
+          ? []
+          : attachments.map(({ name, type, data }) => ({ name, type, data })),
         // A retried POST must not start a second run of the same message.
         idempotencyKey: crypto.randomUUID(),
       }),
@@ -230,13 +234,14 @@ export default function SessionPage() {
             onRetry={() => void historyQuery.refetch()}
             liveTurnId={liveTurnId}
             isLive={isLive}
+            onResend={(value) => sendTurn.mutate(value)}
           />
         </ErrorBoundary>
 
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            if (canSend) sendTurn.mutate();
+            if (canSend) sendTurn.mutate(undefined);
           }}
           className="mt-4 border-t pt-4"
         >
@@ -253,7 +258,7 @@ export default function SessionPage() {
               // matching the convention of chat-style composers.
               if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
                 e.preventDefault();
-                if (canSend) sendTurn.mutate();
+                if (canSend) sendTurn.mutate(undefined);
               }
             }}
             placeholder={
@@ -349,6 +354,76 @@ function describeSendError(error: unknown): string {
   return error instanceof Error ? error.message : "Could not send the message.";
 }
 
+/**
+ * Flatten a turn into plain text for the clipboard.
+ *
+ * Only durable text-bearing events are included; tool payloads and usage
+ * records are structural noise in a pasted transcript.
+ */
+function turnAsText(entry: TurnWithEvents): string {
+  const lines = entry.turn.requestText ? [`> ${entry.turn.requestText}`, ""] : [];
+  for (const event of entry.events) {
+    if (!event.text) continue;
+    if (event.kind !== "assistant" && event.kind !== "thinking") continue;
+    lines.push(event.text);
+  }
+  return lines.join("\n").trim();
+}
+
+/** Copy a turn's transcript, and resend it when it did not succeed. */
+function TurnActions({
+  entry,
+  onResend,
+  disabled,
+}: {
+  entry: TurnWithEvents;
+  onResend: (text: string) => void;
+  disabled: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(turnAsText(entry));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard access can be refused (insecure context, denied permission).
+      // Saying nothing would look like a silent success, so the label reports it.
+      setCopied(false);
+    }
+  }
+
+  // Resending a turn that already succeeded would duplicate work the agent has
+  // done, so it is offered only where the turn produced no usable result.
+  const resendable =
+    entry.turn.status === "failed" ||
+    entry.turn.status === "cancelled" ||
+    entry.turn.status === "interrupted";
+
+  return (
+    <div className="mt-1 flex items-center gap-2">
+      <button
+        type="button"
+        onClick={() => void copy()}
+        className="rounded px-1.5 py-0.5 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+      >
+        {copied ? "Copied" : "Copy"}
+      </button>
+      {resendable && entry.turn.requestText && (
+        <button
+          type="button"
+          onClick={() => onResend(entry.turn.requestText)}
+          disabled={disabled}
+          className="rounded px-1.5 py-0.5 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+        >
+          Resend
+        </button>
+      )}
+    </div>
+  );
+}
+
 function Transcript({
   history,
   isPending,
@@ -356,6 +431,7 @@ function Transcript({
   onRetry,
   liveTurnId,
   isLive,
+  onResend,
 }: {
   history: TurnWithEvents[];
   isPending: boolean;
@@ -363,6 +439,7 @@ function Transcript({
   onRetry: () => void;
   liveTurnId: string | null;
   isLive: boolean;
+  onResend: (text: string) => void;
 }) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -429,6 +506,7 @@ function Transcript({
             </p>
           )}
           <EventList events={entry.events} />
+          <TurnActions entry={entry} onResend={onResend} disabled={isLive} />
         </section>
       ))}
 
