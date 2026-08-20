@@ -71,3 +71,86 @@ test("every form control on the create page has an accessible name", async ({ pa
 
   expect(unnamed, "controls without an accessible name").toEqual([]);
 });
+
+/**
+ * Automated WCAG 2.1 A/AA audit with axe-core.
+ *
+ * This checks the rules a machine can check: colour contrast, accessible names,
+ * ARIA validity, landmark structure, and heading order. It is a floor, not a
+ * conformance claim — axe covers roughly a third of WCAG criteria, and the rest
+ * (focus order making sense, alternatives being *meaningful*) needs
+ * assistive-technology testing and expert review. The keyboard tests above cover
+ * what axe cannot.
+ */
+async function audit(page: import("@playwright/test").Page, context?: string) {
+  const { default: AxeBuilder } = await import("@axe-core/playwright");
+  const results = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+
+  const violations = results.violations.map((violation) => ({
+    id: violation.id,
+    impact: violation.impact,
+    help: violation.help,
+    nodes: violation.nodes.slice(0, 3).map((node) => node.target.join(" ")),
+  }));
+
+  expect(
+    violations,
+    `axe violations${context ? ` on ${context}` : ""}: ${JSON.stringify(violations, null, 2)}`,
+  ).toEqual([]);
+}
+
+test("the session list has no automated accessibility violations", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  await audit(page, "session list");
+});
+
+test("the create form has no automated accessibility violations", async ({ page }) => {
+  await page.goto("/sessions/new");
+  await expect(page.getByLabel("Agent")).toBeVisible();
+  await audit(page, "create session");
+});
+
+test("the conversation canvas has no automated accessibility violations", async ({
+  page,
+}) => {
+  await page.goto("/sessions/new");
+  await page.getByLabel("Agent").selectOption("e2e");
+  await page.getByLabel("Working directory").fill("/tmp");
+  await page.getByRole("button", { name: "Create session" }).click();
+  await expect(page.getByLabel("Message")).toBeVisible();
+
+  // Audit with real content: tool calls, a diff, and a failed command are the
+  // parts with the most custom markup and the most colour.
+  await page.getByLabel("Message").fill("exercise tools please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
+
+  // Both sidebars open, so the tree and the panes are in scope too.
+  await page.keyboard.press("ControlOrMeta+Backslash");
+  await expect(page.getByRole("complementary", { name: "Artifacts" })).toBeVisible();
+
+  await audit(page, "conversation canvas with tool calls");
+});
+
+test("every overlay has no automated accessibility violations", async ({ page }) => {
+  await page.goto("/sessions/new");
+  await page.getByLabel("Agent").selectOption("e2e");
+  await page.getByLabel("Working directory").fill("/tmp");
+  await page.getByRole("button", { name: "Create session" }).click();
+  await expect(page.getByLabel("Message")).toBeVisible();
+
+  for (const [combo, name] of [
+    ["ControlOrMeta+k", "search overlay"],
+    ["ControlOrMeta+p", "command palette"],
+    ["ControlOrMeta+Comma", "settings panel"],
+  ] as const) {
+    await page.keyboard.press(combo);
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await audit(page, name);
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeHidden();
+  }
+});
