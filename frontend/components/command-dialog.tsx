@@ -37,9 +37,13 @@ export function CommandDialog({ commands, onSubmit, onClose, busy }: Props) {
   const argSpecs = useMemo(() => Object.entries(spec?.args ?? {}), [spec]);
 
   // Move focus into the dialog on open, so keyboard users are not left behind
-  // on the composer while a modal covers it.
+  // on the composer while a modal covers it. On close, put focus back where it
+  // came from: without this, dismissing the dialog drops a keyboard user at the
+  // top of the document and makes them tab back to the composer (WCAG 2.4.3).
   useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
     firstFieldRef.current?.focus();
+    return () => opener?.focus?.();
   }, []);
 
   // Escape closes, and Tab is trapped inside: a modal that leaks focus to the

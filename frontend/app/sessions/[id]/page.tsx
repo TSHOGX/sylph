@@ -214,7 +214,7 @@ export default function SessionPage() {
         </div>
       </header>
 
-      <main className="container mx-auto flex w-full max-w-4xl flex-1 flex-col px-4 py-6">
+      <main id="main" className="container mx-auto flex w-full max-w-4xl flex-1 flex-col px-4 py-6">
         {isNative && (
           <aside className="mb-4 rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm text-violet-900">
             <p className="font-medium">Native session — identity preserved</p>

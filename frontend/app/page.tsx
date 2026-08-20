@@ -94,7 +94,7 @@ export default function HomePage() {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-6">
+      <main id="main" className="container mx-auto px-4 py-6">
         {isPending ? (
           <output
             aria-live="polite"

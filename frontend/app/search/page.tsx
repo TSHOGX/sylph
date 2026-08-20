@@ -45,7 +45,7 @@ export default function SearchPage() {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-6">
+      <main id="main" className="container mx-auto px-4 py-6">
         <form role="search" onSubmit={(e) => e.preventDefault()}>
           <label htmlFor="archive-query" className="block text-sm font-medium">
             Find archived coding-agent sessions
