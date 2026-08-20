@@ -145,7 +145,9 @@ say "Building frontend (standalone)"
 
 say "Staging artifacts"
 rm -rf "$PREFIX.new"
-mkdir -p "$PREFIX.new/frontend" "$BIN_DIR" "$DATA_DIR"
+# `logs` is created unconditionally: start.sh rotates the files there whether or
+# not a LaunchAgent is what launched it.
+mkdir -p "$PREFIX.new/frontend" "$PREFIX.new/logs" "$BIN_DIR" "$DATA_DIR"
 
 cp "$REPO/backend/target/release/sylph-web-backend" "$PREFIX.new/sylph-web-backend"
 cp -R "$REPO/frontend/.next/standalone/." "$PREFIX.new/frontend/"
@@ -161,6 +163,19 @@ set -euo pipefail
 export SYLPH_WEB_PORT="\${SYLPH_WEB_PORT:-$BACKEND_PORT}"
 export SYLPH_WEB_DATA_DIR="\${SYLPH_WEB_DATA_DIR:-$DATA_DIR}"
 here="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+
+# launchd appends to its log paths forever, so rotate here. Copy then truncate
+# in place rather than renaming: launchd opened these paths before exec'ing this
+# script and holds the descriptors, so a rename would send this run's output to
+# the rotated file. Truncating keeps the inode, and O_APPEND writes land at the
+# new end. One generation is kept.
+for log in "\$here/logs/stdout.log" "\$here/logs/stderr.log"; do
+  [ -f "\$log" ] || continue
+  size=\$(wc -c < "\$log" | tr -d ' ')
+  if [ "\${size:-0}" -gt 16777216 ]; then
+    cp "\$log" "\$log.1" && : > "\$log"
+  fi
+done
 
 "\$here/sylph-web-backend" &
 backend=\$!
@@ -228,6 +243,7 @@ if [ "$WANT_LAUNCHAGENT" -eq 1 ]; then
     <key>SYLPH_WEB_PORT</key><string>$BACKEND_PORT</string>
     <key>SYLPH_WEB_FRONTEND_PORT</key><string>$FRONTEND_PORT</string>
     <key>SYLPH_WEB_DATA_DIR</key><string>$DATA_DIR</string>
+    <key>RUST_LOG</key><string>${RUST_LOG:-info}</string>
     <key>PATH</key><string>$(dirname "$(command -v node)"):/usr/bin:/bin:/usr/sbin:/sbin</string>
 $(
     # launchd starts with a bare environment, so anything overridden in the
