@@ -142,13 +142,18 @@ pub fn router(state: AppState) -> Router {
         )
         // Files before `{id}` would be ambiguous the other way round: axum
         // matches literal segments before captures, so the more specific
-        // `files/content` route must be registered, but order among these three
+        // `files/content` route must be registered, but order among these
         // does not matter. They are grouped for readability.
         .route("/api/v1/sessions/{id}/files", get(api::files::tree))
         .route(
             "/api/v1/sessions/{id}/files/content",
             get(api::files::content),
         )
+        .route(
+            "/api/v1/sessions/{id}/files/document",
+            get(api::files::document),
+        )
+        .route("/api/v1/sessions/{id}/files/raw", get(api::files::raw))
         .route("/api/v1/workspaces", get(api::workspaces::list))
         .route("/api/v1/search", get(api::search::search))
         .route("/api/v1/turns/{id}", get(api::turns::get))

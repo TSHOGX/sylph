@@ -150,6 +150,28 @@ impl TestBackend {
         .await
     }
 
+    /// An authenticated GET carrying one extra request header.
+    ///
+    /// Exists for conditional requests: an `If-None-Match` round trip is the only
+    /// way to observe that a route revalidates instead of resending its body.
+    pub async fn get_authed_with_header(
+        &self,
+        path: &str,
+        name: header::HeaderName,
+        value: &str,
+    ) -> Response<Body> {
+        self.send(
+            Request::builder()
+                .uri(path)
+                .header(header::HOST, "127.0.0.1")
+                .header(header::COOKIE, &self.cookie)
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
     pub async fn post_authed(&self, path: &str, body: Value) -> Response<Body> {
         self.send(
             Request::builder()
