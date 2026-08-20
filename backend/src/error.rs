@@ -59,6 +59,21 @@ pub enum Error {
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
+    /// No route matched the request path.
+    ///
+    /// Raised by the router's fallback, not by a handler, so that a request for
+    /// an endpoint this build does not have still answers with the standard
+    /// error envelope. Without it axum replies with an empty body, and a client
+    /// cannot tell "this endpoint does not exist" from "the file you asked for
+    /// does not exist" — both arrive as a bare 404. That ambiguity is expensive
+    /// in exactly the case it appears: talking to a stale backend.
+    #[error("No such endpoint")]
+    RouteNotFound,
+
+    /// The path exists but does not accept this method.
+    #[error("Method not allowed for this endpoint")]
+    MethodNotAllowed,
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -168,6 +183,21 @@ impl Error {
             Error::InvalidRequest(msg) => {
                 (StatusCode::BAD_REQUEST, "INVALID_REQUEST", msg.clone())
             }
+            // The message names the process rather than the path, because that
+            // is where the fault always is: the caller asked for a route this
+            // binary does not serve.
+            Error::RouteNotFound => (
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                "This backend serves no such endpoint. It may be older than the \
+                 client that called it; restart it from the current source."
+                    .to_string(),
+            ),
+            Error::MethodNotAllowed => (
+                StatusCode::METHOD_NOT_ALLOWED,
+                "METHOD_NOT_ALLOWED",
+                "That endpoint does not accept this HTTP method".to_string(),
+            ),
             Error::Internal(msg) => {
                 tracing::error!("Internal error: {}", msg);
                 (

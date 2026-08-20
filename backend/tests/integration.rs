@@ -308,6 +308,75 @@ async fn turn_runs_to_completion_and_journals_its_events() {
     );
 }
 
+/// An event stream must forbid intermediaries from re-encoding it.
+///
+/// This pins a bug whose symptom pointed entirely the wrong way. The frontend
+/// proxies `/api/v1/*` through Next.js, whose `compression` middleware gzips any
+/// compressible content type — `text/event-stream` included. gzip cannot be
+/// decoded until a block is flushed, so the browser received nothing until the
+/// turn ended and the whole transcript then appeared at once, while `curl`
+/// (sending no `Accept-Encoding`) saw perfectly paced frames. The stream was
+/// fine; the encoding was buffering it.
+///
+/// `no-transform` (RFC 9111 §5.2.2.6) is what forbids that re-encoding, and it
+/// belongs on the response so the guarantee holds behind any proxy rather than
+/// depending on one front end's configuration. Asserting a single header also
+/// matters: axum sets its own `no-cache`, and two `cache-control` headers would
+/// leave which directive applies up to the intermediary.
+#[tokio::test]
+async fn the_event_stream_forbids_intermediaries_from_compressing_it() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let body = json_body(
+        backend
+            .post_authed(
+                &format!("/api/v1/sessions/{session_id}/turns"),
+                json!({"text": "stream please"}),
+            )
+            .await,
+    )
+    .await;
+    let turn_id = body["turn"]["id"].as_str().unwrap().to_string();
+    backend.await_turn(&turn_id).await;
+
+    let response = backend
+        .get_authed(&format!("/api/v1/turns/{turn_id}/events?after_seq=-1"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream"),
+    );
+
+    let cache_control: Vec<&str> = response
+        .headers()
+        .get_all(axum::http::header::CACHE_CONTROL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect();
+
+    assert_eq!(
+        cache_control.len(),
+        1,
+        "exactly one cache-control header, or the applied directive is \
+         ambiguous: {cache_control:?}"
+    );
+    assert!(
+        cache_control[0].contains("no-transform"),
+        "event stream must forbid re-encoding, or a compressing proxy buffers \
+         it into one lump: {cache_control:?}"
+    );
+    assert!(
+        cache_control[0].contains("no-cache"),
+        "event stream must stay uncached: {cache_control:?}"
+    );
+}
+
 #[tokio::test]
 async fn session_returns_to_idle_after_a_turn() {
     let backend = TestBackend::start().await;
@@ -1870,6 +1939,68 @@ async fn a_restart_preserves_journalled_events() {
     assert_eq!(after["turns"].as_array().unwrap().len(), 1);
 }
 
+// ------------------------------------------------ error envelope contract
+
+/// Every failure under `/api/v1/` carries the error envelope, router-level ones
+/// included.
+///
+/// axum's default fallback answers with an empty body, and a client cannot tell
+/// that from a handler reporting a missing file — both are a bare 404. That
+/// ambiguity had a real cost: a stale backend without the files routes made the
+/// Artifacts pane display "Not Found" inside the file tree, which reads as a
+/// missing directory rather than a missing endpoint. This test is the contract
+/// that keeps the two distinguishable.
+#[tokio::test]
+async fn unmatched_routes_answer_with_the_error_envelope() {
+    let backend = TestBackend::start().await;
+
+    let response = backend.get_authed("/api/v1/not-an-endpoint").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"]["code"], "NOT_FOUND",
+        "a router 404 must be distinguishable from FILE_NOT_FOUND"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| !m.is_empty()),
+        "the envelope must explain itself, not just carry a code"
+    );
+}
+
+/// The wrong method on a real path is a 405 with a code, not a bodiless 404.
+#[tokio::test]
+async fn wrong_method_answers_405_with_the_error_envelope() {
+    let backend = TestBackend::start().await;
+
+    let response = backend.post_authed("/api/v1/health", json!({})).await;
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "METHOD_NOT_ALLOWED"
+    );
+}
+
+/// The fallback sits inside the auth layer, so an unmatched path does not leak
+/// the route surface to an unauthenticated caller.
+///
+/// Registering it after `.layer` would compile and appear to work, while
+/// answering every unknown path before the cookie was ever checked.
+#[tokio::test]
+async fn unmatched_routes_are_still_behind_auth() {
+    let backend = TestBackend::start().await;
+
+    let response = backend.get("/api/v1/not-an-endpoint").await;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the fallback must not answer before the auth layer runs"
+    );
+    assert_eq!(json_body(response).await["error"]["code"], "UNAUTHORIZED");
+}
+
 // ---------------------------------------------------------- files (Phase 6.3)
 
 /// The Artifacts pane lists one directory level, directories first.
@@ -2091,6 +2222,129 @@ async fn missing_files_are_404_and_directories_are_not_content() {
         ))
         .await;
     assert_eq!(directory.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A symlinked directory must browse as the directory it points at.
+///
+/// This pins the bug that made the Artifacts pane useless on any workspace laid
+/// out with links: `DirEntry::metadata` does not follow symlinks, so a link to a
+/// directory was reported as a small *file*. The pane then drew it with no
+/// expand arrow, and clicking it asked for content that was not text — a
+/// directory that looked present and could not be opened.
+#[tokio::test]
+async fn file_tree_follows_symlinks_to_their_target_kind() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let root = backend.workdir();
+    std::fs::create_dir_all(root.join("real/nested")).unwrap();
+    std::fs::write(root.join("real/inside.txt"), "contents\n").unwrap();
+    std::os::unix::fs::symlink(root.join("real"), root.join("linked-dir")).unwrap();
+    std::os::unix::fs::symlink(root.join("real/inside.txt"), root.join("linked-file")).unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/files"))
+            .await,
+    )
+    .await;
+    let entries = body["entries"].as_array().unwrap();
+    let find = |name: &str| {
+        entries
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing from {entries:?}"))
+    };
+
+    let linked_dir = find("linked-dir");
+    assert_eq!(
+        linked_dir["isDir"], true,
+        "a symlink to a directory must report isDir, or the tree cannot expand it"
+    );
+    assert!(
+        linked_dir["size"].is_null(),
+        "a directory carries no size, however it was reached"
+    );
+    assert_eq!(linked_dir["isSymlink"], true, "the link is still flagged as one");
+
+    // The target's size, not the link's own byte length.
+    let linked_file = find("linked-file");
+    assert_eq!(linked_file["isDir"], false);
+    assert_eq!(linked_file["size"], 9);
+    assert_eq!(linked_file["isSymlink"], true);
+
+    // And it actually expands: the whole point of reporting it as a directory.
+    let nested = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{session_id}/files?path=linked-dir"
+            ))
+            .await,
+    )
+    .await;
+    let names: Vec<&str> = nested["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"inside.txt"), "link did not expand: {names:?}");
+    assert!(names.contains(&"nested"), "link did not expand: {names:?}");
+}
+
+/// A symlinked build directory is noise under the name it is browsed by.
+#[tokio::test]
+async fn file_tree_skips_symlinked_build_directories() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let root = backend.workdir();
+    std::fs::create_dir_all(root.join("vendor-store")).unwrap();
+    std::os::unix::fs::symlink(root.join("vendor-store"), root.join("node_modules")).unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/files"))
+            .await,
+    )
+    .await;
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        !names.contains(&"node_modules"),
+        "symlinked node_modules listed: {names:?}"
+    );
+}
+
+/// A dangling symlink is omitted rather than listed as an entry that cannot open.
+#[tokio::test]
+async fn file_tree_omits_dangling_symlinks() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let root = backend.workdir();
+    std::os::unix::fs::symlink(root.join("never-existed"), root.join("dangling")).unwrap();
+    std::fs::write(root.join("real.txt"), "ok\n").unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/files"))
+            .await,
+    )
+    .await;
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"dangling"), "dangling link listed: {names:?}");
+    // A broken link must not take the rest of the listing down with it.
+    assert!(names.contains(&"real.txt"), "listing lost entries: {names:?}");
 }
 
 #[tokio::test]

@@ -72,6 +72,30 @@ case "$PROMPT" in
 
     emit '{"stream":"sylph.runner.v1","event":{"kind":"assistant","phase":"completed","id":"blk-reply","text":"Hello from the E2E runner."}}'
     ;;
+  *paced*)
+    # Deliberately slow, so "did the UI paint mid-turn" is observable rather
+    # than inferred. Every other scenario finishes faster than one render, which
+    # makes them all pass even when nothing streams at all — the exact blind spot
+    # that let a fully non-streaming client ship. Each stage is separated by a
+    # gap far longer than a frame, so a test can assert that earlier stages are
+    # on screen while later ones have not been emitted yet.
+    emit '{"stream":"sylph.runner.v1","event":{"kind":"thinking","phase":"started","id":"blk-slow-think"}}'
+    emit '{"stream":"sylph.runner.v1","event":{"kind":"thinking","phase":"delta","id":"blk-slow-think","text":"Reasoning step one. "}}'
+    sleep 1
+    emit '{"stream":"sylph.runner.v1","event":{"kind":"thinking","phase":"delta","id":"blk-slow-think","text":"Reasoning step two."}}'
+    emit '{"stream":"sylph.runner.v1","event":{"kind":"thinking","phase":"completed","id":"blk-slow-think","text":"Reasoning step one. Reasoning step two."}}'
+    sleep 1
+    emit '{"stream":"sylph.runner.v1","event":{"kind":"tool_call","phase":"completed","id":"blk-slow-tool","name":"Read","text":"{\"file_path\":\"src/paced.rs\"}","data":{"input":{"file_path":"src/paced.rs"}}}}'
+    emit '{"stream":"sylph.runner.v1","event":{"kind":"tool_result","phase":"completed","id":"blk-slow-tool","name":"Read","text":"pub fn paced() {}"}}'
+    sleep 1
+    # A second thinking block: the user asked specifically for multi-round
+    # reasoning to stream, not just the first block.
+    emit '{"stream":"sylph.runner.v1","event":{"kind":"thinking","phase":"completed","id":"blk-slow-think2","text":"Second round of reasoning."}}'
+    sleep 1
+    emit '{"stream":"sylph.runner.v1","event":{"kind":"assistant","phase":"delta","id":"blk-reply","text":"Hello from "}}'
+    emit '{"stream":"sylph.runner.v1","event":{"kind":"assistant","phase":"delta","id":"blk-reply","text":"the E2E runner."}}'
+    emit '{"stream":"sylph.runner.v1","event":{"kind":"assistant","phase":"completed","id":"blk-reply","text":"Hello from the E2E runner."}}'
+    ;;
   *)
     # Stream the reply as deltas so the test sees incremental rendering rather
     # than a single finished block.

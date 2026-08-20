@@ -175,6 +175,12 @@ test("expand-all and collapse-all drive every disclosure in the timeline", async
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
 
+  // Wait for the turn to settle before asserting the collapsed default. Thinking
+  // is deliberately held open *while* it streams, and the reply block now appears
+  // during the turn rather than after it, so the reply alone no longer implies the
+  // turn is over. The composer re-enabling is what actually marks that.
+  await expect(page.getByLabel("Message")).toBeEnabled();
+
   const thinking = page.getByText("Considering the request.");
   await expect(thinking).toBeHidden();
 
@@ -191,6 +197,73 @@ test("expand-all and collapse-all drive every disclosure in the timeline", async
 
   await page.getByRole("button", { name: "Collapse all" }).click();
   await expect(thinking).toBeHidden();
+});
+
+/**
+ * Session rows inside one sidebar group.
+ *
+ * Counted rather than compared against a literal: the E2E data directory is not
+ * wiped between runs, so absolute counts depend on how many times the suite has
+ * been run before. Each group labels its own list, which is what makes one
+ * group's rows addressable without depending on sidebar ordering.
+ */
+function groupRows(page: Page, name: string) {
+  return page.getByRole("list", { name: `Sessions in ${name}` }).getByRole("link");
+}
+
+test("Quick Sessions creates a session from its menu with no dialog", async ({ page }) => {
+  // The regression: "New session here" used to route to /sessions/new and ask
+  // again for a working directory the right-clicked group had already named.
+  await createSession(page);
+
+  const rows = groupRows(page, "Quick Sessions");
+  const before = await rows.count();
+
+  // The default agent is unset here, so creation falls back to the first
+  // discovered runner — the E2E fixture, which is the only one installed.
+  await page.getByRole("button", { name: /Quick Sessions/ }).click({ button: "right" });
+  const menu = page.getByRole("menu");
+  await expect(menu).toBeVisible();
+  await menu.getByRole("menuitem", { name: "New session here", exact: true }).click();
+
+  // Straight to a usable conversation: no form, and never the create route.
+  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page).toHaveURL(/\/sessions\/(?!new)[0-9a-f-]{36}/);
+  await expect(page.getByLabel("Working directory")).toHaveCount(0);
+
+  // Created in the fixed Quick Start directory, so it joins that group rather
+  // than spawning a workspace of its own.
+  await expect(rows).toHaveCount(before + 1);
+});
+
+test("a workspace group creates in its own directory, and the ... variant still opens the form", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  // `/tmp` is where `createSession` put that session, so this group exists and
+  // its directory is the one a new session must inherit.
+  const group = page.getByRole("button", { name: "tmp", exact: false }).first();
+  const rows = groupRows(page, "tmp");
+  const before = await rows.count();
+
+  await group.click({ button: "right" });
+  await page
+    .getByRole("menu")
+    .getByRole("menuitem", { name: "New session here", exact: true })
+    .click();
+
+  await expect(page.getByLabel("Message")).toBeVisible();
+  // The directory was inherited from the group, not re-asked.
+  await expect(rows).toHaveCount(before + 1);
+
+  // The explicit variant is still reachable, for overriding agent, model, or title.
+  await page.getByRole("button", { name: "tmp", exact: false }).first().click({ button: "right" });
+  await page.getByRole("menu").getByRole("menuitem", { name: "New session here..." }).click();
+  const workdir = page.getByLabel("Working directory");
+  await expect(workdir).toBeVisible();
+  // Prefilled from the group, so the form is an override surface, not a re-ask.
+  await expect(workdir).toHaveValue(/tmp/);
 });
 
 /**

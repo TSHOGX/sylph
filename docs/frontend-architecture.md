@@ -220,13 +220,15 @@ frontend/
 │   ├── api.ts                  # Typed client; mirrors the wire shape exactly
 │   ├── providers.tsx           # QueryClient + AuthGate
 │   ├── settings.tsx            # Preferences over localStorage
+│   ├── create-session.ts       # Dialog-free session creation + default resolution
 │   ├── workspace-ui.tsx        # Pane visibility, overlays, artifact selection
 │   ├── shortcuts.ts            # Combo grammar and platform resolution
 │   ├── timeline-rows.test.ts   # (tests live beside the code they cover)
 │   ├── diff.ts                 # LCS line diff
 │   ├── tool-shape.ts           # Interprets tool_call payloads per agent
 │   ├── fuzzy.ts                # Subsequence ranking
-│   ├── use-sse.ts              # EventSource with after_seq resume
+│   ├── use-sse.ts              # Streaming fetch reader with after_seq resume
+│   ├── sse-parse.ts            # Incremental event-stream frame decoder
 │   ├── use-debounced.ts
 │   ├── error-boundary.tsx
 │   └── format.ts
@@ -346,6 +348,41 @@ Session-scoped actions — stop turn, expand all, find — cannot be handled by 
 shell, which has no access to the open session's state. The session page registers
 a handler with `registerSessionActions` and the shell forwards to it; with no
 session open, those actions are simply ignored.
+
+### Creating a session: mutation or form
+
+Two paths exist, and which one a surface uses follows from one question — is the
+working directory already known?
+
+| Surface | Path | Why |
+| --- | --- | --- |
+| ⚡ Quick Start, `Mod+Shift+N`, palette | `useQuickCreateSession` | The directory is fixed: the backend-resolved `~/.agents`. |
+| Sidebar group → "New session here" | `useQuickCreateSession` | A group **is** a directory. The right-click already named it. |
+| Sidebar group → "New session here..." | `/sessions/new?workdir=` | Override the agent, model, or title; the directory is prefilled. |
+| `+ New session`, `Mod+N` | `/sessions/new` | No directory chosen yet, so the form's required field is the point. |
+
+The directory is the only field a session needs beyond an agent, and the agent
+has a configured default. So whenever the invocation already carries a directory,
+a form has nothing left to ask: it is a dialog the user must dismiss to get what
+they clicked. `lib/create-session.ts` is that mutation, and it is what makes
+"Quick Start" a special case of a general action rather than its own mechanism —
+before it, Quick Start had a private hook in the shell and the sidebar routed to
+the form, which is why right-clicking the fixed `~/.agents` group still asked for
+a working directory.
+
+One instance lives in the shell and is shared through `WorkspaceUIProvider` as
+`createSessionIn`, so every dialog-free path reports one pending state and one
+error banner. Its value is memoized and passes `mutate` by reference: it feeds the
+shell context's memo, which `runAction` closes over, so an unstable identity would
+re-register the document-level keydown listener on every shell render.
+
+`resolveSessionDefaults` checks both stored preferences against live `--describe`
+output. A `defaultAgent` whose runner was uninstalled would be rejected as an
+unknown agent, and a `defaultModels` entry the runner no longer declares would be
+passed as `--flag model=...` and fail at turn time — far from the setting that
+caused it. Both degrade to a silent, correct fallback instead, and only "no
+runners at all" surfaces as an error, because that is the one case with no
+sensible default.
 
 ### Component Design
 
@@ -525,39 +562,68 @@ could disagree with storage when a write failed.
 
 ### SSE Connection Management
 
+The stream is read with `fetch` and parsed in the client, **not** with
+`EventSource`. This is a correction: the original design here specified
+`EventSource` with one `addEventListener` per event kind, and the implementation
+that followed it listened on `onmessage` instead — which by the SSE spec receives
+only frames named `message`. Since the backend names every frame after its kind
+(`event: thinking`), every mid-turn event was dropped, and the transcript
+appeared all at once when the turn finished because the only repaint was the
+history refetch on completion.
+
+`EventSource` is the wrong primitive here for three reasons, not just that one:
+
+1. Dispatch is by frame name, so a client must enumerate every kind it expects.
+   A kind the backend adds later is silently dropped — and silent event loss
+   renders identically to an agent that did nothing.
+2. A frame named `error` (which the backend emits for a failed turn) arrives as
+   the same `error` event the browser fires for a dropped socket, so a runner
+   failure and a network failure cannot be distinguished.
+3. It reconnects on its own with no way to advance `after_seq`, so resuming at a
+   cursor requires fighting its built-in retry.
+
+Reading the body directly fixes all three: the frame name is parsed but never
+used for dispatch, so every frame reaches the consumer whatever it is called.
+
 ```ts
-class TurnStreamManager {
-  private connections = new Map<string, EventSource>()
-  
-  connect(turnId: string, afterSeq = -1): EventSource {
-    const url = `/api/v1/turns/${turnId}/events?after_seq=${afterSeq}`
-    const source = new EventSource(url)
-    
-    source.addEventListener('thinking', (e) => this.handleEvent('thinking', e))
-    source.addEventListener('assistant', (e) => this.handleEvent('assistant', e))
-    source.addEventListener('tool_call', (e) => this.handleEvent('tool_call', e))
-    source.addEventListener('tool_result', (e) => this.handleEvent('tool_result', e))
-    source.addEventListener('usage', (e) => this.handleEvent('usage', e))
-    source.addEventListener('error', (e) => this.handleReconnect(turnId))
-    
-    this.connections.set(turnId, source)
-    return source
-  }
-  
-  disconnect(turnId: string) {
-    const source = this.connections.get(turnId)
-    if (source) {
-      source.close()
-      this.connections.delete(turnId)
-    }
-  }
-  
-  private handleReconnect(turnId: string) {
-    const lastSeq = this.getLastSeq(turnId)
-    setTimeout(() => this.connect(turnId, lastSeq), 1000)
+const response = await fetch(
+  `/api/v1/turns/${turnId}/events?after_seq=${cursor}`,
+  { credentials: "include", signal: controller.signal, cache: "no-store" },
+)
+
+const reader = response.body.getReader()
+// `stream: true`: a chunk boundary can fall inside a multi-byte UTF-8 sequence.
+const utf8 = new TextDecoder()
+const decoder = createSSEDecoder()   // lib/sse-parse.ts
+
+for (;;) {
+  const { done, value } = await reader.read()
+  if (done) break
+  for (const frame of decoder.push(utf8.decode(value, { stream: true }))) {
+    const event = JSON.parse(frame.data)
+    if (event.seq <= cursor) continue   // drop replay overlap after reconnect
+    cursor = event.seq
+    enqueue(event)                      // coalesced, see below
   }
 }
 ```
+
+**Compression must be refused, or none of this streams.** The backend sets
+`Cache-Control: no-cache, no-store, no-transform` on the event stream. The
+`no-transform` directive is load-bearing rather than cosmetic: Next.js proxies
+`/api/v1/*` through the standard `compression` middleware, which gzips any
+compressible content type including `text/event-stream`, and a gzip stream cannot
+be decoded until its block is flushed. With compression on, every event sat in
+the compressor until the turn ended — while `curl`, which sends no
+`Accept-Encoding`, saw perfectly paced frames and made the bug look like a client
+problem. The header lives on the backend response rather than in
+`next.config.ts` so the guarantee survives any proxy in front of the endpoint.
+
+**Repaint is coalesced, not per-event.** Deltas arrive at token rate — the claude
+runner measures ~20ms between tool-input deltas — so one `setState` per delta is
+one React commit per token. Events are batched into a single flush per animation
+frame (16ms), which bounds repaints by the display rather than by the model's
+speed while staying far below the ~100ms at which a human perceives lag.
 
 **Event normalization:**
 - Parse JSON from `data` field
@@ -567,10 +633,11 @@ class TurnStreamManager {
 - Persist only `completed` events
 
 **Reconnection strategy:**
-- Exponential backoff: 1s, 2s, 4s, 8s, max 30s
-- Resume from `Last-Event-ID` or `after_seq`
+- Backoff: 500ms, 1s, 2s, 5s, 10s (capped, so a dead backend is polled gently)
+- Resume from the highest `seq` seen, via `after_seq`
 - Replay stable events from backend journal
-- Show reconnection UI after 3 seconds
+- A clean end-of-body means the turn finished; retrying there would loop
+- `AbortController` makes teardown immediate, which `EventSource` cannot offer
 
 ### Event Rendering
 

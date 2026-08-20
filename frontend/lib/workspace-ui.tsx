@@ -74,6 +74,14 @@ interface WorkspaceUIValue {
   browseHistory: (workdir?: string) => void;
   /** Run a shortcut action, for the command palette to reuse the same paths. */
   runAction: (action: ShortcutAction) => void;
+  /**
+   * Create a session in a known directory and open it, with no dialog.
+   *
+   * Exposed on the shell context rather than called directly by each surface so
+   * that one mutation — and therefore one pending state and one error banner —
+   * serves the top bar, the palette, and every sidebar group.
+   */
+  createSessionIn: (workdir: string | undefined) => void;
 }
 
 const WorkspaceUIContext = createContext<WorkspaceUIValue | null>(null);
@@ -82,12 +90,16 @@ export function WorkspaceUIProvider({
   children,
   onNewSession,
   onQuickStart,
+  onCreateSessionIn,
 }: {
   children: ReactNode;
   /** Navigate to the create-session route. Supplied by the shell, which has
    *  the router; this provider stays free of routing concerns. */
   onNewSession: () => void;
+  /** Create in the Quick Start directory. The shell supplies it because only
+   *  the shell has the backend-resolved path. */
   onQuickStart: () => void;
+  onCreateSessionIn: (workdir: string | undefined) => void;
 }) {
   const { settings, update } = useSettings();
 
@@ -236,6 +248,7 @@ export function WorkspaceUIProvider({
       setActiveWorkdir,
       browseHistory,
       runAction,
+      createSessionIn: onCreateSessionIn,
     }),
     [
       leftOpen,
@@ -250,6 +263,7 @@ export function WorkspaceUIProvider({
       activeWorkdir,
       browseHistory,
       runAction,
+      onCreateSessionIn,
     ],
   );
 

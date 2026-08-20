@@ -289,7 +289,19 @@ function renderBlocks(text: string): ReactNode {
  */
 const INLINE_SOURCE = [
   "(?<codeFence>`+)(?<code>[\\s\\S]*?)\\k<codeFence>", // inline code
-  "\\[(?<linkText>[^\\]]+)\\]\\((?<linkHref>[^)\\s]+)(?:\\s+\"[^\"]*\")?\\)",
+  // Images before links so `![alt](src)` reads as an image. Alternation order is
+  // not the whole story — JavaScript takes the *leftmost* match, so an earlier
+  // alternative only wins among those matching at the same index — but it is
+  // what settles `!` where both could start.
+  "!\\[(?<imageAlt>[^\\]]*)\\]\\((?<imageSrc>[^)\\s]+)(?:\\s+\"[^\"]*\")?\\)",
+  // A link label admits one level of nested brackets, which is what makes the
+  // badge idiom `[![alt](img)](href)` parse. Under a flat `[^\]]+` the label
+  // could not span the nested `]`, so the line matched as a link labelled
+  // `![alt` carrying the *image's* URL, and the real href was left behind to be
+  // picked up as an autolink — the bare-URL-in-a-label shape that then overflowed
+  // the stack. One level is enough for every idiom this renderer targets;
+  // arbitrary nesting needs a real parser, not a regex.
+  "\\[(?<linkText>(?:[^\\[\\]]|!?\\[[^\\]]*\\])+)\\]\\((?<linkHref>[^)\\s]+)(?:\\s+\"[^\"]*\")?\\)",
   "\\*\\*(?<boldStar>[\\s\\S]+?)\\*\\*",
   "__(?<boldUnderscore>[\\s\\S]+?)__",
   "~~(?<strike>[\\s\\S]+?)~~",
@@ -300,11 +312,27 @@ const INLINE_SOURCE = [
   "(?<autolink>https?://[^\\s<>()]+)",
 ].join("|");
 
-/** One inline span. `href` is set only for links. */
+/** One inline span. `href` is set only for links and images. */
 export interface InlineToken {
-  type: "text" | "code" | "bold" | "italic" | "strike" | "link";
+  type: "text" | "code" | "bold" | "italic" | "strike" | "link" | "image";
   value: string;
   href?: string;
+  /**
+   * The label is literal text, not inline markup, and must not be re-parsed.
+   *
+   * Set on autolinks, where `value` *is* the matched URL. Recursion through
+   * inline content terminates because every nested call gets a strictly shorter
+   * string — `**x**` yields `x`, four characters shorter. An autolink is the one
+   * token that breaks that: re-tokenizing its label reproduces the same token
+   * with the same value, so `renderLink` -> `renderInline` -> `renderLink` never
+   * shrinks and overflows the stack. A GitHub README of badge links is enough to
+   * do it, which is how this shipped: it needs a bare URL in a label, and only
+   * autolinks make one.
+   *
+   * Recorded on the token rather than re-derived in the renderer, because the
+   * tokenizer is the only place that knows the label came from the URL itself.
+   */
+  literal?: boolean;
 }
 
 /**
@@ -344,6 +372,15 @@ export function parseInline(text: string): InlineToken[] {
       // Code content is never re-scanned, which is the rule that lets
       // documentation about Markdown show its own syntax literally.
       tokens.push({ type: "code", value: groups.code });
+    } else if (groups.imageAlt !== undefined) {
+      const src = groups.imageSrc ?? "";
+      // Alt text is literal by definition, so it is never re-parsed. A refused
+      // source degrades to the alt text, which is exactly what alt text is for.
+      tokens.push(
+        isDescribableImageSource(src)
+          ? { type: "image", value: groups.imageAlt, href: src, literal: true }
+          : { type: "text", value: groups.imageAlt },
+      );
     } else if (groups.linkText !== undefined) {
       const href = groups.linkHref ?? "";
       // An unsafe scheme degrades to plain text, so the label survives but the
@@ -360,7 +397,14 @@ export function parseInline(text: string): InlineToken[] {
     } else if (italic !== undefined) {
       tokens.push({ type: "italic", value: italic });
     } else if (groups.autolink !== undefined) {
-      tokens.push({ type: "link", value: groups.autolink, href: groups.autolink });
+      // `literal`: the label is the URL, so re-parsing it would reproduce this
+      // very token and recurse forever. See `InlineToken.literal`.
+      tokens.push({
+        type: "link",
+        value: groups.autolink,
+        href: groups.autolink,
+        literal: true,
+      });
     }
 
     cursor = match.index + match[0].length;
@@ -386,7 +430,41 @@ function isSafeHref(href: string): boolean {
   return /^(https?:|mailto:|#|\/)/i.test(href.trim());
 }
 
-function renderInline(text: string): ReactNode {
+/**
+ * Whether an image source is safe to *describe*.
+ *
+ * Deliberately not `isSafeHref`. That predicate guards the `href` attribute, and
+ * requires a leading `/` — so it rejects `docs/a.svg`, the ordinary way a README
+ * refers to a picture beside it. An image here never becomes an `src` attribute
+ * (see `renderImage`), so the question is not "may the browser fetch this" but
+ * "may this string be shown to the reader".
+ *
+ * The answer is still no for `javascript:` and `data:`. Neither can execute from
+ * the text of a `title`, but an image is offered as a *link* when its source is
+ * remote, and a scheme that reaches `renderImage` unchecked would be one refactor
+ * away from reaching an `href`. Rejecting every scheme except http(s) leaves
+ * relative paths — which have no scheme at all — as the only other thing that
+ * passes.
+ */
+function isDescribableImageSource(src: string): boolean {
+  const trimmed = src.trim();
+  if (/^https?:/i.test(trimmed)) return true;
+  // Anything with a scheme other than http(s) is refused. A bare `foo:bar` is a
+  // valid relative path on disk but indistinguishable from a scheme here, and
+  // refusing it costs an alt-text fallback rather than an unchecked URL.
+  return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+}
+
+/**
+ * Render inline markup.
+ *
+ * `inLink` is threaded through so a nested image does not emit an `<a>` inside an
+ * `<a>`. The badge idiom `[![alt](img)](href)` puts an image inside a link, and
+ * `renderImage` offers a remote source as a link of its own — valid alone, but
+ * nested anchors are invalid HTML that browsers silently unnest, producing markup
+ * that does not match the tree React thinks it rendered.
+ */
+function renderInline(text: string, inLink = false): ReactNode {
   return (
     <Fragment>
       {parseInline(text).map((token, index) => {
@@ -401,19 +479,21 @@ function renderInline(text: string): ReactNode {
               </code>
             );
           case "link":
-            return renderLink(token.value, token.href ?? "", index);
+            return renderLink(token.value, token.href ?? "", index, token.literal);
+          case "image":
+            return renderImage(token.value, token.href ?? "", index, inLink);
           case "bold":
             return (
               <strong key={index} className="font-semibold">
-                {renderInline(token.value)}
+                {renderInline(token.value, inLink)}
               </strong>
             );
           case "italic":
-            return <em key={index}>{renderInline(token.value)}</em>;
+            return <em key={index}>{renderInline(token.value, inLink)}</em>;
           case "strike":
             return (
               <del key={index} className="text-gray-500">
-                {renderInline(token.value)}
+                {renderInline(token.value, inLink)}
               </del>
             );
           default:
@@ -432,8 +512,19 @@ export const parseBlocksForTest = parseBlocks;
  * Render a link. The scheme was already checked in `parseInline`, and is checked
  * again here because this is the function that produces the `href` attribute —
  * a future caller reaching it by another path must not bypass the allowlist.
+ *
+ * `literal` labels are rendered as text instead of being re-parsed. That is a
+ * termination requirement, not a preference: see `InlineToken.literal`. Rather
+ * than defend it with a recursion-depth cap, the label of an autolink is simply
+ * not inline content — a cap would silently truncate deep-but-valid nesting and
+ * still leave the non-decreasing recursion in place.
  */
-function renderLink(label: string, href: string, key: number): ReactNode {
+function renderLink(
+  label: string,
+  href: string,
+  key: number,
+  literal = false,
+): ReactNode {
   if (!isSafeHref(href)) {
     return <span key={key}>{label}</span>;
   }
@@ -447,7 +538,52 @@ function renderLink(label: string, href: string, key: number): ReactNode {
       {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
       className="text-blue-700 underline decoration-blue-300 hover:decoration-blue-700"
     >
-      {renderInline(label)}
+      {literal ? label : renderInline(label, true)}
     </a>
+  );
+}
+
+/**
+ * Render an image as its alt text, not as an `<img>`.
+ *
+ * A Markdown image source is relative to the *file being previewed*, and this
+ * renderer has no idea where that is — it receives a string, not a path. There
+ * is also no endpoint that serves workspace bytes to an `<img>`: `files/content`
+ * returns authenticated JSON, deliberately, so that no unauthenticated route to
+ * the filesystem exists (see `file-preview.tsx`). Emitting `<img src="docs/a.svg">`
+ * would therefore resolve against the *app's* origin and load nothing, drawing a
+ * broken-image glyph where the document meant to show a picture.
+ *
+ * Alt text in brackets is honest about what it is: the description the author
+ * wrote, marked as standing in for an image. A remote `https:` source is still
+ * offered as a link, since that one does resolve.
+ */
+function renderImage(
+  alt: string,
+  src: string,
+  key: number,
+  inLink = false,
+): ReactNode {
+  const label = alt.trim() === "" ? "image" : alt;
+  // Inside a link the enclosing anchor already carries a destination, and nesting
+  // another would be invalid HTML.
+  if (!inLink && /^https?:/i.test(src)) {
+    return (
+      <a
+        key={key}
+        href={src}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={`Image: ${src}`}
+        className="text-blue-700 underline decoration-dotted decoration-blue-300 hover:decoration-blue-700"
+      >
+        [{label}]
+      </a>
+    );
+  }
+  return (
+    <span key={key} title={`Image: ${src}`} className="text-gray-500">
+      [{label}]
+    </span>
   );
 }

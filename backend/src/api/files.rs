@@ -145,27 +145,60 @@ pub async fn tree(
         }
 
         let name = entry.file_name().to_string_lossy().to_string();
-        // `symlink_metadata` does not follow the link, which is what tells us
-        // whether this entry *is* a link before deciding to trust it.
-        let link_meta = match entry.metadata() {
-            Ok(meta) => meta,
+
+        // Two different questions about one entry, and they need two different
+        // calls. Conflating them is what made a symlinked directory unbrowsable:
+        //
+        //   *Is this entry a link?*      must NOT follow it.
+        //   *What is on the other side?* must follow it.
+        //
+        // `DirEntry::file_type` answers the first from the directory entry, with
+        // no extra syscall on platforms that fill in `d_type`. The second needs
+        // `fs::metadata`, which traverses; `DirEntry::metadata` does not —
+        // std documents it as "will not traverse symlinks if this entry points
+        // at a symlink". Using it for the second question reported a symlinked
+        // directory as `isDir: false` carrying the link's own byte length, so
+        // the pane drew a tiny file with no expand arrow and no way to open it.
+        let is_symlink = match entry.file_type() {
+            Ok(file_type) => file_type.is_symlink(),
             Err(_) => continue,
         };
-        let is_symlink = entry
-            .path()
-            .symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
 
-        let is_dir = link_meta.is_dir();
+        // Resolve a link before trusting anything it says about itself. This is
+        // both the containment check and the way to reach the target's real
+        // kind, so it has to happen before the `is_dir` decision below — a link
+        // that escapes the root must not even be classified, let alone listed.
+        //
+        // Only links pay for this. A regular entry sits under an already-canonical
+        // directory, so its path is canonical too, and spending a `canonicalize`
+        // on each of 2000 entries would buy nothing.
+        let resolved = if is_symlink {
+            match std::fs::canonicalize(entry.path()) {
+                // A link out of the root would otherwise be an expandable node
+                // offering the whole filesystem through this endpoint.
+                Ok(target) if target.starts_with(&root) => target,
+                // Dangling or escaping. Both are skipped, for the same reason:
+                // there is nothing inside the workspace to show, and a listed
+                // entry the client cannot open is worse than an absent one.
+                _ => continue,
+            }
+        } else {
+            entry.path()
+        };
+
+        // Following metadata: the kind and size the user is actually browsing.
+        // For a link this describes the target, which is what makes a symlinked
+        // directory expand like the directory it is.
+        let metadata = match std::fs::metadata(&resolved) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+
+        let is_dir = metadata.is_dir();
+        // Checked against the entry's own name, not the target's: a `node_modules`
+        // symlink is noise under the name it is browsed by, however it is spelled
+        // on the other side.
         if is_dir && SKIPPED_DIRS.contains(&name.as_str()) {
-            continue;
-        }
-
-        // A symlink is listed only when its target stays inside the root.
-        // Without this, a link to `/` would be an expandable node offering the
-        // whole filesystem through the same endpoint.
-        if is_symlink && std::fs::canonicalize(entry.path()).ok().filter(|p| p.starts_with(&root)).is_none() {
             continue;
         }
 
@@ -174,8 +207,8 @@ pub async fn tree(
             path: relative,
             name,
             is_dir,
-            size: (!is_dir).then_some(link_meta.len()),
-            modified_at_ms: modified_ms(&link_meta),
+            size: (!is_dir).then_some(metadata.len()),
+            modified_at_ms: modified_ms(&metadata),
             is_symlink,
         });
     }

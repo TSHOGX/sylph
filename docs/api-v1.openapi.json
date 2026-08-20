@@ -243,7 +243,18 @@
         "description": "Reconnectable SSE stream. Last-Event-ID is accepted as an alternative to after_seq. Stable journal replay precedes live projection events.",
         "responses": {
           "200": {
-            "description": "text/event-stream"
+            "description": "SSE stream. Each frame is named after its event kind (event: thinking), so a client must not dispatch on EventSource.onmessage, which receives only frames named message.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always 'no-cache, no-store, no-transform'. no-transform (RFC 9111 5.2.2.6) forbids an intermediary from re-encoding the body; without it a compressing proxy gzips the stream and buffers the whole turn into one delivery.",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": { "type": "string" }
+              }
+            }
           }
         }
       }
@@ -735,6 +746,8 @@
                   "COMMAND_NOT_SUPPORTED",
                   "APPROVAL_NOT_AVAILABLE",
                   "POLICY_VIOLATION",
+                  "NOT_FOUND",
+                  "METHOD_NOT_ALLOWED",
                   "INTERNAL_ERROR"
                 ]
               },

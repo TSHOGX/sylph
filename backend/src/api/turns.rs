@@ -5,7 +5,6 @@ use axum::{
     response::{sse::{Event, KeepAlive}, Sse},
     Json,
 };
-use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::time::Duration;
@@ -174,7 +173,7 @@ pub async fn events(
     State(state): State<AppState>,
     Path(turn_id): Path<String>,
     query: axum::extract::Query<EventsQuery>,
-) -> Result<Sse<impl Stream<Item = std::result::Result<Event, Infallible>>>> {
+) -> Result<impl axum::response::IntoResponse> {
     // Existence check only: a stream for an unknown turn must 404 rather
     // than hang on an empty subscription.
     let _turn = state
@@ -216,7 +215,34 @@ pub async fn events(
         boxed_local(stream::iter(journal_events).map(sse_event))
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+    let sse = Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)));
+
+    // `no-transform` is what actually makes this stream incremental in a browser,
+    // and it is not cosmetic: the Next.js dev/production server proxies
+    // `/api/v1/*` through the standard `compression` middleware, which gzips any
+    // compressible content type. A gzip stream cannot be decoded until its block
+    // is flushed, so every event sat in the compressor until the turn ended and
+    // the whole transcript then appeared at once — while `curl` (which sends no
+    // `Accept-Encoding`) saw perfectly paced frames, making the bug look like a
+    // client problem.
+    //
+    // RFC 9111 §5.2.2.6 is the lever: `no-transform` forbids an intermediary from
+    // altering the payload, and `compression`'s `shouldTransform` honors it.
+    // Declaring it here rather than disabling compression in `next.config.ts`
+    // keeps the guarantee attached to the response that needs it, so it survives
+    // any proxy in front of this endpoint — a tunnel or nginx included — instead
+    // of depending on one particular front end staying configured correctly.
+    //
+    // Axum hard-codes `cache-control: no-cache` on `Sse`, so the header is
+    // replaced rather than appended: two `cache-control` headers would leave the
+    // directive's application up to whichever the intermediary reads first.
+    Ok((
+        [(
+            axum::http::header::CACHE_CONTROL,
+            "no-cache, no-store, no-transform",
+        )],
+        sse,
+    ))
 }
 
 fn sse_event(event: StreamEvent) -> std::result::Result<Event, Infallible> {

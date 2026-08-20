@@ -16,7 +16,7 @@
 import { useParams } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type FileEntry } from "@/lib/api";
+import { ApiError, api, type FileEntry } from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { ContextMenu, type MenuItem } from "@/components/context-menu";
@@ -179,7 +179,7 @@ function Directory({
   selected: string | null;
   onSelect: (path: string) => void;
 }) {
-  const { data, isPending, error } = useQuery({
+  const { data, isPending, error, refetch } = useQuery({
     queryKey: ["files", sessionId, path],
     queryFn: () => api.files.tree(sessionId, path),
     // Only the root and expanded directories are fetched; a collapsed one costs
@@ -198,13 +198,24 @@ function Directory({
 
   if (error) {
     return (
-      <p
+      <div
         role="alert"
-        className="px-1.5 py-1 text-[11px] text-red-700"
+        className="px-1.5 py-1 text-[11px]"
         style={{ paddingLeft: depth * 10 + 6 }}
       >
-        {error instanceof Error ? error.message : "Could not read this directory."}
-      </p>
+        {/* The heading names the directory, and the body carries the backend's
+            message verbatim. Both are needed: a bare message in a tree reads as
+            a property of the tree, which is how an absent *endpoint* came across
+            as an absent *directory*. */}
+        <p className="text-red-800">{describeTreeError(error, path)}</p>
+        <button
+          type="button"
+          onClick={() => void refetch()}
+          className="mt-0.5 rounded text-[10px] text-red-700 underline hover:text-red-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        >
+          Retry
+        </button>
+      </div>
     );
   }
 
@@ -242,6 +253,37 @@ function Directory({
       )}
     </ul>
   );
+}
+
+/**
+ * Phrase a failed directory listing so the reader looks in the right place.
+ *
+ * The distinction that matters is between "this directory is gone" and "this
+ * backend cannot list directories at all". They arrive as the same HTTP status
+ * and differ only by error code, and getting them confused is what makes a
+ * stale-process problem look like a filesystem one.
+ */
+function describeTreeError(error: unknown, path: string): string {
+  const where = path === "" ? "the working directory" : path;
+  if (error instanceof ApiError) {
+    switch (error.code) {
+      case "FILE_NOT_FOUND":
+        return `${where} no longer exists on disk.`;
+      case "SESSION_NOT_FOUND":
+        return "This session is no longer in the journal.";
+      case "POLICY_VIOLATION":
+        return `${where} is outside this session's working directory.`;
+      // Router-level and envelopeless failures: the endpoint, not the path.
+      // `api.ts` has already written the actionable message for these, so it is
+      // passed through rather than restated.
+      case "NOT_FOUND":
+      case "backend_unreachable":
+      case "http_404":
+        return error.message;
+    }
+    return `Could not list ${where}: ${error.message}`;
+  }
+  return `Could not list ${where}.`;
 }
 
 function TreeNode({

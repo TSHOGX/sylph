@@ -145,18 +145,26 @@ export function AttachmentPicker({ attachments, onChange, disabled }: Props) {
           setDragging(false);
           void accept(e.dataTransfer.files);
         }}
+        // Disabled is conveyed by muting the border and the interactive label,
+        // never by fading the whole block. `opacity` composites text against the
+        // background, and half-opacity `text-gray-500` lands near 2.1:1 — below
+        // the 4.5:1 WCAG 1.4.3 floor for the small print inside. Dimming the
+        // chrome instead keeps the explanatory text at full contrast, which is
+        // the text a user most needs while the composer is unavailable.
         className={`rounded-lg border border-dashed px-3 py-2 text-sm transition ${
           dragging ? "border-gray-900 bg-gray-50" : "border-gray-300"
-        } ${disabled ? "opacity-50" : ""}`}
+        } ${disabled ? "border-gray-200 bg-gray-50" : ""}`}
       >
         <label
           htmlFor={inputId}
-          className="cursor-pointer font-medium text-gray-900 underline decoration-dotted focus-within:outline-none"
+          className={`font-medium underline decoration-dotted focus-within:outline-none ${
+            disabled ? "text-gray-500" : "cursor-pointer text-gray-900"
+          }`}
         >
           Attach files
         </label>
-        <span className="text-gray-500"> or drop them here.</span>
-        <span className="ml-1 text-xs text-gray-500">
+        <span className="text-gray-600"> or drop them here.</span>
+        <span className="ml-1 text-xs text-gray-600">
           Up to {MAX_ATTACHMENTS} files, {formatBytes(MAX_TOTAL_BYTES)} total.
         </span>
         <input

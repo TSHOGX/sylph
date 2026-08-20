@@ -354,10 +354,24 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     const error = body?.error ?? {};
+    // A missing envelope is itself diagnostic, so it gets its own message rather
+    // than falling through to `statusText`. That fallback is what turned an
+    // unreachable endpoint into the word "Not Found" rendered inside a file
+    // tree: the pane said the *directory* was missing when the truth was that
+    // the running backend had no files endpoint at all. Anything answering
+    // `/api/v1/*` without the envelope is not a current Sylph backend — it is a
+    // stale build, or a proxy answering in its place.
+    if (!body?.error) {
+      throw new ApiError(
+        response.status,
+        `http_${response.status}`,
+        describeEnvelopeless(response.status, path),
+      );
+    }
     throw new ApiError(
       response.status,
       error.code ?? `http_${response.status}`,
-      error.message ?? response.statusText ?? `Request failed (${response.status})`,
+      error.message ?? `Request failed (${response.status})`,
     );
   }
 
@@ -366,6 +380,25 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return response.json() as Promise<T>;
+}
+
+/**
+ * Explain a response that carried no error envelope.
+ *
+ * The backend documents every `/api/v1/*` failure as `{error: {code, message}}`,
+ * including router-level ones, so a bodiless failure means the request never
+ * reached a current backend. Naming that is the whole point: the alternative is
+ * `statusText`, and "Not Found" alone sends the reader looking for a missing
+ * file instead of a stale process.
+ */
+function describeEnvelopeless(status: number, path: string): string {
+  if (status === 404) {
+    return `The backend has no ${path} endpoint. It is probably an older build than this UI — restart it with \`cd backend && cargo run\`.`;
+  }
+  if (status === 502 || status === 503 || status === 504) {
+    return "The backend did not answer. Check that it is running on the port the frontend proxies to.";
+  }
+  return `Request to ${path} failed (${status}) with no error details.`;
 }
 
 /**

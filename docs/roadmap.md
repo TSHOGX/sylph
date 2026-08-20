@@ -269,6 +269,10 @@ shipped design.
 - ✅ Default agent and per-agent model, density, expansion defaults, shortcut
   recorder, workspace management
 - ✅ Quick Start creates a session in `~/.agents` with no dialog
+- ✅ Any known directory creates with no dialog: one shared mutation
+  (`lib/create-session.ts`) serves Quick Start and every sidebar group, so
+  "New session here" no longer re-asks for a directory the group already names.
+  The form remains for choosing a directory, or overriding agent/model/title.
 - ✅ Preferences over `localStorage` via `useSyncExternalStore`
 
 **6.6 — archived history is browsable by directory**
@@ -316,7 +320,9 @@ cursor pagination — was never called.
 - ✅ **`Cmd+K` and `Cmd+P` keyboard-navigable** — both open, filter, and commit
   by keyboard in E2E, including focus restoration on close.
 - ✅ **Quick Start** — creates in the backend-resolved `~/.agents`; the directory
-  is asserted to end in `/.agents` in integration tests.
+  is asserted to end in `/.agents` in integration tests. Dialog-free creation from
+  a sidebar group is covered in `e2e/workspace-shell.spec.ts`, and default
+  resolution against installed runners in `lib/create-session.test.ts`.
 - ✅ **Settings configure agent and model** — round-trip through storage and into
   the timeline covered in E2E.
 - ✅ **First-load JS under 200 KB gzipped** — **measured 197.1 KB**, from a 187.8 KB
@@ -342,6 +348,16 @@ cursor pagination — was never called.
 
 ### Carried forward
 
+- **Live streaming was fixed after Phase 6 shipped**, and the two causes are worth
+  keeping in mind rather than only in `AGENTS.md`. The transcript arrived in one
+  lump at turn end because (1) the client listened on `EventSource.onmessage`
+  while the backend names every frame after its event kind, and (2) the Next.js
+  proxy gzipped `text/event-stream`, which cannot decode until a block flushes.
+  Neither was visible to `curl`, which sends no `Accept-Encoding` and so saw
+  correctly paced frames. What let this ship green was the test shape: every spec
+  asserted final state against a runner faster than one render, which cannot
+  distinguish streaming from batching. `e2e/streaming.spec.ts` and the `paced`
+  fixture scenario now assert mid-turn painting.
 - **Virtualization** stays deferred, now with a measurement behind it: a
   1000-event conversation renders inside budget through memoization and bounded
   rendering. The evidence that would reverse this is scroll jank while *idle* on a

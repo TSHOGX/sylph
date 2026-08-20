@@ -227,7 +227,7 @@ function GroupSection({
 }) {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { browseHistory } = useWorkspaceUI();
+  const { browseHistory, createSessionIn } = useWorkspaceUI();
   // Groups start expanded: a collapsed-by-default sidebar hides the thing the
   // user came here to click. Collapse is per-group and not persisted, because it
   // is a transient focusing action rather than a preference.
@@ -261,17 +261,34 @@ function GroupSection({
   const hasMoreArchive = Boolean(archiveQuery.data?.nextCursor) || archived.length > 0;
 
   const items: MenuItem[] = [
+    // Creates immediately with the configured default agent and model. A group
+    // *is* a directory, so the create form's only required field is already
+    // decided by which group was right-clicked; routing there would ask the user
+    // to confirm what they just said. "New session here..." below covers the
+    // cases where the agent, model, or title needs overriding.
     {
       label: "New session here",
+      // Disabled only for the placeholder Quick Sessions group, whose path is
+      // empty until `GET /workspaces` resolves it. Dimmed rather than hidden, so
+      // the menu does not change shape between renders.
+      disabled: !group.path,
+      onSelect: () => createSessionIn(group.path),
+    },
+    {
+      label: "New session here...",
       onSelect: () =>
         router.push(`/sessions/new?workdir=${encodeURIComponent(group.path)}`),
     },
     {
       label: "Browse history...",
+      // Separated from the create actions: reading past work and starting new
+      // work are different intents, and the archive one is disabled for the
+      // placeholder group whose path is not resolved yet.
+      separated: true,
       disabled: !group.path,
       onSelect: () => browseHistory(group.path),
     },
-    { label: open ? "Collapse" : "Expand", onSelect: () => setOpen(!open) },
+    { label: open ? "Collapse" : "Expand", separated: true, onSelect: () => setOpen(!open) },
     ...(onTogglePin
       ? [{ label: pinned ? "Unpin from sidebar" : "Pin to sidebar", onSelect: onTogglePin }]
       : []),
@@ -354,7 +371,8 @@ function GroupSection({
 
       {open && (
         // Named, because a bare `<ul>` announces only "list" and the sidebar has
-        // one per group.
+        // one per group. The sr-only `<h2>` above titles the section visually for
+        // screen readers but does not name this list, so the label is explicit.
         <ul
           aria-label={`Sessions in ${label}`}
           className="mb-1 ml-2 border-l border-gray-200 pl-1"
