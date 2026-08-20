@@ -1243,3 +1243,30 @@ async fn imported_sessions_are_listable_by_origin() {
     assert_eq!(sylph["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(sylph["sessions"][0]["origin"], "sylph");
 }
+
+#[tokio::test]
+async fn a_command_turn_needs_no_message_text() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    // Commands are invoked instead of a message, so the composer sends no text.
+    // This has to be accepted: rejecting an empty `text` would make every
+    // command dialog unusable.
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"command": "model", "args": {"name": "opus"}}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let body = json_body(response).await;
+    let turn_id = body["turn"]["id"].as_str().unwrap().to_string();
+    // The invocation is recorded on the turn, which is what lets the transcript
+    // show a command rather than an empty message.
+    assert_eq!(body["turn"]["commandInvocationId"], "model");
+    assert_eq!(body["turn"]["requestText"], "");
+
+    let turn = backend.await_turn(&turn_id).await;
+    assert_eq!(turn["turn"]["status"], "completed");
+}

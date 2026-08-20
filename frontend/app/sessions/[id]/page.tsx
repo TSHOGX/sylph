@@ -9,6 +9,7 @@ import { ErrorBoundary } from "@/lib/error-boundary";
 import { formatTimestamp, sessionLabel } from "@/lib/format";
 import { useSSE } from "@/lib/use-sse";
 import { AttachmentPicker, type StagedAttachment } from "@/components/attachment-picker";
+import { CommandDialog, type CommandInvocation } from "@/components/command-dialog";
 import { EventList } from "@/components/event-list";
 import { OriginBadge, SessionStatusBadge, TurnStatusBadge } from "@/components/badges";
 
@@ -28,6 +29,7 @@ export default function SessionPage() {
   const [attachments, setAttachments] = useState<StagedAttachment[]>([]);
   /** Turn started by this tab. Null means "whatever history says is running". */
   const [sentTurnId, setSentTurnId] = useState<string | null>(null);
+  const [commandOpen, setCommandOpen] = useState(false);
 
   const sessionQuery = useQuery({
     queryKey: ["session", sessionId],
@@ -102,6 +104,37 @@ export default function SessionPage() {
       void queryClient.invalidateQueries({ queryKey: ["turn", liveTurnId] });
     },
   });
+
+  /**
+   * A command runs as a turn, so it reuses the same lifecycle: the runner
+   * receives the invocation and its output streams into the transcript.
+   */
+  const runCommand = useMutation({
+    mutationFn: (invocation: CommandInvocation) =>
+      api.turns.create(sessionId, {
+        command: invocation.command,
+        args: invocation.args,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    onSuccess: (result) => {
+      setSentTurnId(result.turn.id);
+      setCommandOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "history"] });
+    },
+  });
+
+  // Commands come from the agent descriptor, so an agent that declares none
+  // gets no button rather than an empty dialog.
+  const agentsQuery = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => api.agents.list(),
+  });
+  const commands = useMemo(() => {
+    const descriptor = agentsQuery.data?.agents.find((a) => a.name === session?.agent);
+    return descriptor?.commands ?? {};
+  }, [agentsQuery.data, session?.agent]);
+  const hasCommands = Object.keys(commands).length > 0;
 
   if (sessionQuery.isPending) {
     return (
@@ -249,6 +282,16 @@ export default function SessionPage() {
               Enter to send · Shift+Enter for a new line
             </p>
             <div className="flex gap-2">
+              {hasCommands && (
+                <button
+                  type="button"
+                  onClick={() => setCommandOpen(true)}
+                  disabled={isLive || sendTurn.isPending}
+                  className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+                >
+                  Command
+                </button>
+              )}
               {isLive && (
                 <button
                   type="button"
@@ -269,6 +312,21 @@ export default function SessionPage() {
             </div>
           </div>
         </form>
+
+        {runCommand.error && (
+          <p role="alert" className="mt-2 text-sm text-red-700">
+            {describeSendError(runCommand.error)}
+          </p>
+        )}
+
+        {commandOpen && (
+          <CommandDialog
+            commands={commands}
+            busy={runCommand.isPending}
+            onClose={() => setCommandOpen(false)}
+            onSubmit={(invocation) => runCommand.mutate(invocation)}
+          />
+        )}
       </main>
     </div>
   );
