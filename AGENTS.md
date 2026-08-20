@@ -1,262 +1,222 @@
 # Sylph Web Development Guide
 
-Sylph Web is a local-first native interface for Sylph and coding-agent sessions archived by TraceDB.
+Sylph Web is a local-first native interface for Sylph and coding-agent sessions
+archived by TraceDB.
+
+This file holds rules and facts that stay true as the project moves. It
+deliberately records no progress, phase, or status: `docs/roadmap.md` owns
+those, and duplicating them here only creates a second copy to forget.
 
 ## Product Invariants
 
-- Treat session origin as durable data. `sylph` sessions use Sylph identity and lifecycle policy; `native` sessions preserve the originating agent's identity and lifecycle.
-- Never inject `SOUL.md`, reset, compact, or rewrite prompts for a native session unless the user explicitly converts it to a Sylph session.
-- Read durable coding-agent history through TraceDB interfaces. Do not query TraceDB's SQLite schema directly.
-- The live journal is authoritative only while a WebApp turn is active or has not yet appeared in TraceDB. TraceDB is authoritative for stable history.
-- Bind to loopback by default. Any non-loopback deployment requires a separate authentication and threat-model change.
+- Treat session origin as durable data. `sylph` sessions use Sylph identity and
+  lifecycle policy; `native` sessions preserve the originating agent's identity
+  and lifecycle.
+- Never inject `SOUL.md`, reset, compact, or rewrite prompts for a native
+  session unless the user explicitly converts it to a Sylph session.
+- Read durable coding-agent history through TraceDB interfaces. Do not query
+  TraceDB's SQLite schema directly.
+- The live journal is authoritative only while a WebApp turn is active or has
+  not yet appeared in TraceDB. TraceDB is authoritative for stable history.
+- Bind to loopback by default. Any non-loopback deployment requires a separate
+  authentication and threat-model change.
 
-## Development
+## Orientation
 
-**Backend (Rust)** — Phase 1 in progress:
+- `backend/` — Rust, Axum, SQLx. HTTP and SSE on port 4317 by default.
+- `frontend/` — Next.js App Router, React, TanStack Query, Tailwind.
+- `docs/` — the governing specs. Read the relevant section before implementing.
+- `scripts/` — install and deployment tooling.
+
+| Question | Authoritative source |
+| --- | --- |
+| What is built, what is next | `docs/roadmap.md` |
+| System design, data flow | `docs/architecture.md` |
+| Endpoint contracts | `docs/api-design.md`, `docs/api-v1.openapi.json` |
+| Tables, indexes, migrations | `docs/database-schema.md` |
+| UI structure and conventions | `docs/frontend-architecture.md` |
+
+Record progress in commit messages and the roadmap. Do not add new progress,
+handoff, or summary documents: they duplicate the roadmap, then drift from it.
+Carry-forward context belongs in the roadmap's open items; a durable gotcha
+belongs under Pitfalls below; reasoning about a specific decision belongs in a
+comment beside the code.
+
+## Running and Verifying
 
 ```sh
-cd backend
-cargo run
+# backend
+cd backend && cargo run
+cd backend && cargo test && cargo clippy --all-targets
+
+# frontend
+cd frontend && npm run dev
+cd frontend && npm run build && npx eslint . && npm run e2e
 ```
 
-**Frontend (Next.js)** — Phase 2 starts week 4:
+`npm run build` type-checks, so it is the TypeScript gate; there is no separate
+`tsc` step.
 
-```sh
-cd frontend
-npm run dev  # Coming soon
-```
+E2E starts both servers itself on offset ports with a throwaway data directory
+and a mock runner, so it never touches your real journal, archive, or agents.
+Do not start servers by hand for it. It shells out to `cargo`, so the `PATH`
+caveat below applies to E2E too, and a cold run compiles the backend first.
 
-Rust 1.85+ is required. The backend uses SQLx for compile-time SQL verification and Axum for HTTP/SSE.
+Run the checks for every part of the repo you touched, not only the one you
+edited most. Backend and frontend share a wire contract, so a change on either
+side can break the other's tests.
 
-## Git Workflow
+## Environment
 
-### Commits
+| Variable | Applies to | Default |
+| --- | --- | --- |
+| `SYLPH_WEB_HOST` | backend | `127.0.0.1` |
+| `SYLPH_WEB_PORT` | backend | `4317` |
+| `SYLPH_WEB_DATA_DIR` | backend | `$HOME/.agents/data/sylph/web` |
+| `SYLPH_RUNNERS_DIR` | backend | `$HOME/.agents/skills/sylph/runners` |
+| `TRACEDB_BIN` | backend | `$HOME/Workspace/trace-db/target/release/trace-db` |
+| `SYLPH_WEB_BACKEND` | frontend | `http://localhost:4317` |
 
-Use Conventional Commits scoped to the affected component. Write both subject and body in English, even when conversation or changed files are in other languages.
+The journal is always `live.db` inside the data dir; it is derived, not
+separately configurable. `TRACEDB_BIN` defaults to a release build in a sibling
+checkout rather than a `PATH` lookup, so TraceDB-dependent features degrade
+until that binary exists — check `/api/v1/health` for `tracedb.available`.
+
+## Pitfalls Worth Remembering
+
+These have each cost real debugging time. They are properties of the toolchain
+and the design, not of any current task.
+
+**`cargo` is not on the default `PATH`.** Use `~/.cargo/bin/cargo`, or export
+`PATH="$HOME/.cargo/bin:$PATH"` first. A bare `cargo test` fails with
+`command not found`, which reads like a broken repo rather than a shell problem.
+
+**SQLx runs queries at runtime here, not at compile time.** The codebase uses
+`sqlx::query`, never the `query!` macros. There is no `DATABASE_URL` and no
+`.sqlx` offline directory, so reaching for `query!` will not compile. SQL
+mistakes surface in tests, which is why store-level tests matter.
+
+**`next lint` was removed in Next 16.** Invoke ESLint directly (`npx eslint .`
+or `npm run lint`). `npx next lint` fails with a misleading
+`Invalid project directory` error naming a `lint` directory.
+
+**`SYLPH_WEB_BACKEND` is read at build time.** Next compiles rewrites into the
+route manifest, so it must be set for `next build`, not only for `next start`.
+Setting it only at start time leaves a production build proxying to the default
+port.
+
+**Auth is a `SameSite=Strict` cookie, so the frontend must proxy `/api/v1/*`
+same-origin.** A browser will not send the cookie cross-origin to another port.
+The token rotates on backend restart, which invalidates open browser sessions by
+design — do not "fix" it by persisting the token.
+
+**Reading a mid-write file yields a phantom error.** With concurrent work in the
+tree, a compiler or linter can capture a half-written file and report an error
+whose line numbers do not match the source. Re-run before believing it.
+
+**TraceDB builds disagree on JSON shape.** Some emit camelCase, others
+snake_case, and older builds omit session metadata entirely. Every multi-word
+field we read carries a serde `alias` for both spellings; without it a field
+silently parses as `None` — a degradation with no error. Keep both paths when
+touching `backend/src/tracedb/mod.rs`.
+
+## Spec and Code Evolution
+
+Neither code nor spec wins automatically when they diverge. Stop, identify
+whether behavior or intent should move, update the governing spec first when the
+design changes, then update code.
+
+Do not silently rewrite a spec to bless an implementation accident, and do not
+contort code around a design that evidence has invalidated.
+
+Before implementing:
+
+1. Read the governing section in `docs/` and any linked open decision.
+2. Verify behavior against source or a spike. Never turn an unverified
+   assumption into an invariant.
+3. If several materially different shapes remain viable, research reference
+   repositories, dependency source, and prior art. Ask subagents for independent
+   or contradictory reads when useful.
+
+## Design Decisions
+
+When a decision is uncertain, research it rather than guessing. That means
+reading the dependency's source, studying how mature projects solved the same
+problem, and measuring with a disposable spike where behavior is unclear.
+Uncertainty is not permission to stall: investigate, then decide.
+
+Aim for the best available answer across architecture, performance, UI and UX,
+aesthetic judgment, code quality, and documentation quality — not merely the
+first thing that works.
+
+Prefer proven patterns and battle-tested libraries. Deviate when Sylph's own
+requirements demand it, when profiling shows the standard pattern does not
+address the bottleneck, or when security calls for something stricter. Document
+the deviation and its evidence where the code lives.
+
+Record decisions as comments next to the code they govern, including what was
+rejected and why. A future reader needs the reasoning, not just the result.
+`frontend/components/event-list.tsx` shows the intended density: it explains why
+memoization was chosen over virtualization, and what evidence would reverse that
+call.
+
+Do not research basic language syntax, standard library usage, or trivial
+implementation details.
+
+## Compatibility
+
+Before a live deployment, databases and local provider state are disposable:
+change schemas and internal APIs in place, and do not add migrations or
+compatibility branches for imagined users.
+
+Once the project is deployed and carrying real data, migrations become mandatory
+for schema changes. Treat the presence of installed state, not a date, as the
+signal that this has flipped.
+
+## Testing
+
+Write tests for core business logic (session lifecycle, turn supervision, event
+normalization), API endpoints (request validation, error responses, status
+codes), and edge cases (concurrent access, process crashes, malformed input).
+
+Name a test after the behavior it pins, so a failure reads as a broken promise
+rather than a broken function. Assert on observable contract — status, error
+code, ordering — not on incidental structure.
+
+## Language
+
+Code, documentation, and commit messages are English only: every `.rs`, `.ts`,
+and `.tsx` file, everything in `docs/`, all comments, all identifiers and
+endpoint names, all test names, and both commit subject and body.
+
+Conversation happens in whatever language the user writes in. Durable artifacts
+stay English regardless.
+
+## Commits
+
+Use Conventional Commits scoped to the affected component, and explain what
+changed and why — plus how, when the approach is not obvious.
 
 ```
 feat(backend): add SSE streaming for turn events
 fix(db): correct session status transition logic
 docs(arch): clarify runner discovery protocol
-chore(deps): update axum to 0.8.1
 ```
 
-Commit messages must explain what changed and why. Include:
-- What: the actual change made
-- Why: the reason or context for the change
-- How: approach taken if non-obvious
+Stage files explicitly. Never `git add -A` or `git add .`, since unrelated
+concurrent work may be sitting in the tree. Check `git status` and
+`git diff --staged` before committing to confirm exactly what is included.
 
-Bad: `fix bug`  
-Good: `fix(db): prevent duplicate session creation on concurrent requests`
+## Generated Agent Files
 
-### Staging
+`frontend/AGENTS.md` and `frontend/CLAUDE.md` are written by `next dev`, not by
+hand. The generator is
+`frontend/node_modules/next/dist/server/lib/generate-agent-files.js`, and it
+re-creates them when removed. Commit them with your work; reverting them from a
+diff only produces the same uncommitted change again.
 
-Never use `git add -A` or `git add .` — stage files explicitly to avoid committing unintended changes:
+Their content is a real instruction, not boilerplate: this Next.js version has
+breaking changes against older training data, so consult
+`frontend/node_modules/next/dist/docs/` before writing frontend code.
 
-```sh
-git add backend/src/api/sessions.rs
-git add docs/architecture.md
-git commit
-```
-
-Use `git status` and `git diff --staged` before committing to verify exactly what will be committed.
-
-### Branches
-
-- `main` — stable, deployable code
-- Feature branches for multi-commit work
-- Push early, push often
-- Squash or rebase before merging to main
-
-## Spec and Code Evolution
-
-Neither code nor spec wins automatically when they diverge. Stop, identify whether behavior or intent should move, update the governing spec first when the design changes, then update code.
-
-Do not silently rewrite a spec to bless an implementation accident, and do not contort code around a design that evidence has invalidated.
-
-Before implementation:
-
-1. Read the governing section and any linked open decision.
-2. Verify behavior against source or a spike. Never turn an unverified assumption into an invariant.
-3. If several materially different shapes remain viable, research reference repositories, dependency source, and prior art. Ask subagents for independent and contradictory reads when useful; measure with a disposable spike where behavior is uncertain.
-
-## Design Decision Process
-
-**As Sylph Web enters continuous development, any uncertain design decision requires research:**
-
-### When to Research
-
-Research is required when you encounter:
-- Architectural patterns (state management, error handling, caching strategies)
-- Performance optimization (database indexing, query patterns, streaming protocols)
-- Security considerations (authentication flows, input validation, rate limiting)
-- User experience patterns (loading states, error recovery, accessibility)
-- Protocol implementations (SSE reconnection, WebSocket fallbacks, HTTP retries)
-- Third-party integrations (TraceDB protocol, runner discovery, external APIs)
-
-**Do NOT research:** basic language syntax, standard library usage, or trivial implementation details.
-
-### Research Workflow
-
-1. **Define the problem clearly**
-   - What are you trying to solve?
-   - What are the constraints (performance, compatibility, security)?
-   - What is the expected outcome?
-
-2. **Search for established patterns:**
-   - **GitHub:** repos with high stars in the relevant domain (Rust web frameworks, Next.js apps, SQLite patterns)
-   - **Crates.io / npm:** popular, actively-maintained libraries
-   - **Official documentation:** Rust docs, Next.js docs, Axum guides, SQLx examples
-   - **Production implementations:** read source code of mature projects (e.g., how does Zed handle IPC? How does Linear handle optimistic updates?)
-
-3. **Study mature open-source practices:**
-   - How does Axum recommend structuring error types?
-   - How does TanStack Query handle cache invalidation?
-   - How does SQLite's own documentation recommend indexing for this query pattern?
-   - How does TraceDB implement its JSON protocol?
-
-4. **Document findings in code or specs:**
-   - Add comments explaining why you chose approach X
-   - Reference the source (link to GitHub repo, docs, article)
-   - Note tradeoffs considered
-
-5. **Implement based on proven patterns:**
-   - Prefer battle-tested libraries over custom implementations
-   - Adopt community conventions unless strong evidence suggests otherwise
-   - Default to the simplest solution that meets requirements
-
-### Example: Rust Backend Research
-
-```rust
-// Problem: How to handle database connection pooling?
-
-// Research:
-// 1. Read SQLx documentation on connection pools
-// 2. Check Axum examples for pool management with state
-// 3. Search GitHub for "axum sqlx pool" → find common patterns
-// 4. Study realworld-axum-sqlx example repo
-
-// Decision: Use SQLx's built-in Pool, shared via Axum's State
-// Rationale: Proven pattern, minimal dependencies, good performance
-// Reference: https://github.com/tokio-rs/axum/blob/main/examples/sqlx-postgres/src/main.rs
-
-pub type DbPool = sqlx::SqlitePool;
-
-pub async fn create_pool(database_url: &str) -> Result<DbPool> {
-    SqlitePoolOptions::new()
-        .max_connections(5)  // Conservative for single-user local app
-        .connect(database_url)
-        .await
-        .map_err(|e| Error::Database(e.to_string()))
-}
-```
-
-### Example: Frontend Research
-
-```typescript
-// Problem: How to handle optimistic updates with rollback?
-
-// Research:
-// 1. TanStack Query docs: "Optimistic Updates" section
-// 2. GitHub: search "tanstack query optimistic rollback"
-// 3. Real apps: how does Linear handle failed mutations?
-// 4. Articles: Kent C. Dodds on optimistic UI patterns
-
-// Decision: Use TanStack Query's onMutate + onError rollback
-// Rationale: Built-in pattern, handles edge cases, well-tested
-// Reference: https://tanstack.com/query/latest/docs/react/guides/optimistic-updates
-
-const sendMessage = useMutation({
-  mutationFn: api.turns.create,
-  onMutate: async (variables) => {
-    await queryClient.cancelQueries(['sessions', sessionId])
-    const previous = queryClient.getQueryData(['sessions', sessionId])
-    queryClient.setQueryData(['sessions', sessionId], /* optimistic state */)
-    return { previous }  // Context for rollback
-  },
-  onError: (err, variables, context) => {
-    queryClient.setQueryData(['sessions', sessionId], context.previous)
-  }
-})
-```
-
-### When NOT to Follow Established Patterns
-
-Deviate from common patterns only when:
-- Sylph's unique requirements (dual-origin sessions, TraceDB integration) demand it
-- Performance profiling reveals a bottleneck the standard pattern doesn't address
-- Security considerations require a stricter approach
-- You have benchmarks showing measurable improvement
-
-**Document the deviation clearly** — future maintainers need to understand why you went off the beaten path.
-
-## Language Requirements
-
-**Code, documentation, and commit messages: English only.**
-
-- All `.rs`, `.ts`, `.tsx` source files
-- All documentation in `docs/`
-- All commit messages (subject and body)
-- All comments in code
-- API endpoint names, function names, variable names
-- Test descriptions
-
-**Chat and conversation: any language.**
-
-The user may communicate in any language. Respond in the language they use. But all durable artifacts (code, docs, commits) remain in English for long-term maintainability and collaboration.
-
-## Compatibility Before Deployment
-
-Before a live deployment, databases and local provider state are disposable. Change schemas and internal APIs in place; do not add migrations or compatibility branches for imagined users.
-
-Once deployed, migrations become mandatory for schema changes. Until then, iterate freely.
-
-## Testing
-
-Write tests for:
-- Core business logic (session lifecycle, turn supervision, event normalization)
-- API endpoints (request validation, error responses, status codes)
-- Edge cases (concurrent access, process crashes, malformed input)
-
-Run tests before committing:
-
-```sh
-cd backend
-cargo test
-cargo clippy
-```
-
-## Documentation Structure
-
-- `AGENTS.md` (this file) — Development guide and project rules
-- `README.md` — Project introduction and quick start
-- `docs/architecture.md` — System architecture and design
-- `docs/roadmap.md` — Product roadmap and release plan
-- `docs/api-design.md` — API design principles and endpoints
-- `docs/database-schema.md` — Database schema and migrations
-- `docs/frontend-architecture.md` — Frontend architecture and UI design (Phase 2)
-
-Progress is tracked through commit messages, not separate progress documents.
-
-## Implementation Guidance
-
-When implementing a feature:
-
-1. Read the relevant spec section in `docs/`
-2. Write or update tests first when useful
-3. Implement the feature
-4. Update documentation if behavior or design changes
-5. Run tests and linters
-6. Stage files explicitly and commit with a detailed message
-
-When encountering ambiguity:
-- Check existing documentation in `docs/` for design decisions
-- Propose and document the decision before implementing
-- Prefer simple, maintainable solutions over clever abstractions
-
-## References
-
-- Architecture: `docs/architecture.md`
-- API specification: `docs/api-v1.openapi.json`
-- Database schema: `docs/database-schema.md`
-- Roadmap: `docs/roadmap.md`
+The root `CLAUDE.md` is a symlink to this file. Edit `AGENTS.md`.
