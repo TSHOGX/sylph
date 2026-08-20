@@ -271,3 +271,232 @@ impl EventHub {
             .is_some_and(|channel| !channel.finished)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(seq: i32, kind: &str, phase: Option<&str>) -> StreamEvent {
+        StreamEvent {
+            seq,
+            kind: kind.to_string(),
+            phase: phase.map(str::to_string),
+            stream_id: None,
+            name: None,
+            text: String::new(),
+            data: None,
+            is_error: false,
+            stability: if matches!(phase, Some("completed") | None) {
+                "stable".to_string()
+            } else {
+                "ephemeral".to_string()
+            },
+            source: "runner".to_string(),
+            created_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    #[test]
+    fn completed_and_phaseless_events_are_stable() {
+        assert!(event(1, "assistant", Some("completed")).is_stable());
+        // Server-authored events carry no phase and are always durable.
+        assert!(event(2, "status", None).is_stable());
+        assert!(!event(3, "assistant", Some("delta")).is_stable());
+        assert!(!event(4, "assistant", Some("started")).is_stable());
+    }
+
+    #[test]
+    fn a_row_round_trips_through_the_wire_form() {
+        let mut original = event(7, "tool_call", Some("completed"));
+        original.stream_id = Some("blk-1".to_string());
+        original.name = Some("Read".to_string());
+        original.text = "reading a file".to_string();
+        original.data = Some(serde_json::json!({"path": "/tmp/x"}));
+        original.is_error = true;
+
+        let restored = StreamEvent::from_row(&original.to_row("sess-1", "turn-1"));
+
+        assert_eq!(restored.seq, 7);
+        assert_eq!(restored.kind, "tool_call");
+        assert_eq!(restored.phase.as_deref(), Some("completed"));
+        assert_eq!(restored.stream_id.as_deref(), Some("blk-1"));
+        assert_eq!(restored.name.as_deref(), Some("Read"));
+        assert_eq!(restored.text, "reading a file");
+        assert_eq!(restored.data, Some(serde_json::json!({"path": "/tmp/x"})));
+        assert!(restored.is_error);
+        assert_eq!(restored.created_at_ms, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn to_row_carries_the_session_and_turn_ids() {
+        let row = event(1, "status", None).to_row("sess-9", "turn-9");
+        assert_eq!(row.session_id, "sess-9");
+        assert_eq!(row.turn_id.as_deref(), Some("turn-9"));
+        assert!(row.id.is_none(), "a new row has no assigned id yet");
+        assert!(row.reconciled_at_ms.is_none());
+    }
+
+    #[test]
+    fn absent_data_persists_as_an_empty_object_and_reads_back_as_none() {
+        // The column is NOT NULL, so absent data is stored as "{}" rather than
+        // an empty string. Both spellings must read back as None so a row
+        // written by an older build does not resurface as Some({}).
+        let row = event(1, "status", None).to_row("s", "t");
+        assert_eq!(row.data_json, "{}");
+        assert!(StreamEvent::from_row(&row).data.is_none());
+
+        let mut legacy = row.clone();
+        legacy.data_json = String::new();
+        assert!(StreamEvent::from_row(&legacy).data.is_none());
+    }
+
+    #[test]
+    fn malformed_stored_data_reads_back_as_none_rather_than_failing() {
+        // A corrupt data column must not make an otherwise readable event
+        // unrenderable; the text and kind still carry the useful content.
+        let mut row = event(1, "assistant", Some("completed")).to_row("s", "t");
+        row.data_json = "{not json".to_string();
+        assert!(StreamEvent::from_row(&row).data.is_none());
+    }
+
+    #[test]
+    fn stream_id_is_exposed_as_stream_id_on_the_wire() {
+        let mut e = event(1, "assistant", Some("delta"));
+        e.stream_id = Some("blk-2".to_string());
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["streamId"], "blk-2");
+        assert!(
+            json.get("stream_id").is_none(),
+            "snake_case must not leak to clients"
+        );
+    }
+
+    #[test]
+    fn empty_optional_fields_are_omitted_from_the_wire_form() {
+        let json = serde_json::to_value(event(1, "status", None)).unwrap();
+        for absent in ["phase", "streamId", "name", "text", "data", "isError"] {
+            assert!(json.get(absent).is_none(), "{absent} should be omitted");
+        }
+        assert_eq!(json["seq"], 1);
+        assert_eq!(json["kind"], "status");
+    }
+
+    #[tokio::test]
+    async fn ephemeral_events_replay_from_the_projection_after_the_given_seq() {
+        let hub = EventHub::new();
+        hub.open("t1").await;
+        for seq in 1..=5 {
+            hub.publish("t1", event(seq, "assistant", Some("delta"))).await;
+        }
+
+        let attachment = hub.attach("t1", 3).await;
+        let seqs: Vec<i32> = attachment.replay.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![4, 5], "only events newer than after_seq replay");
+        assert!(attachment.live.is_some());
+        assert!(!attachment.finished);
+    }
+
+    #[tokio::test]
+    async fn stable_events_are_not_kept_in_the_projection() {
+        // The journal is authoritative for stable events. Buffering them here
+        // too would replay them twice on reconnect.
+        let hub = EventHub::new();
+        hub.open("t1").await;
+        hub.publish("t1", event(1, "assistant", Some("completed"))).await;
+        hub.publish("t1", event(2, "status", None)).await;
+        hub.publish("t1", event(3, "assistant", Some("delta"))).await;
+
+        let replay = hub.attach("t1", 0).await.replay;
+        let seqs: Vec<i32> = replay.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![3]);
+    }
+
+    #[tokio::test]
+    async fn the_projection_drops_its_oldest_events_past_capacity() {
+        let hub = EventHub::new();
+        hub.open("t1").await;
+        let overflow = PROJECTION_CAPACITY as i32 + 10;
+        for seq in 1..=overflow {
+            hub.publish("t1", event(seq, "assistant", Some("delta"))).await;
+        }
+
+        let replay = hub.attach("t1", 0).await.replay;
+        assert_eq!(replay.len(), PROJECTION_CAPACITY);
+        assert_eq!(replay.first().unwrap().seq, 11, "oldest events were dropped");
+        assert_eq!(replay.last().unwrap().seq, overflow);
+    }
+
+    #[tokio::test]
+    async fn a_live_subscriber_receives_events_published_after_it_attaches() {
+        let hub = EventHub::new();
+        hub.open("t1").await;
+        let mut live = hub.attach("t1", 0).await.live.expect("live channel");
+
+        hub.publish("t1", event(1, "assistant", Some("delta"))).await;
+        let received = live.recv().await.expect("event delivered");
+        assert_eq!(received.seq, 1);
+    }
+
+    #[tokio::test]
+    async fn publishing_without_a_listener_is_not_an_error() {
+        // A turn runs independently of any HTTP request, so nobody listening is
+        // the normal case rather than a failure.
+        let hub = EventHub::new();
+        hub.open("t1").await;
+        hub.publish("t1", event(1, "assistant", Some("delta"))).await;
+        assert!(hub.is_live("t1").await);
+    }
+
+    #[tokio::test]
+    async fn attaching_to_a_closed_turn_reports_finished_instead_of_hanging() {
+        let hub = EventHub::new();
+        hub.open("t1").await;
+        hub.publish("t1", event(1, "assistant", Some("delta"))).await;
+        hub.close("t1").await;
+
+        let attachment = hub.attach("t1", 0).await;
+        assert!(attachment.finished);
+        assert!(attachment.live.is_none(), "no live channel for a closed turn");
+        assert!(attachment.replay.is_empty(), "closing clears the projection");
+        assert!(!hub.is_live("t1").await);
+    }
+
+    #[tokio::test]
+    async fn attaching_to_an_unknown_turn_reports_finished() {
+        let hub = EventHub::new();
+        let attachment = hub.attach("never-existed", 0).await;
+        assert!(attachment.finished);
+        assert!(attachment.live.is_none());
+        assert!(!hub.is_live("never-existed").await);
+    }
+
+    #[tokio::test]
+    async fn publishing_to_an_unopened_turn_is_dropped_silently() {
+        let hub = EventHub::new();
+        hub.publish("t1", event(1, "assistant", Some("delta"))).await;
+        assert!(!hub.is_live("t1").await);
+    }
+
+    #[tokio::test]
+    async fn removing_a_turn_drops_its_channel() {
+        let hub = EventHub::new();
+        hub.open("t1").await;
+        hub.remove("t1").await;
+        assert!(!hub.is_live("t1").await);
+        assert!(hub.attach("t1", 0).await.finished);
+    }
+
+    #[tokio::test]
+    async fn channels_are_isolated_per_turn() {
+        let hub = EventHub::new();
+        hub.open("t1").await;
+        hub.open("t2").await;
+        hub.publish("t1", event(1, "assistant", Some("delta"))).await;
+
+        assert_eq!(hub.attach("t1", 0).await.replay.len(), 1);
+        assert!(hub.attach("t2", 0).await.replay.is_empty());
+
+        hub.close("t1").await;
+        assert!(hub.is_live("t2").await, "closing one turn must not close another");
+    }
+}
