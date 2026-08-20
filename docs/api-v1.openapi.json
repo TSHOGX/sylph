@@ -16,7 +16,7 @@
       "get": { "description": "Sessions newest-activity-first. Filters are applied in SQL, not by the client: the listing is capped by limit, so client-side filtering would only narrow the truncated page. A blank filter value means unfiltered.", "parameters": [{ "$ref": "#/components/parameters/Limit" }, { "$ref": "#/components/parameters/FilterAgent" }, { "$ref": "#/components/parameters/FilterOrigin" }, { "$ref": "#/components/parameters/FilterWorkdir" }, { "$ref": "#/components/parameters/UpdatedAfterMs" }, { "$ref": "#/components/parameters/UpdatedBeforeMs" }], "responses": { "200": { "description": "Product sessions" }, "400": { "$ref": "#/components/responses/Error" } } },
       "post": { "requestBody": { "$ref": "#/components/requestBodies/CreateSession" }, "responses": { "201": { "$ref": "#/components/responses/SessionCreated" }, "400": { "$ref": "#/components/responses/Error" } } }
     },
-    "/api/v1/sessions/import": { "post": { "requestBody": { "$ref": "#/components/requestBodies/ImportSession" }, "responses": { "201": { "$ref": "#/components/responses/SessionCreated" }, "422": { "$ref": "#/components/responses/Error" } } } },
+    "/api/v1/sessions/import": { "post": { "description": "Adopt an archived native session. Policy-relevant fields are derived from the archive rather than the request: the agent from the id prefix, since it selects identity and lifecycle policy, and the working directory from the session's own system event. The session is restored as recorded, with identityMode and lifecycleMode set to preserve.", "requestBody": { "$ref": "#/components/requestBodies/ImportSession" }, "responses": { "201": { "$ref": "#/components/responses/SessionCreated" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" } } } },
     "/api/v1/sessions/{sessionId}": { "get": { "parameters": [{ "$ref": "#/components/parameters/SessionId" }], "responses": { "200": { "description": "Session detail" }, "404": { "$ref": "#/components/responses/Error" } } } },
     "/api/v1/sessions/{sessionId}/turns": {
       "get": { "parameters": [{ "$ref": "#/components/parameters/SessionId" }, { "$ref": "#/components/parameters/Limit" }, { "$ref": "#/components/parameters/Before" }], "responses": { "200": { "description": "Turn list" } } },
@@ -45,7 +45,7 @@
     },
     "requestBodies": {
       "CreateSession": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateSession" } } } },
-      "ImportSession": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["traceSessionId"], "properties": { "traceSessionId": { "type": "string" } } } } } },
+      "ImportSession": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["traceSessionId"], "properties": { "traceSessionId": { "type": "string", "description": "Formatted <agent>:<native-id>, as TraceDB reports it." }, "title": { "type": "string", "description": "Optional override; otherwise derived from the opening user turn." } } } } } },
       "CreateTurn": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateTurn" } } } }
     },
     "responses": {

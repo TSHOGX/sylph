@@ -1047,3 +1047,199 @@ async fn diagnostics_carries_archive_counts() {
         "expected a null tracedb field: {body}"
     );
 }
+
+// ------------------------------------------------- native session import
+
+/// An archived event stream shaped like the real `show` payload: a `system`
+/// event carrying the working directory as JSON, then the opening user turn.
+fn archived_events(workdir: &str, ask: &str) -> Value {
+    json!([
+        {"kind": "system", "subtype": "mode", "text": "{\"mode\":\"normal\"}", "createdAtMs": 0, "idx": 0},
+        {"kind": "system", "subtype": "system", "text": format!("{{\"cwd\":\"{workdir}\"}}"), "createdAtMs": 0, "idx": 1},
+        {"kind": "user", "subtype": null, "text": ask, "createdAtMs": 1_700_000_000_000i64, "idx": 2},
+        {"kind": "assistant", "subtype": null, "text": "done", "createdAtMs": 1_700_000_100_000i64, "idx": 3},
+    ])
+}
+
+/// Build a backend whose stubbed archive describes a session rooted in a
+/// directory that really exists.
+///
+/// Import validates that the recorded working directory is present, and each
+/// harness owns a fresh temp directory that is deleted when it drops. So a
+/// throwaway harness is created first to borrow a live path, and returned
+/// alongside the one under test to keep that path alive for the test's
+/// duration.
+async fn backend_with_archived_session(ask: &str) -> (TestBackend, TestBackend, String) {
+    let host = TestBackend::start().await;
+    let workdir = host.workdir().display().to_string();
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_events(archived_events(
+        &workdir, ask,
+    )))
+    .await;
+    (backend, host, workdir)
+}
+
+#[tokio::test]
+async fn importing_a_native_session_preserves_its_identity() {
+    let (backend, _host, workdir) = backend_with_archived_session("审查冗余的代码").await;
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions/import",
+            json!({"traceSessionId": "mock:f45ba2ed-3866-4dba-9769-801029b16aa3"}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let session = json_body(response).await["session"].clone();
+
+    // The product invariant: a native session keeps its originating agent's
+    // identity and lifecycle. Anything else here would mean Sylph policy had
+    // been applied to someone else's session.
+    assert_eq!(session["origin"], "native");
+    assert_eq!(session["identityMode"], "preserve");
+    assert_eq!(session["lifecycleMode"], "preserve");
+    assert_eq!(session["agent"], "mock");
+    assert_eq!(session["status"], "idle");
+
+    // Workdir comes from the archive, not the request.
+    assert_eq!(session["workdir"], workdir);
+    // Title falls back to the opening ask, and multi-byte text must survive.
+    assert_eq!(session["title"], "审查冗余的代码");
+    // Archive identifiers stay server-side.
+    assert!(session.get("traceSessionId").is_none());
+}
+
+#[tokio::test]
+async fn importing_the_same_archived_session_twice_conflicts() {
+    let (backend, _host, _workdir) = backend_with_archived_session("hi").await;
+
+    let body = json!({"traceSessionId": "mock:abc-123"});
+    let first = backend.post_authed("/api/v1/sessions/import", body.clone()).await;
+    assert_eq!(first.status(), StatusCode::CREATED);
+
+    let second = backend.post_authed("/api/v1/sessions/import", body).await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(second).await["error"]["code"],
+        "SESSION_ALREADY_IMPORTED"
+    );
+}
+
+#[tokio::test]
+async fn importing_an_unknown_archived_session_is_not_found() {
+    // An empty event array is how the archive reports an id it does not have.
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_events(json!([]))).await;
+
+    let response = backend
+        .post_authed("/api/v1/sessions/import", json!({"traceSessionId": "mock:nope"}))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "TRACE_SESSION_NOT_FOUND");
+    // The id is echoed so a stale id is diagnosable.
+    assert!(body["error"]["message"].as_str().unwrap().contains("mock:nope"));
+}
+
+#[tokio::test]
+async fn importing_rejects_a_malformed_trace_id() {
+    let backend = TestBackend::start().await;
+
+    for id in ["no-colon", ":leading", "trailing:", ""] {
+        let response = backend
+            .post_authed("/api/v1/sessions/import", json!({"traceSessionId": id}))
+            .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{id:?} should be rejected"
+        );
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "INVALID_REQUEST"
+        );
+    }
+}
+
+#[tokio::test]
+async fn importing_requires_a_runner_for_the_originating_agent() {
+    // A native session that cannot be resumed by its own agent would be inert:
+    // listable but never continuable. Refuse rather than create it.
+    let (backend, _host, _workdir) = backend_with_archived_session("hi").await;
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions/import",
+            json!({"traceSessionId": "someagent:abc"}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let message = json_body(response).await["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        message.contains("someagent"),
+        "message should name the missing agent: {message}"
+    );
+}
+
+#[tokio::test]
+async fn importing_reports_an_unreachable_archive() {
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::failing()).await;
+
+    let response = backend
+        .post_authed("/api/v1/sessions/import", json!({"traceSessionId": "mock:abc"}))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "TRACEDB_UNAVAILABLE"
+    );
+}
+
+#[tokio::test]
+async fn importing_rejects_an_archive_session_whose_workdir_is_gone() {
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_events(archived_events(
+        "/definitely/not/a/real/path",
+        "hi",
+    )))
+    .await;
+
+    let response = backend
+        .post_authed("/api/v1/sessions/import", json!({"traceSessionId": "mock:abc"}))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let message = json_body(response).await["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        message.contains("/definitely/not/a/real/path"),
+        "message should name the missing directory: {message}"
+    );
+}
+
+#[tokio::test]
+async fn imported_sessions_are_listable_by_origin() {
+    let (backend, _host, _workdir) = backend_with_archived_session("hi").await;
+
+    backend.create_session("mock").await;
+    let imported = backend
+        .post_authed("/api/v1/sessions/import", json!({"traceSessionId": "mock:abc"}))
+        .await;
+    assert_eq!(imported.status(), StatusCode::CREATED);
+
+    let native = json_body(backend.get_authed("/api/v1/sessions?origin=native").await).await;
+    let sessions = native["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["origin"], "native");
+
+    let sylph = json_body(backend.get_authed("/api/v1/sessions?origin=sylph").await).await;
+    assert_eq!(sylph["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(sylph["sessions"][0]["origin"], "sylph");
+}

@@ -155,6 +155,16 @@ Import a native session from TraceDB.
 }
 ```
 
+`traceSessionId` is formatted `<agent>:<native-id>`, exactly as TraceDB
+reports it. `title` may be supplied to override the derived one.
+
+Policy-relevant fields are derived from the archive, never taken from the
+request: the agent comes from the id prefix, because it selects identity and
+lifecycle policy, and the working directory comes from the archived session's
+own `system` event. A client naming the wrong agent would otherwise produce a
+session governed by the wrong rules. The title falls back to the first line of
+the opening user turn.
+
 **Response 201:**
 ```json
 {
@@ -163,15 +173,23 @@ Import a native session from TraceDB.
     "origin": "native",
     "identityMode": "preserve",
     "lifecycleMode": "preserve",
-    "traceSessionId": "ts_xyz789",
-    /* ... */
+    "agent": "claude",
+    "workdir": "/Users/me/project",
+    "title": "refactor the store layer",
+    "status": "idle"
   }
 }
 ```
 
+`traceSessionId` is deliberately absent from the response: agent-native
+identifiers are never exposed in session payloads.
+
 **Errors:**
-- `404` — TraceDB session not found
-- `409` — already imported
+- `400` — malformed `traceSessionId`, no runner for the originating agent, or
+  the archived working directory no longer exists
+- `404` — no such archived session (`TRACE_SESSION_NOT_FOUND`)
+- `409` — already imported (`SESSION_ALREADY_IMPORTED`)
+- `503` — TraceDB unreachable (`TRACEDB_UNAVAILABLE`)
 
 #### `GET /api/v1/sessions/{id}`
 

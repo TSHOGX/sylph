@@ -130,6 +130,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/sessions",
             get(api::sessions::list).post(api::sessions::create),
         )
+        .route("/api/v1/sessions/import", post(api::sessions::import))
         .route("/api/v1/sessions/{id}", get(api::sessions::get))
         .route(
             "/api/v1/sessions/{id}/turns",

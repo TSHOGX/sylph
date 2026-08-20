@@ -57,6 +57,33 @@ pub struct ArchiveCounts {
     pub events: Option<i64>,
 }
 
+/// One normalized event from an archived session. Fields are all optional
+/// because the protocol's fields are additive and older sessions predate some
+/// of them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceEvent {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub subtype: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub created_at_ms: Option<i64>,
+}
+
+/// Facts about an archived session, derived from its own event stream.
+#[derive(Debug, Clone)]
+pub struct SessionFacts {
+    /// Working directory recorded by the agent, when it recorded one.
+    pub cwd: Option<String>,
+    /// The opening user turn, used as a fallback title.
+    pub first_ask: Option<String>,
+    pub started_at_ms: Option<i64>,
+    pub event_count: usize,
+}
+
 /// The snippet TraceDB judged most relevant within a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,9 +181,59 @@ impl Client {
         serde_json::from_value(raw).map_err(|e| format!("Unexpected search payload: {}", e))
     }
 
-    /// Show: metadata and the normalized event stream for one session.
-    pub async fn show(&self, id: &str) -> Result<serde_json::Value, String> {
-        self.call("show", None, None, Some(id)).await
+    /// Show: the normalized event stream for one session.
+    ///
+    /// `result` is a bare array of events. Despite the protocol table's
+    /// wording, it carries no session metadata object — no agent, title, cwd,
+    /// or outcome. Those appear only on a search hit, so anything the import
+    /// path needs about the session itself has to be derived from the events
+    /// or from the id.
+    pub async fn show(&self, id: &str) -> Result<Vec<TraceEvent>, String> {
+        let raw = self.call("show", None, None, Some(id)).await?;
+        serde_json::from_value(raw).map_err(|e| format!("Unexpected show payload: {}", e))
+    }
+
+    /// What the import path needs to know about an archived session, derived
+    /// from its event stream rather than taken from the client.
+    ///
+    /// Returns `Ok(None)` when the archive has no such session, which is
+    /// distinct from the archive being unreachable (`Err`).
+    pub async fn session_facts(&self, id: &str) -> Result<Option<SessionFacts>, String> {
+        let events = self.show(id).await?;
+        if events.is_empty() {
+            return Ok(None);
+        }
+
+        // The agent runs a `system` event early carrying the session's working
+        // directory. Taking it from the archive keeps a policy-relevant field
+        // authoritative rather than trusting whatever a client posts.
+        let cwd = events.iter().find_map(|event| {
+            let text = event.text.as_deref()?;
+            let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+            parsed
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
+
+        // The opening user turn is the session's recognizable summary; `show`
+        // exposes no title.
+        let first_ask = events
+            .iter()
+            .find(|event| event.kind.as_deref() == Some("user"))
+            .and_then(|event| event.text.clone());
+
+        let started_at_ms = events
+            .iter()
+            .filter_map(|event| event.created_at_ms)
+            .find(|ms| *ms > 0);
+
+        Ok(Some(SessionFacts {
+            cwd,
+            first_ask,
+            started_at_ms,
+            event_count: events.len(),
+        }))
     }
 
     /// Unified call path: spawn the process if absent, serialize the request,

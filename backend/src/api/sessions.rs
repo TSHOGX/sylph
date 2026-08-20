@@ -200,3 +200,133 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(SessionResponse { session: created })))
 }
 
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSessionRequest {
+    /// TraceDB session id, e.g. `claude:uuid`.
+    pub trace_session_id: String,
+    /// Optional override; otherwise derived from the archived session's
+    /// opening user turn.
+    pub title: Option<String>,
+}
+
+/// Split `claude:uuid` into its agent prefix and native id.
+///
+/// The agent is taken from the id rather than from the request body because it
+/// selects identity and lifecycle policy. A client that named the wrong agent
+/// would produce a session governed by the wrong rules, so the value has to
+/// come from the archive's own naming.
+fn split_trace_id(trace_id: &str) -> Option<(&str, &str)> {
+    let (agent, native) = trace_id.split_once(':')?;
+    if agent.is_empty() || native.is_empty() {
+        return None;
+    }
+    Some((agent, native))
+}
+
+/// POST /api/v1/sessions/import — adopt an archived native session.
+///
+/// A native session is restored as it was recorded. Its originating agent's
+/// identity and lifecycle are preserved: no SOUL.md injection, no reset, no
+/// compaction, no prompt rewriting. That is why `identityMode` and
+/// `lifecycleMode` are `preserve` here rather than `sylph`, and why every
+/// policy-relevant field is derived from the archive instead of the request.
+pub async fn import(
+    State(state): State<AppState>,
+    Json(req): Json<ImportSessionRequest>,
+) -> Result<(StatusCode, Json<SessionResponse>)> {
+    let trace_id = req.trace_session_id.trim();
+    let (agent, _native_id) = split_trace_id(trace_id).ok_or_else(|| {
+        Error::InvalidRequest(
+            "traceSessionId must be formatted as \"<agent>:<id>\", as TraceDB reports it."
+                .to_string(),
+        )
+    })?;
+
+    // Importing twice would produce two live sessions mirroring one archived
+    // session, and each would resume the same native history independently.
+    if state.store.find_session_by_trace_id(trace_id).await?.is_some() {
+        return Err(Error::SessionAlreadyImported);
+    }
+
+    // Resuming needs a runner for the originating agent. Without one the
+    // session could be listed but never continued, so refuse up front rather
+    // than create something inert.
+    {
+        let registry = state.registry.lock().await;
+        if !registry.has_agent(agent) {
+            return Err(Error::InvalidRequest(format!(
+                "No runner for agent {agent:?}, which this archived session was created by. \
+                 A native session can only be imported when its own agent is available, \
+                 because its identity and lifecycle must be preserved."
+            )));
+        }
+    }
+
+    let facts = state
+        .tracedb
+        .session_facts(trace_id)
+        .await
+        .map_err(Error::TraceDbUnavailable)?
+        .ok_or_else(|| Error::TraceSessionNotFound(trace_id.to_string()))?;
+
+    // Without a recorded working directory there is nothing to resume into.
+    let workdir = facts.cwd.ok_or_else(|| {
+        Error::InvalidRequest(
+            "This archived session recorded no working directory, so it cannot be resumed."
+                .to_string(),
+        )
+    })?;
+    if !std::path::Path::new(&workdir).exists() {
+        return Err(Error::InvalidRequest(format!(
+            "The working directory this session ran in no longer exists: {workdir}"
+        )));
+    }
+
+    let title = req
+        .title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| facts.first_ask.as_deref().map(summarize_ask));
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let session = Session {
+        id: uuid::Uuid::new_v4().to_string(),
+        origin: "native".to_string(),
+        // `preserve`, not `native`: the mode names the policy, which is to keep
+        // whatever the originating agent established.
+        identity_mode: "preserve".to_string(),
+        lifecycle_mode: "preserve".to_string(),
+        agent: agent.to_string(),
+        backend_session_id: None,
+        trace_session_id: Some(trace_id.to_string()),
+        workdir,
+        title,
+        flags_json: "{}".to_string(),
+        status: "idle".to_string(),
+        // Keep the archived session's own start time so it sorts by when the
+        // work actually happened, not when it was adopted.
+        created_at_ms: facts.started_at_ms.unwrap_or(now),
+        updated_at_ms: now,
+    };
+
+    let created = state.store.create_session(&session).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(SessionResponse { session: created }),
+    ))
+}
+
+/// First line of the opening ask, capped, for use as a title.
+fn summarize_ask(ask: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let line = ask.lines().find(|l| !l.trim().is_empty()).unwrap_or(ask).trim();
+    // Counting characters, not bytes: these asks are frequently not ASCII, and
+    // slicing on a byte index would panic mid-codepoint.
+    if line.chars().count() <= MAX_CHARS {
+        return line.to_string();
+    }
+    let truncated: String = line.chars().take(MAX_CHARS).collect();
+    format!("{}…", truncated.trim_end())
+}

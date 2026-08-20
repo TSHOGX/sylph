@@ -376,6 +376,8 @@ cat >/dev/null
 pub struct MockTraceDb {
     /// Emitted verbatim as the `result` of every `search` request.
     search_result: String,
+    /// Emitted verbatim as the `result` of every `show` request.
+    show_result: String,
     /// When true, answer `{"ok": false, ...}` instead of a result.
     fails: bool,
 }
@@ -385,6 +387,17 @@ impl MockTraceDb {
     pub fn with_hits(hits: Value) -> Self {
         Self {
             search_result: hits.to_string(),
+            show_result: "[]".to_string(),
+            fails: false,
+        }
+    }
+
+    /// Returns `events` for any show request. An empty array is how the real
+    /// archive reports an unknown session id.
+    pub fn with_events(events: Value) -> Self {
+        Self {
+            search_result: "[]".to_string(),
+            show_result: events.to_string(),
             fails: false,
         }
     }
@@ -393,6 +406,7 @@ impl MockTraceDb {
     pub fn failing() -> Self {
         Self {
             search_result: "[]".to_string(),
+            show_result: "[]".to_string(),
             fails: true,
         }
     }
@@ -413,20 +427,34 @@ impl MockTraceDb {
     }
 
     /// A line-protocol server: read a request line, write a response line.
-    /// Long-lived, because the client reuses the process across calls.
+    /// Long-lived, because the client reuses the process across calls, and
+    /// branching on the request's `op` because one process serves every method.
     fn script(&self) -> String {
-        let response = if self.fails {
-            r#"{"ok": false, "result": {"error": "index is locked"}}"#.to_string()
-        } else {
-            format!(r#"{{"ok": true, "result": {}}}"#, self.search_result)
-        };
+        if self.fails {
+            return r#"#!/bin/sh
+set -eu
+
+while IFS= read -r _line; do
+  printf '%s\n' '{"ok": false, "result": {"error": "index is locked"}}'
+done
+"#
+            .to_string();
+        }
+
+        let search = format!(r#"{{"ok": true, "result": {}}}"#, self.search_result);
+        let show = format!(r#"{{"ok": true, "result": {}}}"#, self.show_result);
+        let stats = r#"{"ok": true, "result": {"totalSessions": 2, "totalEvents": 9}}"#;
 
         format!(
             r#"#!/bin/sh
 set -eu
 
-while IFS= read -r _line; do
-  printf '%s\n' '{response}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"show"'*) printf '%s\n' '{show}' ;;
+    *'"stats"'*) printf '%s\n' '{stats}' ;;
+    *) printf '%s\n' '{search}' ;;
+  esac
 done
 "#
         )
