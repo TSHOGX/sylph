@@ -75,7 +75,13 @@ side can break the other's tests.
 | `SYLPH_WEB_DATA_DIR` | backend | `$HOME/.agents/data/sylph/web` |
 | `SYLPH_RUNNERS_DIR` | backend | `$HOME/.agents/skills/sylph/runners` |
 | `TRACEDB_BIN` | backend | `$HOME/Workspace/trace-db/target/release/trace-db` |
+| `SYLPH_WEB_BROWSE_ROOTS` | backend | `$HOME` |
 | `SYLPH_WEB_BACKEND` | frontend | `http://localhost:4317` |
+
+`SYLPH_WEB_BROWSE_ROOTS` is colon-separated and *adds* to `$HOME`, which is
+always browsable. It bounds `/api/v1/fs/*`, the only endpoint that lists
+directories the client names — so widening it widens what any client of this
+backend can enumerate. Set it when projects live outside the home directory.
 
 The journal is always `live.db` inside the data dir; it is derived, not
 separately configurable. `TRACEDB_BIN` defaults to a release build in a sibling

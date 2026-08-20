@@ -220,6 +220,7 @@ frontend/
 │   ├── api.ts                  # Typed client; mirrors the wire shape exactly
 │   ├── providers.tsx           # QueryClient + AuthGate
 │   ├── settings.tsx            # Preferences over localStorage
+│   ├── create-session.ts       # Dialog-free session creation + default resolution
 │   ├── workspace-ui.tsx        # Pane visibility, overlays, artifact selection
 │   ├── shortcuts.ts            # Combo grammar and platform resolution
 │   ├── timeline-rows.test.ts   # (tests live beside the code they cover)
@@ -342,6 +343,116 @@ Session-scoped actions — stop turn, expand all, find — cannot be handled by 
 shell, which has no access to the open session's state. The session page registers
 a handler with `registerSessionActions` and the shell forwards to it; with no
 session open, those actions are simply ignored.
+
+### Creating a session: mutation or form
+
+Two paths exist, and which one a surface uses follows from one question — is the
+working directory already known?
+
+| Surface | Path | Why |
+| --- | --- | --- |
+| `Mod+Shift+N`, palette "Quick Start" | `createSessionIn(quickStartDir)` | The directory is fixed: the backend-resolved `~/.agents`. |
+| Sidebar group → "New session here" | `createSessionIn(group.path)` | A group **is** a directory. The right-click already named it. |
+| Sidebar group → "New session here..." | `/sessions/new?workdir=` | Override the agent, model, or title; the directory is prefilled. |
+| `Mod+N`, palette "New session" | `/sessions/new` | No directory chosen yet, so the form's required field is the point. |
+
+The top bar carries **no create buttons.** It cannot: creating a session needs a
+working directory, and the top bar knows none — so a button there could only
+re-ask for one in a form, or silently pick the scratch directory. Both are worse
+than the surface that already knows the answer. The keyboard and palette entries
+survive because they dispatch through `runAction`, which is independent of the
+chrome that used to trigger it.
+
+The directory is the only field a session needs beyond an agent, and the agent
+has a configured default. So whenever the invocation already carries a directory,
+a form has nothing left to ask: it is a dialog the user must dismiss to get what
+they clicked. `lib/create-session.ts` is that mutation, and it is what makes
+"Quick Start" a special case of a general action rather than its own mechanism —
+before it, Quick Start had a private hook in the shell and the sidebar routed to
+the form, which is why right-clicking the fixed `~/.agents` group still asked for
+a working directory.
+
+One instance lives in the shell and is shared through `WorkspaceUIProvider` as
+`createSessionIn`, so every dialog-free path reports one pending state and one
+error banner. Its value is memoized and passes `mutate` by reference: it feeds the
+shell context's memo, which `runAction` closes over, so an unstable identity would
+re-register the document-level keydown listener on every shell render.
+
+`resolveSessionDefaults` checks both stored preferences against live `--describe`
+output. A `defaultAgent` whose runner was uninstalled would be rejected as an
+unknown agent, and a `defaultModels` entry the runner no longer declares would be
+passed as `--flag model=...` and fail at turn time — far from the setting that
+caused it. Both degrade to a silent, correct fallback instead, and only "no
+runners at all" surfaces as an error, because that is the one case with no
+sensible default.
+
+### Binding a workspace
+
+A workspace has no server-side record: `GET /workspaces` derives spaces from the
+sessions that exist, so a directory with no sessions cannot be represented in the
+journal. But a session needs a directory, so binding a *new* project directory
+would be impossible if a workspace could only appear behind a session.
+
+`pinnedWorkspaces` in settings closes that loop. It already existed, and the
+sidebar already renders pinned paths as groups with zero sessions, so binding is
+just adding a path to it: no new table, no new endpoint, and it survives reload
+because preferences do. The directory itself comes from `DirectoryPicker`, which
+browses the *backend's* filesystem over `/api/v1/fs/*` — a browser cannot name a
+local directory (`<input type="file">` hides real paths, `~` does not expand
+client-side), and the machine that matters is the backend's anyway.
+
+The picker navigates one current directory with a breadcrumb rather than an
+expandable tree. A tree is right for the Artifacts pane, where the question is
+"where is this file in the project"; here the question is "which directory do I
+want", and one level answers it in fewer clicks, with no horizontal scrolling, and
+matches the native folder pickers users arrive with expectations from. Crumbs stop
+at the deepest containing root, because a crumb above it would be refused by the
+next request — an affordance leading to an error is worse than its absence.
+
+"New Workspace..." is offered **both** on the sidebar's context menu and as a
+visible footer button. The duplication is deliberate: this is the only route to
+binding a fresh directory, and a right-click gesture alone is undiscoverable. It
+is also unreachable in practice once sessions fill the scroll container — rows
+stop propagation so their own menus win, so there is no empty background left to
+right-click. E2E caught exactly that.
+
+### The composer
+
+One bordered surface holding everything a turn needs: attachments, the message,
+and the runner configuration that turn will use. It replaced three stacked blocks
+— textarea, attachment dropzone, button row — which read as unrelated form fields
+rather than one input, and left the agent and model invisible even though both
+decide what the message does.
+
+**Controls are generated from `--describe`, never hardcoded.** This is not
+defensiveness; the installed runners genuinely disagree. `codex` declares no
+`model` at all, and each declares a different `effort` enumeration — `claude` has
+`xhigh`/`max`, `codex` has `minimal`, `pi` has `off`. A fixed pair of dropdowns
+would be wrong for `codex` on first render. A flag with no declared choices is
+omitted rather than drawn as an empty dropdown.
+
+**The agent is interactive only before the first turn.** After that it renders as
+a plain label, not a disabled `<select>` — a disabled control invites the user to
+keep trying, where a label plus a tooltip explains. Switching agent hands an
+existing transcript to a different identity and lifecycle policy, so it is only
+offered when there is no transcript, and it works by creating a fresh session in
+the same directory (the backend fixes `agent` at creation).
+
+**Flag changes persist through `PATCH /sessions/{id}`,** which validates against
+the declared schema. They are disabled mid-turn: the runner is already executing
+with the old value, so a change then would appear to affect the running turn while
+actually applying to the next one.
+
+Attachments moved inside the surface as chips plus a paperclip, drag-and-drop now
+covers the whole composer, and pasted images are accepted — a screenshot in the
+clipboard previously pasted as nothing. `components/attachment-picker.tsx` kept the
+limits and the base64 encoding and lost its UI, since the limits must live beside
+the code enforcing them.
+
+"Save to workspace..." writes staged files into the project through
+`POST /sessions/{id}/files`, reusing the picker. Uploads are sequential, not
+concurrent: these are writes into the user's project, and a partial failure is far
+easier to describe when files land in a known order.
 
 ### Component Design
 
@@ -833,10 +944,12 @@ function SessionSearch() {
 
 ### Bundle budget
 
-**Measured: 196.2 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
+**Measured: 196.6 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
 established the budget at 200 KB and measured 187.8 KB; Phase 6 added the shell,
 three overlays, the file browser, the Markdown renderer, the diff view, and the
-fuzzy ranker for **+8.4 KB**.
+fuzzy ranker for **+8.4 KB**; Phase 7 added the directory picker and rebuilt the
+composer for **+0.4 KB**, which is small only because the picker is dynamically
+imported at both its call sites and the composer replaced code it did not add to.
 
 That number is why this document lists so many "no dependency" decisions. The
 naive versions of these features — `react-markdown` + `remark-gfm` (~45 KB), Shiki
@@ -860,6 +973,11 @@ first-load bundle of *every* route. The three overlays and the Artifacts pane ar
 therefore `next/dynamic` with `ssr: false`: each is reached by a keypress or a
 toggle, by which point the chunk has fetched. Measured effect: **204.3 KB → 195.8
 KB**, which is the difference between over and under budget.
+
+`DirectoryPicker` is split for the same reason at both call sites — the sidebar
+(which renders on first paint) and the composer. It carries its own queries and
+modal markup for a dialog nobody has opened on load, and the budget has under
+4 KB of headroom.
 
 ### Render cost
 

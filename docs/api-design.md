@@ -215,6 +215,38 @@ Get session detail with incarnations and turn summary.
 }
 ```
 
+#### `PATCH /api/v1/sessions/{id}`
+
+Change runner flags or the title of an existing session.
+
+```json
+{ "flags": { "model": "opus", "effort": "high" }, "title": "Auth refactor" }
+```
+
+Both fields are optional; an omitted field is left untouched. `flags` is a
+**complete replacement set**, not a merge — the caller has already validated the
+whole set, and merging would let a stale key survive a change the user believed
+was total. An empty object clears them.
+
+**Why flags are validated here rather than at turn time.** `POST .../turns` filters
+the stored set against the runner's `--describe` schema and silently drops what it
+does not recognize. That is right there: a descriptor can change under a session
+created before it, and the turn should still run. It is wrong for a user action —
+a model chosen in the composer that the runner never declared would be accepted,
+stored, dropped at turn time, and the turn would run on the default with nothing
+anywhere saying why. Validating on write turns that silent no-op into an error the
+UI can show against the control that caused it.
+
+Identity is deliberately not patchable. `agent`, `origin`, `identityMode`, and
+`lifecycleMode` decide which runner owns the conversation and whether `SOUL.md`
+may be injected; changing them on a session with history would rewrite what that
+history was produced by. Native→Sylph conversion is a separate, explicit
+operation for the same reason.
+
+Errors: `SESSION_NOT_FOUND` (404), `INVALID_REQUEST` (400) for an undeclared flag
+key, a value outside a declared enumeration, or an agent that is no longer
+installed.
+
 ### Turns
 
 #### `POST /api/v1/sessions/{id}/turns`
@@ -373,9 +405,11 @@ exist before the first quick session is created.
 
 ### Files
 
-Read-only browsing of a session's working directory, for the Artifacts pane.
-There is deliberately no write, rename, or delete endpoint: the agent mutates the
-workspace, the browser observes it.
+Browsing a session's working directory, for the Artifacts pane. Reads are
+unrestricted within the root; writing is confined to one endpoint
+(`POST .../files`) that creates files and refuses to overwrite by default. There
+is still deliberately no rename or delete endpoint: the agent mutates the
+workspace, the browser adds inputs for it to read.
 
 **Path safety.** These are the only endpoints that turn a client string into a
 filesystem read, so containment is enforced on the *canonical* path, never on the
@@ -439,14 +473,109 @@ Errors: `FILE_NOT_FOUND` (404) for a missing path, `POLICY_VIOLATION` (403) for
 one outside the workdir, `INVALID_REQUEST` (400) when a directory is requested as
 content or vice versa.
 
+#### `POST /api/v1/sessions/{id}/files`
+
+Write one file into the session's working directory.
+
+```json
+{ "path": "docs/assets", "name": "diagram.png", "data": "<base64>", "overwrite": false }
+```
+
+`path` is the destination *directory*, relative to the workdir; empty means the
+root. `data` is base64 with no `data:` prefix — the same encoding turn attachments
+use, so a client has one encoder. `name` is reduced to a single path component, so
+a separator in it cannot rebuild a path.
+
+**Response 201:**
+```json
+{ "path": "docs/assets/diagram.png", "absolutePath": "/Users/you/p/docs/assets/diagram.png", "size": 20480 }
+```
+
+**Why writing is allowed here at all.** Reading and writing are not symmetric
+risks, so this does not inherit the read endpoints' justification. The argument is
+narrower: the agent driving this session already writes anywhere under `workdir`
+— that is what a coding agent does — so an upload confined to the same subtree
+grants no capability the session did not already have. What it must not become is
+a general file-writing service, so the root is the journalled `workdir` and never
+a client-supplied directory, the destination goes through the same containment
+check as reads, and an existing file is refused unless `overwrite` is explicitly
+true. Per-file size shares the 8 MiB attachment ceiling.
+
+Errors: `POLICY_VIOLATION` (403) outside the workdir, `INVALID_REQUEST` (400) for
+an existing file without `overwrite`, `ATTACHMENT_INVALID` (400) for malformed
+base64 or an oversized payload.
+
+### Machine-level browsing
+
+Choosing a directory to bind as a workspace. Separate from the session file API
+because the *root* differs: that one is rooted at a session's `workdir`, this at
+directories named in configuration.
+
+**Why it exists.** A workspace is a directory, and a session cannot be created
+without one — but nothing in a browser can name a directory on the machine the
+backend runs on. `<input type="file">` deliberately hides real paths, `~` cannot be
+expanded client-side, and the machine that matters is the backend's, which may not
+be the one running the browser. Without these endpoints, binding a new project
+directory is impossible from the UI.
+
+**Bound.** This is the only endpoint that lists directories the client names, so
+the bound cannot come from the request. It comes from `SYLPH_WEB_BROWSE_ROOTS`
+(colon-separated) plus `$HOME`, checked on the canonical path by the same
+containment primitive the session file API uses (`backend/src/paths.rs`).
+
+It is deliberately narrower than the session file API in three ways: only
+directories are listed, so it cannot be used to discover file names; there is no
+content endpoint, so reading bytes stays session-scoped; and a symlink leaving the
+root is omitted from listings rather than merely refused on access. Dotfiles *are*
+listed, because `~/.agents` is a legitimate workspace the product points at.
+
+#### `GET /api/v1/fs/roots`
+
+```json
+{ "roots": [{ "name": "Home", "path": "/Users/you" }], "home": "/Users/you" }
+```
+
+`home` lets a client abbreviate paths as `~/…` without guessing. A configured root
+that no longer exists is filtered out rather than returned as an unopenable node.
+
+#### `GET /api/v1/fs/tree?path=`
+
+One directory level, subdirectories only. Omitted or empty `path` means the first
+configured root, so a client's first request needs no prior knowledge of them.
+
+```json
+{
+  "path": "/Users/you/Workspace",
+  "parent": "/Users/you",
+  "entries": [{ "path": "/Users/you/Workspace/sylph-web", "name": "sylph-web", "modifiedAtMs": 1755600000000 }],
+  "truncated": false
+}
+```
+
+`parent` is **absent** when `path` is itself a configured root. The server
+withholds it rather than the client deciding where to stop, so a "go up"
+affordance can never offer a path the next request would refuse.
+
+Errors: `POLICY_VIOLATION` (403) for a path outside every root, `FILE_NOT_FOUND`
+(404) for one that does not exist.
+
 ## Error Responses
 
-All errors use structured JSON:
+Every failing response under `/api/v1/` carries this envelope, with no
+exceptions. That includes failures raised before any handler runs: a path that
+matches no route answers `NOT_FOUND`, and a known path with the wrong method
+answers `METHOD_NOT_ALLOWED`.
+
+The invariant matters more than it looks. A bodiless framework 404 is
+indistinguishable, at the client, from a handler reporting that a *file* is
+missing — so a client showing "Not Found" cannot say whether the file is absent
+or the endpoint is. Clients branch on `error.code`, never on the HTTP status
+alone, and that is only sound if every error has a code.
 
 ```json
 {
   "error": {
-    "code": "VALIDATION_ERROR",
+    "code": "INVALID_REQUEST",
     "message": "Invalid agent name",
     "details": {
       "field": "agent",
@@ -456,12 +585,20 @@ All errors use structured JSON:
 }
 ```
 
-Common codes:
-- `VALIDATION_ERROR` (400)
-- `NOT_FOUND` (404)
-- `CONFLICT` (409)
-- `INTERNAL_ERROR` (500)
-- `SERVICE_UNAVAILABLE` (503)
+`details` is optional and omitted when there is nothing structured to add.
+
+The full set of codes is the `ErrorResponse.error.code` enum in
+`docs/api-v1.openapi.json`, which is authoritative. The two router-level codes
+are worth calling out here because no handler can produce them:
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `NOT_FOUND` | 404 | No route matches this path. The endpoint does not exist in this build — distinct from `SESSION_NOT_FOUND` or `FILE_NOT_FOUND`, which mean the route exists and the named thing does not. |
+| `METHOD_NOT_ALLOWED` | 405 | The path exists but not for this method. |
+
+A client that sees `NOT_FOUND` for an endpoint it expects to exist is talking to
+an older backend than it was built against, and should say so rather than
+blaming the request.
 
 ## Authentication
 

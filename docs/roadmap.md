@@ -21,7 +21,8 @@
 - Phase 6: frontend redesign — three-pane agent workspace, tool-first timeline
   with inline diffs, file browser, `Cmd+K`/`Cmd+P`, settings panel
 
-All six phases are complete.
+All six phases are complete. Phase 7 (interaction and composer redesign) is
+complete; see the section at the end of this file.
 
 ### Open Decisions
 
@@ -322,8 +323,9 @@ shipped design.
   need the backend to spawn a process against a client-supplied path, which is a
   local code-execution surface and needs a threat-model decision, not a menu entry.
 - **Screen-reader passes** (VoiceOver, NVDA) and forced-colours mode are untested.
-- **Session rename, move, delete, and export** are still absent; the context menus
-  currently offer only non-mutating actions, since no endpoint backs the rest.
+- **Session move, delete, and export** are still absent. Rename now has an
+  endpoint (`PATCH /api/v1/sessions/{id}` accepts `title`), but no context menu
+  calls it yet; the rest have no endpoint behind them.
 - **`Cmd+F` filters turns** rather than highlighting matches inside them.
   Highlighting would mean reaching into the Markdown, diff, and code renderers to
   rewrite their text nodes.
@@ -341,3 +343,87 @@ now supersede. They describe a bundle allocation (~80 KB of new dependencies) th
 the measured budget did not permit, so following them now would be actively
 misleading. **They should be deleted;** they are left in place only because
 removing another author's untracked drafts is not this change's call to make.
+
+## Phase 7: Interaction and Composer Redesign — Complete
+
+**Goal:** remove the forms and stacked form-fields that Phase 6 left in the two
+surfaces a user touches most — creating a session, and writing a message.
+
+**The shift, concretely:** creation happens where the context already exists
+(right-click a workspace, get a session in it) rather than in a form that re-asks
+for what the click named; and the composer becomes one control surface exposing
+the agent, model, and reasoning effort that the runners have always declared and
+the UI never showed.
+
+### Delivered
+
+**7.1 — machine-level directory browsing**
+- ✅ `GET /api/v1/fs/{roots,tree}`, bounded by `$HOME` plus `SYLPH_WEB_BROWSE_ROOTS`
+- ✅ Containment extracted to `backend/src/paths.rs` and shared with the
+  session file API, so the rule exists once rather than in two divergent copies
+- ✅ Directories only, no content endpoint, escaping symlinks omitted from
+  listings — deliberately narrower than the session-scoped file API
+- ✅ `DirectoryPicker`, one level with a breadcrumb, dynamically imported
+
+**7.2 — creation without forms**
+- ✅ "New session here" creates and opens directly, wiring up the
+  `useQuickCreateSession` hook Phase 6 wrote and never called
+- ✅ "New Workspace..." binds a directory with no session in it, via
+  `pinnedWorkspaces` — no workspace table needed, since the sidebar already
+  rendered pinned paths as empty groups
+- ✅ Top-bar "New session" and "⚡ Quick Start" removed; `Mod+N`,
+  `Mod+Shift+N`, and both palette entries still work through `runAction`
+- ✅ One shared creator in the shell, so every path reports one pending state
+  and one error banner
+
+**7.3 — the composer**
+- ✅ One bordered surface: attachment chips, auto-growing textarea, and controls
+- ✅ Agent shown bottom-left; switchable at turn zero, a plain label with an
+  explanatory tooltip afterwards
+- ✅ Model and Thinking rendered **from `--describe`**, so `codex` correctly shows
+  effort alone — verified against all four installed runners
+- ✅ `PATCH /api/v1/sessions/{id}` for flags, validated against the declared
+  schema on write rather than dropped silently at turn time
+- ✅ Attachments moved inside; paste-to-attach added; drag-and-drop over the
+  whole surface
+- ✅ `POST /api/v1/sessions/{id}/files` uploads into the workdir subtree, refusing
+  to overwrite by default
+
+### Exit criteria — how each was checked
+
+- ✅ **No form on the fast path** — E2E asserts a right-click reaches a
+  conversation with no `Working directory` field and never the create route, for
+  both Quick Sessions and a project group.
+- ✅ **Removed buttons stay removed, shortcuts keep working** — E2E asserts both
+  buttons are absent from the banner and that `Mod+N` still opens the form.
+- ✅ **A workspace can exist before a session** — E2E binds `/tmp` through the
+  picker and finds the group.
+- ✅ **Agent locks after the first turn** — E2E sends a turn and asserts the
+  `<select>` is replaced by the explanatory label.
+- ✅ **Path containment holds** — 16 new integration tests over `..`, escaping
+  symlinks, prefix siblings, cross-root traversal, root boundaries, filename
+  sanitization, overwrite refusal, and flag validation.
+- ✅ **First-load JS under 200 KB** — **measured 196.6 KB**, +0.4 KB over Phase 6.
+- ✅ **No regressions** — 68 backend unit + 84 integration + 98 frontend unit +
+  28 E2E, all passing; clippy and ESLint clean.
+
+**Test totals:** 68 backend unit + 84 backend integration + 98 frontend unit +
+28 E2E.
+
+### Carried forward
+
+- **Uploading outside the workdir** is deliberately not possible. The agent can
+  only write under `workdir`, so allowing the browser more would give the UI a
+  wider write range than the process it drives. Revisit only with a real need and
+  a threat-model decision, not for convenience.
+- **`browse_roots` widening** is a configuration decision with real consequence:
+  it is what any client of this backend can enumerate. The default is `$HOME`
+  alone, and `docs/architecture.md` records why enumeration is the part that
+  matters.
+- **Rename from the sidebar** now has an endpoint but no menu item.
+- **Dark theme** remains deliberately absent; the composer and picker were built
+  with the same light-only palette as the rest, so they inherit that debt.
+- **The agent switcher creates a new session** rather than converting the current
+  one, because `agent` is fixed at creation server-side. On an empty session there
+  is nothing to preserve, so this is correct rather than a workaround — but it
+  means the switcher is unavailable exactly where conversion would be interesting.

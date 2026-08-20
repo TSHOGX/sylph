@@ -53,6 +53,7 @@ not come up, so a broken install does not look like a successful one.
 | `SYLPH_WEB_FRONTEND_PORT` | `3000` | Frontend port |
 | `SYLPH_RUNNERS_DIR` | `~/.agents/skills/sylph/runners` | Runner discovery |
 | `TRACEDB_BIN` | `~/Workspace/trace-db/target/release/trace-db` | TraceDB binary |
+| `SYLPH_WEB_BROWSE_ROOTS` | *(none; `$HOME` is implicit)* | Extra directories the workspace picker may browse |
 | `RUST_LOG` | `info` | Backend log verbosity |
 
 Set them for the install command, not just at start time:

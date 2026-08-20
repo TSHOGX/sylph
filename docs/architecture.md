@@ -201,6 +201,43 @@ Exposing beyond loopback requires:
 - Attachment size enforcement
 - Explicit permission policy
 
+### Filesystem exposure
+
+Three endpoints turn a client-supplied string into a filesystem operation, and
+they are bounded differently because their roots differ. The *check* is shared —
+`backend/src/paths.rs` canonicalizes, then compares component-wise with
+`Path::starts_with` — because a containment rule implemented twice is one that
+will diverge. Canonicalizing first is what defeats both `..` and a symlink whose
+escape lives on disk rather than in the request.
+
+| Surface | Root | Scope |
+| --- | --- | --- |
+| `GET /sessions/{id}/files*` | the session's journalled `workdir` | read files and directories |
+| `POST /sessions/{id}/files` | same | create files, no overwrite by default |
+| `GET /fs/*` | `Config::browse_roots` (`$HOME` + `SYLPH_WEB_BROWSE_ROOTS`) | list directories only |
+
+Two decisions are worth recording, because both could reasonably have gone the
+other way:
+
+**Machine-level browsing lists directories, never file contents.** It exists only
+so a user can name a workspace, which a browser cannot do for itself. Enumerating
+directory names is a strictly smaller disclosure than serving bytes, and there is
+deliberately no `/fs/content` — reading bytes stays session-scoped, where the root
+is journalled rather than chosen. A symlink leaving a root is omitted from
+listings rather than merely refused, so it is never advertised as a node to try.
+
+**Writing is confined to the session's own workdir.** The agent driving a session
+already writes anywhere under `workdir`, so a browser upload into the same subtree
+grants no new capability; it only makes an existing one explicit. Allowing uploads
+anywhere the *picker* can reach would have given the browser a wider write range
+than the agent, which is why the upload root is the journalled workdir and not the
+browse roots.
+
+Note that `POST /sessions` already accepts any `workdir` that exists, with no
+containment check. Browsing therefore adds *enumeration*, not the ability to name
+a path — a distinction worth keeping in mind before widening `browse_roots`, since
+enumeration is the part that scales with an attacker's ignorance of the layout.
+
 ## Runner Discovery
 
 Runners live under `~/.agents/skills/sylph/runners/{name}/runner.sh`.

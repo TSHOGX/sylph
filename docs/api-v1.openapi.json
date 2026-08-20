@@ -142,6 +142,51 @@
             "$ref": "#/components/responses/Error"
           }
         }
+      },
+      "patch": {
+        "summary": "Update a session's runner flags or title",
+        "description": "Flags are a complete replacement set, validated against the agent's `--describe` schema on write. Identity fields (agent, origin, identityMode, lifecycleMode) are deliberately not patchable: they decide which runner owns the transcript and whether SOUL.md may be injected.",
+        "operationId": "updateSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSession"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated session"
+          },
+          "400": {
+            "description": "An undeclared flag key, a value outside its enumeration, or an uninstalled agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/sessions/{sessionId}/turns": {
@@ -325,6 +370,73 @@
             "$ref": "#/components/responses/Error"
           }
         }
+      },
+      "post": {
+        "summary": "Upload one file into the session's working directory",
+        "description": "Confined to the workdir subtree — the same range the agent already writes to — and refuses to overwrite an existing file unless `overwrite` is true. The destination directory is resolved through the same canonical containment check as reads, and `name` is reduced to a single path component.",
+        "operationId": "uploadSessionFile",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadFile"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The written file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadFileResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An existing file without overwrite, malformed base64, or an oversized payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The destination is outside the session's working directory",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/sessions/{sessionId}/files/content": {
@@ -364,6 +476,75 @@
           },
           "404": {
             "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/fs/roots": {
+      "get": {
+        "summary": "List directories the workspace picker may browse from",
+        "description": "`$HOME` plus anything in SYLPH_WEB_BROWSE_ROOTS. A configured root that no longer exists is omitted rather than returned as an unopenable node.",
+        "operationId": "listBrowseRoots",
+        "responses": {
+          "200": {
+            "description": "Configured browse roots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowseRootsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/fs/tree": {
+      "get": {
+        "summary": "List subdirectories of a directory on the backend's machine",
+        "description": "One level, directories only — this endpoint exists so a client can name a workspace, which a browser cannot do for itself. There is deliberately no content counterpart: reading bytes stays session-scoped. Every request must resolve inside a configured root, checked on the canonical path, so `..` and escaping symlinks are refused.",
+        "operationId": "browseDirectories",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "description": "Absolute directory to list. Omitted or empty means the first configured root.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One directory level",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowseResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The path is outside every configured browse root",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The path does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -616,6 +797,8 @@
                   "COMMAND_NOT_SUPPORTED",
                   "APPROVAL_NOT_AVAILABLE",
                   "POLICY_VIOLATION",
+                  "NOT_FOUND",
+                  "METHOD_NOT_ALLOWED",
                   "INTERNAL_ERROR"
                 ]
               },
@@ -973,6 +1156,157 @@
           "modifiedAtMs": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "UpdateSession": {
+        "type": "object",
+        "description": "Both fields optional; an omitted field is left untouched.",
+        "properties": {
+          "flags": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Complete replacement set. An empty object clears all flags."
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "UploadFile": {
+        "type": "object",
+        "required": [
+          "name",
+          "data"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Destination directory relative to the workdir. Empty means the root."
+          },
+          "name": {
+            "type": "string",
+            "description": "Filename; reduced to a single safe path component."
+          },
+          "data": {
+            "type": "string",
+            "description": "File bytes, base64, no `data:` prefix. Max 8 MiB decoded."
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false,
+            "description": "Replace an existing file. Omitted or false refuses instead."
+          }
+        }
+      },
+      "UploadFileResponse": {
+        "type": "object",
+        "required": [
+          "path",
+          "absolutePath",
+          "size"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path relative to the workdir."
+          },
+          "absolutePath": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "BrowseRoot": {
+        "type": "object",
+        "required": [
+          "name",
+          "path"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Display label; `Home` for the home directory."
+          },
+          "path": {
+            "type": "string",
+            "description": "Absolute path."
+          }
+        }
+      },
+      "BrowseRootsResponse": {
+        "type": "object",
+        "required": [
+          "roots",
+          "home"
+        ],
+        "properties": {
+          "roots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BrowseRoot"
+            }
+          },
+          "home": {
+            "type": "string",
+            "description": "Absolute home directory, so a client can abbreviate paths as `~/…`."
+          }
+        }
+      },
+      "BrowseEntry": {
+        "type": "object",
+        "required": [
+          "path",
+          "name",
+          "modifiedAtMs"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path, handed back as a workdir or next listing."
+          },
+          "name": {
+            "type": "string"
+          },
+          "modifiedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "isSymlink": {
+            "type": "boolean",
+            "description": "A listed symlink is always inside a root; escaping ones are omitted."
+          }
+        }
+      },
+      "BrowseResponse": {
+        "type": "object",
+        "required": [
+          "path",
+          "entries",
+          "truncated"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The canonicalized directory listed."
+          },
+          "parent": {
+            "type": "string",
+            "description": "Absent when `path` is itself a configured root, so a \"go up\" affordance cannot leave the permitted set."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BrowseEntry"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
           }
         }
       }
