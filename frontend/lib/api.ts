@@ -183,6 +183,62 @@ export interface SessionFilters {
   updatedBeforeMs?: number;
 }
 
+/** One working directory that groups sessions in the left sidebar. */
+export interface Workspace {
+  /** Absolute path. Display shortens it; every API call needs the real value. */
+  path: string;
+  name: string;
+  sessionCount: number;
+  runningCount: number;
+  lastUsedMs: number;
+  isQuickStart: boolean;
+}
+
+export interface WorkspacesResponse {
+  /** Absolute `~/.agents`, resolved server-side: the browser cannot expand `~`. */
+  quickStartDir: string;
+  dataDir: string;
+  home: string;
+  workspaces: Workspace[];
+}
+
+/** One entry in a session's file tree. */
+export interface FileEntry {
+  /** Path relative to the session workdir. The root itself is `""`. */
+  path: string;
+  name: string;
+  isDir: boolean;
+  size?: number;
+  modifiedAtMs: number;
+  isSymlink?: boolean;
+}
+
+export interface FileTreeResponse {
+  /** Absolute path of the listed directory. */
+  root: string;
+  path: string;
+  entries: FileEntry[];
+  /** True when the directory held more entries than the server will list. */
+  truncated: boolean;
+}
+
+/**
+ * A previewable file. `encoding` decides the viewer, and is derived from the
+ * bytes server-side rather than from the extension, so a `.log` holding binary
+ * output is reported as binary rather than rendered as mojibake.
+ */
+export interface FileContentResponse {
+  path: string;
+  absolutePath: string;
+  size: number;
+  encoding: "text" | "image" | "binary";
+  mimeType: string;
+  /** Text, or base64 for images. Absent for binaries and oversized images. */
+  content?: string;
+  truncated: boolean;
+  modifiedAtMs: number;
+}
+
 export interface ImportSessionRequest {
   /** TraceDB session id, formatted `<agent>:<native-id>`. */
   traceSessionId: string;
@@ -286,6 +342,20 @@ export const api = {
         method: "POST",
         body: JSON.stringify(req),
       }),
+  },
+  workspaces: {
+    list: () => fetchAPI<WorkspacesResponse>("/workspaces"),
+  },
+  files: {
+    /** One directory level. Lazy expansion is what keeps a large repo usable. */
+    tree: (sessionId: string, path = "") =>
+      fetchAPI<FileTreeResponse>(
+        `/sessions/${sessionId}/files${queryString({ path })}`,
+      ),
+    content: (sessionId: string, path: string) =>
+      fetchAPI<FileContentResponse>(
+        `/sessions/${sessionId}/files/content${queryString({ path })}`,
+      ),
   },
   turns: {
     create: (sessionId: string, req: CreateTurnRequest) =>

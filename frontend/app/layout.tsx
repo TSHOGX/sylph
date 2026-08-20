@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { Providers } from "@/lib/providers";
+import { AppShell } from "@/components/app-shell";
 
 export const metadata: Metadata = {
   title: "Sylph Web",
@@ -26,7 +27,16 @@ export default function RootLayout({
         >
           Skip to main content
         </a>
-        <Providers>{children}</Providers>
+        {/*
+          The shell lives in the layout, not in each page: sidebars must keep
+          their state and scroll position across navigation, which a shell
+          mounted inside a page cannot do because it remounts on every route
+          change. `<main id="main">` is provided by the shell, so pages no
+          longer declare their own.
+        */}
+        <Providers>
+          <AppShell>{children}</AppShell>
+        </Providers>
       </body>
     </html>
   );
