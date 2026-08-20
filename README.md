@@ -77,7 +77,12 @@ resets, or rewrites prompts for an imported native session.
 ```sh
 cd backend && cargo test && cargo clippy
 cd frontend && npm run build && npm run lint
+cd frontend && npm run e2e
 ```
+
+`npm run e2e` starts its own backend and frontend on separate ports with a
+throwaway data directory and a mock runner, so it does not touch your journal,
+your archive, or your real agents. It needs no servers running beforehand.
 
 ### Troubleshooting
 
