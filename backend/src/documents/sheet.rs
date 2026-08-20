@@ -116,26 +116,32 @@ fn build(
 /// `Empty` becomes `None` rather than an empty-string cell: sheets are mostly
 /// empty, and an object per blank cell is most of the payload.
 fn convert(value: Option<&Data>, formula: Option<&String>) -> Option<Cell> {
-    let cell = match value {
-        // An uncalculated formula: the cell holds an expression but no cached
-        // result. Excel always writes one, but generators frequently do not —
-        // openpyxl writes `=B2+C2` with no `<v>` — so without this branch every
-        // computed cell in an agent-generated workbook renders blank. Showing the
-        // expression is the honest answer: there is no value to show, and the
-        // formula is what the file actually contains.
-        None | Some(Data::Empty) => {
-            let expression = formula?;
-            return Some(Cell::text(format!("={expression}")).with_formula(expression.clone()));
-        }
-        Some(Data::String(s)) if s.is_empty() => return None,
-        Some(Data::String(s)) => Cell::text(s.clone()),
-        Some(Data::Float(f)) => Cell::number(*f),
-        Some(Data::Int(i)) => Cell::number(*i as f64),
-        Some(Data::Bool(b)) => Cell::bool(*b),
+    // An uncalculated formula: the cell holds an expression but no usable result.
+    // Excel always writes one, but generators frequently do not — openpyxl emits
+    // either `<f>B2+C2</f>` alone or with an *empty* `<v></v>`, which calamine
+    // surfaces as `Empty` and `String("")` respectively. Both are caught here,
+    // ahead of the empty-cell rule, or every computed column in a generated
+    // workbook renders blank. Showing the expression is the honest answer: there
+    // is no value to show, and the expression is what the file contains.
+    let blank = matches!(value, None | Some(Data::Empty))
+        || matches!(value, Some(Data::String(s)) if s.is_empty());
+    if blank {
+        let expression = formula?;
+        return Some(Cell::text(format!("={expression}")).with_formula(expression.clone()));
+    }
+
+    let cell = match value? {
+        // Handled above; both arms are unreachable and exist for exhaustiveness.
+        Data::Empty => return None,
+        Data::String(s) if s.is_empty() => return None,
+        Data::String(s) => Cell::text(s.clone()),
+        Data::Float(f) => Cell::number(*f),
+        Data::Int(i) => Cell::number(*i as f64),
+        Data::Bool(b) => Cell::bool(*b),
         // The whole reason calamine carries the `dates` feature. Without the
         // conversion the client receives 46112 and cannot recover 2026-03-31,
         // because the epoch and the 1900-leap-year quirk live in the file.
-        Some(Data::DateTime(dt)) => match dt.as_datetime() {
+        Data::DateTime(dt) => match dt.as_datetime() {
             Some(parsed) => Cell::date(
                 if dt.is_datetime() && parsed.time() != chrono::NaiveTime::MIN {
                     parsed.format("%Y-%m-%d %H:%M").to_string()
@@ -148,9 +154,9 @@ fn convert(value: Option<&Data>, formula: Option<&String>) -> Option<Cell> {
             // the number beats showing nothing.
             None => Cell::number(dt.as_f64()),
         },
-        Some(Data::DateTimeIso(s)) => Cell::date(s.clone(), None),
-        Some(Data::DurationIso(s)) => Cell::text(s.clone()),
-        Some(Data::Error(e)) => Cell::error(format!("{e:?}")),
+        Data::DateTimeIso(s) => Cell::date(s.clone(), None),
+        Data::DurationIso(s) => Cell::text(s.clone()),
+        Data::Error(e) => Cell::error(format!("{e:?}")),
     };
 
     Some(match formula {
@@ -261,21 +267,29 @@ mod tests {
 
     /// A formula with no cached result still shows something.
     ///
-    /// Found against a real openpyxl file: it writes `=B2+C2` with no `<v>`, so
-    /// the cell arrives as `Empty` with a formula beside it. Returning `None` for
-    /// it — the obvious reading of "empty" — rendered every computed column in a
-    /// generated workbook as blank.
+    /// Found against real openpyxl output, which writes a formula either with no
+    /// `<v>` at all or with an empty `<v></v>`. calamine reports those as `Empty`
+    /// and `String("")`, and treating either as a blank cell — the obvious
+    /// reading — blanked every computed column in a generated workbook.
     #[test]
     fn an_uncalculated_formula_shows_its_expression_rather_than_nothing() {
         let file = testing::xlsx_uncalculated_formulas();
         let grid = parse(file.path(), Window::new(None, None, None)).unwrap();
 
-        let computed = grid.rows[1][1]
+        // Absent `<v>`.
+        let missing = grid.rows[1][1]
             .as_ref()
-            .expect("a formula cell must not be dropped for having no cached value");
-        assert_eq!(computed.v, "=B1+C1", "the expression stands in for the value");
-        assert_eq!(computed.f.as_deref(), Some("B1+C1"));
-        assert_eq!(computed.t, crate::documents::grid::CellType::Formula);
+            .expect("a formula with no cached value must not be dropped");
+        assert_eq!(missing.v, "=B1+C1", "the expression stands in for the value");
+        assert_eq!(missing.f.as_deref(), Some("B1+C1"));
+        assert_eq!(missing.t, crate::documents::grid::CellType::Formula);
+
+        // Empty `<v></v>`, which is the spelling openpyxl actually emits.
+        let empty = grid.rows[1][2]
+            .as_ref()
+            .expect("an empty <v> is still a formula cell, not a blank one");
+        assert_eq!(empty.v, "=B1*2");
+        assert_eq!(empty.f.as_deref(), Some("B1*2"));
     }
 
     #[test]

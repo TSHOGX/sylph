@@ -268,12 +268,14 @@ fn formula_cell(reference: &str, formula: &str, cached: &str) -> String {
 /// an agent-generated workbook renders blank, which is how this was found.
 pub fn xlsx_uncalculated_formulas() -> NamedTempFile {
     let rows = format!(
-        r#"<row r="1">{}{}</row><row r="2">{}{}</row>"#,
+        r#"<row r="1">{}{}{}</row><row r="2">{}{}</row>"#,
         text_cell("A1", "Region"),
         text_cell("B1", "Total"),
+        text_cell("C1", "Double"),
         text_cell("A2", "APAC"),
-        // A formula with no `<v>`: the shape openpyxl emits.
-        r#"<c r="B2"><f>B1+C1</f></c>"#,
+        // Two spellings of "no result", both of which openpyxl emits: an absent
+        // `<v>` and an empty one. calamine reports them as Empty and String("").
+        r#"<c r="B2"><f>B1+C1</f></c><c r="C2"><f>B1*2</f><v></v></c>"#,
     );
     xlsx(&[("Sales", worksheet(rows))])
 }
