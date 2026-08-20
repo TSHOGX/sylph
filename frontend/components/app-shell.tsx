@@ -51,6 +51,10 @@ const SettingsPanel = dynamic(
   () => import("@/components/settings-panel").then((m) => m.SettingsPanel),
   { ssr: false },
 );
+const HistoryOverlay = dynamic(
+  () => import("@/components/history-overlay").then((m) => m.HistoryOverlay),
+  { ssr: false },
+);
 
 /**
  * Routes that own the full width and get no shell.
@@ -187,6 +191,7 @@ function ShellFrame({
       {overlay === "search" && <SearchOverlay />}
       {overlay === "palette" && <CommandPalette />}
       {overlay === "settings" && <SettingsPanel />}
+      {overlay === "history" && <HistoryOverlay />}
     </div>
   );
 }

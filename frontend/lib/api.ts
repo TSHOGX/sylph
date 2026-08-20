@@ -29,6 +29,14 @@ export interface Session {
   workdir: string;
   /** Nullable: the backend stores title as an optional column. */
   title: string | null;
+  /**
+   * TraceDB id this session was imported from, when it was.
+   *
+   * Present only for imported native sessions. The archive browser uses it to
+   * recognize that an archived row and a live session are one conversation, and
+   * list it once rather than twice.
+   */
+  traceSessionId?: string;
   flagsJson: string;
   status: SessionStatus;
   createdAtMs: number;
@@ -192,6 +200,13 @@ export interface Workspace {
   runningCount: number;
   lastUsedMs: number;
   isQuickStart: boolean;
+  /**
+   * Archived sessions TraceDB holds here.
+   *
+   * Zero unless the request passed `includeArchived`, so zero means "not
+   * counted" rather than "no history".
+   */
+  archivedCount: number;
 }
 
 export interface WorkspacesResponse {
@@ -243,6 +258,57 @@ export interface ImportSessionRequest {
   /** TraceDB session id, formatted `<agent>:<native-id>`. */
   traceSessionId: string;
   title?: string;
+}
+
+/**
+ * One archived session, as the sidebar and history browser list it.
+ *
+ * `id` is a TraceDB session id (`claude:uuid`), not a Sylph Web session id — and
+ * for a subagent it carries a `/agent-...` suffix, so it must be
+ * percent-encoded into a URL path.
+ */
+export interface ArchiveSession {
+  id: string;
+  agent: string;
+  /** Title, else the opening typed message. Absent for ~2% of real sessions. */
+  label?: string;
+  cwd: string;
+  model?: string;
+  startedAtMs?: number;
+  endedAtMs?: number;
+  /** Events the archive holds: the only size signal available. */
+  events: number;
+  /** Subagent sessions folded into this row rather than listed separately. */
+  subagentCount: number;
+  /** Live session id when already imported, so the UI opens it instead. */
+  sessionId?: string;
+}
+
+export interface ArchiveListResponse {
+  sessions: ArchiveSession[];
+  /** Cursor to continue from; absent on the last page. */
+  nextCursor?: string;
+  /**
+   * False when the TraceDB archive could not be reached. The request still
+   * succeeds, so a workspace with no archive reads as "live only" rather than
+   * as an error.
+   */
+  available: boolean;
+  detail?: string;
+}
+
+/** A read-only archived transcript, normalized into live timeline events. */
+export interface ArchiveTranscript {
+  id: string;
+  agent: string;
+  label?: string;
+  /** Absent for 19% of the archive, which is why a session may be unresumable. */
+  cwd?: string;
+  startedAtMs?: number;
+  events: StreamEvent[];
+  /** True when `limit` cut the stream short. */
+  truncated: boolean;
+  sessionId?: string;
 }
 
 /**
@@ -344,7 +410,38 @@ export const api = {
       }),
   },
   workspaces: {
-    list: () => fetchAPI<WorkspacesResponse>("/workspaces"),
+    /**
+     * `includeArchived` also reports directories that exist only in the TraceDB
+     * archive. Off by default because the sidebar polls this; surfaces where the
+     * user *picks* a directory pass it, since a directory they want to work in
+     * has no live session yet.
+     */
+    list: (options: { includeArchived?: boolean } = {}) =>
+      fetchAPI<WorkspacesResponse>(
+        `/workspaces${queryString({
+          includeArchived: options.includeArchived ? "true" : undefined,
+        })}`,
+      ),
+  },
+  archive: {
+    /**
+     * Archived sessions that ran in one directory, newest first.
+     *
+     * This is what makes a workspace's past visible: `search` only answers a
+     * question the user already knows how to ask.
+     */
+    list: (params: { workdir: string; limit?: number; cursor?: string }) =>
+      fetchAPI<ArchiveListResponse>(`/archive/sessions${queryString({ ...params })}`),
+    /**
+     * One archived transcript, read-only.
+     *
+     * The id is encoded whole rather than interpolated: a subagent id contains a
+     * `/`, which would otherwise be read as a path separator.
+     */
+    get: (traceId: string, limit?: number) =>
+      fetchAPI<ArchiveTranscript>(
+        `/archive/sessions/${encodeURIComponent(traceId)}${queryString({ limit })}`,
+      ),
   },
   files: {
     /** One directory level. Lazy expansion is what keeps a large repo usable. */

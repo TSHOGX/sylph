@@ -192,3 +192,57 @@ test("expand-all and collapse-all drive every disclosure in the timeline", async
   await page.getByRole("button", { name: "Collapse all" }).click();
   await expect(thinking).toBeHidden();
 });
+
+/**
+ * Archive browsing with no archive.
+ *
+ * The e2e backend points `TRACEDB_BIN` at a path that does not exist, so these
+ * cover the degradation path: on a machine without TraceDB the sidebar must still
+ * list live sessions, and the history browser must say the archive is unavailable
+ * rather than render an error or hang. That is the state every user without a
+ * TraceDB build is in, which makes it the more important of the two paths to pin.
+ */
+test("the history browser opens by keyboard and reports an unavailable archive", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  await page.keyboard.press("ControlOrMeta+Shift+k");
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+
+  // Scoped to the open session's workspace, not a global list.
+  await expect(dialog.getByRole("combobox", { name: /filter this workspace/i })).toBeFocused();
+  await expect(dialog.getByText(/archive is unavailable/i)).toBeVisible();
+
+  // Escape closes it, like every other overlay.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+});
+
+test("the sidebar still lists live sessions when the archive is absent", async ({ page }) => {
+  await createSession(page);
+
+  const sidebar = page.getByRole("navigation", { name: "Sessions by workspace" });
+  await expect(sidebar).toBeVisible();
+
+  // The live session is listed, and no archived row is invented.
+  await expect(sidebar.getByRole("link").first()).toBeVisible();
+  await expect(sidebar.locator('a[href^="/archive/"]')).toHaveCount(0);
+});
+
+test("an archived session missing from the archive says so, with no composer", async ({
+  page,
+}) => {
+  // Also covers the catch-all route decoding a colon-bearing trace id: a
+  // double-encoded id would look up a literal `claude%3A...` and report the wrong
+  // thing.
+  await page.goto(`/archive/${encodeURIComponent("claude:does-not-exist")}`);
+
+  // A heading, not `role=alert`: Next mounts its own empty route announcer with
+  // that role, so matching on the role alone is ambiguous.
+  await expect(page.getByRole("heading", { level: 1 })).toContainText(
+    /archive|could not load/i,
+  );
+  await expect(page.getByLabel("Message")).toHaveCount(0);
+});

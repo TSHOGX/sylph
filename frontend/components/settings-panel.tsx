@@ -264,8 +264,10 @@ function AgentsSection() {
 function WorkspacesSection() {
   const { settings, update } = useSettings();
   const { data } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: () => api.workspaces.list(),
+    // Includes archive-only directories so a project with history but no live
+    // session can still be pinned — which is the whole point of pinning.
+    queryKey: ["workspaces", { includeArchived: true }],
+    queryFn: () => api.workspaces.list({ includeArchived: true }),
     staleTime: 30_000,
   });
 
@@ -312,6 +314,10 @@ function WorkspacesSection() {
                   <span className="shrink-0 text-[10px] text-gray-500">
                     {workspace.sessionCount}{" "}
                     {workspace.sessionCount === 1 ? "session" : "sessions"}
+                    {/* Archived history is why a directory with no live session
+                        is worth pinning at all, so it is stated rather than left
+                        for the user to discover after pinning. */}
+                    {workspace.archivedCount > 0 && ` · ${workspace.archivedCount} archived`}
                     {workspace.lastUsedMs > 0 && ` · ${formatRelative(workspace.lastUsedMs)}`}
                   </span>
                   {!workspace.isQuickStart && (
@@ -347,6 +353,7 @@ function WorkspacesSection() {
 const ACTION_LABELS: Record<ShortcutAction, string> = {
   search: "Global search",
   commandPalette: "Command palette",
+  browseWorkspaceHistory: "Browse workspace history",
   newSession: "New session",
   quickStart: "Quick Start session",
   toggleLeftSidebar: "Toggle workspaces sidebar",

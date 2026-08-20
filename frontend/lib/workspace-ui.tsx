@@ -28,7 +28,7 @@ import { comboFromEvent, isTypingTarget } from "@/lib/shortcuts";
 import type { ShortcutAction } from "@/lib/settings";
 
 /** At most one overlay is up at a time; they are all modal. */
-export type Overlay = "none" | "search" | "palette" | "settings";
+export type Overlay = "none" | "search" | "palette" | "settings" | "history";
 
 /** A file the Artifacts pane should show, addressed inside a session. */
 export interface ArtifactTarget {
@@ -61,6 +61,17 @@ interface WorkspaceUIValue {
   clearArtifact: () => void;
   /** Register the open session's shortcut handler. Returns an unsubscriber. */
   registerSessionActions: (handler: SessionActionHandler) => () => void;
+  /**
+   * Directory the history browser scopes itself to.
+   *
+   * Set by whatever established the context — the open session's `workdir`, or
+   * the sidebar group whose "Browse all" was clicked. `null` means nothing has,
+   * and the overlay then asks the user to pick a workspace instead of guessing.
+   */
+  activeWorkdir: string | null;
+  setActiveWorkdir: (workdir: string | null) => void;
+  /** Open the history browser, optionally scoped to a specific directory. */
+  browseHistory: (workdir?: string) => void;
   /** Run a shortcut action, for the command palette to reuse the same paths. */
   runAction: (action: ShortcutAction) => void;
 }
@@ -90,7 +101,13 @@ export function WorkspaceUIProvider({
 
   const [overlay, setOverlay] = useState<Overlay>("none");
   const [artifact, setArtifact] = useState<ArtifactTarget | null>(null);
+  const [activeWorkdir, setActiveWorkdir] = useState<string | null>(null);
   const sessionHandlerRef = useRef<SessionActionHandler | null>(null);
+
+  const browseHistory = useCallback((workdir?: string) => {
+    if (workdir) setActiveWorkdir(workdir);
+    setOverlay("history");
+  }, []);
 
   const toggleLeft = useCallback(
     () => update({ showLeftSidebar: !leftOpen }),
@@ -139,6 +156,9 @@ export function WorkspaceUIProvider({
           return;
         case "commandPalette":
           setOverlay("palette");
+          return;
+        case "browseWorkspaceHistory":
+          setOverlay("history");
           return;
         case "openSettings":
           setOverlay("settings");
@@ -212,6 +232,9 @@ export function WorkspaceUIProvider({
       showArtifact,
       clearArtifact: () => setArtifact(null),
       registerSessionActions,
+      activeWorkdir,
+      setActiveWorkdir,
+      browseHistory,
       runAction,
     }),
     [
@@ -224,6 +247,8 @@ export function WorkspaceUIProvider({
       artifact,
       showArtifact,
       registerSessionActions,
+      activeWorkdir,
+      browseHistory,
       runAction,
     ],
   );

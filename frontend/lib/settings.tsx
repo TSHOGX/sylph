@@ -23,6 +23,7 @@ export type Density = "compact" | "normal" | "comfortable";
 export type ShortcutAction =
   | "search"
   | "commandPalette"
+  | "browseWorkspaceHistory"
   | "newSession"
   | "quickStart"
   | "toggleLeftSidebar"
@@ -65,9 +66,14 @@ export interface Settings {
  * `Cmd+P` is a browser print binding, and `Cmd+N` opens a browser window. Both
  * are preventable from a page and are what a user of a workspace app expects to
  * be taken over; the settings panel exists so anyone who disagrees can rebind.
+ *
+ * `Cmd+Shift+K` browses one workspace's archived history, deliberately adjacent
+ * to `Cmd+K`: both answer "find a session", and the shifted form is the one
+ * scoped to where you are working.
  */
 export const DEFAULT_SHORTCUTS: Record<string, ShortcutAction> = {
   "Mod+k": "search",
+  "Mod+Shift+k": "browseWorkspaceHistory",
   "Mod+p": "commandPalette",
   "Mod+n": "newSession",
   "Mod+Shift+n": "quickStart",
