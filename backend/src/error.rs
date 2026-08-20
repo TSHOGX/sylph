@@ -43,6 +43,13 @@ pub enum Error {
     #[error("Archived session already imported")]
     SessionAlreadyImported,
 
+    /// The archive has the session but recorded no working directory for it,
+    /// so there is nothing to resume into. Distinct from `InvalidRequest`
+    /// because the request was well-formed: the gap is in the archive, and the
+    /// remedy is on the archive side, not the caller's.
+    #[error("Archived session has no recorded working directory: {0}")]
+    TraceSessionNotResumable(String),
+
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
@@ -137,6 +144,16 @@ impl Error {
                 "SESSION_ALREADY_IMPORTED",
                 "This archived session has already been imported".to_string(),
             ),
+            // 422: understood and well-formed, but the archived session lacks a
+            // field import cannot proceed without.
+            Error::TraceSessionNotResumable(id) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "TRACE_SESSION_NOT_RESUMABLE",
+                format!(
+                    "The archive recorded no working directory for {id}, \
+                     so there is no directory to resume it in."
+                ),
+            ),
             Error::InvalidRequest(msg) => {
                 (StatusCode::BAD_REQUEST, "INVALID_REQUEST", msg.clone())
             }
@@ -230,6 +247,10 @@ mod tests {
             Error::SessionAlreadyImported.code(),
             "SESSION_ALREADY_IMPORTED"
         );
+        assert_eq!(
+            Error::TraceSessionNotResumable("x".into()).code(),
+            "TRACE_SESSION_NOT_RESUMABLE"
+        );
         assert_eq!(Error::InvalidRequest("x".into()).code(), "INVALID_REQUEST");
     }
 
@@ -240,6 +261,11 @@ mod tests {
         assert_eq!(
             Error::TraceSessionNotFound("claude:abc".into()).status(),
             StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            // Well-formed request, unusable archive record: not a 400.
+            Error::TraceSessionNotResumable("claude:abc".into()).status(),
+            StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(
             Error::SessionAlreadyImported.status(),

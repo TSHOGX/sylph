@@ -197,6 +197,8 @@ function describeImportError(error: unknown): string {
       return "The archive no longer has this session. It may have been pruned.";
     case "TRACEDB_UNAVAILABLE":
       return "The archive became unreachable during import. Try again once trace-db is running.";
+    case "TRACE_SESSION_NOT_RESUMABLE":
+      return "The archive recorded no working directory for this session, so there is no directory to resume it in. Sessions archived by older trace-db versions may be missing this.";
     default:
       return error.message;
   }

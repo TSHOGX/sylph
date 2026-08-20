@@ -272,12 +272,9 @@ pub async fn import(
         .ok_or_else(|| Error::TraceSessionNotFound(trace_id.to_string()))?;
 
     // Without a recorded working directory there is nothing to resume into.
-    let workdir = facts.cwd.ok_or_else(|| {
-        Error::InvalidRequest(
-            "This archived session recorded no working directory, so it cannot be resumed."
-                .to_string(),
-        )
-    })?;
+    let workdir = facts
+        .cwd
+        .ok_or_else(|| Error::TraceSessionNotResumable(trace_id.to_string()))?;
     if !std::path::Path::new(&workdir).exists() {
         return Err(Error::InvalidRequest(format!(
             "The working directory this session ran in no longer exists: {workdir}"

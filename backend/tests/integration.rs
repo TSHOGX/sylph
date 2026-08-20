@@ -1111,6 +1111,69 @@ async fn importing_a_native_session_preserves_its_identity() {
 }
 
 #[tokio::test]
+async fn importing_reads_the_workdir_from_session_metadata() {
+    // The bug this pins: a real 413-event session carried no event with parsable
+    // cwd JSON, so scanning events rejected a session the archive knew the
+    // directory for. Archives that report session-level metadata must be read
+    // there. No event here carries a cwd, so only the metadata can satisfy it.
+    let host = TestBackend::start().await;
+    let workdir = host.workdir().display().to_string();
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_events(json!({
+        "session": {"cwd": workdir, "title": "Recorded title"},
+        "mode": "full",
+        "events": [
+            {"kind": "user", "text": "resume this", "createdAtMs": 1_700_000_000_000i64, "idx": 0},
+        ],
+    })))
+    .await;
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions/import",
+            json!({"traceSessionId": "mock:f45ba2ed-3866-4dba-9769-801029b16aa3"}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let session = json_body(response).await["session"].clone();
+    assert_eq!(session["workdir"], workdir);
+    // The archive's own title wins over the opening ask when it has one.
+    assert_eq!(session["title"], "Recorded title");
+}
+
+#[tokio::test]
+async fn importing_an_archived_session_without_a_workdir_is_unprocessable() {
+    // Well-formed request, unusable record: the archive has the session but
+    // never recorded where it ran. That is not a client mistake, so it must not
+    // report as INVALID_REQUEST, and the code has to be distinguishable so the
+    // UI can explain the actual remedy.
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_events(json!([
+        {"kind": "user", "subtype": null, "text": "no cwd anywhere", "createdAtMs": 1, "idx": 0},
+        {"kind": "assistant", "subtype": null, "text": "done", "createdAtMs": 2, "idx": 1},
+    ])))
+    .await;
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions/import",
+            json!({"traceSessionId": "mock:f45ba2ed-3866-4dba-9769-801029b16aa3"}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "TRACE_SESSION_NOT_RESUMABLE");
+    // The id makes it clear which archived session is unusable.
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("mock:f45ba2ed-3866-4dba-9769-801029b16aa3"),
+        "id missing from message: {body}"
+    );
+}
+
+#[tokio::test]
 async fn importing_the_same_archived_session_twice_conflicts() {
     let (backend, _host, _workdir) = backend_with_archived_session("hi").await;
 
