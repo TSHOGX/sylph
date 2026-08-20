@@ -77,11 +77,18 @@ fn build(
     for r in start..end {
         let mut row = Vec::with_capacity(range.width());
         for c in 0..range.width() {
+            // Absolute sheet coordinates for the formula lookup, because the
+            // formula range carries its *own* origin — for a sheet whose values
+            // start at A1 and whose only formulas are in D2:D4, the value range
+            // starts at (0,0) while the formula range starts at (1,3). Indexing
+            // both with the same relative pair tagged unrelated text cells as
+            // formulas, which is what this arithmetic exists to avoid.
+            let absolute = (origin_row + r as u32, origin_col + c as u32);
             row.push(convert(
                 range.get((r, c)),
-                // Formula coordinates are relative to the formula range's own
-                // origin, which matches the value range's for the same sheet.
-                formulas.and_then(|f| f.get((r, c))).filter(|s| !s.is_empty()),
+                formulas
+                    .and_then(|f| f.get_value(absolute))
+                    .filter(|s| !s.is_empty()),
             ));
         }
         // Trailing empties carry no information and are most of a sparse row.
@@ -109,17 +116,26 @@ fn build(
 /// `Empty` becomes `None` rather than an empty-string cell: sheets are mostly
 /// empty, and an object per blank cell is most of the payload.
 fn convert(value: Option<&Data>, formula: Option<&String>) -> Option<Cell> {
-    let cell = match value? {
-        Data::Empty => return None,
-        Data::String(s) if s.is_empty() => return None,
-        Data::String(s) => Cell::text(s.clone()),
-        Data::Float(f) => Cell::number(*f),
-        Data::Int(i) => Cell::number(*i as f64),
-        Data::Bool(b) => Cell::bool(*b),
+    let cell = match value {
+        // An uncalculated formula: the cell holds an expression but no cached
+        // result. Excel always writes one, but generators frequently do not —
+        // openpyxl writes `=B2+C2` with no `<v>` — so without this branch every
+        // computed cell in an agent-generated workbook renders blank. Showing the
+        // expression is the honest answer: there is no value to show, and the
+        // formula is what the file actually contains.
+        None | Some(Data::Empty) => {
+            let expression = formula?;
+            return Some(Cell::text(format!("={expression}")).with_formula(expression.clone()));
+        }
+        Some(Data::String(s)) if s.is_empty() => return None,
+        Some(Data::String(s)) => Cell::text(s.clone()),
+        Some(Data::Float(f)) => Cell::number(*f),
+        Some(Data::Int(i)) => Cell::number(*i as f64),
+        Some(Data::Bool(b)) => Cell::bool(*b),
         // The whole reason calamine carries the `dates` feature. Without the
         // conversion the client receives 46112 and cannot recover 2026-03-31,
         // because the epoch and the 1900-leap-year quirk live in the file.
-        Data::DateTime(dt) => match dt.as_datetime() {
+        Some(Data::DateTime(dt)) => match dt.as_datetime() {
             Some(parsed) => Cell::date(
                 if dt.is_datetime() && parsed.time() != chrono::NaiveTime::MIN {
                     parsed.format("%Y-%m-%d %H:%M").to_string()
@@ -132,9 +148,9 @@ fn convert(value: Option<&Data>, formula: Option<&String>) -> Option<Cell> {
             // the number beats showing nothing.
             None => Cell::number(dt.as_f64()),
         },
-        Data::DateTimeIso(s) => Cell::date(s.clone(), None),
-        Data::DurationIso(s) => Cell::text(s.clone()),
-        Data::Error(e) => Cell::error(format!("{e:?}")),
+        Some(Data::DateTimeIso(s)) => Cell::date(s.clone(), None),
+        Some(Data::DurationIso(s)) => Cell::text(s.clone()),
+        Some(Data::Error(e)) => Cell::error(format!("{e:?}")),
     };
 
     Some(match formula {
@@ -209,6 +225,57 @@ mod tests {
 
         let error = parse(file.path(), Window::new(Some(9), None, None)).unwrap_err();
         assert_eq!(error.code(), "INVALID_REQUEST");
+    }
+
+    /// A formula lands on the cell that owns it, and nowhere else.
+    ///
+    /// This is a regression test for a real bug: calamine gives the formula range
+    /// its own origin, so a sheet with values from A1 and formulas only in C2:C3
+    /// has a value range starting at (0,0) and a formula range starting at (1,2).
+    /// Looking both up with the same relative coordinates tagged "Region" and
+    /// "APAC" as formulas — visible only against a real file, since a fixture with
+    /// formulas everywhere would have hidden it.
+    #[test]
+    fn formulas_attach_to_their_own_cells_not_to_shifted_ones() {
+        let file = testing::xlsx_with_formulas();
+        let grid = parse(file.path(), Window::new(None, None, None)).unwrap();
+
+        // Header row: all text, no formulas anywhere in it.
+        for cell in grid.rows[0].iter().flatten() {
+            assert_eq!(cell.t, crate::documents::grid::CellType::Text, "{cell:?}");
+            assert!(cell.f.is_none(), "a header cell carries no formula: {cell:?}");
+        }
+
+        // Body: the label and the number are untouched, only C is computed.
+        let row = &grid.rows[1];
+        assert_eq!(row[0].as_ref().unwrap().v, "APAC");
+        assert!(row[0].as_ref().unwrap().f.is_none());
+        assert_eq!(row[1].as_ref().unwrap().t, crate::documents::grid::CellType::Number);
+        assert!(row[1].as_ref().unwrap().f.is_none());
+
+        let computed = row[2].as_ref().unwrap();
+        assert_eq!(computed.f.as_deref(), Some("B2*2"));
+        assert_eq!(computed.t, crate::documents::grid::CellType::Formula);
+        assert_eq!(computed.v, "2400", "the cached result, not the expression");
+    }
+
+    /// A formula with no cached result still shows something.
+    ///
+    /// Found against a real openpyxl file: it writes `=B2+C2` with no `<v>`, so
+    /// the cell arrives as `Empty` with a formula beside it. Returning `None` for
+    /// it — the obvious reading of "empty" — rendered every computed column in a
+    /// generated workbook as blank.
+    #[test]
+    fn an_uncalculated_formula_shows_its_expression_rather_than_nothing() {
+        let file = testing::xlsx_uncalculated_formulas();
+        let grid = parse(file.path(), Window::new(None, None, None)).unwrap();
+
+        let computed = grid.rows[1][1]
+            .as_ref()
+            .expect("a formula cell must not be dropped for having no cached value");
+        assert_eq!(computed.v, "=B1+C1", "the expression stands in for the value");
+        assert_eq!(computed.f.as_deref(), Some("B1+C1"));
+        assert_eq!(computed.t, crate::documents::grid::CellType::Formula);
     }
 
     #[test]

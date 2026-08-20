@@ -53,7 +53,9 @@ fn a_real_xlsx_from_openpyxl_parses() {
         "an Excel serial must arrive as a date, got {dates:?}"
     );
 
-    // Formulas, which openpyxl writes and the fixtures do not.
+    // Formulas, which openpyxl writes without a cached `<v>`. Returning None for
+    // such a cell — the obvious reading of "empty" — rendered every computed
+    // column in a generated workbook blank, which is how that bug was found.
     let formulas: Vec<&str> = grid
         .rows
         .iter()
@@ -62,6 +64,10 @@ fn a_real_xlsx_from_openpyxl_parses() {
         .filter_map(|c| c.f.as_deref())
         .collect();
     println!("formulas: {formulas:?}");
+    assert!(
+        formulas.contains(&"B2+C2"),
+        "an uncalculated formula must still reach the payload, got {formulas:?}"
+    );
 }
 
 #[test]

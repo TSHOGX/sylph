@@ -234,6 +234,50 @@ pub fn xlsx_wide(cols: usize) -> NamedTempFile {
     xlsx(&[("Wide", worksheet(format!(r#"<row r="1">{header}</row>"#)))])
 }
 
+/// A sheet whose formulas sit in a different region from its values.
+///
+/// The shape that exposed a real bug: calamine gives the formula range its own
+/// origin, so a sheet with values from A1 and formulas only in D2:D4 has a value
+/// range starting at (0,0) and a formula range starting at (1,3). Indexing both
+/// with the same relative coordinates tagged unrelated text cells as formulas.
+pub fn xlsx_with_formulas() -> NamedTempFile {
+    let rows = format!(
+        r#"<row r="1">{}{}{}</row><row r="2">{}{}{}</row><row r="3">{}{}{}</row>"#,
+        text_cell("A1", "Region"),
+        text_cell("B1", "Q1"),
+        text_cell("C1", "Total"),
+        text_cell("A2", "APAC"),
+        number_cell("B2", "1200"),
+        formula_cell("C2", "B2*2", "2400"),
+        text_cell("A3", "EMEA"),
+        number_cell("B3", "980"),
+        formula_cell("C3", "B3*2", "1960"),
+    );
+    xlsx(&[("Sales", worksheet(rows))])
+}
+
+/// A computed cell: the formula plus its cached result, as Excel stores both.
+fn formula_cell(reference: &str, formula: &str, cached: &str) -> String {
+    format!(r#"<c r="{reference}"><f>{formula}</f><v>{cached}</v></c>"#)
+}
+
+/// A sheet whose formulas carry no cached result.
+///
+/// Excel always writes a `<v>` beside a formula; generators frequently do not —
+/// openpyxl writes `=B2+C2` alone. Without special handling every computed cell in
+/// an agent-generated workbook renders blank, which is how this was found.
+pub fn xlsx_uncalculated_formulas() -> NamedTempFile {
+    let rows = format!(
+        r#"<row r="1">{}{}</row><row r="2">{}{}</row>"#,
+        text_cell("A1", "Region"),
+        text_cell("B1", "Total"),
+        text_cell("A2", "APAC"),
+        // A formula with no `<v>`: the shape openpyxl emits.
+        r#"<c r="B2"><f>B1+C1</f></c>"#,
+    );
+    xlsx(&[("Sales", worksheet(rows))])
+}
+
 // ------------------------------------------------------------------ documents
 
 /// A Word document exercising headings, lists, formatting, and a table.
