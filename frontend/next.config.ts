@@ -19,6 +19,12 @@ import type { NextConfig } from "next";
 const backend = process.env.SYLPH_WEB_BACKEND ?? "http://localhost:4317";
 
 const config: NextConfig = {
+  /**
+   * Emit a self-contained server bundle under `.next/standalone`, so an
+   * install needs neither the repo nor `npm install` at runtime. The bundle
+   * excludes `.next/static` and `public`, which `scripts/install.sh` copies in.
+   */
+  output: "standalone",
   async rewrites() {
     return [
       {
