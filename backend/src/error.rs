@@ -295,6 +295,70 @@ mod tests {
         assert_eq!(Error::InvalidRequest("x".into()).code(), "INVALID_REQUEST");
     }
 
+    /// Every code this type can emit must appear in the published enum.
+    ///
+    /// The assertions above pin the *spelling* of individual codes but compare
+    /// them against string literals, so both sides could drift from the schema
+    /// together and still pass. That is exactly what happened: the schema said
+    /// `TRACE_NOT_RESUMABLE` while this type emitted
+    /// `TRACE_SESSION_NOT_RESUMABLE`, and `TURN_NOT_FOUND` and `UNAUTHORIZED`
+    /// were missing from it entirely, for as long as the mirror was maintained
+    /// by hand. Reading the file is what makes the test able to notice.
+    ///
+    /// One direction only: the schema may list codes no variant emits (turn
+    /// failure codes such as `TURN_INTERRUPTED` are recorded on turn rows rather
+    /// than raised here, and a few are reserved for planned endpoints). The
+    /// reverse — emitting a code no client is told about — is the bug.
+    #[test]
+    fn every_emitted_code_is_published_in_the_openapi_enum() {
+        let schema = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../docs/api-v1.openapi.json"),
+        )
+        .expect("the OpenAPI schema is part of the repo");
+        let schema: serde_json::Value =
+            serde_json::from_str(&schema).expect("the OpenAPI schema is valid JSON");
+
+        let published = schema["components"]["schemas"]["ErrorResponse"]["properties"]["error"]
+            ["properties"]["code"]["enum"]
+            .as_array()
+            .expect("the ErrorResponse schema declares a code enum")
+            .iter()
+            .map(|value| value.as_str().expect("enum members are strings").to_string())
+            .collect::<Vec<_>>();
+
+        // Every variant, constructed so the match in `code()` is exercised. A
+        // new variant added without a schema entry fails here.
+        let emitted = [
+            Error::Database(sqlx::Error::RowNotFound).code(),
+            Error::SessionNotFound.code(),
+            Error::TurnNotFound.code(),
+            Error::RunnerNotFound.code(),
+            Error::FileNotFound.code(),
+            Error::SessionAlreadyRunning.code(),
+            Error::StopAlreadyCompleted.code(),
+            Error::Unauthorized.code(),
+            Error::Forbidden("x".into()).code(),
+            Error::AttachmentInvalid("x".into()).code(),
+            Error::TraceDbUnavailable("x".into()).code(),
+            Error::TraceSessionNotFound("x".into()).code(),
+            Error::SessionAlreadyImported.code(),
+            Error::TraceSessionNotResumable("x".into()).code(),
+            Error::InvalidRequest("x".into()).code(),
+            Error::RouteNotFound.code(),
+            Error::MethodNotAllowed.code(),
+            Error::Internal("x".into()).code(),
+        ];
+
+        for code in emitted {
+            assert!(
+                published.iter().any(|member| member == code),
+                "`{code}` is emitted by the API but absent from the OpenAPI \
+                 error enum, so a client cannot know to handle it",
+            );
+        }
+    }
+
     /// A mistyped archive id must be distinguishable from an archive that is
     /// down, and from a session that was already imported.
     #[test]
