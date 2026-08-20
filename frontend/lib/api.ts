@@ -202,6 +202,9 @@ export interface WorkspacesResponse {
   workspaces: Workspace[];
 }
 
+/** Which viewer a file wants. Absent means "read it as text". */
+export type PreviewKind = "grid" | "blocks" | "html" | "pdf" | "image";
+
 /** One entry in a session's file tree. */
 export interface FileEntry {
   /** Path relative to the session workdir. The root itself is `""`. */
@@ -211,6 +214,15 @@ export interface FileEntry {
   size?: number;
   modifiedAtMs: number;
   isSymlink?: boolean;
+  /**
+   * Viewer family, classified server-side from the extension.
+   *
+   * Present so opening a file costs one request: the client knows which of
+   * `content`, `document`, or `raw` to call before asking. Advisory — the
+   * document endpoint validates the bytes and a mislabelled file falls back to
+   * `content`.
+   */
+  previewKind?: PreviewKind;
 }
 
 export interface FileTreeResponse {
@@ -243,6 +255,107 @@ export interface ImportSessionRequest {
   /** TraceDB session id, formatted `<agent>:<native-id>`. */
   traceSessionId: string;
   title?: string;
+}
+
+/** What kind of value a spreadsheet cell holds. Drives column alignment. */
+export type CellType = "text" | "number" | "bool" | "date" | "formula" | "error";
+
+/**
+ * One non-empty cell.
+ *
+ * `v` is rendered server-side, because that is where the number format lives: a
+ * date arrives as an ISO string rather than the Excel serial the file stores.
+ * `n` carries the raw number so sorting need not re-parse a formatted string.
+ */
+export interface Cell {
+  v: string;
+  t: CellType;
+  n?: number;
+  /** The formula expression, when the cell is computed. `v` stays its result. */
+  f?: string;
+}
+
+export interface SheetInfo {
+  name: string;
+  /** The sheet's own size, not the window served. */
+  rows: number;
+  cols: number;
+  /** False when the total was counted rather than read from the file. */
+  exact?: boolean;
+}
+
+/** A window of one sheet. `null` cells are empty, which is most of a sheet. */
+export interface GridPayload {
+  sheets: SheetInfo[];
+  sheet: number;
+  /** First row of the window, absolute within the sheet. */
+  row: number;
+  /** Column the used range starts at, non-zero when data does not begin at A. */
+  column: number;
+  rows: (Cell | null)[][];
+  hasHeaderRow: boolean;
+  truncated: boolean;
+}
+
+/** A run of text with inline formatting. */
+export interface Span {
+  text: string;
+  bold?: boolean;
+  italic?: boolean;
+}
+
+/**
+ * One block of document content.
+ *
+ * A discriminated union over `type`, shared by Word and PowerPoint so a single
+ * renderer serves both.
+ */
+export type DocumentBlock =
+  | { type: "heading"; level: number; text: string }
+  | { type: "paragraph"; spans: Span[] }
+  | { type: "listItem"; level: number; ordered: boolean; text: string }
+  | { type: "table"; rows: string[][] };
+
+/** One slide. Word documents have no sections. */
+export interface DocumentSection {
+  title?: string;
+  index: number;
+  /** Speaker notes, from the slide's own notes part. */
+  notes?: string;
+  /** Index into `blocks` where this section's content begins. */
+  firstBlock: number;
+}
+
+export interface BlocksPayload {
+  sections: DocumentSection[];
+  blocks: DocumentBlock[];
+  truncated: boolean;
+}
+
+/**
+ * A parsed document. `kind` discriminates which payload is present.
+ *
+ * Parsed server-side: the npm option for these formats is unmaintained with
+ * unpatched CVEs on the parse path, and would not fit the bundle budget anyway.
+ */
+export interface FileDocumentResponse {
+  path: string;
+  absolutePath: string;
+  size: number;
+  modifiedAtMs: number;
+  kind: "grid" | "blocks";
+  format: string;
+  /** Display name for the header, e.g. "Excel workbook". */
+  formatLabel: string;
+  grid?: GridPayload;
+  blocks?: BlocksPayload;
+}
+
+/** Window parameters for a spreadsheet request. Omitted fields take defaults. */
+export interface DocumentWindow {
+  sheet?: number;
+  row?: number;
+  rows?: number;
 }
 
 /**
@@ -389,6 +502,26 @@ export const api = {
       fetchAPI<FileContentResponse>(
         `/sessions/${sessionId}/files/content${queryString({ path })}`,
       ),
+    /** A spreadsheet, CSV, Word document, or deck as structure. */
+    document: (sessionId: string, path: string, window: DocumentWindow = {}) =>
+      fetchAPI<FileDocumentResponse>(
+        `/sessions/${sessionId}/files/document${queryString({
+          path,
+          sheet: window.sheet,
+          row: window.row,
+          rows: window.rows,
+        })}`,
+      ),
+    /**
+     * URL for the file's bytes, for content the browser loads itself.
+     *
+     * A URL builder rather than a fetch: an `<img>`, `<iframe>`, or `<object>`
+     * requests this itself, which is what buys progressive decode and HTTP
+     * caching. Same-origin through the Next rewrite, so the `SameSite=Strict`
+     * session cookie is sent.
+     */
+    rawUrl: (sessionId: string, path: string) =>
+      `${API_BASE}/sessions/${sessionId}/files/raw${queryString({ path })}`,
   },
   turns: {
     create: (sessionId: string, req: CreateTurnRequest) =>
