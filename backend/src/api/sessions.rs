@@ -203,6 +203,100 @@ pub async fn create(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateSessionRequest {
+    /// Complete replacement flag set. Absent leaves flags untouched; an empty
+    /// map clears them.
+    pub flags: Option<std::collections::HashMap<String, String>>,
+    /// Display title. Absent leaves it untouched.
+    pub title: Option<String>,
+}
+
+/// PATCH /api/v1/sessions/{id}
+///
+/// Change runner flags (model, reasoning effort) or the title of an existing
+/// session.
+///
+/// # Why flags are validated here rather than at turn time
+///
+/// `POST /sessions/{id}/turns` filters the stored flag set against the runner's
+/// declared schema and silently drops what it does not recognize. That is the
+/// right behaviour there — a descriptor can change under a session that was
+/// created before it, and a turn should still run. It is the wrong behaviour for
+/// a user action: a model chosen in the composer that the runner never declared
+/// would be accepted, stored, dropped at turn time, and the turn would run on
+/// the default with nothing anywhere saying why. Validating on write turns that
+/// silent no-op into an error the UI can show against the control that caused it.
+///
+/// Identity is deliberately not patchable. `agent`, `origin`, `identityMode`, and
+/// `lifecycleMode` decide which runner owns the conversation and whether `SOUL.md`
+/// may be injected; changing them on a session with history would rewrite what
+/// that history was produced by. Native-to-Sylph conversion is a separate,
+/// explicit operation for exactly this reason.
+pub async fn update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateSessionRequest>,
+) -> Result<Json<SessionResponse>> {
+    let session = state
+        .store
+        .get_session(&id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+
+    if let Some(flags) = &req.flags {
+        let registry = state.registry.lock().await;
+        let descriptor = registry
+            .list_agents()
+            .into_iter()
+            .find(|agent| agent.name == session.agent);
+        drop(registry);
+
+        // A session whose runner has been uninstalled cannot have its flags
+        // validated, so it cannot have them changed. Failing is better than
+        // storing an unvalidated value that would be dropped at turn time.
+        let descriptor = descriptor.ok_or_else(|| {
+            Error::InvalidRequest(format!(
+                "Agent '{}' is not currently installed, so its flags cannot be changed.",
+                session.agent
+            ))
+        })?;
+
+        for (key, value) in flags {
+            let spec = descriptor.flags.get(key).ok_or_else(|| {
+                Error::InvalidRequest(format!(
+                    "Agent '{}' does not declare a '{key}' flag.",
+                    session.agent
+                ))
+            })?;
+            // An empty `choices` list means the flag is free-form, so only
+            // enumerated flags are checked against their enumeration.
+            if !spec.choices.is_empty() && !spec.choices.contains(value) {
+                return Err(Error::InvalidRequest(format!(
+                    "'{value}' is not a valid {key} for '{}'. Valid choices: {:?}",
+                    session.agent, spec.choices
+                )));
+            }
+        }
+
+        let flags_json = serde_json::to_string(flags)
+            .map_err(|e| Error::Internal(format!("Failed to encode flags: {e}")))?;
+        state.store.set_session_flags(&id, &flags_json).await?;
+    }
+
+    if let Some(title) = &req.title {
+        state.store.set_session_title(&id, title.trim()).await?;
+    }
+
+    let updated = state
+        .store
+        .get_session(&id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+    Ok(Json(SessionResponse { session: updated }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportSessionRequest {
     /// TraceDB session id, e.g. `claude:uuid`.
     pub trace_session_id: String,

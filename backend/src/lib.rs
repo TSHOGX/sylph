@@ -25,11 +25,13 @@ pub mod error;
 pub mod events;
 pub mod middleware;
 pub mod models;
+pub mod paths;
 pub mod runners;
 pub mod supervisor;
 pub mod tracedb;
 
 use crate::config::Config;
+use crate::error::Error;
 use crate::db::LiveStore;
 use crate::events::EventHub;
 use crate::runners::Registry;
@@ -131,7 +133,10 @@ pub fn router(state: AppState) -> Router {
             get(api::sessions::list).post(api::sessions::create),
         )
         .route("/api/v1/sessions/import", post(api::sessions::import))
-        .route("/api/v1/sessions/{id}", get(api::sessions::get))
+        .route(
+            "/api/v1/sessions/{id}",
+            get(api::sessions::get).patch(api::sessions::update),
+        )
         .route(
             "/api/v1/sessions/{id}/turns",
             get(api::sessions::history).post(api::turns::create),
@@ -140,16 +145,35 @@ pub fn router(state: AppState) -> Router {
         // matches literal segments before captures, so the more specific
         // `files/content` route must be registered, but order among these three
         // does not matter. They are grouped for readability.
-        .route("/api/v1/sessions/{id}/files", get(api::files::tree))
+        .route(
+            "/api/v1/sessions/{id}/files",
+            get(api::files::tree).post(api::files::upload),
+        )
         .route(
             "/api/v1/sessions/{id}/files/content",
             get(api::files::content),
         )
+        // Machine-level directory browsing, bounded by configured roots rather
+        // than by a session. Separate from the `sessions/{id}/files` tree
+        // because the root differs: see `api::fs` for the threat model.
+        .route("/api/v1/fs/roots", get(api::fs::roots))
+        .route("/api/v1/fs/tree", get(api::fs::tree))
         .route("/api/v1/workspaces", get(api::workspaces::list))
         .route("/api/v1/search", get(api::search::search))
         .route("/api/v1/turns/{id}", get(api::turns::get))
         .route("/api/v1/turns/{id}/events", get(api::turns::events))
         .route("/api/v1/turns/{id}/stop", post(api::turns::stop))
+        // Registered before `.layer`, which only wraps routes that already
+        // exist: a fallback added afterwards would bypass the auth and trace
+        // layers, and would answer unmatched paths without being logged.
+        //
+        // These two exist so the error envelope has no holes. axum's default
+        // fallback returns a bodiless 404, which a client reads as the bare
+        // string "Not Found" — identical to what it shows when a *file* is
+        // missing. Making the router speak the same envelope as every handler
+        // is what lets a client distinguish a stale backend from a bad path.
+        .fallback(|| async { Error::RouteNotFound })
+        .method_not_allowed_fallback(|| async { Error::MethodNotAllowed })
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::auth::auth_middleware,

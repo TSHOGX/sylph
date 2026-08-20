@@ -1481,6 +1481,68 @@ async fn a_restart_preserves_journalled_events() {
     assert_eq!(after["turns"].as_array().unwrap().len(), 1);
 }
 
+// ------------------------------------------------ error envelope contract
+
+/// Every failure under `/api/v1/` carries the error envelope, router-level ones
+/// included.
+///
+/// axum's default fallback answers with an empty body, and a client cannot tell
+/// that from a handler reporting a missing file — both are a bare 404. That
+/// ambiguity had a real cost: a stale backend without the files routes made the
+/// Artifacts pane display "Not Found" inside the file tree, which reads as a
+/// missing directory rather than a missing endpoint. This test is the contract
+/// that keeps the two distinguishable.
+#[tokio::test]
+async fn unmatched_routes_answer_with_the_error_envelope() {
+    let backend = TestBackend::start().await;
+
+    let response = backend.get_authed("/api/v1/not-an-endpoint").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"]["code"], "NOT_FOUND",
+        "a router 404 must be distinguishable from FILE_NOT_FOUND"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| !m.is_empty()),
+        "the envelope must explain itself, not just carry a code"
+    );
+}
+
+/// The wrong method on a real path is a 405 with a code, not a bodiless 404.
+#[tokio::test]
+async fn wrong_method_answers_405_with_the_error_envelope() {
+    let backend = TestBackend::start().await;
+
+    let response = backend.post_authed("/api/v1/health", json!({})).await;
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "METHOD_NOT_ALLOWED"
+    );
+}
+
+/// The fallback sits inside the auth layer, so an unmatched path does not leak
+/// the route surface to an unauthenticated caller.
+///
+/// Registering it after `.layer` would compile and appear to work, while
+/// answering every unknown path before the cookie was ever checked.
+#[tokio::test]
+async fn unmatched_routes_are_still_behind_auth() {
+    let backend = TestBackend::start().await;
+
+    let response = backend.get("/api/v1/not-an-endpoint").await;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the fallback must not answer before the auth layer runs"
+    );
+    assert_eq!(json_body(response).await["error"]["code"], "UNAUTHORIZED");
+}
+
 // ---------------------------------------------------------- files (Phase 6.3)
 
 /// The Artifacts pane lists one directory level, directories first.
@@ -1704,6 +1766,129 @@ async fn missing_files_are_404_and_directories_are_not_content() {
     assert_eq!(directory.status(), StatusCode::BAD_REQUEST);
 }
 
+/// A symlinked directory must browse as the directory it points at.
+///
+/// This pins the bug that made the Artifacts pane useless on any workspace laid
+/// out with links: `DirEntry::metadata` does not follow symlinks, so a link to a
+/// directory was reported as a small *file*. The pane then drew it with no
+/// expand arrow, and clicking it asked for content that was not text — a
+/// directory that looked present and could not be opened.
+#[tokio::test]
+async fn file_tree_follows_symlinks_to_their_target_kind() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let root = backend.workdir();
+    std::fs::create_dir_all(root.join("real/nested")).unwrap();
+    std::fs::write(root.join("real/inside.txt"), "contents\n").unwrap();
+    std::os::unix::fs::symlink(root.join("real"), root.join("linked-dir")).unwrap();
+    std::os::unix::fs::symlink(root.join("real/inside.txt"), root.join("linked-file")).unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/files"))
+            .await,
+    )
+    .await;
+    let entries = body["entries"].as_array().unwrap();
+    let find = |name: &str| {
+        entries
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing from {entries:?}"))
+    };
+
+    let linked_dir = find("linked-dir");
+    assert_eq!(
+        linked_dir["isDir"], true,
+        "a symlink to a directory must report isDir, or the tree cannot expand it"
+    );
+    assert!(
+        linked_dir["size"].is_null(),
+        "a directory carries no size, however it was reached"
+    );
+    assert_eq!(linked_dir["isSymlink"], true, "the link is still flagged as one");
+
+    // The target's size, not the link's own byte length.
+    let linked_file = find("linked-file");
+    assert_eq!(linked_file["isDir"], false);
+    assert_eq!(linked_file["size"], 9);
+    assert_eq!(linked_file["isSymlink"], true);
+
+    // And it actually expands: the whole point of reporting it as a directory.
+    let nested = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{session_id}/files?path=linked-dir"
+            ))
+            .await,
+    )
+    .await;
+    let names: Vec<&str> = nested["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"inside.txt"), "link did not expand: {names:?}");
+    assert!(names.contains(&"nested"), "link did not expand: {names:?}");
+}
+
+/// A symlinked build directory is noise under the name it is browsed by.
+#[tokio::test]
+async fn file_tree_skips_symlinked_build_directories() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let root = backend.workdir();
+    std::fs::create_dir_all(root.join("vendor-store")).unwrap();
+    std::os::unix::fs::symlink(root.join("vendor-store"), root.join("node_modules")).unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/files"))
+            .await,
+    )
+    .await;
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        !names.contains(&"node_modules"),
+        "symlinked node_modules listed: {names:?}"
+    );
+}
+
+/// A dangling symlink is omitted rather than listed as an entry that cannot open.
+#[tokio::test]
+async fn file_tree_omits_dangling_symlinks() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let root = backend.workdir();
+    std::os::unix::fs::symlink(root.join("never-existed"), root.join("dangling")).unwrap();
+    std::fs::write(root.join("real.txt"), "ok\n").unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/files"))
+            .await,
+    )
+    .await;
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"dangling"), "dangling link listed: {names:?}");
+    // A broken link must not take the rest of the listing down with it.
+    assert!(names.contains(&"real.txt"), "listing lost entries: {names:?}");
+}
+
 #[tokio::test]
 async fn file_endpoints_require_auth_and_a_real_session() {
     let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
@@ -1784,4 +1969,436 @@ fn urlencoding(value: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+// ---------------------------------------------------- machine-level browsing
+//
+// The picker that binds a new workspace. These assert the bound, not the
+// convenience: the roots come from configuration, and everything outside them is
+// refused however it is spelled. The harness sets `browse_roots` to its throwaway
+// root, so "outside a root" is expressible without touching the real `$HOME`.
+
+#[tokio::test]
+async fn fs_roots_lists_configured_browse_roots() {
+    let backend = TestBackend::start().await;
+
+    let body = json_body(backend.get_authed("/api/v1/fs/roots").await).await;
+
+    let roots = body["roots"].as_array().unwrap();
+    assert!(!roots.is_empty(), "at least the harness root must be listed");
+    assert!(
+        body["home"].as_str().is_some(),
+        "home is needed for `~/...` abbreviation"
+    );
+    // Absolute, because the client hands these straight back as a `workdir`.
+    assert!(roots[0]["path"].as_str().unwrap().starts_with('/'));
+}
+
+#[tokio::test]
+async fn fs_tree_lists_only_directories() {
+    let backend = TestBackend::start().await;
+    let root = backend.workdir();
+    std::fs::create_dir_all(root.join("project")).unwrap();
+    std::fs::write(root.join("loose-file.txt"), "x").unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/fs/tree?path={}",
+                urlencoding(&root.display().to_string())
+            ))
+            .await,
+    )
+    .await;
+
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"project"), "directory missing: {names:?}");
+    assert!(
+        !names.contains(&"loose-file.txt"),
+        "files must not be listed by a directory picker: {names:?}"
+    );
+}
+
+/// `~/.agents` is the Quick Start directory and a legitimate workspace, so a
+/// picker that hid dot-directories would hide a directory the product points at.
+#[tokio::test]
+async fn fs_tree_lists_dot_directories() {
+    let backend = TestBackend::start().await;
+    let root = backend.workdir();
+    std::fs::create_dir_all(root.join(".agents")).unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/fs/tree?path={}",
+                urlencoding(&root.display().to_string())
+            ))
+            .await,
+    )
+    .await;
+
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&".agents"), "dotfiles must be pickable: {names:?}");
+}
+
+#[tokio::test]
+async fn fs_tree_omits_build_directories() {
+    let backend = TestBackend::start().await;
+    let root = backend.workdir();
+    for skipped in [".git", "node_modules", "target"] {
+        std::fs::create_dir_all(root.join(skipped)).unwrap();
+    }
+    std::fs::create_dir_all(root.join("src")).unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/fs/tree?path={}",
+                urlencoding(&root.display().to_string())
+            ))
+            .await,
+    )
+    .await;
+
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["src"], "only real directories belong: {names:?}");
+}
+
+/// The traversal defense for the machine-level browser. Resolution, not
+/// pattern-matching, is what refuses this.
+#[tokio::test]
+async fn fs_tree_refuses_paths_outside_every_root() {
+    let backend = TestBackend::start().await;
+
+    // `/etc` exists and is a directory, so this is refused for being outside the
+    // configured roots rather than for being missing.
+    let response = backend.get_authed("/api/v1/fs/tree?path=/etc").await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let escaped = format!("{}/../../..", backend.workdir().display());
+    let response = backend
+        .get_authed(&format!("/api/v1/fs/tree?path={}", urlencoding(&escaped)))
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "`..` must not climb out of a browse root"
+    );
+}
+
+/// A symlink out of the root is not merely refused on access — it is never
+/// offered, so the client cannot present an unopenable node.
+#[cfg(unix)]
+#[tokio::test]
+async fn fs_tree_omits_symlinks_escaping_the_root() {
+    let backend = TestBackend::start().await;
+    let root = backend.workdir();
+    std::fs::create_dir_all(root.join("inside")).unwrap();
+    std::os::unix::fs::symlink("/etc", root.join("outside")).unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/fs/tree?path={}",
+                urlencoding(&root.display().to_string())
+            ))
+            .await,
+    )
+    .await;
+
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"inside"));
+    assert!(
+        !names.contains(&"outside"),
+        "an escaping symlink must not be listed: {names:?}"
+    );
+}
+
+/// `parent` is what the picker draws a "go up" affordance from, so it must stop
+/// at a root rather than handing back a path the next request would refuse.
+#[tokio::test]
+async fn fs_tree_withholds_parent_at_a_root() {
+    let backend = TestBackend::start().await;
+    // The configured root itself, not the workdir inside it: only at a root is
+    // "no parent offered" the correct answer.
+    let root = backend.browse_root().to_path_buf();
+    std::fs::create_dir_all(root.join("child")).unwrap();
+
+    let at_root = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/fs/tree?path={}",
+                urlencoding(&root.display().to_string())
+            ))
+            .await,
+    )
+    .await;
+    assert!(
+        at_root.get("parent").is_none() || at_root["parent"].is_null(),
+        "a root has no parent to offer: {at_root:?}"
+    );
+
+    let at_child = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/fs/tree?path={}",
+                urlencoding(&root.join("child").display().to_string())
+            ))
+            .await,
+    )
+    .await;
+    assert!(
+        at_child["parent"].as_str().is_some(),
+        "a directory below a root must offer its parent"
+    );
+}
+
+// ------------------------------------------------------- workspace file upload
+//
+// Writing is the one mutating filesystem operation. The agent already writes
+// anywhere under `workdir`, so these assert that the endpoint grants nothing
+// beyond that, and destroys nothing by accident.
+
+#[tokio::test]
+async fn upload_writes_into_the_session_workdir() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::create_dir_all(backend.workdir().join("docs")).unwrap();
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/files"),
+            json!({ "path": "docs", "name": "note.txt", "data": "aGVsbG8=" }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = json_body(response).await;
+    assert_eq!(body["path"], "docs/note.txt");
+    assert_eq!(body["size"], 5);
+    assert_eq!(
+        std::fs::read_to_string(backend.workdir().join("docs/note.txt")).unwrap(),
+        "hello",
+        "the decoded bytes must reach disk where the agent can read them"
+    );
+}
+
+#[tokio::test]
+async fn upload_refuses_to_escape_the_workdir() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/files"),
+            json!({ "path": "../..", "name": "escaped.txt", "data": "eA==" }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // A separator in the filename must not reconstitute a path either.
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/files"),
+            json!({ "path": "", "name": "../escaped.txt", "data": "eA==" }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(
+        !backend.workdir().parent().unwrap().join("escaped.txt").exists(),
+        "the filename must be reduced to one component, not treated as a path"
+    );
+}
+
+/// An upload must not quietly destroy source the user did not mean to touch.
+#[tokio::test]
+async fn upload_refuses_to_overwrite_unless_asked() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::write(backend.workdir().join("keep.txt"), "original").unwrap();
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/files"),
+            json!({ "path": "", "name": "keep.txt", "data": "bmV3" }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        std::fs::read_to_string(backend.workdir().join("keep.txt")).unwrap(),
+        "original",
+        "the existing file must survive a refused upload"
+    );
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/files"),
+            json!({ "path": "", "name": "keep.txt", "data": "bmV3", "overwrite": true }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        std::fs::read_to_string(backend.workdir().join("keep.txt")).unwrap(),
+        "new",
+        "an explicit overwrite must take effect"
+    );
+}
+
+#[tokio::test]
+async fn upload_rejects_malformed_base64() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/files"),
+            json!({ "path": "", "name": "bad.bin", "data": "not base64!!" }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ------------------------------------------------------- session flag patching
+//
+// Model and reasoning effort are chosen in the composer, so they must be
+// changeable after creation — and validated on write, because a value the runner
+// never declared would otherwise be dropped at turn time with nothing saying why.
+
+#[tokio::test]
+async fn patch_updates_flags_the_agent_declares() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let body = json_body(
+        backend
+            .patch_authed(
+                &format!("/api/v1/sessions/{session_id}"),
+                json!({ "flags": { "model": "slow", "effort": "high" } }),
+            )
+            .await,
+    )
+    .await;
+
+    // `flagsJson` is the wire field: the stored JSON, verbatim.
+    let flags: Value =
+        serde_json::from_str(body["session"]["flagsJson"].as_str().unwrap()).unwrap();
+    assert_eq!(flags["model"], "slow");
+    assert_eq!(flags["effort"], "high");
+}
+
+#[tokio::test]
+async fn patch_rejects_undeclared_flag_values() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    // A choice outside the declared enumeration.
+    let response = backend
+        .patch_authed(
+            &format!("/api/v1/sessions/{session_id}"),
+            json!({ "flags": { "model": "gpt-nonexistent" } }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // A flag the runner does not declare at all.
+    let response = backend
+        .patch_authed(
+            &format!("/api/v1/sessions/{session_id}"),
+            json!({ "flags": { "temperature": "0.7" } }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Neither attempt may have altered stored state.
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}"))
+            .await,
+    )
+    .await;
+    let flags: Value =
+        serde_json::from_str(body["session"]["flagsJson"].as_str().unwrap()).unwrap();
+    assert!(
+        flags.get("temperature").is_none() && flags.get("model").is_none(),
+        "a rejected patch must not persist: {flags:?}"
+    );
+}
+
+/// The flag the composer sets is the flag the runner is invoked with. Without
+/// this, a patch could be stored and still not reach the process.
+#[tokio::test]
+async fn patched_flags_reach_the_runner_on_the_next_turn() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let response = backend
+        .patch_authed(
+            &format!("/api/v1/sessions/{session_id}"),
+            json!({ "flags": { "model": "slow" } }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}"))
+            .await,
+    )
+    .await;
+    let flags: Value =
+        serde_json::from_str(body["session"]["flagsJson"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        flags["model"], "slow",
+        "the stored flag is what `turns` reads per turn"
+    );
+}
+
+#[tokio::test]
+async fn patch_updates_the_title() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let body = json_body(
+        backend
+            .patch_authed(
+                &format!("/api/v1/sessions/{session_id}"),
+                json!({ "title": "  Renamed  " }),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(body["session"]["title"], "Renamed", "titles are trimmed");
+}
+
+#[tokio::test]
+async fn patch_on_a_missing_session_is_not_found() {
+    let backend = TestBackend::start().await;
+
+    let response = backend
+        .patch_authed(
+            "/api/v1/sessions/does-not-exist",
+            json!({ "title": "x" }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

@@ -333,6 +333,23 @@ impl LiveStore {
         Ok(())
     }
 
+    /// Replace a session's runner flags.
+    ///
+    /// Flags were write-once until the composer needed to change model and
+    /// reasoning effort mid-session. They are stored whole rather than merged
+    /// per key: the caller has already validated the complete set against the
+    /// agent's declared schema, and a merge here would let a stale key survive a
+    /// change the user believed was total.
+    pub async fn set_session_flags(&self, session_id: &str, flags_json: &str) -> Result<()> {
+        sqlx::query("UPDATE sessions SET flags_json = ?, updated_at_ms = ? WHERE id = ?")
+            .bind(flags_json)
+            .bind(now_ms())
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // Incarnation operations
 
     pub async fn create_incarnation(&self, incarnation: &Incarnation) -> Result<Incarnation> {

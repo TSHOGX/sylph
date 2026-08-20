@@ -26,7 +26,7 @@ pub struct TestBackend {
     router: Router,
     /// Held for the lifetime of the test: dropping it deletes the journal and
     /// every staged attachment.
-    _temp: TempDir,
+    temp: TempDir,
     workdir: PathBuf,
     cookie: String,
     /// Kept so a test can rebuild the backend against the same journal, which
@@ -81,6 +81,10 @@ impl TestBackend {
                 Some(stub) => stub.install(root),
                 None => root.join("nonexistent-trace-db"),
             },
+            // The harness root, not `$HOME`: browsing tests must resolve inside
+            // the throwaway tree so they assert the real containment rule
+            // without depending on the developer's home directory.
+            browse_roots: vec![root.to_path_buf()],
             cookie_secret: "test-secret-token".to_string(),
         };
 
@@ -91,7 +95,7 @@ impl TestBackend {
 
         Self {
             router: router(state),
-            _temp: temp,
+            temp,
             workdir,
             cookie,
             config,
@@ -112,6 +116,15 @@ impl TestBackend {
 
     pub fn workdir(&self) -> &Path {
         &self.workdir
+    }
+
+    /// The configured browse root — the throwaway tree's top level.
+    ///
+    /// Distinct from [`Self::workdir`], which is a directory *inside* it. Tests
+    /// about the browse boundary need the root itself, because "has no parent to
+    /// offer" is only true at a root.
+    pub fn browse_root(&self) -> &Path {
+        self.temp.path()
     }
 
     /// A Cookie header value that passes auth.
@@ -154,6 +167,20 @@ impl TestBackend {
         self.send(
             Request::builder()
                 .method("POST")
+                .uri(path)
+                .header(header::HOST, "127.0.0.1")
+                .header(header::COOKIE, &self.cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    pub async fn patch_authed(&self, path: &str, body: Value) -> Response<Body> {
+        self.send(
+            Request::builder()
+                .method("PATCH")
                 .uri(path)
                 .header(header::HOST, "127.0.0.1")
                 .header(header::COOKIE, &self.cookie)
@@ -319,7 +346,8 @@ impl MockRunner {
   "description": "Mock runner for tests",
   "session_key": "{}",
   "flags": {{
-    "model": {{"choices": ["fast", "slow"], "description": "Mock model"}}
+    "model": {{"choices": ["fast", "slow"], "description": "Mock model"}},
+    "effort": {{"choices": ["low", "high"], "description": "Mock reasoning effort"}}
   }},
   "commands": {{
     "noop": {{"description": "Does nothing", "args": {{}}}}

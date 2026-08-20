@@ -9,6 +9,15 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub runners_dir: PathBuf,
     pub tracedb_bin: PathBuf,
+    /// Directories the browser may enumerate when picking a workspace.
+    ///
+    /// Defaults to `$HOME` alone. This is the root set for `/api/v1/fs/*`, which
+    /// is the only endpoint that lists directories the client names rather than
+    /// ones derived from a session — so the bound lives in configuration, not in
+    /// the request. Additional roots come from `SYLPH_WEB_BROWSE_ROOTS`, for the
+    /// case where projects live outside the home directory (an external volume,
+    /// a shared checkout).
+    pub browse_roots: Vec<PathBuf>,
     pub cookie_secret: String,
 }
 
@@ -38,6 +47,20 @@ impl Config {
         let database_path = format!("{}/live.db",
             PathBuf::from(&data_dir).display());
 
+        // `$HOME` first so it is the default landing root in the picker, then any
+        // configured extras. Existence is not checked here: a root that vanishes
+        // later must be handled at request time anyway, so the endpoint filters
+        // rather than the constructor failing at startup over a stale env var.
+        let mut browse_roots = vec![PathBuf::from(&home)];
+        if let Ok(extra) = env::var("SYLPH_WEB_BROWSE_ROOTS") {
+            for part in extra.split(':').filter(|p| !p.trim().is_empty()) {
+                let path = PathBuf::from(part.trim());
+                if !browse_roots.contains(&path) {
+                    browse_roots.push(path);
+                }
+            }
+        }
+
         // Generate random cookie secret on startup
         let cookie_secret = uuid::Uuid::new_v4().to_string();
 
@@ -48,6 +71,7 @@ impl Config {
             data_dir,
             runners_dir,
             tracedb_bin,
+            browse_roots,
             cookie_secret,
         })
     }
