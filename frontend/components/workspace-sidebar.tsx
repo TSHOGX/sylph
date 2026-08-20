@@ -11,6 +11,7 @@
  */
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -18,6 +19,15 @@ import { api, type Session } from "@/lib/api";
 import { formatRelative, sessionLabel } from "@/lib/format";
 import { useSettings } from "@/lib/settings";
 import { ContextMenu, type MenuItem } from "@/components/context-menu";
+import { useWorkspaceUI } from "@/lib/workspace-ui";
+
+// Code-split: the picker pulls in its own queries and markup, and the sidebar
+// renders on first paint. Loading it eagerly would put a modal nobody has opened
+// into the first-load bundle, which is within 4 KB of its budget.
+const DirectoryPicker = dynamic(
+  () => import("@/components/directory-picker").then((m) => m.DirectoryPicker),
+  { ssr: false },
+);
 
 /** Sessions the sidebar shows. Higher than the list default: the sidebar is the
  *  primary navigation surface, so truncating it hides work rather than paging it. */
@@ -35,6 +45,11 @@ export function WorkspaceSidebar() {
   const { settings, update } = useSettings();
   const params = useParams();
   const activeId = typeof params?.id === "string" ? params.id : undefined;
+  /** Right-click on the pane background, as distinct from on a group row. */
+  const [paneMenu, setPaneMenu] = useState<{ x: number; y: number } | null>(null);
+  const [picking, setPicking] = useState(false);
+
+  const queryClient = useQueryClient();
 
   const sessionsQuery = useQuery({
     queryKey: ["sessions", { limit: SIDEBAR_LIMIT }],
@@ -109,8 +124,48 @@ export function WorkspaceSidebar() {
     return { quick: quickGroup, projects: rest };
   }, [sessionsQuery.data, pinnedWorkspaces, workspaceNames, quickStartDir]);
 
+  /**
+   * Bind a directory as a workspace by pinning it.
+   *
+   * There is no workspace table: `GET /workspaces` derives spaces from the
+   * sessions that exist, so a directory with no sessions cannot be represented
+   * server-side. Pinning is the existing mechanism for exactly that — the sidebar
+   * already renders pinned paths as groups with zero sessions — so binding needs
+   * no new persistence, and the workspace survives reload because settings do.
+   */
+  function bindWorkspace(path: string) {
+    const normalized = path.replace(/\/+$/, "") || "/";
+    if (!settings.pinnedWorkspaces.includes(normalized)) {
+      update({ pinnedWorkspaces: [...settings.pinnedWorkspaces, normalized] });
+    }
+    setPicking(false);
+  }
+
+  const paneItems: MenuItem[] = [
+    { label: "New Workspace...", onSelect: () => setPicking(true) },
+    {
+      label: "Refresh",
+      onSelect: () => {
+        void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+      },
+    },
+  ];
+
   return (
-    <nav aria-label="Sessions by workspace" className="flex min-h-0 flex-1 flex-col">
+    <nav
+      aria-label="Sessions by workspace"
+      className="flex min-h-0 flex-1 flex-col"
+      // Bound to the pane itself rather than to its scroll container's background.
+      // Once enough sessions exist the rows fill that container completely, and a
+      // handler that only answered clicks on empty space would become unreachable
+      // exactly when the sidebar is busiest. Group and session rows stop
+      // propagation, so they still win for clicks that land on them.
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setPaneMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
         {sessionsQuery.isPending ? (
           <output aria-live="polite" className="block px-1.5 py-3 text-xs text-gray-500">
@@ -181,6 +236,39 @@ export function WorkspaceSidebar() {
           </>
         )}
       </div>
+
+      {/* Also offered as a button, not only on right-click: this is the sole entry
+          point for binding a directory that has no sessions yet, and a hidden
+          gesture is a poor way to expose the only path to a feature. */}
+      <div className="shrink-0 border-t border-gray-200 p-1.5">
+        <button
+          type="button"
+          onClick={() => setPicking(true)}
+          className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs font-medium text-gray-600 hover:bg-gray-200/60 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        >
+          <span aria-hidden="true">+</span>
+          New Workspace...
+        </button>
+      </div>
+
+      {paneMenu && (
+        <ContextMenu
+          x={paneMenu.x}
+          y={paneMenu.y}
+          items={paneItems}
+          onClose={() => setPaneMenu(null)}
+          label="Workspace list actions"
+        />
+      )}
+
+      {picking && (
+        <DirectoryPicker
+          title="Bind a workspace"
+          confirmLabel="Bind workspace"
+          onClose={() => setPicking(false)}
+          onChoose={bindWorkspace}
+        />
+      )}
     </nav>
   );
 }
@@ -208,6 +296,7 @@ function GroupSection({
 }) {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const { createSessionIn, createPending } = useWorkspaceUI();
   // Groups start expanded: a collapsed-by-default sidebar hides the thing the
   // user came here to click. Collapse is per-group and not persisted, because it
   // is a transient focusing action rather than a preference.
@@ -219,9 +308,21 @@ function GroupSection({
 
   const items: MenuItem[] = [
     {
-      label: "New session here",
+      // Creates and opens directly. Routing to the form would ask for the
+      // working directory that right-clicking this group already named, which is
+      // a dialog the user has to dismiss to get what they clicked.
+      label: createPending ? "Creating session..." : "New session here",
+      onSelect: () => createSessionIn(group.path),
+      disabled: createPending || !group.path,
+    },
+    {
+      // The override surface, kept because the fast path deliberately decides
+      // agent, model, and title for you. Prefilled with this group's directory,
+      // so it is an override rather than the re-ask the fast path removed.
+      label: "New session here...",
       onSelect: () =>
         router.push(`/sessions/new?workdir=${encodeURIComponent(group.path)}`),
+      disabled: !group.path,
     },
     { label: open ? "Collapse" : "Expand", onSelect: () => setOpen(!open) },
     ...(onTogglePin
@@ -260,6 +361,8 @@ function GroupSection({
         onClick={() => setOpen(!open)}
         onContextMenu={(event) => {
           event.preventDefault();
+          // Stopped so the pane's own menu does not also open behind this one.
+          event.stopPropagation();
           setMenu({ x: event.clientX, y: event.clientY });
         }}
         aria-expanded={open}
@@ -290,8 +393,14 @@ function GroupSection({
         </span>
       </button>
 
+      {/* The list is named per group so one group's rows are addressable without
+          relying on sidebar ordering, and so a screen reader announces which
+          workspace a list of sessions belongs to. */}
       {open && (
-        <ul className="mb-1 ml-2 border-l border-gray-200 pl-1">
+        <ul
+          aria-label={`Sessions in ${label}`}
+          className="mb-1 ml-2 border-l border-gray-200 pl-1"
+        >
           {group.sessions.length === 0 ? (
             <li className="px-1.5 py-1 text-[11px] text-gray-500">
               {emptyHint ?? "No sessions yet."}
@@ -357,6 +466,7 @@ function SessionRow({
         aria-current={active ? "page" : undefined}
         onContextMenu={(event) => {
           event.preventDefault();
+          event.stopPropagation();
           setMenu({ x: event.clientX, y: event.clientY });
         }}
         title={`${sessionLabel(session)} — ${shortenHome(session.workdir, home)}`}

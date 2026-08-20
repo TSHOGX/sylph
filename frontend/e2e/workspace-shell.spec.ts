@@ -192,3 +192,187 @@ test("expand-all and collapse-all drive every disclosure in the timeline", async
   await page.getByRole("button", { name: "Collapse all" }).click();
   await expect(thinking).toBeHidden();
 });
+
+/**
+ * Session rows inside one sidebar group.
+ *
+ * Counted rather than compared against a literal: the E2E data directory is not
+ * wiped between runs, so absolute counts depend on how many times the suite has
+ * been run before. Each group labels its own list, which is what makes one
+ * group's rows addressable without depending on sidebar ordering.
+ */
+function groupRows(page: Page, name: string) {
+  return page.getByRole("list", { name: `Sessions in ${name}` }).getByRole("link");
+}
+
+test("Quick Sessions creates a session from its menu with no dialog", async ({ page }) => {
+  // The regression: "New session here" used to route to /sessions/new and ask
+  // again for a working directory the right-clicked group had already named.
+  await createSession(page);
+
+  const rows = groupRows(page, "Quick Sessions");
+  const before = await rows.count();
+
+  // The default agent is unset here, so creation falls back to the first
+  // discovered runner — the E2E fixture, which is the only one installed.
+  await page.getByRole("button", { name: /Quick Sessions/ }).click({ button: "right" });
+  const menu = page.getByRole("menu");
+  await expect(menu).toBeVisible();
+  await menu.getByRole("menuitem", { name: "New session here", exact: true }).click();
+
+  // Straight to a usable conversation: no form, and never the create route.
+  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page).toHaveURL(/\/sessions\/(?!new)[0-9a-f-]{36}/);
+  await expect(page.getByLabel("Working directory")).toHaveCount(0);
+
+  // Created in the fixed Quick Start directory, so it joins that group rather
+  // than spawning a workspace of its own.
+  await expect(rows).toHaveCount(before + 1);
+});
+
+test("a workspace group creates in its own directory, and the ... variant still opens the form", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  // `/tmp` is where `createSession` put that session, so this group exists and
+  // its directory is the one a new session must inherit.
+  const group = page.getByRole("button", { name: "tmp", exact: false }).first();
+  const rows = groupRows(page, "tmp");
+  const before = await rows.count();
+
+  await group.click({ button: "right" });
+  await page
+    .getByRole("menu")
+    .getByRole("menuitem", { name: "New session here", exact: true })
+    .click();
+
+  await expect(page.getByLabel("Message")).toBeVisible();
+  // The directory was inherited from the group, not re-asked.
+  await expect(rows).toHaveCount(before + 1);
+
+  // The explicit variant is still reachable, for overriding agent, model, or title.
+  await page.getByRole("button", { name: "tmp", exact: false }).first().click({ button: "right" });
+  await page.getByRole("menu").getByRole("menuitem", { name: "New session here..." }).click();
+  const workdir = page.getByLabel("Working directory");
+  await expect(workdir).toBeVisible();
+  // Prefilled from the group, so the form is an override surface, not a re-ask.
+  await expect(workdir).toHaveValue(/tmp/);
+});
+
+// ------------------------------------------------- Phase 7: creation surfaces
+//
+// Creating a session and binding a workspace both moved into the sidebar's
+// context menus. These pin the two properties that motivated the move: the fast
+// path asks for nothing, and the entry points that vanished from the top bar are
+// still reachable by keyboard.
+
+test("the top bar carries no create buttons, but the shortcuts still work", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  const header = page.getByRole("banner");
+  // Both were removed: a top-bar button cannot know a working directory, so it
+  // could only re-ask for one or silently pick the scratch directory.
+  await expect(header.getByRole("button", { name: "New session" })).toHaveCount(0);
+  await expect(header.getByRole("button", { name: /Quick Start/ })).toHaveCount(0);
+
+  // The action survived their removal — it dispatches through `runAction`, which
+  // the shortcut and the command palette share.
+  await page.keyboard.press("ControlOrMeta+n");
+  await expect(page).toHaveURL(/\/sessions\/new/);
+});
+
+test("binding a workspace from the empty sidebar area needs no session first", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  const sidebar = page.getByRole("complementary", { name: "Workspaces" });
+
+  // Reachable by right-click on pane chrome. Aimed at the footer rather than the
+  // list area: group and session rows deliberately stop propagation so their own
+  // menus win, and once sessions fill the scroll container they cover all of it.
+  await sidebar
+    .getByRole("button", { name: "New Workspace..." })
+    .click({ button: "right" });
+  const menu = page.getByRole("menu", { name: "Workspace list actions" });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "New Workspace..." })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+
+  // And as a visible button, since a right-click gesture alone would leave the
+  // only path to binding a fresh directory undiscoverable.
+  await sidebar.getByRole("button", { name: "New Workspace..." }).click();
+
+  // The picker enumerates the *backend's* filesystem, which a browser cannot do
+  // for itself.
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("list", { name: "Folders" })).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Bind workspace" }).click();
+
+  // `/tmp` is a configured browse root and the picker's landing directory, so
+  // binding it makes a group with no sessions of its own — which is the point:
+  // a workspace can exist before any session does.
+  await expect(dialog).toBeHidden();
+  await expect(sidebar.getByRole("button", { name: /tmp/ }).first()).toBeVisible();
+});
+
+// -------------------------------------------------------- Phase 7: composer
+//
+// The composer now exposes the runner configuration a turn will use. Both
+// controls are generated from `--describe`, so these assert against whatever the
+// E2E fixture declares rather than hardcoding a model list.
+
+test("the composer exposes the agent and its declared flags, and locks the agent after the first turn", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  // Before any turn the agent is changeable: nothing has been produced by it yet.
+  const agent = page.getByLabel("Agent", { exact: true });
+  await expect(agent).toBeVisible();
+  await expect(agent).toHaveValue("e2e");
+
+  const composer = page.getByLabel("Message");
+  await composer.fill("First turn");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
+
+  // After a turn it is a plain label, not a disabled control: switching runner
+  // would hand an existing transcript to a different identity policy.
+  await expect(page.getByLabel("Agent", { exact: true })).toHaveCount(0);
+  await expect(page.getByTitle(/agent is fixed once a session has history/)).toBeVisible();
+});
+
+test("attachments stage inside the composer rather than in a separate dropzone", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  // The old stacked "Attach files or drop them here" strip is gone; the paperclip
+  // inside the composer replaces it.
+  await expect(page.getByText("Attach files or drop them here.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Attach files" })).toBeVisible();
+
+  await page.setInputFiles('input[type="file"]', {
+    name: "note.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("hello"),
+  });
+
+  // Staged as a chip on the composer's own surface.
+  const staged = page.getByRole("list", { name: "Staged attachments" });
+  await expect(staged.getByText("note.txt")).toBeVisible();
+
+  // Offered only once something is staged, and writes into the workspace subtree
+  // rather than the per-turn staging directory.
+  await expect(page.getByRole("button", { name: /Save to workspace/ })).toBeVisible();
+
+  await staged.getByRole("button", { name: "Remove note.txt" }).click();
+  await expect(staged).toHaveCount(0);
+});

@@ -16,8 +16,11 @@ test("a new session accepts a turn and streams the reply", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 
-  // "New session" is a top-bar button in the three-pane shell, not a page link.
-  await page.getByRole("button", { name: "New session" }).click();
+  // The top bar no longer carries create buttons: creating a session needs a
+  // working directory, which only the sidebar's context menus know. `Mod+N` is
+  // the keyboard route to the explicit form, and it still dispatches through
+  // `runAction`, so this also pins that the shortcut survived their removal.
+  await page.keyboard.press("ControlOrMeta+n");
   await expect(page.getByRole("heading", { name: /new session/i })).toBeVisible();
 
   await page.getByLabel("Agent").selectOption("e2e");

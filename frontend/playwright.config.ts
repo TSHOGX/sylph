@@ -49,6 +49,10 @@ export default defineConfig({
         // Point at a path that does not exist so archive-dependent screens
         // exercise their unavailable state instead of the developer's archive.
         TRACEDB_BIN: path.join(dataDir, "absent-trace-db"),
+        // Browse roots default to `$HOME`, but the specs create sessions in
+        // `/tmp`. Naming both keeps the directory picker assertable without
+        // depending on what happens to live in the developer's home directory.
+        SYLPH_WEB_BROWSE_ROOTS: "/tmp",
       },
     },
     {

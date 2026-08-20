@@ -15,11 +15,12 @@
 import dynamic from "next/dynamic";
 import { useRouter, usePathname } from "next/navigation";
 import { useCallback, type ReactNode } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api, type Session } from "@/lib/api";
 import { useSettings } from "@/lib/settings";
 import { WorkspaceUIProvider, useWorkspaceUI } from "@/lib/workspace-ui";
 import { WorkspaceSidebar } from "@/components/workspace-sidebar";
+import { useQuickCreateSession } from "@/lib/create-session";
 import { formatCombo, useIsMac } from "@/lib/shortcuts";
 
 /**
@@ -67,98 +68,52 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const goToNewSession = useCallback(() => router.push("/sessions/new"), [router]);
 
-  // Quick Start is a mutation, not a route: the point is that it creates a
-  // session with no dialog. It needs the resolved `~/.agents` path and the
-  // default agent, so the handler lives here where both are in scope.
-  const quickStart = useQuickStart();
+  // One creator for the whole shell. Creating a session is a mutation, not a
+  // route — the sidebar's group menus, and Quick Start, all go through this so
+  // there is a single pending state and a single error banner.
+  const create = useQuickCreateSession();
+
+  // `~/.agents` comes from the backend, never from a client-side guess: `~`
+  // cannot be expanded in a browser, and the backend runs as the user whose home
+  // directory is the right one.
+  const workspaces = useQuery({
+    queryKey: ["workspaces"],
+    queryFn: () => api.workspaces.list(),
+    staleTime: 30_000,
+  });
 
   if (BARE_ROUTES.includes(pathname)) {
     return <>{children}</>;
   }
 
   return (
-    <WorkspaceUIProvider onNewSession={goToNewSession} onQuickStart={quickStart.start}>
-      <ShellFrame quickStartPending={quickStart.isPending} quickStartError={quickStart.error}>
-        {children}
-      </ShellFrame>
+    <WorkspaceUIProvider
+      onNewSession={goToNewSession}
+      quickStartDir={workspaces.data?.quickStartDir}
+      createSession={create.create}
+      createPending={create.isPending}
+      createError={create.error}
+    >
+      <ShellFrame>{children}</ShellFrame>
     </WorkspaceUIProvider>
   );
 }
 
-/**
- * Create a session in `~/.agents` and navigate to it.
- *
- * The directory comes from `GET /workspaces`, never from a client-side guess:
- * `~` cannot be expanded in a browser, and the backend runs as the user whose
- * home directory is the right one.
- */
-function useQuickStart() {
-  const router = useRouter();
-  const queryClient = useQueryClient();
-  const { settings } = useSettings();
-
-  const workspaces = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: () => api.workspaces.list(),
-    staleTime: 30_000,
-  });
-  const agents = useQuery({ queryKey: ["agents"], queryFn: () => api.agents.list() });
-
-  const mutation = useMutation({
-    mutationFn: async () => {
-      const workdir = workspaces.data?.quickStartDir;
-      if (!workdir) {
-        throw new Error("Still resolving the Quick Start directory. Try again in a moment.");
-      }
-      // Prefer the configured default; otherwise the first discovered runner, so
-      // Quick Start works before anyone has visited settings.
-      const agent = settings.defaultAgent || agents.data?.agents[0]?.name;
-      if (!agent) {
-        throw new Error(
-          "No agent runners were discovered, so there is nothing to start a session with.",
-        );
-      }
-      const model = settings.defaultModels[agent];
-      return api.sessions.create({
-        agent,
-        workdir,
-        flags: model ? { model } : undefined,
-      });
-    },
-    onSuccess: ({ session }) => {
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      router.push(`/sessions/${session.id}`);
-    },
-  });
-
-  return {
-    start: () => mutation.mutate(),
-    isPending: mutation.isPending,
-    error: mutation.error,
-  };
-}
-
-function ShellFrame({
-  children,
-  quickStartPending,
-  quickStartError,
-}: {
-  children: ReactNode;
-  quickStartPending: boolean;
-  quickStartError: unknown;
-}) {
-  const { leftOpen, rightOpen, overlay } = useWorkspaceUI();
+function ShellFrame({ children }: { children: ReactNode }) {
+  const { leftOpen, rightOpen, overlay, createError } = useWorkspaceUI();
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-white text-gray-900">
-      <TopBar quickStartPending={quickStartPending} />
+      <TopBar />
 
-      {quickStartError != null && (
+      {/* Reported at the shell rather than inside the sidebar menu that started
+          it: the menu closes on select, so an error rendered there would unmount
+          with it. */}
+      {createError != null && (
         <p role="alert" className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
-          {quickStartError instanceof Error
-            ? quickStartError.message
-            : "Quick Start could not create a session."}
+          {createError instanceof Error
+            ? createError.message
+            : "Could not create the session."}
         </p>
       )}
 
@@ -191,9 +146,8 @@ function ShellFrame({
   );
 }
 
-function TopBar({ quickStartPending }: { quickStartPending: boolean }) {
-  const { toggleLeft, toggleRight, openOverlay, runAction, leftOpen, rightOpen } =
-    useWorkspaceUI();
+function TopBar() {
+  const { toggleLeft, toggleRight, openOverlay, leftOpen, rightOpen } = useWorkspaceUI();
   const { settings } = useSettings();
   const isMac = useIsMac();
 
@@ -232,24 +186,14 @@ function TopBar({ quickStartPending }: { quickStartPending: boolean }) {
         </button>
       </div>
 
-      <button
-        type="button"
-        onClick={() => runAction("quickStart")}
-        disabled={quickStartPending}
-        title={`Start a session in ~/.agents${hint("quickStart") ? ` (${hint("quickStart")})` : ""}`}
-        className="rounded-md border border-gray-200 px-2.5 py-1 text-xs font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
-      >
-        {quickStartPending ? "Starting..." : "⚡ Quick Start"}
-      </button>
-
-      <button
-        type="button"
-        onClick={() => runAction("newSession")}
-        className="rounded-md bg-gray-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-      >
-        New session
-      </button>
-
+      {/* No create buttons here.
+          Creating a session needs a working directory, and the top bar does not
+          know one — so a button here could only open a form asking for it, or
+          silently pick the scratch directory. Both are worse than the surface
+          that already knows the answer: right-clicking a workspace in the sidebar
+          names the directory by the act of clicking it. `Mod+N` and
+          `Mod+Shift+N` still reach both paths through `runAction`, and the
+          command palette still lists them. */}
       <IconButton
         label="Open settings"
         hint={hint("openSettings")}

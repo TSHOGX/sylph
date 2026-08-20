@@ -63,6 +63,16 @@ interface WorkspaceUIValue {
   registerSessionActions: (handler: SessionActionHandler) => () => void;
   /** Run a shortcut action, for the command palette to reuse the same paths. */
   runAction: (action: ShortcutAction) => void;
+  /**
+   * Create a Sylph session in `workdir` and open it, with no intermediate form.
+   *
+   * Shared through the context rather than instantiated per call site so the
+   * sidebar's group menus and the shortcut dispatcher report one pending state and
+   * one error, instead of each owning a copy that can disagree.
+   */
+  createSessionIn: (workdir: string | undefined) => void;
+  createPending: boolean;
+  createError: unknown;
 }
 
 const WorkspaceUIContext = createContext<WorkspaceUIValue | null>(null);
@@ -70,13 +80,20 @@ const WorkspaceUIContext = createContext<WorkspaceUIValue | null>(null);
 export function WorkspaceUIProvider({
   children,
   onNewSession,
-  onQuickStart,
+  quickStartDir,
+  createSession,
+  createPending,
+  createError,
 }: {
   children: ReactNode;
   /** Navigate to the create-session route. Supplied by the shell, which has
    *  the router; this provider stays free of routing concerns. */
   onNewSession: () => void;
-  onQuickStart: () => void;
+  /** Resolved `~/.agents`, which only the backend can expand. */
+  quickStartDir: string | undefined;
+  createSession: (workdir: string | undefined) => void;
+  createPending: boolean;
+  createError: unknown;
 }) {
   const { settings, update } = useSettings();
 
@@ -152,7 +169,10 @@ export function WorkspaceUIProvider({
           onNewSession();
           return;
         case "quickStart":
-          onQuickStart();
+          // Same creator as the sidebar menus, aimed at `~/.agents`. Quick Start
+          // is just "create in the scratch directory", so it must not be a second
+          // implementation of creation.
+          createSession(quickStartDir);
           return;
         case "toggleLeftSidebar":
           toggleLeft();
@@ -166,7 +186,7 @@ export function WorkspaceUIProvider({
           sessionHandlerRef.current?.(action);
       }
     },
-    [onNewSession, onQuickStart, toggleLeft, toggleRight],
+    [onNewSession, createSession, quickStartDir, toggleLeft, toggleRight],
   );
 
   // One document-level listener for every shortcut. Per-component listeners
@@ -213,6 +233,9 @@ export function WorkspaceUIProvider({
       clearArtifact: () => setArtifact(null),
       registerSessionActions,
       runAction,
+      createSessionIn: createSession,
+      createPending,
+      createError,
     }),
     [
       leftOpen,
@@ -225,6 +248,9 @@ export function WorkspaceUIProvider({
       showArtifact,
       registerSessionActions,
       runAction,
+      createSession,
+      createPending,
+      createError,
     ],
   );
 

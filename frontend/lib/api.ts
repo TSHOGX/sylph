@@ -239,10 +239,96 @@ export interface FileContentResponse {
   modifiedAtMs: number;
 }
 
+/** One browsable root on the machine the backend runs on. */
+export interface BrowseRoot {
+  /** Display label: the directory leaf, or `Home` for the home directory. */
+  name: string;
+  /** Absolute path, handed straight back as a `workdir` or a listing request. */
+  path: string;
+}
+
+export interface BrowseRootsResponse {
+  roots: BrowseRoot[];
+  /** Absolute home directory, so paths can be abbreviated as `~/...`. */
+  home: string;
+}
+
+/** A subdirectory in the machine-level browser. Files are never listed. */
+export interface BrowseEntry {
+  path: string;
+  name: string;
+  modifiedAtMs: number;
+  isSymlink?: boolean;
+}
+
+export interface BrowseResponse {
+  path: string;
+  /**
+   * Absent at a configured root.
+   *
+   * The server withholds it rather than the client hiding it, so a "go up"
+   * affordance never offers a path the next request would refuse.
+   */
+  parent?: string;
+  entries: BrowseEntry[];
+  truncated: boolean;
+}
+
+export interface UploadFileRequest {
+  /** Destination directory relative to the workdir. Empty means the root. */
+  path?: string;
+  name: string;
+  /** Base64, no `data:` prefix — the same encoding attachments use. */
+  data: string;
+  /** Replace an existing file. Omitted means refuse instead. */
+  overwrite?: boolean;
+}
+
+export interface UploadFileResponse {
+  path: string;
+  absolutePath: string;
+  size: number;
+}
+
+/**
+ * Patchable session fields.
+ *
+ * Only these two. Agent and origin decide which runner owns the conversation and
+ * whether `SOUL.md` may be injected, so they are fixed once history exists.
+ */
+export interface UpdateSessionRequest {
+  /** Complete replacement set, validated server-side against `--describe`. */
+  flags?: Record<string, string>;
+  title?: string;
+}
+
 export interface ImportSessionRequest {
   /** TraceDB session id, formatted `<agent>:<native-id>`. */
   traceSessionId: string;
   title?: string;
+}
+
+/**
+ * Parse a session's runner flags.
+ *
+ * The wire carries `flagsJson` as a string because that is how the journal
+ * stores it. Parsing it here means the composer reads `flags.model` without every
+ * consumer repeating a `JSON.parse` that can throw on a hand-edited row.
+ */
+export function sessionFlags(session: Session): Record<string, string> {
+  try {
+    const parsed = JSON.parse(session.flagsJson || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    // Values are coerced rather than trusted: the column is free-form JSON, and a
+    // non-string would otherwise reach a `<select value>` as `[object Object]`.
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([, value]) => typeof value === "string")
+        .map(([key, value]) => [key, value as string]),
+    );
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -342,6 +428,12 @@ export const api = {
         method: "POST",
         body: JSON.stringify(req),
       }),
+    /** Change runner flags or the title of an existing session. */
+    update: (id: string, req: UpdateSessionRequest) =>
+      fetchAPI<{ session: Session }>(`/sessions/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(req),
+      }),
   },
   workspaces: {
     list: () => fetchAPI<WorkspacesResponse>("/workspaces"),
@@ -356,6 +448,28 @@ export const api = {
       fetchAPI<FileContentResponse>(
         `/sessions/${sessionId}/files/content${queryString({ path })}`,
       ),
+    /**
+     * Write one file into the session's working directory.
+     *
+     * Confined server-side to the workdir subtree — the same range the agent
+     * already writes to — and refuses to overwrite unless asked.
+     */
+    upload: (sessionId: string, req: UploadFileRequest) =>
+      fetchAPI<UploadFileResponse>(`/sessions/${sessionId}/files`, {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+  },
+  /**
+   * Machine-level directory browsing, for choosing a workspace to bind.
+   *
+   * Separate from `files` because the root differs: `files` is rooted at one
+   * session's workdir, this at the backend's configured browse roots. There is
+   * deliberately no content call here — reading bytes stays session-scoped.
+   */
+  fs: {
+    roots: () => fetchAPI<BrowseRootsResponse>("/fs/roots"),
+    tree: (path = "") => fetchAPI<BrowseResponse>(`/fs/tree${queryString({ path })}`),
   },
   turns: {
     create: (sessionId: string, req: CreateTurnRequest) =>

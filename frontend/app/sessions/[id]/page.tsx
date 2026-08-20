@@ -24,7 +24,8 @@ import { formatTimestamp, sessionLabel } from "@/lib/format";
 import { densityClasses, useSettings } from "@/lib/settings";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useSSE } from "@/lib/use-sse";
-import { AttachmentPicker, type StagedAttachment } from "@/components/attachment-picker";
+import { type StagedAttachment } from "@/components/attachment-picker";
+import { Composer } from "@/components/composer";
 import { CommandDialog, type CommandInvocation } from "@/components/command-dialog";
 import { Timeline } from "@/components/timeline";
 import { OriginBadge, SessionStatusBadge, TurnStatusBadge } from "@/components/badges";
@@ -240,7 +241,6 @@ export default function SessionPage() {
   }
 
   const isNative = session.origin === "native";
-  const canSend = text.trim().length > 0 && !sendTurn.isPending && !isLive;
   const density = densityClasses(settings.density);
 
   return (
@@ -307,91 +307,25 @@ export default function SessionPage() {
         </div>
       </div>
 
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (canSend) sendTurn.mutate(undefined);
-        }}
-        className="shrink-0 border-t border-gray-200 px-4 py-2"
-      >
-        <div className="mx-auto max-w-3xl">
-          <label htmlFor="message" className="sr-only">
-            Message
-          </label>
-          <textarea
-            id="message"
-            value={text}
-            rows={2}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => {
-              // Enter sends; Shift+Enter and Cmd/Ctrl+Enter insert a newline.
-              if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey) {
-                event.preventDefault();
-                if (canSend) sendTurn.mutate(undefined);
-              }
-            }}
-            placeholder={
-              isLive ? "Waiting for the current turn to finish..." : "Send a message..."
-            }
-            disabled={isLive || sendTurn.isPending}
-            className="w-full resize-y rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:bg-gray-50"
-          />
-
-          <div className="mt-1.5">
-            <AttachmentPicker
-              attachments={attachments}
-              onChange={setAttachments}
-              disabled={isLive || sendTurn.isPending}
-            />
-          </div>
-
-          {sendTurn.error && (
-            <p role="alert" className="mt-1.5 text-xs text-red-700">
-              {describeSendError(sendTurn.error)}
-            </p>
-          )}
-          {runCommand.error && (
-            <p role="alert" className="mt-1.5 text-xs text-red-700">
-              {describeSendError(runCommand.error)}
-            </p>
-          )}
-
-          <div className="mt-1.5 flex items-center justify-between gap-3">
-            <p className="text-[10px] text-gray-500">
-              Enter to send · Shift+Enter for a new line
-            </p>
-            <div className="flex gap-1.5">
-              {hasCommands && (
-                <button
-                  type="button"
-                  onClick={() => setCommandOpen(true)}
-                  disabled={isLive || sendTurn.isPending}
-                  className="rounded-md border border-gray-200 px-3 py-1 text-xs font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
-                >
-                  Command
-                </button>
-              )}
-              {isLive && (
-                <button
-                  type="button"
-                  onClick={() => stopTurn.mutate()}
-                  disabled={stopTurn.isPending}
-                  className="rounded-md border border-red-300 px-3 py-1 text-xs font-medium text-red-800 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:opacity-50"
-                >
-                  {stopTurn.isPending ? "Stopping..." : "Stop turn"}
-                </button>
-              )}
-              <button
-                type="submit"
-                disabled={!canSend}
-                className="rounded-md bg-gray-900 px-4 py-1 text-xs font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
-              >
-                {sendTurn.isPending ? "Sending..." : "Send"}
-              </button>
-            </div>
-          </div>
-        </div>
-      </form>
+      <Composer
+        session={session}
+        agents={agentsQuery.data?.agents ?? []}
+        // Drives the agent lock: an empty session can still change runner, one
+        // with history cannot.
+        turnCount={history.length}
+        isLive={isLive}
+        text={text}
+        onTextChange={setText}
+        attachments={attachments}
+        onAttachmentsChange={setAttachments}
+        onSend={() => sendTurn.mutate(undefined)}
+        sending={sendTurn.isPending}
+        sendError={sendTurn.error ?? runCommand.error}
+        onStop={() => stopTurn.mutate()}
+        stopping={stopTurn.isPending}
+        hasCommands={hasCommands}
+        onOpenCommands={() => setCommandOpen(true)}
+      />
 
       {commandOpen && (
         <CommandDialog
@@ -454,23 +388,6 @@ function FindBar({
       </button>
     </div>
   );
-}
-
-/** Turn an API failure into text that names the actual cause. */
-function describeSendError(error: unknown): string {
-  if (error instanceof ApiError) {
-    switch (error.code) {
-      case "SESSION_ALREADY_RUNNING":
-        return "This session already has a turn in flight. Wait for it to finish, or stop it first.";
-      case "ATTACHMENT_INVALID":
-        return `Attachment rejected: ${error.message}`;
-      case "PAYLOAD_TOO_LARGE":
-        return "The message plus attachments exceed the 10 MB per-turn limit. Remove a file and try again.";
-      default:
-        return error.message;
-    }
-  }
-  return error instanceof Error ? error.message : "Could not send the message.";
 }
 
 /**
