@@ -73,6 +73,61 @@ pub struct TraceEvent {
     pub created_at_ms: Option<i64>,
 }
 
+/// A `show` response, accepted in either shape TraceDB may return.
+///
+/// Newer archives answer with an object carrying session-level metadata
+/// alongside the events; older ones answer with a bare event array and expose
+/// no metadata at all. Tolerating both keeps import working across archive
+/// versions instead of failing on whichever shape we did not expect.
+#[derive(Debug, Clone, Default)]
+pub struct SessionTrace {
+    /// Session-level metadata, absent on archives that do not report it.
+    pub session: Option<TraceSession>,
+    pub events: Vec<TraceEvent>,
+}
+
+impl<'de> Deserialize<'de> for SessionTrace {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Object {
+                #[serde(default)]
+                session: Option<TraceSession>,
+                #[serde(default)]
+                events: Vec<TraceEvent>,
+            },
+            Events(Vec<TraceEvent>),
+            /// Archives that return an optional trace answer `null` for an
+            /// unknown session id. That is a clean "no such session", not a
+            /// protocol error, so it must not fail deserialization.
+            Missing,
+        }
+
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Object { session, events } => SessionTrace { session, events },
+            Raw::Events(events) => SessionTrace {
+                session: None,
+                events,
+            },
+            Raw::Missing => SessionTrace::default(),
+        })
+    }
+}
+
+/// Session-level metadata as TraceDB reports it. Unknown fields are ignored so
+/// the archive can add its own without breaking us.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceSession {
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub started_at_ms: Option<i64>,
+}
+
 /// Facts about an archived session, derived from its own event stream.
 #[derive(Debug, Clone)]
 pub struct SessionFacts {
@@ -188,7 +243,7 @@ impl Client {
     /// or outcome. Those appear only on a search hit, so anything the import
     /// path needs about the session itself has to be derived from the events
     /// or from the id.
-    pub async fn show(&self, id: &str) -> Result<Vec<TraceEvent>, String> {
+    pub async fn show(&self, id: &str) -> Result<SessionTrace, String> {
         let raw = self.call("show", None, None, Some(id)).await?;
         serde_json::from_value(raw).map_err(|e| format!("Unexpected show payload: {}", e))
     }
@@ -199,40 +254,55 @@ impl Client {
     /// Returns `Ok(None)` when the archive has no such session, which is
     /// distinct from the archive being unreachable (`Err`).
     pub async fn session_facts(&self, id: &str) -> Result<Option<SessionFacts>, String> {
-        let events = self.show(id).await?;
-        if events.is_empty() {
+        let trace = self.show(id).await?;
+        if trace.events.is_empty() && trace.session.is_none() {
             return Ok(None);
         }
 
-        // The agent runs a `system` event early carrying the session's working
-        // directory. Taking it from the archive keeps a policy-relevant field
-        // authoritative rather than trusting whatever a client posts.
-        let cwd = events.iter().find_map(|event| {
-            let text = event.text.as_deref()?;
-            let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
-            parsed
-                .get("cwd")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
+        let meta = trace.session.as_ref();
+
+        // Prefer the working directory the archive reports for the session.
+        // Some agents also embed it in an early event's JSON payload, which is
+        // the only source older archives expose -- but many sessions have no
+        // such event, so it is a fallback, not the rule. Either way the value
+        // comes from the archive rather than from whatever a client posts.
+        let cwd = meta.and_then(|s| s.cwd.clone()).or_else(|| {
+            trace.events.iter().find_map(|event| {
+                let text = event.text.as_deref()?;
+                let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+                parsed
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
         });
 
-        // The opening user turn is the session's recognizable summary; `show`
-        // exposes no title.
-        let first_ask = events
-            .iter()
-            .find(|event| event.kind.as_deref() == Some("user"))
-            .and_then(|event| event.text.clone());
+        // The archive's own title when it has one, else the opening user turn as
+        // the session's recognizable summary.
+        let first_ask = meta.and_then(|s| s.title.clone()).or_else(|| {
+            trace
+                .events
+                .iter()
+                .find(|event| event.kind.as_deref() == Some("user"))
+                .and_then(|event| event.text.clone())
+        });
 
-        let started_at_ms = events
-            .iter()
-            .filter_map(|event| event.created_at_ms)
-            .find(|ms| *ms > 0);
+        let started_at_ms = meta
+            .and_then(|s| s.started_at_ms)
+            .filter(|ms| *ms > 0)
+            .or_else(|| {
+                trace
+                    .events
+                    .iter()
+                    .filter_map(|event| event.created_at_ms)
+                    .find(|ms| *ms > 0)
+            });
 
         Ok(Some(SessionFacts {
             cwd,
             first_ask,
             started_at_ms,
-            event_count: events.len(),
+            event_count: trace.events.len(),
         }))
     }
 
@@ -329,5 +399,55 @@ impl Client {
             stdin,
             stdout,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(raw: &str) -> SessionTrace {
+        serde_json::from_str(raw).expect("show payload should deserialize")
+    }
+
+    #[test]
+    fn show_accepts_a_session_object_with_metadata() {
+        let trace = parse(
+            r#"{"session":{"cwd":"/w/app","title":"Fix login","startedAtMs":17},
+                "mode":"full","events":[{"kind":"user","text":"hi"}]}"#,
+        );
+
+        let session = trace.session.expect("session metadata should be present");
+        assert_eq!(session.cwd.as_deref(), Some("/w/app"));
+        assert_eq!(session.title.as_deref(), Some("Fix login"));
+        assert_eq!(session.started_at_ms, Some(17));
+        assert_eq!(trace.events.len(), 1);
+    }
+
+    #[test]
+    fn show_accepts_a_bare_event_array() {
+        let trace = parse(r#"[{"kind":"user","text":"hi"},{"kind":"assistant"}]"#);
+
+        assert!(trace.session.is_none());
+        assert_eq!(trace.events.len(), 2);
+    }
+
+    #[test]
+    fn show_accepts_null_for_an_unknown_session() {
+        let trace = parse("null");
+
+        assert!(trace.session.is_none());
+        assert!(trace.events.is_empty());
+    }
+
+    #[test]
+    fn show_ignores_unknown_session_fields() {
+        let trace = parse(r#"{"session":{"cwd":"/w","gitBranch":"main"},"events":[]}"#);
+
+        assert_eq!(
+            trace.session.and_then(|s| s.cwd).as_deref(),
+            Some("/w"),
+            "an added archive field must not break parsing"
+        );
     }
 }
