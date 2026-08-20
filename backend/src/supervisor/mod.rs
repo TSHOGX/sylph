@@ -661,3 +661,158 @@ fn normalize(line: RunnerStreamLine) -> StreamEvent {
         created_at_ms: chrono::Utc::now().timestamp_millis(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::{RunnerEvent, RunnerStreamLine};
+
+    /// Event kinds the journal's CHECK constraint accepts, copied from
+    /// `migrations/001_initial_schema.sql`. Kept here so a schema change that
+    /// drops a kind fails a test instead of aborting a live turn.
+    const JOURNAL_KINDS: &[&str] = &[
+        "status",
+        "system",
+        "user",
+        "thinking",
+        "assistant",
+        "tool_call",
+        "tool_result",
+        "usage",
+        "error",
+        "approval",
+    ];
+
+    fn line(kind: &str, phase: Option<&str>) -> RunnerStreamLine {
+        RunnerStreamLine {
+            stream: "sylph.runner.v1".to_string(),
+            event: RunnerEvent {
+                kind: kind.to_string(),
+                phase: phase.map(str::to_string),
+                id: None,
+                name: None,
+                text: None,
+                data: None,
+                is_error: None,
+            },
+        }
+    }
+
+    #[test]
+    fn every_protocol_kind_survives_normalization_unchanged() {
+        for kind in JOURNAL_KINDS {
+            let normalized = normalize(line(kind, Some("completed")));
+            assert_eq!(
+                &normalized.kind, kind,
+                "{kind} is a journal kind and must not be coerced"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_kind_is_coerced_to_status() {
+        // A newer runner emitting a kind this build has never seen must not be
+        // able to abort the turn on the journal's CHECK constraint.
+        for unknown in ["reasoning_summary", "", "STATUS", "tool-call"] {
+            let normalized = normalize(line(unknown, Some("completed")));
+            assert_eq!(normalized.kind, "status", "{unknown:?} should coerce");
+            assert!(JOURNAL_KINDS.contains(&normalized.kind.as_str()));
+        }
+    }
+
+    #[test]
+    fn stability_follows_phase_and_matches_is_stable() {
+        // normalize() and StreamEvent::is_stable() decide durability
+        // independently. If they disagree, an event is written with a stability
+        // its phase contradicts.
+        for (phase, expected) in [
+            (Some("completed"), "stable"),
+            (None, "stable"),
+            (Some("started"), "ephemeral"),
+            (Some("delta"), "ephemeral"),
+            (Some("unrecognized"), "ephemeral"),
+        ] {
+            let normalized = normalize(line("assistant", phase));
+            assert_eq!(normalized.stability, expected, "phase {phase:?}");
+            assert_eq!(
+                normalized.is_stable(),
+                expected == "stable",
+                "phase {phase:?} disagrees with is_stable()"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_optional_fields_normalize_to_their_empty_forms() {
+        let normalized = normalize(line("assistant", Some("delta")));
+        assert_eq!(normalized.text, "", "absent text is empty, not null");
+        assert!(normalized.data.is_none());
+        assert!(!normalized.is_error, "absent is_error defaults to false");
+        assert!(normalized.stream_id.is_none());
+        assert!(normalized.name.is_none());
+    }
+
+    #[test]
+    fn the_runner_block_id_becomes_the_stream_id() {
+        // The protocol calls it `id`; the journal calls it stream_id so it
+        // cannot be confused with a row id.
+        let mut raw = line("tool_call", Some("completed"));
+        raw.event.id = Some("blk-7".to_string());
+        raw.event.name = Some("Read".to_string());
+        raw.event.text = Some("body".to_string());
+        raw.event.is_error = Some(true);
+        raw.event.data = Some(serde_json::json!({"path": "/tmp/x"}));
+
+        let normalized = normalize(raw);
+
+        assert_eq!(normalized.stream_id.as_deref(), Some("blk-7"));
+        assert_eq!(normalized.name.as_deref(), Some("Read"));
+        assert_eq!(normalized.text, "body");
+        assert!(normalized.is_error);
+        assert_eq!(normalized.data, Some(serde_json::json!({"path": "/tmp/x"})));
+    }
+
+    #[test]
+    fn normalized_events_are_attributed_to_the_runner_with_an_unassigned_seq() {
+        // The session-wide counter assigns seq at persist time, so normalize
+        // must leave it at 0 rather than inventing an ordering.
+        let normalized = normalize(line("assistant", Some("completed")));
+        assert_eq!(normalized.source, "runner");
+        assert_eq!(normalized.seq, 0);
+        assert!(normalized.created_at_ms > 0);
+    }
+
+    #[test]
+    fn a_runner_event_accepts_both_spellings_of_is_error() {
+        for raw in [
+            r#"{"kind":"tool_result","phase":"completed","is_error":true}"#,
+            r#"{"kind":"tool_result","phase":"completed","isError":true}"#,
+        ] {
+            let event: RunnerEvent = serde_json::from_str(raw).unwrap();
+            assert_eq!(event.is_error, Some(true), "failed on {raw}");
+        }
+    }
+
+    #[test]
+    fn a_runner_event_tolerates_unknown_fields() {
+        // A newer runner must be able to add fields without breaking this
+        // consumer.
+        let event: RunnerEvent = serde_json::from_str(
+            r#"{"kind":"assistant","phase":"delta","text":"hi","future_field":42}"#,
+        )
+        .unwrap();
+        assert_eq!(event.kind, "assistant");
+        assert_eq!(event.text.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn server_authored_events_are_stable_and_phaseless() {
+        let event = TurnSupervisor::server_event("error", "boom".to_string(), None, true);
+        assert_eq!(event.source, "server");
+        assert_eq!(event.stability, "stable");
+        assert!(event.phase.is_none(), "server events carry no phase");
+        assert!(event.is_stable());
+        assert!(event.is_error);
+        assert_eq!(event.text, "boom");
+    }
+}

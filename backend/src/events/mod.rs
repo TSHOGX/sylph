@@ -133,7 +133,9 @@ pub struct RunnerEvent {
     pub text: Option<String>,
     #[serde(default)]
     pub data: Option<serde_json::Value>,
-    #[serde(default, alias = "is_error")]
+    /// The protocol spells this `isError` and every shipped runner emits that
+    /// form; the snake_case alias is kept for hand-written or older runners.
+    #[serde(default, alias = "isError")]
     pub is_error: Option<bool>,
 }
 
