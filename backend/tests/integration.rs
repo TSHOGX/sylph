@@ -308,6 +308,75 @@ async fn turn_runs_to_completion_and_journals_its_events() {
     );
 }
 
+/// An event stream must forbid intermediaries from re-encoding it.
+///
+/// This pins a bug whose symptom pointed entirely the wrong way. The frontend
+/// proxies `/api/v1/*` through Next.js, whose `compression` middleware gzips any
+/// compressible content type — `text/event-stream` included. gzip cannot be
+/// decoded until a block is flushed, so the browser received nothing until the
+/// turn ended and the whole transcript then appeared at once, while `curl`
+/// (sending no `Accept-Encoding`) saw perfectly paced frames. The stream was
+/// fine; the encoding was buffering it.
+///
+/// `no-transform` (RFC 9111 §5.2.2.6) is what forbids that re-encoding, and it
+/// belongs on the response so the guarantee holds behind any proxy rather than
+/// depending on one front end's configuration. Asserting a single header also
+/// matters: axum sets its own `no-cache`, and two `cache-control` headers would
+/// leave which directive applies up to the intermediary.
+#[tokio::test]
+async fn the_event_stream_forbids_intermediaries_from_compressing_it() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let body = json_body(
+        backend
+            .post_authed(
+                &format!("/api/v1/sessions/{session_id}/turns"),
+                json!({"text": "stream please"}),
+            )
+            .await,
+    )
+    .await;
+    let turn_id = body["turn"]["id"].as_str().unwrap().to_string();
+    backend.await_turn(&turn_id).await;
+
+    let response = backend
+        .get_authed(&format!("/api/v1/turns/{turn_id}/events?after_seq=-1"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream"),
+    );
+
+    let cache_control: Vec<&str> = response
+        .headers()
+        .get_all(axum::http::header::CACHE_CONTROL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect();
+
+    assert_eq!(
+        cache_control.len(),
+        1,
+        "exactly one cache-control header, or the applied directive is \
+         ambiguous: {cache_control:?}"
+    );
+    assert!(
+        cache_control[0].contains("no-transform"),
+        "event stream must forbid re-encoding, or a compressing proxy buffers \
+         it into one lump: {cache_control:?}"
+    );
+    assert!(
+        cache_control[0].contains("no-cache"),
+        "event stream must stay uncached: {cache_control:?}"
+    );
+}
+
 #[tokio::test]
 async fn session_returns_to_idle_after_a_turn() {
     let backend = TestBackend::start().await;

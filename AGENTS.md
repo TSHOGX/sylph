@@ -87,6 +87,34 @@ until that binary exists — check `/api/v1/health` for `tracedb.available`.
 These have each cost real debugging time. They are properties of the toolchain
 and the design, not of any current task.
 
+**A proxy that gzips an SSE stream buffers it invisibly.** Next.js proxies
+`/api/v1/*` through the standard `compression` middleware, which compresses any
+compressible content type — `text/event-stream` included — and a gzip stream
+cannot be decoded until its block is flushed. The whole turn then lands in the
+browser at once, while `curl` sees perfectly paced frames because it sends no
+`Accept-Encoding`. That asymmetry makes a transport bug look like a rendering
+bug. The event stream therefore sets `Cache-Control: no-cache, no-store,
+no-transform`; `no-transform` is what forbids the re-encoding, and it belongs on
+the backend response so it holds behind any proxy, tunnel, or nginx.
+
+**`EventSource` dispatches by frame name, so `onmessage` sees almost nothing.**
+Every frame the backend emits is named after its event kind (`event: thinking`),
+and `onmessage` receives only frames named `message` — so listening there drops
+the entire stream. Per-kind `addEventListener` is not the fix either: a kind added
+later is then silently dropped, and a frame named `error` collides with the
+browser's own connection-error event. `frontend/lib/use-sse.ts` reads the body
+with `fetch` and parses frames itself, which is also what makes the parser
+unit-testable; `EventSource` is not, which is why the original bug shipped
+untested.
+
+**Testing "it streams" needs a runner slower than one render.** Every E2E spec
+asserted final state against a mock runner that finished in well under a second,
+so a client that dropped every mid-turn event passed the entire suite. The `paced`
+scenario in `frontend/e2e/fixtures/runners/e2e/runner.sh` spaces its stages a
+second apart, and `e2e/streaming.spec.ts` asserts an earlier stage is on screen
+while a later one has not been emitted yet. Asserting only the end state cannot
+distinguish streaming from batching.
+
 **`cargo` is not on the default `PATH`.** Use `~/.cargo/bin/cargo`, or export
 `PATH="$HOME/.cargo/bin:$PATH"` first. A bare `cargo test` fails with
 `command not found`, which reads like a broken repo rather than a shell problem.

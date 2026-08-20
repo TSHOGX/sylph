@@ -316,6 +316,16 @@ shipped design.
 
 ### Carried forward
 
+- **Live streaming was fixed after Phase 6 shipped**, and the two causes are worth
+  keeping in mind rather than only in `AGENTS.md`. The transcript arrived in one
+  lump at turn end because (1) the client listened on `EventSource.onmessage`
+  while the backend names every frame after its event kind, and (2) the Next.js
+  proxy gzipped `text/event-stream`, which cannot decode until a block flushes.
+  Neither was visible to `curl`, which sends no `Accept-Encoding` and so saw
+  correctly paced frames. What let this ship green was the test shape: every spec
+  asserted final state against a runner faster than one render, which cannot
+  distinguish streaming from batching. `e2e/streaming.spec.ts` and the `paced`
+  fixture scenario now assert mid-turn painting.
 - **Virtualization** stays deferred, now with a measurement behind it: a
   1000-event conversation renders inside budget through memoization and bounded
   rendering. The evidence that would reverse this is scroll jank while *idle* on a

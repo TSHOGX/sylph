@@ -286,6 +286,21 @@ Stream turn events via SSE.
 **Query parameters:**
 - `after_seq` (default -1, replay from this sequence number)
 
+**Response headers:**
+- `Content-Type: text/event-stream`
+- `Cache-Control: no-cache, no-store, no-transform`
+
+`no-transform` (RFC 9111 §5.2.2.6) is required, not decorative. It forbids an
+intermediary from re-encoding the body, and without it the Next.js proxy's
+`compression` middleware gzips the stream — which cannot be decoded until a block
+flushes, so the client receives the entire turn at once instead of incrementally.
+Exactly one `cache-control` header is sent; two would leave the applied directive
+up to whichever an intermediary reads first.
+
+Note that each frame is **named** after its event kind (`event: thinking`), so a
+client must not dispatch on `EventSource.onmessage`, which by spec receives only
+frames named `message`.
+
 **Response 200 (text/event-stream):**
 ```
 event: thinking

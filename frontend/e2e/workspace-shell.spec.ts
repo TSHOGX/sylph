@@ -175,6 +175,12 @@ test("expand-all and collapse-all drive every disclosure in the timeline", async
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
 
+  // Wait for the turn to settle before asserting the collapsed default. Thinking
+  // is deliberately held open *while* it streams, and the reply block now appears
+  // during the turn rather than after it, so the reply alone no longer implies the
+  // turn is over. The composer re-enabling is what actually marks that.
+  await expect(page.getByLabel("Message")).toBeEnabled();
+
   const thinking = page.getByText("Considering the request.");
   await expect(thinking).toBeHidden();
 
