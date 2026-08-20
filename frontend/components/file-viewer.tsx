@@ -61,6 +61,7 @@ export function FileViewer({
   onBack,
   onClose,
   onExpand,
+  registerExpand,
   scale = "pane",
 }: {
   sessionId: string;
@@ -70,6 +71,15 @@ export function FileViewer({
   onBack?: () => void;
   onClose?: () => void;
   onExpand?: () => void;
+  /**
+   * Hands the expand button to the pane.
+   *
+   * Opening fullscreen unmounts this button — the pane shows a placeholder while
+   * the dialog is up — so `Overlay` cannot restore focus to it: its `isConnected`
+   * guard correctly refuses to focus a detached node. The pane therefore holds a
+   * live reference and restores focus itself once the button remounts.
+   */
+  registerExpand?: (node: HTMLButtonElement | null) => void;
   scale?: "pane" | "full";
 }) {
   const kind = viewerKindOf(path, previewKind);
@@ -81,8 +91,18 @@ export function FileViewer({
   // Swapping the tree out hides the node that had focus, which would drop focus
   // to <body>. The same class of bug the Overlay focus comments guard against,
   // handled here because this transition involves no dialog.
+  //
+  // Keyed on `path` alone, deliberately *not* on every mount: the pane viewer
+  // re-renders when the fullscreen dialog closes, and taking focus there would
+  // steal it back from the Expand button that `Overlay` had just restored it to.
+  // A ref holds the last path focused for, so returning from fullscreen to the
+  // same file is a no-op.
+  const focusedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (scale === "pane") sectionRef.current?.focus();
+    if (scale !== "pane") return;
+    if (focusedFor.current === path) return;
+    focusedFor.current = path;
+    sectionRef.current?.focus();
   }, [scale, path]);
 
   return (
@@ -131,6 +151,7 @@ export function FileViewer({
         {onExpand && (
           <button
             type="button"
+            ref={registerExpand}
             onClick={onExpand}
             aria-label="Open full screen"
             title="Open full screen"

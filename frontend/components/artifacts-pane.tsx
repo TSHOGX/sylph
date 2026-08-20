@@ -92,6 +92,22 @@ export function ArtifactsPane() {
     });
   }, [backToTree, selected]);
 
+  /**
+   * The pane's expand button, so focus can return to it after fullscreen closes.
+   *
+   * `Overlay` restores focus to whatever was active when it opened, but this
+   * button is unmounted while the dialog is up — the pane shows a placeholder
+   * instead of a second copy of the viewer — so its `isConnected` guard correctly
+   * declines to focus a detached node. Restoring it here, once React has
+   * remounted the button, is what keeps the round trip WCAG-conformant.
+   */
+  const expandRef = useRef<HTMLButtonElement | null>(null);
+
+  const handleCloseFullscreen = useCallback(() => {
+    closeArtifactFullscreen();
+    requestAnimationFrame(() => expandRef.current?.focus());
+  }, [closeArtifactFullscreen]);
+
   if (!sessionId) {
     return (
       <div className="p-3 text-xs text-gray-500">
@@ -135,7 +151,7 @@ export function ArtifactsPane() {
                 </p>
                 <button
                   type="button"
-                  onClick={closeArtifactFullscreen}
+                  onClick={handleCloseFullscreen}
                   className="rounded border border-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
                 >
                   Show it here instead
@@ -149,6 +165,9 @@ export function ArtifactsPane() {
                 onBack={handleBack}
                 onClose={clearArtifact}
                 onExpand={openArtifactFullscreen}
+                registerExpand={(node) => {
+                  expandRef.current = node;
+                }}
               />
             )}
           </>
@@ -160,7 +179,7 @@ export function ArtifactsPane() {
           sessionId={sessionId}
           path={selected}
           previewKind={selectedKind}
-          onClose={closeArtifactFullscreen}
+          onClose={handleCloseFullscreen}
         />
       )}
     </div>
