@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import type { StreamEvent } from "@/lib/api";
 import { formatTime } from "@/lib/format";
 
@@ -75,12 +75,24 @@ export function EventList({ events }: { events: StreamEvent[] }) {
     <ol className="space-y-2">
       {rows.map((event, index) => (
         <li key={`${event.seq}-${event.streamId ?? index}`}>
-          <EventCard event={event} />
+          <MemoizedEventCard event={event} />
         </li>
       ))}
     </ol>
   );
 }
+
+/**
+ * Deltas arrive at token rate, so an unmemoized list re-renders every prior
+ * card on each token — cost grows with conversation length exactly when the UI
+ * most needs to stay responsive. Only the streaming tail changes identity, so
+ * comparing by identity keeps completed rows untouched.
+ *
+ * This is deliberately not windowing: it costs no bundle bytes, where a
+ * virtualization library would consume most of the remaining first-load budget.
+ * Revisit if profiling shows DOM size, rather than re-render count, dominating.
+ */
+const MemoizedEventCard = memo(EventCard, (prev, next) => prev.event === next.event);
 
 export function EventCard({ event }: { event: StreamEvent }) {
   const style = event.isError
