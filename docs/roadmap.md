@@ -12,8 +12,10 @@
   EventHub, auth middleware, runner discovery, TraceDB client, integration tests
 - Phase 2: frontend foundation — session list, create dialog, SSE conversation
   view, reconnection from `after_seq`
+- Phase 3: feature completion — attachments, TraceDB search, native import,
+  server-side filters, error boundaries. See `PHASE3_HANDOFF.md`.
 
-**In progress:** Phase 3 (feature completion). See `PHASE3_HANDOFF.md`.
+**In progress:** Phase 4 (production readiness).
 
 **Runner protocol:** the backend consumes `sylph.runner.v1` NDJSON lines
 (`SYLPH_STREAM_FORMAT=ndjson-v1`) as specified in the Sylph skill's
@@ -66,25 +68,30 @@
 - `/sessions/[id]` — Conversation view
 - `/sessions/new` — Create session dialog
 
-## Phase 3: Feature Completion (Weeks 6-7)
+## Phase 3: Feature Completion (Weeks 6-7) — Complete
 
 **Goal:** Full feature parity with specs.
 
 **Deliverables:**
-- Attachment upload (drag/drop, image previews)
-- Agent command dialogs (model/effort selection, status checks)
-- TraceDB search integration
-- Native session import flow
-- Session filters (agent, workspace, time)
-- Error boundaries and retry logic
-- Reconnection handling for SSE
+- ✅ Attachment upload (drag/drop, image previews) — `components/attachment-picker.tsx`
+- ✅ Agent command dialogs (model/effort selection, status checks) — `components/command-dialog.tsx`
+- ✅ TraceDB search integration — `GET /api/v1/trace/search`, `app/search/page.tsx`
+- ✅ Native session import flow — `POST /api/v1/sessions/import`
+- ✅ Session filters (agent, workspace, time) — server-side, `LIMIT`-cap safe
+- ✅ Error boundaries and retry logic — `lib/error-boundary.tsx`
+- ✅ Reconnection handling for SSE — `after_seq` resume in `lib/use-sse.ts`
 
 **UX:**
-- Origin indicators (green for Sylph, violet for native)
-- Preservation policy warning on native session resume
-- Per-turn status (running, completed, failed)
-- Copy/retry actions
-- Scroll anchoring during streaming
+- ✅ Origin indicators (green for Sylph, violet for native)
+- ✅ Preservation policy warning on native session resume
+- ✅ Per-turn status (running, completed, failed)
+- ✅ Copy/retry actions
+- ✅ Scroll anchoring during streaming (pin-to-bottom only when already pinned)
+
+**Carried forward:** the archive-metadata code path in `backend/src/tracedb/mod.rs`
+is inert against the currently installed `trace-db` build, which returns a bare
+event array from `show`. See `PHASE3_HANDOFF.md` for the divergence and the
+rebuild decision.
 
 ## Phase 4: Production Readiness (Weeks 8-9)
 
