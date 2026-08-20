@@ -16,32 +16,80 @@ Sylph Web can create Sylph-managed sessions, stream live tool/reasoning events, 
 ### Prerequisites
 
 - Rust 1.85+
-- Node.js 22.5+ (for frontend, Phase 2)
-- TraceDB built from `~/Workspace/trace-db`
-- Sylph runners under `~/.agents/skills/sylph/runners`
+- Node.js 22.5+
+- TraceDB built from `~/Workspace/trace-db` (optional — without it, live
+  sessions still work and archive search reports itself unavailable)
+- At least one Sylph runner under `~/.agents/skills/sylph/runners`
 
-### Development
+### First Run
 
-**Backend:**
+Two terminals, start to finish. Every command below has been run as written.
+
+**Terminal 1 — backend:**
 
 ```sh
 cd backend
 cargo run
 ```
 
-The backend runs on `http://127.0.0.1:4317`. Check health:
+It binds `http://127.0.0.1:4317` and creates its database on first start.
+Confirm it is up, and whether it found your archive:
 
 ```sh
-curl http://127.0.0.1:4317/api/v1/health
+curl -s http://127.0.0.1:4317/api/v1/health
+# {"ok":true,"apiVersion":"1","schemaVersion":1,"tracedb":{"available":true}}
 ```
 
-**Frontend (coming Phase 2):**
+`tracedb.available: false` is not a failure. Live sessions work; only archive
+search and native import are unavailable. Set `TRACEDB_BIN` to fix it.
+
+**Terminal 2 — frontend:**
 
 ```sh
 cd frontend
 npm install
 npm run dev
 ```
+
+Open `http://localhost:3000`. The frontend proxies `/api/v1/*` to the backend
+on the same origin, which is required: authentication is a `SameSite=Strict`
+cookie that the browser would withhold across ports.
+
+**Create a session and send one turn:**
+
+1. Click **New session**.
+2. Pick an agent from the dropdown. If it is empty, no runners were
+   discovered — check `SYLPH_RUNNERS_DIR` and click refresh.
+3. Set the working directory to a real path. The agent runs there.
+4. Create, type a message, and send.
+
+Events stream in as the agent works: thinking, tool calls, then the reply.
+Closing the tab mid-turn is safe — reopening resumes the stream from where it
+left off rather than replaying from the start.
+
+**Import an archived session** (needs TraceDB): click **Search archive**, query for
+something you remember saying, and import a hit. The session is restored with
+its original agent identity and lifecycle. Sylph never injects `SOUL.md`,
+resets, or rewrites prompts for an imported native session.
+
+### Verifying a Checkout
+
+```sh
+cd backend && cargo test && cargo clippy
+cd frontend && npm run build && npm run lint
+```
+
+### Troubleshooting
+
+- **Agent dropdown empty** — no runners discovered. Check
+  `~/.agents/skills/sylph/runners` exists and its scripts are executable.
+- **Browser 401s after a backend restart** — the auth token is regenerated on
+  every start. Reload the page to pick up a fresh one.
+- **Import fails with `TRACE_SESSION_NOT_RESUMABLE`** — the archive recorded no
+  working directory for that session, so there is nowhere to resume it. Older
+  `trace-db` versions did not record one.
+- **Port 4317 in use** — set `SYLPH_WEB_PORT`, and point the frontend at it
+  with `SYLPH_WEB_BACKEND`.
 
 ### Environment Variables
 
@@ -62,21 +110,16 @@ npm run dev
 
 ## Project Status
 
-**Phase 1 (in progress):** Rust backend core
-- ✅ Database layer with migrations
-- ✅ Session management API
-- ✅ Health and diagnostics
-- 🚧 Turn management and SSE streaming
-- 🚧 Runner discovery and process supervision
-- 🚧 Authentication middleware
+Sylph Web is usable end to end today: create a session, stream a turn, search
+the archive, import a native session.
 
-**Phase 2 (week 4-5):** Next.js frontend foundation
+- ✅ **Phase 1** — backend core: sessions, turns, SSE, runner discovery, auth
+- ✅ **Phase 2** — frontend foundation: session list, conversation view, resume
+- ✅ **Phase 3** — attachments, archive search, native import, filters
+- 🚧 **Phase 4** — production readiness: coverage, accessibility, performance
+- ⬜ **Phase 5** — packaging and deployment
 
-**Phase 3 (week 6-7):** Feature completion (attachments, search, commands)
-
-**Phase 4 (week 8-9):** Testing and accessibility
-
-**Phase 5 (week 10):** Deployment and packaging
+See [PHASE4_HANDOFF.md](PHASE4_HANDOFF.md) for what is deferred and why.
 
 See [roadmap](docs/roadmap.md) for details.
 

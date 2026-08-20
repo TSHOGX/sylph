@@ -75,7 +75,7 @@
 **Deliverables:**
 - ✅ Attachment upload (drag/drop, image previews) — `components/attachment-picker.tsx`
 - ✅ Agent command dialogs (model/effort selection, status checks) — `components/command-dialog.tsx`
-- ✅ TraceDB search integration — `GET /api/v1/trace/search`, `app/search/page.tsx`
+- ✅ TraceDB search integration — `GET /api/v1/search`, `app/search/page.tsx`
 - ✅ Native session import flow — `POST /api/v1/sessions/import`
 - ✅ Session filters (agent, workspace, time) — server-side, `LIMIT`-cap safe
 - ✅ Error boundaries and retry logic — `lib/error-boundary.tsx`
