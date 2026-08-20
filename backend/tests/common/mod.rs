@@ -29,6 +29,9 @@ pub struct TestBackend {
     _temp: TempDir,
     workdir: PathBuf,
     cookie: String,
+    /// Kept so a test can rebuild the backend against the same journal, which
+    /// is how a restart is simulated.
+    config: Config,
 }
 
 impl TestBackend {
@@ -81,7 +84,9 @@ impl TestBackend {
             cookie_secret: "test-secret-token".to_string(),
         };
 
-        let state = AppState::build(config).await.expect("failed to build state");
+        let state = AppState::build(config.clone())
+            .await
+            .expect("failed to build state");
         let cookie = format!("sylph_session={}", state.config.cookie_secret);
 
         Self {
@@ -89,7 +94,20 @@ impl TestBackend {
             _temp: temp,
             workdir,
             cookie,
+            config,
         }
+    }
+
+    /// Rebuild the backend against the same journal, as a restart would.
+    ///
+    /// Child processes do not survive a real restart, so anything the previous
+    /// process left mid-flight is gone. This is the only way to exercise the
+    /// startup recovery that reconciles those rows.
+    pub async fn restart(&mut self) {
+        let state = AppState::build(self.config.clone())
+            .await
+            .expect("failed to rebuild state");
+        self.router = router(state);
     }
 
     pub fn workdir(&self) -> &Path {

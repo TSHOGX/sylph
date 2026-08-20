@@ -1333,3 +1333,158 @@ async fn a_command_turn_needs_no_message_text() {
     let turn = backend.await_turn(&turn_id).await;
     assert_eq!(turn["turn"]["status"], "completed");
 }
+
+/// Wait for `turn_id` to report `status`, or panic. Polls because the runner is
+/// a real subprocess whose startup is not synchronous with the HTTP response.
+async fn await_turn_status(backend: &TestBackend, turn_id: &str, status: &str) {
+    for _ in 0..100 {
+        let response = backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await;
+        if json_body(response).await["turn"]["status"] == status {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("turn never reached {status}");
+}
+
+#[tokio::test]
+async fn a_restart_interrupts_a_turn_that_was_still_running() {
+    // Child processes do not survive a restart, so a turn left marked running
+    // would otherwise appear to hang forever with no way to learn it is dead.
+    let mut backend = TestBackend::start_with_runners(&[MockRunner::slow("mock")]).await;
+    let session_id = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "take your time"}),
+        )
+        .await;
+    let turn_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    await_turn_status(&backend, &turn_id, "running").await;
+
+    backend.restart().await;
+
+    let turn = json_body(backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await).await;
+    assert_eq!(turn["turn"]["status"], "interrupted");
+    assert_eq!(turn["turn"]["errorCode"], "TURN_INTERRUPTED");
+    assert!(
+        turn["turn"]["completedAtMs"].as_i64().unwrap_or(0) > 0,
+        "an interrupted turn is terminal and must carry a completion time"
+    );
+}
+
+#[tokio::test]
+async fn a_session_is_usable_again_after_a_restart_interrupts_its_turn() {
+    // The important half: a session left running would reject every subsequent
+    // turn as a conflict, stranding it permanently.
+    let mut backend =
+        TestBackend::start_with_runners(&[MockRunner::slow("slow"), MockRunner::success("mock")])
+            .await;
+    let session_id = backend.create_session("slow").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "hang"}),
+        )
+        .await;
+    let turn_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    await_turn_status(&backend, &turn_id, "running").await;
+
+    let before = json_body(backend.get_authed(&format!("/api/v1/sessions/{session_id}")).await).await;
+    assert_eq!(before["session"]["status"], "running");
+
+    backend.restart().await;
+
+    let after = json_body(backend.get_authed(&format!("/api/v1/sessions/{session_id}")).await).await;
+    assert_eq!(
+        after["session"]["status"], "idle",
+        "a session cannot be running when no turn is"
+    );
+
+    // And it actually accepts work rather than merely reporting idle.
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "again"}),
+        )
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::ACCEPTED,
+        "a recovered session must accept a new turn"
+    );
+}
+
+#[tokio::test]
+async fn a_restart_leaves_finished_turns_alone() {
+    // Recovery must be surgical: rewriting a completed turn would corrupt
+    // durable history on every ordinary restart.
+    let mut backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "hello"}),
+        )
+        .await;
+    let turn_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    await_turn_status(&backend, &turn_id, "completed").await;
+
+    let before = json_body(backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await).await;
+
+    backend.restart().await;
+
+    let after = json_body(backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await).await;
+    assert_eq!(after["turn"]["status"], "completed");
+    assert!(after["turn"]["errorCode"].is_null());
+    assert_eq!(
+        after["turn"]["completedAtMs"], before["turn"]["completedAtMs"],
+        "a completed turn must not be re-stamped by recovery"
+    );
+}
+
+#[tokio::test]
+async fn a_restart_preserves_journalled_events() {
+    // Recovery touches turn and session status only. The event journal is the
+    // durable record and must survive untouched.
+    let mut backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "hello"}),
+        )
+        .await;
+    let turn_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    await_turn_status(&backend, &turn_id, "completed").await;
+
+    let before = json_body(backend.get_authed(&format!("/api/v1/sessions/{session_id}/turns")).await).await;
+    let before_events = before["turns"][0]["events"].as_array().unwrap().len();
+    assert!(before_events > 0, "the turn journalled nothing to compare");
+
+    backend.restart().await;
+
+    let after = json_body(backend.get_authed(&format!("/api/v1/sessions/{session_id}/turns")).await).await;
+    assert_eq!(
+        after["turns"][0]["events"].as_array().unwrap().len(),
+        before_events,
+        "restart must not drop or duplicate journalled events"
+    );
+    assert_eq!(after["turns"].as_array().unwrap().len(), 1);
+}
