@@ -1,16 +1,32 @@
 "use client";
 
+/**
+ * A session: the agent-workspace conversation canvas.
+ *
+ * The transcript is one continuous timeline rather than a list of per-turn cards.
+ * A turn boundary is a rule with a status line, not a container — an agent's work
+ * reads as a single log, and boxing each turn re-introduces the chat framing that
+ * `docs/agent-ui-design-analysis.md` argues against.
+ *
+ * Live and durable events come from different places and must not both render the
+ * same turn: history holds every finished turn, and the SSE stream holds the one
+ * in flight. The live turn is filtered out of history until the refetched history
+ * actually contains it, which closes the gap where it would vanish for a frame.
+ */
+
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, type Turn, type TurnWithEvents } from "@/lib/api";
 import { ErrorBoundary } from "@/lib/error-boundary";
 import { formatTimestamp, sessionLabel } from "@/lib/format";
+import { densityClasses, useSettings } from "@/lib/settings";
+import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useSSE } from "@/lib/use-sse";
 import { AttachmentPicker, type StagedAttachment } from "@/components/attachment-picker";
 import { CommandDialog, type CommandInvocation } from "@/components/command-dialog";
-import { EventList } from "@/components/event-list";
+import { Timeline } from "@/components/timeline";
 import { OriginBadge, SessionStatusBadge, TurnStatusBadge } from "@/components/badges";
 
 const TERMINAL: ReadonlySet<Turn["status"]> = new Set([
@@ -24,12 +40,18 @@ export default function SessionPage() {
   const params = useParams();
   const sessionId = String(params.id);
   const queryClient = useQueryClient();
+  const { settings } = useSettings();
+  const { showArtifact, registerSessionActions } = useWorkspaceUI();
 
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<StagedAttachment[]>([]);
   /** Turn started by this tab. Null means "whatever history says is running". */
   const [sentTurnId, setSentTurnId] = useState<string | null>(null);
   const [commandOpen, setCommandOpen] = useState(false);
+  /** Global expand override from `Shift+E` / `Shift+C`. Null restores per-row
+   *  defaults, so the timeline is not stuck open after one use. */
+  const [expandAll, setExpandAll] = useState<boolean | null>(null);
+  const [find, setFind] = useState<string | null>(null);
 
   const sessionQuery = useQuery({
     queryKey: ["session", sessionId],
@@ -45,8 +67,8 @@ export default function SessionPage() {
   const history = useMemo(() => historyQuery.data?.turns ?? [], [historyQuery.data]);
 
   // The turn to stream is derived, not stored: a turn this tab started takes
-  // precedence, otherwise any unfinished turn in history is adopted so
-  // reopening the page mid-run reattaches to the live stream.
+  // precedence, otherwise any unfinished turn in history is adopted so reopening
+  // the page mid-run reattaches to the live stream.
   const adoptedTurnId = useMemo(
     () => history.find((entry) => !TERMINAL.has(entry.turn.status))?.turn.id ?? null,
     [history],
@@ -66,15 +88,11 @@ export default function SessionPage() {
   const watchedStatus = watchedTurn.data?.turn.status;
   const finished = Boolean(watchedStatus && TERMINAL.has(watchedStatus));
 
-  // A finished turn belongs to durable history. It keeps its live pane until
-  // the refetched history actually contains it, which closes the gap where it
-  // would otherwise vanish for one render.
   const absorbed = history.some((entry) => entry.turn.id === watchedTurnId);
   const liveTurnId = watchedTurnId && !(finished && absorbed) ? watchedTurnId : null;
   const isLive = Boolean(liveTurnId) && !finished;
 
-  // Pull the finished turn into history. This is a genuine external-system
-  // sync — the cache needs invalidating — and sets no local state.
+  // Pull the finished turn into history. A genuine external-system sync.
   useEffect(() => {
     if (!finished) return;
     void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "history"] });
@@ -109,10 +127,7 @@ export default function SessionPage() {
     },
   });
 
-  /**
-   * A command runs as a turn, so it reuses the same lifecycle: the runner
-   * receives the invocation and its output streams into the transcript.
-   */
+  /** A command runs as a turn, so its output streams into the same transcript. */
   const runCommand = useMutation({
     mutationFn: (invocation: CommandInvocation) =>
       api.turns.create(sessionId, {
@@ -128,23 +143,58 @@ export default function SessionPage() {
     },
   });
 
-  // Commands come from the agent descriptor, so an agent that declares none
-  // gets no button rather than an empty dialog.
-  const agentsQuery = useQuery({
-    queryKey: ["agents"],
-    queryFn: () => api.agents.list(),
-  });
+  const agentsQuery = useQuery({ queryKey: ["agents"], queryFn: () => api.agents.list() });
   const commands = useMemo(() => {
     const descriptor = agentsQuery.data?.agents.find((a) => a.name === session?.agent);
     return descriptor?.commands ?? {};
   }, [agentsQuery.data, session?.agent]);
   const hasCommands = Object.keys(commands).length > 0;
 
+  const openFile = useCallback(
+    (path: string, line?: number) => {
+      // Absolute paths inside the workspace are rewritten to relative ones: the
+      // file API is rooted at the session workdir and takes nothing else, and
+      // agents report paths both ways.
+      const workdir = session?.workdir.replace(/\/+$/, "");
+      let relative = path;
+      if (workdir && path.startsWith(`${workdir}/`)) {
+        relative = path.slice(workdir.length + 1);
+      }
+      showArtifact({ sessionId, path: relative.replace(/^\/+/, ""), line });
+    },
+    [session?.workdir, sessionId, showArtifact],
+  );
+
+  // Session-scoped shortcuts are dispatched by the shell, which cannot know this
+  // page's state, so the handler is registered here and unregistered on unmount.
+  useEffect(
+    () =>
+      registerSessionActions((action) => {
+        switch (action) {
+          case "stopTurn":
+            if (isLive && !stopTurn.isPending) stopTurn.mutate();
+            return true;
+          case "expandAll":
+            setExpandAll(true);
+            return true;
+          case "collapseAll":
+            setExpandAll(false);
+            return true;
+          case "findInSession":
+            setFind((current) => (current === null ? "" : current));
+            return true;
+          default:
+            return false;
+        }
+      }),
+    [registerSessionActions, isLive, stopTurn],
+  );
+
   if (sessionQuery.isPending) {
     return (
       <output
         aria-live="polite"
-        className="flex min-h-screen items-center justify-center text-sm text-gray-500"
+        className="flex flex-1 items-center justify-center text-sm text-gray-500"
       >
         Loading session...
       </output>
@@ -155,7 +205,7 @@ export default function SessionPage() {
     const error = sessionQuery.error;
     const missing = error instanceof ApiError && error.status === 404;
     return (
-      <div role="alert" className="flex min-h-screen items-center justify-center px-4">
+      <div role="alert" className="flex flex-1 items-center justify-center px-4">
         <div className="max-w-md text-center">
           <h1 className="text-lg font-semibold text-red-800">
             {missing ? "Session not found" : "Could not load this session"}
@@ -191,73 +241,92 @@ export default function SessionPage() {
 
   const isNative = session.origin === "native";
   const canSend = text.trim().length > 0 && !sendTurn.isPending && !isLive;
+  const density = densityClasses(settings.density);
 
   return (
-    <div className="flex min-h-screen flex-col bg-white">
-      <header className="border-b">
-        <div className="container mx-auto px-4 py-3">
-          <Link
-            href="/"
-            className="text-sm text-gray-500 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-          >
-            ← All sessions
-          </Link>
-          <div className="mt-1.5 flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-semibold">{sessionLabel(session)}</h1>
-            <OriginBadge origin={session.origin} />
-            <SessionStatusBadge status={session.status} />
+    <>
+      <header className="shrink-0 border-b border-gray-200 px-4 py-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="truncate text-sm font-semibold">{sessionLabel(session)}</h1>
+          <OriginBadge origin={session.origin} />
+          <SessionStatusBadge status={session.status} />
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setExpandAll(expandAll === true ? null : true)}
+              className="rounded px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            >
+              Expand all
+            </button>
+            <button
+              type="button"
+              onClick={() => setExpandAll(expandAll === false ? null : false)}
+              className="rounded px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            >
+              Collapse all
+            </button>
           </div>
-          <p className="mt-1 text-xs text-gray-500">
-            {session.agent} · <span className="font-mono">{session.workdir}</span> ·
-            created {formatTimestamp(session.createdAtMs)}
-          </p>
         </div>
+        <p className="mt-0.5 truncate text-[11px] text-gray-500">
+          {session.agent} · <span className="font-mono">{session.workdir}</span> · created{" "}
+          {formatTimestamp(session.createdAtMs)}
+        </p>
       </header>
 
-      <main id="main" className="container mx-auto flex w-full max-w-4xl flex-1 flex-col px-4 py-6">
-        {isNative && (
-          <aside className="mb-4 rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm text-violet-900">
-            <p className="font-medium">Native session — identity preserved</p>
-            <p className="mt-1 text-violet-800">
-              This session originated in {session.agent}&apos;s own storage. Sylph does
-              not inject an identity, reset, or compact it, and prompts are passed
-              through unchanged.
-            </p>
-          </aside>
-        )}
+      {find !== null && (
+        <FindBar value={find} onChange={setFind} onClose={() => setFind(null)} />
+      )}
 
-        <ErrorBoundary label="the transcript">
-          <Transcript
-            history={history}
-            isPending={historyQuery.isPending}
-            error={historyQuery.error}
-            onRetry={() => void historyQuery.refetch()}
-            liveTurnId={liveTurnId}
-            isLive={isLive}
-            onResend={(value) => sendTurn.mutate(value)}
-          />
-        </ErrorBoundary>
-
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (canSend) sendTurn.mutate(undefined);
-          }}
-          className="mt-4 border-t pt-4"
+      {isNative && (
+        <aside
+          className="shrink-0 border-b border-violet-200 bg-violet-50 px-4 py-1.5 text-[11px] text-violet-900"
+          aria-label="Native session policy"
         >
+          <span className="font-medium">Native session — identity preserved.</span> Sylph
+          does not inject an identity, reset, or compact it, and prompts pass through
+          unchanged.
+        </aside>
+      )}
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <div className={`mx-auto max-w-3xl ${density.text}`}>
+          <ErrorBoundary label="the transcript">
+            <Transcript
+              history={history}
+              isPending={historyQuery.isPending}
+              error={historyQuery.error}
+              onRetry={() => void historyQuery.refetch()}
+              liveTurnId={liveTurnId}
+              isLive={isLive}
+              onResend={(value) => sendTurn.mutate(value)}
+              onOpenFile={openFile}
+              expandAll={expandAll}
+              filter={find}
+            />
+          </ErrorBoundary>
+        </div>
+      </div>
+
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (canSend) sendTurn.mutate(undefined);
+        }}
+        className="shrink-0 border-t border-gray-200 px-4 py-2"
+      >
+        <div className="mx-auto max-w-3xl">
           <label htmlFor="message" className="sr-only">
             Message
           </label>
           <textarea
             id="message"
             value={text}
-            rows={3}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              // Enter sends; Shift+Enter and Cmd/Ctrl+Enter insert a newline,
-              // matching the convention of chat-style composers.
-              if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
-                e.preventDefault();
+            rows={2}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => {
+              // Enter sends; Shift+Enter and Cmd/Ctrl+Enter insert a newline.
+              if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey) {
+                event.preventDefault();
                 if (canSend) sendTurn.mutate(undefined);
               }
             }}
@@ -265,10 +334,10 @@ export default function SessionPage() {
               isLive ? "Waiting for the current turn to finish..." : "Send a message..."
             }
             disabled={isLive || sendTurn.isPending}
-            className="w-full resize-y rounded-lg border px-3 py-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:bg-gray-50"
+            className="w-full resize-y rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:bg-gray-50"
           />
 
-          <div className="mt-2">
+          <div className="mt-1.5">
             <AttachmentPicker
               attachments={attachments}
               onChange={setAttachments}
@@ -277,22 +346,27 @@ export default function SessionPage() {
           </div>
 
           {sendTurn.error && (
-            <p role="alert" className="mt-2 text-sm text-red-700">
+            <p role="alert" className="mt-1.5 text-xs text-red-700">
               {describeSendError(sendTurn.error)}
             </p>
           )}
+          {runCommand.error && (
+            <p role="alert" className="mt-1.5 text-xs text-red-700">
+              {describeSendError(runCommand.error)}
+            </p>
+          )}
 
-          <div className="mt-3 flex items-center justify-between gap-3">
-            <p className="text-xs text-gray-500">
+          <div className="mt-1.5 flex items-center justify-between gap-3">
+            <p className="text-[10px] text-gray-500">
               Enter to send · Shift+Enter for a new line
             </p>
-            <div className="flex gap-2">
+            <div className="flex gap-1.5">
               {hasCommands && (
                 <button
                   type="button"
                   onClick={() => setCommandOpen(true)}
                   disabled={isLive || sendTurn.isPending}
-                  className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+                  className="rounded-md border border-gray-200 px-3 py-1 text-xs font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
                 >
                   Command
                 </button>
@@ -302,7 +376,7 @@ export default function SessionPage() {
                   type="button"
                   onClick={() => stopTurn.mutate()}
                   disabled={stopTurn.isPending}
-                  className="rounded-lg border border-red-300 px-4 py-2 text-sm font-medium text-red-800 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:opacity-50"
+                  className="rounded-md border border-red-300 px-3 py-1 text-xs font-medium text-red-800 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:opacity-50"
                 >
                   {stopTurn.isPending ? "Stopping..." : "Stop turn"}
                 </button>
@@ -310,29 +384,74 @@ export default function SessionPage() {
               <button
                 type="submit"
                 disabled={!canSend}
-                className="rounded-lg bg-gray-900 px-5 py-2 text-sm font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+                className="rounded-md bg-gray-900 px-4 py-1 text-xs font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
               >
                 {sendTurn.isPending ? "Sending..." : "Send"}
               </button>
             </div>
           </div>
-        </form>
+        </div>
+      </form>
 
-        {runCommand.error && (
-          <p role="alert" className="mt-2 text-sm text-red-700">
-            {describeSendError(runCommand.error)}
-          </p>
-        )}
+      {commandOpen && (
+        <CommandDialog
+          commands={commands}
+          busy={runCommand.isPending}
+          onClose={() => setCommandOpen(false)}
+          onSubmit={(invocation) => runCommand.mutate(invocation)}
+        />
+      )}
+    </>
+  );
+}
 
-        {commandOpen && (
-          <CommandDialog
-            commands={commands}
-            busy={runCommand.isPending}
-            onClose={() => setCommandOpen(false)}
-            onSubmit={(invocation) => runCommand.mutate(invocation)}
-          />
-        )}
-      </main>
+/**
+ * In-session filter (`Cmd+F`).
+ *
+ * Filters turns rather than highlighting matches inside them. Highlighting would
+ * need to reach into every renderer — Markdown, diffs, code blocks — and rewrite
+ * their text nodes; filtering answers the actual question ("which turn was that
+ * in?") without that coupling. The browser's own find still works on what remains.
+ */
+function FindBar({
+  value,
+  onChange,
+  onClose,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => ref.current?.focus(), []);
+
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b border-gray-200 bg-gray-50 px-4 py-1">
+      <label htmlFor="find-in-session" className="text-[10px] font-medium text-gray-500">
+        Filter turns
+      </label>
+      <input
+        id="find-in-session"
+        ref={ref}
+        type="search"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.stopPropagation();
+            onClose();
+          }
+        }}
+        placeholder="Text in a prompt or reply..."
+        className="flex-1 rounded border border-gray-200 bg-white px-2 py-0.5 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+      />
+      <button
+        type="button"
+        onClick={onClose}
+        className="rounded px-1.5 text-[11px] text-gray-500 hover:bg-gray-200 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+      >
+        Close
+      </button>
     </div>
   );
 }
@@ -355,73 +474,22 @@ function describeSendError(error: unknown): string {
 }
 
 /**
- * Flatten a turn into plain text for the clipboard.
+ * Flatten a turn into Markdown for the clipboard.
  *
- * Only durable text-bearing events are included; tool payloads and usage
- * records are structural noise in a pasted transcript.
+ * Tool calls are included as headings now, unlike the Phase 4 version which kept
+ * only prose: in an agent transcript the tool calls are the record of what
+ * happened, so a copy without them is not the conversation.
  */
 function turnAsText(entry: TurnWithEvents): string {
   const lines = entry.turn.requestText ? [`> ${entry.turn.requestText}`, ""] : [];
   for (const event of entry.events) {
-    if (!event.text) continue;
-    if (event.kind !== "assistant" && event.kind !== "thinking") continue;
-    lines.push(event.text);
-  }
-  return lines.join("\n").trim();
-}
-
-/** Copy a turn's transcript, and resend it when it did not succeed. */
-function TurnActions({
-  entry,
-  onResend,
-  disabled,
-}: {
-  entry: TurnWithEvents;
-  onResend: (text: string) => void;
-  disabled: boolean;
-}) {
-  const [copied, setCopied] = useState(false);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(turnAsText(entry));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard access can be refused (insecure context, denied permission).
-      // Saying nothing would look like a silent success, so the label reports it.
-      setCopied(false);
+    if (event.kind === "assistant" && event.text) {
+      lines.push(event.text, "");
+    } else if (event.kind === "tool_call") {
+      lines.push(`- ${event.name ?? "tool"}: ${(event.text ?? "").split("\n")[0]}`);
     }
   }
-
-  // Resending a turn that already succeeded would duplicate work the agent has
-  // done, so it is offered only where the turn produced no usable result.
-  const resendable =
-    entry.turn.status === "failed" ||
-    entry.turn.status === "cancelled" ||
-    entry.turn.status === "interrupted";
-
-  return (
-    <div className="mt-1 flex items-center gap-2">
-      <button
-        type="button"
-        onClick={() => void copy()}
-        className="rounded px-1.5 py-0.5 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-      >
-        {copied ? "Copied" : "Copy"}
-      </button>
-      {resendable && entry.turn.requestText && (
-        <button
-          type="button"
-          onClick={() => onResend(entry.turn.requestText)}
-          disabled={disabled}
-          className="rounded px-1.5 py-0.5 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
-        >
-          Resend
-        </button>
-      )}
-    </div>
-  );
+  return lines.join("\n").trim();
 }
 
 function Transcript({
@@ -432,6 +500,9 @@ function Transcript({
   liveTurnId,
   isLive,
   onResend,
+  onOpenFile,
+  expandAll,
+  filter,
 }: {
   history: TurnWithEvents[];
   isPending: boolean;
@@ -440,20 +511,24 @@ function Transcript({
   liveTurnId: string | null;
   isLive: boolean;
   onResend: (text: string) => void;
+  onOpenFile: (path: string, line?: number) => void;
+  expandAll: boolean | null;
+  filter: string | null;
 }) {
-  const bottomRef = useRef<HTMLDivElement>(null);
-
-  // History already contains every finished turn. Rendering the live turn from
-  // the same list too would duplicate it, so it is filtered out here and drawn
-  // by LiveTurn instead.
-  const past = useMemo(
-    () => history.filter((entry) => entry.turn.id !== liveTurnId),
-    [history, liveTurnId],
-  );
+  const past = useMemo(() => {
+    const rows = history.filter((entry) => entry.turn.id !== liveTurnId);
+    const needle = filter?.trim().toLowerCase();
+    if (!needle) return rows;
+    return rows.filter(
+      (entry) =>
+        entry.turn.requestText.toLowerCase().includes(needle) ||
+        entry.events.some((event) => event.text?.toLowerCase().includes(needle)),
+    );
+  }, [history, liveTurnId, filter]);
 
   if (isPending) {
     return (
-      <output aria-live="polite" className="py-8 text-center text-sm text-gray-500">
+      <output aria-live="polite" className="block py-8 text-center text-sm text-gray-500">
         Loading conversation...
       </output>
     );
@@ -479,11 +554,12 @@ function Transcript({
     );
   }
 
+  const filtering = Boolean(filter?.trim());
   const empty = past.length === 0 && !liveTurnId;
 
   return (
-    <div className="flex-1 space-y-6 overflow-y-auto">
-      {empty && (
+    <div>
+      {empty && !filtering && (
         <div className="py-12 text-center">
           <p className="text-sm font-medium text-gray-700">No turns yet</p>
           <p className="mt-1 text-sm text-gray-500">
@@ -491,33 +567,118 @@ function Transcript({
           </p>
         </div>
       )}
+      {empty && filtering && (
+        <p className="py-12 text-center text-sm text-gray-500">No turns match that text.</p>
+      )}
 
       {past.map((entry) => (
-        <section key={entry.turn.id} aria-label={`Turn ${entry.turn.id}`}>
-          <div className="mb-1.5 flex items-center gap-2">
-            <TurnStatusBadge status={entry.turn.status} />
-            <span className="text-xs text-gray-400">
-              {formatTimestamp(entry.turn.createdAtMs)}
-            </span>
-          </div>
-          {entry.turn.errorMessage && (
-            <p role="alert" className="mb-2 text-sm text-red-700">
-              {entry.turn.errorMessage}
-            </p>
-          )}
-          <EventList events={entry.events} />
-          <TurnActions entry={entry} onResend={onResend} disabled={isLive} />
-        </section>
+        <TurnSection
+          key={entry.turn.id}
+          entry={entry}
+          onResend={onResend}
+          disabled={isLive}
+          onOpenFile={onOpenFile}
+          expandAll={expandAll}
+        />
       ))}
 
-      {liveTurnId && <LiveTurn turnId={liveTurnId} isLive={isLive} />}
-
-      <div ref={bottomRef} />
+      {liveTurnId && !filtering && (
+        <LiveTurn turnId={liveTurnId} isLive={isLive} onOpenFile={onOpenFile} expandAll={expandAll} />
+      )}
     </div>
   );
 }
 
-function LiveTurn({ turnId, isLive }: { turnId: string; isLive: boolean }) {
+/**
+ * One completed turn.
+ *
+ * The boundary is a rule with a status line above the events, not a box around
+ * them — enough to see where a turn began without fragmenting the log.
+ */
+function TurnSection({
+  entry,
+  onResend,
+  disabled,
+  onOpenFile,
+  expandAll,
+}: {
+  entry: TurnWithEvents;
+  onResend: (text: string) => void;
+  disabled: boolean;
+  onOpenFile: (path: string, line?: number) => void;
+  expandAll: boolean | null;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  // Resending a turn that already succeeded would duplicate work the agent has
+  // done, so it is offered only where the turn produced no usable result.
+  const resendable =
+    entry.turn.status === "failed" ||
+    entry.turn.status === "cancelled" ||
+    entry.turn.status === "interrupted";
+
+  const duration =
+    entry.turn.completedAtMs && entry.turn.startedAtMs
+      ? (entry.turn.completedAtMs - entry.turn.startedAtMs) / 1000
+      : undefined;
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(turnAsText(entry));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard access can be refused; a silent success would be misleading.
+      setCopied(false);
+    }
+  }
+
+  return (
+    <section aria-label={`Turn ${entry.turn.id}`} className="border-t border-gray-100 pt-1 first:border-t-0">
+      <Timeline events={entry.events} onOpenFile={onOpenFile} expandAll={expandAll} />
+
+      {entry.turn.errorMessage && (
+        <p role="alert" className="mt-1 text-xs text-red-700">
+          {entry.turn.errorMessage}
+        </p>
+      )}
+
+      <div className="flex items-center gap-2 py-1 text-[10px] text-gray-500">
+        <TurnStatusBadge status={entry.turn.status} />
+        {duration !== undefined && <span>{duration.toFixed(1)}s</span>}
+        <button
+          type="button"
+          onClick={() => void copy()}
+          className="rounded px-1 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+        {resendable && entry.turn.requestText && (
+          <button
+            type="button"
+            onClick={() => onResend(entry.turn.requestText)}
+            disabled={disabled}
+            className="rounded px-1 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+          >
+            Resend
+          </button>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function LiveTurn({
+  turnId,
+  isLive,
+  onOpenFile,
+  expandAll,
+}: {
+  turnId: string;
+  isLive: boolean;
+  onOpenFile: (path: string, line?: number) => void;
+  expandAll: boolean | null;
+}) {
   const { events, status } = useSSE({ turnId, enabled: isLive });
   const anchorRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
@@ -529,18 +690,19 @@ function LiveTurn({ turnId, isLive }: { turnId: string; isLive: boolean }) {
     if (!node) return;
     const scroller = node.closest(".overflow-y-auto");
     if (!scroller) return;
-    const distance =
-      scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
     pinnedRef.current = distance < 120;
     if (pinnedRef.current) node.scrollIntoView({ block: "end" });
   }, [events]);
 
   return (
-    <section aria-label="Current turn">
-      <div className="mb-1.5 flex items-center gap-2 text-xs">
+    <section aria-label="Current turn" className="border-t border-gray-100 pt-1">
+      <Timeline events={events} onOpenFile={onOpenFile} expandAll={expandAll} />
+
+      <div className="flex items-center gap-1.5 py-1 text-[10px]">
         <span
           aria-hidden="true"
-          className={`h-2 w-2 rounded-full ${
+          className={`h-1.5 w-1.5 rounded-full ${
             status === "open"
               ? "animate-pulse bg-blue-500"
               : status === "reconnecting"
@@ -550,7 +712,9 @@ function LiveTurn({ turnId, isLive }: { turnId: string; isLive: boolean }) {
         />
         <span aria-live="polite" className="text-gray-500">
           {status === "open"
-            ? "Streaming"
+            ? events.length === 0
+              ? "Waiting for the agent to respond..."
+              : "Streaming"
             : status === "reconnecting"
               ? "Connection dropped — reconnecting..."
               : status === "connecting"
@@ -558,12 +722,6 @@ function LiveTurn({ turnId, isLive }: { turnId: string; isLive: boolean }) {
                 : "Stream closed"}
         </span>
       </div>
-
-      {events.length === 0 && isLive && (
-        <p className="text-sm text-gray-500">Waiting for the agent to respond...</p>
-      )}
-
-      <EventList events={events} />
       <div ref={anchorRef} />
     </section>
   );
