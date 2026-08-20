@@ -132,15 +132,61 @@ export interface CreateTurnRequest {
   args?: Record<string, string>;
 }
 
-export interface SearchResult {
-  sessionId: string;
-  agent?: string;
-  title?: string;
+/** Where in a session the query matched. */
+export interface BestMatch {
+  kind?: string;
   snippet?: string;
+}
+
+/**
+ * One lineage-collapsed TraceDB search hit.
+ *
+ * `id` is the TraceDB session id (`claude:uuid`), not a Sylph Web session id.
+ * `sessionId` is set only when this archived session has already been imported,
+ * which is what makes a hit navigable instead of merely importable.
+ */
+export interface SearchResult {
+  id: string;
+  agent: string;
+  title?: string;
+  /** The opening user request: what makes a hit recognizable at a glance. */
+  ask?: string;
+  cwd?: string;
+  outcome?: string;
+  bestMatch?: BestMatch;
+  /** How many events inside the session matched. */
+  hits?: number;
+  startedAtMs?: number;
+  endedAtMs?: number;
+  lineageRootId?: string;
+  sessionId?: string;
+}
+
+export interface SearchResponse {
+  results: SearchResult[];
+  /**
+   * False when the TraceDB archive could not be reached. The request still
+   * succeeds, so the UI distinguishes "no matches" from "cannot search".
+   */
+  available: boolean;
+  detail?: string;
+}
+
+/** Server-side filters for the session list. Omitted fields are no-ops. */
+export interface SessionFilters {
+  limit?: number;
+  agent?: string;
+  origin?: SessionOrigin;
+  /** Case-insensitive substring match on the working directory. */
   workdir?: string;
-  updatedAtMs?: number;
-  /** True when a live session already mirrors this TraceDB session. */
-  imported?: boolean;
+  updatedAfterMs?: number;
+  updatedBeforeMs?: number;
+}
+
+export interface ImportSessionRequest {
+  /** TraceDB session id, formatted `<agent>:<native-id>`. */
+  traceSessionId: string;
+  title?: string;
 }
 
 /**
@@ -200,9 +246,26 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+/**
+ * Build a query string from filter values, dropping empty ones.
+ *
+ * Filters are applied server-side because the listing is `LIMIT`-capped:
+ * filtering an already-truncated page would silently miss older matches.
+ */
+function queryString(params: Record<string, string | number | undefined>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === "") continue;
+    search.set(key, String(value));
+  }
+  const encoded = search.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
 export const api = {
   sessions: {
-    list: () => fetchAPI<{ sessions: Session[] }>("/sessions"),
+    list: (filters: SessionFilters = {}) =>
+      fetchAPI<{ sessions: Session[] }>(`/sessions${queryString({ ...filters })}`),
     get: (id: string) => fetchAPI<{ session: Session }>(`/sessions/${id}`),
     create: (req: CreateSessionRequest) =>
       fetchAPI<{ session: Session }>("/sessions", {
@@ -212,6 +275,17 @@ export const api = {
     /** Full durable history: every turn in the session with its events. */
     history: (id: string) =>
       fetchAPI<{ turns: TurnWithEvents[] }>(`/sessions/${id}/turns`),
+    /**
+     * Adopt an archived native session.
+     *
+     * Agent and working directory are derived from the archive by the backend,
+     * so they are deliberately not accepted here.
+     */
+    import: (req: ImportSessionRequest) =>
+      fetchAPI<{ session: Session }>("/sessions/import", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
   },
   turns: {
     create: (sessionId: string, req: CreateTurnRequest) =>
@@ -227,15 +301,14 @@ export const api = {
     list: () => fetchAPI<{ agents: Agent[] }>("/agents"),
     refresh: () => fetchAPI<{ agents: Agent[] }>("/agents", { method: "POST" }),
   },
-  search: (query: string) =>
-    fetchAPI<{ results: SearchResult[]; available: boolean }>(
-      `/search?q=${encodeURIComponent(query)}`,
-    ),
+  search: (query: string, limit?: number) =>
+    fetchAPI<SearchResponse>(`/search${queryString({ q: query, limit })}`),
   health: () =>
     fetchAPI<{
       ok: boolean;
       apiVersion: string;
       schemaVersion: number;
-      tracedb: { available: boolean; version?: string };
+      /** Availability only: `/health` is unauthenticated, so it reports no counts. */
+      tracedb: { available: boolean };
     }>("/health"),
 };

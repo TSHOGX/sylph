@@ -3,8 +3,9 @@
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { api, type Session } from "@/lib/api";
+import { api, type SessionFilters, type SessionOrigin } from "@/lib/api";
 import { formatRelative, sessionLabel } from "@/lib/format";
+import { useDebounced } from "@/lib/use-debounced";
 import { OriginBadge, SessionStatusBadge } from "@/components/badges";
 
 interface Filters {
@@ -17,43 +18,59 @@ interface Filters {
 const EMPTY_FILTERS: Filters = { agent: "", origin: "", workdir: "", since: "" };
 
 /**
- * Filtering is client-side on purpose.
+ * Translate form state into backend query parameters.
  *
- * `GET /api/v1/sessions` already returns the full list for a single-user local
- * app, so filtering in the browser is instant and needs no round trip. If the
- * session count ever outgrows one response, this moves to query parameters —
- * the backend already has `list_sessions_filtered` for that.
+ * Filtering runs server-side because `GET /api/v1/sessions` is `LIMIT`-capped:
+ * narrowing an already-truncated page would silently hide older matches that
+ * never left the database. Blank fields are dropped so they act as no-ops.
  */
-function applyFilters(sessions: Session[], filters: Filters): Session[] {
-  const workdir = filters.workdir.trim().toLowerCase();
-  const sinceMs = filters.since ? new Date(filters.since).getTime() : null;
+function toQuery(filters: Filters): SessionFilters {
+  const sinceMs = filters.since ? new Date(filters.since).getTime() : NaN;
 
-  return sessions.filter((session) => {
-    if (filters.agent && session.agent !== filters.agent) return false;
-    if (filters.origin && session.origin !== filters.origin) return false;
-    if (workdir && !session.workdir.toLowerCase().includes(workdir)) return false;
-    if (sinceMs != null && Number.isFinite(sinceMs) && session.updatedAtMs < sinceMs) {
-      return false;
-    }
-    return true;
-  });
+  return {
+    agent: filters.agent || undefined,
+    origin: (filters.origin || undefined) as SessionOrigin | undefined,
+    workdir: filters.workdir.trim() || undefined,
+    updatedAfterMs: Number.isFinite(sinceMs) ? sinceMs : undefined,
+  };
 }
 
 export default function HomePage() {
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const filtersActive = Object.values(filters).some(Boolean);
+
+  // Only the free-text box needs debouncing; selects and dates settle on their own.
+  const debouncedWorkdir = useDebounced(filters.workdir);
+  const query = useMemo(
+    () => toQuery({ ...filters, workdir: debouncedWorkdir }),
+    [filters, debouncedWorkdir],
+  );
 
   const { data, isPending, error, refetch, isFetching } = useQuery({
-    queryKey: ["sessions"],
+    queryKey: ["sessions", query],
+    queryFn: () => api.sessions.list(query),
+    // Keep the previous page visible while a filter change is in flight, so the
+    // list dims rather than flashing an empty state on every keystroke.
+    placeholderData: (previous) => previous,
+  });
+
+  /**
+   * The agent dropdown is built from the unfiltered listing. Deriving it from
+   * filtered results would collapse the menu to the agent already chosen, making
+   * it impossible to switch to another one.
+   */
+  const { data: unfiltered } = useQuery({
+    queryKey: ["sessions", {}],
     queryFn: () => api.sessions.list(),
   });
 
   const sessions = useMemo(() => data?.sessions ?? [], [data]);
   const agents = useMemo(
-    () => Array.from(new Set(sessions.map((s) => s.agent))).sort(),
-    [sessions],
+    () => Array.from(new Set((unfiltered?.sessions ?? []).map((s) => s.agent))).sort(),
+    [unfiltered],
   );
-  const visible = useMemo(() => applyFilters(sessions, filters), [sessions, filters]);
-  const filtersActive = Object.values(filters).some(Boolean);
+  const total = unfiltered?.sessions.length ?? 0;
+  const visible = sessions;
 
   return (
     <div className="min-h-screen bg-white">
@@ -103,7 +120,7 @@ export default function HomePage() {
               {isFetching ? "Retrying..." : "Retry"}
             </button>
           </div>
-        ) : sessions.length === 0 ? (
+        ) : total === 0 && !filtersActive ? (
           <div className="py-16 text-center">
             <p className="font-medium text-gray-800">No sessions yet</p>
             <p className="mx-auto mt-1 max-w-sm text-sm text-gray-500">
@@ -125,7 +142,8 @@ export default function HomePage() {
               onChange={setFilters}
               onReset={() => setFilters(EMPTY_FILTERS)}
               showing={visible.length}
-              total={sessions.length}
+              total={total}
+              busy={isFetching}
             />
 
             {visible.length === 0 ? (
@@ -170,7 +188,6 @@ export default function HomePage() {
             )}
           </>
         )}
-        {filtersActive && <span className="sr-only" aria-live="polite" />}
       </main>
     </div>
   );
@@ -183,6 +200,7 @@ function FilterBar({
   onReset,
   showing,
   total,
+  busy,
 }: {
   filters: Filters;
   agents: string[];
@@ -190,6 +208,7 @@ function FilterBar({
   onReset: () => void;
   showing: number;
   total: number;
+  busy: boolean;
 }) {
   const active = Object.values(filters).some(Boolean);
 
@@ -261,7 +280,9 @@ function FilterBar({
 
       <div className="mt-2 flex items-center justify-between">
         <p aria-live="polite" className="text-xs text-gray-500">
-          Showing {showing} of {total} {total === 1 ? "session" : "sessions"}
+          {busy
+            ? "Filtering..."
+            : `Showing ${showing} of ${total} ${total === 1 ? "session" : "sessions"}`}
         </p>
         {active && (
           <button
