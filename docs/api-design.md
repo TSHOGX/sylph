@@ -441,12 +441,21 @@ content or vice versa.
 
 ## Error Responses
 
-All errors use structured JSON:
+Every failing response under `/api/v1/` carries this envelope, with no
+exceptions. That includes failures raised before any handler runs: a path that
+matches no route answers `NOT_FOUND`, and a known path with the wrong method
+answers `METHOD_NOT_ALLOWED`.
+
+The invariant matters more than it looks. A bodiless framework 404 is
+indistinguishable, at the client, from a handler reporting that a *file* is
+missing — so a client showing "Not Found" cannot say whether the file is absent
+or the endpoint is. Clients branch on `error.code`, never on the HTTP status
+alone, and that is only sound if every error has a code.
 
 ```json
 {
   "error": {
-    "code": "VALIDATION_ERROR",
+    "code": "INVALID_REQUEST",
     "message": "Invalid agent name",
     "details": {
       "field": "agent",
@@ -456,12 +465,20 @@ All errors use structured JSON:
 }
 ```
 
-Common codes:
-- `VALIDATION_ERROR` (400)
-- `NOT_FOUND` (404)
-- `CONFLICT` (409)
-- `INTERNAL_ERROR` (500)
-- `SERVICE_UNAVAILABLE` (503)
+`details` is optional and omitted when there is nothing structured to add.
+
+The full set of codes is the `ErrorResponse.error.code` enum in
+`docs/api-v1.openapi.json`, which is authoritative. The two router-level codes
+are worth calling out here because no handler can produce them:
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `NOT_FOUND` | 404 | No route matches this path. The endpoint does not exist in this build — distinct from `SESSION_NOT_FOUND` or `FILE_NOT_FOUND`, which mean the route exists and the named thing does not. |
+| `METHOD_NOT_ALLOWED` | 405 | The path exists but not for this method. |
+
+A client that sees `NOT_FOUND` for an endpoint it expects to exist is talking to
+an older backend than it was built against, and should say so rather than
+blaming the request.
 
 ## Authentication
 

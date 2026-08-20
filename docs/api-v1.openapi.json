@@ -616,6 +616,8 @@
                   "COMMAND_NOT_SUPPORTED",
                   "APPROVAL_NOT_AVAILABLE",
                   "POLICY_VIOLATION",
+                  "NOT_FOUND",
+                  "METHOD_NOT_ALLOWED",
                   "INTERNAL_ERROR"
                 ]
               },
