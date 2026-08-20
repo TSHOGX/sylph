@@ -21,6 +21,9 @@ pub mod api;
 pub mod attachments;
 pub mod config;
 pub mod db;
+/// Parsing spreadsheets, documents, and presentations. A library with no HTTP
+/// knowledge, so it sits beside `attachments` rather than inside `api`.
+pub mod documents;
 pub mod error;
 pub mod events;
 pub mod middleware;
