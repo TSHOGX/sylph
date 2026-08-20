@@ -5,61 +5,977 @@
     "version": "0.1.0",
     "description": "Loopback-only, versioned API for durable sessions, turns, normalized events, and runner capabilities. Backend and agent-native session identifiers are never exposed in ordinary session responses."
   },
-  "servers": [{ "url": "http://127.0.0.1:4317" }],
-  "security": [{ "SylphSessionCookie": [] }],
+  "servers": [
+    {
+      "url": "http://127.0.0.1:4317"
+    }
+  ],
+  "security": [
+    {
+      "SylphSessionCookie": []
+    }
+  ],
   "paths": {
-    "/api/v1/health": { "get": { "security": [], "responses": { "200": { "description": "Service health" } } } },
-    "/api/v1/diagnostics": { "get": { "responses": { "200": { "description": "Diagnostics snapshot" } } } },
-    "/api/v1/agents": { "get": { "responses": { "200": { "description": "Discovered runner capabilities" } } } },
-    "/api/v1/agents/refresh": { "post": { "responses": { "200": { "description": "Refreshed capabilities" } } } },
+    "/api/v1/health": {
+      "get": {
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Service health"
+          }
+        }
+      }
+    },
+    "/api/v1/diagnostics": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Diagnostics snapshot"
+          }
+        }
+      }
+    },
+    "/api/v1/agents": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Discovered runner capabilities"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/refresh": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Refreshed capabilities"
+          }
+        }
+      }
+    },
     "/api/v1/sessions": {
-      "get": { "description": "Sessions newest-activity-first. Filters are applied in SQL, not by the client: the listing is capped by limit, so client-side filtering would only narrow the truncated page. A blank filter value means unfiltered.", "parameters": [{ "$ref": "#/components/parameters/Limit" }, { "$ref": "#/components/parameters/FilterAgent" }, { "$ref": "#/components/parameters/FilterOrigin" }, { "$ref": "#/components/parameters/FilterWorkdir" }, { "$ref": "#/components/parameters/UpdatedAfterMs" }, { "$ref": "#/components/parameters/UpdatedBeforeMs" }], "responses": { "200": { "description": "Product sessions" }, "400": { "$ref": "#/components/responses/Error" } } },
-      "post": { "requestBody": { "$ref": "#/components/requestBodies/CreateSession" }, "responses": { "201": { "$ref": "#/components/responses/SessionCreated" }, "400": { "$ref": "#/components/responses/Error" } } }
+      "get": {
+        "description": "Sessions newest-activity-first. Filters are applied in SQL, not by the client: the listing is capped by limit, so client-side filtering would only narrow the truncated page. A blank filter value means unfiltered.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/FilterAgent"
+          },
+          {
+            "$ref": "#/components/parameters/FilterOrigin"
+          },
+          {
+            "$ref": "#/components/parameters/FilterWorkdir"
+          },
+          {
+            "$ref": "#/components/parameters/UpdatedAfterMs"
+          },
+          {
+            "$ref": "#/components/parameters/UpdatedBeforeMs"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Product sessions"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "requestBody": {
+          "$ref": "#/components/requestBodies/CreateSession"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/SessionCreated"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     },
-    "/api/v1/sessions/import": { "post": { "description": "Adopt an archived native session. Policy-relevant fields are derived from the archive rather than the request: the agent from the id prefix, since it selects identity and lifecycle policy, and the working directory from the archive's session metadata, falling back to an early event carrying it as JSON for archives that report no metadata. The session is restored as recorded, with identityMode and lifecycleMode set to preserve. 422 means the archive has the session but recorded no working directory, so there is nothing to resume into; the request itself was valid.", "requestBody": { "$ref": "#/components/requestBodies/ImportSession" }, "responses": { "201": { "$ref": "#/components/responses/SessionCreated" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" } } } },
-    "/api/v1/sessions/{sessionId}": { "get": { "parameters": [{ "$ref": "#/components/parameters/SessionId" }], "responses": { "200": { "description": "Session detail" }, "404": { "$ref": "#/components/responses/Error" } } } },
+    "/api/v1/sessions/import": {
+      "post": {
+        "description": "Adopt an archived native session. Policy-relevant fields are derived from the archive rather than the request: the agent from the id prefix, since it selects identity and lifecycle policy, and the working directory from the archive's session metadata, falling back to an early event carrying it as JSON for archives that report no metadata. The session is restored as recorded, with identityMode and lifecycleMode set to preserve. 422 means the archive has the session but recorded no working directory, so there is nothing to resume into; the request itself was valid.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ImportSession"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/SessionCreated"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session detail"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/v1/sessions/{sessionId}/turns": {
-      "get": { "parameters": [{ "$ref": "#/components/parameters/SessionId" }, { "$ref": "#/components/parameters/Limit" }, { "$ref": "#/components/parameters/Before" }], "responses": { "200": { "description": "Turn list" } } },
-      "post": { "parameters": [{ "$ref": "#/components/parameters/SessionId" }, { "$ref": "#/components/parameters/IdempotencyKey" }], "requestBody": { "$ref": "#/components/requestBodies/CreateTurn" }, "responses": { "202": { "$ref": "#/components/responses/TurnAccepted" }, "200": { "$ref": "#/components/responses/TurnAccepted" }, "409": { "$ref": "#/components/responses/Error" } } }
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Before"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Turn list"
+          }
+        }
+      },
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/CreateTurn"
+        },
+        "responses": {
+          "202": {
+            "$ref": "#/components/responses/TurnAccepted"
+          },
+          "200": {
+            "$ref": "#/components/responses/TurnAccepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     },
-    "/api/v1/search": { "get": { "parameters": [{ "$ref": "#/components/parameters/Query" }, { "$ref": "#/components/parameters/Limit" }], "description": "Search the durable TraceDB archive. Hits are lineage-collapsed and ranked by TraceDB, which owns both. A whitespace-only query returns no results without consulting the archive. An unreachable archive is a normal local state, so it answers 200 with available=false rather than 503.", "responses": { "200": { "description": "Archive search results", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchResponse" } } } } } } },
-    "/api/v1/turns/{turnId}": { "get": { "parameters": [{ "$ref": "#/components/parameters/TurnId" }], "responses": { "200": { "description": "Turn resource" }, "404": { "$ref": "#/components/responses/Error" } } } },
-    "/api/v1/turns/{turnId}/events": { "get": { "parameters": [{ "$ref": "#/components/parameters/TurnId" }, { "$ref": "#/components/parameters/AfterSeq" }], "description": "Reconnectable SSE stream. Last-Event-ID is accepted as an alternative to after_seq. Stable journal replay precedes live projection events.", "responses": { "200": { "description": "text/event-stream" } } } },
-    "/api/v1/turns/{turnId}/stop": { "post": { "parameters": [{ "$ref": "#/components/parameters/TurnId" }], "responses": { "202": { "description": "Stop requested" }, "409": { "$ref": "#/components/responses/Error" } } } }
+    "/api/v1/search": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Query"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "description": "Search the durable TraceDB archive. Hits are lineage-collapsed and ranked by TraceDB, which owns both. A whitespace-only query returns no results without consulting the archive. An unreachable archive is a normal local state, so it answers 200 with available=false rather than 503.",
+        "responses": {
+          "200": {
+            "description": "Archive search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/turns/{turnId}": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TurnId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Turn resource"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/turns/{turnId}/events": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TurnId"
+          },
+          {
+            "$ref": "#/components/parameters/AfterSeq"
+          }
+        ],
+        "description": "Reconnectable SSE stream. Last-Event-ID is accepted as an alternative to after_seq. Stable journal replay precedes live projection events.",
+        "responses": {
+          "200": {
+            "description": "text/event-stream"
+          }
+        }
+      }
+    },
+    "/api/v1/turns/{turnId}/stop": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TurnId"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Stop requested"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces": {
+      "get": {
+        "summary": "Sessions rolled up by working directory",
+        "description": "Backs the left sidebar and the settings panel. Derivable from GET /sessions except for two facts only the server has: the absolute Quick Start directory (requires expanding ~) and counts spanning more sessions than the LIMIT-capped session listing returns. The Quick Start directory is always present, even with no sessions.",
+        "responses": {
+          "200": {
+            "description": "Workspace roll-up, newest first by lastUsedMs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspacesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/files": {
+      "get": {
+        "summary": "List one directory level in a session's working directory",
+        "description": "Read-only. `path` is relative to the session workdir; omitted means the root. One level per request, because walking a 100k-file repository server-side spends seconds building a payload whose first screen is all that is read. Containment is enforced on the canonicalized path, so `..` and symlinks cannot escape the workdir; escaping symlinks are omitted from listings entirely. Machine-generated directories (.git, node_modules, target, .next, and similar) are never listed.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Directory relative to the session workdir. Empty or omitted lists the root."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory listing, directories first then case-insensitive by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileTreeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/files/content": {
+      "get": {
+        "summary": "Read one file from a session's working directory",
+        "description": "`encoding` is decided by whether the bytes decode as UTF-8, not by the file extension, so a .log holding binary output is reported as binary rather than rendered as mojibake. Text over 1 MiB is truncated to a 256 KiB prefix. An image over 1 MiB is not served at all, since a partial image decodes to nothing; it returns encoding=binary with truncated=true.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "File relative to the session workdir."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File contents, or metadata alone for binary and oversized files",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileContentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
   },
   "components": {
-    "securitySchemes": { "SylphSessionCookie": { "type": "apiKey", "in": "cookie", "name": "sylph_session" } },
+    "securitySchemes": {
+      "SylphSessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "sylph_session"
+      }
+    },
     "parameters": {
-      "SessionId": { "name": "sessionId", "in": "path", "required": true, "schema": { "type": "string" } },
-      "TurnId": { "name": "turnId", "in": "path", "required": true, "schema": { "type": "string" } },
-      "Limit": { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 } },
-      "Before": { "name": "before", "in": "query", "schema": { "type": "integer" } },
-      "FilterAgent": { "name": "agent", "in": "query", "description": "Exact agent name.", "schema": { "type": "string" } },
-      "FilterOrigin": { "name": "origin", "in": "query", "description": "Closed set; an unknown value is rejected with 400 rather than yielding an empty list.", "schema": { "type": "string", "enum": ["sylph", "native"] } },
-      "FilterWorkdir": { "name": "workdir", "in": "query", "description": "Case-insensitive substring of the working directory.", "schema": { "type": "string" } },
-      "UpdatedAfterMs": { "name": "updatedAfterMs", "in": "query", "schema": { "type": "integer" } },
-      "UpdatedBeforeMs": { "name": "updatedBeforeMs", "in": "query", "schema": { "type": "integer" } },
-      "Query": { "name": "q", "in": "query", "description": "Free-text query; whitespace-only is treated as absent.", "schema": { "type": "string" } },
-      "AfterSeq": { "name": "after_seq", "in": "query", "schema": { "type": "integer", "default": -1 } },
-      "IdempotencyKey": { "name": "Idempotency-Key", "in": "header", "schema": { "type": "string", "maxLength": 200 } }
+      "SessionId": {
+        "name": "sessionId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "TurnId": {
+        "name": "turnId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        }
+      },
+      "Before": {
+        "name": "before",
+        "in": "query",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "FilterAgent": {
+        "name": "agent",
+        "in": "query",
+        "description": "Exact agent name.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "FilterOrigin": {
+        "name": "origin",
+        "in": "query",
+        "description": "Closed set; an unknown value is rejected with 400 rather than yielding an empty list.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "sylph",
+            "native"
+          ]
+        }
+      },
+      "FilterWorkdir": {
+        "name": "workdir",
+        "in": "query",
+        "description": "Case-insensitive substring of the working directory.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "UpdatedAfterMs": {
+        "name": "updatedAfterMs",
+        "in": "query",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "UpdatedBeforeMs": {
+        "name": "updatedBeforeMs",
+        "in": "query",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "Query": {
+        "name": "q",
+        "in": "query",
+        "description": "Free-text query; whitespace-only is treated as absent.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "AfterSeq": {
+        "name": "after_seq",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "default": -1
+        }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "schema": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
     },
     "requestBodies": {
-      "CreateSession": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateSession" } } } },
-      "ImportSession": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["traceSessionId"], "properties": { "traceSessionId": { "type": "string", "description": "Formatted <agent>:<native-id>, as TraceDB reports it." }, "title": { "type": "string", "description": "Optional override; otherwise derived from the opening user turn." } } } } } },
-      "CreateTurn": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateTurn" } } } }
+      "CreateSession": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CreateSession"
+            }
+          }
+        }
+      },
+      "ImportSession": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "traceSessionId"
+              ],
+              "properties": {
+                "traceSessionId": {
+                  "type": "string",
+                  "description": "Formatted <agent>:<native-id>, as TraceDB reports it."
+                },
+                "title": {
+                  "type": "string",
+                  "description": "Optional override; otherwise derived from the opening user turn."
+                }
+              }
+            }
+          }
+        }
+      },
+      "CreateTurn": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CreateTurn"
+            }
+          }
+        }
+      }
     },
     "responses": {
-      "Error": { "description": "Stable API error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
-      "SessionCreated": { "description": "Session resource" },
-      "TurnAccepted": { "description": "Durable turn resource" }
+      "Error": {
+        "description": "Stable API error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "SessionCreated": {
+        "description": "Session resource"
+      },
+      "TurnAccepted": {
+        "description": "Durable turn resource"
+      }
     },
     "schemas": {
-      "CreateSession": { "type": "object", "required": ["agent", "workdir"], "properties": { "agent": { "type": "string" }, "workdir": { "type": "string" }, "title": { "type": "string" }, "flags": { "type": "object", "additionalProperties": { "type": "string" } } } },
-      "CreateTurn": { "type": "object", "properties": { "text": { "type": "string" }, "idempotencyKey": { "type": "string" }, "attachments": { "type": "array", "maxItems": 5 } } },
-      "ErrorResponse": { "type": "object", "required": ["error"], "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string", "enum": ["INVALID_REQUEST", "SESSION_NOT_FOUND", "SESSION_ALREADY_RUNNING", "RUNNER_NOT_FOUND", "RUNNER_BROKEN", "RUNNER_START_FAILED", "RUNNER_PROTOCOL_ERROR", "TURN_FAILED", "TURN_INTERRUPTED", "STOP_ALREADY_COMPLETED", "TRACEDB_UNAVAILABLE", "TRACE_SESSION_NOT_FOUND", "SESSION_ALREADY_IMPORTED", "TRACE_NOT_RESUMABLE", "ATTACHMENT_INVALID", "COMMAND_NOT_SUPPORTED", "APPROVAL_NOT_AVAILABLE", "POLICY_VIOLATION", "INTERNAL_ERROR"] }, "message": { "type": "string" }, "details": { "type": "object" } } } } },
-      "SearchHit": { "type": "object", "description": "One lineage-collapsed archived session. TraceDB scoring internals (score, scoreBreakdown, bm25) are deliberately not exposed: they carry no UI meaning and would couple this API to TraceDB's ranking implementation.", "required": ["id", "agent"], "properties": { "id": { "type": "string", "description": "TraceDB session id, e.g. claude:uuid/agent-suffix" }, "agent": { "type": "string" }, "title": { "type": ["string", "null"] }, "ask": { "type": ["string", "null"], "description": "Opening user request" }, "cwd": { "type": ["string", "null"] }, "outcome": { "type": ["string", "null"] }, "bestMatch": { "type": ["object", "null"], "properties": { "kind": { "type": "string" }, "snippet": { "type": "string" } } }, "hits": { "type": ["integer", "null"] }, "startedAtMs": { "type": ["integer", "null"] }, "endedAtMs": { "type": ["integer", "null"] }, "lineageRootId": { "type": ["string", "null"] }, "sessionId": { "type": ["string", "null"], "description": "Live session id when this archived session was already imported, so the UI can offer open instead of a duplicate import." } } },
-      "SearchResponse": { "type": "object", "required": ["results", "available"], "properties": { "results": { "type": "array", "items": { "$ref": "#/components/schemas/SearchHit" } }, "available": { "type": "boolean", "description": "False when TraceDB could not be reached at all." }, "detail": { "type": ["string", "null"], "description": "Why the archive is unavailable. Absent when available." } } },
-      "Event": { "type": "object", "required": ["seq", "kind", "stability", "source"], "properties": { "seq": { "type": "integer" }, "kind": { "type": "string", "enum": ["status", "system", "user", "thinking", "assistant", "tool_call", "tool_result", "usage", "error", "approval"] }, "phase": { "type": ["string", "null"] }, "text": { "type": "string" }, "data": { "type": "object" }, "stability": { "type": "string", "enum": ["ephemeral", "stable"] }, "source": { "type": "string", "enum": ["runner", "server", "tracedb"] } } }
+      "CreateSession": {
+        "type": "object",
+        "required": [
+          "agent",
+          "workdir"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "workdir": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "flags": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "CreateTurn": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "attachments": {
+            "type": "array",
+            "maxItems": 5
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "INVALID_REQUEST",
+                  "SESSION_NOT_FOUND",
+                  "SESSION_ALREADY_RUNNING",
+                  "RUNNER_NOT_FOUND",
+                  "FILE_NOT_FOUND",
+                  "RUNNER_BROKEN",
+                  "RUNNER_START_FAILED",
+                  "RUNNER_PROTOCOL_ERROR",
+                  "TURN_FAILED",
+                  "TURN_INTERRUPTED",
+                  "STOP_ALREADY_COMPLETED",
+                  "TRACEDB_UNAVAILABLE",
+                  "TRACE_SESSION_NOT_FOUND",
+                  "SESSION_ALREADY_IMPORTED",
+                  "TRACE_NOT_RESUMABLE",
+                  "ATTACHMENT_INVALID",
+                  "COMMAND_NOT_SUPPORTED",
+                  "APPROVAL_NOT_AVAILABLE",
+                  "POLICY_VIOLATION",
+                  "INTERNAL_ERROR"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "details": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      "SearchHit": {
+        "type": "object",
+        "description": "One lineage-collapsed archived session. TraceDB scoring internals (score, scoreBreakdown, bm25) are deliberately not exposed: they carry no UI meaning and would couple this API to TraceDB's ranking implementation.",
+        "required": [
+          "id",
+          "agent"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "TraceDB session id, e.g. claude:uuid/agent-suffix"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ask": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opening user request"
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bestMatch": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "snippet": {
+                "type": "string"
+              }
+            }
+          },
+          "hits": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "startedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "endedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "lineageRootId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Live session id when this archived session was already imported, so the UI can offer open instead of a duplicate import."
+          }
+        }
+      },
+      "SearchResponse": {
+        "type": "object",
+        "required": [
+          "results",
+          "available"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            }
+          },
+          "available": {
+            "type": "boolean",
+            "description": "False when TraceDB could not be reached at all."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the archive is unavailable. Absent when available."
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "required": [
+          "seq",
+          "kind",
+          "stability",
+          "source"
+        ],
+        "properties": {
+          "seq": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "status",
+              "system",
+              "user",
+              "thinking",
+              "assistant",
+              "tool_call",
+              "tool_result",
+              "usage",
+              "error",
+              "approval"
+            ]
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object"
+          },
+          "stability": {
+            "type": "string",
+            "enum": [
+              "ephemeral",
+              "stable"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "runner",
+              "server",
+              "tracedb"
+            ]
+          }
+        }
+      },
+      "Workspace": {
+        "type": "object",
+        "required": [
+          "path",
+          "name",
+          "sessionCount",
+          "runningCount",
+          "lastUsedMs",
+          "isQuickStart"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path. Display shortens it; API calls need the real value."
+          },
+          "name": {
+            "type": "string",
+            "description": "Directory leaf, precomputed for display."
+          },
+          "sessionCount": {
+            "type": "integer"
+          },
+          "runningCount": {
+            "type": "integer"
+          },
+          "lastUsedMs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Newest updatedAtMs across the workspace's sessions. 0 when it has none."
+          },
+          "isQuickStart": {
+            "type": "boolean",
+            "description": "True for ~/.agents, which the sidebar lists separately."
+          }
+        }
+      },
+      "WorkspacesResponse": {
+        "type": "object",
+        "required": [
+          "quickStartDir",
+          "dataDir",
+          "home",
+          "workspaces"
+        ],
+        "properties": {
+          "quickStartDir": {
+            "type": "string",
+            "description": "Absolute $HOME/.agents."
+          },
+          "dataDir": {
+            "type": "string",
+            "description": "Where the journal and attachments live."
+          },
+          "home": {
+            "type": "string",
+            "description": "Used client-side to abbreviate paths as ~/..."
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Workspace"
+            }
+          }
+        }
+      },
+      "FileEntry": {
+        "type": "object",
+        "required": [
+          "path",
+          "name",
+          "isDir",
+          "modifiedAtMs"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the session workdir. The root itself is the empty string."
+          },
+          "name": {
+            "type": "string"
+          },
+          "isDir": {
+            "type": "boolean"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Files only; omitted for directories, where it means nothing."
+          },
+          "modifiedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "isSymlink": {
+            "type": "boolean",
+            "description": "A listed symlink always resolves inside the workdir; escaping ones are omitted."
+          }
+        }
+      },
+      "FileTreeResponse": {
+        "type": "object",
+        "required": [
+          "root",
+          "path",
+          "entries",
+          "truncated"
+        ],
+        "properties": {
+          "root": {
+            "type": "string",
+            "description": "Absolute canonical path of the session workdir."
+          },
+          "path": {
+            "type": "string",
+            "description": "The directory listed, relative to the workdir."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileEntry"
+            }
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True past 2000 entries in one directory."
+          }
+        }
+      },
+      "FileContentResponse": {
+        "type": "object",
+        "required": [
+          "path",
+          "absolutePath",
+          "size",
+          "encoding",
+          "mimeType",
+          "truncated",
+          "modifiedAtMs"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "absolutePath": {
+            "type": "string",
+            "description": "For \"Copy path\" in the UI."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Full size on disk, even when the body is truncated."
+          },
+          "encoding": {
+            "type": "string",
+            "enum": [
+              "text",
+              "image",
+              "binary"
+            ],
+            "description": "Derived from the bytes, not the extension."
+          },
+          "mimeType": {
+            "type": "string",
+            "description": "Extension-based guess. Advisory: selects a viewer, never access."
+          },
+          "content": {
+            "type": "string",
+            "description": "Text, or base64 for images. Absent for binary and oversized images."
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "modifiedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      }
     }
   }
 }

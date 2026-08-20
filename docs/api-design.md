@@ -336,6 +336,109 @@ Stop a running turn.
 
 Process receives SIGTERM, escalates to SIGKILL after 2 seconds.
 
+### Workspaces
+
+#### `GET /api/v1/workspaces`
+
+Sessions rolled up by the directory they run in, for the left sidebar and the
+settings panel.
+
+A client could derive this from `GET /sessions`, but two facts are only knowable
+server-side: the absolute path of the Quick Start directory, which requires
+expanding `~`, and counts spanning more sessions than the `LIMIT`-capped session
+listing returns.
+
+**Response 200:**
+```json
+{
+  "quickStartDir": "/Users/you/.agents",
+  "dataDir": "/Users/you/.agents/data/sylph/web",
+  "home": "/Users/you",
+  "workspaces": [
+    {
+      "path": "/Users/you/Workspace/sylph-web",
+      "name": "sylph-web",
+      "sessionCount": 8,
+      "runningCount": 1,
+      "lastUsedMs": 1755600000000,
+      "isQuickStart": false
+    }
+  ]
+}
+```
+
+Ordered newest-first by `lastUsedMs`. The Quick Start directory is always
+present, even with no sessions, because the sidebar section and the settings row
+exist before the first quick session is created.
+
+### Files
+
+Read-only browsing of a session's working directory, for the Artifacts pane.
+There is deliberately no write, rename, or delete endpoint: the agent mutates the
+workspace, the browser observes it.
+
+**Path safety.** These are the only endpoints that turn a client string into a
+filesystem read, so containment is enforced on the *canonical* path, never on the
+string. The root is the session's `workdir` as recorded in the journal, so no
+request can choose its own root; the joined path is canonicalized, which resolves
+`..` and every symlink component, and is then required to still be inside the
+canonical root. A symlink pointing outside the workspace is refused and is also
+omitted from listings. See `backend/src/api/files.rs` for the threat model.
+
+#### `GET /api/v1/sessions/{id}/files?path=`
+
+One directory level. `path` is relative to the workdir; omitted or empty means the
+root. Lazy expansion is what keeps a repository with 100k files usable.
+
+**Response 200:**
+```json
+{
+  "root": "/Users/you/Workspace/sylph-web",
+  "path": "backend/src",
+  "entries": [
+    { "path": "backend/src/api", "name": "api", "isDir": true, "modifiedAtMs": 1755600000000 },
+    { "path": "backend/src/lib.rs", "name": "lib.rs", "isDir": false, "size": 5120, "modifiedAtMs": 1755600000000 }
+  ],
+  "truncated": false
+}
+```
+
+Directories sort before files, then case-insensitively by name. `.git`,
+`node_modules`, `target`, `.next`, and similar machine-generated directories are
+never listed. `truncated` is true past 2000 entries in one directory.
+
+#### `GET /api/v1/sessions/{id}/files/content?path=`
+
+One file's contents.
+
+**Response 200:**
+```json
+{
+  "path": "README.md",
+  "absolutePath": "/Users/you/Workspace/sylph-web/README.md",
+  "size": 2048,
+  "encoding": "text",
+  "mimeType": "text/markdown",
+  "content": "# Sylph Web\n...",
+  "truncated": false,
+  "modifiedAtMs": 1755600000000
+}
+```
+
+`encoding` is `text`, `image`, or `binary`, and is decided by whether the bytes
+decode as UTF-8 — not by the extension. A `.log` holding binary output is
+therefore reported as `binary` rather than rendered as mojibake, and a file with
+no extension is still served as text when it is text. For `image`, `content` is
+base64. For `binary`, `content` is absent.
+
+Text over 1 MiB is truncated to a 256 KiB prefix with `truncated: true`. An image
+over 1 MiB is not served at all — a partial image decodes to nothing — and comes
+back as `binary` with `truncated: true` so the client can explain why.
+
+Errors: `FILE_NOT_FOUND` (404) for a missing path, `POLICY_VIOLATION` (403) for
+one outside the workdir, `INVALID_REQUEST` (400) when a directory is requested as
+content or vice versa.
+
 ## Error Responses
 
 All errors use structured JSON:

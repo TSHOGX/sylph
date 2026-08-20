@@ -18,8 +18,10 @@
   accessibility audit, first-load JS measured at 190.4 KB gzipped
 - Phase 5: deployment — `scripts/install.sh`, standalone frontend bundle,
   LaunchAgent, reversible rollback, `docs/installation.md`
+- Phase 6: frontend redesign — three-pane agent workspace, tool-first timeline
+  with inline diffs, file browser, `Cmd+K`/`Cmd+P`, settings panel
 
-All five phases are complete.
+All six phases are complete.
 
 ### Open Decisions
 
@@ -216,3 +218,126 @@ Phase 5 exit criteria — all met, with how each was checked:
 - ✅ Health checks report correctly — `/api/v1/health` answers 200 without a
   cookie, directly and through the frontend proxy; `/api/v1/diagnostics`
   returns 401 without one.
+
+## Phase 6: Frontend Redesign — Complete
+
+**Goal:** turn the frontend from a technical demonstration into a production
+agent workspace, where tool execution is the primary content and the keyboard is
+the primary input.
+
+**The shift, concretely:** away from chat-app UX (message bubbles, alternating
+alignment, tool calls minimized) toward the pattern Claude Code, Cursor, and Zed
+share — a flat timeline where tool calls are the visual anchors. `docs/agent-ui-design-analysis.md`
+holds the comparison this rests on; `docs/frontend-architecture.md` holds the
+shipped design.
+
+### Delivered
+
+**6.1 — three-pane layout and workspace sidebar**
+- ✅ `AppShell` in the root layout, so panes keep state across navigation
+- ✅ Sessions grouped by `workdir`; Quick Sessions (`~/.agents`) listed separately
+- ✅ Pin and rename workspaces; right-click menus on groups and sessions
+- ✅ `GET /api/v1/workspaces` — the roll-up, and the only source of the resolved
+  `~/.agents` path, which a browser cannot expand
+
+**6.2 — agent-first conversation canvas**
+- ✅ Flat timeline, no bubbles; tool calls as bordered regions with target and status
+- ✅ Tool call and its `tool_result` render as one operation, paired by `streamId`
+- ✅ Inline unified diffs computed browser-side from edit arguments
+- ✅ Expansion policy by role: thinking collapsed, edits open, shell output open
+  only on failure
+- ✅ Markdown for assistant prose; `lib/tool-shape.ts` normalizes all four runners'
+  payload shapes
+- ✅ Clicking any file path opens it in the Artifacts pane
+
+**6.3 — Artifacts pane and file API**
+- ✅ `GET /api/v1/sessions/{id}/files` and `.../files/content`, read-only, rooted
+  at the session's journalled `workdir`
+- ✅ Containment enforced on the canonical path, so `..` and symlinks cannot
+  escape; escaping symlinks are also hidden from listings
+- ✅ Lazy per-directory expansion; Markdown, code, image, and JSON previews
+- ✅ Encoding decided by the bytes, not the extension
+
+**6.4 — search and command palette**
+- ✅ `Cmd+K`: live sessions ranked client-side, archive searched server-side,
+  already-imported hits de-duplicated
+- ✅ `Cmd+P`: palette dispatching through the same paths as the shortcuts, with
+  recency ordering
+- ✅ One document-level dispatcher; bindings stored platform-neutral and rebindable
+
+**6.5 — settings and Quick Start**
+- ✅ Default agent and per-agent model, density, expansion defaults, shortcut
+  recorder, workspace management
+- ✅ Quick Start creates a session in `~/.agents` with no dialog
+- ✅ Preferences over `localStorage` via `useSyncExternalStore`
+
+### Exit criteria — how each was checked
+
+- ✅ **Three panes functional** — toggles, persistence across reload, and
+  keyboard operation covered in `e2e/workspace-shell.spec.ts`.
+- ✅ **No chat bubbles; tool execution primary** — `e2e/timeline.spec.ts` asserts
+  tool calls render as labelled regions with their target, that an edit shows a
+  real diff with `+1`/`−1` counts, that a failed command's output is visible
+  without interaction, and that a successful read's is not.
+- ✅ **File tree and previews** — integration tests cover listing, ordering,
+  skipped directories, and text/image/binary detection; the pane is exercised in
+  E2E.
+- ✅ **`Cmd+K` and `Cmd+P` keyboard-navigable** — both open, filter, and commit
+  by keyboard in E2E, including focus restoration on close.
+- ✅ **Quick Start** — creates in the backend-resolved `~/.agents`; the directory
+  is asserted to end in `/.agents` in integration tests.
+- ✅ **Settings configure agent and model** — round-trip through storage and into
+  the timeline covered in E2E.
+- ✅ **First-load JS under 200 KB gzipped** — **measured 196.2 KB**, from a 187.8 KB
+  baseline, so Phase 6 cost +8.4 KB. Achieved by code-splitting the overlays and
+  Artifacts pane (204.3 → 195.8 KB) and by implementing Markdown, diff, fuzzy
+  matching, and the modal primitives directly rather than adding ~87 KB of
+  dependencies. Each such decision, and what would reverse it, is recorded in
+  `docs/frontend-architecture.md`.
+- ✅ **1000-event conversation renders under 2s** — measured on a cold reload of
+  durable history in `e2e/timeline.spec.ts`.
+- ✅ **WCAG 2.1 AA maintained** — axe-core (`wcag2a`/`wcag2aa`/`wcag21a`/`wcag21aa`)
+  reports **zero violations** across the session list, create form, a conversation
+  canvas with tool calls and both sidebars open, and all three overlays. It caught
+  two real defects during the work: an `aria-activedescendant` pointing at no
+  element, and 2.48:1 muted text.
+- ✅ **E2E passes with Phase 6 scenarios** — 18 specs, up from 6. Plus 81 new
+  Vitest unit tests over the diff, Markdown parser, tool-shape interpreter, fuzzy
+  ranker, shortcut grammar, and timeline row building.
+
+**Test totals:** 61 backend unit + 62 backend integration + 81 frontend unit +
+18 E2E.
+
+### Carried forward
+
+- **Virtualization** stays deferred, now with a measurement behind it: a
+  1000-event conversation renders inside budget through memoization and bounded
+  rendering. The evidence that would reverse this is scroll jank while *idle* on a
+  large session, which indicates DOM size rather than render count.
+- **Dark theme** is deliberately absent rather than half-built. It needs a `dark:`
+  pass over every component plus a resolved `prefers-color-scheme` fallback; a
+  settings toggle storing a preference nothing reads would misrepresent that.
+- **"Open in Default App" and "Reveal in Finder"** are specified in
+  `docs/keyboard-shortcuts-default-sessions-settings.md` but not implemented. Both
+  need the backend to spawn a process against a client-supplied path, which is a
+  local code-execution surface and needs a threat-model decision, not a menu entry.
+- **Screen-reader passes** (VoiceOver, NVDA) and forced-colours mode are untested.
+- **Session rename, move, delete, and export** are still absent; the context menus
+  currently offer only non-mutating actions, since no endpoint backs the rest.
+- **`Cmd+F` filters turns** rather than highlighting matches inside them.
+  Highlighting would mean reaching into the Markdown, diff, and code renderers to
+  rewrite their text nodes.
+
+### Superseded design documents
+
+Phase 6 design was drafted across several documents, some of which were still
+being rewritten when implementation began. The two that remain authoritative for
+*intent* are `agent-ui-design-analysis.md` (the UI pattern argument) and
+`keyboard-shortcuts-default-sessions-settings.md` (shortcut map, Quick Start,
+settings). The rest — `phase6-design-index.md`, `phase6-frontend-redesign.md`,
+`phase6-quick-start.md`, `phase6-research-checklist.md`, `PHASE6_*.md` — are
+planning scaffolding that the shipped design and `docs/frontend-architecture.md`
+now supersede. They describe a bundle allocation (~80 KB of new dependencies) that
+the measured budget did not permit, so following them now would be actively
+misleading. **They should be deleted;** they are left in place only because
+removing another author's untracked drafts is not this change's call to make.

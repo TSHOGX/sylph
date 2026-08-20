@@ -1,6 +1,17 @@
-# Frontend Architecture (Phase 2)
+# Frontend Architecture
 
-Sylph Web frontend is a Next.js 16 application providing a local-first UI for multi-agent session management. The design draws inspiration from modern coding-agent interfaces while optimizing for Sylph's unique multi-origin session model and real-time event streaming.
+Sylph Web frontend is a Next.js 16 application providing a local-first UI for
+multi-agent session management. It is an **agent workspace**, not a chat client:
+tool execution is the primary content, prose is connective tissue, and navigation
+is keyboard-first.
+
+> **Reading this document.** Sections below describe the shipped design. Where an
+> earlier plan was not followed, the deviation is stated with its reason rather
+> than quietly deleted — a spec that hides why it diverged from the code teaches
+> the next reader nothing. The largest deviations are: no Zustand (React context
+> plus an external store), no Radix UI, no Shiki, no `react-markdown`, and no
+> virtualization. All four are bundle-budget decisions, explained in
+> **Performance Optimization**.
 
 ## Design Philosophy
 
@@ -117,24 +128,53 @@ UI feedback after 3s. Pattern proven in both eventsource lib and DSH.
 - TypeScript 5.7+ (strict mode)
 
 **State management:**
-- TanStack Query v5 (server state, caching, optimistic updates)
-- Zustand (client state, UI preferences)
+- TanStack Query v5 (server state, caching)
+- React context for shell state; `useSyncExternalStore` over `localStorage` for
+  preferences. **No Zustand:** two contexts and one external store cover every
+  case here, and a state library would add a dependency for a store that holds
+  about a dozen fields.
 - EventSource API (SSE streaming)
 
 **UI components:**
-- Radix UI (accessible primitives: Dialog, Dropdown, Tabs, Toast)
-- Tailwind CSS 4.0 (utility-first styling)
-- Framer Motion (animations, transitions)
-- Lucide React (icons)
+- Tailwind CSS 4 (utility-first styling)
+- **No component library.** The four interactive primitives needed — modal,
+  context menu, disclosure, listbox — are implemented directly in
+  `components/overlay.tsx`, `components/context-menu.tsx`, native `<details>`,
+  and the two picker overlays. Radix UI would have supplied them with better
+  edge-case coverage, at roughly the whole remaining first-load budget. Native
+  `<details>` in particular is *better* than a scripted disclosure: it gives
+  keyboard operation, `aria-expanded`, and find-on-page behaviour with no script.
+- Inline SVG and text glyphs for icons. **No icon package** for the handful of
+  shapes in use.
+- **No animation library.** Tailwind's `animate-pulse` covers the only motion in
+  the UI, which is streaming and running indicators.
 
 **Code rendering:**
-- Shiki (syntax highlighting, theme-aware)
-- React Markdown (message formatting)
+- `components/markdown.tsx` — a block-then-inline parser covering the subset agent
+  output uses: fenced code, inline code, headings, lists, emphasis, links,
+  blockquotes, tables. **Not `react-markdown`** (~45 KB gzipped with `remark-gfm`),
+  which alone would exceed the budget. Every node is a React element, so
+  agent-authored text cannot inject markup and no sanitizer is needed; link
+  schemes are still allowlisted, because a React-rendered `javascript:` href
+  executes.
+- `components/code-block.tsx` — monospace, line numbers, copy, truncation.
+  **No syntax highlighting.** Shiki ships a WASM regex engine plus grammars;
+  `react-syntax-highlighter` with Prism is ~35 KB. The way to add it later is a
+  dynamic `import()` behind a settings toggle, so it never lands in first-load JS.
+- `lib/diff.ts` — LCS line diff for rendering agent edits. **Not jsdiff** (~30 KB)
+  or `diff-match-patch` (~70 KB), whose value is character-level diffing and patch
+  formats that this UI does not render.
+- `lib/fuzzy.ts` — subsequence matching with cluster-based ranking. **Not fuse.js**
+  (~12 KB); typo tolerance is deliberately absent, because in a short visible list
+  a near-miss costs one keystroke while a promoted wrong match costs trust.
 
 **Testing:**
-- Vitest (unit tests)
-- Playwright (E2E tests)
-- React Testing Library (component tests)
+- Vitest (`npm test`) for pure logic: the diff, the Markdown parser, tool-shape
+  interpretation, fuzzy ranking, the shortcut grammar, and timeline row building.
+  These are the components where hand-rolling replaced a dependency, so they carry
+  the test burden that dependency would have carried.
+- Playwright (`npm run e2e`) for rendered behaviour, focus management, keyboard
+  paths, and render cost.
 
 **Development:**
 - Turbopack (dev server)
@@ -143,155 +183,165 @@ UI feedback after 3s. Pattern proven in both eventsource lib and DSH.
 
 ## Application Structure
 
+There is no `src/` directory: the app, component, and library roots sit at the
+top of `frontend/`, which is what `create-next-app` produces and what the `@/`
+path alias resolves against.
+
 ```
 frontend/
-├── src/
-│   ├── app/                      # Next.js App Router
-│   │   ├── layout.tsx           # Root layout (theme provider, auth)
-│   │   ├── page.tsx             # Home (session list)
-│   │   ├── sessions/
-│   │   │   ├── [id]/
-│   │   │   │   └── page.tsx    # Conversation view
-│   │   │   └── new/
-│   │   │       └── page.tsx    # Create session dialog
-│   │   ├── api/                 # Proxy routes to Rust backend
-│   │   │   └── [...proxy]/
-│   │   │       └── route.ts
-│   │   └── globals.css
-│   │
-│   ├── components/              # UI components
-│   │   ├── ui/                 # Radix primitives (Button, Dialog, etc.)
-│   │   ├── session/            # Session-specific components
-│   │   │   ├── SessionCard.tsx
-│   │   │   ├── SessionList.tsx
-│   │   │   ├── CreateSessionDialog.tsx
-│   │   │   └── OriginBadge.tsx
-│   │   ├── conversation/       # Message canvas components
-│   │   │   ├── ConversationCanvas.tsx
-│   │   │   ├── MessageGroup.tsx
-│   │   │   ├── ThinkingBlock.tsx
-│   │   │   ├── AssistantMessage.tsx
-│   │   │   ├── ToolCallBlock.tsx
-│   │   │   ├── UserMessage.tsx
-│   │   │   └── EventStream.tsx
-│   │   ├── input/              # Input area
-│   │   │   ├── MessageInput.tsx
-│   │   │   ├── AttachmentPicker.tsx
-│   │   │   └── AttachmentPreview.tsx
-│   │   └── layout/             # Layout components
-│   │       ├── SessionRail.tsx
-│   │       ├── ConversationHeader.tsx
-│   │       └── StatusIndicator.tsx
-│   │
-│   ├── lib/                     # Business logic
-│   │   ├── api/                # API client
-│   │   │   ├── client.ts       # Fetch wrapper
-│   │   │   ├── sessions.ts     # Session endpoints
-│   │   │   ├── turns.ts        # Turn endpoints
-│   │   │   └── agents.ts       # Agent endpoints
-│   │   ├── sse/                # SSE streaming
-│   │   │   ├── connection.ts   # EventSource wrapper
-│   │   │   ├── parser.ts       # Event normalization
-│   │   │   └── reconnect.ts    # Reconnection logic
-│   │   ├── hooks/              # React hooks
-│   │   │   ├── useSession.ts
-│   │   │   ├── useTurnStream.ts
-│   │   │   ├── useAgents.ts
-│   │   │   └── useSessionList.ts
-│   │   └── utils/              # Utilities
-│   │       ├── date.ts
-│   │       ├── format.ts
-│   │       └── validation.ts
-│   │
-│   ├── stores/                  # Client state (Zustand)
-│   │   ├── ui.ts               # UI preferences (theme, collapsed state)
-│   │   └── stream.ts           # Live event stream state
-│   │
-│   └── types/                   # TypeScript definitions
-│       ├── api.ts              # Generated from OpenAPI
-│       ├── events.ts           # Event stream types
-│       └── ui.ts               # UI-specific types
+├── app/
+│   ├── layout.tsx              # Root layout: providers + AppShell
+│   ├── page.tsx                # All-sessions list
+│   ├── search/page.tsx         # TraceDB archive search and import
+│   ├── sessions/
+│   │   ├── [id]/page.tsx       # Conversation canvas
+│   │   └── new/page.tsx        # Create session
+│   └── globals.css
 │
-├── public/                      # Static assets
-│   ├── favicon.ico
-│   └── fonts/
+├── components/
+│   ├── app-shell.tsx           # Three-pane frame, top bar, Quick Start
+│   ├── workspace-sidebar.tsx   # Left pane: sessions grouped by workdir
+│   ├── artifacts-pane.tsx      # Right pane: file tree
+│   ├── file-preview.tsx        # Right pane: one file
+│   ├── timeline.tsx            # The conversation canvas itself
+│   ├── markdown.tsx            # Markdown parser and renderer
+│   ├── code-block.tsx          # Code and command output
+│   ├── diff-view.tsx           # Unified inline diff
+│   ├── overlay.tsx             # Modal shell, focus trap, list navigation
+│   ├── search-overlay.tsx      # Cmd+K
+│   ├── command-palette.tsx     # Cmd+P
+│   ├── settings-panel.tsx      # Cmd+,
+│   ├── context-menu.tsx        # Right-click menus
+│   ├── attachment-picker.tsx
+│   ├── command-dialog.tsx      # Agent-declared commands
+│   └── badges.tsx              # Origin and status badges
 │
-├── tests/                       # Tests
-│   ├── unit/
-│   ├── integration/
-│   └── e2e/
+├── lib/
+│   ├── api.ts                  # Typed client; mirrors the wire shape exactly
+│   ├── providers.tsx           # QueryClient + AuthGate
+│   ├── settings.tsx            # Preferences over localStorage
+│   ├── workspace-ui.tsx        # Pane visibility, overlays, artifact selection
+│   ├── shortcuts.ts            # Combo grammar and platform resolution
+│   ├── timeline-rows.test.ts   # (tests live beside the code they cover)
+│   ├── diff.ts                 # LCS line diff
+│   ├── tool-shape.ts           # Interprets tool_call payloads per agent
+│   ├── fuzzy.ts                # Subsequence ranking
+│   ├── use-sse.ts              # EventSource with after_seq resume
+│   ├── use-debounced.ts
+│   ├── error-boundary.tsx
+│   └── format.ts
 │
-├── next.config.js
-├── tailwind.config.ts
-├── tsconfig.json
-└── package.json
+├── e2e/                        # Playwright specs + mock runner fixture
+├── next.config.ts              # Proxy rewrite, standalone output
+├── vitest.config.ts
+└── playwright.config.ts
 ```
+
+**Why the shell lives in the root layout.** `AppShell` wraps `children` in
+`app/layout.tsx` rather than being placed per page. A layout does not remount on
+navigation, so the sidebars keep their expanded groups and scroll position when
+moving between sessions; a shell mounted inside a page loses both on every route
+change. The consequence is that pages render only their own scrolling content and
+do not declare `<main>` — the shell owns `<main id="main">`, which the skip link
+targets.
 
 ## UI Layout & Design
 
-### Overall Layout
-
-Inspired by DeepSeek Harness's clean interface with Sylph-specific enhancements:
+### Three-pane layout
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Sylph Web                                      [Settings] ⚙  │
-├────────────┬─────────────────────────────────────────────────┤
-│            │  Feature Implementation · opus-5 · high    [🟢]  │
-│  Sessions  │  /Users/hsw/Workspace/project               [···]│
-│            ├─────────────────────────────────────────────────┤
-│ ┌────────┐ │                                                  │
-│ │Sylph 🟢│ │  ┌─────────────────────────────────────────┐   │
-│ │Feature │ │  │ 👤 User                                  │   │
-│ │Impl... │ │  │ Implement feature X with proper tests   │   │
-│ └────────┘ │  └─────────────────────────────────────────┘   │
-│            │                                                  │
-│ ┌────────┐ │  ┌─────────────────────────────────────────┐   │
-│ │Native🟣│ │  │ 💭 Thinking                         [−]  │   │
-│ │Refactor│ │  │ Analyzing the codebase structure...     │   │
-│ └────────┘ │  └─────────────────────────────────────────┘   │
-│            │                                                  │
-│ [+ New]    │  ┌─────────────────────────────────────────┐   │
-│            │  │ 🤖 Assistant                             │   │
-│ [Search]   │  │ I'll implement feature X by...          │   │
-│            │  │                                          │   │
-│            │  │ ┌─ Write ──────────────────────────┐    │   │
-│            │  │ │ file_path: src/feature.rs        │    │   │
-│            │  │ │ content: ...                     │    │   │
-│            │  │ └──────────────────────────────────┘    │   │
-│            │  └─────────────────────────────────────────┘   │
-│            │                                                  │
-│            │  ┌─────────────────────────────────────────┐   │
-│            │  │ Type a message...               [📎] [⏎]│   │
-│            │  └─────────────────────────────────────────┘   │
-└────────────┴─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ ▣ Sylph  [⌕ Search sessions and archive        ⌘K] ⚡Quick Start +New ⚙ ▣│
+├──────────────┬────────────────────────────────────┬──────────────────┤
+│ Workspaces   │ Conversation                       │ Artifacts        │
+│ (240px)      │ (flex, only this scrolls)          │ (320–384px)      │
+│              │                                    │                  │
+│ ⚡Quick Sess. │ › Add logging to the auth module   │ Files            │
+│   scratch    │                                    │ ▾ backend/       │
+│              │ ▸ ✻ Thinking  84 words             │   ▾ src/         │
+│ Workspaces   │                                    │     ▫ lib.rs     │
+│ ▾ sylph-web 8│ ▤ Read  backend/src/auth.rs    ✓   │     ▫ auth.rs    │
+│   ● session A│                                    │ ▫ Cargo.toml     │
+│   ◆ session B│ I'll add logging at three points.  │                  │
+│ ▾ trace-db  3│                                    │ ─────────────────│
+│   ● session C│ ✎ Edit  backend/src/auth.rs    ✓   │ auth.rs          │
+│              │  ┌──────────────────────────────┐  │ [preview]        │
+│              │  │ 45 45   pub async fn auth(   │  │                  │
+│              │  │    46 + info!("attempt");    │  │                  │
+│              │  └──────────────────────────────┘  │                  │
+│              │                                    │                  │
+│              │ ❯ Bash  cargo test  ✕ failed (101) │                  │
+│              │  ┌──────────────────────────────┐  │                  │
+│              │  │ error[E0425]: cannot find... │  │                  │
+│              │  └──────────────────────────────┘  │                  │
+│              │ ──────────────────────────────────  │                 │
+│              │ completed  23.4s  Copy             │                  │
+│              │ [composer]                         │                  │
+└──────────────┴────────────────────────────────────┴──────────────────┘
 ```
 
-**Left Rail (240px fixed width):**
-- Session list with virtual scrolling
-- Origin badge (🟢 Sylph / 🟣 Native)
-- Title truncation with tooltip
-- Active session highlight
-- "New Session" button
-- Search input
+Flexbox with fixed sidebar widths, not a grid with `fr` units: sidebars must not
+shrink as conversation content grows, and only the centre pane scrolls. Panes
+toggle with `hidden`/`flex` rather than conditional rendering, so a hidden sidebar
+keeps its expanded groups and scroll position.
 
-**Main Canvas (flex-grow):**
-- **Header bar:**
-  - Session title (editable on hover)
-  - Agent + model + effort flags
-  - Status indicator (idle/running/failed)
-  - Actions menu (rename, archive, stop)
-  
-- **Message area (scrollable):**
-  - Auto-scroll during streaming
-  - Scroll lock when user scrolls up
-  - Virtual scrolling for 1000+ events
-  
-- **Input area (fixed bottom):**
-  - Auto-expanding textarea (max 10 lines)
-  - Attachment picker (drag/drop, file picker)
-  - Attachment previews with remove button
-  - Send button (Enter to send, Shift+Enter for newline)
+### Conversation canvas: agent-first, not chat-first
+
+The canvas follows `agent-ui-design-analysis.md`, which compares Claude Code,
+Cursor, and Zed against chat UIs. The distinction that drives every decision here:
+in an agent workspace the **tool calls are the content**, and prose is what joins
+them. So:
+
+| Decision | Reason |
+| --- | --- |
+| Flat, left-aligned timeline; no bubbles, no alternating alignment | Bubbles spend vertical space separating speakers, which is not the axis a reader cares about. Alternating alignment breaks scanning. |
+| Tool calls get a 2px left border; prose gets no chrome | The border is a visual anchor for the thing being scanned for. Prose does not need to be found. |
+| Thinking collapsed by default, expanded while streaming | Reasoning is debugging detail once it is finished, and the interesting thing while it arrives. |
+| Reads collapsed, edits always open | A read is context-gathering; an edit is the output. |
+| Shell output collapsed on success, expanded on failure | On failure the output *is* the answer to "what happened". |
+| Turn boundary is a rule with a status line, not a box | A box per turn fragments one continuous work log. |
+| Every file path is a button into the Artifacts pane | The path is the natural link between what the agent did and what it did it to. |
+
+A tool call and its `tool_result` render as **one row**, paired by the shared
+`streamId` the runner protocol says they SHOULD reuse. A result whose runner did
+not reuse the id still renders on its own, so no output is ever dropped.
+
+Tool payloads are interpreted by `lib/tool-shape.ts`. The runner protocol
+deliberately leaves `data` unspecified, so that module normalizes what the four
+shipped runners actually emit — `data.input` holding the arguments, with `text` as
+a stringified fallback — and degrades to "unknown tool with some arguments" rather
+than throwing, because a fifth runner will spell something differently.
+
+### Keyboard model
+
+One document-level listener in `lib/workspace-ui.tsx` dispatches every shortcut.
+Per-component listeners would fight over the same combos and make precedence
+depend on mount order.
+
+| Combo | Action |
+| --- | --- |
+| `Mod+K` | Global search (live sessions + archive) |
+| `Mod+P` | Command palette |
+| `Mod+N` | New session |
+| `Mod+Shift+N` | Quick Start in `~/.agents` |
+| `Mod+B` / `Mod+\` | Toggle left / right pane |
+| `Mod+,` | Settings |
+| `Mod+.` | Stop the running turn |
+| `Mod+F` | Filter turns in this session |
+| `Shift+E` / `Shift+C` | Expand / collapse all disclosures |
+| `Escape` | Close the top overlay (not rebindable) |
+
+`Mod` is Cmd on macOS and Ctrl elsewhere, resolved at match time. Bindings are
+stored platform-neutral, so a stored `Meta+k` cannot silently stop working for the
+same user on another machine.
+
+Bare-key combos (`Shift+E`) are suppressed while a text field has focus, so the
+composer keeps its keystrokes; `Mod`-prefixed combos are global on purpose.
+
+Session-scoped actions — stop turn, expand all, find — cannot be handled by the
+shell, which has no access to the open session's state. The session page registers
+a handler with `registerSessionActions` and the shell forwards to it; with no
+session open, those actions are simply ignored.
 
 ### Component Design
 
@@ -427,29 +477,45 @@ Query keys follow a hierarchical structure:
 - Stop turn → immediately update status to 'stopping'
 - Revert on error via `onError` rollback
 
-### Client State (Zustand)
+### Client State
 
-```ts
-// UI preferences store
-interface UIStore {
-  theme: 'light' | 'dark' | 'system'
-  sidebarCollapsed: boolean
-  expandedThinkingBlocks: Set<string> // by turn ID
-  toggleThinking: (turnId: string) => void
-}
+Two stores, neither of them Zustand.
 
-// Stream state store
-interface StreamStore {
-  activeStreams: Map<string, EventSource> // turnId → connection
-  liveEvents: Map<string, Event[]> // turnId → ephemeral events
-  addEvent: (turnId: string, event: Event) => void
-  finalizeEvent: (turnId: string, seq: number) => void
-}
-```
+**`lib/workspace-ui.tsx` — shell state, React context.** Which panes are open,
+which overlay is up, which artifact the right pane shows, and the session-action
+handler registration. This lives above the page tree because the shell outlives
+navigation, and because a conversation event needs to ask the Artifacts pane to
+open a file — a request that has to reach it from outside its own subtree.
 
-**Persistence:**
-- UI preferences → localStorage
-- Stream state → in-memory only (ephemeral)
+**`lib/settings.tsx` — preferences, `useSyncExternalStore` over `localStorage`.**
+Default agent and model, density, expansion defaults, shortcut bindings, pane
+visibility, pinned workspaces, workspace display names.
+
+The external-store hook rather than state-plus-effect, for three reasons:
+
+1. Reading storage in an effect and calling `setState` cascades an extra render on
+   every mount, which is what `react-hooks/set-state-in-effect` flags.
+2. The server snapshot is a separate stable value, so hydration cannot mismatch —
+   the failure mode of reading `localStorage` in a lazy initializer.
+3. Subscribing to the `storage` event makes a change in one tab reach the others,
+   which a per-component effect cannot do at all.
+
+Stored JSON is merged over the defaults **field by field**, each checked against
+its own shape. A blob written by an older build is missing keys a newer one needs,
+and a hand-edited one can hold anything; spreading it wholesale would let
+`density: 42` through and break rendering. Custom shortcuts layer over the
+defaults rather than replacing them, so a binding added in a later release still
+works for an existing user.
+
+Preferences are client-side by design: every value is a display or input
+preference, and none changes what the backend does with a session. The trade-off is
+that they do not follow a user to another browser — acceptable for a loopback-only
+single-user app, and not acceptable once a non-loopback deployment adds real
+accounts, which is already gated behind a separate authentication change.
+
+Pane visibility is read straight from settings rather than mirrored into local
+state: the mirror needed an effect to adopt the stored value after hydration, and
+could disagree with storage when a write failed.
 
 ## Real-Time Event Streaming
 
@@ -765,115 +831,146 @@ function SessionSearch() {
 
 ## Performance Optimization
 
-### Virtual Scrolling
+### Bundle budget
 
-For sessions with 1000+ events, use virtual scrolling:
+**Measured: 196.2 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
+established the budget at 200 KB and measured 187.8 KB; Phase 6 added the shell,
+three overlays, the file browser, the Markdown renderer, the diff view, and the
+fuzzy ranker for **+8.4 KB**.
 
-```tsx
-import { useVirtualizer } from '@tanstack/react-virtual'
+That number is why this document lists so many "no dependency" decisions. The
+naive versions of these features — `react-markdown` + `remark-gfm` (~45 KB), Shiki
+or Prism (~35 KB), jsdiff (~30 KB), Radix (~30 KB for the primitives used), fuse.js
+(~12 KB), an icon package — total well over 150 KB against 12 KB of headroom.
+Each replacement is a bounded, well-understood algorithm carrying unit tests; that
+is the trade, stated plainly, and it is a trade that stops being right the moment
+the budget rises or the feature set outgrows the subset implemented.
 
-function ConversationCanvas({ turns }: Props) {
-  const parentRef = useRef<HTMLDivElement>(null)
-  
-  const virtualizer = useVirtualizer({
-    count: turns.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 200, // avg turn height
-    overscan: 5
-  })
-  
-  return (
-    <div ref={parentRef} className="h-full overflow-auto">
-      <div style={{ height: virtualizer.getTotalSize() }}>
-        {virtualizer.getVirtualItems().map(item => (
-          <div
-            key={item.key}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              width: '100%',
-              transform: `translateY(${item.start}px)`
-            }}
-          >
-            <TurnView turn={turns[item.index]} />
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
+To measure:
+
+```sh
+cd frontend && npm run build
+# then sum the gzipped size of the scripts referenced by a prerendered route
 ```
 
-### Code Splitting
+### Code splitting
 
-**Route-based splitting:**
-- `/` (session list) — lazy load conversation components
-- `/sessions/[id]` — lazy load input/stream components
-- `/sessions/new` — lazy load dialog
+`AppShell` sits in the root layout, so anything it imports statically lands in the
+first-load bundle of *every* route. The three overlays and the Artifacts pane are
+therefore `next/dynamic` with `ssr: false`: each is reached by a keypress or a
+toggle, by which point the chunk has fetched. Measured effect: **204.3 KB → 195.8
+KB**, which is the difference between over and under budget.
 
-**Component-based splitting:**
-```tsx
-const ThinkingBlock = lazy(() => import('./ThinkingBlock'))
-const CodeBlock = lazy(() => import('./CodeBlock'))
-const AttachmentPreview = lazy(() => import('./AttachmentPreview'))
-```
+### Render cost
 
-### Bundle Size Target
+**Measured: a 1000-event conversation cold-renders in well under the 2s budget**
+(`e2e/timeline.spec.ts`, on a reload so it covers durable history rather than
+incremental streaming).
 
-- Initial load: <150KB (gzip)
-- Route chunks: <50KB each
-- Total budget: <200KB
-- Use `next/dynamic` for heavy components
-- Tree-shake unused Radix primitives
+The mechanism is memoization by object identity, not windowing. `buildRows`
+produces a new row object only for rows whose content changed, and the row
+component compares by reference — so a streaming token costs O(new rows) rather
+than O(conversation length). A unit test pins that settled rows stay referentially
+stable as events arrive, because that property is what the whole approach rests on
+and it is invisible if it breaks.
 
-### Image Optimization
+**No virtualization.** A windowing library would consume most of the remaining
+budget, and profiling showed re-render count, not DOM size, to be the cost. The
+evidence that would reverse this: scroll jank on a large session while *idle*,
+which is the signature of a DOM-size problem rather than a render-count one.
 
-**Attachment previews:**
-- Use Next.js `<Image>` component
-- Lazy load below fold
-- Blur placeholder for images
-- WebP format with fallback
-- Max display width 800px
+Bounded rendering keeps DOM size in check without windowing: code blocks show 60
+lines with "show all", command output 40, diffs elide unchanged runs to three lines
+of context, and diff alignment above 2000 lines per side degrades to a wholesale
+replacement rather than allocating a quadratic table.
+
+### File browsing
+
+The Artifacts tree fetches **one directory per expansion**. Walking the tree
+server-side would spend seconds on a 100k-file repository building a payload whose
+first screen is all anyone reads. Each level owns its own query, so an expanded
+subtree is cached independently and collapsing does not discard it. Listings cap at
+2000 entries per directory and report `truncated`.
+
+Previews cap at 1 MiB, truncating text to a 256 KiB prefix. Images are
+all-or-nothing, because a truncated image decodes to nothing.
 
 ## Accessibility
 
-### WCAG 2.1 AA Compliance
+Target: WCAG 2.1 AA. What that means concretely here, and how each part is
+checked.
 
-**Keyboard navigation:**
-- Tab through sessions, messages, actions
-- Arrow keys in session list
-- Enter to open session
-- Escape to close dialogs
-- Focus trapping in modals
+### Automated: axe-core, in CI
 
-**Screen reader support:**
-- Semantic HTML (`<main>`, `<nav>`, `<article>`)
-- ARIA labels for icons
-- Live regions for streaming updates
-- Alt text for images
-- Status announcements
+`e2e/accessibility.spec.ts` runs axe-core against four surfaces with real content —
+the session list, the create form, a conversation canvas holding tool calls, a
+diff, and a failed command with both sidebars open, and each of the three overlays
+while open. Tags: `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`. **Currently zero
+violations.**
 
-**Color contrast:**
-- All text meets 4.5:1 ratio
-- Interactive elements meet 3:1
-- Focus indicators 3:1 against background
-- Error states use color + icon
+This is a floor, not a conformance claim. axe covers roughly a third of WCAG
+criteria; whether focus order makes sense and whether an alternative is
+*meaningful* are not machine-checkable. Full validation needs assistive-technology
+testing and expert review, which has not been done.
 
-**Focus management:**
-- Visible focus rings (outline, not box-shadow)
-- Skip to content link
-- Focus returns to trigger after dialog close
-- Focus moves to first error on validation
+The audit has already earned its place twice, catching a broken
+`aria-activedescendant` that pointed at no element, and 2.48:1 text that had been
+reviewed by eye and passed.
 
-### Testing Checklist
+### Colour
 
-- [ ] VoiceOver (macOS)
-- [ ] NVDA (Windows)
-- [ ] Keyboard-only navigation
-- [ ] Axe DevTools audit
-- [ ] Color contrast checker
-- [ ] High contrast mode
+`text-gray-400` (#99a1af) measures **2.48:1** on white and fails at every size, so
+it is used only on `aria-hidden` decorative glyphs. Visible muted text is
+`text-gray-500` minimum, and `text-gray-600` on a `gray-100` highlighted row where
+gray-500 lands at 4.39:1 — just under the threshold. On the dark active sidebar
+row the scale inverts: muted text there is `text-gray-300`, because gray-500 on
+gray-900 measures 3.66:1.
+
+Nothing is conveyed by colour alone (WCAG 1.4.1):
+
+- Session origin: shape (`●` vs `◆`) plus a `title`, not just green vs violet.
+- Diff lines: a `+`/`−` sign as real text, plus an `sr-only` "added:"/"removed:"
+  prefix — the glyph alone reads as punctuation to a screen reader.
+- Tool failure: the word "failed" and the exit code, not a red border alone.
+
+### Keyboard
+
+Checked in a real browser, because none of it is verifiable statically:
+
+- The skip link is the first focusable element, becomes visible on focus, and
+  actually moves focus to `<main>`.
+- Every overlay traps Tab, closes on Escape, and **returns focus to its opener** —
+  without which a keyboard user is dropped at the top of the document.
+- Bare-key shortcuts (`Shift+E`) do not fire while a text field has focus.
+- Sidebars toggle, the palette runs commands, and search opens a session, all
+  without a pointer.
+
+### Semantics
+
+- Landmarks: `<main id="main">`, `<nav aria-label="Sessions by workspace">`,
+  `<aside aria-label="Workspaces">`, `<aside aria-label="Artifacts">`.
+- Each tool call is a `<section>` with an `aria-label` naming its tool, so a screen
+  reader can move between operations instead of reading one undifferentiated
+  stream.
+- Disclosures are native `<details>`/`<summary>`, which carry `aria-expanded` and
+  keyboard operation with no script.
+- Pickers follow the combobox pattern: focus stays on the input, rows carry
+  `aria-selected`, and the input carries `aria-activedescendant`. This is the only
+  arrangement where typing and arrow-navigating do not fight over focus.
+- Toggle buttons carry `aria-pressed`; the open session's sidebar link carries
+  `aria-current="page"`.
+- Streaming status is announced through `aria-live="polite"`.
+- Markdown headings inside agent prose start at `<h4>`: the page owns h1–h3, and
+  emitting an h1 mid-transcript would break the document outline that screen-reader
+  navigation depends on.
+
+### Not done
+
+- Screen-reader passes with VoiceOver and NVDA.
+- High-contrast and forced-colours modes.
+- Dark theme — deliberately absent rather than half-built. It needs a `dark:` pass
+  over every component plus a resolved `prefers-color-scheme` fallback, and a
+  settings toggle storing a preference nothing reads would misrepresent that.
 
 ## Error Handling
 
@@ -991,171 +1088,64 @@ function ConversationCanvas({ sessionId }: Props) {
 
 ## Testing Strategy
 
-### Unit Tests (Vitest)
+Three layers, split by what each can actually establish.
 
-**Test utilities:**
-```tsx
-// tests/utils/test-utils.tsx
-export function renderWithProviders(ui: ReactElement) {
-  return render(
-    <QueryClientProvider client={testQueryClient}>
-      <ThemeProvider>
-        {ui}
-      </ThemeProvider>
-    </QueryClientProvider>
-  )
-}
+### Unit — Vitest (`npm test`)
 
-export function createMockSession(overrides?: Partial<Session>): Session {
-  return {
-    id: 's_test',
-    origin: 'sylph',
-    agent: 'claude',
-    workdir: '/test',
-    title: 'Test Session',
-    status: 'idle',
-    ...overrides
-  }
-}
+```sh
+cd frontend && npm test          # once
+cd frontend && npm run test:watch
 ```
 
-**Component tests:**
-```tsx
-describe('SessionCard', () => {
-  it('shows Sylph badge for Sylph sessions', () => {
-    const session = createMockSession({ origin: 'sylph' })
-    const { getByText } = renderWithProviders(<SessionCard session={session} />)
-    expect(getByText('🟢 Sylph')).toBeInTheDocument()
-  })
-  
-  it('shows native badge for native sessions', () => {
-    const session = createMockSession({ origin: 'native' })
-    const { getByText } = renderWithProviders(<SessionCard session={session} />)
-    expect(getByText('🟣 Native')).toBeInTheDocument()
-  })
-})
-```
+**81 tests over the pure logic that replaced a dependency.** That is the
+selection rule: hand-rolling a diff, a Markdown parser, and a fuzzy ranker means
+taking on the test burden those libraries carried, and this is where that debt is
+paid.
 
-**Hook tests:**
-```tsx
-describe('useTurnStream', () => {
-  it('accumulates delta events', async () => {
-    const { result } = renderHook(() => useTurnStream('t_123'))
-    
-    act(() => {
-      result.current.handleEvent({
-        kind: 'thinking',
-        phase: 'delta',
-        seq: 1,
-        text: 'Hello'
-      })
-      result.current.handleEvent({
-        kind: 'thinking',
-        phase: 'delta',
-        seq: 2,
-        text: ' world'
-      })
-    })
-    
-    expect(result.current.liveText).toBe('Hello world')
-  })
-})
-```
+| File | Covers |
+| --- | --- |
+| `lib/diff.test.ts` | LCS alignment, line numbering against the original files, `-` before `+`, no phantom trailing line, prefix/suffix stripping speed, degradation above the size cap |
+| `lib/markdown-parse.test.ts` | Block and inline parsing, code not re-scanned, `javascript:`/`data:` links refused, termination on pathological input |
+| `lib/tool-shape.test.ts` | Each shipped runner's payload shape, name classification, hunk extraction, never throwing on malformed `data` |
+| `lib/fuzzy.test.ts` | Subsequence matching and *relative ranking* — boundary and adjacency bonuses, field weighting |
+| `lib/shortcuts.test.ts` | Canonical combo spelling, Cmd/Ctrl unification, recorder and dispatcher agreeing |
+| `lib/timeline-rows.test.ts` | Delta accumulation, tool-result pairing, interleaved streams, referential stability of settled rows |
 
-### Integration Tests
+Tests live beside the code they cover, not in a parallel `tests/` tree, so a
+reader of `lib/diff.ts` can see its tests without going looking.
 
-**API mock server:**
-```tsx
-// tests/mocks/server.ts
-import { setupServer } from 'msw/node'
-import { rest } from 'msw'
+`environment: "node"` — these are pure functions, so no DOM is needed. Anything
+requiring one is tested in Playwright instead, where the DOM is real. `e2e/` is
+excluded from Vitest because those files import `@playwright/test`, whose `test`
+export would collide with Vitest's runner.
 
-export const server = setupServer(
-  rest.get('/api/v1/sessions', (req, res, ctx) => {
-    return res(ctx.json({ sessions: [createMockSession()] }))
-  }),
-  rest.post('/api/v1/sessions/:id/turns', (req, res, ctx) => {
-    return res(ctx.status(202), ctx.json({ turn: createMockTurn() }))
-  })
-)
-```
+**No React Testing Library.** Component behaviour here is focus management,
+keyboard dispatch, and streaming — all of which jsdom approximates badly enough
+that a passing test would not mean much. Those live in Playwright.
 
-**Flow tests:**
-```tsx
-describe('Create session flow', () => {
-  it('creates session and navigates to conversation', async () => {
-    const { user } = renderWithProviders(<App />)
-    
-    // Open dialog
-    await user.click(screen.getByText('New Session'))
-    
-    // Fill form
-    await user.selectOptions(screen.getByLabelText('Agent'), 'claude')
-    await user.type(screen.getByLabelText('Workdir'), '/test')
-    await user.type(screen.getByLabelText('Title'), 'Test')
-    
-    // Submit
-    await user.click(screen.getByText('Create'))
-    
-    // Verify navigation
-    await waitFor(() => {
-      expect(window.location.pathname).toMatch(/\/sessions\/s_/)
-    })
-  })
-})
-```
+### E2E — Playwright (`npm run e2e`)
 
-### E2E Tests (Playwright)
+**18 specs.** Both servers start automatically on offset ports with a throwaway
+data directory and a mock runner, so a run never touches the real journal,
+archive, or agents.
 
-**Critical paths:**
-```ts
-test('send message and receive streaming response', async ({ page }) => {
-  await page.goto('/')
-  await page.click('text=New Session')
-  await page.fill('[name=agent]', 'claude')
-  await page.fill('[name=workdir]', '/test')
-  await page.click('text=Create')
-  
-  // Wait for conversation
-  await page.waitForURL(/\/sessions\/s_/)
-  
-  // Send message
-  await page.fill('textarea', 'Hello')
-  await page.press('textarea', 'Enter')
-  
-  // Verify streaming
-  await page.waitForSelector('.thinking-block')
-  await page.waitForSelector('.assistant-message')
-  
-  // Verify completed state
-  await expect(page.locator('[data-turn-status="completed"]')).toBeVisible()
-})
-```
+| File | Covers |
+| --- | --- |
+| `session-lifecycle.spec.ts` | Create, send, stream, reload-replay, sidebar grouping |
+| `timeline.spec.ts` | Tool calls as regions, inline diff, failure auto-expansion, Markdown, 1000-event render budget |
+| `workspace-shell.spec.ts` | Pane toggles and persistence, palette, search, focus restoration, settings round-trip, Artifacts tree |
+| `accessibility.spec.ts` | Skip link, focus trapping and restoration, axe-core audit of four surfaces |
 
-**Performance tests:**
-```ts
-test('renders 1000 turns without lag', async ({ page }) => {
-  // Mock session with 1000 turns
-  await page.route('/api/v1/sessions/*', route => {
-    route.fulfill({
-      json: { session: createSessionWith1000Turns() }
-    })
-  })
-  
-  await page.goto('/sessions/s_perf')
-  
-  // Measure render time
-  const startTime = Date.now()
-  await page.waitForLoadState('domcontentloaded')
-  const duration = Date.now() - startTime
-  
-  expect(duration).toBeLessThan(2000) // <2s render
-  
-  // Verify virtual scrolling
-  const visibleTurns = await page.locator('[data-turn]').count()
-  expect(visibleTurns).toBeLessThan(50) // only ~20 rendered
-})
-```
+The mock runner (`e2e/fixtures/runners/e2e/runner.sh`) branches on its prompt to
+emit three scenarios: a plain streamed reply, a tool sequence with a real diff and
+a failing command, and a 1000-event bulk transcript. Its payloads mirror what the
+shipped runners emit, transcribed from their source — a fixture that emitted a
+tidier shape would test a protocol nothing speaks.
+
+**A note on shortcut tests.** Pressing a shortcut immediately after `page.goto`
+races hydration: the listener is attached by an effect, so the key can land on
+static markup. Tests wait for a client-rendered control first. This is a real race
+on a cold load, not a test artifact.
 
 ## Development Workflow
 
@@ -1287,66 +1277,12 @@ npm run start
 # Or let Rust backend serve dist/
 ```
 
-## Phase 2 Deliverables
-
-### Week 4: Foundation
-
-- [ ] **Before starting: Read DSH `/apps/web/` structure**
-- [ ] Next.js project setup with TypeScript
-- [ ] Tailwind + Radix UI configuration (match DSH color tokens)
-- [ ] API client with type safety
-- [ ] Session list page (`/`) — **verify against DSH conversation list**
-- [ ] Conversation page (`/sessions/[id]`) — **verify against DSH chat page**
-- [ ] Basic layout (left rail + main canvas) — **match DSH layout proportions**
-- [ ] Session card components — **verify card structure with DSH**
-- [ ] TanStack Query setup
-- [ ] **Week 4 checkpoint: Compare all components with DSH source**
-
-### Week 5: Streaming & Interaction
-
-- [ ] SSE connection manager — **check DSH SSE/WebSocket handling**
-- [ ] Event stream rendering — **verify delta accumulation matches DSH**
-- [ ] Message input with attachments — **match DSH input area behavior**
-- [ ] Create session dialog — **verify form validation with DSH**
-- [ ] Thinking block (collapsible) — **MUST match DSH animation timing**
-- [ ] Tool call rendering with syntax highlighting — **verify Shiki config with DSH**
-- [ ] Origin badges and warnings (Sylph-specific)
-- [ ] Error boundaries — **match DSH error fallback UI**
-- [ ] Loading states — **verify skeleton design with DSH**
-- [ ] **Week 5 checkpoint: Side-by-side comparison with running DSH instance**
-
-### Final Verification (Before Phase 2 Exit)
-
-- [ ] **Open DSH web app locally and Sylph Web side-by-side**
-- [ ] **Verify UI patterns match:**
-  - [ ] Layout proportions (rail width, header height, input area)
-  - [ ] Message bubble styling and spacing
-  - [ ] Thinking block collapse/expand animation
-  - [ ] Tool call result formatting
-  - [ ] Code syntax highlighting theme
-  - [ ] Loading skeleton structure
-  - [ ] Error state illustrations
-  - [ ] Input area behavior (focus, resize, attachment preview)
-- [ ] **Document any deviations with justification**
-- [ ] **If uncertain whether deviation is improvement, revert to DSH pattern**
-
-- [ ] Origin badges and warnings
-- [ ] Error boundaries
-- [ ] Loading states
-
-### Testing
-
-- [ ] Unit tests for components
-- [ ] Integration tests for flows
-- [ ] E2E tests for critical paths
-- [ ] Accessibility audit
-
-### Documentation
-
-- [ ] Component usage examples
-- [ ] State management patterns
-- [ ] SSE reconnection guide
-- [ ] Performance optimization notes
+<!--
+  A per-week deliverables checklist used to live here. It has been removed rather
+  than updated: `docs/roadmap.md` owns phase status, and a second copy in a design
+  document only drifts from it. This file describes how the frontend is built and
+  why; what is built and what is next belongs in the roadmap.
+-->
 
 ## Future Enhancements (Phase 3+)
 
@@ -1404,19 +1340,42 @@ npm run start
 - Better DevTools
 - Wider ecosystem adoption
 
-### Why Radix over Headless UI?
+### Why no component library (neither Radix nor Headless UI)?
 
-- More primitives (Toast, Toolbar, etc.)
-- Better accessibility defaults
-- Active maintenance
-- Composable API
+Radix would have been the right choice on accessibility defaults and edge-case
+coverage. It was not taken because of one measured constraint: Phase 4 left ~12 KB
+of first-load budget, and the primitives needed here — modal, context menu,
+disclosure, listbox — cost roughly 30 KB of it.
 
-### Why Zustand over Context API?
+What was built instead: `components/overlay.tsx` (focus trap, Escape, focus
+restoration, scroll lock), `components/context-menu.tsx` (arrow navigation,
+viewport clamping, outside-dismiss), native `<details>`, and the combobox pattern in
+the two pickers. The axe audit and the focus tests exist to hold that decision
+honest, and they have already caught one ARIA bug a library would not have had.
 
-- Less boilerplate
-- Better performance (no re-renders)
-- DevTools support
-- Simpler mental model
+Reverse this if the budget rises or a primitive with real complexity is needed —
+a date picker, a drag-and-drop tree, a virtualized listbox. Do not reverse it
+piecemeal: a codebase with both patterns is worse than either.
+
+### Why context and an external store, not Zustand?
+
+Two contexts and one `useSyncExternalStore` cover the whole client state: shell
+state that must outlive navigation, and preferences over `localStorage`. Zustand's
+advantages — less boilerplate, selector-scoped re-renders — pay off at a scale this
+store has not reached; it holds about a dozen fields.
+
+`useSyncExternalStore` specifically, rather than state plus an effect: it avoids a
+cascading render on mount, cannot mismatch during hydration because the server
+snapshot is separate, and gets cross-tab sync from the `storage` event for free.
+
+### Why hand-rolled Markdown, diff, and fuzzy matching?
+
+See **Technology Stack** and **Performance Optimization**. Short version: the three
+libraries total ~87 KB gzipped against ~12 KB of headroom, and what each provides
+beyond the subset used — character-level diffs, patch formats, typo tolerance,
+full CommonMark — is not rendered by this UI. The cost is carrying 81 unit tests
+and two bugs already found in review; both are recorded in the test file that now
+guards them.
 
 ## References
 
