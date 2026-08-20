@@ -10,6 +10,12 @@ import type { NextConfig } from "next";
  * `SYLPH_WEB_PORT`; hardcoding 4317 makes the frontend silently unable to reach
  * a backend started on any other port.
  */
+/**
+ * Read at build time, not at request time: Next compiles rewrites into the
+ * route manifest, so `SYLPH_WEB_BACKEND` must be set for `next build` and not
+ * only for `next start`. Setting it only at start time leaves a production
+ * build proxying to the default port.
+ */
 const backend = process.env.SYLPH_WEB_BACKEND ?? "http://localhost:4317";
 
 const config: NextConfig = {

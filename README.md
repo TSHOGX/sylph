@@ -89,7 +89,10 @@ cd frontend && npm run build && npm run lint
   working directory for that session, so there is nowhere to resume it. Older
   `trace-db` versions did not record one.
 - **Port 4317 in use** — set `SYLPH_WEB_PORT`, and point the frontend at it
-  with `SYLPH_WEB_BACKEND`.
+  with `SYLPH_WEB_BACKEND`. For a production build, set `SYLPH_WEB_BACKEND`
+  for `npm run build` as well: Next compiles the proxy target into the route
+  manifest, so setting it only for `npm start` leaves the built app talking to
+  the default port. `npm run dev` reads it on startup and needs no rebuild.
 
 ### Environment Variables
 
