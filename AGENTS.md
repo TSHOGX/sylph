@@ -122,6 +122,41 @@ a spelling change fails a test rather than silently yielding `None`. Do not add
 dual-spelling aliases: they mask future renames and suppress parse errors that
 would catch breaking changes.
 
+**TraceDB's `cwd` filter is a substring match, not a path match.** `list` and
+`search` compile it to `cwd LIKE '%' || ? || '%'`, so asking for `/w/app` also
+returns `/w/app-old` and every subdirectory. Anything that means "this one
+directory" must re-filter for exact equality after normalizing trailing slashes —
+`api::archive` and `api::workspaces` share `normalize` for exactly this.
+
+**`list` does not collapse fork lineage, but `search` does.** A subagent session is
+a row of its own, named `<parent-id>/agent-<name>`, and those are 43% of a real
+local archive. A listing that does not fold them into their parent is half noise.
+`list` carries no parent column, so the id suffix is the only signal available at
+listing time (`tracedb::split_lineage`).
+
+**Unknown request fields are silently ignored by `trace-db api`.** Its handlers
+read named keys off a JSON object rather than deserializing a typed struct, so a
+misspelled field is dropped with no error and the operation runs unfiltered. `list`
+takes `since` as a *string*, not `since_ms` as an integer — passing the latter
+looks like it works and filters nothing. Verify a new field changes the result
+rather than assuming it was accepted.
+
+**The first `user` event is usually not what the user typed.** Agents inject their
+own context as leading pseudo user turns (`<permissions instructions>`,
+`<environment_context>`, `<skills_instructions>`, memory files as
+`# AGENTS.md instructions`, Claude's `Caveat:` preamble). Taking the first user
+event verbatim labels most sessions with boilerplate that is byte-identical across
+every session of that agent. `tracedb::is_injected_envelope` skips them, which over
+311 measured sessions raises recognizable labels from ~10% to 98%. Keep that rule
+narrow: an earlier version also treated a leading `You are ` as boilerplate and
+discarded 44 genuine labels, because subagent task briefs legitimately open that
+way.
+
+**Archived titles are per-agent, not universal.** `claude` records one for ~73% of
+sessions and `opencode` for all of them; `codex` and `pi` record none. Any surface
+showing an archived title needs the opening-ask fallback, or most rows read as
+untitled.
+
 ## Spec and Code Evolution
 
 Neither code nor spec wins automatically when they diverge. Stop, identify

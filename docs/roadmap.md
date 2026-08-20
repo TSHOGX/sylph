@@ -271,6 +271,37 @@ shipped design.
 - ✅ Quick Start creates a session in `~/.agents` with no dialog
 - ✅ Preferences over `localStorage` via `useSyncExternalStore`
 
+**6.6 — archived history is browsable by directory**
+
+Selecting or pinning a directory used to show "No sessions yet" even when TraceDB
+held hundreds of sessions for that exact path: the sidebar read only the live
+journal, and archived history was reachable only by full-text search, which needs
+a query the user does not have. TraceDB's `list` op — with a `cwd` filter and
+cursor pagination — was never called.
+
+- ✅ `GET /api/v1/archive/sessions` — archived sessions for one directory, with
+  exact-path re-filtering (TraceDB's `cwd` filter is a substring match), subagent
+  rollup (`list` does not collapse lineage, and subagents are 43% of the local
+  archive), and empty sessions dropped
+- ✅ `GET /api/v1/archive/sessions/{traceId}` — read-only transcript, normalized
+  into the live `StreamEvent` shape so one timeline renders both; greedy id capture
+  because a subagent id contains a slash
+- ✅ Row labels from the archive's title, else the opening *typed* message with
+  harness-injected envelopes skipped — 98% of real project sessions get a
+  recognizable label, against ~10% taking the first user event verbatim
+- ✅ Sidebar merges live and archived rows, deduplicated on `traceSessionId`, with
+  `⌗` marking archived and `⑂N` rolled-up subagents
+- ✅ `Cmd+Shift+K` — workspace-scoped history browser with cursor paging
+- ✅ `/archive/[...id]` — read-only view offering explicit continuation, disabled
+  with its reason when the archive recorded no `cwd`
+- ✅ `GET /api/v1/workspaces?includeArchived=true` — directories whose only history
+  is archived, so one can be pinned or picked before it has a live session (138
+  discoverable locally, against 1 before)
+- ✅ Fixed along the way: imported sessions were titled
+  `<permissions instructions> …` because `summarize_ask` applied no envelope
+  filter, and `traceSessionId` was `skip_serializing`, so the client could not tell
+  an imported session from an archived one and would have listed both
+
 ### Exit criteria — how each was checked
 
 - ✅ **Three panes functional** — toggles, persistence across reload, and
@@ -288,8 +319,9 @@ shipped design.
   is asserted to end in `/.agents` in integration tests.
 - ✅ **Settings configure agent and model** — round-trip through storage and into
   the timeline covered in E2E.
-- ✅ **First-load JS under 200 KB gzipped** — **measured 196.2 KB**, from a 187.8 KB
-  baseline, so Phase 6 cost +8.4 KB. Achieved by code-splitting the overlays and
+- ✅ **First-load JS under 200 KB gzipped** — **measured 197.1 KB**, from a 187.8 KB
+  baseline: +8.4 KB for the Phase 6 shell and +0.9 KB for archive browsing. Under
+  3 KB of headroom now remains. Achieved by code-splitting the overlays and
   Artifacts pane (204.3 → 195.8 KB) and by implementing Markdown, diff, fuzzy
   matching, and the modal primitives directly rather than adding ~87 KB of
   dependencies. Each such decision, and what would reverse it, is recorded in

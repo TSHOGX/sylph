@@ -283,6 +283,125 @@
           "401": {
             "$ref": "#/components/responses/Error"
           }
+        },
+        "parameters": [
+          {
+            "name": "includeArchived",
+            "in": "query",
+            "required": false,
+            "description": "Also report directories that exist only in the TraceDB archive, with archivedCount set. Off by default: the sidebar polls this endpoint and needs only live sessions, while the scan walks every archived session. Surfaces where the user picks a directory pass it, because a project they are about to work in has no live session yet. An unreachable archive degrades to live-only rather than failing.",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/archive/sessions": {
+      "get": {
+        "summary": "Archived sessions that ran in one directory",
+        "description": "Read-only browse of durable coding-agent history, newest first. /search answers \"which session mentioned X\", which needs a query the user may not have; this answers \"what happened in this directory before\", which is what an empty-looking workspace needs. Reading is not importing: this mutates nothing, while POST /sessions/import adopts a session for continuation and requires both a runner and a surviving workdir. TraceDB matches cwd as a substring and does not collapse fork lineage, so rows are re-filtered for exact directory equality, subagents are folded into their parent, and empty sessions are dropped. Those filters shrink a page, so one request may walk several upstream pages up to a fixed cap. An unreachable archive answers 200 with available=false.",
+        "parameters": [
+          {
+            "name": "workdir",
+            "in": "query",
+            "required": true,
+            "description": "Absolute directory to list history for.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "nextCursor from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of archived sessions, or available=false",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/archive/sessions/{traceId}": {
+      "get": {
+        "summary": "One archived transcript, read-only",
+        "description": "Events normalized into the live StreamEvent shape, so the conversation timeline renders archived history with no second code path. limit bounds the read because the largest session in a real archive is 8167 events and 20 MB of JSON. Unlike the listing, a single transcript has no useful degraded form, so an unreachable archive is reported rather than rendered empty.",
+        "parameters": [
+          {
+            "name": "traceId",
+            "in": "path",
+            "required": true,
+            "description": "TraceDB session id. Matched greedily: a subagent id contains a slash (claude:uuid/agent-name), which is 43% of the archive.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 2000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archived transcript",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveTranscript"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
@@ -806,7 +925,8 @@
           "sessionCount",
           "runningCount",
           "lastUsedMs",
-          "isQuickStart"
+          "isQuickStart",
+          "archivedCount"
         ],
         "properties": {
           "path": {
@@ -831,6 +951,10 @@
           "isQuickStart": {
             "type": "boolean",
             "description": "True for ~/.agents, which the sidebar lists separately."
+          },
+          "archivedCount": {
+            "type": "integer",
+            "description": "Archived sessions TraceDB holds for this directory. Always 0 unless the request passed includeArchived, so 0 means \"not counted\" rather than \"no history\"."
           }
         }
       },
@@ -973,6 +1097,160 @@
           "modifiedAtMs": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "ArchiveSession": {
+        "type": "object",
+        "required": [
+          "id",
+          "agent",
+          "cwd",
+          "events",
+          "subagentCount"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "TraceDB session id (claude:uuid), not a Sylph Web session id. A subagent id carries a /agent-... suffix."
+          },
+          "agent": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The archive's title when it recorded one, else the opening typed message with harness-injected envelopes skipped. Absent for ~2% of real project sessions."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Recorded working directory, normalized. Always equals the requested workdir."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "endedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "events": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events the archive holds: the only size signal available."
+          },
+          "subagentCount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Subagent sessions spawned by this one, folded in rather than listed as peers. TraceDB's list does not collapse lineage, and subagents are 43% of a real archive."
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Live session id when this archived session was already imported, so the UI opens the conversation instead of listing it twice."
+          }
+        }
+      },
+      "ArchiveListResponse": {
+        "type": "object",
+        "required": [
+          "sessions",
+          "available"
+        ],
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArchiveSession"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor to continue from. Absent on the last page."
+          },
+          "available": {
+            "type": "boolean",
+            "description": "False when TraceDB could not be reached. The request still succeeds."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the archive is unavailable. Absent when available."
+          }
+        }
+      },
+      "ArchiveTranscript": {
+        "type": "object",
+        "required": [
+          "id",
+          "agent",
+          "events",
+          "truncated"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Recorded working directory. Absent for 19% of the archive, and its absence is why such a session can be read but not continued."
+          },
+          "startedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            },
+            "description": "Normalized into the live StreamEvent shape so one timeline renders both: every event is phase=completed and stability=stable with source=archive, agent-internal system events are dropped, tool arguments move from text into data.input, and a tool_result shares its tool_call's streamId."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when limit cut the stream short."
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       }

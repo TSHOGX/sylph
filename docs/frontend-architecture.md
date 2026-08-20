@@ -260,11 +260,14 @@ targets.
 │   scratch    │                                    │ ▾ backend/       │
 │              │ ▸ ✻ Thinking  84 words             │   ▾ src/         │
 │ Workspaces   │                                    │     ▫ lib.rs     │
-│ ▾ sylph-web 8│ ▤ Read  backend/src/auth.rs    ✓   │     ▫ auth.rs    │
+│ ▾ sylph-web8+│ ▤ Read  backend/src/auth.rs    ✓   │     ▫ auth.rs    │
 │   ● session A│                                    │ ▫ Cargo.toml     │
 │   ◆ session B│ I'll add logging at three points.  │                  │
-│ ▾ trace-db  3│                                    │ ─────────────────│
-│   ● session C│ ✎ Edit  backend/src/auth.rs    ✓   │ auth.rs          │
+│   ⌗ past work│                                    │ ─────────────────│
+│   ⌗ older  ⑂2│ ✎ Edit  backend/src/auth.rs    ✓   │ auth.rs          │
+│   Browse all→│                                    │                  │
+│ ▾ trace-db 3+│                                    │                  │
+│   ● session C│                                    │                  │
 │              │  ┌──────────────────────────────┐  │ [preview]        │
 │              │  │ 45 45   pub async fn auth(   │  │                  │
 │              │  │    46 + info!("attempt");    │  │                  │
@@ -321,6 +324,7 @@ depend on mount order.
 | Combo | Action |
 | --- | --- |
 | `Mod+K` | Global search (live sessions + archive) |
+| `Mod+Shift+K` | Browse this workspace's archived history |
 | `Mod+P` | Command palette |
 | `Mod+N` | New session |
 | `Mod+Shift+N` | Quick Start in `~/.agents` |
@@ -829,14 +833,81 @@ function SessionSearch() {
 }
 ```
 
+### Archived history in the sidebar
+
+The left pane is built from two sources, because one of them does not know what
+the user has done. `GET /sessions` holds only sessions created in this app, so a
+directory with years of coding-agent history rendered as **"No sessions yet"** —
+the sidebar claimed a workspace was empty while TraceDB held hundreds of sessions
+for that same path. Archived history was reachable only through full-text search,
+which requires already knowing what to search for.
+
+Each expanded group therefore also queries `GET /archive/sessions?workdir=...`,
+and merges:
+
+- **Live rows first**, then archived ones. A session you can continue outranks one
+  you can only read.
+- **Deduplicated** on `traceSessionId` / `sessionId`. An imported archived session
+  is the same conversation as a live row, so listing both would offer two routes
+  into one history.
+- **Marked by shape, not colour** (WCAG 1.4.1): `●` sylph, `◆` native, `⌗`
+  archived, with `⑂N` for rolled-up subagent sessions.
+- **Fetched only while the group is open** (`enabled: open`), because each row
+  costs the backend a label lookup. `staleTime` is 60s: archived history only
+  changes when TraceDB ingests, which nothing in this tab drives.
+
+The group count reads `8+` rather than a total. The archive count for a directory
+is unknown without paging all of it, and a live-plus-preview sum would look like a
+complete tally while being an arbitrary partial one. A `⚠` replaces the `+` when
+the archive is unreachable, so "no history" and "cannot see history" stay
+distinguishable.
+
+### Browsing history: `Mod+Shift+K`
+
+The sidebar shows a handful of rows per workspace; a real directory can hold over
+a thousand sessions. Paging that in a 240px pane is not navigation, so
+`components/history-overlay.tsx` is the browse surface: workspace-scoped, cursor
+paged, with a client-side filter over the loaded pages.
+
+Scoping is what separates it from `Mod+K`. Search answers "which session mentioned
+X" across everything; this answers "what have I done in this project", which is
+the question someone has when a workspace looks unfamiliar. The scope comes from
+`activeWorkdir` in `lib/workspace-ui.tsx`, set by the open session or by the
+sidebar group whose `Browse all` was clicked.
+
+Filtering is deliberately local. TraceDB's full-text search is already `Mod+K`,
+and re-querying it per keystroke would spawn a subprocess per character to answer
+a narrower question; the footer says the filter covers loaded sessions only.
+
+### Reading an archived session
+
+`app/archive/[...id]/page.tsx` renders an archived transcript read-only, through
+the same `Timeline` the live conversation uses — the backend normalizes archived
+events into the live `StreamEvent` shape, so there is no second renderer to drift.
+
+A catch-all route because a subagent id contains a slash
+(`claude:uuid/agent-name`). Next hands those segments back **still
+percent-encoded**, so each is decoded before rejoining; without that the client
+re-encodes and the backend looks up a literal `claude%3A...`.
+
+Browsing must not mutate, which is why this is separate from import. Continuation
+is offered as an explicit action, disabled with its reason shown when the archive
+recorded no `cwd` — `POST /sessions/import` rejects those, and a button that always
+fails is worse than one that explains itself. There is no composer.
+
 ## Performance Optimization
 
 ### Bundle budget
 
-**Measured: 196.2 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
+**Measured: 197.1 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
 established the budget at 200 KB and measured 187.8 KB; Phase 6 added the shell,
 three overlays, the file browser, the Markdown renderer, the diff view, and the
-fuzzy ranker for **+8.4 KB**.
+fuzzy ranker for **+8.4 KB**, reaching 196.2 KB. Archive browsing added **+0.9
+KB**: the history overlay and the read-only archived view are both `next/dynamic`,
+so only their client-side entry points land here.
+
+Headroom is now under 3 KB. The next feature that needs a dependency should expect
+to raise the budget deliberately rather than discover it has been exceeded.
 
 That number is why this document lists so many "no dependency" decisions. The
 naive versions of these features — `react-markdown` + `remark-gfm` (~45 KB), Shiki
