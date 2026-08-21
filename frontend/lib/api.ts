@@ -531,6 +531,8 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify(req),
       }),
+    deleteEmpty: (id: string) =>
+      fetchAPI<void>(`/sessions/${id}`, { method: "DELETE" }),
   },
   files: {
     tree: (sessionId: string, path = "") =>

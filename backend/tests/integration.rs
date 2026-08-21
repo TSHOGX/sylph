@@ -239,6 +239,29 @@ async fn session_history_returns_turns_oldest_first_with_events() {
 }
 
 #[tokio::test]
+async fn deleting_an_empty_session_is_idempotent_but_turns_make_it_durable() {
+    let backend = TestBackend::start().await;
+    let empty = backend.create_session("mock").await;
+
+    let response = backend
+        .delete_authed(&format!("/api/v1/sessions/{empty}"))
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(backend.get_authed(&format!("/api/v1/sessions/{empty}")).await.status(), StatusCode::NOT_FOUND);
+
+    let durable = backend.create_session("mock").await;
+    let response = backend
+        .post_authed(&format!("/api/v1/sessions/{durable}/turns"), json!({"text": "keep me"}))
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let response = backend
+        .delete_authed(&format!("/api/v1/sessions/{durable}"))
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(backend.get_authed(&format!("/api/v1/sessions/{durable}")).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn session_history_404s_for_an_unknown_session() {
     let backend = TestBackend::start().await;
 
