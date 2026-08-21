@@ -117,6 +117,23 @@ pub struct TraceSession {
     pub cwd: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// Session that spawned this one as a subagent.
+    ///
+    /// Authoritative, unlike the id suffix: measured over the whole local archive,
+    /// 199 non-empty sessions record a parent while carrying no `/agent-` suffix,
+    /// almost all of them `codex`. Only `show` reports this — `list` has no parent
+    /// column — so a listing that wants correct lineage has to ask per row.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    /// Session this one was forked or resumed from, as `<id>#<event-uuid>`.
+    ///
+    /// A different relationship from `parent_session_id`, and not a subagent: a
+    /// fork replays its origin's entire prefix and then continues past it, so the
+    /// two share every early user turn and read as one conversation resumed. The
+    /// fragment after `#` is the event it branched at; [`Lineage`] drops it,
+    /// because only the session id is addressable.
+    #[serde(default)]
+    pub forked_from: Option<String>,
     #[serde(default)]
     pub started_at_ms: Option<i64>,
 }
@@ -278,22 +295,114 @@ pub fn summarize_line(ask: &str) -> String {
     format!("{}…", truncated.trim_end())
 }
 
+/// How an archived session relates to another one.
+///
+/// Three cases, because the archive records two different relationships and they
+/// want opposite treatment in a listing. Measured over the whole local archive
+/// (4730 sessions, 4416 non-empty):
+///
+/// | Case | Count | Why |
+/// | --- | --- | --- |
+/// | [`Lineage::Root`] | 2176 | Its own work; the thing a user started |
+/// | [`Lineage::Subagent`] | 2238 | Delegated work: 2039 carry an id suffix, a further 199 only record a parent |
+/// | [`Lineage::Fork`] | 2 | The same conversation resumed after an interruption |
+///
+/// A **subagent** is work the parent delegated. It is real, but it is not a
+/// separate conversation, so it belongs folded into its parent as a count.
+///
+/// A **fork** is the same conversation continued. Both sides replay an identical
+/// prefix of user turns, so listing both shows one conversation twice under one
+/// label — exactly the duplication a directory listing exists to avoid. Only one
+/// survives, and *which* one cannot be fixed in advance: of the two real cases
+/// here, one has its newer work in the fork (1108 events vs 389) and the other in
+/// the origin (2459 vs 649). The listing keeps whichever ran more recently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lineage<'a> {
+    /// No recorded relationship: list it.
+    Root,
+    /// Delegated work. Fold into `parent`, which is a full TraceDB id.
+    Subagent { parent: &'a str },
+    /// The same conversation resumed. `origin` is a full TraceDB id.
+    Fork { origin: &'a str },
+}
+
+impl TraceSession {
+    /// How this session relates to another, from the archive's own record.
+    ///
+    /// Precedence is deliberate. `parent_session_id` wins over `forked_from`
+    /// because a subagent that was also resumed is still delegated work, and
+    /// folding it into its parent is what keeps it out of the top level.
+    ///
+    /// The id suffix is checked last, as a fallback for a session whose metadata
+    /// records no parent but whose id says otherwise. It cannot be the primary
+    /// signal — 199 sessions record a parent with no suffix — but it costs nothing
+    /// and covers the reverse case.
+    pub fn lineage(&self) -> Lineage<'_> {
+        if let Some(parent) = self.parent_session_id.as_deref().filter(|p| !p.is_empty()) {
+            return Lineage::Subagent { parent };
+        }
+        if let Some(origin) = self.forked_from.as_deref().filter(|f| !f.is_empty()) {
+            // `forked_from` is `<session-id>#<event-uuid>`; only the id resolves.
+            let origin = origin.split('#').next().unwrap_or(origin);
+            if !origin.is_empty() && origin != self.id {
+                return Lineage::Fork { origin };
+            }
+        }
+        match split_lineage(&self.id) {
+            Some((parent, _)) => Lineage::Subagent { parent },
+            None => Lineage::Root,
+        }
+    }
+}
+
+/// A task description recovered from a harness-injected envelope's `summary`.
+///
+/// Some sessions are delegated work whose every user turn is a
+/// `<teammate-message ... summary="Author insects pests unit">` block. There is no
+/// typed ask to fall back to, but the `summary` attribute is human-written and
+/// describes the task, so it is a better label than nothing — 174 sessions in the
+/// local archive are nameless without it.
+///
+/// Hand-parsed rather than pulled through a regex dependency: the pattern is a
+/// quoted attribute value, and the surrounding text is untrusted archive content
+/// where a cheap scan is easier to reason about than a pattern. XML entities are
+/// decoded because the archive escapes them (`&quot;`, `&apos;`) and a label
+/// reading `meadow&apos;s asks` is worse than one reading `meadow's asks`.
+fn envelope_summary(text: &str) -> Option<String> {
+    // Only inside an opening tag, so prose that merely contains `summary="` in a
+    // sentence cannot masquerade as one.
+    let tag_end = text.find('>')?;
+    let tag = &text[..tag_end];
+
+    let start = tag.find("summary=\"")? + "summary=\"".len();
+    let rest = &tag[start..];
+    let end = rest.find('"')?;
+    let raw = rest[..end].trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let decoded = raw
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        // Ampersand last, so a decoded entity cannot be decoded twice.
+        .replace("&amp;", "&");
+
+    Some(decoded)
+}
+
 /// Split an archived session id into its root session and subagent suffix.
 ///
 /// TraceDB names a subagent session after the session that spawned it, as
-/// `claude:<uuid>/agent-<name>`. `list` exposes no parent column, so this id
-/// shape is the only lineage signal a listing has. Sampling 25 suffixed and 25
-/// unsuffixed ids against `show` found the suffix and a recorded
-/// `parent_session_id` agree in every suffixed case.
+/// `claude:<uuid>/agent-<name>`. This is a *fallback* signal only: it is available
+/// without a `show` call, but it is incomplete, because 199 non-empty sessions in
+/// the local archive record a `parent_session_id` while carrying no suffix.
+/// [`TraceSession::lineage`] is the authoritative answer.
 ///
 /// The agent prefix (`claude:`) is left attached to the root, because that is the
-/// form every other operation takes as an `id`. Returns `None` for a root
-/// session.
-///
-/// Note this is one-directional evidence: a suffix always means a child, but a
-/// bare id is not proof of a root — `codex` records a `parent_session_id` on some
-/// ids that carry no suffix. Rolling up by suffix therefore under-collapses
-/// rather than wrongly hiding a real session, which is the safe direction.
+/// form every other operation takes as an `id`. Returns `None` for a bare id.
 pub fn split_lineage(id: &str) -> Option<(&str, &str)> {
     id.split_once('/')
 }
@@ -516,18 +625,33 @@ impl Client {
         let trace: Option<UserEvents> = serde_json::from_value(raw)
             .map_err(|e| format!("Unexpected show payload: {}", e))?;
 
+        let texts: Vec<String> = trace
+            .map(|trace| {
+                trace
+                    .events
+                    .into_iter()
+                    .filter(|event| event.kind.as_deref() == Some("user"))
+                    .filter_map(|event| event.text)
+                    .filter(|text| !text.trim().is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // The first *typed* message, not the first user event. Agents inject
         // their own context as leading pseudo user turns, so taking the first
         // event verbatim labels a session with boilerplate that is identical
         // across every session of that agent.
-        Ok(trace.and_then(|trace| {
-            trace
-                .events
-                .into_iter()
-                .filter(|event| event.kind.as_deref() == Some("user"))
-                .filter_map(|event| event.text)
-                .find(|text| !text.trim().is_empty() && !is_injected_envelope(text))
-        }))
+        if let Some(ask) = texts.iter().find(|text| !is_injected_envelope(text)) {
+            return Ok(Some(ask.clone()));
+        }
+
+        // Every turn is an envelope. That is the normal shape of a delegated
+        // session driven entirely by `<teammate-message>` blocks, and those carry a
+        // human-written `summary` attribute describing the task — "Author insects
+        // pests unit", "meadow contracts spec". Recovering it labels 174 sessions
+        // in the local archive that are otherwise nameless, taking coverage from
+        // 94.3% to 98.3%.
+        Ok(texts.iter().find_map(|text| envelope_summary(text)))
     }
 
     /// A recognizable label for one archived session, cheaply.
@@ -543,6 +667,43 @@ impl Client {
         // carries its agent, time, and event count.
         let ask = self.first_user_text(id).await.ok().flatten()?;
         Some(summarize_line(&ask))
+    }
+
+    /// Session-level metadata for one archived session, without its events.
+    ///
+    /// An event slice of `(0, 0)` asks for a single event, which is the cheapest
+    /// shape `show` offers: measured warm at ~0.5 ms and ~1.1 KB per call against
+    /// the local archive, the same order as the label lookup a listing already
+    /// pays, where a bare `show` on the same session returns up to 20 MB.
+    ///
+    /// The listing needs this because `list` reports no lineage: without it,
+    /// subagent detection falls back to the id suffix and misses the 199 sessions
+    /// that record only a `parent_session_id`.
+    ///
+    /// A `kind` filter is deliberately *not* used to make the event list empty. An
+    /// unknown kind is rejected outright (`unknown event kind: ...`), and naming a
+    /// real one streams its matching events, so neither is cheaper or safer than
+    /// the one-event slice.
+    pub async fn session_metadata(&self, id: &str) -> Result<Option<TraceSession>, String> {
+        let raw = self
+            .call(Request {
+                op: "show",
+                id: Some(id),
+                from: Some(0),
+                to: Some(0),
+                ..Default::default()
+            })
+            .await?;
+
+        // Only the header is deserialized; the one-event payload is ignored.
+        #[derive(Deserialize)]
+        struct Header {
+            session: TraceSession,
+        }
+
+        let header: Option<Header> = serde_json::from_value(raw)
+            .map_err(|e| format!("Unexpected show payload: {}", e))?;
+        Ok(header.map(|header| header.session))
     }
 
 
@@ -821,6 +982,113 @@ mod tests {
         let ask = "<permissions instructions> Filesystem sandboxing\nFix the reconnect loop";
 
         assert_eq!(summarize_line(ask), "Fix the reconnect loop");
+    }
+
+    /// Build a `show` session header for lineage tests.
+    fn session(id: &str, parent: Option<&str>, forked: Option<&str>) -> TraceSession {
+        TraceSession {
+            id: id.to_string(),
+            agent: "claude".to_string(),
+            cwd: Some("/w/app".to_string()),
+            title: None,
+            parent_session_id: parent.map(str::to_string),
+            forked_from: forked.map(str::to_string),
+            started_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_recorded_parent_marks_a_subagent_even_with_no_id_suffix() {
+        // The gap this closes: 199 non-empty sessions in the local archive record a
+        // parent while carrying no `/agent-` suffix, almost all codex. Reading the
+        // id alone left that delegated work at the top level of a listing.
+        let child = session("codex:child", Some("codex:parent"), None);
+
+        assert_eq!(
+            child.lineage(),
+            Lineage::Subagent { parent: "codex:parent" }
+        );
+    }
+
+    #[test]
+    fn a_fork_is_distinguished_from_a_subagent() {
+        // Different relationships wanting opposite treatment: a subagent folds into
+        // its parent as a count, a fork replaces one side of a duplicated pair.
+        let fork = session(
+            "claude:resumed",
+            None,
+            Some("claude:origin#ec58fee8-5801-431a-a51e-eb99e33d8c42"),
+        );
+
+        // The `#event-uuid` fragment is dropped: only the session id is addressable.
+        assert_eq!(fork.lineage(), Lineage::Fork { origin: "claude:origin" });
+    }
+
+    #[test]
+    fn a_subagent_that_was_also_resumed_still_folds_into_its_parent() {
+        // Precedence matters: delegated work belongs under its parent regardless of
+        // having been resumed, otherwise it surfaces at the top level.
+        let both = session("claude:x", Some("claude:parent"), Some("claude:origin#abc"));
+
+        assert_eq!(
+            both.lineage(),
+            Lineage::Subagent { parent: "claude:parent" }
+        );
+    }
+
+    #[test]
+    fn an_id_suffix_still_marks_a_subagent_when_metadata_records_nothing() {
+        // The suffix cannot be the primary signal, but it remains valid evidence.
+        let child = session("claude:root/agent-one", None, None);
+
+        assert_eq!(child.lineage(), Lineage::Subagent { parent: "claude:root" });
+    }
+
+    #[test]
+    fn a_session_with_no_recorded_relationship_is_a_root() {
+        assert_eq!(session("claude:alone", None, None).lineage(), Lineage::Root);
+        // Empty strings are absence, not a relationship to a nameless session.
+        assert_eq!(session("claude:alone", Some(""), Some("")).lineage(), Lineage::Root);
+    }
+
+    #[test]
+    fn a_self_referential_fork_is_not_treated_as_a_duplicate() {
+        // Defensive: folding a session into itself would delete it from the listing.
+        let odd = session("claude:x", None, Some("claude:x#abc"));
+
+        assert_eq!(odd.lineage(), Lineage::Root);
+    }
+
+    #[test]
+    fn a_teammate_envelope_yields_its_summary_as_a_label() {
+        // These sessions have no typed ask at all — every turn is an envelope — but
+        // the summary attribute is human-written and describes the task. Recovering
+        // it names 174 otherwise-nameless sessions in the local archive.
+        let text = r#"<teammate-message teammate_id="team-lead" summary="meadow contracts spec"> Read the brief"#;
+
+        assert_eq!(envelope_summary(text).as_deref(), Some("meadow contracts spec"));
+    }
+
+    #[test]
+    fn an_envelope_summary_is_entity_decoded() {
+        // The archive escapes these, and `meadow&apos;s asks` is a worse label than
+        // `meadow's asks`.
+        let text = r#"<teammate-message summary="Evaluate meadow&apos;s asks on &quot;tpl-pi&quot; &amp; report">x"#;
+
+        assert_eq!(
+            envelope_summary(text).as_deref(),
+            Some("Evaluate meadow's asks on \"tpl-pi\" & report")
+        );
+    }
+
+    #[test]
+    fn prose_mentioning_summary_is_not_mistaken_for_an_envelope() {
+        // Only an opening tag counts, so a sentence that happens to contain the
+        // attribute spelling cannot supply a label.
+        assert!(envelope_summary("Please write summary=\"not a tag\" in the doc").is_none());
+        assert!(envelope_summary("no tag here at all").is_none());
+        // An empty value is absence, not a blank label.
+        assert!(envelope_summary(r#"<teammate-message summary="">x"#).is_none());
     }
 
     #[test]

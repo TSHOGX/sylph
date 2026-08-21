@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::workspaces::normalize;
 use crate::error::{Error, Result};
 use crate::events::StreamEvent;
-use crate::tracedb::{split_lineage, TraceEvent};
+use crate::tracedb::{split_lineage, Lineage, TraceEvent};
 use crate::AppState;
 
 #[derive(Deserialize)]
@@ -56,17 +56,31 @@ fn default_limit() -> usize {
     20
 }
 
-/// How many upstream pages one request may walk.
+/// How many upstream rows one request may examine.
 ///
 /// Exact-path filtering and lineage rollup both shrink a page, so reaching the
 /// requested `limit` usually takes more than one upstream call. This bounds that
-/// loop: without it, a request for a directory with few sessions would page
-/// through the whole 4700-row archive looking for matches it will never find.
-const MAX_UPSTREAM_PAGES: usize = 8;
+/// loop so a request cannot walk the archive indefinitely.
+///
+/// Counted in rows rather than pages, and generous, because the upstream `cwd`
+/// filter is an unanchored substring match: a parent directory's pattern also
+/// matches every path beneath it, and those sort by recency, not by depth. For
+/// `/Users/x/Workspace/huawei` — 88 sessions of its own — the first exact match
+/// lands 1300 rows in, behind subdirectory work. An earlier 8-page cap gave up
+/// before reaching it and reported the directory as empty, which is the same
+/// wrong answer this endpoint exists to fix.
+///
+/// The archive is local SQLite and each page is one pipe round trip, so the cost
+/// of the ceiling is bounded and only paid by directories that actually need it.
+const MAX_UPSTREAM_ROWS: usize = 4000;
 
-/// Upstream page size. Larger than the typical `limit` because most rows are
-/// discarded — wrong directory, subagent, or empty.
-const UPSTREAM_PAGE: usize = 100;
+/// Upstream page size.
+///
+/// 500 because that is what `trace-db` returns at most, whatever larger value is
+/// requested — asking for more buys nothing and hides the real page size from
+/// anyone reading this. Larger than the typical `limit` because most rows are
+/// discarded: wrong directory, subagent, or empty.
+const UPSTREAM_PAGE: usize = 500;
 
 /// One archived session, as the sidebar and history browser render it.
 #[derive(Serialize)]
@@ -91,6 +105,16 @@ pub struct ArchiveSession {
     pub events: i64,
     /// Subagent sessions spawned by this one, folded in rather than listed.
     pub subagent_count: i64,
+    /// Set when this session is a fork of another: the origin's TraceDB id.
+    ///
+    /// A fork replays its origin's whole prefix, so the two read as one
+    /// conversation and only one belongs in a listing. Within a single response
+    /// the loser is already dropped, but a pair can straddle two pages — one
+    /// measured pair sits 268 rows apart — and the server holds no state between
+    /// requests. Reporting the relationship lets a client that accumulates pages
+    /// suppress the duplicate, which is where cross-page state naturally lives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork_of: Option<String>,
     /// Live session id when this archived session was already imported, so the
     /// UI opens the live conversation instead of showing it twice.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -108,6 +132,26 @@ pub struct ArchiveListResponse {
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+/// Whether a parent session belongs in the directory being listed.
+///
+/// Decides whether a subagent folds into its parent or stands as its own row. A
+/// parent is "in this directory" only when the archive records the same
+/// normalized `cwd`; otherwise the child is the only trace of that work in the
+/// directory it actually ran in, and folding it away hides it entirely.
+///
+/// A lookup failure answers `false`, which lists the child. Between a duplicated
+/// row and a vanished session, the duplicate is the recoverable mistake.
+async fn parent_in_directory(state: &AppState, parent: &str, workdir: &str) -> bool {
+    match state.tracedb.session_metadata(parent).await {
+        Ok(Some(session)) => session.cwd.as_deref().map(normalize).as_deref() == Some(workdir),
+        Ok(None) => false,
+        Err(detail) => {
+            tracing::warn!("Parent lookup failed for {}: {}", parent, detail);
+            false
+        }
+    }
 }
 
 /// GET /api/v1/archive/sessions?workdir={path}&limit={n}&cursor={c}
@@ -133,16 +177,25 @@ pub async fn list(
     let limit = params.limit.clamp(1, 100);
     let mut cursor = params.cursor.clone();
     let mut rows: Vec<ArchiveSession> = Vec::new();
-    // Root id -> index in `rows`, so a child found after its parent increments
+    // Parent id -> index in `rows`, so a child found after its parent increments
     // the right row.
-    let mut by_root: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    // Children whose parent has not been seen yet. The archive orders by recency,
-    // and a subagent commonly ends after the session that spawned it, so its row
-    // can arrive first.
-    let mut orphan_children: std::collections::HashMap<String, i64> =
+    let mut by_parent: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // Subagent counts for a parent not yet seen. The archive orders newest-first
+    // and a subagent commonly ends after the session that spawned it, so a child's
+    // row often arrives before its parent's.
+    let mut pending_children: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    // Sessions folded away, so a fork's other side is recognized whichever order
+    // the two arrive in, and a child is never also listed as a row.
+    let mut folded: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Parent id -> whether it lives in this directory, so a parent with many
+    // children costs one lookup rather than one per child.
+    let mut parent_locality: std::collections::HashMap<String, bool> =
         std::collections::HashMap::new();
 
-    for _ in 0..MAX_UPSTREAM_PAGES {
+    let mut examined = 0usize;
+
+    while examined < MAX_UPSTREAM_ROWS {
         let page = match state
             .tracedb
             .list(Some(&workdir), UPSTREAM_PAGE, cursor.as_deref())
@@ -162,6 +215,7 @@ pub async fn list(
 
         let exhausted = page.next_cursor.is_none();
         cursor = page.next_cursor;
+        examined += page.sessions.len();
 
         for summary in page.sessions {
             // The upstream filter is a substring match, so a request for
@@ -177,23 +231,107 @@ pub async fn list(
             if summary.events == 0 {
                 continue;
             }
-
-            if let Some((root, _)) = split_lineage(&summary.id) {
-                match by_root.get(root) {
-                    Some(&at) => rows[at].subagent_count += 1,
-                    None => *orphan_children.entry(root.to_string()).or_insert(0) += 1,
-                }
+            // Already accounted for as the other side of a fork.
+            if folded.contains(&summary.id) {
                 continue;
+            }
+
+            // Lineage comes from the archive's own record, not from the id shape.
+            // `list` reports none, so this costs one cheap metadata call per
+            // candidate — the alternative, reading the `/agent-` suffix, misses the
+            // 199 sessions that record only a `parent_session_id` and leaves
+            // delegated work sitting at the top level.
+            //
+            // A failed lookup degrades to the id suffix rather than dropping the
+            // row: an unrollable session is a cosmetic problem, a vanished one is
+            // not.
+            let metadata = state.tracedb.session_metadata(&summary.id).await;
+            if let Err(detail) = &metadata {
+                tracing::warn!("Lineage lookup failed for {}: {}", summary.id, detail);
+            }
+            let metadata = metadata.ok().flatten();
+            let lineage = metadata
+                .as_ref()
+                .map(|session| session.lineage())
+                .unwrap_or_else(|| match split_lineage(&summary.id) {
+                    Some((parent, _)) => Lineage::Subagent { parent },
+                    None => Lineage::Root,
+                });
+
+            // Recorded on the row when this session is a fork, so a client holding
+            // several pages can drop a duplicate whose pair fell in another
+            // request. Within this request the pair is already resolved above.
+            let mut fork_of: Option<String> = None;
+
+            match lineage {
+                Lineage::Subagent { parent } => {
+                    // Delegated work folds into its parent — but only when the
+                    // parent is a row in *this* directory. 484 of the 2238
+                    // subagents in the local archive ran in a different directory
+                    // than the session that spawned them, typically a worktree or
+                    // a subdirectory, and folding those unconditionally deletes
+                    // them from the only listing that would ever show them. It
+                    // emptied 42 directories, one of them holding 193 sessions.
+                    //
+                    // So a cross-directory child is promoted to a row of its own:
+                    // in its own directory it is not delegated work, it is the
+                    // work. Held aside when the parent has not been seen yet,
+                    // because the archive orders newest-first and a subagent
+                    // commonly outlives its parent.
+                    if let Some(&at) = by_parent.get(parent) {
+                        rows[at].subagent_count += 1;
+                        continue;
+                    }
+                    // Cached: one parent commonly has dozens of children — 193 in
+                    // the largest local case — and they all ask the same question.
+                    let local = match parent_locality.get(parent) {
+                        Some(&known) => known,
+                        None => {
+                            let known = parent_in_directory(&state, parent, &workdir).await;
+                            parent_locality.insert(parent.to_string(), known);
+                            known
+                        }
+                    };
+                    if local {
+                        *pending_children.entry(parent.to_string()).or_insert(0) += 1;
+                        continue;
+                    }
+                    // Falls through and is listed.
+                }
+                Lineage::Fork { origin } => {
+                    // The same conversation resumed: both sides replay an identical
+                    // prefix, so listing both shows one conversation twice. Keep
+                    // this one and fold the other away.
+                    //
+                    // Whichever side is newer must survive, and that is not a fixed
+                    // side: of the two real cases in the local archive, one has its
+                    // later work in the fork (1108 events against 389) and the
+                    // other in the origin (2459 against 649). `list` is ordered by
+                    // `endedAtMs` descending, so the newer side is simply the one
+                    // reached first — no comparison needed, and the loser is
+                    // recorded so it is skipped when it arrives.
+                    folded.insert(origin.to_string());
+                    if by_parent.contains_key(origin) {
+                        // The origin is already a row, so it ran more recently.
+                        // Leave it standing and drop this side.
+                        continue;
+                    }
+                    fork_of = Some(origin.to_string());
+                }
+                Lineage::Root => {}
             }
 
             if rows.len() >= limit {
                 break;
             }
 
-            let label = state
-                .tracedb
-                .session_label(&summary.id, summary.title.as_deref())
-                .await;
+            // Reuses the title from the metadata call just made, so labelling a row
+            // adds a request only when the archive recorded no title.
+            let title = metadata
+                .as_ref()
+                .and_then(|session| session.title.as_deref())
+                .or(summary.title.as_deref());
+            let label = state.tracedb.session_label(&summary.id, title).await;
 
             let session_id = state
                 .store
@@ -201,9 +339,10 @@ pub async fn list(
                 .await?
                 .map(|session| session.id);
 
-            by_root.insert(summary.id.clone(), rows.len());
+            by_parent.insert(summary.id.clone(), rows.len());
             rows.push(ArchiveSession {
-                subagent_count: orphan_children.remove(&summary.id).unwrap_or(0),
+                subagent_count: pending_children.remove(&summary.id).unwrap_or(0),
+                fork_of,
                 id: summary.id,
                 agent: summary.agent,
                 label,
