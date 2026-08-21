@@ -148,6 +148,20 @@ design — do not "fix" it by persisting the token.
 tree, a compiler or linter can capture a half-written file and report an error
 whose line numbers do not match the source. Re-run before believing it.
 
+**The E2E data directory is never wiped, so specs must not count shared state.**
+`frontend/.e2e-data/` accumulates every session across every run — it passed 240
+during Phase 7 — and the sidebar caps its listing at 200. A spec that creates a
+session in `/tmp` and asserts "the group grew by one" therefore passes for months
+and then fails permanently once the shared group reaches that cap, with a
+diff-by-one that looks like a UI bug and is not. Create a `mkdtemp` directory per
+spec and assert exact counts against it.
+
+**A clean `git merge` can still lose code.** Both sides adding methods to the same
+object literal merges without a conflict marker and silently keeps only one set —
+this happened to `api.files` during the Phase 7 merge, dropping two client methods.
+Nothing in git reports it; only `npm run build` did. Run both sides' full checks on
+a merge that reports itself clean, especially the type check.
+
 **TraceDB's API spellings are inconsistent per-operation.** `show` emits
 snake_case (`created_at_ms`, `started_at_ms`), while `stats`, `search`, and
 `list` emit camelCase (`totalSessions`, `startedAtMs`). The backend client
