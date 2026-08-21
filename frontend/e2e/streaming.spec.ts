@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { createSession } from "./fixtures/session";
 
 /**
  * Incremental streaming: does the transcript paint *during* a turn?
@@ -18,13 +19,9 @@ import { expect, test } from "@playwright/test";
 test("the transcript paints thinking, tools, and prose while the turn is still running", async ({
   page,
 }) => {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByRole("button", { name: "Create session" }).click();
+  await createSession(page);
 
   const composer = page.getByLabel("Message");
-  await expect(composer).toBeVisible();
   await composer.fill("paced please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
@@ -70,13 +67,9 @@ test("the transcript paints thinking, tools, and prose while the turn is still r
  * accepting either label would pass against the very bug this covers.
  */
 test("the live turn reports Streaming once events arrive", async ({ page }) => {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByRole("button", { name: "Create session" }).click();
+  await createSession(page);
 
   const composer = page.getByLabel("Message");
-  await expect(composer).toBeVisible();
   await composer.fill("paced please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 

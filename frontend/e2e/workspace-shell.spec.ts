@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { createSession } from "./fixtures/session";
 
 /**
  * The Phase 6 shell: three panes, keyboard-driven overlays, and the Artifacts
@@ -12,15 +13,6 @@ import { expect, test, type Page } from "@playwright/test";
  * `ControlOrMeta` is Playwright's platform-resolving modifier, so one spec covers
  * the Cmd and Ctrl bindings without branching on the runner's OS.
  */
-
-/** Create a session in `/tmp` and land on its conversation view. */
-async function createSession(page: Page) {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByRole("button", { name: "Create session" }).click();
-  await expect(page.getByLabel("Message")).toBeVisible();
-}
 
 test("both sidebars toggle by keyboard and the state persists across navigation", async ({
   page,
@@ -77,12 +69,7 @@ test("global search finds a session and opens it", async ({ page }) => {
 
   // A second session, so search has to choose between them rather than matching
   // whatever happens to be first.
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByLabel(/^Title/).fill("Findable needle session");
-  await page.getByRole("button", { name: "Create session" }).click();
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await createSession(page, { title: "Findable needle session" });
 
   await page.goto(sessionUrl);
   // The shortcut listener is attached by an effect, so it does not exist until
@@ -212,7 +199,7 @@ function groupRows(page: Page, name: string) {
 }
 
 test("Quick Sessions creates a session from its menu with no dialog", async ({ page }) => {
-  // The regression: "New session here" used to route to /sessions/new and ask
+  // The regression: "New session here" used to route to a create form and ask
   // again for a working directory the right-clicked group had already named.
   await createSession(page);
 
@@ -236,7 +223,7 @@ test("Quick Sessions creates a session from its menu with no dialog", async ({ p
   await expect(rows).toHaveCount(before + 1);
 });
 
-test("a workspace group creates in its own directory, and the ... variant still opens the form", async ({
+test("a workspace group creates in its own directory, with one menu item and no form", async ({
   page,
 }) => {
   await createSession(page);
@@ -257,13 +244,13 @@ test("a workspace group creates in its own directory, and the ... variant still 
   // The directory was inherited from the group, not re-asked.
   await expect(rows).toHaveCount(before + 1);
 
-  // The explicit variant is still reachable, for overriding agent, model, or title.
+  // Exactly one create item in the menu. There were two — one creating directly,
+  // one opening a prefilled form — which put the same words on two entries that
+  // behaved differently, and made the slower one look like the careful choice.
+  // The form is gone, so this asserts the menu did not keep a second door to it.
   await page.getByRole("button", { name: "tmp", exact: false }).first().click({ button: "right" });
-  await page.getByRole("menu").getByRole("menuitem", { name: "New session here..." }).click();
-  const workdir = page.getByLabel("Working directory");
-  await expect(workdir).toBeVisible();
-  // Prefilled from the group, so the form is an override surface, not a re-ask.
-  await expect(workdir).toHaveValue(/tmp/);
+  const menu = page.getByRole("menu");
+  await expect(menu.getByRole("menuitem", { name: /^New session here/ })).toHaveCount(1);
 });
 
 /**
@@ -289,6 +276,51 @@ test("the history browser opens by keyboard and reports an unavailable archive",
   await expect(dialog.getByText(/archive is unavailable/i)).toBeVisible();
 
   // Escape closes it, like every other overlay.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+});
+
+/**
+ * Switching which workspace the history browser reads.
+ *
+ * This replaced a `<select>`, which on a real archive is 200+ options sharing a
+ * `~/Workspace/` prefix and reachable only by first letter. What matters here is
+ * that the switcher filters on any part of the path and hands focus to its own
+ * input — a mode swap inside one modal, so a second focus trap is never mounted.
+ */
+test("the history browser switches workspace through a filterable picker", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  await page.keyboard.press("ControlOrMeta+Shift+k");
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("button", { name: /^Workspace:/ }).click();
+
+  // The switcher took over the same dialog, and its filter has focus — so the
+  // user's first keystroke narrows workspaces rather than being swallowed.
+  const filter = dialog.getByRole("combobox", { name: /filter workspaces/i });
+  await expect(filter).toBeFocused();
+
+  // Matched on the path, not just the leaf name: `/tmp` is where the session was
+  // created, so that workspace exists and is findable by a path fragment.
+  await filter.fill("tmp");
+  const option = dialog.getByRole("option").first();
+  await expect(option).toContainText("tmp");
+
+  await option.click();
+  // Back to the session list, now scoped to the chosen workspace.
+  await expect(dialog.getByRole("combobox", { name: /filter this workspace/i })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: /^Workspace:.*tmp/ })).toBeVisible();
+
+  // The filesystem fallback exists for a directory the archive has never seen.
+  await dialog.getByRole("button", { name: /^Workspace:/ }).click();
+  await dialog.getByRole("button", { name: "Browse folders..." }).click();
+  await expect(dialog.getByRole("list", { name: "Folders" })).toBeVisible();
+
+  // One trap throughout: Escape closes the whole thing, not just a nested layer.
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
 });

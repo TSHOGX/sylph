@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { createSession } from "./fixtures/session";
 
 /**
  * The critical path: create a session, send a turn, watch it stream, and see it
@@ -16,17 +17,19 @@ test("a new session accepts a turn and streams the reply", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 
-  // The top bar no longer carries create buttons: creating a session needs a
-  // working directory, which only the sidebar's context menus know. `Mod+N` is
-  // the keyboard route to the explicit form, and it still dispatches through
-  // `runAction`, so this also pins that the shortcut survived their removal.
+  // `Mod+N` opens a directory picker, not a form. This is the one spec that
+  // drives that path through the UI — the rest create their precondition through
+  // the API — so it pins both that the shortcut dispatches through `runAction`
+  // and that choosing a folder is the whole interaction.
   await page.keyboard.press("ControlOrMeta+n");
-  await expect(page.getByRole("heading", { name: /new session/i })).toBeVisible();
+  const picker = page.getByRole("dialog");
+  await expect(picker).toBeVisible();
 
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-
-  await page.getByRole("button", { name: "Create session" }).click();
+  // `SYLPH_WEB_BROWSE_ROOTS` is `/tmp`, so the picker opens there and the
+  // confirm button needs no navigation. Choosing the directory is the only input
+  // a session takes: no agent select, no title, no path typed from memory.
+  await expect(picker.getByRole("list", { name: "Folders" })).toBeVisible();
+  await picker.getByRole("button", { name: "Start session here" }).click();
 
   // Creation navigates to the session, so the composer is the signal it worked.
   const composer = page.getByLabel("Message");
@@ -52,11 +55,7 @@ test("a new session accepts a turn and streams the reply", async ({ page }) => {
 });
 
 test("a created session appears in the list with its origin", async ({ page }) => {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByRole("button", { name: "Create session" }).click();
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await createSession(page);
 
   await page.goto("/");
 
@@ -68,10 +67,7 @@ test("a created session appears in the list with its origin", async ({ page }) =
 });
 
 test("reloading mid-conversation replays the journal", async ({ page }) => {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByRole("button", { name: "Create session" }).click();
+  await createSession(page);
 
   const composer = page.getByLabel("Message");
   await composer.fill("Persist this");
@@ -89,11 +85,7 @@ test("reloading mid-conversation replays the journal", async ({ page }) => {
 
 /** The session a run creates must show up under its workspace in the sidebar. */
 test("the sidebar groups a new session under its workspace", async ({ page }) => {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByRole("button", { name: "Create session" }).click();
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await createSession(page);
 
   const sidebar = page.getByRole("complementary", { name: "Workspaces" });
   await expect(sidebar).toBeVisible();

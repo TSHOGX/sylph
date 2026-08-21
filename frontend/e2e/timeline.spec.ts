@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { createSession } from "./fixtures/session";
 
 /**
  * The agent-first timeline: tool calls as primary content, inline diffs, and
@@ -10,11 +11,7 @@ import { expect, test, type Page } from "@playwright/test";
  */
 
 async function runPrompt(page: Page, prompt: string) {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByRole("button", { name: "Create session" }).click();
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await createSession(page);
   await page.getByLabel("Message").fill(prompt);
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
