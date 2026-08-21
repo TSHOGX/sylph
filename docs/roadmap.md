@@ -284,15 +284,15 @@ a query the user does not have. TraceDB's `list` op — with a `cwd` filter and
 cursor pagination — was never called.
 
 - ✅ `GET /api/v1/archive/sessions` — archived sessions for one directory, with
-  exact-path re-filtering (TraceDB's `cwd` filter is a substring match), subagent
-  rollup (`list` does not collapse lineage, and subagents are 43% of the local
-  archive), and empty sessions dropped
+  exact-path re-filtering (TraceDB's `cwd` filter is a substring match), lineage
+  rollup, and empty sessions dropped
 - ✅ `GET /api/v1/archive/sessions/{traceId}` — read-only transcript, normalized
   into the live `StreamEvent` shape so one timeline renders both; greedy id capture
   because a subagent id contains a slash
 - ✅ Row labels from the archive's title, else the opening *typed* message with
-  harness-injected envelopes skipped — 98% of real project sessions get a
-  recognizable label, against ~10% taking the first user event verbatim
+  harness-injected envelopes skipped, else an envelope's own `summary` attribute —
+  98.3% of non-empty archived sessions get a recognizable label, and 99.5% of
+  listed rows do, against ~10% taking the first user event verbatim
 - ✅ Sidebar merges live and archived rows, deduplicated on `traceSessionId`, with
   `⌗` marking archived and `⑂N` rolled-up subagents
 - ✅ `Cmd+Shift+K` — workspace-scoped history browser with cursor paging
@@ -305,6 +305,43 @@ cursor pagination — was never called.
   `<permissions instructions> …` because `summarize_ask` applied no envelope
   filter, and `traceSessionId` was `skip_serializing`, so the client could not tell
   an imported session from an archived one and would have listed both
+
+**6.7 — lineage rollup reads the archive instead of guessing**
+
+Reported from use: subagent folding missed cases. It did, and measuring the whole
+archive found the first version wrong in three separate ways — one under-folding,
+two hiding real work.
+
+- ✅ Lineage now comes from `parent_session_id` / `forked_from` via a cheap
+  metadata `show` (~0.5 ms), not from the `/agent-` id suffix. The suffix missed
+  **199** delegated sessions that record only a parent, almost all `codex`, and
+  they sat at the top level of every listing. It remains a fallback for a failed
+  lookup.
+- ✅ A subagent that ran in a **different directory** than its parent is listed
+  rather than folded. **484 of 2238** do — worktrees and subdirectories — and
+  folding them into an absent parent emptied **42 directories**, one holding 193
+  sessions. That was the same false "nothing here" that 6.6 set out to fix.
+- ✅ `forked_from` is distinguished from delegation. A fork replays its origin's
+  whole prefix, so both sides read as one conversation; one survives, and which one
+  is not a fixed side — measured locally, one pair keeps the fork (1108 events
+  against 389) and the other the origin (2459 against 649). Newest-first ordering
+  makes "the one reached first" the correct answer. `forkOf` reports the suppressed
+  side so a client accumulating pages can collapse a pair split across requests, as
+  one measured pair 268 rows apart is.
+- ✅ The upstream scan is bounded in **rows examined, not pages**. An unanchored
+  substring `cwd` match means a parent directory also matches everything beneath
+  it; `~/Workspace/huawei` has 88 sessions whose first exact match sits ~1300 rows
+  in, and the old 8-page cap reported it empty. It now returns its history in
+  0.76 s, the worst case measured.
+- ✅ Labels gained a third fallback: an envelope's own `summary` attribute, for
+  delegated sessions whose every turn is a `<teammate-message>`. Coverage went from
+  94.3% to **98.3%** of non-empty sessions, and 99.5% of listed rows.
+- ✅ Verified across all 138 directories holding archived history: **137 list
+  correctly**. Only `/` does not, and cannot — every path contains it, so no
+  substring filter can isolate it.
+- ✅ Fixed along the way: `MockTraceDb` emitted payloads inside single-quoted shell
+  words, so an apostrophe in fixture data truncated the response and surfaced as a
+  JSON decoding error that read like a protocol bug.
 
 ### Exit criteria — how each was checked
 
@@ -325,9 +362,9 @@ cursor pagination — was never called.
   resolution against installed runners in `lib/create-session.test.ts`.
 - ✅ **Settings configure agent and model** — round-trip through storage and into
   the timeline covered in E2E.
-- ✅ **First-load JS under 200 KB gzipped** — **measured 197.1 KB**, from a 187.8 KB
-  baseline: +8.4 KB for the Phase 6 shell and +0.9 KB for archive browsing. Under
-  3 KB of headroom now remains. Achieved by code-splitting the overlays and
+- ✅ **First-load JS under 200 KB gzipped** — **measured 197.4 KB**, from a 187.8 KB
+  baseline: +8.4 KB for the Phase 6 shell and +1.2 KB for archive browsing. 2.6 KB
+  of headroom now remains. Achieved by code-splitting the overlays and
   Artifacts pane (204.3 → 195.8 KB) and by implementing Markdown, diff, fuzzy
   matching, and the modal primitives directly rather than adding ~87 KB of
   dependencies. Each such decision, and what would reverse it, is recorded in

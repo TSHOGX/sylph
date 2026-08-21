@@ -247,12 +247,16 @@
             "headers": {
               "Cache-Control": {
                 "description": "Always 'no-cache, no-store, no-transform'. no-transform (RFC 9111 5.2.2.6) forbids an intermediary from re-encoding the body; without it a compressing proxy gzips the stream and buffers the whole turn into one delivery.",
-                "schema": { "type": "string" }
+                "schema": {
+                  "type": "string"
+                }
               }
             },
             "content": {
               "text/event-stream": {
-                "schema": { "type": "string" }
+                "schema": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -312,7 +316,7 @@
     "/api/v1/archive/sessions": {
       "get": {
         "summary": "Archived sessions that ran in one directory",
-        "description": "Read-only browse of durable coding-agent history, newest first. /search answers \"which session mentioned X\", which needs a query the user may not have; this answers \"what happened in this directory before\", which is what an empty-looking workspace needs. Reading is not importing: this mutates nothing, while POST /sessions/import adopts a session for continuation and requires both a runner and a surviving workdir. TraceDB matches cwd as a substring and does not collapse fork lineage, so rows are re-filtered for exact directory equality, subagents are folded into their parent, and empty sessions are dropped. Those filters shrink a page, so one request may walk several upstream pages up to a fixed cap. An unreachable archive answers 200 with available=false.",
+        "description": "Read-only browse of durable coding-agent history, newest first. /search answers \"which session mentioned X\", which needs a query the user may not have; this answers \"what happened in this directory before\", which is what an empty-looking workspace needs. Reading is not importing: this mutates nothing, while POST /sessions/import adopts a session for continuation and requires both a runner and a surviving workdir. TraceDB matches cwd as an unanchored substring and reports no lineage, so rows are re-filtered for exact directory equality and each candidate costs one cheap metadata show. Delegated sessions fold into their parent as subagentCount when that parent is in the same directory, and are listed on their own when it is not; a fork and its origin collapse to whichever ran more recently, with forkOf naming the other side. Empty sessions are dropped. Those filters shrink a page, so one request may walk several upstream pages, bounded by rows examined rather than pages -- a parent directory's substring also matches everything beneath it, and one real directory's first exact match sat ~1300 rows in. An unreachable archive answers 200 with available=false.",
         "parameters": [
           {
             "name": "workdir",
@@ -1169,7 +1173,14 @@
           "subagentCount": {
             "type": "integer",
             "format": "int64",
-            "description": "Subagent sessions spawned by this one, folded in rather than listed as peers. TraceDB's list does not collapse lineage, and subagents are 43% of a real archive."
+            "description": "Subagent sessions spawned by this one, folded in rather than listed as peers. Delegated sessions are 51% of a real archive. A subagent that ran in a different directory than its parent is NOT folded -- 484 of 2238 do, and folding those into an absent parent deleted them from the only directory that would show them."
+          },
+          "forkOf": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Origin's TraceDB id when this session is a fork of another. A fork replays its origin's whole prefix, so the two read as one conversation and only one belongs in a listing; the server drops the loser within a response, but a pair can straddle two pages (one measured pair sits 268 rows apart) and no state is kept between requests. A client accumulating pages must suppress a row whose forkOf names a session it already showed, and a row that an already-shown fork names."
           },
           "sessionId": {
             "type": [

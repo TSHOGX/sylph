@@ -454,24 +454,69 @@ Three filters are applied here rather than upstream, each for a measured reason:
   `/w/app-old` and every subdirectory. Rows are re-filtered for exact equality
   after normalizing trailing slashes.
 - **Lineage rollup.** TraceDB's `list` does not collapse fork lineage, though
-  `search` does, and subagent sessions are 43% of a real archive. They are folded
-  into the session that spawned them as `subagentCount` rather than listed as
-  peers, since listing them buries the sessions a user actually started.
+  `search` does, and delegated sessions are 51% of a real archive (2238 of 4416
+  non-empty). They fold into the session that spawned them as `subagentCount`,
+  since listing them as peers buries the sessions a user actually started. See
+  **Lineage** below, which is the subtlest part of this endpoint.
 - **Empty sessions.** Rows with `events: 0` are dropped; they are common for
   aborted runs and there is nothing to read.
 
 Because those filters shrink a page, one request may walk several upstream pages
-to fill `limit`, up to a fixed cap. `nextCursor` continues from wherever it
-stopped.
+to fill `limit`, bounded by rows examined rather than pages. That bound is
+generous on purpose: the substring `cwd` match means a parent directory's pattern
+also matches everything beneath it, and those sort by recency rather than depth,
+so an exact match can sit far into the scan. One real directory with 88 sessions
+of its own had its first exact match ~1300 rows in, and a page-count cap reported
+it as empty. `nextCursor` continues from wherever the scan stopped.
 
-`label` is the archive's own title when it recorded one, else the opening *typed*
-message. The fallback is the common path, not the exception: `claude` records a
-title for 73% of sessions and `opencode` for all of them, while `codex` and `pi`
-record none. Leading harness-injected envelopes (`<permissions instructions>`,
-`<environment_context>`, `<skills_instructions>`, memory files, `Caveat:`) are
-skipped — they are byte-identical across every session of an agent and identify
-nothing. Measured over 311 sessions in six real project directories, this yields a
-recognizable label for 98%.
+##### Lineage
+
+The archive records two different relationships, and they want opposite
+treatment. Neither is reported by `list`, so each candidate row costs one cheap
+metadata `show` (~0.5 ms); the `/agent-` id suffix is only a fallback for when
+that lookup fails, because it misses the 199 sessions that record a parent without
+carrying a suffix.
+
+- **`parent_session_id` — delegated work.** Folded into the parent as
+  `subagentCount`, *provided the parent is in the directory being listed*. 484 of
+  2238 subagents ran somewhere else — a worktree or a subdirectory — and folding
+  those into an absent parent deletes them from the only listing that would show
+  them, which emptied 42 directories, one holding 193 sessions. A cross-directory
+  child is therefore promoted to a row of its own: in its own directory it is not
+  delegated work, it is the work.
+- **`forked_from` — the same conversation resumed.** A fork replays its origin's
+  entire prefix, so both sides share every early user turn and read as one
+  conversation; listing both shows it twice under one label. One side survives,
+  and which one cannot be fixed in advance — of the two real local cases, one has
+  its later work in the fork (1108 events against 389) and the other in the origin
+  (2459 against 649). Since `list` is ordered by `endedAtMs` descending, the
+  survivor is whichever is reached first.
+
+`forkOf` names the suppressed origin on a surviving fork row. Within one response
+the loser is already dropped, but a pair can straddle two pages — one measured
+pair sits 268 rows apart — and the server keeps no state between requests. A
+client that accumulates pages must therefore drop a row whose `forkOf` names a
+session it has already shown, and equally a row that a previously-shown fork
+names. `components/history-overlay.tsx` is the only such surface; the sidebar
+fetches a single page, where the server has already resolved the pair.
+
+`label` falls back through three sources, in order:
+
+1. **The archive's own title.** `claude` records one for 73% of sessions and
+   `opencode` for all of them, while `codex` and `pi` record none — so the
+   fallbacks are the common path, not the exception.
+2. **The opening *typed* message.** Leading harness-injected envelopes
+   (`<permissions instructions>`, `<environment_context>`,
+   `<skills_instructions>`, memory files, `Caveat:`) are skipped: they are
+   byte-identical across every session of an agent and identify nothing.
+3. **An envelope's `summary` attribute.** Some delegated sessions have no typed
+   turn at all — every one is a `<teammate-message ... summary="...">` block — but
+   that attribute is human-written and describes the task ("Author insects pests
+   unit"). XML entities in it are decoded.
+
+Measured over the whole local archive, those three take labelled sessions from
+94.3% (title plus typed ask alone) to **98.3%**; across the 138 directories that
+hold archived history, 99.5% of listed rows carry one.
 
 An unreachable archive answers **200** with `available: false` and a `detail`,
 never 503, matching `/search`: TraceDB is optional locally, and the sidebar calls

@@ -156,11 +156,41 @@ returns `/w/app-old` and every subdirectory. Anything that means "this one
 directory" must re-filter for exact equality after normalizing trailing slashes —
 `api::archive` and `api::workspaces` share `normalize` for exactly this.
 
-**`list` does not collapse fork lineage, but `search` does.** A subagent session is
-a row of its own, named `<parent-id>/agent-<name>`, and those are 43% of a real
-local archive. A listing that does not fold them into their parent is half noise.
-`list` carries no parent column, so the id suffix is the only signal available at
-listing time (`tracedb::split_lineage`).
+**`list` does not collapse fork lineage, but `search` does.** Delegated sessions
+are rows of their own and are 51% of a real local archive (2238 of 4416
+non-empty), so a listing that does not fold them into their parent is half noise.
+`list` carries no parent column, so lineage costs one `show` per candidate —
+`Client::session_metadata` is the cheap shape, ~0.5 ms and ~1 KB.
+
+**The `/agent-` id suffix is not a reliable lineage signal.** It catches 2039
+subagents but misses 199 that record only a `parent_session_id`, almost all
+`codex`; those sat at the top level of every listing until
+`TraceSession::lineage` started reading the archive's own record. The suffix
+survives as a fallback for when a metadata lookup fails.
+
+**A subagent often runs in a different directory than its parent.** 484 of 2238
+do — typically a worktree or a subdirectory. Folding those into a parent that is
+not in the directory being listed deletes them from the only listing that would
+ever show them: it emptied 42 directories, one holding 193 sessions. A
+cross-directory child is promoted to a row of its own, because in its own
+directory it is not delegated work, it *is* the work.
+
+**`parent_session_id` and `forked_from` are different relationships.** A subagent
+folds into its parent as a count. A fork replays its origin's entire prefix and
+continues past it, so the two share every early user turn and read as one
+conversation resumed — listing both shows it twice under one label. Only one
+survives, and which one cannot be fixed in advance: of the two real cases here,
+one has its later work in the fork (1108 events against 389) and the other in the
+origin (2459 against 649). `list` is ordered by `endedAtMs` descending, so the
+survivor is simply whichever is reached first.
+
+**An unanchored `cwd` filter can starve a paged scan.** Because the match is a
+substring, a parent directory's pattern also matches every path beneath it, and
+those sort by recency rather than depth. `/Users/x/Workspace/huawei` has 88
+sessions of its own whose first exact match lands ~1300 rows in; an 8-page cap
+gave up first and reported the directory empty. Bound such a scan in rows
+examined (`MAX_UPSTREAM_ROWS`), not pages. `trace-db` also caps a `list` page at
+500 rows however many are requested.
 
 **Unknown request fields are silently ignored by `trace-db api`.** Its handlers
 read named keys off a JSON object rather than deserializing a typed struct, so a

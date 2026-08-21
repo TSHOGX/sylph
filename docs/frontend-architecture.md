@@ -918,10 +918,14 @@ and merges:
   is the same conversation as a live row, so listing both would offer two routes
   into one history.
 - **Marked by shape, not colour** (WCAG 1.4.1): `●` sylph, `◆` native, `⌗`
-  archived, with `⑂N` for rolled-up subagent sessions.
+  archived, with `⑂N` for rolled-up subagent sessions. `⑂N` counts only subagents
+  that ran in *this* directory — one that ran in a worktree or subdirectory is a
+  row in that directory instead, because there it is the work rather than a
+  delegation.
 - **Fetched only while the group is open** (`enabled: open`), because each row
-  costs the backend a label lookup. `staleTime` is 60s: archived history only
-  changes when TraceDB ingests, which nothing in this tab drives.
+  costs the backend a lineage lookup and, when the archive recorded no title, a
+  label lookup. `staleTime` is 60s: archived history only changes when TraceDB
+  ingests, which nothing in this tab drives.
 
 The group count reads `8+` rather than a total. The archive count for a directory
 is unknown without paging all of it, and a live-plus-preview sum would look like a
@@ -946,6 +950,19 @@ Filtering is deliberately local. TraceDB's full-text search is already `Mod+K`,
 and re-querying it per keystroke would spawn a subprocess per character to answer
 a narrower question; the footer says the filter covers loaded sessions only.
 
+This overlay carries the one piece of lineage work the client owns: collapsing a
+**fork** whose pair straddles a page boundary. A fork and its origin replay the
+same prefix and read as one conversation, so only one belongs in the list. The
+server drops the loser within a single response, but it keeps no state between
+requests, and one measured pair sits 268 rows apart — so only a surface that
+accumulates pages can see both. Rows arrive newest-first, so the survivor is
+whichever appeared earlier, and the check runs in both directions: a row whose
+`forkOf` names an earlier row is a duplicate, and so is a row that an earlier
+row's `forkOf` names. Two index maps keep it linear as pages accumulate.
+
+The sidebar deliberately does *not* do this: it fetches one page, where the server
+has already resolved any pair.
+
 ### Reading an archived session
 
 `app/archive/[...id]/page.tsx` renders an archived transcript read-only, through
@@ -966,14 +983,14 @@ fails is worse than one that explains itself. There is no composer.
 
 ### Bundle budget
 
-**Measured: 197.1 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
+**Measured: 197.4 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
 established the budget at 200 KB and measured 187.8 KB; Phase 6 added the shell,
 three overlays, the file browser, the Markdown renderer, the diff view, and the
-fuzzy ranker for **+8.4 KB**, reaching 196.2 KB. Archive browsing added **+0.9
-KB**: the history overlay and the read-only archived view are both `next/dynamic`,
-so only their client-side entry points land here.
+fuzzy ranker for **+8.4 KB**, reaching 196.2 KB. Archive browsing added **+1.2 KB**
+across 6.6 and 6.7: the history overlay and the read-only archived view are both
+`next/dynamic`, so only their client-side entry points land here.
 
-Headroom is now under 3 KB. The next feature that needs a dependency should expect
+Headroom is now **2.6 KB**. The next feature that needs a dependency should expect
 to raise the budget deliberately rather than discover it has been exceeded.
 
 That number is why this document lists so many "no dependency" decisions. The
