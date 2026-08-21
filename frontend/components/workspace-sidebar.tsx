@@ -8,18 +8,24 @@
  * separate "Quick Sessions" group: they exist so a user can ask something
  * without picking a project, and mixing them into the project list would bury
  * the projects under scratch work.
+ *
+ * Each group shows live sessions *and* recent archived ones. The live journal
+ * only holds sessions this app created, so a directory with years of
+ * coding-agent history rendered as "No sessions yet" — the sidebar claimed a
+ * workspace was empty while TraceDB held hundreds of sessions for that exact
+ * path. Archived rows are read-only and marked `⌗`; `Browse all` opens the
+ * paged history browser, because a 240px pane is not where you page a thousand
+ * rows.
  */
 
 import Link from "next/link";
-import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Session } from "@/lib/api";
+import { api, type ArchiveSession, type Session } from "@/lib/api";
 import { formatRelative, sessionLabel } from "@/lib/format";
 import { useSettings } from "@/lib/settings";
-import { ContextMenu, type MenuItem } from "@/components/context-menu";
-import { useWorkspaceUI } from "@/lib/workspace-ui";
+import dynamic from "next/dynamic";
 
 // Code-split: the picker pulls in its own queries and markup, and the sidebar
 // renders on first paint. Loading it eagerly would put a modal nobody has opened
@@ -28,10 +34,22 @@ const DirectoryPicker = dynamic(
   () => import("@/components/directory-picker").then((m) => m.DirectoryPicker),
   { ssr: false },
 );
+import { ContextMenu, type MenuItem } from "@/components/context-menu";
+import { useWorkspaceUI } from "@/lib/workspace-ui";
 
 /** Sessions the sidebar shows. Higher than the list default: the sidebar is the
  *  primary navigation surface, so truncating it hides work rather than paging it. */
 const SIDEBAR_LIMIT = 200;
+
+/**
+ * Archived sessions fetched per expanded group.
+ *
+ * Small on purpose. This is a recency teaser that proves the directory has
+ * history and gets the user one click from it; browsing is `Browse all`'s job.
+ * Each row costs the backend a label lookup, so a large number here would make
+ * expanding a group noticeably slower for rows the user has to scroll to see.
+ */
+const ARCHIVE_PREVIEW = 6;
 
 interface Group {
   path: string;
@@ -45,11 +63,14 @@ export function WorkspaceSidebar() {
   const { settings, update } = useSettings();
   const params = useParams();
   const activeId = typeof params?.id === "string" ? params.id : undefined;
-  /** Right-click on the pane background, as distinct from on a group row. */
-  const [paneMenu, setPaneMenu] = useState<{ x: number; y: number } | null>(null);
   const [picking, setPicking] = useState(false);
 
-  const queryClient = useQueryClient();
+  const bindWorkspace = (path: string) => {
+    update({
+      pinnedWorkspaces: [...(settings.pinnedWorkspaces ?? []), path],
+    });
+    setPicking(false);
+  };
 
   const sessionsQuery = useQuery({
     queryKey: ["sessions", { limit: SIDEBAR_LIMIT }],
@@ -124,48 +145,21 @@ export function WorkspaceSidebar() {
     return { quick: quickGroup, projects: rest };
   }, [sessionsQuery.data, pinnedWorkspaces, workspaceNames, quickStartDir]);
 
-  /**
-   * Bind a directory as a workspace by pinning it.
-   *
-   * There is no workspace table: `GET /workspaces` derives spaces from the
-   * sessions that exist, so a directory with no sessions cannot be represented
-   * server-side. Pinning is the existing mechanism for exactly that — the sidebar
-   * already renders pinned paths as groups with zero sessions — so binding needs
-   * no new persistence, and the workspace survives reload because settings do.
-   */
-  function bindWorkspace(path: string) {
-    const normalized = path.replace(/\/+$/, "") || "/";
-    if (!settings.pinnedWorkspaces.includes(normalized)) {
-      update({ pinnedWorkspaces: [...settings.pinnedWorkspaces, normalized] });
-    }
-    setPicking(false);
-  }
-
-  const paneItems: MenuItem[] = [
-    { label: "New Workspace...", onSelect: () => setPicking(true) },
-    {
-      label: "Refresh",
-      onSelect: () => {
-        void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      },
-    },
-  ];
+  const [paneMenu, setPaneMenu] = useState<{ x: number; y: number } | null>(null);
 
   return (
-    <nav
-      aria-label="Sessions by workspace"
-      className="flex min-h-0 flex-1 flex-col"
-      // Bound to the pane itself rather than to its scroll container's background.
-      // Once enough sessions exist the rows fill that container completely, and a
-      // handler that only answered clicks on empty space would become unreachable
-      // exactly when the sidebar is busiest. Group and session rows stop
-      // propagation, so they still win for clicks that land on them.
-      onContextMenu={(event) => {
-        event.preventDefault();
-        setPaneMenu({ x: event.clientX, y: event.clientY });
-      }}
-    >
+    <>
+      <nav
+        aria-label="Sessions by workspace"
+        className="flex min-h-0 flex-1 flex-col"
+        onContextMenu={(event) => {
+          // Only on the nav chrome itself, not bubbled from a group or row.
+          if (event.target === event.currentTarget) {
+            event.preventDefault();
+            setPaneMenu({ x: event.clientX, y: event.clientY });
+          }
+        }}
+      >
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
         {sessionsQuery.isPending ? (
           <output aria-live="polite" className="block px-1.5 py-3 text-xs text-gray-500">
@@ -255,21 +249,30 @@ export function WorkspaceSidebar() {
         <ContextMenu
           x={paneMenu.x}
           y={paneMenu.y}
-          items={paneItems}
+          label="Workspace actions"
           onClose={() => setPaneMenu(null)}
-          label="Workspace list actions"
-        />
-      )}
-
-      {picking && (
-        <DirectoryPicker
-          title="Bind a workspace"
-          confirmLabel="Bind workspace"
-          onClose={() => setPicking(false)}
-          onChoose={bindWorkspace}
+          items={[
+            {
+              label: "New Workspace...",
+              onSelect: () => {
+                setPaneMenu(null);
+                setPicking(true);
+              },
+            },
+          ]}
         />
       )}
     </nav>
+
+    {picking && (
+      <DirectoryPicker
+        title="New Workspace"
+        confirmLabel="Bind workspace"
+        onChoose={bindWorkspace}
+        onClose={() => setPicking(false)}
+      />
+    )}
+    </>
   );
 }
 
@@ -296,35 +299,71 @@ function GroupSection({
 }) {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { createSessionIn } = useWorkspaceUI();
+  const { browseHistory, createSessionIn } = useWorkspaceUI();
   // Groups start expanded: a collapsed-by-default sidebar hides the thing the
   // user came here to click. Collapse is per-group and not persisted, because it
   // is a transient focusing action rather than a preference.
   const [open, setOpen] = useState(true);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
+  // Only while expanded, and only for a real directory: a collapsed sidebar
+  // must not cost a label lookup per row, and the Quick Sessions placeholder has
+  // no path until `GET /workspaces` resolves it.
+  const archiveQuery = useQuery({
+    queryKey: ["archive", "sessions", group.path, ARCHIVE_PREVIEW],
+    queryFn: () => api.archive.list({ workdir: group.path, limit: ARCHIVE_PREVIEW }),
+    enabled: open && Boolean(group.path),
+    // Archived history is settled: it only changes when TraceDB ingests, which
+    // is not driven by anything happening in this tab.
+    staleTime: 60_000,
+  });
+
+  const archived = useMemo(() => {
+    const live = new Set(group.sessions.map((session) => session.traceSessionId).filter(Boolean));
+    // No fork de-duplication here: this fetches a single page, and the server
+    // already resolves a fork pair within one response. Only a surface that
+    // accumulates pages — the history overlay — can see a pair split across two.
+    return (archiveQuery.data?.sessions ?? []).filter(
+      // An imported session is already a live row above; listing it again offers
+      // two routes into one conversation.
+      (row) => !row.sessionId && !live.has(row.id),
+    );
+  }, [archiveQuery.data, group.sessions]);
+
   const running = group.sessions.filter((s) => s.status === "running").length;
   const label = title ?? group.name;
+  const archiveAvailable = archiveQuery.data?.available ?? true;
+  const hasMoreArchive = Boolean(archiveQuery.data?.nextCursor) || archived.length > 0;
 
   const items: MenuItem[] = [
+    // Creates immediately with the configured default agent and model. A group
+    // *is* a directory, so the create form's only required field is already
+    // decided by which group was right-clicked; routing there would ask the user
+    // to confirm what they just said. "New session here..." below covers the
+    // cases where the agent, model, or title needs overriding.
     {
-      // Creates and opens directly. Routing to the form would ask for the
-      // working directory that right-clicking this group already named, which is
-      // a dialog the user has to dismiss to get what they clicked.
       label: "New session here",
-      onSelect: () => createSessionIn(group.path),
+      // Disabled only for the placeholder Quick Sessions group, whose path is
+      // empty until `GET /workspaces` resolves it. Dimmed rather than hidden, so
+      // the menu does not change shape between renders.
       disabled: !group.path,
+      onSelect: () => createSessionIn(group.path),
     },
     {
-      // The override surface, kept because the fast path deliberately decides
-      // agent, model, and title for you. Prefilled with this group's directory,
-      // so it is an override rather than the re-ask the fast path removed.
       label: "New session here...",
       onSelect: () =>
         router.push(`/sessions/new?workdir=${encodeURIComponent(group.path)}`),
-      disabled: !group.path,
     },
-    { label: open ? "Collapse" : "Expand", onSelect: () => setOpen(!open) },
+    {
+      label: "Browse history...",
+      // Separated from the create actions: reading past work and starting new
+      // work are different intents, and the archive one is disabled for the
+      // placeholder group whose path is not resolved yet.
+      separated: true,
+      disabled: !group.path,
+      onSelect: () => browseHistory(group.path),
+    },
+    { label: open ? "Collapse" : "Expand", separated: true, onSelect: () => setOpen(!open) },
     ...(onTogglePin
       ? [{ label: pinned ? "Unpin from sidebar" : "Pin to sidebar", onSelect: onTogglePin }]
       : []),
@@ -361,8 +400,6 @@ function GroupSection({
         onClick={() => setOpen(!open)}
         onContextMenu={(event) => {
           event.preventDefault();
-          // Stopped so the pane's own menu does not also open behind this one.
-          event.stopPropagation();
           setMenu({ x: event.clientX, y: event.clientY });
         }}
         aria-expanded={open}
@@ -389,31 +426,61 @@ function GroupSection({
               {running}▶
             </span>
           )}
+          {/* Live count only. The archive count is unknown without paging the
+              whole directory, and a live-plus-preview total would read as a
+              complete tally while actually being an arbitrary partial sum. `+`
+              says "there is more here" without inventing a number. */}
           {group.sessions.length}
+          {archived.length > 0 && (
+            <span title="plus archived history" className="text-gray-400">
+              +
+            </span>
+          )}
+          {!archiveAvailable && (
+            <span title="Archive unavailable — showing live sessions only" className="ml-0.5">
+              ⚠
+            </span>
+          )}
         </span>
       </button>
 
-      {/* The list is named per group so one group's rows are addressable without
-          relying on sidebar ordering, and so a screen reader announces which
-          workspace a list of sessions belongs to. */}
       {open && (
+        // Named, because a bare `<ul>` announces only "list" and the sidebar has
+        // one per group. The sr-only `<h2>` above titles the section visually for
+        // screen readers but does not name this list, so the label is explicit.
         <ul
           aria-label={`Sessions in ${label}`}
           className="mb-1 ml-2 border-l border-gray-200 pl-1"
         >
-          {group.sessions.length === 0 ? (
+          {group.sessions.map((session) => (
+            <SessionRow
+              key={session.id}
+              session={session}
+              active={session.id === activeId}
+              home={home}
+            />
+          ))}
+
+          {archived.map((session) => (
+            <ArchivedRow key={session.id} session={session} />
+          ))}
+
+          {group.sessions.length === 0 && archived.length === 0 && (
             <li className="px-1.5 py-1 text-[11px] text-gray-500">
-              {emptyHint ?? "No sessions yet."}
+              {archiveQuery.isFetching ? "Loading history..." : (emptyHint ?? "No sessions yet.")}
             </li>
-          ) : (
-            group.sessions.map((session) => (
-              <SessionRow
-                key={session.id}
-                session={session}
-                active={session.id === activeId}
-                home={home}
-              />
-            ))
+          )}
+
+          {hasMoreArchive && group.path && (
+            <li>
+              <button
+                type="button"
+                onClick={() => browseHistory(group.path)}
+                className="flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-[11px] text-gray-600 hover:bg-gray-200/60 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              >
+                Browse all history →
+              </button>
+            </li>
           )}
         </ul>
       )}
@@ -466,7 +533,6 @@ function SessionRow({
         aria-current={active ? "page" : undefined}
         onContextMenu={(event) => {
           event.preventDefault();
-          event.stopPropagation();
           setMenu({ x: event.clientX, y: event.clientY });
         }}
         title={`${sessionLabel(session)} — ${shortenHome(session.workdir, home)}`}
@@ -515,6 +581,45 @@ function SessionRow({
           label={`${sessionLabel(session)} actions`}
         />
       )}
+    </li>
+  );
+}
+
+/**
+ * One archived session, linking to the read-only view.
+ *
+ * Visually subordinate to a live row: this is history, and the sidebar's job is
+ * still to get the user to work they can continue. `⌗` rather than a colour
+ * change carries the distinction, so it survives greyscale and colour-blindness
+ * (WCAG 1.4.1).
+ */
+function ArchivedRow({ session }: { session: ArchiveSession }) {
+  const when = session.endedAtMs ?? session.startedAtMs;
+  const label = session.label ?? `Untitled ${session.agent} session`;
+
+  return (
+    <li>
+      <Link
+        href={`/archive/${encodeURIComponent(session.id)}`}
+        title={`${label} — archived ${session.agent} session, read-only`}
+        className="flex items-center gap-1.5 rounded px-1.5 py-1 text-xs text-gray-600 hover:bg-gray-200/60 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+      >
+        <span aria-hidden="true" title="archived session" className="shrink-0 text-[9px] text-gray-500">
+          ⌗
+        </span>
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {session.subagentCount > 0 && (
+          <span
+            title={`${session.subagentCount} subagent session${session.subagentCount === 1 ? "" : "s"}`}
+            className="shrink-0 text-[9px] text-gray-500"
+          >
+            ⑂{session.subagentCount}
+          </span>
+        )}
+        <span className="shrink-0 text-[9px] text-gray-500">
+          {formatRelative(when).replace(" ago", "")}
+        </span>
+      </Link>
     </li>
   );
 }
