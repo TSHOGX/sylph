@@ -28,6 +28,7 @@ pub mod error;
 pub mod events;
 pub mod middleware;
 pub mod models;
+pub mod paths;
 pub mod runners;
 pub mod supervisor;
 pub mod tracedb;
@@ -135,7 +136,10 @@ pub fn router(state: AppState) -> Router {
             get(api::sessions::list).post(api::sessions::create),
         )
         .route("/api/v1/sessions/import", post(api::sessions::import))
-        .route("/api/v1/sessions/{id}", get(api::sessions::get))
+        .route(
+            "/api/v1/sessions/{id}",
+            get(api::sessions::get).patch(api::sessions::update),
+        )
         .route(
             "/api/v1/sessions/{id}/turns",
             get(api::sessions::history).post(api::turns::create),
@@ -144,18 +148,35 @@ pub fn router(state: AppState) -> Router {
         // matches literal segments before captures, so the more specific
         // `files/content` route must be registered, but order among these
         // does not matter. They are grouped for readability.
-        .route("/api/v1/sessions/{id}/files", get(api::files::tree))
+        .route(
+            "/api/v1/sessions/{id}/files",
+            get(api::files::tree).post(api::files::upload),
+        )
         .route(
             "/api/v1/sessions/{id}/files/content",
             get(api::files::content),
         )
+        // Parsed documents and raw bytes, both rooted at the session workdir
+        // like the tree above.
         .route(
             "/api/v1/sessions/{id}/files/document",
             get(api::files::document),
         )
         .route("/api/v1/sessions/{id}/files/raw", get(api::files::raw))
+        // Machine-level directory browsing, bounded by configured roots rather
+        // than by a session. Separate from the `sessions/{id}/files` tree
+        // because the root differs: see `api::fs` for the threat model.
+        .route("/api/v1/fs/roots", get(api::fs::roots))
+        .route("/api/v1/fs/tree", get(api::fs::tree))
         .route("/api/v1/workspaces", get(api::workspaces::list))
         .route("/api/v1/search", get(api::search::search))
+        .route("/api/v1/archive/sessions", get(api::archive::list))
+        // Greedy capture, not `{id}`: a subagent session id contains a slash
+        // (`claude:uuid/agent-name`), which is 43% of the local archive.
+        .route(
+            "/api/v1/archive/sessions/{*trace_id}",
+            get(api::archive::transcript),
+        )
         .route("/api/v1/turns/{id}", get(api::turns::get))
         .route("/api/v1/turns/{id}/events", get(api::turns::events))
         .route("/api/v1/turns/{id}/stop", post(api::turns::stop))

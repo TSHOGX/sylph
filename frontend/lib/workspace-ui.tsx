@@ -28,8 +28,15 @@ import { comboFromEvent, isTypingTarget } from "@/lib/shortcuts";
 import type { ShortcutAction } from "@/lib/settings";
 import type { PreviewKind } from "@/lib/api";
 
-/** At most one overlay is up at a time; they are all modal. */
-export type Overlay = "none" | "search" | "palette" | "settings";
+/**
+ * At most one overlay is up at a time; they are all modal.
+ *
+ * `newSession` is a directory picker, not a form. A session needs a directory and
+ * nothing else — the agent is switchable in the composer until the first turn, and
+ * model and effort are composer controls for every turn — so the only question
+ * worth asking at creation time is "where".
+ */
+export type Overlay = "none" | "search" | "palette" | "settings" | "history" | "newSession";
 
 /** A file the Artifacts pane should show, addressed inside a session. */
 export interface ArtifactTarget {
@@ -87,6 +94,17 @@ interface WorkspaceUIValue {
   closeArtifactFullscreen: () => void;
   /** Register the open session's shortcut handler. Returns an unsubscriber. */
   registerSessionActions: (handler: SessionActionHandler) => () => void;
+  /**
+   * Directory the history browser scopes itself to.
+   *
+   * Set by whatever established the context — the open session's `workdir`, or
+   * the sidebar group whose "Browse all" was clicked. `null` means nothing has,
+   * and the overlay then asks the user to pick a workspace instead of guessing.
+   */
+  activeWorkdir: string | null;
+  setActiveWorkdir: (workdir: string | null) => void;
+  /** Open the history browser, optionally scoped to a specific directory. */
+  browseHistory: (workdir?: string) => void;
   /** Run a shortcut action, for the command palette to reuse the same paths. */
   runAction: (action: ShortcutAction) => void;
   /**
@@ -103,14 +121,10 @@ const WorkspaceUIContext = createContext<WorkspaceUIValue | null>(null);
 
 export function WorkspaceUIProvider({
   children,
-  onNewSession,
   onQuickStart,
   onCreateSessionIn,
 }: {
   children: ReactNode;
-  /** Navigate to the create-session route. Supplied by the shell, which has
-   *  the router; this provider stays free of routing concerns. */
-  onNewSession: () => void;
   /** Create in the Quick Start directory. The shell supplies it because only
    *  the shell has the backend-resolved path. */
   onQuickStart: () => void;
@@ -130,7 +144,17 @@ export function WorkspaceUIProvider({
   const [artifact, setArtifact] = useState<ArtifactTarget | null>(null);
   const [artifactView, setArtifactView] = useState<ArtifactView>("tree");
   const [artifactFullscreen, setArtifactFullscreen] = useState(false);
+  const [activeWorkdir, setActiveWorkdir] = useState<string | null>(null);
   const sessionHandlerRef = useRef<SessionActionHandler | null>(null);
+
+  const browseHistory = useCallback((workdir?: string) => {
+    if (workdir) setActiveWorkdir(workdir);
+    setOverlay("history");
+    // Called directly from the sidebar as well as through `runAction`, so the
+    // one-modal-at-a-time invariant has to be enforced here too — otherwise the
+    // history overlay opens behind an already-open full-screen viewer.
+    setArtifactFullscreen(false);
+  }, []);
 
   const toggleLeft = useCallback(
     () => update({ showLeftSidebar: !leftOpen }),
@@ -202,30 +226,34 @@ export function WorkspaceUIProvider({
       // that just ran. A no-op when nothing is open, so shortcut dispatch is
       // unaffected.
       //
-      // The fullscreen viewer is dismissed alongside, for the same reason and to
-      // keep the one-modal-at-a-time invariant: an overlay opening behind a
-      // full-screen viewer would be unreachable.
+      // The fullscreen viewer is dismissed whichever branch runs, which is why
+      // that call sits outside the switch rather than being repeated in each
+      // arm: the one-modal-at-a-time invariant has to hold for overlays added
+      // later too, and a per-arm call is a rule every new `case` can forget.
+      // An overlay opening behind a full-screen viewer would be unreachable.
+      setArtifactFullscreen(false);
+
       switch (action) {
         case "search":
           setOverlay("search");
-          setArtifactFullscreen(false);
           return;
         case "commandPalette":
           setOverlay("palette");
-          setArtifactFullscreen(false);
+          return;
+        case "browseWorkspaceHistory":
+          setOverlay("history");
           return;
         case "openSettings":
           setOverlay("settings");
-          setArtifactFullscreen(false);
+          return;
+        case "newSession":
+          setOverlay("newSession");
           return;
         default:
           setOverlay("none");
       }
 
       switch (action) {
-        case "newSession":
-          onNewSession();
-          return;
         case "quickStart":
           onQuickStart();
           return;
@@ -241,7 +269,7 @@ export function WorkspaceUIProvider({
           sessionHandlerRef.current?.(action);
       }
     },
-    [onNewSession, onQuickStart, toggleLeft, toggleRight],
+    [onQuickStart, toggleLeft, toggleRight],
   );
 
   // One document-level listener for every shortcut. Per-component listeners
@@ -292,6 +320,9 @@ export function WorkspaceUIProvider({
       openArtifactFullscreen,
       closeArtifactFullscreen,
       registerSessionActions,
+      activeWorkdir,
+      setActiveWorkdir,
+      browseHistory,
       runAction,
       createSessionIn: onCreateSessionIn,
     }),
@@ -311,6 +342,8 @@ export function WorkspaceUIProvider({
       openArtifactFullscreen,
       closeArtifactFullscreen,
       registerSessionActions,
+      activeWorkdir,
+      browseHistory,
       runAction,
       onCreateSessionIn,
     ],

@@ -93,12 +93,15 @@ UI feedback after 3s. Pattern proven in both eventsource lib and DSH.
 
 ---
 
+## Design Philosophy
+
 **Core principles:**
 1. **Origin-aware UI** — Visual distinction between Sylph-managed and native sessions
 2. **Real-time first** — SSE-driven updates with optimistic rendering
 3. **Local-first** — No external dependencies, works offline after initial load
 4. **Accessibility** — WCAG 2.1 AA compliance, keyboard navigation, screen reader support
-5. **Performance** — Virtual scrolling for large trajectories, code splitting, <200KB bundle
+5. **Performance** — Keep bundles compact, optimize rendering, maintain responsiveness
+6. **Architecture quality** — Balance performance, user experience, maintainability, and extensibility
 
 **What to copy from DeepSeek Harness:**
 - Overall layout structure (left rail + canvas)
@@ -193,9 +196,7 @@ frontend/
 │   ├── layout.tsx              # Root layout: providers + AppShell
 │   ├── page.tsx                # All-sessions list
 │   ├── search/page.tsx         # TraceDB archive search and import
-│   ├── sessions/
-│   │   ├── [id]/page.tsx       # Conversation canvas
-│   │   └── new/page.tsx        # Create session
+│   ├── sessions/[id]/page.tsx  # Conversation canvas
 │   └── globals.css
 │
 ├── components/
@@ -217,6 +218,9 @@ frontend/
 │   ├── search-overlay.tsx      # Cmd+K
 │   ├── command-palette.tsx     # Cmd+P
 │   ├── settings-panel.tsx      # Cmd+,
+│   ├── history-overlay.tsx     # Cmd+Shift+K, plus the workspace switcher
+│   ├── directory-picker.tsx    # Server-enumerated folder chooser
+│   ├── composer.tsx            # Message entry, model/effort, attachments
 │   ├── context-menu.tsx        # Right-click menus
 │   ├── attachment-picker.tsx
 │   ├── command-dialog.tsx      # Agent-declared commands
@@ -236,7 +240,8 @@ frontend/
 │   ├── grid-format.ts          # Column labels, alignment, paging arithmetic
 │   ├── sandbox-html.ts         # CSP injection for previewed HTML
 │   ├── fuzzy.ts                # Subsequence ranking
-│   ├── use-sse.ts              # EventSource with after_seq resume
+│   ├── use-sse.ts              # Streaming fetch reader with after_seq resume
+│   ├── sse-parse.ts            # Incremental event-stream frame decoder
 │   ├── use-debounced.ts
 │   ├── error-boundary.tsx
 │   └── format.ts
@@ -270,11 +275,14 @@ targets.
 │   scratch    │                                    │ ▾ backend/       │
 │              │ ▸ ✻ Thinking  84 words             │   ▾ src/         │
 │ Workspaces   │                                    │     ▫ lib.rs     │
-│ ▾ sylph-web 8│ ▤ Read  backend/src/auth.rs    ✓   │     ▫ auth.rs    │
+│ ▾ sylph-web8+│ ▤ Read  backend/src/auth.rs    ✓   │     ▫ auth.rs    │
 │   ● session A│                                    │ ▫ Cargo.toml     │
 │   ◆ session B│ I'll add logging at three points.  │                  │
-│ ▾ trace-db  3│                                    │ ─────────────────│
-│   ● session C│ ✎ Edit  backend/src/auth.rs    ✓   │ auth.rs          │
+│   ⌗ past work│                                    │ ─────────────────│
+│   ⌗ older  ⑂2│ ✎ Edit  backend/src/auth.rs    ✓   │ auth.rs          │
+│   Browse all→│                                    │                  │
+│ ▾ trace-db 3+│                                    │                  │
+│   ● session C│                                    │                  │
 │              │  ┌──────────────────────────────┐  │ [preview]        │
 │              │  │ 45 45   pub async fn auth(   │  │                  │
 │              │  │    46 + info!("attempt");    │  │                  │
@@ -454,8 +462,9 @@ depend on mount order.
 | Combo | Action |
 | --- | --- |
 | `Mod+K` | Global search (live sessions + archive) |
+| `Mod+Shift+K` | Browse this workspace's archived history |
 | `Mod+P` | Command palette |
-| `Mod+N` | New session |
+| `Mod+N` | New session (pick a directory) |
 | `Mod+Shift+N` | Quick Start in `~/.agents` |
 | `Mod+B` / `Mod+\` | Toggle left / right pane |
 | `Mod+,` | Settings |
@@ -476,26 +485,45 @@ shell, which has no access to the open session's state. The session page registe
 a handler with `registerSessionActions` and the shell forwards to it; with no
 session open, those actions are simply ignored.
 
-### Creating a session: mutation or form
+### Creating a session: one mutation, and a directory when it is unknown
 
-Two paths exist, and which one a surface uses follows from one question — is the
-working directory already known?
+There is no create form. Every surface runs the same mutation; the only question
+is whether the invocation already names a working directory.
 
 | Surface | Path | Why |
 | --- | --- | --- |
 | ⚡ Quick Start, `Mod+Shift+N`, palette | `useQuickCreateSession` | The directory is fixed: the backend-resolved `~/.agents`. |
 | Sidebar group → "New session here" | `useQuickCreateSession` | A group **is** a directory. The right-click already named it. |
-| Sidebar group → "New session here..." | `/sessions/new?workdir=` | Override the agent, model, or title; the directory is prefilled. |
-| `+ New session`, `Mod+N` | `/sessions/new` | No directory chosen yet, so the form's required field is the point. |
+| `Mod+N`, empty-state button | `overlay: "newSession"` → same mutation | No directory yet, so a picker asks for that and nothing else. |
 
-The directory is the only field a session needs beyond an agent, and the agent
-has a configured default. So whenever the invocation already carries a directory,
-a form has nothing left to ask: it is a dialog the user must dismiss to get what
-they clicked. `lib/create-session.ts` is that mutation, and it is what makes
-"Quick Start" a special case of a general action rather than its own mechanism —
-before it, Quick Start had a private hook in the shell and the sidebar routed to
-the form, which is why right-clicking the fixed `~/.agents` group still asked for
-a working directory.
+A session needs a directory. Nothing else is worth asking at creation time, and
+the four-field form that used to ask is worth recording because each field's
+removal has a different reason:
+
+- **`workdir`** — the one field a session cannot start without, and the one a text
+  input served worst. An absolute path typed from memory fails as a backend
+  rejection; `DirectoryPicker` enumerates server-side, so the path is chosen and
+  cannot be mistyped.
+- **`agent`** — switchable in the composer until the first turn (`AgentSwitcher`),
+  which is strictly more forgiving than deciding before the conversation exists.
+- **`model` / `effort`** — composer controls on every turn. Choosing once at
+  creation was less capable than the surface that replaced it.
+- **`title`** — optional, and the sidebar already labels a session from its
+  opening message. It stays on the model and the API, because an imported native
+  session carries the originating agent's title.
+
+So whenever the invocation carries a directory, a dialog has nothing left to ask
+and is only something to dismiss. `lib/create-session.ts` is that mutation, and it
+is what makes "Quick Start" a special case of a general action rather than its own
+mechanism — before it, Quick Start had a private hook in the shell and the sidebar
+routed to the form, which is why right-clicking the fixed `~/.agents` group still
+asked for a working directory.
+
+The sidebar group menu carried both variants for one release: "New session here"
+created directly, "New session here..." opened the prefilled form. Two entries
+with the same words and different behaviour is a coin flip, and the slower one
+reads as the careful choice. `workspace-shell.spec.ts` now asserts the menu holds
+exactly one.
 
 One instance lives in the shell and is shared through `WorkspaceUIProvider` as
 `createSessionIn`, so every dialog-free path reports one pending state and one
@@ -689,39 +717,68 @@ could disagree with storage when a write failed.
 
 ### SSE Connection Management
 
+The stream is read with `fetch` and parsed in the client, **not** with
+`EventSource`. This is a correction: the original design here specified
+`EventSource` with one `addEventListener` per event kind, and the implementation
+that followed it listened on `onmessage` instead — which by the SSE spec receives
+only frames named `message`. Since the backend names every frame after its kind
+(`event: thinking`), every mid-turn event was dropped, and the transcript
+appeared all at once when the turn finished because the only repaint was the
+history refetch on completion.
+
+`EventSource` is the wrong primitive here for three reasons, not just that one:
+
+1. Dispatch is by frame name, so a client must enumerate every kind it expects.
+   A kind the backend adds later is silently dropped — and silent event loss
+   renders identically to an agent that did nothing.
+2. A frame named `error` (which the backend emits for a failed turn) arrives as
+   the same `error` event the browser fires for a dropped socket, so a runner
+   failure and a network failure cannot be distinguished.
+3. It reconnects on its own with no way to advance `after_seq`, so resuming at a
+   cursor requires fighting its built-in retry.
+
+Reading the body directly fixes all three: the frame name is parsed but never
+used for dispatch, so every frame reaches the consumer whatever it is called.
+
 ```ts
-class TurnStreamManager {
-  private connections = new Map<string, EventSource>()
-  
-  connect(turnId: string, afterSeq = -1): EventSource {
-    const url = `/api/v1/turns/${turnId}/events?after_seq=${afterSeq}`
-    const source = new EventSource(url)
-    
-    source.addEventListener('thinking', (e) => this.handleEvent('thinking', e))
-    source.addEventListener('assistant', (e) => this.handleEvent('assistant', e))
-    source.addEventListener('tool_call', (e) => this.handleEvent('tool_call', e))
-    source.addEventListener('tool_result', (e) => this.handleEvent('tool_result', e))
-    source.addEventListener('usage', (e) => this.handleEvent('usage', e))
-    source.addEventListener('error', (e) => this.handleReconnect(turnId))
-    
-    this.connections.set(turnId, source)
-    return source
-  }
-  
-  disconnect(turnId: string) {
-    const source = this.connections.get(turnId)
-    if (source) {
-      source.close()
-      this.connections.delete(turnId)
-    }
-  }
-  
-  private handleReconnect(turnId: string) {
-    const lastSeq = this.getLastSeq(turnId)
-    setTimeout(() => this.connect(turnId, lastSeq), 1000)
+const response = await fetch(
+  `/api/v1/turns/${turnId}/events?after_seq=${cursor}`,
+  { credentials: "include", signal: controller.signal, cache: "no-store" },
+)
+
+const reader = response.body.getReader()
+// `stream: true`: a chunk boundary can fall inside a multi-byte UTF-8 sequence.
+const utf8 = new TextDecoder()
+const decoder = createSSEDecoder()   // lib/sse-parse.ts
+
+for (;;) {
+  const { done, value } = await reader.read()
+  if (done) break
+  for (const frame of decoder.push(utf8.decode(value, { stream: true }))) {
+    const event = JSON.parse(frame.data)
+    if (event.seq <= cursor) continue   // drop replay overlap after reconnect
+    cursor = event.seq
+    enqueue(event)                      // coalesced, see below
   }
 }
 ```
+
+**Compression must be refused, or none of this streams.** The backend sets
+`Cache-Control: no-cache, no-store, no-transform` on the event stream. The
+`no-transform` directive is load-bearing rather than cosmetic: Next.js proxies
+`/api/v1/*` through the standard `compression` middleware, which gzips any
+compressible content type including `text/event-stream`, and a gzip stream cannot
+be decoded until its block is flushed. With compression on, every event sat in
+the compressor until the turn ended — while `curl`, which sends no
+`Accept-Encoding`, saw perfectly paced frames and made the bug look like a client
+problem. The header lives on the backend response rather than in
+`next.config.ts` so the guarantee survives any proxy in front of the endpoint.
+
+**Repaint is coalesced, not per-event.** Deltas arrive at token rate — the claude
+runner measures ~20ms between tool-input deltas — so one `setState` per delta is
+one React commit per token. Events are batched into a single flush per animation
+frame (16ms), which bounds repaints by the display rather than by the model's
+speed while staying far below the ~100ms at which a human perceives lag.
 
 **Event normalization:**
 - Parse JSON from `data` field
@@ -731,10 +788,11 @@ class TurnStreamManager {
 - Persist only `completed` events
 
 **Reconnection strategy:**
-- Exponential backoff: 1s, 2s, 4s, 8s, max 30s
-- Resume from `Last-Event-ID` or `after_seq`
+- Backoff: 500ms, 1s, 2s, 5s, 10s (capped, so a dead backend is polled gently)
+- Resume from the highest `seq` seen, via `after_seq`
 - Replay stable events from backend journal
-- Show reconnection UI after 3 seconds
+- A clean end-of-body means the turn finished; retrying there would loop
+- `AbortController` makes teardown immediate, which `EventSource` cannot offer
 
 ### Event Rendering
 
@@ -997,22 +1055,126 @@ function SessionSearch() {
 }
 ```
 
+### Archived history in the sidebar
+
+The left pane is built from two sources, because one of them does not know what
+the user has done. `GET /sessions` holds only sessions created in this app, so a
+directory with years of coding-agent history rendered as **"No sessions yet"** —
+the sidebar claimed a workspace was empty while TraceDB held hundreds of sessions
+for that same path. Archived history was reachable only through full-text search,
+which requires already knowing what to search for.
+
+Each expanded group therefore also queries `GET /archive/sessions?workdir=...`,
+and merges:
+
+- **Live rows first**, then archived ones. A session you can continue outranks one
+  you can only read.
+- **Deduplicated** on `traceSessionId` / `sessionId`. An imported archived session
+  is the same conversation as a live row, so listing both would offer two routes
+  into one history.
+- **Marked by shape, not colour** (WCAG 1.4.1): `●` sylph, `◆` native, `⌗`
+  archived, with `⑂N` for rolled-up subagent sessions. `⑂N` counts only subagents
+  that ran in *this* directory — one that ran in a worktree or subdirectory is a
+  row in that directory instead, because there it is the work rather than a
+  delegation.
+- **Fetched only while the group is open** (`enabled: open`), because each row
+  costs the backend a lineage lookup and, when the archive recorded no title, a
+  label lookup. `staleTime` is 60s: archived history only changes when TraceDB
+  ingests, which nothing in this tab drives.
+
+The group count reads `8+` rather than a total. The archive count for a directory
+is unknown without paging all of it, and a live-plus-preview sum would look like a
+complete tally while being an arbitrary partial one. A `⚠` replaces the `+` when
+the archive is unreachable, so "no history" and "cannot see history" stay
+distinguishable.
+
+### Browsing history: `Mod+Shift+K`
+
+The sidebar shows a handful of rows per workspace; a real directory can hold over
+a thousand sessions. Paging that in a 240px pane is not navigation, so
+`components/history-overlay.tsx` is the browse surface: workspace-scoped, cursor
+paged, with a client-side filter over the loaded pages.
+
+Scoping is what separates it from `Mod+K`. Search answers "which session mentioned
+X" across everything; this answers "what have I done in this project", which is
+the question someone has when a workspace looks unfamiliar. The scope comes from
+`activeWorkdir` in `lib/workspace-ui.tsx`, set by the open session or by the
+sidebar group whose `Browse all` was clicked.
+
+Filtering is deliberately local. TraceDB's full-text search is already `Mod+K`,
+and re-querying it per keystroke would spawn a subprocess per character to answer
+a narrower question; the footer says the filter covers loaded sessions only.
+
+Changing the scope goes through a **workspace switcher**, not a `<select>`. On a
+real archive that select is 200+ options sharing a `~/Workspace/` prefix, ordered
+by recency and reachable only by first letter — and it could not name a directory
+the archive has never seen at all. The switcher ranks known workspaces by recency,
+filters on the full path rather than the leaf name (the segment someone remembers
+is often in the middle: `huawei`, `sylph`), shows each one's archived and live
+counts so an empty directory is visible before it is opened, and falls back to
+`DirectoryPicker` for anything unlisted.
+
+It is a **mode swap inside the same modal**, not a second modal. Nesting `Overlay`
+in `Overlay` puts two focus traps on one DOM path: the outer trap's
+`querySelectorAll` also matches the inner dialog's controls, so Tab at the
+boundary depends on document order rather than on which dialog is on top. Swapping
+the content keeps exactly one trap alive, makes "back" a state change rather than
+an unmount, and leaves `Escape` meaning the same thing at every depth.
+
+This overlay carries the one piece of lineage work the client owns: collapsing a
+**fork** whose pair straddles a page boundary. A fork and its origin replay the
+same prefix and read as one conversation, so only one belongs in the list. The
+server drops the loser within a single response, but it keeps no state between
+requests, and one measured pair sits 268 rows apart — so only a surface that
+accumulates pages can see both. Rows arrive newest-first, so the survivor is
+whichever appeared earlier, and the check runs in both directions: a row whose
+`forkOf` names an earlier row is a duplicate, and so is a row that an earlier
+row's `forkOf` names. Two index maps keep it linear as pages accumulate.
+
+The sidebar deliberately does *not* do this: it fetches one page, where the server
+has already resolved any pair.
+
+### Reading an archived session
+
+`app/archive/[...id]/page.tsx` renders an archived transcript read-only, through
+the same `Timeline` the live conversation uses — the backend normalizes archived
+events into the live `StreamEvent` shape, so there is no second renderer to drift.
+
+A catch-all route because a subagent id contains a slash
+(`claude:uuid/agent-name`). Next hands those segments back **still
+percent-encoded**, so each is decoded before rejoining; without that the client
+re-encodes and the backend looks up a literal `claude%3A...`.
+
+Browsing must not mutate, which is why this is separate from import. Continuation
+is offered as an explicit action, disabled with its reason shown when the archive
+recorded no `cwd` — `POST /sessions/import` rejects those, and a button that always
+fails is worse than one that explains itself. There is no composer.
+
 ## Performance Optimization
 
-### Bundle budget
+### Bundle size management
 
-**Measured: 197.1 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
-established the budget at 200 KB and measured 187.8 KB; Phase 6 added the shell,
-three overlays, the file browser, the Markdown renderer, the diff view, and the
-fuzzy ranker for **+8.4 KB**; Phase 7's document viewers added **+0.9 KB**.
+**Measured: 198.3 KB gzipped first-load JS.** The project maintains a compact bundle
+through deliberate architecture and dependency choices. Phase 4 measured 187.8 KB;
+Phase 6 added the shell, three overlays, the file browser, the Markdown renderer,
+the diff view, and the fuzzy ranker for **+8.4 KB**, reaching 196.2 KB. Archive
+browsing added **+1.2 KB** across 6.6 and 6.7, and the document viewers **+0.9 KB**:
+the history overlay, the read-only archived view, and every format viewer are all
+`next/dynamic`, so only their client-side entry points land here.
 
-That number is why this document lists so many "no dependency" decisions. The
-naive versions of these features — `react-markdown` + `remark-gfm` (~45 KB), Shiki
-or Prism (~35 KB), jsdiff (~30 KB), Radix (~30 KB for the primitives used), fuse.js
-(~12 KB), an icon package — total well over 150 KB against 12 KB of headroom.
-Each replacement is a bounded, well-understood algorithm carrying unit tests; that
-is the trade, stated plainly, and it is a trade that stops being right the moment
-the budget rises or the feature set outgrows the subset implemented.
+**The goal is to keep the bundle lean and fast-loading**, not to enforce a hard
+numeric ceiling. As features grow, bundle size should scale proportionally to value
+delivered. Monitor growth deliberately, optimize where reasonable, but never let an
+arbitrary limit constrain valuable functionality or architectural improvements.
+
+This principle explains the "no dependency" decisions throughout this document. The
+alternative implementations — `react-markdown` + `remark-gfm` (~45 KB), Shiki or
+Prism (~35 KB), jsdiff (~30 KB), Radix (~30 KB for the primitives used), fuse.js
+(~12 KB), an icon package — would have totaled over 150 KB. Each replacement is a
+bounded, well-understood algorithm carrying unit tests; that is the trade-off,
+stated plainly. This approach remains correct while the implemented subset serves
+the product's needs and the bundle stays compact. As requirements evolve, adopting
+battle-tested libraries may become the better choice.
 
 **Office formats are parsed server-side**, which is the largest single instance of
 this. SheetJS (`xlsx`) is 7.5 MB unpacked, frozen at 0.18.5 on npm, and carries two

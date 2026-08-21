@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { createSession } from "./fixtures/session";
 
 /**
  * Keyboard reachability, checked in a real browser.
@@ -26,11 +27,7 @@ test("the skip link moves focus to main content", async ({ page }) => {
 });
 
 test("the command dialog traps focus and returns it on close", async ({ page }) => {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByRole("button", { name: "Create session" }).click();
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await createSession(page);
 
   // The mock runner declares one command, so the button is present.
   const opener = page.getByRole("button", { name: "Command" });
@@ -49,12 +46,29 @@ test("the command dialog traps focus and returns it on close", async ({ page }) 
   await expect(opener).toBeFocused();
 });
 
-test("every form control on the create page has an accessible name", async ({ page }) => {
-  await page.goto("/sessions/new");
+/**
+ * Every control in the create path has an accessible name.
+ *
+ * This used to audit the create *form*, which no longer exists — a session is
+ * created by picking a directory. The check moved rather than being dropped,
+ * because the picker is now the surface with the controls, and an unnamed
+ * breadcrumb or folder button is the same failure the form's unnamed input would
+ * have been.
+ */
+test("every control in the create picker has an accessible name", async ({ page }) => {
+  await page.goto("/");
+  await page.keyboard.press("ControlOrMeta+n");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  // Wait for the listing, so the audit sees folder rows rather than the spinner.
+  await expect(page.getByRole("list", { name: "Folders" })).toBeVisible();
 
   const unnamed = await page.evaluate(() => {
+    // Buttons are included, not just fields: this surface navigates by button,
+    // and a nameless one is unusable by a screen reader in the same way a
+    // nameless input is. Their text content counts as the name, which is why an
+    // icon-only button with no `aria-label` is what this catches.
     const controls = Array.from(
-      document.querySelectorAll("input, select, textarea"),
+      document.querySelectorAll("input, select, textarea, button"),
     );
     return controls
       .filter((el) => {
@@ -63,7 +77,8 @@ test("every form control on the create page has an accessible name", async ({ pa
           (id && document.querySelector(`label[for="${id}"]`)) ||
           el.getAttribute("aria-label") ||
           el.getAttribute("aria-labelledby") ||
-          el.closest("label");
+          el.closest("label") ||
+          (el.textContent ?? "").trim().length > 0;
         return !labelled;
       })
       .map((el) => el.outerHTML.slice(0, 80));
@@ -92,7 +107,15 @@ async function audit(page: import("@playwright/test").Page, context?: string) {
     id: violation.id,
     impact: violation.impact,
     help: violation.help,
-    nodes: violation.nodes.slice(0, 3).map((node) => node.target.join(" ")),
+    // Selector *and* the failure summary axe computed. The selector alone names a
+    // class soup that can match several elements, and for contrast failures the
+    // summary carries the measured ratio and the two colours — which is the
+    // difference between fixing the right element and guessing at one.
+    nodes: violation.nodes.slice(0, 3).map((node) => ({
+      target: node.target.join(" "),
+      html: node.html.slice(0, 160),
+      summary: node.failureSummary?.replace(/\s+/g, " ").slice(0, 240),
+    })),
   }));
 
   expect(
@@ -107,20 +130,18 @@ test("the session list has no automated accessibility violations", async ({ page
   await audit(page, "session list");
 });
 
-test("the create form has no automated accessibility violations", async ({ page }) => {
-  await page.goto("/sessions/new");
-  await expect(page.getByLabel("Agent")).toBeVisible();
-  await audit(page, "create session");
+test("the create picker has no automated accessibility violations", async ({ page }) => {
+  await page.goto("/");
+  await page.keyboard.press("ControlOrMeta+n");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByRole("list", { name: "Folders" })).toBeVisible();
+  await audit(page, "create session picker");
 });
 
 test("the conversation canvas has no automated accessibility violations", async ({
   page,
 }) => {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByRole("button", { name: "Create session" }).click();
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await createSession(page);
 
   // Audit with real content: tool calls, a diff, and a failed command are the
   // parts with the most custom markup and the most colour.
@@ -135,12 +156,38 @@ test("the conversation canvas has no automated accessibility violations", async 
   await audit(page, "conversation canvas with tool calls");
 });
 
+/**
+ * The composer *while a turn runs*, which is a different colour state.
+ *
+ * The composer is disabled mid-turn, and it used to express that with
+ * `opacity-60` on its container. Opacity composites the whole subtree, so every
+ * descendant lost contrast at once: `text-gray-600` measured 2.87:1 and the Stop
+ * button 3.7:1, against the 4.5:1 WCAG 1.4.3 requires — and Stop is the only
+ * control that matters at that moment.
+ *
+ * The audit above cannot catch this, because it waits for the reply before
+ * auditing and the default runner finishes in under a second. It went unnoticed
+ * until a faster test fixture happened to land the audit mid-turn. `paced` spaces
+ * its stages a second apart, which makes the live state hold still long enough to
+ * assert on deliberately rather than by luck.
+ */
+test("the composer has no accessibility violations while a turn is running", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  await page.getByLabel("Message").fill("paced please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+
+  // Stop replaces Send only while the turn is live, so its presence *is* the
+  // proof the audit runs in the state being tested.
+  await expect(page.getByRole("button", { name: /^Stop/ })).toBeVisible();
+
+  await audit(page, "composer during a live turn");
+});
+
 test("every overlay has no automated accessibility violations", async ({ page }) => {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByRole("button", { name: "Create session" }).click();
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await createSession(page);
 
   for (const [combo, name] of [
     ["ControlOrMeta+k", "search overlay"],

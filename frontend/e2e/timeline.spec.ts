@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { createSession } from "./fixtures/session";
 
 /**
  * The agent-first timeline: tool calls as primary content, inline diffs, and
@@ -10,11 +11,7 @@ import { expect, test, type Page } from "@playwright/test";
  */
 
 async function runPrompt(page: Page, prompt: string) {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill("/tmp");
-  await page.getByRole("button", { name: "Create session" }).click();
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await createSession(page);
   await page.getByLabel("Message").fill(prompt);
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
@@ -96,8 +93,16 @@ test("a 1000-event conversation renders within the performance budget", async ({
 
   // Confirm the fixture really produced the volume the budget is about, so the
   // measurement cannot silently pass against a short transcript.
-  const events = await page.getByRole("region", { name: /tool call/ }).count();
-  expect(events, "bulk fixture should emit 250 tool calls").toBeGreaterThanOrEqual(250);
+  //
+  // Polled rather than counted once: the transcript now paints incrementally, so
+  // the reply block that `runPrompt` waits for appears while rows are still
+  // arriving. A single count here races the stream and reads a partial log.
+  await expect
+    .poll(
+      () => page.getByRole("region", { name: /tool call/ }).count(),
+      { message: "bulk fixture should emit 250 tool calls", timeout: 30_000 },
+    )
+    .toBeGreaterThanOrEqual(250);
 
   const started = Date.now();
   await page.reload();

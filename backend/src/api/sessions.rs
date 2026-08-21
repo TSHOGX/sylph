@@ -9,6 +9,7 @@ use crate::{
     error::{Error, Result},
     events::StreamEvent,
     models::{CreateSessionRequest, Session, Turn},
+    tracedb::summarize_line,
     AppState,
 };
 
@@ -203,6 +204,100 @@ pub async fn create(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateSessionRequest {
+    /// Complete replacement flag set. Absent leaves flags untouched; an empty
+    /// map clears them.
+    pub flags: Option<std::collections::HashMap<String, String>>,
+    /// Display title. Absent leaves it untouched.
+    pub title: Option<String>,
+}
+
+/// PATCH /api/v1/sessions/{id}
+///
+/// Change runner flags (model, reasoning effort) or the title of an existing
+/// session.
+///
+/// # Why flags are validated here rather than at turn time
+///
+/// `POST /sessions/{id}/turns` filters the stored flag set against the runner's
+/// declared schema and silently drops what it does not recognize. That is the
+/// right behaviour there — a descriptor can change under a session that was
+/// created before it, and a turn should still run. It is the wrong behaviour for
+/// a user action: a model chosen in the composer that the runner never declared
+/// would be accepted, stored, dropped at turn time, and the turn would run on
+/// the default with nothing anywhere saying why. Validating on write turns that
+/// silent no-op into an error the UI can show against the control that caused it.
+///
+/// Identity is deliberately not patchable. `agent`, `origin`, `identityMode`, and
+/// `lifecycleMode` decide which runner owns the conversation and whether `SOUL.md`
+/// may be injected; changing them on a session with history would rewrite what
+/// that history was produced by. Native-to-Sylph conversion is a separate,
+/// explicit operation for exactly this reason.
+pub async fn update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateSessionRequest>,
+) -> Result<Json<SessionResponse>> {
+    let session = state
+        .store
+        .get_session(&id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+
+    if let Some(flags) = &req.flags {
+        let registry = state.registry.lock().await;
+        let descriptor = registry
+            .list_agents()
+            .into_iter()
+            .find(|agent| agent.name == session.agent);
+        drop(registry);
+
+        // A session whose runner has been uninstalled cannot have its flags
+        // validated, so it cannot have them changed. Failing is better than
+        // storing an unvalidated value that would be dropped at turn time.
+        let descriptor = descriptor.ok_or_else(|| {
+            Error::InvalidRequest(format!(
+                "Agent '{}' is not currently installed, so its flags cannot be changed.",
+                session.agent
+            ))
+        })?;
+
+        for (key, value) in flags {
+            let spec = descriptor.flags.get(key).ok_or_else(|| {
+                Error::InvalidRequest(format!(
+                    "Agent '{}' does not declare a '{key}' flag.",
+                    session.agent
+                ))
+            })?;
+            // An empty `choices` list means the flag is free-form, so only
+            // enumerated flags are checked against their enumeration.
+            if !spec.choices.is_empty() && !spec.choices.contains(value) {
+                return Err(Error::InvalidRequest(format!(
+                    "'{value}' is not a valid {key} for '{}'. Valid choices: {:?}",
+                    session.agent, spec.choices
+                )));
+            }
+        }
+
+        let flags_json = serde_json::to_string(flags)
+            .map_err(|e| Error::Internal(format!("Failed to encode flags: {e}")))?;
+        state.store.set_session_flags(&id, &flags_json).await?;
+    }
+
+    if let Some(title) = &req.title {
+        state.store.set_session_title(&id, title.trim()).await?;
+    }
+
+    let updated = state
+        .store
+        .get_session(&id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+    Ok(Json(SessionResponse { session: updated }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportSessionRequest {
     /// TraceDB session id, e.g. `claude:uuid`.
     pub trace_session_id: String,
@@ -315,15 +410,56 @@ pub async fn import(
     ))
 }
 
-/// First line of the opening ask, capped, for use as a title.
+/// First meaningful line of the opening ask, capped, for use as a title.
+///
+/// Shares one implementation with the archive browser's row labels: an imported
+/// session and its archived counterpart must not be named differently, or the
+/// same conversation reads as two.
 fn summarize_ask(ask: &str) -> String {
-    const MAX_CHARS: usize = 80;
-    let line = ask.lines().find(|l| !l.trim().is_empty()).unwrap_or(ask).trim();
-    // Counting characters, not bytes: these asks are frequently not ASCII, and
-    // slicing on a byte index would panic mid-codepoint.
-    if line.chars().count() <= MAX_CHARS {
-        return line.to_string();
+    summarize_line(ask)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_imported_title_is_the_ask_not_the_injected_preamble() {
+        // Before this filter, every imported codex session was titled with the
+        // same sandboxing boilerplate.
+        let ask = "<permissions instructions> Filesystem sandboxing defines which files\n\
+                   Fix the SSE reconnect loop";
+
+        assert_eq!(summarize_ask(ask), "Fix the SSE reconnect loop");
     }
-    let truncated: String = line.chars().take(MAX_CHARS).collect();
-    format!("{}…", truncated.trim_end())
+
+    #[test]
+    fn a_plain_ask_is_unchanged() {
+        assert_eq!(summarize_ask("Fix the login bug"), "Fix the login bug");
+        // A subagent brief is a real ask, not boilerplate.
+        assert_eq!(
+            summarize_ask("You are reviewing Task 4."),
+            "You are reviewing Task 4."
+        );
+    }
+
+    #[test]
+    fn a_long_ask_is_truncated_on_a_character_boundary() {
+        // Non-ASCII is the norm in this archive; slicing by byte would panic.
+        let ask = "请帮我".repeat(40);
+        let summary = summarize_ask(&ask);
+
+        assert!(summary.ends_with('…'));
+        assert_eq!(summary.chars().count(), 81, "80 chars plus the ellipsis");
+    }
+
+    #[test]
+    fn an_envelope_only_ask_still_yields_a_title() {
+        // Slash-command sessions carry nothing else. An empty title would render
+        // as a blank row, which is worse than showing the envelope.
+        assert_eq!(
+            summarize_ask("<command-name>/theme</command-name>"),
+            "<command-name>/theme</command-name>"
+        );
+    }
 }

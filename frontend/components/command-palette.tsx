@@ -100,6 +100,14 @@ export function CommandPalette() {
         run: () => runAction("search"),
       },
       {
+        id: "browse-history",
+        label: "Browse this workspace's archived history",
+        group: "Navigation",
+        action: "browseWorkspaceHistory",
+        keywords: "past previous archive tracedb directory workdir",
+        run: () => runAction("browseWorkspaceHistory"),
+      },
+      {
         id: "all-sessions",
         label: "Go to all sessions",
         group: "Navigation",

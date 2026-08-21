@@ -26,8 +26,6 @@ import {
 import { comboFromEvent, formatCombo, useIsMac } from "@/lib/shortcuts";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Overlay } from "@/components/overlay";
-import { shortenHome } from "@/components/workspace-sidebar";
-import { formatRelative } from "@/lib/format";
 
 type Section = "general" | "agents" | "workspaces" | "shortcuts";
 
@@ -262,84 +260,47 @@ function AgentsSection() {
 }
 
 function WorkspacesSection() {
-  const { settings, update } = useSettings();
+  const { settings } = useSettings();
+  const isMac = useIsMac();
   const { data } = useQuery({
     queryKey: ["workspaces"],
     queryFn: () => api.workspaces.list(),
     staleTime: 30_000,
   });
 
-  const workspaces = data?.workspaces ?? [];
-  const home = data?.home;
+  // Read from the live bindings, not written out: shortcuts are rebindable, and a
+  // hardcoded combo in a hint becomes a lie the first time one is changed.
+  const quickStartCombo = useMemo(() => {
+    const combo = Object.entries(settings.shortcuts).find(
+      ([, action]) => action === "quickStart",
+    )?.[0];
+    return combo ? formatCombo(combo, isMac) : "Quick Start";
+  }, [settings.shortcuts, isMac]);
 
   return (
     <div className="space-y-4">
-      <Field label="Quick Start directory" hint="Fixed: Quick Start sessions always land here.">
+      {/* Read-only, and the only thing this section holds.
+          A "known workspaces" table lived here with pin and rename controls, and
+          it was a second, worse copy of the sidebar: the sidebar lists the same
+          directories with their sessions under them, and its context menu already
+          pins, renames, and binds a new directory. Settings could only show the
+          rows without the sessions that give them meaning, so the same action was
+          two clicks further from the thing it acts on. Pointing at the sidebar
+          also beats restating its menu here, which would drift the moment the menu
+          changes. */}
+      <Field
+        label="Quick Start directory"
+        hint={`Where ${quickStartCombo} starts a session. Resolved by the backend, which is the only side that can expand ~.`}
+      >
         <p className="rounded border border-gray-200 bg-gray-50 px-2 py-1 font-mono text-[11px] text-gray-600">
           {data?.quickStartDir ?? "loading..."}
         </p>
       </Field>
 
-      <Field
-        label="Known workspaces"
-        hint="Discovered from sessions. Pinning keeps one visible with no sessions; renaming affects display only."
-      >
-        {workspaces.length === 0 ? (
-          <p className="text-xs text-gray-500">No workspaces yet.</p>
-        ) : (
-          <ul className="divide-y divide-gray-100 rounded border border-gray-200">
-            {workspaces.map((workspace) => {
-              const pinned = settings.pinnedWorkspaces.includes(workspace.path);
-              const custom = settings.workspaceNames[workspace.path];
-              return (
-                <li key={workspace.path} className="flex items-center gap-2 px-2 py-1.5">
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-xs font-medium">
-                      {custom ?? workspace.name}
-                      {workspace.isQuickStart && (
-                        <span className="ml-1.5 rounded bg-gray-100 px-1 text-[9px] font-normal text-gray-600">
-                          quick start
-                        </span>
-                      )}
-                    </p>
-                    <p
-                      className="truncate font-mono text-[10px] text-gray-500"
-                      title={workspace.path}
-                    >
-                      {shortenHome(workspace.path, home)}
-                    </p>
-                  </div>
-                  <span className="shrink-0 text-[10px] text-gray-500">
-                    {workspace.sessionCount}{" "}
-                    {workspace.sessionCount === 1 ? "session" : "sessions"}
-                    {workspace.lastUsedMs > 0 && ` · ${formatRelative(workspace.lastUsedMs)}`}
-                  </span>
-                  {!workspace.isQuickStart && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        update({
-                          pinnedWorkspaces: pinned
-                            ? settings.pinnedWorkspaces.filter((p) => p !== workspace.path)
-                            : [...settings.pinnedWorkspaces, workspace.path],
-                        })
-                      }
-                      aria-pressed={pinned}
-                      className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 ${
-                        pinned
-                          ? "border-gray-900 bg-gray-900 text-white"
-                          : "border-gray-300 hover:bg-gray-50"
-                      }`}
-                    >
-                      {pinned ? "Pinned" : "Pin"}
-                    </button>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </Field>
+      <p className="text-xs text-gray-500">
+        Workspaces themselves are managed in the sidebar, where each one lists its
+        sessions: right-click a workspace to pin, rename, or browse its history.
+      </p>
     </div>
   );
 }
@@ -347,6 +308,7 @@ function WorkspacesSection() {
 const ACTION_LABELS: Record<ShortcutAction, string> = {
   search: "Global search",
   commandPalette: "Command palette",
+  browseWorkspaceHistory: "Browse workspace history",
   newSession: "New session",
   quickStart: "Quick Start session",
   toggleLeftSidebar: "Toggle workspaces sidebar",

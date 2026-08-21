@@ -64,6 +64,8 @@ npm run dev
 - `SYLPH_WEB_PORT` — Backend port (default: `4317`)
 - `SYLPH_WEB_DATA_DIR` — Database location (default: `~/.agents/data/sylph/web`)
 - `TRACEDB_BIN` — TraceDB binary path (default: `~/Workspace/trace-db/target/release/trace-db`)
+- `SYLPH_WEB_BROWSE_ROOTS` — Extra colon-separated directories the workspace
+  picker may browse (default: none; `$HOME` is always included)
 - `RUST_LOG` — Log level (default: `info`, try `debug` for troubleshooting)
 
 ## Quick Health Check

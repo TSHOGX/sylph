@@ -14,7 +14,9 @@ use crate::models::AttachmentData;
 
 /// Per-turn limits from `docs/api-design.md`.
 const MAX_ATTACHMENTS: usize = 5;
-const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
+/// Per-file ceiling, shared with the workspace upload endpoint so a browser
+/// upload has one limit however it reaches disk.
+pub const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 10 * 1024 * 1024;
 
 /// Decode and write attachments, returning the staged absolute paths.
@@ -83,6 +85,16 @@ pub async fn stage(
 /// is kept, and anything outside a conservative allowlist becomes dropped. An
 /// index prefix keeps two attachments with the same name from colliding.
 fn safe_filename(name: &str, index: usize) -> String {
+    format!("{}-{}", index, sanitize_filename(name))
+}
+
+/// Reduce a client-supplied filename to one safe path component, unprefixed.
+///
+/// Split out from [`safe_filename`] because a workspace upload keeps the user's
+/// own filename — an index prefix is right for per-turn staging, where collisions
+/// between two attachments in one message are the hazard, and wrong for a file
+/// the user is placing in their own project by name.
+pub fn sanitize_filename(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("attachment").trim();
 
     let cleaned: String = base
@@ -97,9 +109,8 @@ fn safe_filename(name: &str, index: usize) -> String {
         cleaned
     };
 
-    // Leave room for the prefix while staying well under any filesystem limit.
-    let truncated: String = cleaned.chars().take(120).collect();
-    format!("{}-{}", index, truncated)
+    // Leave room for a prefix while staying well under any filesystem limit.
+    cleaned.chars().take(120).collect()
 }
 
 #[cfg(test)]

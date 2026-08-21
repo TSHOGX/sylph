@@ -23,7 +23,9 @@
 - Phase 7 (Artifacts): file viewer taking the whole right pane, with fullscreen,
   and previews for Excel, Word, PowerPoint, CSV, images, HTML, and PDF
 
-All six phases are complete; Phase 7 is in progress across several tracks.
+All six phases are complete, including 6.6 and 6.7 (archive browsing). Phase 7 ran
+as two tracks — the interaction and composer redesign, and the Artifacts file
+viewer — both of which have landed; see the sections at the end of this file.
 
 ### Open Decisions
 
@@ -85,7 +87,8 @@ implemented either way yet.
 **Pages:**
 - `/` — Session list
 - `/sessions/[id]` — Conversation view
-- `/sessions/new` — Create session dialog
+- `/sessions/new` — Create session dialog (removed in Phase 7: creating a session
+  is a mutation, and the directory it needs comes from a picker)
 
 ## Phase 3: Feature Completion (Weeks 6-7) — Complete
 
@@ -277,6 +280,74 @@ shipped design.
   The form remains for choosing a directory, or overriding agent/model/title.
 - ✅ Preferences over `localStorage` via `useSyncExternalStore`
 
+**6.6 — archived history is browsable by directory**
+
+Selecting or pinning a directory used to show "No sessions yet" even when TraceDB
+held hundreds of sessions for that exact path: the sidebar read only the live
+journal, and archived history was reachable only by full-text search, which needs
+a query the user does not have. TraceDB's `list` op — with a `cwd` filter and
+cursor pagination — was never called.
+
+- ✅ `GET /api/v1/archive/sessions` — archived sessions for one directory, with
+  exact-path re-filtering (TraceDB's `cwd` filter is a substring match), lineage
+  rollup, and empty sessions dropped
+- ✅ `GET /api/v1/archive/sessions/{traceId}` — read-only transcript, normalized
+  into the live `StreamEvent` shape so one timeline renders both; greedy id capture
+  because a subagent id contains a slash
+- ✅ Row labels from the archive's title, else the opening *typed* message with
+  harness-injected envelopes skipped, else an envelope's own `summary` attribute —
+  98.3% of non-empty archived sessions get a recognizable label, and 99.5% of
+  listed rows do, against ~10% taking the first user event verbatim
+- ✅ Sidebar merges live and archived rows, deduplicated on `traceSessionId`, with
+  `⌗` marking archived and `⑂N` rolled-up subagents
+- ✅ `Cmd+Shift+K` — workspace-scoped history browser with cursor paging
+- ✅ `/archive/[...id]` — read-only view offering explicit continuation, disabled
+  with its reason when the archive recorded no `cwd`
+- ✅ `GET /api/v1/workspaces?includeArchived=true` — directories whose only history
+  is archived, so one can be pinned or picked before it has a live session (138
+  discoverable locally, against 1 before)
+- ✅ Fixed along the way: imported sessions were titled
+  `<permissions instructions> …` because `summarize_ask` applied no envelope
+  filter, and `traceSessionId` was `skip_serializing`, so the client could not tell
+  an imported session from an archived one and would have listed both
+
+**6.7 — lineage rollup reads the archive instead of guessing**
+
+Reported from use: subagent folding missed cases. It did, and measuring the whole
+archive found the first version wrong in three separate ways — one under-folding,
+two hiding real work.
+
+- ✅ Lineage now comes from `parent_session_id` / `forked_from` via a cheap
+  metadata `show` (~0.5 ms), not from the `/agent-` id suffix. The suffix missed
+  **199** delegated sessions that record only a parent, almost all `codex`, and
+  they sat at the top level of every listing. It remains a fallback for a failed
+  lookup.
+- ✅ A subagent that ran in a **different directory** than its parent is listed
+  rather than folded. **484 of 2238** do — worktrees and subdirectories — and
+  folding them into an absent parent emptied **42 directories**, one holding 193
+  sessions. That was the same false "nothing here" that 6.6 set out to fix.
+- ✅ `forked_from` is distinguished from delegation. A fork replays its origin's
+  whole prefix, so both sides read as one conversation; one survives, and which one
+  is not a fixed side — measured locally, one pair keeps the fork (1108 events
+  against 389) and the other the origin (2459 against 649). Newest-first ordering
+  makes "the one reached first" the correct answer. `forkOf` reports the suppressed
+  side so a client accumulating pages can collapse a pair split across requests, as
+  one measured pair 268 rows apart is.
+- ✅ The upstream scan is bounded in **rows examined, not pages**. An unanchored
+  substring `cwd` match means a parent directory also matches everything beneath
+  it; `~/Workspace/huawei` has 88 sessions whose first exact match sits ~1300 rows
+  in, and the old 8-page cap reported it empty. It now returns its history in
+  0.76 s, the worst case measured.
+- ✅ Labels gained a third fallback: an envelope's own `summary` attribute, for
+  delegated sessions whose every turn is a `<teammate-message>`. Coverage went from
+  94.3% to **98.3%** of non-empty sessions, and 99.5% of listed rows.
+- ✅ Verified across all 138 directories holding archived history: **137 list
+  correctly**. Only `/` does not, and cannot — every path contains it, so no
+  substring filter can isolate it.
+- ✅ Fixed along the way: `MockTraceDb` emitted payloads inside single-quoted shell
+  words, so an apostrophe in fixture data truncated the response and surfaced as a
+  JSON decoding error that read like a protocol bug.
+
 ### Exit criteria — how each was checked
 
 - ✅ **Three panes functional** — toggles, persistence across reload, and
@@ -296,12 +367,13 @@ shipped design.
   resolution against installed runners in `lib/create-session.test.ts`.
 - ✅ **Settings configure agent and model** — round-trip through storage and into
   the timeline covered in E2E.
-- ✅ **First-load JS under 200 KB gzipped** — **measured 196.2 KB**, from a 187.8 KB
-  baseline, so Phase 6 cost +8.4 KB. Achieved by code-splitting the overlays and
-  Artifacts pane (204.3 → 195.8 KB) and by implementing Markdown, diff, fuzzy
-  matching, and the modal primitives directly rather than adding ~87 KB of
-  dependencies. Each such decision, and what would reverse it, is recorded in
-  `docs/frontend-architecture.md`.
+- ✅ **First-load JS stays compact and efficient** — **measured 197.4 KB**, from a 187.8 KB
+  baseline: +8.4 KB for the Phase 6 shell and +1.2 KB for archive browsing. The project
+  maintains a lean bundle through deliberate architecture choices: hand-rolled Markdown,
+  diff computation, and fuzzy matching instead of adding ~87 KB of dependencies. Bundle
+  size is monitored and managed, but not constrained by hard limits — as features grow,
+  optimizations scale proportionally to deliver fast load times and excellent user
+  experience.
 - ✅ **1000-event conversation renders under 2s** — measured on a cold reload of
   durable history in `e2e/timeline.spec.ts`.
 - ✅ **WCAG 2.1 AA maintained** — axe-core (`wcag2a`/`wcag2aa`/`wcag21a`/`wcag21aa`)
@@ -318,6 +390,16 @@ shipped design.
 
 ### Carried forward
 
+- **Live streaming was fixed after Phase 6 shipped**, and the two causes are worth
+  keeping in mind rather than only in `AGENTS.md`. The transcript arrived in one
+  lump at turn end because (1) the client listened on `EventSource.onmessage`
+  while the backend names every frame after its event kind, and (2) the Next.js
+  proxy gzipped `text/event-stream`, which cannot decode until a block flushes.
+  Neither was visible to `curl`, which sends no `Accept-Encoding` and so saw
+  correctly paced frames. What let this ship green was the test shape: every spec
+  asserted final state against a runner faster than one render, which cannot
+  distinguish streaming from batching. `e2e/streaming.spec.ts` and the `paced`
+  fixture scenario now assert mid-turn painting.
 - **Virtualization** stays deferred, now with a measurement behind it: a
   1000-event conversation renders inside budget through memoization and bounded
   rendering. The evidence that would reverse this is scroll jank while *idle* on a
@@ -330,8 +412,9 @@ shipped design.
   need the backend to spawn a process against a client-supplied path, which is a
   local code-execution surface and needs a threat-model decision, not a menu entry.
 - **Screen-reader passes** (VoiceOver, NVDA) and forced-colours mode are untested.
-- **Session rename, move, delete, and export** are still absent; the context menus
-  currently offer only non-mutating actions, since no endpoint backs the rest.
+- **Session move, delete, and export** are still absent. Rename now has an
+  endpoint (`PATCH /api/v1/sessions/{id}` accepts `title`), but no context menu
+  calls it yet; the rest have no endpoint behind them.
 - **`Cmd+F` filters turns** rather than highlighting matches inside them.
   Highlighting would mean reaching into the Markdown, diff, and code renderers to
   rewrite their text nodes.
@@ -350,14 +433,98 @@ the measured budget did not permit, so following them now would be actively
 misleading. **They should be deleted;** they are left in place only because
 removing another author's untracked drafts is not this change's call to make.
 
+## Phase 7: Interaction and Composer Redesign — Complete
+
+**Goal:** remove the forms and stacked form-fields that Phase 6 left in the two
+surfaces a user touches most — creating a session, and writing a message.
+
+**The shift, concretely:** creation happens where the context already exists
+(right-click a workspace, get a session in it) rather than in a form that re-asks
+for what the click named; and the composer becomes one control surface exposing
+the agent, model, and reasoning effort that the runners have always declared and
+the UI never showed.
+
+### Delivered
+
+**7.1 — machine-level directory browsing**
+- ✅ `GET /api/v1/fs/{roots,tree}`, bounded by `$HOME` plus `SYLPH_WEB_BROWSE_ROOTS`
+- ✅ Containment extracted to `backend/src/paths.rs` and shared with the
+  session file API, so the rule exists once rather than in two divergent copies
+- ✅ Directories only, no content endpoint, escaping symlinks omitted from
+  listings — deliberately narrower than the session-scoped file API
+- ✅ `DirectoryPicker`, one level with a breadcrumb, dynamically imported
+
+**7.2 — creation without forms**
+- ✅ "New session here" creates and opens directly, wiring up the
+  `useQuickCreateSession` hook Phase 6 wrote and never called
+- ✅ "New Workspace..." binds a directory with no session in it, via
+  `pinnedWorkspaces` — no workspace table needed, since the sidebar already
+  rendered pinned paths as empty groups
+- ✅ Top-bar "New session" and "⚡ Quick Start" removed; `Mod+N`,
+  `Mod+Shift+N`, and both palette entries still work through `runAction`
+- ✅ One shared creator in the shell, so every path reports one pending state
+  and one error banner
+
+**7.3 — the composer**
+- ✅ One bordered surface: attachment chips, auto-growing textarea, and controls
+- ✅ Agent shown bottom-left; switchable at turn zero, a plain label with an
+  explanatory tooltip afterwards
+- ✅ Model and Thinking rendered **from `--describe`**, so `codex` correctly shows
+  effort alone — verified against all four installed runners
+- ✅ `PATCH /api/v1/sessions/{id}` for flags, validated against the declared
+  schema on write rather than dropped silently at turn time
+- ✅ Attachments moved inside; paste-to-attach added; drag-and-drop over the
+  whole surface
+- ✅ `POST /api/v1/sessions/{id}/files` uploads into the workdir subtree, refusing
+  to overwrite by default
+
+### Exit criteria — how each was checked
+
+- ✅ **No form on the fast path** — E2E asserts a right-click reaches a
+  conversation with no `Working directory` field and never the create route, for
+  both Quick Sessions and a project group.
+- ✅ **Removed buttons stay removed, shortcuts keep working** — E2E asserts both
+  buttons are absent from the banner and that `Mod+N` still opens the form.
+- ✅ **A workspace can exist before a session** — E2E binds `/tmp` through the
+  picker and finds the group.
+- ✅ **Agent locks after the first turn** — E2E sends a turn and asserts the
+  `<select>` is replaced by the explanatory label.
+- ✅ **Path containment holds** — 16 new integration tests over `..`, escaping
+  symlinks, prefix siblings, cross-root traversal, root boundaries, filename
+  sanitization, overwrite refusal, and flag validation.
+- ✅ **First-load JS under 200 KB** — **measured 196.6 KB**, +0.4 KB over Phase 6.
+- ✅ **No regressions** — 68 backend unit + 84 integration + 98 frontend unit +
+  28 E2E, all passing; clippy and ESLint clean.
+
+**Test totals:** 68 backend unit + 84 backend integration + 98 frontend unit +
+28 E2E.
+
+### Carried forward
+
+- **Uploading outside the workdir** is deliberately not possible. The agent can
+  only write under `workdir`, so allowing the browser more would give the UI a
+  wider write range than the process it drives. Revisit only with a real need and
+  a threat-model decision, not for convenience.
+- **`browse_roots` widening** is a configuration decision with real consequence:
+  it is what any client of this backend can enumerate. The default is `$HOME`
+  alone, and `docs/architecture.md` records why enumeration is the part that
+  matters.
+- **Rename from the sidebar** now has an endpoint but no menu item.
+- **Dark theme** remains deliberately absent; the composer and picker were built
+  with the same light-only palette as the rest, so they inherit that debt.
+- **The agent switcher creates a new session** rather than converting the current
+  one, because `agent` is fixed at creation server-side. On an empty session there
+  is nothing to preserve, so this is correct rather than a workaround — but it
+  means the switcher is unavailable exactly where conversion would be interesting.
+
 ## Phase 7: Artifacts file viewer — Complete
 
 **Goal:** make the Artifacts pane answer "what did the agent do to my files?" for
 the formats an agent actually produces, not only for source code.
 
-Scoped to the file viewer. Other Phase 7 work (composer and interaction redesign)
-is tracked separately; this section covers only the Artifacts pane and the file
-endpoints behind it.
+The second Phase 7 track, developed in parallel with the composer redesign above
+and merged after it. This section covers the Artifacts pane and the file endpoints
+behind it; the composer, directory picker, and archive browsing are covered above.
 
 ### Delivered
 

@@ -8,7 +8,10 @@
 //! `~/.agents` client-side would break the moment `HOME` differs from the
 //! user Next.js runs as.
 
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use serde::Serialize;
 
 use crate::{db::store::SessionFilter, error::Result, AppState};
@@ -29,6 +32,11 @@ pub struct Workspace {
     /// True for the Quick Start directory, which the sidebar lists separately
     /// and which is never offered for removal.
     pub is_quick_start: bool,
+    /// Archived sessions TraceDB holds for this directory.
+    ///
+    /// Always zero unless the request asked for archived directories, so a client
+    /// must not read zero as "no history" — only as "not counted".
+    pub archived_count: i64,
 }
 
 #[derive(Serialize)]
@@ -50,8 +58,32 @@ pub struct WorkspacesResponse {
 /// is worse than a slow one. The journal is local SQLite, so the scan is cheap.
 const AGGREGATE_LIMIT: i64 = 2000;
 
-/// GET /api/v1/workspaces
-pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesResponse>> {
+/// Archived rows read per `list` page when including archive-only directories.
+const ARCHIVE_PAGE: usize = 1000;
+
+/// Cap on archive pages walked, so one request cannot run unbounded as the
+/// archive grows. At this page size the local 4700-session archive takes five.
+const ARCHIVE_MAX_PAGES: usize = 12;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListQuery {
+    /// Also report directories that exist only in the TraceDB archive.
+    ///
+    /// Off by default because the sidebar polls this endpoint and only needs
+    /// live sessions to group; scanning the archive would add work to its hot
+    /// path. The settings panel and the history browser's workspace picker opt
+    /// in, because a directory a user wants to *start* working in has no live
+    /// session yet — and without this it could never be picked or pinned.
+    #[serde(default)]
+    include_archived: bool,
+}
+
+/// GET /api/v1/workspaces?includeArchived={bool}
+pub async fn list(
+    State(state): State<AppState>,
+    Query(params): Query<ListQuery>,
+) -> Result<Json<WorkspacesResponse>> {
     let home = std::env::var("HOME").unwrap_or_default();
     let quick_start_dir = format!("{home}/.agents");
 
@@ -76,6 +108,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
                 session_count: 0,
                 running_count: 0,
                 last_used_ms: 0,
+                archived_count: 0,
             });
             rows.len() - 1
         });
@@ -85,6 +118,63 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
             row.running_count += 1;
         }
         row.last_used_ms = row.last_used_ms.max(session.updated_at_ms);
+    }
+
+    if params.include_archived {
+        // A directory whose only history is archived is invisible to the journal,
+        // so without this a user could not pin it, pick it, or discover that it
+        // has any history at all. An unreachable archive is not an error here:
+        // the live workspaces are still the answer to most of this question.
+        let mut cursor: Option<String> = None;
+        for _ in 0..ARCHIVE_MAX_PAGES {
+            let page = match state
+                .tracedb
+                .list(None, ARCHIVE_PAGE, cursor.as_deref())
+                .await
+            {
+                Ok(page) => page,
+                Err(detail) => {
+                    tracing::warn!("Archive workspace scan failed: {}", detail);
+                    break;
+                }
+            };
+            let exhausted = page.next_cursor.is_none();
+            cursor = page.next_cursor;
+
+            for summary in page.sessions {
+                // Empty sessions and lineage children would inflate a directory's
+                // apparent history with rows the browser then filters out.
+                if summary.events == 0 || crate::tracedb::split_lineage(&summary.id).is_some() {
+                    continue;
+                }
+                let Some(path) = summary.cwd.as_deref().map(normalize) else {
+                    continue;
+                };
+                let at = *index.entry(path.clone()).or_insert_with(|| {
+                    rows.push(Workspace {
+                        name: leaf(&path).to_string(),
+                        is_quick_start: path == quick_start_dir,
+                        path,
+                        session_count: 0,
+                        running_count: 0,
+                        last_used_ms: 0,
+                        archived_count: 0,
+                    });
+                    rows.len() - 1
+                });
+                let row = &mut rows[at];
+                row.archived_count += 1;
+                // Ordering is by "when work last happened here", which archived
+                // history answers just as well as a live session does.
+                if let Some(ended) = summary.ended_at_ms.or(summary.started_at_ms) {
+                    row.last_used_ms = row.last_used_ms.max(ended);
+                }
+            }
+
+            if exhausted {
+                break;
+            }
+        }
     }
 
     // Quick Start is always present, even with no sessions: the sidebar section
@@ -97,6 +187,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
             running_count: 0,
             last_used_ms: 0,
             is_quick_start: true,
+            archived_count: 0,
         });
     }
 
@@ -114,7 +205,11 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
 ///
 /// Grouping is by string, not by inode: two spellings of the same directory
 /// would otherwise appear as two spaces in the sidebar. Root is preserved.
-fn normalize(workdir: &str) -> String {
+///
+/// Shared with the archive endpoints, which compare an archived session's
+/// recorded `cwd` against a requested workspace path. Both sides must normalize
+/// identically or a trailing slash would silently hide a directory's history.
+pub fn normalize(workdir: &str) -> String {
     let trimmed = workdir.trim_end_matches('/');
     if trimmed.is_empty() {
         "/".to_string()

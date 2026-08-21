@@ -29,6 +29,14 @@ export interface Session {
   workdir: string;
   /** Nullable: the backend stores title as an optional column. */
   title: string | null;
+  /**
+   * TraceDB id this session was imported from, when it was.
+   *
+   * Present only for imported native sessions. The archive browser uses it to
+   * recognize that an archived row and a live session are one conversation, and
+   * list it once rather than twice.
+   */
+  traceSessionId?: string;
   flagsJson: string;
   status: SessionStatus;
   createdAtMs: number;
@@ -192,6 +200,13 @@ export interface Workspace {
   runningCount: number;
   lastUsedMs: number;
   isQuickStart: boolean;
+  /**
+   * Archived sessions TraceDB holds here.
+   *
+   * Zero unless the request passed `includeArchived`, so zero means "not
+   * counted" rather than "no history".
+   */
+  archivedCount: number;
 }
 
 export interface WorkspacesResponse {
@@ -359,6 +374,116 @@ export interface DocumentWindow {
 }
 
 /**
+ * One archived session, as the sidebar and history browser list it.
+ *
+ * `id` is a TraceDB session id (`claude:uuid`), not a Sylph Web session id — and
+ * for a subagent it carries a `/agent-...` suffix, so it must be
+ * percent-encoded into a URL path.
+ */
+export interface ArchiveSession {
+  id: string;
+  agent: string;
+  /** Title, else the opening typed message. Absent for ~2% of real sessions. */
+  label?: string;
+  cwd: string;
+  model?: string;
+  startedAtMs?: number;
+  endedAtMs?: number;
+  /** Events the archive holds: the only size signal available. */
+  events: number;
+  /** Subagent sessions folded into this row rather than listed separately. */
+  subagentCount: number;
+  /**
+   * Origin's TraceDB id when this session is a fork of another.
+   *
+   * A fork replays its origin's whole prefix, so the two read as one conversation
+   * and only one belongs in a list. The server drops the loser within a single
+   * response, but a pair can straddle two pages, so a client accumulating pages
+   * must suppress a row whose `forkOf` names a session it has already shown.
+   */
+  forkOf?: string;
+  /** Live session id when already imported, so the UI opens it instead. */
+  sessionId?: string;
+}
+
+export interface ArchiveListResponse {
+  sessions: ArchiveSession[];
+  /** Cursor to continue from; absent on the last page. */
+  nextCursor?: string;
+  /**
+   * False when the TraceDB archive could not be reached. The request still
+   * succeeds, so a workspace with no archive reads as "live only" rather than
+   * as an error.
+   */
+  available: boolean;
+  detail?: string;
+}
+
+export interface BrowseRoot {
+  /** Display label: the directory leaf, or `Home` for the home directory. */
+  name: string;
+  /** Absolute path, handed straight back as a `workdir` or a listing request. */
+  path: string;
+}
+
+export interface BrowseRootsResponse {
+  roots: BrowseRoot[];
+  /** Absolute home directory, so paths can be abbreviated as `~/...`. */
+  home: string;
+}
+
+/** A subdirectory in the machine-level browser. Files are never listed. */
+export interface BrowseEntry {
+  path: string;
+  name: string;
+  modifiedAtMs: number;
+  isSymlink?: boolean;
+}
+
+export interface BrowseResponse {
+  path: string;
+  /**
+   * Absent at a configured root.
+   *
+   * The server withholds it rather than the client hiding it, so a "go up"
+   * affordance never offers a path the next request would refuse.
+   */
+  parent?: string;
+  entries: BrowseEntry[];
+  truncated: boolean;
+}
+
+export interface UploadFileRequest {
+  /** Destination directory relative to the workdir. Empty means the root. */
+  path?: string;
+  name: string;
+  /** Base64, no `data:` prefix — the same encoding attachments use. */
+  data: string;
+  /** Replace an existing file. Omitted means refuse instead. */
+  overwrite?: boolean;
+}
+
+export interface UploadFileResponse {
+  path: string;
+  absolutePath: string;
+  size: number;
+}
+
+/** A read-only archived transcript, normalized into live timeline events. */
+export interface ArchiveTranscript {
+  id: string;
+  agent: string;
+  label?: string;
+  /** Absent for 19% of the archive, which is why a session may be unresumable. */
+  cwd?: string;
+  startedAtMs?: number;
+  events: StreamEvent[];
+  /** True when `limit` cut the stream short. */
+  truncated: boolean;
+  sessionId?: string;
+}
+
+/**
  * An API failure carrying the backend's stable error code.
  *
  * The backend answers errors as `{error: {code, message}}` with UPPER_SNAKE
@@ -374,6 +499,31 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+  }
+}
+
+/**
+ * Parse a session's runner flags from the JSON column.
+ *
+ * The column is written by the backend and already validated, but parsed here
+ * rather than duplicated across every row because JSON parsing can technically
+ * throw and the client does not control what the editor-accessible database
+ * stores it. Parsing it here means the composer reads `flags.model` without every
+ * consumer repeating a `JSON.parse` that can throw on a hand-edited row.
+ */
+export function sessionFlags(session: Session): Record<string, string> {
+  try {
+    const parsed = JSON.parse(session.flagsJson || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    // Values are coerced rather than trusted: the column is free-form JSON, and a
+    // non-string would otherwise reach a `<select value>` as `[object Object]`.
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([, value]) => typeof value === "string")
+        .map(([key, value]) => [key, value as string]),
+    );
+  } catch {
+    return {};
   }
 }
 
@@ -488,19 +638,93 @@ export const api = {
         method: "POST",
         body: JSON.stringify(req),
       }),
-  },
-  workspaces: {
-    list: () => fetchAPI<WorkspacesResponse>("/workspaces"),
+    /** Change runner flags or the title of an existing session. */
+    update: (id: string, req: { flags?: Record<string, string>; title?: string }) =>
+      fetchAPI<{ session: Session }>(`/sessions/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(req),
+      }),
   },
   files: {
-    /** One directory level. Lazy expansion is what keeps a large repo usable. */
     tree: (sessionId: string, path = "") =>
-      fetchAPI<FileTreeResponse>(
-        `/sessions/${sessionId}/files${queryString({ path })}`,
-      ),
+      fetchAPI<FileTreeResponse>(`/sessions/${sessionId}/files${queryString({ path })}`),
     content: (sessionId: string, path: string) =>
-      fetchAPI<FileContentResponse>(
-        `/sessions/${sessionId}/files/content${queryString({ path })}`,
+      fetchAPI<FileContentResponse>(`/sessions/${sessionId}/files/content${queryString({ path })}`),
+    /**
+     * Upload one file into the session's working directory.
+     *
+     * Confined server-side to the workdir subtree — the same range the agent
+     * already writes to — and refuses to overwrite unless asked.
+     */
+    upload: (sessionId: string, req: UploadFileRequest) =>
+      fetchAPI<UploadFileResponse>(`/sessions/${sessionId}/files`, {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    /** A spreadsheet, CSV, Word document, or deck as structure. */
+    document: (sessionId: string, path: string, window: DocumentWindow = {}) =>
+      fetchAPI<FileDocumentResponse>(
+        `/sessions/${sessionId}/files/document${queryString({
+          path,
+          sheet: window.sheet,
+          row: window.row,
+          rows: window.rows,
+        })}`,
+      ),
+    /**
+     * URL for the file's bytes, for content the browser loads itself.
+     *
+     * A URL builder rather than a fetch: an `<img>`, `<iframe>`, or `<object>`
+     * requests this itself, which is what buys progressive decode and HTTP
+     * caching. Same-origin through the Next rewrite, so the `SameSite=Strict`
+     * session cookie is sent.
+     */
+    rawUrl: (sessionId: string, path: string) =>
+      `${API_BASE}/sessions/${sessionId}/files/raw${queryString({ path })}`,
+  },
+  /**
+   * Machine-level directory browsing, for choosing a workspace to bind.
+   *
+   * Separate from `files` because the root differs: `files` is rooted at one
+   * session's workdir, this at the backend's configured browse roots. There is
+   * deliberately no content call here — reading bytes stays session-scoped.
+   */
+  fs: {
+    roots: () => fetchAPI<BrowseRootsResponse>("/fs/roots"),
+    tree: (path = "") => fetchAPI<BrowseResponse>(`/fs/tree${queryString({ path })}`),
+  },
+  workspaces: {
+    /**
+     * `includeArchived` also reports directories that exist only in the TraceDB
+     * archive. Off by default because the sidebar polls this; surfaces where the
+     * user *picks* a directory pass it, since a directory they want to work in
+     * has no live session yet.
+     */
+    list: (options: { includeArchived?: boolean } = {}) =>
+      fetchAPI<WorkspacesResponse>(
+        `/workspaces${queryString({
+          includeArchived: options.includeArchived ? "true" : undefined,
+        })}`,
+      ),
+  },
+  archive: {
+    /**
+     * Archived sessions that ran in one directory, newest first.
+     *
+     * This is what makes a workspace's past visible: `search` only answers a
+     * question the user already knows how to ask.
+     */
+    list: (params: { workdir: string; limit?: number; cursor?: string }) =>
+      fetchAPI<ArchiveListResponse>(`/archive/sessions${queryString({ ...params })}`),
+    /**
+     * One archived transcript, read-only.
+     *
+     * The id is encoded whole rather than interpolated: a subagent id contains a
+     * `/`, which would otherwise be read as a path separator.
+     */
+    get: (traceId: string, limit?: number) =>
+      fetchAPI<ArchiveTranscript>(
+        `/archive/sessions/${encodeURIComponent(traceId)}${queryString({ limit })}`,
       ),
     /** A spreadsheet, CSV, Word document, or deck as structure. */
     document: (sessionId: string, path: string, window: DocumentWindow = {}) =>

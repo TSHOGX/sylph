@@ -2,16 +2,22 @@ import { expect, test, type Page } from "@playwright/test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createSession } from "./fixtures/session";
 
 /**
  * The Artifacts file viewer: the tree/viewer swap, fullscreen, and formats.
  *
  * # Why these specs write their own workdir
  *
- * The other specs create sessions in `/tmp`, whose contents are arbitrary, so
- * they can only assert that a tree exists. Asserting on *file contents* needs a
- * directory this spec controls, so each test mkdtemps one and creates the session
- * against it. Specs run in Node, so `fs` is available.
+ * The shared fixture defaults to `/tmp`, whose contents are arbitrary, so a spec
+ * using it can only assert that a tree exists. Asserting on *file contents* needs
+ * a directory the spec controls, so each test mkdtemps one and passes it to
+ * `createSession`. Specs run in Node, so `fs` is available.
+ *
+ * The session itself is a precondition here, not the subject, so it is created
+ * through the API via the shared fixture rather than by driving the picker — which
+ * is what keeps a change to the create UI from failing these specs. The create
+ * interaction is owned by `workspace-shell.spec.ts`.
  *
  * # What is deliberately not covered here
  *
@@ -33,12 +39,9 @@ function workdir(files: Record<string, string>): string {
   return dir;
 }
 
-async function openSession(page: Page, dir: string) {
-  await page.goto("/sessions/new");
-  await page.getByLabel("Agent").selectOption("e2e");
-  await page.getByLabel("Working directory").fill(dir);
-  await page.getByRole("button", { name: "Create session" }).click();
-  await expect(page.getByLabel("Message")).toBeVisible();
+/** Open a session on `dir` and reveal the Artifacts pane. */
+async function openPane(page: Page, dir: string) {
+  await createSession(page, { workdir: dir });
   await page.keyboard.press("ControlOrMeta+Backslash");
   const pane = page.getByRole("complementary", { name: "Artifacts" });
   await expect(pane).toBeVisible();
@@ -58,7 +61,7 @@ test("opening a file swaps the tree for the viewer, and Back restores both", asy
   fs.mkdirSync(path.join(dir, "nested"));
   fs.writeFileSync(path.join(dir, "nested", "inner.txt"), "inner file\n");
 
-  const pane = await openSession(page, dir);
+  const pane = await openPane(page, dir);
   const tree = pane.getByRole("tree");
   await expect(tree).toBeVisible();
 
@@ -83,7 +86,7 @@ test("the expand control opens a dialog that Escape closes, restoring focus", as
   page,
 }) => {
   const dir = workdir({ "data.csv": "region,revenue\nAPAC,1200\n" });
-  const pane = await openSession(page, dir);
+  const pane = await openPane(page, dir);
 
   await pane.getByRole("button", { name: /data\.csv/ }).click();
   const expand = pane.getByRole("button", { name: "Open full screen" });
@@ -105,7 +108,7 @@ test("the expand control opens a dialog that Escape closes, restoring focus", as
 /** The one-modal-at-a-time invariant. */
 test("opening a picker dismisses the fullscreen viewer", async ({ page }) => {
   const dir = workdir({ "data.csv": "a,b\n1,2\n" });
-  const pane = await openSession(page, dir);
+  const pane = await openPane(page, dir);
 
   await pane.getByRole("button", { name: /data\.csv/ }).click();
   await pane.getByRole("button", { name: "Open full screen" }).click();
@@ -134,7 +137,7 @@ test("a CSV renders as a table with real column letters and typed alignment", as
     // A quoted comma and an embedded newline, which naive splitting would break.
     "data.csv": 'region,revenue\n"Smith, Alice",1200\nBob,980\n',
   });
-  const pane = await openSession(page, dir);
+  const pane = await openPane(page, dir);
   await pane.getByRole("button", { name: /data\.csv/ }).click();
 
   const table = pane.getByRole("table");
@@ -161,7 +164,7 @@ test("HTML renders in a frame that cannot run scripts or reach the page", async 
       "<style>h1 { color: rgb(10, 20, 30) }</style>" +
       "<script>document.title = 'pwned'; parent.document.body.innerHTML = 'breached';</script>",
   });
-  const pane = await openSession(page, dir);
+  const pane = await openPane(page, dir);
   const titleBefore = await page.title();
 
   await pane.getByRole("button", { name: /page\.html/ }).click();
@@ -208,7 +211,7 @@ test("an image opens in a viewer offering fit and zoom", async ({ page }) => {
     Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64"),
   );
 
-  const pane = await openSession(page, dir);
+  const pane = await openPane(page, dir);
   await pane.getByRole("button", { name: /pixel\.gif/ }).click();
 
   await expect(pane.getByRole("img", { name: /pixel\.gif/ })).toBeVisible();
@@ -222,7 +225,7 @@ test("the viewer and the fullscreen dialog have no accessibility violations", as
   page,
 }) => {
   const dir = workdir({ "data.csv": "region,revenue\nAPAC,1200\nEMEA,980\n" });
-  const pane = await openSession(page, dir);
+  const pane = await openPane(page, dir);
   await pane.getByRole("button", { name: /data\.csv/ }).click();
   await expect(pane.getByRole("table")).toBeVisible();
 

@@ -18,8 +18,14 @@
 //!    the check cannot use `Path::components` filtering alone: that inspects the
 //!    request, and the escape lives on disk.
 //!
-//! Both operations are read-only. There is deliberately no write, rename, or
-//! delete endpoint: the agent mutates the workspace, the browser observes it.
+//! The containment check itself lives in [`crate::paths`], shared with the
+//! machine-level browser in [`crate::api::fs`]: a containment rule implemented
+//! twice is one that will diverge.
+//!
+//! Reads are unrestricted within the root. Writing is deliberately narrower —
+//! [`upload`] is the only mutating operation, it creates files and refuses to
+//! overwrite by default, and there is still no rename or delete endpoint. The
+//! agent mutates the workspace; the browser adds inputs for it to read.
 
 use std::path::{Path, PathBuf};
 
@@ -35,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     documents::{self, DocumentKind, Window},
     error::{Error, Result},
+    paths::{self, SKIPPED_DIRS},
     AppState,
 };
 
@@ -54,25 +61,6 @@ const TRUNCATE_TO_BYTES: usize = 256 * 1024;
 /// A `node_modules` directory can hold tens of thousands of entries; sending
 /// them all would stall the pane for a list nobody reads to the end.
 const MAX_ENTRIES: usize = 2000;
-
-/// Directory names never listed.
-///
-/// These are large, machine-generated, and never the artifact a user is looking
-/// for. `.git` is excluded for a second reason: it holds object data and config
-/// that has no business being browsable from a web pane.
-const SKIPPED_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    ".next",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".mypy_cache",
-    ".pytest_cache",
-    "dist",
-    "build",
-];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,7 +120,7 @@ pub async fn tree(
     let (root, target) = resolve(&state, &id, &query.path).await?;
 
     let metadata = std::fs::metadata(&target)
-        .map_err(|e| describe_io_error(&e, "read that directory"))?;
+        .map_err(|e| paths::describe_io_error(&e, "read that directory"))?;
     if !metadata.is_dir() {
         return Err(Error::InvalidRequest(
             "That path is a file, not a directory.".to_string(),
@@ -142,7 +130,7 @@ pub async fn tree(
     let mut entries = Vec::new();
     let mut truncated = false;
     let reader =
-        std::fs::read_dir(&target).map_err(|e| describe_io_error(&e, "read that directory"))?;
+        std::fs::read_dir(&target).map_err(|e| paths::describe_io_error(&e, "read that directory"))?;
 
     for entry in reader {
         let entry = match entry {
@@ -214,13 +202,13 @@ pub async fn tree(
             continue;
         }
 
-        let relative = join_relative(&query.path, &name);
+        let relative = paths::join_relative(&query.path, &name);
         entries.push(FileEntry {
             path: relative,
             name,
             is_dir,
             size: (!is_dir).then_some(metadata.len()),
-            modified_at_ms: modified_ms(&metadata),
+            modified_at_ms: paths::modified_ms(&metadata),
             is_symlink,
             preview_kind: (!is_dir).then(|| preview_kind(&resolved)).flatten(),
         });
@@ -236,7 +224,7 @@ pub async fn tree(
 
     Ok(Json(TreeResponse {
         root: root.display().to_string(),
-        path: normalize_relative(&query.path),
+        path: paths::normalize_relative(&query.path),
         entries,
         truncated,
     }))
@@ -278,7 +266,7 @@ pub async fn content(
     let (_root, target) = resolve(&state, &id, &query.path).await?;
 
     let metadata =
-        std::fs::metadata(&target).map_err(|e| describe_io_error(&e, "read that file"))?;
+        std::fs::metadata(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
     if metadata.is_dir() {
         return Err(Error::InvalidRequest(
             "That path is a directory, not a file.".to_string(),
@@ -294,26 +282,26 @@ pub async fn content(
     if is_image {
         if size > MAX_PREVIEW_BYTES {
             return Ok(Json(ContentResponse {
-                path: normalize_relative(&query.path),
+                path: paths::normalize_relative(&query.path),
                 absolute_path: target.display().to_string(),
                 size,
                 encoding: "binary".to_string(),
                 mime_type,
                 content: None,
                 truncated: true,
-                modified_at_ms: modified_ms(&metadata),
+                modified_at_ms: paths::modified_ms(&metadata),
             }));
         }
-        let bytes = std::fs::read(&target).map_err(|e| describe_io_error(&e, "read that file"))?;
+        let bytes = std::fs::read(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
         return Ok(Json(ContentResponse {
-            path: normalize_relative(&query.path),
+            path: paths::normalize_relative(&query.path),
             absolute_path: target.display().to_string(),
             size,
             encoding: "image".to_string(),
             mime_type,
             content: Some(base64_encode(&bytes)),
             truncated: false,
-            modified_at_ms: modified_ms(&metadata),
+            modified_at_ms: paths::modified_ms(&metadata),
         }));
     }
 
@@ -340,25 +328,25 @@ pub async fn content(
                 text
             };
             Ok(Json(ContentResponse {
-                path: normalize_relative(&query.path),
+                path: paths::normalize_relative(&query.path),
                 absolute_path: target.display().to_string(),
                 size,
                 encoding: "text".to_string(),
                 mime_type,
                 content: Some(content),
                 truncated,
-                modified_at_ms: modified_ms(&metadata),
+                modified_at_ms: paths::modified_ms(&metadata),
             }))
         }
         Err(_) => Ok(Json(ContentResponse {
-            path: normalize_relative(&query.path),
+            path: paths::normalize_relative(&query.path),
             absolute_path: target.display().to_string(),
             size,
             encoding: "binary".to_string(),
             mime_type,
             content: None,
             truncated: false,
-            modified_at_ms: modified_ms(&metadata),
+            modified_at_ms: paths::modified_ms(&metadata),
         })),
     }
 }
@@ -401,7 +389,7 @@ pub async fn document(
     let (_root, target) = resolve(&state, &id, &query.path).await?;
 
     let metadata =
-        std::fs::metadata(&target).map_err(|e| describe_io_error(&e, "read that file"))?;
+        std::fs::metadata(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
     if metadata.is_dir() {
         return Err(Error::InvalidRequest(
             "That path is a directory, not a document.".to_string(),
@@ -428,10 +416,10 @@ pub async fn document(
     };
 
     Ok(Json(DocumentResponse {
-        path: normalize_relative(&query.path),
+        path: paths::normalize_relative(&query.path),
         absolute_path: target.display().to_string(),
         size: metadata.len(),
-        modified_at_ms: modified_ms(&metadata),
+        modified_at_ms: paths::modified_ms(&metadata),
         document: parsed,
     }))
 }
@@ -496,7 +484,7 @@ pub async fn raw(
     let (_root, target) = resolve(&state, &id, &query.path).await?;
 
     let metadata =
-        std::fs::metadata(&target).map_err(|e| describe_io_error(&e, "read that file"))?;
+        std::fs::metadata(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
     if metadata.is_dir() {
         return Err(Error::InvalidRequest(
             "That path is a directory, not a file.".to_string(),
@@ -511,7 +499,7 @@ pub async fn raw(
     // may not need its body.
     let etag = format!(
         "\"{:x}-{:x}\"",
-        modified_ms(&metadata).max(0) as u64,
+        paths::modified_ms(&metadata).max(0) as u64,
         metadata.len()
     );
 
@@ -526,7 +514,7 @@ pub async fn raw(
         return Ok((StatusCode::NOT_MODIFIED, hardened_headers(&etag, &mime_type, inline)).into_response());
     }
 
-    let bytes = std::fs::read(&target).map_err(|e| describe_io_error(&e, "read that file"))?;
+    let bytes = std::fs::read(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
 
     Ok((hardened_headers(&etag, &mime_type, inline), bytes).into_response())
 }
@@ -606,11 +594,11 @@ fn preview_kind(path: &Path) -> Option<&'static str> {
 /// just to be discarded by the size check afterwards.
 fn read_prefix(path: &Path, limit: usize) -> Result<Vec<u8>> {
     use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|e| describe_io_error(&e, "read that file"))?;
+    let file = std::fs::File::open(path).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
     let mut buffer = Vec::with_capacity(limit.min(64 * 1024));
     file.take(limit as u64)
         .read_to_end(&mut buffer)
-        .map_err(|e| describe_io_error(&e, "read that file"))?;
+        .map_err(|e| paths::describe_io_error(&e, "read that file"))?;
     Ok(buffer)
 }
 
@@ -635,74 +623,126 @@ async fn resolve(state: &AppState, session_id: &str, relative: &str) -> Result<(
         ))
     })?;
 
-    let cleaned = normalize_relative(relative);
+    let cleaned = paths::normalize_relative(relative);
     if cleaned.is_empty() {
         return Ok((root.clone(), root));
     }
 
-    let joined = root.join(&cleaned);
-    let target = std::fs::canonicalize(&joined)
-        .map_err(|e| describe_io_error(&e, "find that path"))?;
+    // The containment check, shared with the machine-level browser so both
+    // endpoints resolve and compare identically.
+    let target = paths::contain(&root, &root.join(&cleaned))?;
 
-    // The containment check. `starts_with` on `Path` compares whole components,
-    // so `/workdir-evil` does not match a root of `/workdir` the way a string
-    // prefix test would.
+    Ok((root, target))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadRequest {
+    /// Destination directory, relative to the workdir. Empty means the root.
+    #[serde(default)]
+    pub path: String,
+    /// Filename as the user knows it; sanitized to one path component.
+    pub name: String,
+    /// File bytes, base64, no `data:` prefix — the same encoding turn
+    /// attachments already use, so the client has one encoder.
+    pub data: String,
+    /// Replace an existing file. Absent or false refuses instead.
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadResponse {
+    /// Path relative to the workdir, as the Artifacts pane addresses files.
+    pub path: String,
+    pub absolute_path: String,
+    pub size: u64,
+}
+
+/// POST /api/v1/sessions/{id}/files
+///
+/// Write one file into the session's working directory.
+///
+/// # Why writing is permitted here
+///
+/// Reading and writing are not symmetric risks, so this needs its own argument
+/// rather than inheriting the read endpoint's. The agent driving this session
+/// already writes anywhere under `workdir` — that is what a coding agent does —
+/// so a browser upload confined to the same subtree grants no capability the
+/// session did not already have. What it must not become is a general
+/// file-writing service: hence the root is the journalled `workdir` and never a
+/// client-supplied directory, the destination is resolved through the same
+/// containment check as reads, and an existing file is refused rather than
+/// silently replaced, so an upload cannot quietly destroy source the user did
+/// not mean to touch.
+pub async fn upload(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<UploadRequest>,
+) -> Result<(StatusCode, Json<UploadResponse>)> {
+    // Resolves the *parent directory*, not the target: the file may not exist
+    // yet, and `canonicalize` requires an existing path. Containment is therefore
+    // established on the directory, and the filename is reduced to a single
+    // component that cannot re-introduce a separator.
+    let (root, directory) = resolve(&state, &id, &req.path).await?;
+
+    let metadata = std::fs::metadata(&directory)
+        .map_err(|e| paths::describe_io_error(&e, "read that directory"))?;
+    if !metadata.is_dir() {
+        return Err(Error::InvalidRequest(
+            "The upload destination is a file, not a directory.".to_string(),
+        ));
+    }
+
+    let filename = crate::attachments::sanitize_filename(&req.name);
+    let target = directory.join(&filename);
+
+    // Re-assert containment on the joined path. `sanitize_filename` already
+    // strips separators, so this cannot currently fail — it is kept because the
+    // cost is one comparison and the alternative is trusting a sanitizer at a
+    // distance from the boundary it protects.
     if !target.starts_with(&root) {
         return Err(Error::Forbidden(
             "That path is outside the session's working directory.".to_string(),
         ));
     }
 
-    Ok((root, target))
-}
-
-/// Normalize a client-supplied relative path to `a/b/c` form.
-///
-/// This is tidying, not security: it strips leading slashes so an absolute-looking
-/// request is treated as relative, drops `.` segments, and collapses empty ones.
-/// `..` is deliberately left in place for [`resolve`] to catch by canonicalization,
-/// because filtering it here would create the illusion that this function is the
-/// defense. It is not.
-fn normalize_relative(path: &str) -> String {
-    path.split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-/// Append a child name to a relative directory path.
-fn join_relative(parent: &str, name: &str) -> String {
-    let parent = normalize_relative(parent);
-    if parent.is_empty() {
-        name.to_string()
-    } else {
-        format!("{parent}/{name}")
+    if target.exists() && !req.overwrite {
+        return Err(Error::InvalidRequest(format!(
+            "{filename} already exists. Send overwrite to replace it."
+        )));
     }
-}
 
-fn modified_ms(metadata: &std::fs::Metadata) -> i64 {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+    let bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        req.data.as_bytes(),
+    )
+    .map_err(|e| Error::AttachmentInvalid(format!("Invalid base64 in '{}': {e}", req.name)))?;
 
-/// Turn an IO error into an API error that names the cause.
-///
-/// `NotFound` and `PermissionDenied` are the two a user can act on, and they
-/// need different statuses: a missing file is a 404, a refused one is not.
-/// Everything else is internal, and its message is withheld because IO error
-/// strings carry absolute paths.
-fn describe_io_error(error: &std::io::Error, action: &str) -> Error {
-    match error.kind() {
-        std::io::ErrorKind::NotFound => Error::FileNotFound,
-        std::io::ErrorKind::PermissionDenied => Error::Forbidden(format!(
-            "Permission denied trying to {action}."
-        )),
-        _ => Error::Internal(format!("Failed to {action}: {error}")),
+    // Same ceiling as a turn attachment: both are browser uploads over the same
+    // transport, and two different limits would be arbitrary.
+    if bytes.len() > crate::attachments::MAX_ATTACHMENT_BYTES {
+        return Err(Error::AttachmentInvalid(format!(
+            "'{}' is {} bytes (max {})",
+            req.name,
+            bytes.len(),
+            crate::attachments::MAX_ATTACHMENT_BYTES
+        )));
     }
+
+    tokio::fs::write(&target, &bytes)
+        .await
+        .map_err(|e| paths::describe_io_error(&e, "write that file"))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(UploadResponse {
+            path: paths::join_relative(&req.path, &filename),
+            absolute_path: target.display().to_string(),
+            size: bytes.len() as u64,
+        }),
+    ))
 }
 
 /// Extension-based MIME guess, for choosing a viewer and a highlighter.
@@ -765,21 +805,21 @@ mod tests {
 
     #[test]
     fn relative_paths_are_normalized_without_pretending_to_be_safe() {
-        assert_eq!(normalize_relative("/src/main.rs"), "src/main.rs");
-        assert_eq!(normalize_relative("src//main.rs"), "src/main.rs");
-        assert_eq!(normalize_relative("./src/./main.rs"), "src/main.rs");
-        assert_eq!(normalize_relative(""), "");
-        assert_eq!(normalize_relative("/"), "");
+        assert_eq!(paths::normalize_relative("/src/main.rs"), "src/main.rs");
+        assert_eq!(paths::normalize_relative("src//main.rs"), "src/main.rs");
+        assert_eq!(paths::normalize_relative("./src/./main.rs"), "src/main.rs");
+        assert_eq!(paths::normalize_relative(""), "");
+        assert_eq!(paths::normalize_relative("/"), "");
         // `..` survives on purpose: canonicalization in `resolve` is the check,
         // and stripping it here would hide traversal attempts from that check.
-        assert_eq!(normalize_relative("../etc/passwd"), "../etc/passwd");
+        assert_eq!(paths::normalize_relative("../etc/passwd"), "../etc/passwd");
     }
 
     #[test]
     fn join_relative_builds_child_paths() {
-        assert_eq!(join_relative("", "src"), "src");
-        assert_eq!(join_relative("src", "main.rs"), "src/main.rs");
-        assert_eq!(join_relative("/src/", "main.rs"), "src/main.rs");
+        assert_eq!(paths::join_relative("", "src"), "src");
+        assert_eq!(paths::join_relative("src", "main.rs"), "src/main.rs");
+        assert_eq!(paths::join_relative("/src/", "main.rs"), "src/main.rs");
     }
 
     /// A sibling directory sharing a prefix must not be reachable. This is the

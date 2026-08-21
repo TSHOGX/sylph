@@ -7,6 +7,7 @@ import { api, type SessionFilters, type SessionOrigin } from "@/lib/api";
 import { formatRelative, sessionLabel } from "@/lib/format";
 import { useDebounced } from "@/lib/use-debounced";
 import { OriginBadge, SessionStatusBadge } from "@/components/badges";
+import { useWorkspaceUI } from "@/lib/workspace-ui";
 
 interface Filters {
   agent: string;
@@ -36,6 +37,7 @@ function toQuery(filters: Filters): SessionFilters {
 }
 
 export default function HomePage() {
+  const { browseHistory, runAction } = useWorkspaceUI();
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const filtersActive = Object.values(filters).some(Boolean);
 
@@ -112,17 +114,35 @@ export default function HomePage() {
           </div>
         ) : total === 0 && !filtersActive ? (
           <div className="py-16 text-center">
-            <p className="font-medium text-gray-800">No sessions yet</p>
+            <p className="font-medium text-gray-800">No sessions in this app yet</p>
+            {/* "No sessions yet" was misleading: it means no session was created
+                *here*, while the archive may hold years of coding-agent history
+                for these same directories. The sidebar now shows that history, so
+                this points at browsing it rather than only at creating. */}
             <p className="mx-auto mt-1 max-w-sm text-sm text-gray-500">
               A session pairs an agent with a working directory. Create one to start a
-              conversation, or search the TraceDB archive to import existing history.
+              conversation, or browse a workspace&rsquo;s archived history in the sidebar to
+              read what an agent did there before.
             </p>
-            <Link
-              href="/sessions/new"
-              className="mt-4 inline-block rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-            >
-              Create your first session
-            </Link>
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+              {/* A button running the shared action, not a link to a route:
+                  creating a session is a mutation once its directory is known,
+                  and this is the same path `Mod+N` takes. */}
+              <button
+                type="button"
+                onClick={() => runAction("newSession")}
+                className="inline-block rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              >
+                Create your first session
+              </button>
+              <button
+                type="button"
+                onClick={() => browseHistory()}
+                className="inline-block rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              >
+                Browse past work
+              </button>
+            </div>
           </div>
         ) : (
           <>
