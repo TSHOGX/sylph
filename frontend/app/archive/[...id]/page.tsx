@@ -28,6 +28,7 @@ import { formatTimestamp } from "@/lib/format";
 import { densityClasses, useSettings } from "@/lib/settings";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Timeline } from "@/components/timeline";
+import { ContextMenu, type MenuItem } from "@/components/context-menu";
 
 /** Events fetched at once. The largest archived session here is 8167 events. */
 const EVENT_LIMIT = 2000;
@@ -39,6 +40,7 @@ export default function ArchivedSessionPage() {
   const { settings } = useSettings();
   const { showArtifact, setActiveWorkdir } = useWorkspaceUI();
   const [expandAll, setExpandAll] = useState<boolean | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   // A catch-all yields the path segments still percent-encoded, so each is
   // decoded before rejoining with "/" to restore the archive's own spelling
@@ -127,10 +129,32 @@ export default function ArchivedSessionPage() {
 
   const density = densityClasses(settings.density);
   const title = data.label ?? `Untitled ${data.agent} session`;
+  const menuItems: MenuItem[] = [
+    {
+      label: "Copy original session ID",
+      onSelect: () => void navigator.clipboard.writeText(data.id).catch(() => {}),
+    },
+    ...(data.cwd
+      ? [{
+          label: "Copy workspace path",
+          onSelect: () => void navigator.clipboard.writeText(data.cwd!).catch(() => {}),
+        }]
+      : []),
+    {
+      label: "Refresh transcript",
+      onSelect: () => void transcript.refetch(),
+    },
+  ];
 
   return (
     <>
-      <header className="shrink-0 border-b border-gray-200 px-4 py-2">
+      <header
+        className="shrink-0 border-b border-gray-200 px-4 py-2"
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY });
+        }}
+      >
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="truncate text-sm font-semibold">{title}</h1>
           <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-700">
@@ -164,6 +188,15 @@ export default function ArchivedSessionPage() {
           {data.startedAtMs ? ` · started ${formatTimestamp(data.startedAtMs)}` : ""}
         </p>
       </header>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems}
+          onClose={() => setMenu(null)}
+          label={`${title} actions`}
+        />
+      )}
 
       <ContinuationBar
         sessionId={data.sessionId}

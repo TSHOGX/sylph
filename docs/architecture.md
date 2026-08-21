@@ -119,7 +119,8 @@ Operations:
 - `search` — full-text search
 
 Sylph Web reads from TraceDB for:
-- Session list (merged with live sessions, deduplicated)
+- Session list and archive browser (deduplicated by imported TraceDB id or by
+  the runner's native session id once ingestion is observed)
 - Native session import (creates lightweight continuation)
 - Cross-agent search
 

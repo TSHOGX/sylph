@@ -51,7 +51,8 @@ test("a new session accepts a turn and streams the reply", async ({ page }) => {
   await expect(thinking).toBeVisible();
 
   // The user's own message is journalled too, so history is complete.
-  await expect(page.getByText("Hello from Playwright")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Hello from Playwright" })).toBeVisible();
+  await expect(page.getByLabel(/Turn /).getByText("Hello from Playwright")).toBeVisible();
 });
 
 test("a created session appears in the list with its origin", async ({ page }) => {
@@ -80,7 +81,8 @@ test("reloading mid-conversation replays the journal", async ({ page }) => {
   await page.reload();
 
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
-  await expect(page.getByText("Persist this")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Persist this" })).toBeVisible();
+  await expect(page.getByLabel(/Turn /).getByText("Persist this")).toBeVisible();
 });
 
 /** The session a run creates must show up under its workspace in the sidebar. */

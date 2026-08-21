@@ -138,7 +138,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/sessions/import", post(api::sessions::import))
         .route(
             "/api/v1/sessions/{id}",
-            get(api::sessions::get).patch(api::sessions::update),
+            get(api::sessions::get)
+                .patch(api::sessions::update)
+                .delete(api::sessions::delete_empty),
         )
         .route(
             "/api/v1/sessions/{id}/turns",

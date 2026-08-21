@@ -105,6 +105,7 @@ List sessions (live + TraceDB, deduplicated).
       "identityMode": "sylph",
       "lifecycleMode": "sylph",
       "agent": "claude",
+      "nativeSessionId": "native-agent-id",
       "workdir": "/Users/hsw/Workspace/project",
       "title": "Feature implementation",
       "flags": { "model": "opus-5", "effort": "high" },
@@ -181,8 +182,11 @@ the opening user turn.
 }
 ```
 
-`traceSessionId` is deliberately absent from the response: agent-native
-identifiers are never exposed in session payloads.
+Live sessions expose `nativeSessionId` after the first runner turn. It is the
+agent-native id returned by the runner, and is the id users should copy into
+the originating agent or TraceDB. `id` remains the Sylph Web route key. Native
+imports also expose `traceSessionId`, the complete TraceDB id. The backend uses
+both forms when reconciling a live row with an archive row.
 
 **Errors:**
 - `400` — malformed `traceSessionId`, no runner for the originating agent, or
@@ -202,7 +206,7 @@ Get session detail with incarnations and turn summary.
   "incarnations": [
     {
       "id": "i_def456",
-      "backendSessionId": "opaque_id",
+      "nativeSessionId": "opaque_id",
       "createdAtMs": 1724054400000,
       "lastUsedAtMs": 1724058000000
     }

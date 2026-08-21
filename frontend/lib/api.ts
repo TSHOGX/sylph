@@ -26,6 +26,8 @@ export interface Session {
   /** Lifecycle policy: governs reset and compaction eligibility. */
   lifecycleMode: string;
   agent: string;
+  /** Agent-native id returned by the runner, when a turn has started. */
+  nativeSessionId?: string;
   workdir: string;
   /** Nullable: the backend stores title as an optional column. */
   title: string | null;
@@ -644,6 +646,8 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify(req),
       }),
+    deleteEmpty: (id: string) =>
+      fetchAPI<void>(`/sessions/${id}`, { method: "DELETE" }),
   },
   files: {
     tree: (sessionId: string, path = "") =>
