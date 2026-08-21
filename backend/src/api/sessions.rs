@@ -351,7 +351,7 @@ pub async fn import(
 
     // Importing twice would produce two live sessions mirroring one archived
     // session, and each would resume the same native history independently.
-    if state.store.find_session_by_trace_id(trace_id).await?.is_some() {
+    if state.store.find_session_by_archive_id(trace_id).await?.is_some() {
         return Err(Error::SessionAlreadyImported);
     }
 

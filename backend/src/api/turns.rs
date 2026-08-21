@@ -64,6 +64,12 @@ pub async fn create(
     }
 
     let text = req.text.unwrap_or_default();
+    if session.title.as_deref().is_none_or(|title| title.trim().is_empty()) {
+        // The opening ask is the one title source available before TraceDB
+        // ingestion. Persisting it here keeps a live row recognisable and makes
+        // its later archived counterpart use the same label.
+        state.store.set_session_title_if_empty(&session_id, &text).await?;
+    }
     let attachments = req.attachments.unwrap_or_default();
     let staged_attachments = attachments::stage(
         &state.config.data_dir,

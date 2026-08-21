@@ -295,7 +295,8 @@ cursor pagination — was never called.
   harness-injected envelopes skipped, else an envelope's own `summary` attribute —
   98.3% of non-empty archived sessions get a recognizable label, and 99.5% of
   listed rows do, against ~10% taking the first user event verbatim
-- ✅ Sidebar merges live and archived rows, deduplicated on `traceSessionId`, with
+- ✅ Sidebar merges live and archived rows, deduplicated on imported
+  `traceSessionId` or the runner's `<agent>:<native-session-id>` identity, with
   `⌗` marking archived and `⑂N` rolled-up subagents
 - ✅ `Cmd+Shift+K` — workspace-scoped history browser with cursor paging
 - ✅ `/archive/[...id]` — read-only view offering explicit continuation, disabled
@@ -305,8 +306,9 @@ cursor pagination — was never called.
   discoverable locally, against 1 before)
 - ✅ Fixed along the way: imported sessions were titled
   `<permissions instructions> …` because `summarize_ask` applied no envelope
-  filter, and `traceSessionId` was `skip_serializing`, so the client could not tell
-  an imported session from an archived one and would have listed both
+  filter; live rows now persist the opening ask as their title and expose the
+  runner's native id for copy/paste; archive matching also covers sessions that
+  are ingested after a live turn without requiring an import
 
 **6.7 — lineage rollup reads the archive instead of guessing**
 

@@ -23,7 +23,7 @@ import { useParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type ArchiveSession, type Session } from "@/lib/api";
-import { formatRelative, sessionLabel } from "@/lib/format";
+import { formatRelative, originalSessionId, sessionLabel } from "@/lib/format";
 import { useSettings } from "@/lib/settings";
 import dynamic from "next/dynamic";
 
@@ -522,9 +522,19 @@ function SessionRow({
 
   const items: MenuItem[] = [
     {
-      label: "Copy session id",
-      onSelect: () => void navigator.clipboard.writeText(session.id).catch(() => {}),
+      label:
+        session.traceSessionId || session.nativeSessionId
+          ? "Copy original session ID"
+          : "Copy Web session ID",
+      onSelect: () =>
+        void navigator.clipboard.writeText(originalSessionId(session)).catch(() => {}),
     },
+    ...(session.traceSessionId || session.nativeSessionId
+      ? [{
+          label: "Copy Web session ID",
+          onSelect: () => void navigator.clipboard.writeText(session.id).catch(() => {}),
+        }]
+      : []),
     {
       label: "Copy workspace path",
       onSelect: () => void navigator.clipboard.writeText(session.workdir).catch(() => {}),
@@ -604,13 +614,36 @@ function SessionRow({
  * (WCAG 1.4.1).
  */
 function ArchivedRow({ session }: { session: ArchiveSession }) {
+  const queryClient = useQueryClient();
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const when = session.endedAtMs ?? session.startedAtMs;
   const label = session.label ?? `Untitled ${session.agent} session`;
+  const items: MenuItem[] = [
+    {
+      label: "Copy original session ID",
+      onSelect: () => void navigator.clipboard.writeText(session.id).catch(() => {}),
+    },
+    {
+      label: "Copy workspace path",
+      onSelect: () => void navigator.clipboard.writeText(session.cwd).catch(() => {}),
+    },
+    {
+      label: "Refresh transcript",
+      onSelect: () => {
+        void queryClient.invalidateQueries({ queryKey: ["archive", "transcript", session.id] });
+        void queryClient.invalidateQueries({ queryKey: ["archive", "sessions"] });
+      },
+    },
+  ];
 
   return (
     <li>
       <Link
         href={`/archive/${encodeURIComponent(session.id)}`}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY });
+        }}
         title={`${label} — archived ${session.agent} session, read-only`}
         className="flex items-center gap-1.5 rounded px-1.5 py-1 text-xs text-gray-600 hover:bg-gray-200/60 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
       >
@@ -630,6 +663,15 @@ function ArchivedRow({ session }: { session: ArchiveSession }) {
           {formatRelative(when).replace(" ago", "")}
         </span>
       </Link>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={items}
+          onClose={() => setMenu(null)}
+          label={`${label} actions`}
+        />
+      )}
     </li>
   );
 }

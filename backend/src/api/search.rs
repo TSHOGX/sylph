@@ -88,7 +88,7 @@ pub async fn search(
         // cost less than fanning out over the connection pool.
         let session_id = state
             .store
-            .find_session_by_trace_id(&hit.id)
+            .find_session_by_archive_id(&hit.id)
             .await?
             .map(|session| session.id);
         results.push(SearchResultItem { hit, session_id });

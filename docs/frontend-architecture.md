@@ -902,13 +902,18 @@ function SessionSearch() {
     { enabled: query.length >= 2 }
   )
   
-  // Merge and deduplicate by trace_session_id
+  // The backend annotates archive hits with the matching Web session id. For
+  // live rows without an import, nativeSessionId is the durable identity.
   const merged = useMemo(() => {
     const live = liveResults.sessions
     const trace = traceResults?.sessions || []
     
     const traceIds = new Set(live.map(s => s.traceSessionId).filter(Boolean))
-    const uniqueTrace = trace.filter(s => !traceIds.has(s.traceSessionId))
+    const nativeIds = new Set(live
+      .filter(s => s.nativeSessionId)
+      .map(s => `${s.agent}:${s.nativeSessionId}`))
+    const uniqueTrace = trace.filter(s =>
+      !traceIds.has(s.traceSessionId) && !nativeIds.has(s.traceSessionId))
     
     return [...live, ...uniqueTrace]
   }, [liveResults, traceResults])
@@ -937,9 +942,11 @@ and merges:
 
 - **Live rows first**, then archived ones. A session you can continue outranks one
   you can only read.
-- **Deduplicated** on `traceSessionId` / `sessionId`. An imported archived session
-  is the same conversation as a live row, so listing both would offer two routes
-  into one history.
+- **Deduplicated** on `traceSessionId` / `sessionId`, with a backend fallback to
+  the originating agent's `<agent>:<native-session-id>` identity. This covers a
+  normal live session as soon as TraceDB ingests it, before any explicit import.
+  An imported archived session is the same conversation as a live row, so listing
+  both would offer two routes into one history.
 - **Marked by shape, not colour** (WCAG 1.4.1): `●` sylph, `◆` native, `⌗`
   archived, with `⑂N` for rolled-up subagent sessions. `⑂N` counts only subagents
   that ran in *this* directory — one that ran in a worktree or subdirectory is a
@@ -1581,5 +1588,3 @@ guards them.
 - Event protocol: `docs/architecture.md` (Event Streaming section)
 - Database schema: `docs/database-schema.md`
 - Product roadmap: `docs/roadmap.md`
-
-

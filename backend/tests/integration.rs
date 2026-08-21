@@ -107,8 +107,9 @@ async fn create_and_read_back_a_session() {
     assert_eq!(session["lifecycleMode"], "sylph");
     assert_eq!(session["status"], "idle");
 
-    // Agent-native identifiers must never appear in an API response.
-    assert!(session.get("backendSessionId").is_none());
+    // A native id is absent until the first runner turn; the Web UUID remains
+    // the only id for an untouched draft.
+    assert!(session.get("nativeSessionId").is_none());
     assert!(session.get("traceSessionId").is_none());
 
     let id = session["id"].as_str().unwrap();
@@ -278,7 +279,17 @@ async fn session_history_404s_for_an_unknown_session() {
 #[tokio::test]
 async fn turn_runs_to_completion_and_journals_its_events() {
     let backend = TestBackend::start().await;
-    let session_id = backend.create_session("mock").await;
+    let session_response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({"agent": "mock", "workdir": backend.workdir().display().to_string()}),
+        )
+        .await;
+    assert_eq!(session_response.status(), StatusCode::CREATED);
+    let session_id = json_body(session_response).await["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let response = backend
         .post_authed(
@@ -329,6 +340,18 @@ async fn turn_runs_to_completion_and_journals_its_events() {
         seqs.windows(2).all(|pair| pair[0] < pair[1]),
         "sequence numbers not increasing: {seqs:?}"
     );
+
+    // The live row exposes the same native identity that TraceDB will later
+    // ingest, and its title is derived from the opening ask immediately.
+    let session = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}"))
+            .await,
+    )
+    .await["session"]
+        .clone();
+    assert_eq!(session["nativeSessionId"], "mock-session-1");
+    assert_eq!(session["title"], "do the thing");
 }
 
 /// An event stream must forbid intermediaries from re-encoding it.
@@ -1773,12 +1796,12 @@ async fn importing_a_native_session_preserves_its_identity() {
     assert_eq!(session["title"], "审查冗余的代码");
     // The archive id is exposed so the archive browser can tell that an archived
     // row and this live session are one conversation, and list it once rather
-    // than twice. `backendSessionId` stays hidden: it is runner-internal.
+    // than twice. The imported session has no runner-native id until resumed.
     assert_eq!(
         session["traceSessionId"],
         "mock:f45ba2ed-3866-4dba-9769-801029b16aa3"
     );
-    assert!(session.get("backendSessionId").is_none());
+    assert!(session.get("nativeSessionId").is_none());
 }
 
 #[tokio::test]
