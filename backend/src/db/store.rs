@@ -121,8 +121,7 @@ impl LiveStore {
         sqlx::query_as::<_, Session>(
             r#"
             SELECT * FROM sessions
-            WHERE (origin = 'native' OR EXISTS (SELECT 1 FROM turns WHERE turns.session_id = sessions.id))
-              AND (?1 IS NULL OR agent = ?1)
+            WHERE (?1 IS NULL OR agent = ?1)
               AND (?2 IS NULL OR origin = ?2)
               AND (?3 IS NULL OR instr(lower(workdir), lower(?3)) > 0)
               AND (?4 IS NULL OR updated_at_ms >= ?4)
