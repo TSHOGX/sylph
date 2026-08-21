@@ -70,8 +70,21 @@ export default function SessionPage() {
 
   const session = sessionQuery.data?.session;
   const history = useMemo(() => historyQuery.data?.turns ?? [], [historyQuery.data]);
-  sessionRef.current = session;
-  hasHistoryRef.current = history.length > 0;
+
+  // Mirrored into refs so the unmount cleanup below can read current values: it
+  // has an empty dependency array on purpose, because re-running it on every
+  // session or history change would schedule and cancel the discard repeatedly
+  // rather than once at unmount.
+  //
+  // Written in an effect rather than during render. A render-phase ref write is a
+  // side effect in a function React may call speculatively and discard, so it can
+  // publish a value from a render that never committed — and it is what
+  // `react-hooks/refs` flags. An effect runs only after commit, which is exactly
+  // the guarantee the cleanup needs.
+  useEffect(() => {
+    sessionRef.current = session;
+    hasHistoryRef.current = history.length > 0;
+  }, [session, history]);
 
   useEffect(() => {
     if (cleanupTimerRef.current !== undefined) {
