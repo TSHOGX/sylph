@@ -70,7 +70,41 @@ export function HistoryOverlay() {
   // recompute on every keystroke instead of only when a page arrives.
   const pages = history.data?.pages;
   const available = pages === undefined || pages.length === 0 || pages[0].available;
-  const sessions = useMemo(() => (pages ?? []).flatMap((page) => page.sessions), [pages]);
+  const sessions = useMemo(() => {
+    const all = (pages ?? []).flatMap((page) => page.sessions);
+
+    // Collapse forks across page boundaries. A fork and its origin are one
+    // conversation — both replay the same prefix — and the server drops the loser
+    // within a single response, but it holds no state between requests. One
+    // measured pair sits 268 rows apart, so only a client accumulating pages sees
+    // both.
+    //
+    // Both directions matter, because either side can come first. Rows arrive
+    // newest-first, so the survivor is whichever appears earlier: a fork naming an
+    // origin already shown is the duplicate, and an origin whose fork was shown
+    // earlier is likewise the duplicate.
+    //
+    // Two index maps rather than a nested scan, so this stays linear as pages
+    // accumulate — a directory here can reach several hundred loaded rows.
+    const firstIndexById = new Map<string, number>();
+    const forkIndexByOrigin = new Map<string, number>();
+    all.forEach((session, index) => {
+      if (!firstIndexById.has(session.id)) firstIndexById.set(session.id, index);
+      if (session.forkOf && !forkIndexByOrigin.has(session.forkOf)) {
+        forkIndexByOrigin.set(session.forkOf, index);
+      }
+    });
+
+    return all.filter((session, index) => {
+      const originIndex = session.forkOf ? firstIndexById.get(session.forkOf) : undefined;
+      // A fork whose origin appears earlier: the origin survives.
+      if (originIndex !== undefined && originIndex < index) return false;
+      // An origin whose fork appears earlier: the fork survives.
+      const forkIndex = forkIndexByOrigin.get(session.id);
+      if (forkIndex !== undefined && forkIndex < index) return false;
+      return true;
+    });
+  }, [pages]);
 
   const rows = useMemo(() => {
     if (!query.trim()) return sessions;

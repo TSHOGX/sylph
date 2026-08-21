@@ -280,6 +280,15 @@ export interface ArchiveSession {
   events: number;
   /** Subagent sessions folded into this row rather than listed separately. */
   subagentCount: number;
+  /**
+   * Origin's TraceDB id when this session is a fork of another.
+   *
+   * A fork replays its origin's whole prefix, so the two read as one conversation
+   * and only one belongs in a list. The server drops the loser within a single
+   * response, but a pair can straddle two pages, so a client accumulating pages
+   * must suppress a row whose `forkOf` names a session it has already shown.
+   */
+  forkOf?: string;
   /** Live session id when already imported, so the UI opens it instead. */
   sessionId?: string;
 }

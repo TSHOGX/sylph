@@ -248,6 +248,9 @@ function GroupSection({
 
   const archived = useMemo(() => {
     const live = new Set(group.sessions.map((session) => session.traceSessionId).filter(Boolean));
+    // No fork de-duplication here: this fetches a single page, and the server
+    // already resolves a fork pair within one response. Only a surface that
+    // accumulates pages — the history overlay — can see a pair split across two.
     return (archiveQuery.data?.sessions ?? []).filter(
       // An imported session is already a live row above; listing it again offers
       // two routes into one conversation.
