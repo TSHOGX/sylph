@@ -340,14 +340,37 @@ Back keeps the file *selected* rather than clearing it, because the tree derives
 its expanded ancestors from the selection — clearing would collapse the path the
 user navigated through.
 
-**Fullscreen reuses `Overlay`** with a `size="viewer"` variant, because the focus
-trap, opener restoration, and Escape-that-stops-propagating are WCAG 2.4.3
-obligations that are easy to get subtly wrong; there is one implementation rather
-than two. It is tracked by its own boolean on the shell rather than a fourth
-member of the `Overlay` union: the union answers "which overlay is up", while a
-viewer also needs to know *which file*, and that already lives beside it in
-`artifact`. `runAction` dismisses it alongside the overlays, keeping at most one
-modal surface up.
+**Fullscreen reuses `Overlay`**, because the focus trap, opener restoration, and
+Escape-that-stops-propagating are WCAG 2.4.3 obligations that are easy to get
+subtly wrong; there is one implementation rather than two. It is tracked by its own
+boolean on the shell rather than a fourth member of the `Overlay` union: the union
+answers "which overlay is up", while a viewer also needs to know *which file*, and
+that already lives beside it in `artifact`. `runAction` dismisses it alongside the
+overlays, keeping at most one modal surface up — the dismissal sits outside that
+switch rather than in each arm, because a per-arm call is a rule every overlay
+added later can forget, and two of them already did.
+
+**The dialog sizes to what it holds**, through two variants, because content types
+differ in a way one rule cannot cover:
+
+| Variant | Sizing | For |
+| --- | --- | --- |
+| `viewer` | `w-fit h-fit`, capped at 92vh × 95vw, floored at 32rem | Tables, documents, images, text |
+| `viewer-full` | 92vh × 95vw outright | Rendered HTML, PDF |
+
+A fixed box strands a seven-row sheet in an acre of white, which reads as broken
+even though nothing is: measured, that file now gets 512×265 while a 3000-row
+sheet still fills at 578×874, because its own height asks for that. The
+`viewer-full` variant exists because an iframe reports *no* intrinsic size, so a
+page or a PDF would collapse to the floor under `w-fit` — and those are also the
+formats authored for a viewport, so filling one is what they expect.
+
+The 32rem floor is measured, not guessed: the header needs 510px for a filename
+plus Reload, expand, and close, so the dialog cannot go narrower without cramping
+its own controls. A narrow table therefore leaves real space to its right, which
+is why the grid's scroll region is tinted and its cells explicitly white — past
+the last column has to read as outside the sheet rather than as cells that failed
+to load, which is how every spreadsheet application draws it.
 
 One consequence worth knowing: while the dialog is open the pane shows a
 placeholder instead of a second copy of the viewer, so the expand button is
@@ -1520,7 +1543,7 @@ archive, or agents.
 | `session-lifecycle.spec.ts` | Create, send, stream, reload-replay, sidebar grouping |
 | `timeline.spec.ts` | Tool calls as regions, inline diff, failure auto-expansion, Markdown, 1000-event render budget |
 | `workspace-shell.spec.ts` | Pane toggles and persistence, palette, search, focus restoration, settings round-trip, Artifacts tree |
-| `file-viewer.spec.ts` | Tree/viewer swap preserving expansion, fullscreen and focus return, single-modal invariant, CSV table, sandboxed HTML refusing script and cookie access, image zoom, axe over both scales |
+| `file-viewer.spec.ts` | Tree/viewer swap preserving expansion, fullscreen and focus return, dialog sizing to content vs filling for a page, single-modal invariant, CSV table, sandboxed HTML refusing script and cookie access, image zoom, axe over both scales |
 | `accessibility.spec.ts` | Skip link, focus trapping and restoration, axe-core audit of four surfaces |
 
 The mock runner (`e2e/fixtures/runners/e2e/runner.sh`) branches on its prompt to
