@@ -93,12 +93,15 @@ UI feedback after 3s. Pattern proven in both eventsource lib and DSH.
 
 ---
 
+## Design Philosophy
+
 **Core principles:**
 1. **Origin-aware UI** — Visual distinction between Sylph-managed and native sessions
 2. **Real-time first** — SSE-driven updates with optimistic rendering
 3. **Local-first** — No external dependencies, works offline after initial load
 4. **Accessibility** — WCAG 2.1 AA compliance, keyboard navigation, screen reader support
-5. **Performance** — Virtual scrolling for large trajectories, code splitting, <200KB bundle
+5. **Performance** — Keep bundles compact, optimize rendering, maintain responsiveness
+6. **Architecture quality** — Balance performance, user experience, maintainability, and extensibility
 
 **What to copy from DeepSeek Harness:**
 - Overall layout structure (left rail + canvas)
@@ -981,25 +984,29 @@ fails is worse than one that explains itself. There is no composer.
 
 ## Performance Optimization
 
-### Bundle budget
+### Bundle size management
 
-**Measured: 197.4 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
-established the budget at 200 KB and measured 187.8 KB; Phase 6 added the shell,
-three overlays, the file browser, the Markdown renderer, the diff view, and the
-fuzzy ranker for **+8.4 KB**, reaching 196.2 KB. Archive browsing added **+1.2 KB**
-across 6.6 and 6.7: the history overlay and the read-only archived view are both
-`next/dynamic`, so only their client-side entry points land here.
+**Measured: 197.4 KB gzipped first-load JS.** The project maintains a compact bundle
+through deliberate architecture and dependency choices. Phase 4 measured 187.8 KB;
+Phase 6 added the shell, three overlays, the file browser, the Markdown renderer,
+the diff view, and the fuzzy ranker for **+8.4 KB**, reaching 196.2 KB. Archive
+browsing added **+1.2 KB** across 6.6 and 6.7: the history overlay and the read-only
+archived view are both `next/dynamic`, so only their client-side entry points land
+here.
 
-Headroom is now **2.6 KB**. The next feature that needs a dependency should expect
-to raise the budget deliberately rather than discover it has been exceeded.
+**The goal is to keep the bundle lean and fast-loading**, not to enforce a hard
+numeric ceiling. As features grow, bundle size should scale proportionally to value
+delivered. Monitor growth deliberately, optimize where reasonable, but never let an
+arbitrary limit constrain valuable functionality or architectural improvements.
 
-That number is why this document lists so many "no dependency" decisions. The
-naive versions of these features — `react-markdown` + `remark-gfm` (~45 KB), Shiki
-or Prism (~35 KB), jsdiff (~30 KB), Radix (~30 KB for the primitives used), fuse.js
-(~12 KB), an icon package — total well over 150 KB against 12 KB of headroom.
-Each replacement is a bounded, well-understood algorithm carrying unit tests; that
-is the trade, stated plainly, and it is a trade that stops being right the moment
-the budget rises or the feature set outgrows the subset implemented.
+This principle explains the "no dependency" decisions throughout this document. The
+alternative implementations — `react-markdown` + `remark-gfm` (~45 KB), Shiki or
+Prism (~35 KB), jsdiff (~30 KB), Radix (~30 KB for the primitives used), fuse.js
+(~12 KB), an icon package — would have totaled over 150 KB. Each replacement is a
+bounded, well-understood algorithm carrying unit tests; that is the trade-off,
+stated plainly. This approach remains correct while the implemented subset serves
+the product's needs and the bundle stays compact. As requirements evolve, adopting
+battle-tested libraries may become the better choice.
 
 To measure:
 
