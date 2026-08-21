@@ -29,6 +29,14 @@ export interface Session {
   workdir: string;
   /** Nullable: the backend stores title as an optional column. */
   title: string | null;
+  /**
+   * TraceDB id this session was imported from, when it was.
+   *
+   * Present only for imported native sessions. The archive browser uses it to
+   * recognize that an archived row and a live session are one conversation, and
+   * list it once rather than twice.
+   */
+  traceSessionId?: string;
   flagsJson: string;
   status: SessionStatus;
   createdAtMs: number;
@@ -192,6 +200,13 @@ export interface Workspace {
   runningCount: number;
   lastUsedMs: number;
   isQuickStart: boolean;
+  /**
+   * Archived sessions TraceDB holds here.
+   *
+   * Zero unless the request passed `includeArchived`, so zero means "not
+   * counted" rather than "no history".
+   */
+  archivedCount: number;
 }
 
 export interface WorkspacesResponse {
@@ -239,7 +254,58 @@ export interface FileContentResponse {
   modifiedAtMs: number;
 }
 
-/** One browsable root on the machine the backend runs on. */
+export interface ImportSessionRequest {
+  /** TraceDB session id, formatted `<agent>:<native-id>`. */
+  traceSessionId: string;
+  title?: string;
+}
+
+/**
+ * One archived session, as the sidebar and history browser list it.
+ *
+ * `id` is a TraceDB session id (`claude:uuid`), not a Sylph Web session id — and
+ * for a subagent it carries a `/agent-...` suffix, so it must be
+ * percent-encoded into a URL path.
+ */
+export interface ArchiveSession {
+  id: string;
+  agent: string;
+  /** Title, else the opening typed message. Absent for ~2% of real sessions. */
+  label?: string;
+  cwd: string;
+  model?: string;
+  startedAtMs?: number;
+  endedAtMs?: number;
+  /** Events the archive holds: the only size signal available. */
+  events: number;
+  /** Subagent sessions folded into this row rather than listed separately. */
+  subagentCount: number;
+  /**
+   * Origin's TraceDB id when this session is a fork of another.
+   *
+   * A fork replays its origin's whole prefix, so the two read as one conversation
+   * and only one belongs in a list. The server drops the loser within a single
+   * response, but a pair can straddle two pages, so a client accumulating pages
+   * must suppress a row whose `forkOf` names a session it has already shown.
+   */
+  forkOf?: string;
+  /** Live session id when already imported, so the UI opens it instead. */
+  sessionId?: string;
+}
+
+export interface ArchiveListResponse {
+  sessions: ArchiveSession[];
+  /** Cursor to continue from; absent on the last page. */
+  nextCursor?: string;
+  /**
+   * False when the TraceDB archive could not be reached. The request still
+   * succeeds, so a workspace with no archive reads as "live only" rather than
+   * as an error.
+   */
+  available: boolean;
+  detail?: string;
+}
+
 export interface BrowseRoot {
   /** Display label: the directory leaf, or `Home` for the home directory. */
   name: string;
@@ -290,45 +356,18 @@ export interface UploadFileResponse {
   size: number;
 }
 
-/**
- * Patchable session fields.
- *
- * Only these two. Agent and origin decide which runner owns the conversation and
- * whether `SOUL.md` may be injected, so they are fixed once history exists.
- */
-export interface UpdateSessionRequest {
-  /** Complete replacement set, validated server-side against `--describe`. */
-  flags?: Record<string, string>;
-  title?: string;
-}
-
-export interface ImportSessionRequest {
-  /** TraceDB session id, formatted `<agent>:<native-id>`. */
-  traceSessionId: string;
-  title?: string;
-}
-
-/**
- * Parse a session's runner flags.
- *
- * The wire carries `flagsJson` as a string because that is how the journal
- * stores it. Parsing it here means the composer reads `flags.model` without every
- * consumer repeating a `JSON.parse` that can throw on a hand-edited row.
- */
-export function sessionFlags(session: Session): Record<string, string> {
-  try {
-    const parsed = JSON.parse(session.flagsJson || "{}");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    // Values are coerced rather than trusted: the column is free-form JSON, and a
-    // non-string would otherwise reach a `<select value>` as `[object Object]`.
-    return Object.fromEntries(
-      Object.entries(parsed)
-        .filter(([, value]) => typeof value === "string")
-        .map(([key, value]) => [key, value as string]),
-    );
-  } catch {
-    return {};
-  }
+/** A read-only archived transcript, normalized into live timeline events. */
+export interface ArchiveTranscript {
+  id: string;
+  agent: string;
+  label?: string;
+  /** Absent for 19% of the archive, which is why a session may be unresumable. */
+  cwd?: string;
+  startedAtMs?: number;
+  events: StreamEvent[];
+  /** True when `limit` cut the stream short. */
+  truncated: boolean;
+  sessionId?: string;
 }
 
 /**
@@ -347,6 +386,31 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+  }
+}
+
+/**
+ * Parse a session's runner flags from the JSON column.
+ *
+ * The column is written by the backend and already validated, but parsed here
+ * rather than duplicated across every row because JSON parsing can technically
+ * throw and the client does not control what the editor-accessible database
+ * stores it. Parsing it here means the composer reads `flags.model` without every
+ * consumer repeating a `JSON.parse` that can throw on a hand-edited row.
+ */
+export function sessionFlags(session: Session): Record<string, string> {
+  try {
+    const parsed = JSON.parse(session.flagsJson || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    // Values are coerced rather than trusted: the column is free-form JSON, and a
+    // non-string would otherwise reach a `<select value>` as `[object Object]`.
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([, value]) => typeof value === "string")
+        .map(([key, value]) => [key, value as string]),
+    );
+  } catch {
+    return {};
   }
 }
 
@@ -374,10 +438,24 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     const error = body?.error ?? {};
+    // A missing envelope is itself diagnostic, so it gets its own message rather
+    // than falling through to `statusText`. That fallback is what turned an
+    // unreachable endpoint into the word "Not Found" rendered inside a file
+    // tree: the pane said the *directory* was missing when the truth was that
+    // the running backend had no files endpoint at all. Anything answering
+    // `/api/v1/*` without the envelope is not a current Sylph backend — it is a
+    // stale build, or a proxy answering in its place.
+    if (!body?.error) {
+      throw new ApiError(
+        response.status,
+        `http_${response.status}`,
+        describeEnvelopeless(response.status, path),
+      );
+    }
     throw new ApiError(
       response.status,
       error.code ?? `http_${response.status}`,
-      error.message ?? response.statusText ?? `Request failed (${response.status})`,
+      error.message ?? `Request failed (${response.status})`,
     );
   }
 
@@ -386,6 +464,25 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return response.json() as Promise<T>;
+}
+
+/**
+ * Explain a response that carried no error envelope.
+ *
+ * The backend documents every `/api/v1/*` failure as `{error: {code, message}}`,
+ * including router-level ones, so a bodiless failure means the request never
+ * reached a current backend. Naming that is the whole point: the alternative is
+ * `statusText`, and "Not Found" alone sends the reader looking for a missing
+ * file instead of a stale process.
+ */
+function describeEnvelopeless(status: number, path: string): string {
+  if (status === 404) {
+    return `The backend has no ${path} endpoint. It is probably an older build than this UI — restart it with \`cd backend && cargo run\`.`;
+  }
+  if (status === 502 || status === 503 || status === 504) {
+    return "The backend did not answer. Check that it is running on the port the frontend proxies to.";
+  }
+  return `Request to ${path} failed (${status}) with no error details.`;
 }
 
 /**
@@ -429,27 +526,19 @@ export const api = {
         body: JSON.stringify(req),
       }),
     /** Change runner flags or the title of an existing session. */
-    update: (id: string, req: UpdateSessionRequest) =>
+    update: (id: string, req: { flags?: Record<string, string>; title?: string }) =>
       fetchAPI<{ session: Session }>(`/sessions/${id}`, {
         method: "PATCH",
         body: JSON.stringify(req),
       }),
   },
-  workspaces: {
-    list: () => fetchAPI<WorkspacesResponse>("/workspaces"),
-  },
   files: {
-    /** One directory level. Lazy expansion is what keeps a large repo usable. */
     tree: (sessionId: string, path = "") =>
-      fetchAPI<FileTreeResponse>(
-        `/sessions/${sessionId}/files${queryString({ path })}`,
-      ),
+      fetchAPI<FileTreeResponse>(`/sessions/${sessionId}/files${queryString({ path })}`),
     content: (sessionId: string, path: string) =>
-      fetchAPI<FileContentResponse>(
-        `/sessions/${sessionId}/files/content${queryString({ path })}`,
-      ),
+      fetchAPI<FileContentResponse>(`/sessions/${sessionId}/files/content${queryString({ path })}`),
     /**
-     * Write one file into the session's working directory.
+     * Upload one file into the session's working directory.
      *
      * Confined server-side to the workdir subtree — the same range the agent
      * already writes to — and refuses to overwrite unless asked.
@@ -470,6 +559,40 @@ export const api = {
   fs: {
     roots: () => fetchAPI<BrowseRootsResponse>("/fs/roots"),
     tree: (path = "") => fetchAPI<BrowseResponse>(`/fs/tree${queryString({ path })}`),
+  },
+  workspaces: {
+    /**
+     * `includeArchived` also reports directories that exist only in the TraceDB
+     * archive. Off by default because the sidebar polls this; surfaces where the
+     * user *picks* a directory pass it, since a directory they want to work in
+     * has no live session yet.
+     */
+    list: (options: { includeArchived?: boolean } = {}) =>
+      fetchAPI<WorkspacesResponse>(
+        `/workspaces${queryString({
+          includeArchived: options.includeArchived ? "true" : undefined,
+        })}`,
+      ),
+  },
+  archive: {
+    /**
+     * Archived sessions that ran in one directory, newest first.
+     *
+     * This is what makes a workspace's past visible: `search` only answers a
+     * question the user already knows how to ask.
+     */
+    list: (params: { workdir: string; limit?: number; cursor?: string }) =>
+      fetchAPI<ArchiveListResponse>(`/archive/sessions${queryString({ ...params })}`),
+    /**
+     * One archived transcript, read-only.
+     *
+     * The id is encoded whole rather than interpolated: a subagent id contains a
+     * `/`, which would otherwise be read as a path separator.
+     */
+    get: (traceId: string, limit?: number) =>
+      fetchAPI<ArchiveTranscript>(
+        `/archive/sessions/${encodeURIComponent(traceId)}${queryString({ limit })}`,
+      ),
   },
   turns: {
     create: (sessionId: string, req: CreateTurnRequest) =>

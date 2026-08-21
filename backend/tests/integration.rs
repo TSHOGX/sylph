@@ -308,6 +308,75 @@ async fn turn_runs_to_completion_and_journals_its_events() {
     );
 }
 
+/// An event stream must forbid intermediaries from re-encoding it.
+///
+/// This pins a bug whose symptom pointed entirely the wrong way. The frontend
+/// proxies `/api/v1/*` through Next.js, whose `compression` middleware gzips any
+/// compressible content type — `text/event-stream` included. gzip cannot be
+/// decoded until a block is flushed, so the browser received nothing until the
+/// turn ended and the whole transcript then appeared at once, while `curl`
+/// (sending no `Accept-Encoding`) saw perfectly paced frames. The stream was
+/// fine; the encoding was buffering it.
+///
+/// `no-transform` (RFC 9111 §5.2.2.6) is what forbids that re-encoding, and it
+/// belongs on the response so the guarantee holds behind any proxy rather than
+/// depending on one front end's configuration. Asserting a single header also
+/// matters: axum sets its own `no-cache`, and two `cache-control` headers would
+/// leave which directive applies up to the intermediary.
+#[tokio::test]
+async fn the_event_stream_forbids_intermediaries_from_compressing_it() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let body = json_body(
+        backend
+            .post_authed(
+                &format!("/api/v1/sessions/{session_id}/turns"),
+                json!({"text": "stream please"}),
+            )
+            .await,
+    )
+    .await;
+    let turn_id = body["turn"]["id"].as_str().unwrap().to_string();
+    backend.await_turn(&turn_id).await;
+
+    let response = backend
+        .get_authed(&format!("/api/v1/turns/{turn_id}/events?after_seq=-1"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream"),
+    );
+
+    let cache_control: Vec<&str> = response
+        .headers()
+        .get_all(axum::http::header::CACHE_CONTROL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect();
+
+    assert_eq!(
+        cache_control.len(),
+        1,
+        "exactly one cache-control header, or the applied directive is \
+         ambiguous: {cache_control:?}"
+    );
+    assert!(
+        cache_control[0].contains("no-transform"),
+        "event stream must forbid re-encoding, or a compressing proxy buffers \
+         it into one lump: {cache_control:?}"
+    );
+    assert!(
+        cache_control[0].contains("no-cache"),
+        "event stream must stay uncached: {cache_control:?}"
+    );
+}
+
 #[tokio::test]
 async fn session_returns_to_idle_after_a_turn() {
     let backend = TestBackend::start().await;
@@ -860,6 +929,574 @@ async fn search_clamps_an_absurd_limit() {
     assert_eq!(json_body(response).await["available"], true);
 }
 
+// ------------------------------------------------------- archive browsing
+
+#[tokio::test]
+async fn archive_listing_requires_auth() {
+    let backend = TestBackend::start().await;
+
+    let response = backend.get("/api/v1/archive/sessions?workdir=/w/app").await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn archive_listing_requires_an_absolute_workdir() {
+    let backend = TestBackend::start().await;
+
+    // Answered by this endpoint's own validation, not by axum's query rejection,
+    // so the body carries a code a client can branch on.
+    for path in [
+        "/api/v1/archive/sessions",
+        "/api/v1/archive/sessions?workdir=",
+        "/api/v1/archive/sessions?workdir=relative/path",
+    ] {
+        let response = backend.get_authed(path).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(json_body(response).await["error"]["code"], "INVALID_REQUEST");
+    }
+}
+
+#[tokio::test]
+async fn archive_listing_reports_unavailable_instead_of_failing() {
+    // A machine without TraceDB is normal, and the sidebar calls this on every
+    // expanded workspace. A 5xx there would turn an optional component into a
+    // broken-looking UI.
+    let backend = TestBackend::start().await;
+
+    let response = backend
+        .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["available"], false);
+    assert_eq!(body["sessions"].as_array().unwrap().len(), 0);
+    assert!(
+        body["detail"].as_str().is_some_and(|d| !d.is_empty()),
+        "unavailable response carried no reason: {body}"
+    );
+}
+
+#[tokio::test]
+async fn archive_listing_keeps_only_the_requested_directory() {
+    // TraceDB matches `cwd` as a substring, so a request for `/w/app` also
+    // returns `/w/app-old` and `/w/app/sub`. Without an exact re-filter here, a
+    // workspace's history would be polluted by its neighbours.
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_listing(
+        json!([
+            {"id": "claude:wanted", "agent": "claude", "cwd": "/w/app",
+             "title": "In the directory", "events": 12},
+            {"id": "claude:sibling", "agent": "claude", "cwd": "/w/app-old",
+             "title": "Sibling directory", "events": 12},
+            {"id": "claude:child", "agent": "claude", "cwd": "/w/app/sub",
+             "title": "Subdirectory", "events": 12},
+            // Trailing slash is the same directory.
+            {"id": "claude:slashed", "agent": "claude", "cwd": "/w/app/",
+             "title": "Trailing slash", "events": 12},
+        ]),
+        None,
+    ))
+    .await;
+
+    let response = backend
+        .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    let ids: Vec<&str> = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["claude:wanted", "claude:slashed"], "{body}");
+}
+
+#[tokio::test]
+async fn archive_listing_folds_subagents_into_the_session_that_spawned_them() {
+    // Subagent sessions are 43% of a real archive. Listed as peers they bury the
+    // sessions a user actually started, so they become a count instead.
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(
+            json!([
+                {"id": "claude:root", "agent": "claude", "cwd": "/w/app",
+                 "title": "Parent", "events": 40},
+                {"id": "claude:root/agent-one", "agent": "claude", "cwd": "/w/app",
+                 "title": "Subagent one", "events": 9},
+                {"id": "claude:root/agent-two", "agent": "claude", "cwd": "/w/app",
+                 "title": "Subagent two", "events": 9},
+            ]),
+            None,
+        )
+        .and_session_for("claude:root", json!({"cwd": "/w/app", "title": "Parent"}))
+        .and_session_for(
+            "claude:root/agent-one",
+            json!({"cwd": "/w/app", "parent_session_id": "claude:root"}),
+        )
+        .and_session_for(
+            "claude:root/agent-two",
+            json!({"cwd": "/w/app", "parent_session_id": "claude:root"}),
+        ),
+    )
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+            .await,
+    )
+    .await;
+
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "subagents must not be listed as peers: {body}");
+    assert_eq!(sessions[0]["id"], "claude:root");
+    assert_eq!(sessions[0]["subagentCount"], 2);
+}
+
+#[tokio::test]
+async fn archive_listing_rolls_up_a_subagent_that_records_only_a_parent() {
+    // The id suffix is not the signal: 199 non-empty sessions in the local archive
+    // record a `parent_session_id` while carrying no `/agent-` suffix, almost all
+    // of them codex. Reading the id alone left that delegated work at the top
+    // level, which is the gap this covers.
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(
+            json!([
+                {"id": "codex:parent", "agent": "codex", "cwd": "/w/app", "events": 300},
+                {"id": "codex:child-a", "agent": "codex", "cwd": "/w/app", "events": 40},
+                {"id": "codex:child-b", "agent": "codex", "cwd": "/w/app", "events": 30},
+            ]),
+            None,
+        )
+        .and_session_for("codex:parent", json!({"cwd": "/w/app", "title": "Parent"}))
+        .and_session_for(
+            "codex:child-a",
+            json!({"cwd": "/w/app", "parent_session_id": "codex:parent"}),
+        )
+        .and_session_for(
+            "codex:child-b",
+            json!({"cwd": "/w/app", "parent_session_id": "codex:parent"}),
+        ),
+    )
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+            .await,
+    )
+    .await;
+
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "a recorded parent must roll up even with no id suffix: {body}"
+    );
+    assert_eq!(sessions[0]["id"], "codex:parent");
+    assert_eq!(sessions[0]["subagentCount"], 2);
+}
+
+#[tokio::test]
+async fn archive_listing_keeps_a_subagent_that_ran_in_another_directory() {
+    // 484 of 2238 subagents in the local archive ran in a different directory than
+    // their parent -- a worktree or a subdirectory. Folding those into a parent
+    // that is not in this listing deleted them from the only directory that would
+    // ever show them, emptying 42 directories, one holding 193 sessions.
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(
+            json!([
+                {"id": "claude:root/agent-sub", "agent": "claude", "cwd": "/w/app/frontend",
+                 "title": "Work in the subdirectory", "events": 120},
+            ]),
+            None,
+        )
+        // The parent lives one directory up, so it is not a row here.
+        .and_session_for("claude:root", json!({"cwd": "/w/app", "title": "Parent"}))
+        .and_session_for(
+            "claude:root/agent-sub",
+            json!({"cwd": "/w/app/frontend", "parent_session_id": "claude:root"}),
+        ),
+    )
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app/frontend")
+            .await,
+    )
+    .await;
+
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "a cross-directory subagent is this directory's only history: {body}"
+    );
+    assert_eq!(sessions[0]["id"], "claude:root/agent-sub");
+}
+
+#[tokio::test]
+async fn archive_listing_shows_one_side_of_a_fork_and_names_the_other() {
+    // A fork replays its origin's whole prefix, so both sides share every early
+    // user turn and read as one conversation. Listing both shows it twice under one
+    // label. `list` is ordered newest-first, so the survivor is the one reached
+    // first -- and it is not a fixed side: measured locally, one pair has its later
+    // work in the fork and the other in the origin.
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(
+            json!([
+                {"id": "claude:resumed", "agent": "claude", "cwd": "/w/app",
+                 "title": "The conversation", "events": 1108, "endedAtMs": 2000},
+                {"id": "claude:origin", "agent": "claude", "cwd": "/w/app",
+                 "title": "The conversation", "events": 389, "endedAtMs": 1000},
+            ]),
+            None,
+        )
+        .and_session_for(
+            "claude:resumed",
+            json!({"cwd": "/w/app", "title": "The conversation",
+                   "forked_from": "claude:origin#ec58fee8-5801-431a-a51e-eb99e33d8c42"}),
+        )
+        .and_session_for("claude:origin", json!({"cwd": "/w/app", "title": "The conversation"})),
+    )
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+            .await,
+    )
+    .await;
+
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "one conversation must not list twice: {body}");
+    assert_eq!(sessions[0]["id"], "claude:resumed", "the newer side survives");
+    // Named so a client accumulating pages can drop the other side when the pair
+    // straddles two requests, which the server cannot see.
+    assert_eq!(sessions[0]["forkOf"], "claude:origin");
+    // A fork is not delegated work, so it must not be counted as a subagent.
+    assert_eq!(sessions[0]["subagentCount"], 0);
+}
+
+#[tokio::test]
+async fn archive_listing_counts_a_subagent_listed_before_its_parent() {
+    // The archive orders by recency and a subagent commonly ends after the
+    // session that spawned it, so the child's row can arrive first.
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(
+            json!([
+                {"id": "claude:root/agent-late", "agent": "claude", "cwd": "/w/app",
+                 "title": "Subagent", "events": 9},
+                {"id": "claude:root", "agent": "claude", "cwd": "/w/app",
+                 "title": "Parent", "events": 40},
+            ]),
+            None,
+        )
+        .and_session_for("claude:root", json!({"cwd": "/w/app", "title": "Parent"}))
+        .and_session_for(
+            "claude:root/agent-late",
+            json!({"cwd": "/w/app", "parent_session_id": "claude:root"}),
+        ),
+    )
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+            .await,
+    )
+    .await;
+
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{body}");
+    assert_eq!(
+        sessions[0]["subagentCount"], 1,
+        "a child seen before its parent was dropped: {body}"
+    );
+}
+
+#[tokio::test]
+async fn archive_listing_reaches_a_match_buried_behind_subdirectory_rows() {
+    // The upstream `cwd` filter is an unanchored substring match, so a parent
+    // directory's pattern also matches everything beneath it, and those sort by
+    // recency rather than depth. A real directory with 88 sessions of its own had
+    // its first exact match 1300 rows in, behind subdirectory work: a page-count
+    // cap gave up first and reported it empty, which is the very bug this endpoint
+    // exists to fix.
+    let mut rows: Vec<serde_json::Value> = (0..120)
+        .map(|i| {
+            json!({"id": format!("claude:deep-{i}"), "agent": "claude",
+                   "cwd": "/w/app/nested/deeper", "title": "Subdirectory work",
+                   "events": 10})
+        })
+        .collect();
+    // The only exact match sits last, after every deeper-path row.
+    rows.push(json!({"id": "claude:wanted", "agent": "claude", "cwd": "/w/app",
+                     "title": "The directory's own work", "events": 42}));
+
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(json!(rows), None)
+            .and_session_for("claude:wanted", json!({"cwd": "/w/app"})),
+    )
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+            .await,
+    )
+    .await;
+
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "a match behind many deeper-path rows must still be found: {body}"
+    );
+    assert_eq!(sessions[0]["id"], "claude:wanted");
+}
+
+#[tokio::test]
+async fn archive_listing_drops_sessions_with_no_transcript() {
+    // Ingested but empty, common for aborted runs in temp directories. There is
+    // nothing to read, so listing one offers a dead link.
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_listing(
+        json!([
+            {"id": "claude:empty", "agent": "claude", "cwd": "/w/app",
+             "title": "Nothing recorded", "events": 0},
+            {"id": "claude:real", "agent": "claude", "cwd": "/w/app",
+             "title": "Real work", "events": 3},
+        ]),
+        None,
+    ))
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+            .await,
+    )
+    .await;
+
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{body}");
+    assert_eq!(sessions[0]["id"], "claude:real");
+}
+
+#[tokio::test]
+async fn an_untitled_archived_session_is_labelled_by_its_opening_ask() {
+    // codex and pi record no titles at all, so this fallback is the common path.
+    // The leading events are harness-injected envelopes, which every session of
+    // that agent shares and which therefore identify nothing.
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(
+            json!([{"id": "codex:untitled", "agent": "codex", "cwd": "/w/app",
+                    "title": null, "events": 20}]),
+            None,
+        )
+        .and_session(
+            json!({"id": "codex:untitled", "agent": "codex", "cwd": "/w/app"}),
+            json!([
+                {"idx": 0, "kind": "user", "text": "<permissions instructions> sandboxing"},
+                {"idx": 1, "kind": "user", "text": "<environment_context> <cwd>/w/app</cwd>"},
+                {"idx": 2, "kind": "user", "text": "Fix the reconnect loop"},
+            ]),
+        ),
+    )
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+            .await,
+    )
+    .await;
+
+    assert_eq!(
+        body["sessions"][0]["label"], "Fix the reconnect loop",
+        "label fell back to injected boilerplate: {body}"
+    );
+}
+
+#[tokio::test]
+async fn an_archived_transcript_renders_as_settled_timeline_events() {
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_session(
+        json!({"id": "claude:archived", "agent": "claude", "cwd": "/w/app",
+               "title": "Fix login", "started_at_ms": 1700000000000_i64}),
+        json!([
+            {"idx": 0, "kind": "user", "text": "fix login", "created_at_ms": 1},
+            {"idx": 1, "kind": "tool_call", "name": "Bash", "call_id": "call_1",
+             "text": "{\"command\":\"ls -la\"}", "created_at_ms": 2},
+            {"idx": 2, "kind": "tool_result", "call_id": "call_1",
+             "text": "total 0", "created_at_ms": 3},
+        ]),
+    ))
+    .await;
+
+    let response = backend
+        .get_authed("/api/v1/archive/sessions/claude:archived")
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["label"], "Fix login");
+    assert_eq!(body["cwd"], "/w/app");
+    assert_eq!(body["truncated"], false);
+
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    // Settled history: nothing here is mid-stream, and a `delta` phase would
+    // make the timeline wait for text that will never arrive.
+    for event in events {
+        assert_eq!(event["phase"], "completed", "{event}");
+        assert_eq!(event["stability"], "stable", "{event}");
+    }
+    // The call's arguments must reach the shape the timeline reads.
+    assert_eq!(events[1]["data"]["input"]["command"], "ls -la");
+    // A result groups with its call through a shared stream id.
+    assert_eq!(events[1]["streamId"], events[2]["streamId"]);
+}
+
+#[tokio::test]
+async fn an_archived_transcript_reports_a_missing_session_as_not_found() {
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::without_session()).await;
+
+    let response = backend
+        .get_authed("/api/v1/archive/sessions/claude:absent")
+        .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "TRACE_SESSION_NOT_FOUND"
+    );
+}
+
+#[tokio::test]
+async fn an_archived_subagent_transcript_is_reachable_despite_its_slashed_id() {
+    // A subagent id contains a slash (`claude:uuid/agent-name`), which a
+    // single-segment route capture would reject — that is 43% of the archive.
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_session(
+        json!({"id": "claude:root/agent-one", "agent": "claude", "cwd": "/w/app"}),
+        json!([{"idx": 0, "kind": "user", "text": "do the subtask", "created_at_ms": 1}]),
+    ))
+    .await;
+
+    let response = backend
+        .get_authed("/api/v1/archive/sessions/claude:root/agent-one")
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["id"], "claude:root/agent-one");
+}
+
+#[tokio::test]
+async fn an_archived_transcript_is_truncated_rather_than_streamed_whole() {
+    // The largest session in the local archive is 20 MB of JSON.
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_session(
+        json!({"id": "claude:big", "agent": "claude", "cwd": "/w/app"}),
+        json!([
+            {"idx": 0, "kind": "user", "text": "one", "created_at_ms": 1},
+            {"idx": 1, "kind": "assistant", "text": "two", "created_at_ms": 2},
+            {"idx": 2, "kind": "assistant", "text": "three", "created_at_ms": 3},
+        ]),
+    ))
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions/claude:big?limit=2")
+            .await,
+    )
+    .await;
+
+    assert_eq!(body["events"].as_array().unwrap().len(), 2);
+    assert_eq!(body["truncated"], true);
+}
+
+#[tokio::test]
+async fn workspaces_omit_archive_only_directories_by_default() {
+    // The sidebar polls this endpoint, so the archive scan must be opt-in: it
+    // needs live sessions only, and paying for an archive walk on every poll
+    // would put that cost on the hot path.
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_listing(
+        json!([{"id": "claude:old", "agent": "claude", "cwd": "/w/archived-only",
+                "title": "Older work", "events": 30, "endedAtMs": 1700000000000_i64}]),
+        None,
+    ))
+    .await;
+
+    let body = json_body(backend.get_authed("/api/v1/workspaces").await).await;
+    let paths: Vec<&str> = body["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["path"].as_str().unwrap())
+        .collect();
+
+    assert!(
+        !paths.contains(&"/w/archived-only"),
+        "archive scan must be opt-in: {body}"
+    );
+}
+
+#[tokio::test]
+async fn workspaces_can_include_a_directory_whose_only_history_is_archived() {
+    // A directory a user wants to work in has no live session yet. Without this
+    // it could never be pinned or picked, so its history stayed unreachable.
+    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_listing(
+        json!([
+            {"id": "claude:old", "agent": "claude", "cwd": "/w/archived-only",
+             "title": "Older work", "events": 30, "endedAtMs": 1700000000000_i64},
+            // Subagents and empty sessions would inflate the count with rows the
+            // history browser then filters out.
+            {"id": "claude:old/agent-x", "agent": "claude", "cwd": "/w/archived-only",
+             "title": "Subagent", "events": 5, "endedAtMs": 1700000000001_i64},
+            {"id": "claude:blank", "agent": "claude", "cwd": "/w/archived-only",
+             "title": null, "events": 0},
+        ]),
+        None,
+    ))
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/workspaces?includeArchived=true")
+            .await,
+    )
+    .await;
+
+    let row = body["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["path"] == "/w/archived-only")
+        .unwrap_or_else(|| panic!("archive-only workspace missing: {body}"));
+
+    assert_eq!(row["sessionCount"], 0, "it has no live sessions");
+    assert_eq!(row["archivedCount"], 1, "subagent and empty rows must not count");
+    // Ordering is by when work last happened, which archived history answers.
+    assert_eq!(row["lastUsedMs"], 1700000000000_i64);
+}
+
+#[tokio::test]
+async fn workspaces_still_answer_when_the_archive_is_unreachable() {
+    // The live workspaces are most of the answer, so an absent archive must
+    // degrade rather than fail the request.
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("mock")]).await;
+    backend.create_session("mock").await;
+
+    let response = backend
+        .get_authed("/api/v1/workspaces?includeArchived=true")
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!json_body(response).await["workspaces"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
 // ------------------------------------------------------- session filters
 
 #[tokio::test]
@@ -1111,8 +1748,14 @@ async fn importing_a_native_session_preserves_its_identity() {
     assert_eq!(session["workdir"], workdir);
     // Title falls back to the opening ask, and multi-byte text must survive.
     assert_eq!(session["title"], "审查冗余的代码");
-    // Archive identifiers stay server-side.
-    assert!(session.get("traceSessionId").is_none());
+    // The archive id is exposed so the archive browser can tell that an archived
+    // row and this live session are one conversation, and list it once rather
+    // than twice. `backendSessionId` stays hidden: it is runner-internal.
+    assert_eq!(
+        session["traceSessionId"],
+        "mock:f45ba2ed-3866-4dba-9769-801029b16aa3"
+    );
+    assert!(session.get("backendSessionId").is_none());
 }
 
 #[tokio::test]

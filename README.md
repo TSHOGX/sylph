@@ -6,8 +6,8 @@ Sylph Web can create Sylph-managed sessions, stream live tool/reasoning events, 
 
 ## Architecture
 
-- **Backend:** Rust + Axum + SQLx + Tokio (Phase 1 in progress)
-- **Frontend:** Next.js 16 + React 19 + TypeScript (Phase 2 starts week 4)
+- **Backend:** Rust + Axum + SQLx + Tokio
+- **Frontend:** Next.js 16 + React 19 + TypeScript + TanStack Query
 - **Database:** SQLite (live sessions) + TraceDB (stable history)
 - **API:** REST + SSE streaming on `http://127.0.0.1:4317`
 
@@ -118,30 +118,34 @@ your archive, or your real agents. It needs no servers running beforehand.
 
 ## Documentation
 
+Comprehensive documentation lives in `docs/`:
+
+- [**Documentation Index**](docs/README.md) — Start here for navigation and principles
 - [**Development**](docs/development.md) — herdr deployment, health checks, troubleshooting
 - [**Installation**](docs/installation.md) — Packaged install, upgrade, rollback
-- [**AGENTS.md**](AGENTS.md) — Development guide and project rules
 - [**Architecture**](docs/architecture.md) — System design and data flow
-- [**Roadmap**](docs/roadmap.md) — Release phases and milestones
+- [**Frontend Architecture**](docs/frontend-architecture.md) — UI design and implementation
+- [**Roadmap**](docs/roadmap.md) — Project status and future enhancements
 - [**API Design**](docs/api-design.md) — REST endpoints and SSE streaming
 - [**Database Schema**](docs/database-schema.md) — SQLite schema and migrations
-- [**Frontend Architecture**](docs/frontend-architecture.md) — UI design and implementation (Phase 2)
+- [**Agent UI Design Analysis**](docs/agent-ui-design-analysis.md) — Why agent workspaces differ from chat UIs
+- [**Keyboard Shortcuts**](docs/keyboard-shortcuts-default-sessions-settings.md) — Shortcuts, Quick Start, Settings
+
+See [**AGENTS.md**](AGENTS.md) for the project's development rules and conventions.
 
 ## Project Status
 
-Sylph Web is usable end to end today: create a session, stream a turn, search
-the archive, import a native session.
+Sylph Web is a complete, production-ready agent workspace. All planned phases are
+implemented and deployed.
 
-- ✅ **Phase 1** — backend core: sessions, turns, SSE, runner discovery, auth
-- ✅ **Phase 2** — frontend foundation: session list, conversation view, resume
-- ✅ **Phase 3** — attachments, archive search, native import, filters
-- ✅ **Phase 4** — production readiness: coverage, accessibility, performance
-- ✅ **Phase 5** — packaging and deployment
+- ✅ **Phase 1** — Backend core: sessions, turns, SSE, runner discovery, auth
+- ✅ **Phase 2** — Frontend foundation: session list, conversation view, reconnection
+- ✅ **Phase 3** — Attachments, archive search, native import, filters
+- ✅ **Phase 4** — Production readiness: comprehensive test coverage, accessibility, performance optimization
+- ✅ **Phase 5** — Packaging and deployment: standalone install, LaunchAgent, rollback
+- ✅ **Phase 6** — Agent workspace redesign: three-pane layout, tool-first timeline, file browser, keyboard shortcuts
 
-All five phases are complete. See [roadmap](docs/roadmap.md) for deliverables
-and [PHASE5_HANDOFF.md](PHASE5_HANDOFF.md) for open decisions.
-
-See [roadmap](docs/roadmap.md) for details.
+All six phases are complete. See [roadmap](docs/roadmap.md) for details and future enhancements.
 
 ## Contributing
 

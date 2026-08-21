@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod archive;
 pub mod files;
 pub mod fs;
 pub mod health;

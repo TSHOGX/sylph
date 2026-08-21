@@ -18,9 +18,9 @@ import { useCallback, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, type Session } from "@/lib/api";
 import { useSettings } from "@/lib/settings";
+import { useQuickCreateSession } from "@/lib/create-session";
 import { WorkspaceUIProvider, useWorkspaceUI } from "@/lib/workspace-ui";
 import { WorkspaceSidebar } from "@/components/workspace-sidebar";
-import { useQuickCreateSession } from "@/lib/create-session";
 import { formatCombo, useIsMac } from "@/lib/shortcuts";
 
 /**
@@ -52,6 +52,10 @@ const SettingsPanel = dynamic(
   () => import("@/components/settings-panel").then((m) => m.SettingsPanel),
   { ssr: false },
 );
+const HistoryOverlay = dynamic(
+  () => import("@/components/history-overlay").then((m) => m.HistoryOverlay),
+  { ssr: false },
+);
 
 /**
  * Routes that own the full width and get no shell.
@@ -68,19 +72,26 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const goToNewSession = useCallback(() => router.push("/sessions/new"), [router]);
 
-  // One creator for the whole shell. Creating a session is a mutation, not a
-  // route — the sidebar's group menus, and Quick Start, all go through this so
-  // there is a single pending state and a single error banner.
-  const create = useQuickCreateSession();
+  // Creating a session is a mutation, not a route: the point of both Quick Start
+  // and the sidebar's "New session here" is that neither shows a dialog. One
+  // instance is shared by every surface, so there is a single pending state and a
+  // single error banner rather than one per caller.
+  const creator = useQuickCreateSession();
 
-  // `~/.agents` comes from the backend, never from a client-side guess: `~`
-  // cannot be expanded in a browser, and the backend runs as the user whose home
-  // directory is the right one.
+  // The Quick Start directory is resolved server-side; `~` cannot be expanded in
+  // a browser, and the backend runs as the user whose home directory is correct.
   const workspaces = useQuery({
     queryKey: ["workspaces"],
     queryFn: () => api.workspaces.list(),
     staleTime: 30_000,
   });
+  const quickStartDir = workspaces.data?.quickStartDir;
+
+  const createSession = creator.create;
+  const quickStart = useCallback(
+    () => createSession(quickStartDir),
+    [createSession, quickStartDir],
+  );
 
   if (BARE_ROUTES.includes(pathname)) {
     return <>{children}</>;
@@ -89,26 +100,34 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <WorkspaceUIProvider
       onNewSession={goToNewSession}
-      quickStartDir={workspaces.data?.quickStartDir}
-      createSession={create.create}
-      createPending={create.isPending}
-      createError={create.error}
+      onQuickStart={quickStart}
+      onCreateSessionIn={createSession}
     >
-      <ShellFrame>{children}</ShellFrame>
+      <ShellFrame createPending={creator.isPending} createError={creator.error}>
+        {children}
+      </ShellFrame>
     </WorkspaceUIProvider>
   );
 }
 
-function ShellFrame({ children }: { children: ReactNode }) {
-  const { leftOpen, rightOpen, overlay, createError } = useWorkspaceUI();
+function ShellFrame({
+  children,
+  createPending,
+  createError,
+}: {
+  children: ReactNode;
+  createPending: boolean;
+  createError: unknown;
+}) {
+  const { leftOpen, rightOpen, overlay } = useWorkspaceUI();
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-white text-gray-900">
-      <TopBar />
+      <TopBar createPending={createPending} />
 
-      {/* Reported at the shell rather than inside the sidebar menu that started
-          it: the menu closes on select, so an error rendered there would unmount
-          with it. */}
+      {/* One banner for every dialog-free create path: Quick Start, the palette,
+          and the sidebar's "New session here" all run the same mutation, so a
+          failure has one place to appear regardless of which triggered it. */}
       {createError != null && (
         <p role="alert" className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
           {createError instanceof Error
@@ -142,12 +161,14 @@ function ShellFrame({ children }: { children: ReactNode }) {
       {overlay === "search" && <SearchOverlay />}
       {overlay === "palette" && <CommandPalette />}
       {overlay === "settings" && <SettingsPanel />}
+      {overlay === "history" && <HistoryOverlay />}
     </div>
   );
 }
 
-function TopBar() {
-  const { toggleLeft, toggleRight, openOverlay, leftOpen, rightOpen } = useWorkspaceUI();
+function TopBar({ createPending }: { createPending: boolean }) {
+  const { toggleLeft, toggleRight, openOverlay, runAction, leftOpen, rightOpen } =
+    useWorkspaceUI();
   const { settings } = useSettings();
   const isMac = useIsMac();
 
@@ -186,14 +207,6 @@ function TopBar() {
         </button>
       </div>
 
-      {/* No create buttons here.
-          Creating a session needs a working directory, and the top bar does not
-          know one — so a button here could only open a form asking for it, or
-          silently pick the scratch directory. Both are worse than the surface
-          that already knows the answer: right-clicking a workspace in the sidebar
-          names the directory by the act of clicking it. `Mod+N` and
-          `Mod+Shift+N` still reach both paths through `runAction`, and the
-          command palette still lists them. */}
       <IconButton
         label="Open settings"
         hint={hint("openSettings")}

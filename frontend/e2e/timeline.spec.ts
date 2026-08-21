@@ -96,8 +96,16 @@ test("a 1000-event conversation renders within the performance budget", async ({
 
   // Confirm the fixture really produced the volume the budget is about, so the
   // measurement cannot silently pass against a short transcript.
-  const events = await page.getByRole("region", { name: /tool call/ }).count();
-  expect(events, "bulk fixture should emit 250 tool calls").toBeGreaterThanOrEqual(250);
+  //
+  // Polled rather than counted once: the transcript now paints incrementally, so
+  // the reply block that `runPrompt` waits for appears while rows are still
+  // arriving. A single count here races the stream and reads a partial log.
+  await expect
+    .poll(
+      () => page.getByRole("region", { name: /tool call/ }).count(),
+      { message: "bulk fixture should emit 250 tool calls", timeout: 30_000 },
+    )
+    .toBeGreaterThanOrEqual(250);
 
   const started = Date.now();
   await page.reload();

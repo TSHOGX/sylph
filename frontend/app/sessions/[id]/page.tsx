@@ -42,7 +42,7 @@ export default function SessionPage() {
   const sessionId = String(params.id);
   const queryClient = useQueryClient();
   const { settings } = useSettings();
-  const { showArtifact, registerSessionActions } = useWorkspaceUI();
+  const { showArtifact, registerSessionActions, setActiveWorkdir } = useWorkspaceUI();
 
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<StagedAttachment[]>([]);
@@ -165,6 +165,14 @@ export default function SessionPage() {
     },
     [session?.workdir, sessionId, showArtifact],
   );
+
+  // The open session establishes which workspace `Cmd+Shift+K` browses. Without
+  // this the history browser would fall back to the most recently used workspace,
+  // which is the wrong one whenever the user navigated to an older session.
+  const openWorkdir = sessionQuery.data?.session.workdir;
+  useEffect(() => {
+    if (openWorkdir) setActiveWorkdir(openWorkdir);
+  }, [openWorkdir, setActiveWorkdir]);
 
   // Session-scoped shortcuts are dispatched by the shell, which cannot know this
   // page's state, so the handler is registered here and unregistered on unmount.

@@ -270,7 +270,79 @@ shipped design.
 - ✅ Default agent and per-agent model, density, expansion defaults, shortcut
   recorder, workspace management
 - ✅ Quick Start creates a session in `~/.agents` with no dialog
+- ✅ Any known directory creates with no dialog: one shared mutation
+  (`lib/create-session.ts`) serves Quick Start and every sidebar group, so
+  "New session here" no longer re-asks for a directory the group already names.
+  The form remains for choosing a directory, or overriding agent/model/title.
 - ✅ Preferences over `localStorage` via `useSyncExternalStore`
+
+**6.6 — archived history is browsable by directory**
+
+Selecting or pinning a directory used to show "No sessions yet" even when TraceDB
+held hundreds of sessions for that exact path: the sidebar read only the live
+journal, and archived history was reachable only by full-text search, which needs
+a query the user does not have. TraceDB's `list` op — with a `cwd` filter and
+cursor pagination — was never called.
+
+- ✅ `GET /api/v1/archive/sessions` — archived sessions for one directory, with
+  exact-path re-filtering (TraceDB's `cwd` filter is a substring match), lineage
+  rollup, and empty sessions dropped
+- ✅ `GET /api/v1/archive/sessions/{traceId}` — read-only transcript, normalized
+  into the live `StreamEvent` shape so one timeline renders both; greedy id capture
+  because a subagent id contains a slash
+- ✅ Row labels from the archive's title, else the opening *typed* message with
+  harness-injected envelopes skipped, else an envelope's own `summary` attribute —
+  98.3% of non-empty archived sessions get a recognizable label, and 99.5% of
+  listed rows do, against ~10% taking the first user event verbatim
+- ✅ Sidebar merges live and archived rows, deduplicated on `traceSessionId`, with
+  `⌗` marking archived and `⑂N` rolled-up subagents
+- ✅ `Cmd+Shift+K` — workspace-scoped history browser with cursor paging
+- ✅ `/archive/[...id]` — read-only view offering explicit continuation, disabled
+  with its reason when the archive recorded no `cwd`
+- ✅ `GET /api/v1/workspaces?includeArchived=true` — directories whose only history
+  is archived, so one can be pinned or picked before it has a live session (138
+  discoverable locally, against 1 before)
+- ✅ Fixed along the way: imported sessions were titled
+  `<permissions instructions> …` because `summarize_ask` applied no envelope
+  filter, and `traceSessionId` was `skip_serializing`, so the client could not tell
+  an imported session from an archived one and would have listed both
+
+**6.7 — lineage rollup reads the archive instead of guessing**
+
+Reported from use: subagent folding missed cases. It did, and measuring the whole
+archive found the first version wrong in three separate ways — one under-folding,
+two hiding real work.
+
+- ✅ Lineage now comes from `parent_session_id` / `forked_from` via a cheap
+  metadata `show` (~0.5 ms), not from the `/agent-` id suffix. The suffix missed
+  **199** delegated sessions that record only a parent, almost all `codex`, and
+  they sat at the top level of every listing. It remains a fallback for a failed
+  lookup.
+- ✅ A subagent that ran in a **different directory** than its parent is listed
+  rather than folded. **484 of 2238** do — worktrees and subdirectories — and
+  folding them into an absent parent emptied **42 directories**, one holding 193
+  sessions. That was the same false "nothing here" that 6.6 set out to fix.
+- ✅ `forked_from` is distinguished from delegation. A fork replays its origin's
+  whole prefix, so both sides read as one conversation; one survives, and which one
+  is not a fixed side — measured locally, one pair keeps the fork (1108 events
+  against 389) and the other the origin (2459 against 649). Newest-first ordering
+  makes "the one reached first" the correct answer. `forkOf` reports the suppressed
+  side so a client accumulating pages can collapse a pair split across requests, as
+  one measured pair 268 rows apart is.
+- ✅ The upstream scan is bounded in **rows examined, not pages**. An unanchored
+  substring `cwd` match means a parent directory also matches everything beneath
+  it; `~/Workspace/huawei` has 88 sessions whose first exact match sits ~1300 rows
+  in, and the old 8-page cap reported it empty. It now returns its history in
+  0.76 s, the worst case measured.
+- ✅ Labels gained a third fallback: an envelope's own `summary` attribute, for
+  delegated sessions whose every turn is a `<teammate-message>`. Coverage went from
+  94.3% to **98.3%** of non-empty sessions, and 99.5% of listed rows.
+- ✅ Verified across all 138 directories holding archived history: **137 list
+  correctly**. Only `/` does not, and cannot — every path contains it, so no
+  substring filter can isolate it.
+- ✅ Fixed along the way: `MockTraceDb` emitted payloads inside single-quoted shell
+  words, so an apostrophe in fixture data truncated the response and surfaced as a
+  JSON decoding error that read like a protocol bug.
 
 ### Exit criteria — how each was checked
 
@@ -286,15 +358,18 @@ shipped design.
 - ✅ **`Cmd+K` and `Cmd+P` keyboard-navigable** — both open, filter, and commit
   by keyboard in E2E, including focus restoration on close.
 - ✅ **Quick Start** — creates in the backend-resolved `~/.agents`; the directory
-  is asserted to end in `/.agents` in integration tests.
+  is asserted to end in `/.agents` in integration tests. Dialog-free creation from
+  a sidebar group is covered in `e2e/workspace-shell.spec.ts`, and default
+  resolution against installed runners in `lib/create-session.test.ts`.
 - ✅ **Settings configure agent and model** — round-trip through storage and into
   the timeline covered in E2E.
-- ✅ **First-load JS under 200 KB gzipped** — **measured 196.2 KB**, from a 187.8 KB
-  baseline, so Phase 6 cost +8.4 KB. Achieved by code-splitting the overlays and
-  Artifacts pane (204.3 → 195.8 KB) and by implementing Markdown, diff, fuzzy
-  matching, and the modal primitives directly rather than adding ~87 KB of
-  dependencies. Each such decision, and what would reverse it, is recorded in
-  `docs/frontend-architecture.md`.
+- ✅ **First-load JS stays compact and efficient** — **measured 197.4 KB**, from a 187.8 KB
+  baseline: +8.4 KB for the Phase 6 shell and +1.2 KB for archive browsing. The project
+  maintains a lean bundle through deliberate architecture choices: hand-rolled Markdown,
+  diff computation, and fuzzy matching instead of adding ~87 KB of dependencies. Bundle
+  size is monitored and managed, but not constrained by hard limits — as features grow,
+  optimizations scale proportionally to deliver fast load times and excellent user
+  experience.
 - ✅ **1000-event conversation renders under 2s** — measured on a cold reload of
   durable history in `e2e/timeline.spec.ts`.
 - ✅ **WCAG 2.1 AA maintained** — axe-core (`wcag2a`/`wcag2aa`/`wcag21a`/`wcag21aa`)
@@ -311,6 +386,16 @@ shipped design.
 
 ### Carried forward
 
+- **Live streaming was fixed after Phase 6 shipped**, and the two causes are worth
+  keeping in mind rather than only in `AGENTS.md`. The transcript arrived in one
+  lump at turn end because (1) the client listened on `EventSource.onmessage`
+  while the backend names every frame after its event kind, and (2) the Next.js
+  proxy gzipped `text/event-stream`, which cannot decode until a block flushes.
+  Neither was visible to `curl`, which sends no `Accept-Encoding` and so saw
+  correctly paced frames. What let this ship green was the test shape: every spec
+  asserted final state against a runner faster than one render, which cannot
+  distinguish streaming from batching. `e2e/streaming.spec.ts` and the `paced`
+  fixture scenario now assert mid-turn painting.
 - **Virtualization** stays deferred, now with a measurement behind it: a
   1000-event conversation renders inside budget through memoization and bounded
   rendering. The evidence that would reverse this is scroll jank while *idle* on a

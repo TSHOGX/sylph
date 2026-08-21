@@ -71,8 +71,17 @@ describe("inline parsing", () => {
       { type: "text", value: "see " },
       { type: "link", value: "docs", href: "https://example.com/x" },
     ]);
+    // `literal` marks a label that must not be re-parsed. An autolink's label is
+    // the URL itself, so re-tokenizing it yields this same token — the renderer
+    // then recursed forever. `components/markdown-render.test.ts` covers the
+    // crash; this pins the flag at the point it is set.
     expect(parseInlineForTest("https://example.com/y")).toEqual([
-      { type: "link", value: "https://example.com/y", href: "https://example.com/y" },
+      {
+        type: "link",
+        value: "https://example.com/y",
+        href: "https://example.com/y",
+        literal: true,
+      },
     ]);
   });
 

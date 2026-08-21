@@ -9,6 +9,7 @@ use crate::{
     error::{Error, Result},
     events::StreamEvent,
     models::{CreateSessionRequest, Session, Turn},
+    tracedb::summarize_line,
     AppState,
 };
 
@@ -409,15 +410,56 @@ pub async fn import(
     ))
 }
 
-/// First line of the opening ask, capped, for use as a title.
+/// First meaningful line of the opening ask, capped, for use as a title.
+///
+/// Shares one implementation with the archive browser's row labels: an imported
+/// session and its archived counterpart must not be named differently, or the
+/// same conversation reads as two.
 fn summarize_ask(ask: &str) -> String {
-    const MAX_CHARS: usize = 80;
-    let line = ask.lines().find(|l| !l.trim().is_empty()).unwrap_or(ask).trim();
-    // Counting characters, not bytes: these asks are frequently not ASCII, and
-    // slicing on a byte index would panic mid-codepoint.
-    if line.chars().count() <= MAX_CHARS {
-        return line.to_string();
+    summarize_line(ask)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_imported_title_is_the_ask_not_the_injected_preamble() {
+        // Before this filter, every imported codex session was titled with the
+        // same sandboxing boilerplate.
+        let ask = "<permissions instructions> Filesystem sandboxing defines which files\n\
+                   Fix the SSE reconnect loop";
+
+        assert_eq!(summarize_ask(ask), "Fix the SSE reconnect loop");
     }
-    let truncated: String = line.chars().take(MAX_CHARS).collect();
-    format!("{}…", truncated.trim_end())
+
+    #[test]
+    fn a_plain_ask_is_unchanged() {
+        assert_eq!(summarize_ask("Fix the login bug"), "Fix the login bug");
+        // A subagent brief is a real ask, not boilerplate.
+        assert_eq!(
+            summarize_ask("You are reviewing Task 4."),
+            "You are reviewing Task 4."
+        );
+    }
+
+    #[test]
+    fn a_long_ask_is_truncated_on_a_character_boundary() {
+        // Non-ASCII is the norm in this archive; slicing by byte would panic.
+        let ask = "请帮我".repeat(40);
+        let summary = summarize_ask(&ask);
+
+        assert!(summary.ends_with('…'));
+        assert_eq!(summary.chars().count(), 81, "80 chars plus the ellipsis");
+    }
+
+    #[test]
+    fn an_envelope_only_ask_still_yields_a_title() {
+        // Slash-command sessions carry nothing else. An empty title would render
+        // as a blank row, which is worse than showing the envelope.
+        assert_eq!(
+            summarize_ask("<command-name>/theme</command-name>"),
+            "<command-name>/theme</command-name>"
+        );
+    }
 }

@@ -318,6 +318,21 @@ Stream turn events via SSE.
 **Query parameters:**
 - `after_seq` (default -1, replay from this sequence number)
 
+**Response headers:**
+- `Content-Type: text/event-stream`
+- `Cache-Control: no-cache, no-store, no-transform`
+
+`no-transform` (RFC 9111 §5.2.2.6) is required, not decorative. It forbids an
+intermediary from re-encoding the body, and without it the Next.js proxy's
+`compression` middleware gzips the stream — which cannot be decoded until a block
+flushes, so the client receives the entire turn at once instead of incrementally.
+Exactly one `cache-control` header is sent; two would leave the applied directive
+up to whichever an intermediary reads first.
+
+Note that each frame is **named** after its event kind (`event: thinking`), so a
+client must not dispatch on `EventSource.onmessage`, which by spec receives only
+frames named `message`.
+
 **Response 200 (text/event-stream):**
 ```
 event: thinking
@@ -393,7 +408,8 @@ listing returns.
       "sessionCount": 8,
       "runningCount": 1,
       "lastUsedMs": 1755600000000,
-      "isQuickStart": false
+      "isQuickStart": false,
+      "archivedCount": 0
     }
   ]
 }
@@ -402,6 +418,185 @@ listing returns.
 Ordered newest-first by `lastUsedMs`. The Quick Start directory is always
 present, even with no sessions, because the sidebar section and the settings row
 exist before the first quick session is created.
+
+**Query parameters.** `includeArchived=true` also reports directories that exist
+only in the TraceDB archive, with `archivedCount` set. It is off by default
+because the sidebar polls this endpoint and needs only live sessions to group,
+while an archive scan walks every archived session. Surfaces where the user
+*picks* a directory pass it: a project someone is about to work in has no live
+session yet, so without this it could never be pinned or selected. When the flag
+is absent `archivedCount` is `0`, which therefore means "not counted" rather than
+"no history". An unreachable archive degrades to live-only rather than failing the
+request.
+
+### Archive
+
+Read-only browsing of durable coding-agent history, by directory.
+
+`/search` answers "which archived session mentioned X", which only helps someone
+who already knows what to ask. These endpoints answer what the sidebar asks:
+"what happened in this directory before?" Without them a freshly pinned workspace
+renders as empty while the archive holds hundreds of sessions for that same path.
+
+**Reading is not importing.** `POST /sessions/import` adopts a session so it can
+be *continued*: it writes a row, requires a runner for the originating agent, and
+requires the recorded `cwd` to still exist. None of that is needed to read a
+transcript, and all of it fails for exactly the old sessions a user most wants to
+look back at. So these endpoints mutate nothing, and import stays an explicit
+action taken from the archived view.
+
+#### `GET /api/v1/archive/sessions`
+
+| Parameter | Required | Meaning |
+| --- | --- | --- |
+| `workdir` | yes | Absolute directory to list history for |
+| `limit` | no | Rows to return, 1–100, default 20 |
+| `cursor` | no | `nextCursor` from a previous response |
+
+**Response 200:**
+```json
+{
+  "sessions": [
+    {
+      "id": "claude:f1830315-5ce1-44e3-86c0-8f65ccbc961e",
+      "agent": "claude",
+      "label": "Fix the SSE reconnect loop",
+      "cwd": "/Users/you/Workspace/sylph-web",
+      "model": "claude-opus-5",
+      "startedAtMs": 1787223579574,
+      "endedAtMs": 1787227503012,
+      "events": 419,
+      "subagentCount": 2,
+      "sessionId": "0c3f..."
+    }
+  ],
+  "nextCursor": "1787223880382:636c...",
+  "available": true
+}
+```
+
+`id` is a TraceDB session id, not a Sylph Web session id. `sessionId` is present
+only when this archived session has already been imported, which lets the UI open
+the live conversation instead of listing one conversation twice.
+
+Three filters are applied here rather than upstream, each for a measured reason:
+
+- **Exact directory.** TraceDB matches `cwd` as a substring
+  (`cwd LIKE '%' || ? || '%'`), so a request for `/w/app` also returns
+  `/w/app-old` and every subdirectory. Rows are re-filtered for exact equality
+  after normalizing trailing slashes.
+- **Lineage rollup.** TraceDB's `list` does not collapse fork lineage, though
+  `search` does, and delegated sessions are 51% of a real archive (2238 of 4416
+  non-empty). They fold into the session that spawned them as `subagentCount`,
+  since listing them as peers buries the sessions a user actually started. See
+  **Lineage** below, which is the subtlest part of this endpoint.
+- **Empty sessions.** Rows with `events: 0` are dropped; they are common for
+  aborted runs and there is nothing to read.
+
+Because those filters shrink a page, one request may walk several upstream pages
+to fill `limit`, bounded by rows examined rather than pages. That bound is
+generous on purpose: the substring `cwd` match means a parent directory's pattern
+also matches everything beneath it, and those sort by recency rather than depth,
+so an exact match can sit far into the scan. One real directory with 88 sessions
+of its own had its first exact match ~1300 rows in, and a page-count cap reported
+it as empty. `nextCursor` continues from wherever the scan stopped.
+
+##### Lineage
+
+The archive records two different relationships, and they want opposite
+treatment. Neither is reported by `list`, so each candidate row costs one cheap
+metadata `show` (~0.5 ms); the `/agent-` id suffix is only a fallback for when
+that lookup fails, because it misses the 199 sessions that record a parent without
+carrying a suffix.
+
+- **`parent_session_id` — delegated work.** Folded into the parent as
+  `subagentCount`, *provided the parent is in the directory being listed*. 484 of
+  2238 subagents ran somewhere else — a worktree or a subdirectory — and folding
+  those into an absent parent deletes them from the only listing that would show
+  them, which emptied 42 directories, one holding 193 sessions. A cross-directory
+  child is therefore promoted to a row of its own: in its own directory it is not
+  delegated work, it is the work.
+- **`forked_from` — the same conversation resumed.** A fork replays its origin's
+  entire prefix, so both sides share every early user turn and read as one
+  conversation; listing both shows it twice under one label. One side survives,
+  and which one cannot be fixed in advance — of the two real local cases, one has
+  its later work in the fork (1108 events against 389) and the other in the origin
+  (2459 against 649). Since `list` is ordered by `endedAtMs` descending, the
+  survivor is whichever is reached first.
+
+`forkOf` names the suppressed origin on a surviving fork row. Within one response
+the loser is already dropped, but a pair can straddle two pages — one measured
+pair sits 268 rows apart — and the server keeps no state between requests. A
+client that accumulates pages must therefore drop a row whose `forkOf` names a
+session it has already shown, and equally a row that a previously-shown fork
+names. `components/history-overlay.tsx` is the only such surface; the sidebar
+fetches a single page, where the server has already resolved the pair.
+
+`label` falls back through three sources, in order:
+
+1. **The archive's own title.** `claude` records one for 73% of sessions and
+   `opencode` for all of them, while `codex` and `pi` record none — so the
+   fallbacks are the common path, not the exception.
+2. **The opening *typed* message.** Leading harness-injected envelopes
+   (`<permissions instructions>`, `<environment_context>`,
+   `<skills_instructions>`, memory files, `Caveat:`) are skipped: they are
+   byte-identical across every session of an agent and identify nothing.
+3. **An envelope's `summary` attribute.** Some delegated sessions have no typed
+   turn at all — every one is a `<teammate-message ... summary="...">` block — but
+   that attribute is human-written and describes the task ("Author insects pests
+   unit"). XML entities in it are decoded.
+
+Measured over the whole local archive, those three take labelled sessions from
+94.3% (title plus typed ask alone) to **98.3%**; across the 138 directories that
+hold archived history, 99.5% of listed rows carry one.
+
+An unreachable archive answers **200** with `available: false` and a `detail`,
+never 503, matching `/search`: TraceDB is optional locally, and the sidebar calls
+this for every expanded workspace.
+
+#### `GET /api/v1/archive/sessions/{traceId}`
+
+One archived transcript, for read-only viewing. `traceId` is matched greedily
+because a subagent id contains a slash (`claude:uuid/agent-name`).
+
+`limit` (1–5000, default 2000) bounds the events read; `truncated` reports when it
+cut the stream short. The cap matters: the largest session in a real local archive
+is 8167 events and 20 MB of JSON.
+
+**Response 200:**
+```json
+{
+  "id": "claude:f1830315-5ce1-44e3-86c0-8f65ccbc961e",
+  "agent": "claude",
+  "label": "Fix the SSE reconnect loop",
+  "cwd": "/Users/you/Workspace/sylph-web",
+  "startedAtMs": 1787223579574,
+  "events": [{ "seq": 2, "kind": "user", "phase": "completed", "...": "..." }],
+  "truncated": false
+}
+```
+
+`events` are normalized into the same `StreamEvent` shape the live SSE stream and
+history endpoint use, so one timeline renderer serves both. Four adaptations:
+
+- Every event is `phase: "completed"` and `stability: "stable"`. Archived history
+  is settled, and a `delta` phase would leave the timeline waiting for text that
+  never arrives. `source` is `archive`.
+- Agent-internal `system` events are dropped. Every observed subtype (`mode`,
+  `permission-mode`, `task_started`, `world_state`, `model_change`, …) carries a
+  raw JSON configuration blob with no live-protocol equivalent, and one measured
+  session held 49 of them in 419 events.
+- Tool arguments move from `text` into `data.input`, which is where the client
+  reads them. `text` is left in place as the documented fallback for a payload
+  that is not JSON.
+- A `tool_result` is given the same `streamId` as its `tool_call` so the two
+  group. The agents record that link differently — `codex` repeats one `call_id`
+  on both, `claude` points the result's `parent_id` at the call's `native_id` —
+  and both are mapped onto one id.
+
+A missing session is `404 TRACE_SESSION_NOT_FOUND`; an unreachable archive is
+`503 TRACEDB_UNAVAILABLE`. Unlike the listing, a single transcript has no useful
+degraded form, so it reports the failure rather than rendering an empty one.
 
 ### Files
 

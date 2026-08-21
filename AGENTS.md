@@ -93,6 +93,34 @@ until that binary exists — check `/api/v1/health` for `tracedb.available`.
 These have each cost real debugging time. They are properties of the toolchain
 and the design, not of any current task.
 
+**A proxy that gzips an SSE stream buffers it invisibly.** Next.js proxies
+`/api/v1/*` through the standard `compression` middleware, which compresses any
+compressible content type — `text/event-stream` included — and a gzip stream
+cannot be decoded until its block is flushed. The whole turn then lands in the
+browser at once, while `curl` sees perfectly paced frames because it sends no
+`Accept-Encoding`. That asymmetry makes a transport bug look like a rendering
+bug. The event stream therefore sets `Cache-Control: no-cache, no-store,
+no-transform`; `no-transform` is what forbids the re-encoding, and it belongs on
+the backend response so it holds behind any proxy, tunnel, or nginx.
+
+**`EventSource` dispatches by frame name, so `onmessage` sees almost nothing.**
+Every frame the backend emits is named after its event kind (`event: thinking`),
+and `onmessage` receives only frames named `message` — so listening there drops
+the entire stream. Per-kind `addEventListener` is not the fix either: a kind added
+later is then silently dropped, and a frame named `error` collides with the
+browser's own connection-error event. `frontend/lib/use-sse.ts` reads the body
+with `fetch` and parses frames itself, which is also what makes the parser
+unit-testable; `EventSource` is not, which is why the original bug shipped
+untested.
+
+**Testing "it streams" needs a runner slower than one render.** Every E2E spec
+asserted final state against a mock runner that finished in well under a second,
+so a client that dropped every mid-turn event passed the entire suite. The `paced`
+scenario in `frontend/e2e/fixtures/runners/e2e/runner.sh` spaces its stages a
+second apart, and `e2e/streaming.spec.ts` asserts an earlier stage is on screen
+while a later one has not been emitted yet. Asserting only the end state cannot
+distinguish streaming from batching.
+
 **`cargo` is not on the default `PATH`.** Use `~/.cargo/bin/cargo`, or export
 `PATH="$HOME/.cargo/bin:$PATH"` first. A bare `cargo test` fails with
 `command not found`, which reads like a broken repo rather than a shell problem.
@@ -127,6 +155,71 @@ snake_case (`created_at_ms`, `started_at_ms`), while `stats`, `search`, and
 a spelling change fails a test rather than silently yielding `None`. Do not add
 dual-spelling aliases: they mask future renames and suppress parse errors that
 would catch breaking changes.
+
+**TraceDB's `cwd` filter is a substring match, not a path match.** `list` and
+`search` compile it to `cwd LIKE '%' || ? || '%'`, so asking for `/w/app` also
+returns `/w/app-old` and every subdirectory. Anything that means "this one
+directory" must re-filter for exact equality after normalizing trailing slashes —
+`api::archive` and `api::workspaces` share `normalize` for exactly this.
+
+**`list` does not collapse fork lineage, but `search` does.** Delegated sessions
+are rows of their own and are 51% of a real local archive (2238 of 4416
+non-empty), so a listing that does not fold them into their parent is half noise.
+`list` carries no parent column, so lineage costs one `show` per candidate —
+`Client::session_metadata` is the cheap shape, ~0.5 ms and ~1 KB.
+
+**The `/agent-` id suffix is not a reliable lineage signal.** It catches 2039
+subagents but misses 199 that record only a `parent_session_id`, almost all
+`codex`; those sat at the top level of every listing until
+`TraceSession::lineage` started reading the archive's own record. The suffix
+survives as a fallback for when a metadata lookup fails.
+
+**A subagent often runs in a different directory than its parent.** 484 of 2238
+do — typically a worktree or a subdirectory. Folding those into a parent that is
+not in the directory being listed deletes them from the only listing that would
+ever show them: it emptied 42 directories, one holding 193 sessions. A
+cross-directory child is promoted to a row of its own, because in its own
+directory it is not delegated work, it *is* the work.
+
+**`parent_session_id` and `forked_from` are different relationships.** A subagent
+folds into its parent as a count. A fork replays its origin's entire prefix and
+continues past it, so the two share every early user turn and read as one
+conversation resumed — listing both shows it twice under one label. Only one
+survives, and which one cannot be fixed in advance: of the two real cases here,
+one has its later work in the fork (1108 events against 389) and the other in the
+origin (2459 against 649). `list` is ordered by `endedAtMs` descending, so the
+survivor is simply whichever is reached first.
+
+**An unanchored `cwd` filter can starve a paged scan.** Because the match is a
+substring, a parent directory's pattern also matches every path beneath it, and
+those sort by recency rather than depth. `/Users/x/Workspace/huawei` has 88
+sessions of its own whose first exact match lands ~1300 rows in; an 8-page cap
+gave up first and reported the directory empty. Bound such a scan in rows
+examined (`MAX_UPSTREAM_ROWS`), not pages. `trace-db` also caps a `list` page at
+500 rows however many are requested.
+
+**Unknown request fields are silently ignored by `trace-db api`.** Its handlers
+read named keys off a JSON object rather than deserializing a typed struct, so a
+misspelled field is dropped with no error and the operation runs unfiltered. `list`
+takes `since` as a *string*, not `since_ms` as an integer — passing the latter
+looks like it works and filters nothing. Verify a new field changes the result
+rather than assuming it was accepted.
+
+**The first `user` event is usually not what the user typed.** Agents inject their
+own context as leading pseudo user turns (`<permissions instructions>`,
+`<environment_context>`, `<skills_instructions>`, memory files as
+`# AGENTS.md instructions`, Claude's `Caveat:` preamble). Taking the first user
+event verbatim labels most sessions with boilerplate that is byte-identical across
+every session of that agent. `tracedb::is_injected_envelope` skips them, which over
+311 measured sessions raises recognizable labels from ~10% to 98%. Keep that rule
+narrow: an earlier version also treated a leading `You are ` as boilerplate and
+discarded 44 genuine labels, because subagent task briefs legitimately open that
+way.
+
+**Archived titles are per-agent, not universal.** `claude` records one for ~73% of
+sessions and `opencode` for all of them; `codex` and `pi` record none. Any surface
+showing an archived title needs the opening-ask fallback, or most rows read as
+untitled.
 
 ## Spec and Code Evolution
 

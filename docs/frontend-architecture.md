@@ -93,12 +93,15 @@ UI feedback after 3s. Pattern proven in both eventsource lib and DSH.
 
 ---
 
+## Design Philosophy
+
 **Core principles:**
 1. **Origin-aware UI** — Visual distinction between Sylph-managed and native sessions
 2. **Real-time first** — SSE-driven updates with optimistic rendering
 3. **Local-first** — No external dependencies, works offline after initial load
 4. **Accessibility** — WCAG 2.1 AA compliance, keyboard navigation, screen reader support
-5. **Performance** — Virtual scrolling for large trajectories, code splitting, <200KB bundle
+5. **Performance** — Keep bundles compact, optimize rendering, maintain responsiveness
+6. **Architecture quality** — Balance performance, user experience, maintainability, and extensibility
 
 **What to copy from DeepSeek Harness:**
 - Overall layout structure (left rail + canvas)
@@ -227,7 +230,8 @@ frontend/
 │   ├── diff.ts                 # LCS line diff
 │   ├── tool-shape.ts           # Interprets tool_call payloads per agent
 │   ├── fuzzy.ts                # Subsequence ranking
-│   ├── use-sse.ts              # EventSource with after_seq resume
+│   ├── use-sse.ts              # Streaming fetch reader with after_seq resume
+│   ├── sse-parse.ts            # Incremental event-stream frame decoder
 │   ├── use-debounced.ts
 │   ├── error-boundary.tsx
 │   └── format.ts
@@ -261,11 +265,14 @@ targets.
 │   scratch    │                                    │ ▾ backend/       │
 │              │ ▸ ✻ Thinking  84 words             │   ▾ src/         │
 │ Workspaces   │                                    │     ▫ lib.rs     │
-│ ▾ sylph-web 8│ ▤ Read  backend/src/auth.rs    ✓   │     ▫ auth.rs    │
+│ ▾ sylph-web8+│ ▤ Read  backend/src/auth.rs    ✓   │     ▫ auth.rs    │
 │   ● session A│                                    │ ▫ Cargo.toml     │
 │   ◆ session B│ I'll add logging at three points.  │                  │
-│ ▾ trace-db  3│                                    │ ─────────────────│
-│   ● session C│ ✎ Edit  backend/src/auth.rs    ✓   │ auth.rs          │
+│   ⌗ past work│                                    │ ─────────────────│
+│   ⌗ older  ⑂2│ ✎ Edit  backend/src/auth.rs    ✓   │ auth.rs          │
+│   Browse all→│                                    │                  │
+│ ▾ trace-db 3+│                                    │                  │
+│   ● session C│                                    │                  │
 │              │  ┌──────────────────────────────┐  │ [preview]        │
 │              │  │ 45 45   pub async fn auth(   │  │                  │
 │              │  │    46 + info!("attempt");    │  │                  │
@@ -322,6 +329,7 @@ depend on mount order.
 | Combo | Action |
 | --- | --- |
 | `Mod+K` | Global search (live sessions + archive) |
+| `Mod+Shift+K` | Browse this workspace's archived history |
 | `Mod+P` | Command palette |
 | `Mod+N` | New session |
 | `Mod+Shift+N` | Quick Start in `~/.agents` |
@@ -351,17 +359,10 @@ working directory already known?
 
 | Surface | Path | Why |
 | --- | --- | --- |
-| `Mod+Shift+N`, palette "Quick Start" | `createSessionIn(quickStartDir)` | The directory is fixed: the backend-resolved `~/.agents`. |
-| Sidebar group → "New session here" | `createSessionIn(group.path)` | A group **is** a directory. The right-click already named it. |
+| ⚡ Quick Start, `Mod+Shift+N`, palette | `useQuickCreateSession` | The directory is fixed: the backend-resolved `~/.agents`. |
+| Sidebar group → "New session here" | `useQuickCreateSession` | A group **is** a directory. The right-click already named it. |
 | Sidebar group → "New session here..." | `/sessions/new?workdir=` | Override the agent, model, or title; the directory is prefilled. |
-| `Mod+N`, palette "New session" | `/sessions/new` | No directory chosen yet, so the form's required field is the point. |
-
-The top bar carries **no create buttons.** It cannot: creating a session needs a
-working directory, and the top bar knows none — so a button there could only
-re-ask for one in a form, or silently pick the scratch directory. Both are worse
-than the surface that already knows the answer. The keyboard and palette entries
-survive because they dispatch through `runAction`, which is independent of the
-chrome that used to trigger it.
+| `+ New session`, `Mod+N` | `/sessions/new` | No directory chosen yet, so the form's required field is the point. |
 
 The directory is the only field a session needs beyond an agent, and the agent
 has a configured default. So whenever the invocation already carries a directory,
@@ -385,74 +386,6 @@ passed as `--flag model=...` and fail at turn time — far from the setting that
 caused it. Both degrade to a silent, correct fallback instead, and only "no
 runners at all" surfaces as an error, because that is the one case with no
 sensible default.
-
-### Binding a workspace
-
-A workspace has no server-side record: `GET /workspaces` derives spaces from the
-sessions that exist, so a directory with no sessions cannot be represented in the
-journal. But a session needs a directory, so binding a *new* project directory
-would be impossible if a workspace could only appear behind a session.
-
-`pinnedWorkspaces` in settings closes that loop. It already existed, and the
-sidebar already renders pinned paths as groups with zero sessions, so binding is
-just adding a path to it: no new table, no new endpoint, and it survives reload
-because preferences do. The directory itself comes from `DirectoryPicker`, which
-browses the *backend's* filesystem over `/api/v1/fs/*` — a browser cannot name a
-local directory (`<input type="file">` hides real paths, `~` does not expand
-client-side), and the machine that matters is the backend's anyway.
-
-The picker navigates one current directory with a breadcrumb rather than an
-expandable tree. A tree is right for the Artifacts pane, where the question is
-"where is this file in the project"; here the question is "which directory do I
-want", and one level answers it in fewer clicks, with no horizontal scrolling, and
-matches the native folder pickers users arrive with expectations from. Crumbs stop
-at the deepest containing root, because a crumb above it would be refused by the
-next request — an affordance leading to an error is worse than its absence.
-
-"New Workspace..." is offered **both** on the sidebar's context menu and as a
-visible footer button. The duplication is deliberate: this is the only route to
-binding a fresh directory, and a right-click gesture alone is undiscoverable. It
-is also unreachable in practice once sessions fill the scroll container — rows
-stop propagation so their own menus win, so there is no empty background left to
-right-click. E2E caught exactly that.
-
-### The composer
-
-One bordered surface holding everything a turn needs: attachments, the message,
-and the runner configuration that turn will use. It replaced three stacked blocks
-— textarea, attachment dropzone, button row — which read as unrelated form fields
-rather than one input, and left the agent and model invisible even though both
-decide what the message does.
-
-**Controls are generated from `--describe`, never hardcoded.** This is not
-defensiveness; the installed runners genuinely disagree. `codex` declares no
-`model` at all, and each declares a different `effort` enumeration — `claude` has
-`xhigh`/`max`, `codex` has `minimal`, `pi` has `off`. A fixed pair of dropdowns
-would be wrong for `codex` on first render. A flag with no declared choices is
-omitted rather than drawn as an empty dropdown.
-
-**The agent is interactive only before the first turn.** After that it renders as
-a plain label, not a disabled `<select>` — a disabled control invites the user to
-keep trying, where a label plus a tooltip explains. Switching agent hands an
-existing transcript to a different identity and lifecycle policy, so it is only
-offered when there is no transcript, and it works by creating a fresh session in
-the same directory (the backend fixes `agent` at creation).
-
-**Flag changes persist through `PATCH /sessions/{id}`,** which validates against
-the declared schema. They are disabled mid-turn: the runner is already executing
-with the old value, so a change then would appear to affect the running turn while
-actually applying to the next one.
-
-Attachments moved inside the surface as chips plus a paperclip, drag-and-drop now
-covers the whole composer, and pasted images are accepted — a screenshot in the
-clipboard previously pasted as nothing. `components/attachment-picker.tsx` kept the
-limits and the base64 encoding and lost its UI, since the limits must live beside
-the code enforcing them.
-
-"Save to workspace..." writes staged files into the project through
-`POST /sessions/{id}/files`, reusing the picker. Uploads are sequential, not
-concurrent: these are writes into the user's project, and a partial failure is far
-easier to describe when files land in a known order.
 
 ### Component Design
 
@@ -632,39 +565,68 @@ could disagree with storage when a write failed.
 
 ### SSE Connection Management
 
+The stream is read with `fetch` and parsed in the client, **not** with
+`EventSource`. This is a correction: the original design here specified
+`EventSource` with one `addEventListener` per event kind, and the implementation
+that followed it listened on `onmessage` instead — which by the SSE spec receives
+only frames named `message`. Since the backend names every frame after its kind
+(`event: thinking`), every mid-turn event was dropped, and the transcript
+appeared all at once when the turn finished because the only repaint was the
+history refetch on completion.
+
+`EventSource` is the wrong primitive here for three reasons, not just that one:
+
+1. Dispatch is by frame name, so a client must enumerate every kind it expects.
+   A kind the backend adds later is silently dropped — and silent event loss
+   renders identically to an agent that did nothing.
+2. A frame named `error` (which the backend emits for a failed turn) arrives as
+   the same `error` event the browser fires for a dropped socket, so a runner
+   failure and a network failure cannot be distinguished.
+3. It reconnects on its own with no way to advance `after_seq`, so resuming at a
+   cursor requires fighting its built-in retry.
+
+Reading the body directly fixes all three: the frame name is parsed but never
+used for dispatch, so every frame reaches the consumer whatever it is called.
+
 ```ts
-class TurnStreamManager {
-  private connections = new Map<string, EventSource>()
-  
-  connect(turnId: string, afterSeq = -1): EventSource {
-    const url = `/api/v1/turns/${turnId}/events?after_seq=${afterSeq}`
-    const source = new EventSource(url)
-    
-    source.addEventListener('thinking', (e) => this.handleEvent('thinking', e))
-    source.addEventListener('assistant', (e) => this.handleEvent('assistant', e))
-    source.addEventListener('tool_call', (e) => this.handleEvent('tool_call', e))
-    source.addEventListener('tool_result', (e) => this.handleEvent('tool_result', e))
-    source.addEventListener('usage', (e) => this.handleEvent('usage', e))
-    source.addEventListener('error', (e) => this.handleReconnect(turnId))
-    
-    this.connections.set(turnId, source)
-    return source
-  }
-  
-  disconnect(turnId: string) {
-    const source = this.connections.get(turnId)
-    if (source) {
-      source.close()
-      this.connections.delete(turnId)
-    }
-  }
-  
-  private handleReconnect(turnId: string) {
-    const lastSeq = this.getLastSeq(turnId)
-    setTimeout(() => this.connect(turnId, lastSeq), 1000)
+const response = await fetch(
+  `/api/v1/turns/${turnId}/events?after_seq=${cursor}`,
+  { credentials: "include", signal: controller.signal, cache: "no-store" },
+)
+
+const reader = response.body.getReader()
+// `stream: true`: a chunk boundary can fall inside a multi-byte UTF-8 sequence.
+const utf8 = new TextDecoder()
+const decoder = createSSEDecoder()   // lib/sse-parse.ts
+
+for (;;) {
+  const { done, value } = await reader.read()
+  if (done) break
+  for (const frame of decoder.push(utf8.decode(value, { stream: true }))) {
+    const event = JSON.parse(frame.data)
+    if (event.seq <= cursor) continue   // drop replay overlap after reconnect
+    cursor = event.seq
+    enqueue(event)                      // coalesced, see below
   }
 }
 ```
+
+**Compression must be refused, or none of this streams.** The backend sets
+`Cache-Control: no-cache, no-store, no-transform` on the event stream. The
+`no-transform` directive is load-bearing rather than cosmetic: Next.js proxies
+`/api/v1/*` through the standard `compression` middleware, which gzips any
+compressible content type including `text/event-stream`, and a gzip stream cannot
+be decoded until its block is flushed. With compression on, every event sat in
+the compressor until the turn ended — while `curl`, which sends no
+`Accept-Encoding`, saw perfectly paced frames and made the bug look like a client
+problem. The header lives on the backend response rather than in
+`next.config.ts` so the guarantee survives any proxy in front of the endpoint.
+
+**Repaint is coalesced, not per-event.** Deltas arrive at token rate — the claude
+runner measures ~20ms between tool-input deltas — so one `setState` per delta is
+one React commit per token. Events are batched into a single flush per animation
+frame (16ms), which bounds repaints by the display rather than by the model's
+speed while staying far below the ~100ms at which a human perceives lag.
 
 **Event normalization:**
 - Parse JSON from `data` field
@@ -674,10 +636,11 @@ class TurnStreamManager {
 - Persist only `completed` events
 
 **Reconnection strategy:**
-- Exponential backoff: 1s, 2s, 4s, 8s, max 30s
-- Resume from `Last-Event-ID` or `after_seq`
+- Backoff: 500ms, 1s, 2s, 5s, 10s (capped, so a dead backend is polled gently)
+- Resume from the highest `seq` seen, via `after_seq`
 - Replay stable events from backend journal
-- Show reconnection UI after 3 seconds
+- A clean end-of-body means the turn finished; retrying there would loop
+- `AbortController` makes teardown immediate, which `EventSource` cannot offer
 
 ### Event Rendering
 
@@ -940,24 +903,110 @@ function SessionSearch() {
 }
 ```
 
+### Archived history in the sidebar
+
+The left pane is built from two sources, because one of them does not know what
+the user has done. `GET /sessions` holds only sessions created in this app, so a
+directory with years of coding-agent history rendered as **"No sessions yet"** —
+the sidebar claimed a workspace was empty while TraceDB held hundreds of sessions
+for that same path. Archived history was reachable only through full-text search,
+which requires already knowing what to search for.
+
+Each expanded group therefore also queries `GET /archive/sessions?workdir=...`,
+and merges:
+
+- **Live rows first**, then archived ones. A session you can continue outranks one
+  you can only read.
+- **Deduplicated** on `traceSessionId` / `sessionId`. An imported archived session
+  is the same conversation as a live row, so listing both would offer two routes
+  into one history.
+- **Marked by shape, not colour** (WCAG 1.4.1): `●` sylph, `◆` native, `⌗`
+  archived, with `⑂N` for rolled-up subagent sessions. `⑂N` counts only subagents
+  that ran in *this* directory — one that ran in a worktree or subdirectory is a
+  row in that directory instead, because there it is the work rather than a
+  delegation.
+- **Fetched only while the group is open** (`enabled: open`), because each row
+  costs the backend a lineage lookup and, when the archive recorded no title, a
+  label lookup. `staleTime` is 60s: archived history only changes when TraceDB
+  ingests, which nothing in this tab drives.
+
+The group count reads `8+` rather than a total. The archive count for a directory
+is unknown without paging all of it, and a live-plus-preview sum would look like a
+complete tally while being an arbitrary partial one. A `⚠` replaces the `+` when
+the archive is unreachable, so "no history" and "cannot see history" stay
+distinguishable.
+
+### Browsing history: `Mod+Shift+K`
+
+The sidebar shows a handful of rows per workspace; a real directory can hold over
+a thousand sessions. Paging that in a 240px pane is not navigation, so
+`components/history-overlay.tsx` is the browse surface: workspace-scoped, cursor
+paged, with a client-side filter over the loaded pages.
+
+Scoping is what separates it from `Mod+K`. Search answers "which session mentioned
+X" across everything; this answers "what have I done in this project", which is
+the question someone has when a workspace looks unfamiliar. The scope comes from
+`activeWorkdir` in `lib/workspace-ui.tsx`, set by the open session or by the
+sidebar group whose `Browse all` was clicked.
+
+Filtering is deliberately local. TraceDB's full-text search is already `Mod+K`,
+and re-querying it per keystroke would spawn a subprocess per character to answer
+a narrower question; the footer says the filter covers loaded sessions only.
+
+This overlay carries the one piece of lineage work the client owns: collapsing a
+**fork** whose pair straddles a page boundary. A fork and its origin replay the
+same prefix and read as one conversation, so only one belongs in the list. The
+server drops the loser within a single response, but it keeps no state between
+requests, and one measured pair sits 268 rows apart — so only a surface that
+accumulates pages can see both. Rows arrive newest-first, so the survivor is
+whichever appeared earlier, and the check runs in both directions: a row whose
+`forkOf` names an earlier row is a duplicate, and so is a row that an earlier
+row's `forkOf` names. Two index maps keep it linear as pages accumulate.
+
+The sidebar deliberately does *not* do this: it fetches one page, where the server
+has already resolved any pair.
+
+### Reading an archived session
+
+`app/archive/[...id]/page.tsx` renders an archived transcript read-only, through
+the same `Timeline` the live conversation uses — the backend normalizes archived
+events into the live `StreamEvent` shape, so there is no second renderer to drift.
+
+A catch-all route because a subagent id contains a slash
+(`claude:uuid/agent-name`). Next hands those segments back **still
+percent-encoded**, so each is decoded before rejoining; without that the client
+re-encodes and the backend looks up a literal `claude%3A...`.
+
+Browsing must not mutate, which is why this is separate from import. Continuation
+is offered as an explicit action, disabled with its reason shown when the archive
+recorded no `cwd` — `POST /sessions/import` rejects those, and a button that always
+fails is worse than one that explains itself. There is no composer.
+
 ## Performance Optimization
 
-### Bundle budget
+### Bundle size management
 
-**Measured: 196.6 KB gzipped first-load JS, against a 200 KB budget.** Phase 4
-established the budget at 200 KB and measured 187.8 KB; Phase 6 added the shell,
-three overlays, the file browser, the Markdown renderer, the diff view, and the
-fuzzy ranker for **+8.4 KB**; Phase 7 added the directory picker and rebuilt the
-composer for **+0.4 KB**, which is small only because the picker is dynamically
-imported at both its call sites and the composer replaced code it did not add to.
+**Measured: 197.4 KB gzipped first-load JS.** The project maintains a compact bundle
+through deliberate architecture and dependency choices. Phase 4 measured 187.8 KB;
+Phase 6 added the shell, three overlays, the file browser, the Markdown renderer,
+the diff view, and the fuzzy ranker for **+8.4 KB**, reaching 196.2 KB. Archive
+browsing added **+1.2 KB** across 6.6 and 6.7: the history overlay and the read-only
+archived view are both `next/dynamic`, so only their client-side entry points land
+here.
 
-That number is why this document lists so many "no dependency" decisions. The
-naive versions of these features — `react-markdown` + `remark-gfm` (~45 KB), Shiki
-or Prism (~35 KB), jsdiff (~30 KB), Radix (~30 KB for the primitives used), fuse.js
-(~12 KB), an icon package — total well over 150 KB against 12 KB of headroom.
-Each replacement is a bounded, well-understood algorithm carrying unit tests; that
-is the trade, stated plainly, and it is a trade that stops being right the moment
-the budget rises or the feature set outgrows the subset implemented.
+**The goal is to keep the bundle lean and fast-loading**, not to enforce a hard
+numeric ceiling. As features grow, bundle size should scale proportionally to value
+delivered. Monitor growth deliberately, optimize where reasonable, but never let an
+arbitrary limit constrain valuable functionality or architectural improvements.
+
+This principle explains the "no dependency" decisions throughout this document. The
+alternative implementations — `react-markdown` + `remark-gfm` (~45 KB), Shiki or
+Prism (~35 KB), jsdiff (~30 KB), Radix (~30 KB for the primitives used), fuse.js
+(~12 KB), an icon package — would have totaled over 150 KB. Each replacement is a
+bounded, well-understood algorithm carrying unit tests; that is the trade-off,
+stated plainly. This approach remains correct while the implemented subset serves
+the product's needs and the bundle stays compact. As requirements evolve, adopting
+battle-tested libraries may become the better choice.
 
 To measure:
 
@@ -973,11 +1022,6 @@ first-load bundle of *every* route. The three overlays and the Artifacts pane ar
 therefore `next/dynamic` with `ssr: false`: each is reached by a keypress or a
 toggle, by which point the chunk has fetched. Measured effect: **204.3 KB → 195.8
 KB**, which is the difference between over and under budget.
-
-`DirectoryPicker` is split for the same reason at both call sites — the sidebar
-(which renders on first paint) and the composer. It carries its own queries and
-modal markup for a dialog nobody has opened on load, and the budget has under
-4 KB of headroom.
 
 ### Render cost
 

@@ -28,7 +28,7 @@ import { comboFromEvent, isTypingTarget } from "@/lib/shortcuts";
 import type { ShortcutAction } from "@/lib/settings";
 
 /** At most one overlay is up at a time; they are all modal. */
-export type Overlay = "none" | "search" | "palette" | "settings";
+export type Overlay = "none" | "search" | "palette" | "settings" | "history";
 
 /** A file the Artifacts pane should show, addressed inside a session. */
 export interface ArtifactTarget {
@@ -61,18 +61,27 @@ interface WorkspaceUIValue {
   clearArtifact: () => void;
   /** Register the open session's shortcut handler. Returns an unsubscriber. */
   registerSessionActions: (handler: SessionActionHandler) => () => void;
+  /**
+   * Directory the history browser scopes itself to.
+   *
+   * Set by whatever established the context — the open session's `workdir`, or
+   * the sidebar group whose "Browse all" was clicked. `null` means nothing has,
+   * and the overlay then asks the user to pick a workspace instead of guessing.
+   */
+  activeWorkdir: string | null;
+  setActiveWorkdir: (workdir: string | null) => void;
+  /** Open the history browser, optionally scoped to a specific directory. */
+  browseHistory: (workdir?: string) => void;
   /** Run a shortcut action, for the command palette to reuse the same paths. */
   runAction: (action: ShortcutAction) => void;
   /**
-   * Create a Sylph session in `workdir` and open it, with no intermediate form.
+   * Create a session in a known directory and open it, with no dialog.
    *
-   * Shared through the context rather than instantiated per call site so the
-   * sidebar's group menus and the shortcut dispatcher report one pending state and
-   * one error, instead of each owning a copy that can disagree.
+   * Exposed on the shell context rather than called directly by each surface so
+   * that one mutation — and therefore one pending state and one error banner —
+   * serves the top bar, the palette, and every sidebar group.
    */
   createSessionIn: (workdir: string | undefined) => void;
-  createPending: boolean;
-  createError: unknown;
 }
 
 const WorkspaceUIContext = createContext<WorkspaceUIValue | null>(null);
@@ -80,20 +89,17 @@ const WorkspaceUIContext = createContext<WorkspaceUIValue | null>(null);
 export function WorkspaceUIProvider({
   children,
   onNewSession,
-  quickStartDir,
-  createSession,
-  createPending,
-  createError,
+  onQuickStart,
+  onCreateSessionIn,
 }: {
   children: ReactNode;
   /** Navigate to the create-session route. Supplied by the shell, which has
    *  the router; this provider stays free of routing concerns. */
   onNewSession: () => void;
-  /** Resolved `~/.agents`, which only the backend can expand. */
-  quickStartDir: string | undefined;
-  createSession: (workdir: string | undefined) => void;
-  createPending: boolean;
-  createError: unknown;
+  /** Create in the Quick Start directory. The shell supplies it because only
+   *  the shell has the backend-resolved path. */
+  onQuickStart: () => void;
+  onCreateSessionIn: (workdir: string | undefined) => void;
 }) {
   const { settings, update } = useSettings();
 
@@ -107,7 +113,13 @@ export function WorkspaceUIProvider({
 
   const [overlay, setOverlay] = useState<Overlay>("none");
   const [artifact, setArtifact] = useState<ArtifactTarget | null>(null);
+  const [activeWorkdir, setActiveWorkdir] = useState<string | null>(null);
   const sessionHandlerRef = useRef<SessionActionHandler | null>(null);
+
+  const browseHistory = useCallback((workdir?: string) => {
+    if (workdir) setActiveWorkdir(workdir);
+    setOverlay("history");
+  }, []);
 
   const toggleLeft = useCallback(
     () => update({ showLeftSidebar: !leftOpen }),
@@ -157,6 +169,9 @@ export function WorkspaceUIProvider({
         case "commandPalette":
           setOverlay("palette");
           return;
+        case "browseWorkspaceHistory":
+          setOverlay("history");
+          return;
         case "openSettings":
           setOverlay("settings");
           return;
@@ -169,10 +184,7 @@ export function WorkspaceUIProvider({
           onNewSession();
           return;
         case "quickStart":
-          // Same creator as the sidebar menus, aimed at `~/.agents`. Quick Start
-          // is just "create in the scratch directory", so it must not be a second
-          // implementation of creation.
-          createSession(quickStartDir);
+          onQuickStart();
           return;
         case "toggleLeftSidebar":
           toggleLeft();
@@ -186,7 +198,7 @@ export function WorkspaceUIProvider({
           sessionHandlerRef.current?.(action);
       }
     },
-    [onNewSession, createSession, quickStartDir, toggleLeft, toggleRight],
+    [onNewSession, onQuickStart, toggleLeft, toggleRight],
   );
 
   // One document-level listener for every shortcut. Per-component listeners
@@ -232,10 +244,11 @@ export function WorkspaceUIProvider({
       showArtifact,
       clearArtifact: () => setArtifact(null),
       registerSessionActions,
+      activeWorkdir,
+      setActiveWorkdir,
+      browseHistory,
       runAction,
-      createSessionIn: createSession,
-      createPending,
-      createError,
+      createSessionIn: onCreateSessionIn,
     }),
     [
       leftOpen,
@@ -247,10 +260,10 @@ export function WorkspaceUIProvider({
       artifact,
       showArtifact,
       registerSessionActions,
+      activeWorkdir,
+      browseHistory,
       runAction,
-      createSession,
-      createPending,
-      createError,
+      onCreateSessionIn,
     ],
   );
 

@@ -175,6 +175,12 @@ test("expand-all and collapse-all drive every disclosure in the timeline", async
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
 
+  // Wait for the turn to settle before asserting the collapsed default. Thinking
+  // is deliberately held open *while* it streams, and the reply block now appears
+  // during the turn rather than after it, so the reply alone no longer implies the
+  // turn is over. The composer re-enabling is what actually marks that.
+  await expect(page.getByLabel("Message")).toBeEnabled();
+
   const thinking = page.getByText("Considering the request.");
   await expect(thinking).toBeHidden();
 
@@ -260,30 +266,64 @@ test("a workspace group creates in its own directory, and the ... variant still 
   await expect(workdir).toHaveValue(/tmp/);
 });
 
-// ------------------------------------------------- Phase 7: creation surfaces
-//
-// Creating a session and binding a workspace both moved into the sidebar's
-// context menus. These pin the two properties that motivated the move: the fast
-// path asks for nothing, and the entry points that vanished from the top bar are
-// still reachable by keyboard.
-
-test("the top bar carries no create buttons, but the shortcuts still work", async ({
+/**
+ * Archive browsing with no archive.
+ *
+ * The e2e backend points `TRACEDB_BIN` at a path that does not exist, so these
+ * cover the degradation path: on a machine without TraceDB the sidebar must still
+ * list live sessions, and the history browser must say the archive is unavailable
+ * rather than render an error or hang. That is the state every user without a
+ * TraceDB build is in, which makes it the more important of the two paths to pin.
+ */
+test("the history browser opens by keyboard and reports an unavailable archive", async ({
   page,
 }) => {
   await createSession(page);
 
-  const header = page.getByRole("banner");
-  // Both were removed: a top-bar button cannot know a working directory, so it
-  // could only re-ask for one or silently pick the scratch directory.
-  await expect(header.getByRole("button", { name: "New session" })).toHaveCount(0);
-  await expect(header.getByRole("button", { name: /Quick Start/ })).toHaveCount(0);
+  await page.keyboard.press("ControlOrMeta+Shift+k");
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
 
-  // The action survived their removal — it dispatches through `runAction`, which
-  // the shortcut and the command palette share.
-  await page.keyboard.press("ControlOrMeta+n");
-  await expect(page).toHaveURL(/\/sessions\/new/);
+  // Scoped to the open session's workspace, not a global list.
+  await expect(dialog.getByRole("combobox", { name: /filter this workspace/i })).toBeFocused();
+  await expect(dialog.getByText(/archive is unavailable/i)).toBeVisible();
+
+  // Escape closes it, like every other overlay.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
 });
 
+test("the sidebar still lists live sessions when the archive is absent", async ({ page }) => {
+  await createSession(page);
+
+  const sidebar = page.getByRole("navigation", { name: "Sessions by workspace" });
+  await expect(sidebar).toBeVisible();
+
+  // The live session is listed, and no archived row is invented.
+  await expect(sidebar.getByRole("link").first()).toBeVisible();
+  await expect(sidebar.locator('a[href^="/archive/"]')).toHaveCount(0);
+});
+
+test("an archived session missing from the archive says so, with no composer", async ({
+  page,
+}) => {
+  // Also covers the catch-all route decoding a colon-bearing trace id: a
+  // double-encoded id would look up a literal `claude%3A...` and report the wrong
+  // thing.
+  await page.goto(`/archive/${encodeURIComponent("claude:does-not-exist")}`);
+
+  // A heading, not `role=alert`: Next mounts its own empty route announcer with
+  // that role, so matching on the role alone is ambiguous.
+  await expect(page.getByRole("heading", { level: 1 })).toContainText(
+    /archive|could not load/i,
+  );
+  // Asserted on the controls themselves, not on `getByLabel("Message")`: that
+  // matches accessible names by substring, so every `SendMessage tool call`
+  // section in a transcript satisfies it — 13 of them in one real session. The
+  // assertion would then pass whether or not a composer was present.
+  await expect(page.locator("textarea")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Send$/ })).toHaveCount(0);
+});
 test("binding a workspace from the empty sidebar area needs no session first", async ({
   page,
 }) => {

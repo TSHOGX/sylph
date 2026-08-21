@@ -160,6 +160,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/fs/tree", get(api::fs::tree))
         .route("/api/v1/workspaces", get(api::workspaces::list))
         .route("/api/v1/search", get(api::search::search))
+        .route("/api/v1/archive/sessions", get(api::archive::list))
+        // Greedy capture, not `{id}`: a subagent session id contains a slash
+        // (`claude:uuid/agent-name`), which is 43% of the local archive.
+        .route(
+            "/api/v1/archive/sessions/{*trace_id}",
+            get(api::archive::transcript),
+        )
         .route("/api/v1/turns/{id}", get(api::turns::get))
         .route("/api/v1/turns/{id}/events", get(api::turns::events))
         .route("/api/v1/turns/{id}/stop", post(api::turns::stop))

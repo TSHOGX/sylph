@@ -296,7 +296,7 @@ function GroupSection({
 }) {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { createSessionIn, createPending } = useWorkspaceUI();
+  const { createSessionIn } = useWorkspaceUI();
   // Groups start expanded: a collapsed-by-default sidebar hides the thing the
   // user came here to click. Collapse is per-group and not persisted, because it
   // is a transient focusing action rather than a preference.
@@ -311,9 +311,9 @@ function GroupSection({
       // Creates and opens directly. Routing to the form would ask for the
       // working directory that right-clicking this group already named, which is
       // a dialog the user has to dismiss to get what they clicked.
-      label: createPending ? "Creating session..." : "New session here",
+      label: "New session here",
       onSelect: () => createSessionIn(group.path),
-      disabled: createPending || !group.path,
+      disabled: !group.path,
     },
     {
       // The override surface, kept because the fast path deliberately decides

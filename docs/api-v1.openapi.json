@@ -142,51 +142,6 @@
             "$ref": "#/components/responses/Error"
           }
         }
-      },
-      "patch": {
-        "summary": "Update a session's runner flags or title",
-        "description": "Flags are a complete replacement set, validated against the agent's `--describe` schema on write. Identity fields (agent, origin, identityMode, lifecycleMode) are deliberately not patchable: they decide which runner owns the transcript and whether SOUL.md may be injected.",
-        "operationId": "updateSession",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SessionId"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateSession"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "The updated session"
-          },
-          "400": {
-            "description": "An undeclared flag key, a value outside its enumeration, or an uninstalled agent",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such session",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
       }
     },
     "/api/v1/sessions/{sessionId}/turns": {
@@ -288,7 +243,22 @@
         "description": "Reconnectable SSE stream. Last-Event-ID is accepted as an alternative to after_seq. Stable journal replay precedes live projection events.",
         "responses": {
           "200": {
-            "description": "text/event-stream"
+            "description": "SSE stream. Each frame is named after its event kind (event: thinking), so a client must not dispatch on EventSource.onmessage, which receives only frames named message.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always 'no-cache, no-store, no-transform'. no-transform (RFC 9111 5.2.2.6) forbids an intermediary from re-encoding the body; without it a compressing proxy gzips the stream and buffers the whole turn into one delivery.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -326,6 +296,125 @@
             }
           },
           "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "includeArchived",
+            "in": "query",
+            "required": false,
+            "description": "Also report directories that exist only in the TraceDB archive, with archivedCount set. Off by default: the sidebar polls this endpoint and needs only live sessions, while the scan walks every archived session. Surfaces where the user picks a directory pass it, because a project they are about to work in has no live session yet. An unreachable archive degrades to live-only rather than failing.",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/archive/sessions": {
+      "get": {
+        "summary": "Archived sessions that ran in one directory",
+        "description": "Read-only browse of durable coding-agent history, newest first. /search answers \"which session mentioned X\", which needs a query the user may not have; this answers \"what happened in this directory before\", which is what an empty-looking workspace needs. Reading is not importing: this mutates nothing, while POST /sessions/import adopts a session for continuation and requires both a runner and a surviving workdir. TraceDB matches cwd as an unanchored substring and reports no lineage, so rows are re-filtered for exact directory equality and each candidate costs one cheap metadata show. Delegated sessions fold into their parent as subagentCount when that parent is in the same directory, and are listed on their own when it is not; a fork and its origin collapse to whichever ran more recently, with forkOf naming the other side. Empty sessions are dropped. Those filters shrink a page, so one request may walk several upstream pages, bounded by rows examined rather than pages -- a parent directory's substring also matches everything beneath it, and one real directory's first exact match sat ~1300 rows in. An unreachable archive answers 200 with available=false.",
+        "parameters": [
+          {
+            "name": "workdir",
+            "in": "query",
+            "required": true,
+            "description": "Absolute directory to list history for.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "nextCursor from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of archived sessions, or available=false",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/archive/sessions/{traceId}": {
+      "get": {
+        "summary": "One archived transcript, read-only",
+        "description": "Events normalized into the live StreamEvent shape, so the conversation timeline renders archived history with no second code path. limit bounds the read because the largest session in a real archive is 8167 events and 20 MB of JSON. Unlike the listing, a single transcript has no useful degraded form, so an unreachable archive is reported rather than rendered empty.",
+        "parameters": [
+          {
+            "name": "traceId",
+            "in": "path",
+            "required": true,
+            "description": "TraceDB session id. Matched greedily: a subagent id contains a slash (claude:uuid/agent-name), which is 43% of the archive.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 2000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archived transcript",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveTranscript"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
             "$ref": "#/components/responses/Error"
           }
         }
@@ -370,73 +459,6 @@
             "$ref": "#/components/responses/Error"
           }
         }
-      },
-      "post": {
-        "summary": "Upload one file into the session's working directory",
-        "description": "Confined to the workdir subtree — the same range the agent already writes to — and refuses to overwrite an existing file unless `overwrite` is true. The destination directory is resolved through the same canonical containment check as reads, and `name` is reduced to a single path component.",
-        "operationId": "uploadSessionFile",
-        "parameters": [
-          {
-            "name": "sessionId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UploadFile"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "The written file",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UploadFileResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "An existing file without overwrite, malformed base64, or an oversized payload",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The destination is outside the session's working directory",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such session",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
       }
     },
     "/api/v1/sessions/{sessionId}/files/content": {
@@ -476,75 +498,6 @@
           },
           "404": {
             "$ref": "#/components/responses/Error"
-          }
-        }
-      }
-    },
-    "/api/v1/fs/roots": {
-      "get": {
-        "summary": "List directories the workspace picker may browse from",
-        "description": "`$HOME` plus anything in SYLPH_WEB_BROWSE_ROOTS. A configured root that no longer exists is omitted rather than returned as an unopenable node.",
-        "operationId": "listBrowseRoots",
-        "responses": {
-          "200": {
-            "description": "Configured browse roots",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BrowseRootsResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/fs/tree": {
-      "get": {
-        "summary": "List subdirectories of a directory on the backend's machine",
-        "description": "One level, directories only — this endpoint exists so a client can name a workspace, which a browser cannot do for itself. There is deliberately no content counterpart: reading bytes stays session-scoped. Every request must resolve inside a configured root, checked on the canonical path, so `..` and escaping symlinks are refused.",
-        "operationId": "browseDirectories",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "query",
-            "required": false,
-            "description": "Absolute directory to list. Omitted or empty means the first configured root.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "One directory level",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BrowseResponse"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The path is outside every configured browse root",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "The path does not exist",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
           }
         }
       }
@@ -989,7 +942,8 @@
           "sessionCount",
           "runningCount",
           "lastUsedMs",
-          "isQuickStart"
+          "isQuickStart",
+          "archivedCount"
         ],
         "properties": {
           "path": {
@@ -1014,6 +968,10 @@
           "isQuickStart": {
             "type": "boolean",
             "description": "True for ~/.agents, which the sidebar lists separately."
+          },
+          "archivedCount": {
+            "type": "integer",
+            "description": "Archived sessions TraceDB holds for this directory. Always 0 unless the request passed includeArchived, so 0 means \"not counted\" rather than \"no history\"."
           }
         }
       },
@@ -1159,154 +1117,164 @@
           }
         }
       },
-      "UpdateSession": {
-        "type": "object",
-        "description": "Both fields optional; an omitted field is left untouched.",
-        "properties": {
-          "flags": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "description": "Complete replacement set. An empty object clears all flags."
-          },
-          "title": {
-            "type": "string"
-          }
-        }
-      },
-      "UploadFile": {
+      "ArchiveSession": {
         "type": "object",
         "required": [
-          "name",
-          "data"
+          "id",
+          "agent",
+          "cwd",
+          "events",
+          "subagentCount"
         ],
         "properties": {
-          "path": {
+          "id": {
             "type": "string",
-            "description": "Destination directory relative to the workdir. Empty means the root."
+            "description": "TraceDB session id (claude:uuid), not a Sylph Web session id. A subagent id carries a /agent-... suffix."
           },
-          "name": {
-            "type": "string",
-            "description": "Filename; reduced to a single safe path component."
-          },
-          "data": {
-            "type": "string",
-            "description": "File bytes, base64, no `data:` prefix. Max 8 MiB decoded."
-          },
-          "overwrite": {
-            "type": "boolean",
-            "default": false,
-            "description": "Replace an existing file. Omitted or false refuses instead."
-          }
-        }
-      },
-      "UploadFileResponse": {
-        "type": "object",
-        "required": [
-          "path",
-          "absolutePath",
-          "size"
-        ],
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Path relative to the workdir."
-          },
-          "absolutePath": {
+          "agent": {
             "type": "string"
           },
-          "size": {
-            "type": "integer",
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The archive's title when it recorded one, else the opening typed message with harness-injected envelopes skipped. Absent for ~2% of real project sessions."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Recorded working directory, normalized. Always equals the requested workdir."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64"
-          }
-        }
-      },
-      "BrowseRoot": {
-        "type": "object",
-        "required": [
-          "name",
-          "path"
-        ],
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "Display label; `Home` for the home directory."
           },
-          "path": {
-            "type": "string",
-            "description": "Absolute path."
+          "endedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "events": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events the archive holds: the only size signal available."
+          },
+          "subagentCount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Subagent sessions spawned by this one, folded in rather than listed as peers. Delegated sessions are 51% of a real archive. A subagent that ran in a different directory than its parent is NOT folded -- 484 of 2238 do, and folding those into an absent parent deleted them from the only directory that would show them."
+          },
+          "forkOf": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Origin's TraceDB id when this session is a fork of another. A fork replays its origin's whole prefix, so the two read as one conversation and only one belongs in a listing; the server drops the loser within a response, but a pair can straddle two pages (one measured pair sits 268 rows apart) and no state is kept between requests. A client accumulating pages must suppress a row whose forkOf names a session it already showed, and a row that an already-shown fork names."
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Live session id when this archived session was already imported, so the UI opens the conversation instead of listing it twice."
           }
         }
       },
-      "BrowseRootsResponse": {
+      "ArchiveListResponse": {
         "type": "object",
         "required": [
-          "roots",
-          "home"
+          "sessions",
+          "available"
         ],
         "properties": {
-          "roots": {
+          "sessions": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/BrowseRoot"
+              "$ref": "#/components/schemas/ArchiveSession"
             }
           },
-          "home": {
-            "type": "string",
-            "description": "Absolute home directory, so a client can abbreviate paths as `~/…`."
-          }
-        }
-      },
-      "BrowseEntry": {
-        "type": "object",
-        "required": [
-          "path",
-          "name",
-          "modifiedAtMs"
-        ],
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Absolute path, handed back as a workdir or next listing."
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor to continue from. Absent on the last page."
           },
-          "name": {
-            "type": "string"
-          },
-          "modifiedAtMs": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "isSymlink": {
+          "available": {
             "type": "boolean",
-            "description": "A listed symlink is always inside a root; escaping ones are omitted."
+            "description": "False when TraceDB could not be reached. The request still succeeds."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the archive is unavailable. Absent when available."
           }
         }
       },
-      "BrowseResponse": {
+      "ArchiveTranscript": {
         "type": "object",
         "required": [
-          "path",
-          "entries",
+          "id",
+          "agent",
+          "events",
           "truncated"
         ],
         "properties": {
-          "path": {
-            "type": "string",
-            "description": "The canonicalized directory listed."
+          "id": {
+            "type": "string"
           },
-          "parent": {
-            "type": "string",
-            "description": "Absent when `path` is itself a configured root, so a \"go up\" affordance cannot leave the permitted set."
+          "agent": {
+            "type": "string"
           },
-          "entries": {
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Recorded working directory. Absent for 19% of the archive, and its absence is why such a session can be read but not continued."
+          },
+          "startedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "events": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/BrowseEntry"
-            }
+              "$ref": "#/components/schemas/Event"
+            },
+            "description": "Normalized into the live StreamEvent shape so one timeline renders both: every event is phase=completed and stability=stable with source=archive, agent-internal system events are dropped, tool arguments move from text into data.input, and a tool_result shares its tool_call's streamId."
           },
           "truncated": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True when limit cut the stream short."
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       }
