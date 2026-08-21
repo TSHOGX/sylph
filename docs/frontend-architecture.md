@@ -1184,7 +1184,7 @@ fails is worse than one that explains itself. There is no composer.
 
 ### Bundle size management
 
-**Measured: 198.3 KB gzipped first-load JS.** The project maintains a compact bundle
+**Measured: 198.4 KB gzipped first-load JS.** The project maintains a compact bundle
 through deliberate architecture and dependency choices. Phase 4 measured 187.8 KB;
 Phase 6 added the shell, three overlays, the file browser, the Markdown renderer,
 the diff view, and the fuzzy ranker for **+8.4 KB**, reaching 196.2 KB. Archive
