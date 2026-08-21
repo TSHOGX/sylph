@@ -317,5 +317,10 @@ test("an archived session missing from the archive says so, with no composer", a
   await expect(page.getByRole("heading", { level: 1 })).toContainText(
     /archive|could not load/i,
   );
-  await expect(page.getByLabel("Message")).toHaveCount(0);
+  // Asserted on the controls themselves, not on `getByLabel("Message")`: that
+  // matches accessible names by substring, so every `SendMessage tool call`
+  // section in a transcript satisfies it — 13 of them in one real session. The
+  // assertion would then pass whether or not a composer was present.
+  await expect(page.locator("textarea")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Send$/ })).toHaveCount(0);
 });
