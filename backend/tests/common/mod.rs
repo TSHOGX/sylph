@@ -191,6 +191,19 @@ impl TestBackend {
         .await
     }
 
+    pub async fn delete_authed(&self, path: &str) -> Response<Body> {
+        self.send(
+            Request::builder()
+                .method("DELETE")
+                .uri(path)
+                .header(header::HOST, "127.0.0.1")
+                .header(header::COOKIE, &self.cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
     /// POST with an explicit `Idempotency-Key` header.
     pub async fn post_authed_with_key(
         &self,

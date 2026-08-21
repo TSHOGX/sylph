@@ -85,6 +85,16 @@ pub async fn get(
     Ok(Json(SessionResponse { session }))
 }
 
+/// Discard an untouched Sylph draft. Native sessions and sessions with turns
+/// are durable history and cannot be removed through this endpoint.
+pub async fn delete_empty(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    state.store.delete_empty_sylph_session(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// One turn together with its durable events, oldest event first.
 #[derive(Serialize)]
 pub struct TurnWithEvents {
