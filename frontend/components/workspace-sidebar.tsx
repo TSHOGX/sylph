@@ -149,18 +149,20 @@ export function WorkspaceSidebar() {
 
   return (
     <>
-      <nav
-        aria-label="Sessions by workspace"
-        className="flex min-h-0 flex-1 flex-col"
-        onContextMenu={(event) => {
-          // Only on the nav chrome itself, not bubbled from a group or row.
-          if (event.target === event.currentTarget) {
-            event.preventDefault();
-            setPaneMenu({ x: event.clientX, y: event.clientY });
-          }
-        }}
-      >
-      <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
+      <nav aria-label="Sessions by workspace" className="flex min-h-0 flex-1 flex-col">
+        <div
+          className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2"
+          onContextMenu={(event) => {
+            // Only in empty space: when clicking the scrollable container itself,
+            // not a child element (group header, session row, button). Groups and
+            // rows stop propagation, so reaching here means the click was on the
+            // container's background between or below groups.
+            if (event.target === event.currentTarget) {
+              event.preventDefault();
+              setPaneMenu({ x: event.clientX, y: event.clientY });
+            }
+          }}
+        >
         {sessionsQuery.isPending ? (
           <output aria-live="polite" className="block px-1.5 py-3 text-xs text-gray-500">
             Loading sessions...

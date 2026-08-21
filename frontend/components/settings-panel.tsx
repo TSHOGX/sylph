@@ -16,6 +16,7 @@
 
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import dynamic from "next/dynamic";
 import { api } from "@/lib/api";
 import {
   DEFAULT_SHORTCUTS,
@@ -28,6 +29,11 @@ import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Overlay } from "@/components/overlay";
 import { shortenHome } from "@/components/workspace-sidebar";
 import { formatRelative } from "@/lib/format";
+
+const DirectoryPicker = dynamic(
+  () => import("@/components/directory-picker").then((m) => m.DirectoryPicker),
+  { ssr: false },
+);
 
 type Section = "general" | "agents" | "workspaces" | "shortcuts";
 
@@ -263,6 +269,7 @@ function AgentsSection() {
 
 function WorkspacesSection() {
   const { settings, update } = useSettings();
+  const [picking, setPicking] = useState(false);
   const { data } = useQuery({
     // Includes archive-only directories so a project with history but no live
     // session can still be pinned — which is the whole point of pinning.
@@ -274,6 +281,18 @@ function WorkspacesSection() {
   const workspaces = data?.workspaces ?? [];
   const home = data?.home;
 
+  // Pinned directories that have no sessions yet (manual bindings)
+  const pinnedOnly = settings.pinnedWorkspaces.filter(
+    (path) => !workspaces.some((w) => w.path === path),
+  );
+
+  const addWorkspace = (path: string) => {
+    if (!settings.pinnedWorkspaces.includes(path)) {
+      update({ pinnedWorkspaces: [...settings.pinnedWorkspaces, path] });
+    }
+    setPicking(false);
+  };
+
   return (
     <div className="space-y-4">
       <Field label="Quick Start directory" hint="Fixed: Quick Start sessions always land here.">
@@ -281,6 +300,40 @@ function WorkspacesSection() {
           {data?.quickStartDir ?? "loading..."}
         </p>
       </Field>
+
+      {pinnedOnly.length > 0 && (
+        <Field
+          label="Pinned workspaces"
+          hint="Manually added directories. These appear in the sidebar even with no sessions."
+        >
+          <ul className="divide-y divide-gray-100 rounded border border-gray-200">
+            {pinnedOnly.map((path) => (
+              <li key={path} className="flex items-center gap-2 px-2 py-1.5">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-xs font-medium">
+                    {settings.workspaceNames[path] ?? path.split("/").filter(Boolean).pop() ?? path}
+                  </p>
+                  <p className="truncate font-mono text-[10px] text-gray-500" title={path}>
+                    {shortenHome(path, home)}
+                  </p>
+                </div>
+                <span className="shrink-0 text-[10px] text-gray-500">no sessions yet</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    update({
+                      pinnedWorkspaces: settings.pinnedWorkspaces.filter((p) => p !== path),
+                    })
+                  }
+                  className="shrink-0 rounded border border-gray-300 px-1.5 py-0.5 text-[10px] font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                >
+                  Unpin
+                </button>
+              </li>
+            ))}
+          </ul>
+        </Field>
+      )}
 
       <Field
         label="Known workspaces"
@@ -345,7 +398,25 @@ function WorkspacesSection() {
             })}
           </ul>
         )}
+
+        <button
+          type="button"
+          onClick={() => setPicking(true)}
+          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded border border-dashed border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        >
+          <span aria-hidden="true">+</span>
+          Add workspace...
+        </button>
       </Field>
+
+      {picking && (
+        <DirectoryPicker
+          title="Add Workspace"
+          confirmLabel="Add to sidebar"
+          onChoose={addWorkspace}
+          onClose={() => setPicking(false)}
+        />
+      )}
     </div>
   );
 }
