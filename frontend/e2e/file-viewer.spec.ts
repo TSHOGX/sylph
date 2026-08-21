@@ -94,15 +94,51 @@ test("the expand control opens a dialog that Escape closes, restoring focus", as
 
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
-  // Near-full-bleed, which is the point of the viewer size variant.
-  const box = await dialog.boundingBox();
-  const viewport = page.viewportSize();
-  expect(box!.width).toBeGreaterThan(viewport!.width * 0.8);
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   // Focus returns to the control that opened it, not to the top of the document.
   await expect(expand).toBeFocused();
+});
+
+/**
+ * The dialog sizes to what it holds.
+ *
+ * Two files, because the rule is a *distinction* rather than a number: a table
+ * has an intrinsic size worth fitting to, while an iframe reports none and would
+ * collapse to the minimum under `w-fit`. Asserting only one of them would let the
+ * other regress silently.
+ */
+test("the fullscreen dialog fits a table but fills for a rendered page", async ({
+  page,
+}) => {
+  const dir = workdir({
+    "small.csv": "a,b\n1,2\n",
+    "page.html": "<h1>Rendered</h1><p>A page authored for a viewport.</p>",
+  });
+  const pane = await openPane(page, dir);
+  const viewport = page.viewportSize()!;
+
+  async function widthFor(file: string) {
+    const back = pane.getByRole("button", { name: /Files/ });
+    if ((await back.count()) && (await back.first().isVisible())) await back.first().click();
+    await pane.getByRole("button", { name: new RegExp(file.replace(".", "\\.")) }).click();
+    await pane.getByRole("button", { name: "Open full screen" }).click();
+    const box = await page.getByRole("dialog").boundingBox();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeHidden();
+    return box!.width;
+  }
+
+  // A two-column table must not be stranded in a near-empty 95vw box; the floor
+  // is the header's own width, which is what the dialog cannot go below.
+  const table = await widthFor("small.csv");
+  expect(table).toBeLessThan(viewport.width * 0.6);
+
+  // A page has no intrinsic width to measure and is authored for a viewport, so
+  // it claims one.
+  const rendered = await widthFor("page.html");
+  expect(rendered).toBeGreaterThan(viewport.width * 0.8);
 });
 
 /** The one-modal-at-a-time invariant. */

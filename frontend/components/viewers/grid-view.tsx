@@ -98,7 +98,12 @@ export function GridView({
           worksheet.
         </p>
       ) : (
-        <div className="min-h-0 flex-1 overflow-auto">
+        // Tinted, so the area past the last column reads as "outside the sheet"
+        // rather than as empty cells. A narrow table in a dialog sized by its
+        // header leaves real space to the right, and undifferentiated white there
+        // looks like a grid that failed to load its data. Every spreadsheet
+        // application distinguishes the two the same way.
+        <div className="min-h-0 flex-1 overflow-auto bg-gray-50/70">
           <table
             className="border-collapse font-mono text-[11.5px]"
             style={{ tableLayout: columnWidth ? "fixed" : "auto" }}
@@ -212,10 +217,10 @@ const Row = memo(function Row({
             key={column}
             style={width ? { width } : undefined}
             title={cellTitle(cell)}
-            className={`max-w-[28rem] truncate border border-gray-200 px-1.5 py-0.5 ${
+            className={`max-w-[28rem] truncate border border-gray-200 bg-white px-1.5 py-0.5 ${
               alignmentFor(cell) === "right" ? "text-right" : "text-left"
             } ${isErrorCell(cell) ? "text-red-700" : "text-gray-800"} ${
-              isHeader ? "font-medium text-gray-900" : ""
+              isHeader ? "bg-gray-50 font-medium text-gray-900" : ""
             }`}
           >
             {cell?.v ?? ""}

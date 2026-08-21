@@ -1,4 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createSession } from "./fixtures/session";
 
 /**
@@ -226,13 +229,20 @@ test("Quick Sessions creates a session from its menu with no dialog", async ({ p
 test("a workspace group creates in its own directory, with one menu item and no form", async ({
   page,
 }) => {
-  await createSession(page);
+  // A directory this run owns, rather than `/tmp`.
+  //
+  // The sidebar caps its listing at 200 sessions, and the e2e data directory is
+  // not wiped between runs, so a shared `/tmp` group creeps toward that cap until
+  // `before + 1` stops being reachable and this spec fails for reasons having
+  // nothing to do with what it tests. A fresh directory makes the group start
+  // empty, so the count is exact and the assertion means what it says.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sylph-e2e-group-"));
+  const name = path.basename(dir);
+  await createSession(page, { workdir: dir });
 
-  // `/tmp` is where `createSession` put that session, so this group exists and
-  // its directory is the one a new session must inherit.
-  const group = page.getByRole("button", { name: "tmp", exact: false }).first();
-  const rows = groupRows(page, "tmp");
-  const before = await rows.count();
+  const group = page.getByRole("button", { name, exact: false }).first();
+  const rows = groupRows(page, name);
+  await expect(rows).toHaveCount(1);
 
   await group.click({ button: "right" });
   await page
@@ -242,13 +252,13 @@ test("a workspace group creates in its own directory, with one menu item and no 
 
   await expect(page.getByLabel("Message")).toBeVisible();
   // The directory was inherited from the group, not re-asked.
-  await expect(rows).toHaveCount(before + 1);
+  await expect(rows).toHaveCount(2);
 
   // Exactly one create item in the menu. There were two — one creating directly,
   // one opening a prefilled form — which put the same words on two entries that
   // behaved differently, and made the slower one look like the careful choice.
   // The form is gone, so this asserts the menu did not keep a second door to it.
-  await page.getByRole("button", { name: "tmp", exact: false }).first().click({ button: "right" });
+  await page.getByRole("button", { name, exact: false }).first().click({ button: "right" });
   const menu = page.getByRole("menu");
   await expect(menu.getByRole("menuitem", { name: /^New session here/ })).toHaveCount(1);
 });
