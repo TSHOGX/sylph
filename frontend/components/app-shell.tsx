@@ -123,7 +123,7 @@ function ShellFrame({
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-white text-gray-900">
-      <TopBar createPending={createPending} />
+      <TopBar />
 
       {/* One banner for every dialog-free create path: Quick Start, the palette,
           and the sidebar's "New session here" all run the same mutation, so a
@@ -166,9 +166,8 @@ function ShellFrame({
   );
 }
 
-function TopBar({ createPending }: { createPending: boolean }) {
-  const { toggleLeft, toggleRight, openOverlay, runAction, leftOpen, rightOpen } =
-    useWorkspaceUI();
+function TopBar() {
+  const { toggleLeft, toggleRight, openOverlay, leftOpen, rightOpen } = useWorkspaceUI();
   const { settings } = useSettings();
   const isMac = useIsMac();
 
