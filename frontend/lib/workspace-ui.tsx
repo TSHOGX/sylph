@@ -27,8 +27,15 @@ import { useSettings } from "@/lib/settings";
 import { comboFromEvent, isTypingTarget } from "@/lib/shortcuts";
 import type { ShortcutAction } from "@/lib/settings";
 
-/** At most one overlay is up at a time; they are all modal. */
-export type Overlay = "none" | "search" | "palette" | "settings" | "history";
+/**
+ * At most one overlay is up at a time; they are all modal.
+ *
+ * `newSession` is a directory picker, not a form. A session needs a directory and
+ * nothing else — the agent is switchable in the composer until the first turn, and
+ * model and effort are composer controls for every turn — so the only question
+ * worth asking at creation time is "where".
+ */
+export type Overlay = "none" | "search" | "palette" | "settings" | "history" | "newSession";
 
 /** A file the Artifacts pane should show, addressed inside a session. */
 export interface ArtifactTarget {
@@ -88,14 +95,10 @@ const WorkspaceUIContext = createContext<WorkspaceUIValue | null>(null);
 
 export function WorkspaceUIProvider({
   children,
-  onNewSession,
   onQuickStart,
   onCreateSessionIn,
 }: {
   children: ReactNode;
-  /** Navigate to the create-session route. Supplied by the shell, which has
-   *  the router; this provider stays free of routing concerns. */
-  onNewSession: () => void;
   /** Create in the Quick Start directory. The shell supplies it because only
    *  the shell has the backend-resolved path. */
   onQuickStart: () => void;
@@ -175,14 +178,14 @@ export function WorkspaceUIProvider({
         case "openSettings":
           setOverlay("settings");
           return;
+        case "newSession":
+          setOverlay("newSession");
+          return;
         default:
           setOverlay("none");
       }
 
       switch (action) {
-        case "newSession":
-          onNewSession();
-          return;
         case "quickStart":
           onQuickStart();
           return;
@@ -198,7 +201,7 @@ export function WorkspaceUIProvider({
           sessionHandlerRef.current?.(action);
       }
     },
-    [onNewSession, onQuickStart, toggleLeft, toggleRight],
+    [onQuickStart, toggleLeft, toggleRight],
   );
 
   // One document-level listener for every shortcut. Per-component listeners

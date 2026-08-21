@@ -21,14 +21,22 @@
  */
 
 import { useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { api, type ArchiveSession } from "@/lib/api";
+import { api, type ArchiveSession, type Workspace } from "@/lib/api";
 import { formatRelative } from "@/lib/format";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Overlay, scrollActiveIntoView, useListNavigation } from "@/components/overlay";
 import { shortenHome } from "@/components/workspace-sidebar";
+
+// Split out because it is reached only from the workspace switcher's fallback,
+// and the shell already pays for this chunk on the `Mod+N` path.
+const DirectoryPicker = dynamic(
+  () => import("@/components/directory-picker").then((m) => m.DirectoryPicker),
+  { ssr: false },
+);
 
 /** Rows per request. Enough to fill the list without a long first wait. */
 const PAGE_SIZE = 25;
@@ -39,6 +47,14 @@ export function HistoryOverlay() {
 
   const [{ query, active }, setPicker] = useState({ query: "", active: 0 });
   const listRef = useRef<HTMLDivElement>(null);
+  /**
+   * Which surface is up. Three modes rather than three stacked modals: nesting
+   * `Overlay` inside `Overlay` puts two focus traps on one DOM path, where the
+   * outer trap's `querySelectorAll` also matches the inner dialog's controls and
+   * Tab at the boundary becomes unpredictable. Swapping the content keeps exactly
+   * one trap alive, and "back" is a state change rather than an unmount.
+   */
+  const [mode, setMode] = useState<"list" | "switch">("list");
 
   const workspacesQuery = useQuery({
     // Distinct key from the sidebar's: this variant carries archive-only
@@ -145,6 +161,28 @@ export function HistoryOverlay() {
 
   const { onKeyDown } = useListNavigation(rows.length, commit);
 
+  const chooseWorkspace = useCallback(
+    (path: string) => {
+      setActiveWorkdir(path);
+      setPicker({ query: "", active: 0 });
+      setMode("list");
+    },
+    [setActiveWorkdir],
+  );
+
+  if (mode === "switch") {
+    return (
+      <WorkspaceSwitcher
+        workspaces={workspaces}
+        home={home}
+        current={workdir}
+        onChoose={chooseWorkspace}
+        onCancel={() => setMode("list")}
+        onClose={closeOverlay}
+      />
+    );
+  }
+
   return (
     <Overlay title="Workspace history" onClose={closeOverlay} describedBy="history-hint">
       {/* The filter input comes first in DOM order deliberately. `Overlay` focuses
@@ -173,26 +211,25 @@ export function HistoryOverlay() {
           />
         </div>
 
+        {/* A button into a filterable switcher, not a `<select>`. A native select
+            of this archive is 200+ options with identical `~/Workspace/` prefixes,
+            navigable only by first letter, and it could not reach a directory that
+            has no archived sessions at all. The switcher filters by any part of the
+            path and offers the filesystem as a fallback. */}
         <div className="flex items-center gap-2 px-3 pb-2">
-          <label htmlFor="history-workspace" className="sr-only">
-            Workspace
-          </label>
-          <select
-            id="history-workspace"
-            value={workdir ?? ""}
-            onChange={(event) => {
-              setActiveWorkdir(event.target.value);
-              setPicker({ query: "", active: 0 });
-            }}
-            className="min-w-0 flex-1 truncate rounded border border-gray-200 bg-white px-1.5 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          <button
+            type="button"
+            onClick={() => setMode("switch")}
+            aria-label={`Workspace: ${workdir ? shortenHome(workdir, home) : "none chosen"}. Change`}
+            className="flex min-w-0 flex-1 items-center gap-1 rounded border border-gray-200 bg-white px-1.5 py-1 text-left text-xs hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
           >
-            {workspaces.length === 0 && <option value="">No workspaces yet</option>}
-            {workspaces.map((workspace) => (
-              <option key={workspace.path} value={workspace.path}>
-                {shortenHome(workspace.path, home)}
-              </option>
-            ))}
-          </select>
+            <span className="min-w-0 flex-1 truncate" title={workdir ?? undefined}>
+              {workdir ? shortenHome(workdir, home) : "Choose a workspace..."}
+            </span>
+            <span aria-hidden="true" className="shrink-0 text-gray-500">
+              ⌄
+            </span>
+          </button>
           <span className="shrink-0 text-[10px] text-gray-600">
             {history.isFetching && sessions.length === 0
               ? "loading..."
@@ -264,6 +301,175 @@ export function HistoryOverlay() {
       >
         ↑↓ navigate · ↵ open read-only · Esc close
         {history.hasNextPage && " · filter searches loaded sessions only"}
+      </footer>
+    </Overlay>
+  );
+}
+
+/**
+ * Pick which workspace's history to read.
+ *
+ * Two paths, because there are two questions. "Which of my projects" is answered
+ * by the known list — directories with live sessions or archived history, ranked
+ * by recency, filtered by any substring of the path. "That other folder" is
+ * answered by the filesystem, because a directory the archive has never seen is
+ * absent from the list by construction, and refusing to offer it would make the
+ * browser unable to answer a question the backend can.
+ *
+ * `sessionCount`/`archivedCount` are shown because they are the difference
+ * between a directory worth opening and one that will render an empty list.
+ */
+function WorkspaceSwitcher({
+  workspaces,
+  home,
+  current,
+  onChoose,
+  onCancel,
+  onClose,
+}: {
+  workspaces: Workspace[];
+  home: string | undefined;
+  current: string | null;
+  onChoose: (path: string) => void;
+  onCancel: () => void;
+  onClose: () => void;
+}) {
+  const [{ query, active }, setPicker] = useState({ query: "", active: 0 });
+  const [browsing, setBrowsing] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const rows = useMemo(() => {
+    const ranked = [...workspaces].sort((a, b) => b.lastUsedMs - a.lastUsedMs);
+    if (!query.trim()) return ranked;
+    // Ranked on the path, not the display name: the user's mental index of a
+    // project is often a middle segment ("huawei", "sylph") that no leaf name
+    // carries.
+    return fuzzyRank(ranked, query, (workspace) => [workspace.path, workspace.name]).map(
+      (result) => result.item,
+    );
+  }, [workspaces, query]);
+
+  const activeIndex = Math.min(active, Math.max(0, rows.length - 1));
+  useEffect(() => scrollActiveIntoView(listRef.current, activeIndex), [activeIndex]);
+
+  const setActive = useCallback(
+    (index: number) => setPicker((state) => ({ ...state, active: index })),
+    [],
+  );
+
+  const commit = useCallback(
+    (index: number) => {
+      const row = rows[index];
+      if (row) onChoose(row.path);
+    },
+    [rows, onChoose],
+  );
+
+  const { onKeyDown } = useListNavigation(rows.length, commit);
+
+  // Replaces this surface rather than stacking on it, so only one focus trap is
+  // ever mounted. Cancelling returns here, which is where the user came from.
+  if (browsing) {
+    return (
+      <DirectoryPicker
+        title="Browse for a workspace"
+        confirmLabel="Show its history"
+        initialPath={current ?? undefined}
+        onChoose={onChoose}
+        onClose={() => setBrowsing(false)}
+      />
+    );
+  }
+
+  return (
+    <Overlay title="Choose a workspace" onClose={onClose} describedBy="switcher-hint">
+      <div className="flex items-center gap-2 border-b border-gray-200 px-3 py-2.5">
+        <span aria-hidden="true" className="text-gray-500">
+          ⌕
+        </span>
+        <input
+          type="text"
+          role="combobox"
+          aria-expanded
+          aria-controls="switcher-results"
+          aria-activedescendant={rows.length > 0 ? `switcher-row-${activeIndex}` : undefined}
+          aria-label="Filter workspaces by path"
+          autoFocus
+          value={query}
+          onChange={(event) => setPicker({ query: event.target.value, active: 0 })}
+          onKeyDown={(event) => onKeyDown(event, activeIndex, setActive)}
+          placeholder="Filter by any part of the path..."
+          className="flex-1 bg-transparent text-sm outline-none placeholder:text-gray-500"
+        />
+      </div>
+
+      <div
+        ref={listRef}
+        id="switcher-results"
+        role="listbox"
+        aria-label="Workspaces"
+        className="min-h-0 flex-1 overflow-y-auto py-1"
+      >
+        {rows.length === 0 ? (
+          <p className="px-3 py-6 text-center text-xs text-gray-600">
+            {query.trim() ? "No workspace matches." : "No workspaces yet."}
+          </p>
+        ) : (
+          rows.map((workspace, index) => (
+            <div
+              key={workspace.path}
+              id={`switcher-row-${index}`}
+              data-index={index}
+              role="option"
+              aria-selected={index === activeIndex}
+              onMouseEnter={() => setActive(index)}
+              onClick={() => onChoose(workspace.path)}
+              className={`cursor-pointer px-3 py-1.5 ${index === activeIndex ? "bg-gray-100" : ""}`}
+            >
+              <div className="flex items-baseline gap-2">
+                <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-900">
+                  {workspace.name}
+                </span>
+                {workspace.path === current && (
+                  <span className="shrink-0 rounded bg-gray-200 px-1 text-[9px] font-medium text-gray-700">
+                    current
+                  </span>
+                )}
+                <span className="shrink-0 text-[10px] text-gray-600">
+                  {workspace.archivedCount > 0 && `${workspace.archivedCount} archived`}
+                  {workspace.archivedCount > 0 && workspace.sessionCount > 0 && " · "}
+                  {workspace.sessionCount > 0 && `${workspace.sessionCount} live`}
+                </span>
+              </div>
+              <p className="truncate font-mono text-[10px] text-gray-600" title={workspace.path}>
+                {shortenHome(workspace.path, home)}
+              </p>
+            </div>
+          ))
+        )}
+      </div>
+
+      <footer
+        id="switcher-hint"
+        className="flex shrink-0 items-center justify-between gap-2 border-t border-gray-200 bg-gray-50 px-3 py-1.5"
+      >
+        <span className="text-[10px] text-gray-600">↑↓ navigate · ↵ choose · Esc close</span>
+        <div className="flex shrink-0 gap-1.5">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          >
+            Back
+          </button>
+          <button
+            type="button"
+            onClick={() => setBrowsing(true)}
+            className="rounded border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          >
+            Browse folders...
+          </button>
+        </div>
       </footer>
     </Overlay>
   );

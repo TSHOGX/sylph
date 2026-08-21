@@ -37,7 +37,7 @@ function toQuery(filters: Filters): SessionFilters {
 }
 
 export default function HomePage() {
-  const { browseHistory } = useWorkspaceUI();
+  const { browseHistory, runAction } = useWorkspaceUI();
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const filtersActive = Object.values(filters).some(Boolean);
 
@@ -125,12 +125,16 @@ export default function HomePage() {
               read what an agent did there before.
             </p>
             <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-              <Link
-                href="/sessions/new"
+              {/* A button running the shared action, not a link to a route:
+                  creating a session is a mutation once its directory is known,
+                  and this is the same path `Mod+N` takes. */}
+              <button
+                type="button"
+                onClick={() => runAction("newSession")}
                 className="inline-block rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
               >
                 Create your first session
-              </Link>
+              </button>
               <button
                 type="button"
                 onClick={() => browseHistory()}

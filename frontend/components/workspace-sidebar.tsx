@@ -19,7 +19,7 @@
  */
 
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type ArchiveSession, type Session } from "@/lib/api";
@@ -149,20 +149,31 @@ export function WorkspaceSidebar() {
 
   return (
     <>
-      <nav aria-label="Sessions by workspace" className="flex min-h-0 flex-1 flex-col">
-        <div
-          className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2"
-          onContextMenu={(event) => {
-            // Only in empty space: when clicking the scrollable container itself,
-            // not a child element (group header, session row, button). Groups and
-            // rows stop propagation, so reaching here means the click was on the
-            // container's background between or below groups.
-            if (event.target === event.currentTarget) {
-              event.preventDefault();
-              setPaneMenu({ x: event.clientX, y: event.clientY });
-            }
-          }}
-        >
+      {/* On the `<nav>`, and gated on `defaultPrevented` rather than on the event
+          target.
+
+          Two earlier versions of this did not work. Putting the handler on the
+          scroll container reaches only the area *inside* it, so a right-click on
+          the footer or the pane's padding — which is most of the chrome once a few
+          sessions are listed — hit nothing. Testing `event.target ===
+          event.currentTarget` was worse: the container's child fills it, so the
+          target is a descendant on every click and the condition was never true.
+
+          Group headers and session rows call `preventDefault` in their own
+          handlers, and the event still bubbles here, so `defaultPrevented` is
+          exactly the question "did something more specific already claim this
+          click". A row's own menu therefore wins, and everything else in the pane
+          falls through to the pane menu. */}
+      <nav
+        aria-label="Sessions by workspace"
+        className="flex min-h-0 flex-1 flex-col"
+        onContextMenu={(event) => {
+          if (event.defaultPrevented) return;
+          event.preventDefault();
+          setPaneMenu({ x: event.clientX, y: event.clientY });
+        }}
+      >
+        <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
         {sessionsQuery.isPending ? (
           <output aria-live="polite" className="block px-1.5 py-3 text-xs text-gray-500">
             Loading sessions...
@@ -251,7 +262,10 @@ export function WorkspaceSidebar() {
         <ContextMenu
           x={paneMenu.x}
           y={paneMenu.y}
-          label="Workspace actions"
+          // "list", to distinguish it from a *single* workspace's menu. Both open
+          // on right-click in the same pane, so an unqualified "Workspace actions"
+          // is ambiguous to a screen reader reading only the menu's name.
+          label="Workspace list actions"
           onClose={() => setPaneMenu(null)}
           items={[
             {
@@ -299,7 +313,6 @@ function GroupSection({
   onTogglePin?: () => void;
   onRename?: (name: string) => void;
 }) {
-  const router = useRouter();
   const queryClient = useQueryClient();
   const { browseHistory, createSessionIn } = useWorkspaceUI();
   // Groups start expanded: a collapsed-by-default sidebar hides the thing the
@@ -350,11 +363,6 @@ function GroupSection({
       // the menu does not change shape between renders.
       disabled: !group.path,
       onSelect: () => createSessionIn(group.path),
-    },
-    {
-      label: "New session here...",
-      onSelect: () =>
-        router.push(`/sessions/new?workdir=${encodeURIComponent(group.path)}`),
     },
     {
       label: "Browse history...",

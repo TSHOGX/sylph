@@ -13,7 +13,7 @@
  */
 
 import dynamic from "next/dynamic";
-import { useRouter, usePathname } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useCallback, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, type Session } from "@/lib/api";
@@ -56,6 +56,10 @@ const HistoryOverlay = dynamic(
   () => import("@/components/history-overlay").then((m) => m.HistoryOverlay),
   { ssr: false },
 );
+const DirectoryPicker = dynamic(
+  () => import("@/components/directory-picker").then((m) => m.DirectoryPicker),
+  { ssr: false },
+);
 
 /**
  * Routes that own the full width and get no shell.
@@ -67,15 +71,13 @@ const HistoryOverlay = dynamic(
 const BARE_ROUTES: string[] = [];
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const router = useRouter();
   const pathname = usePathname();
 
-  const goToNewSession = useCallback(() => router.push("/sessions/new"), [router]);
-
-  // Creating a session is a mutation, not a route: the point of both Quick Start
-  // and the sidebar's "New session here" is that neither shows a dialog. One
-  // instance is shared by every surface, so there is a single pending state and a
-  // single error banner rather than one per caller.
+  // Creating a session is a mutation, not a route: every create path here is
+  // dialog-free once a directory is known, and `Mod+N` — the one path that does
+  // not know one — asks for the directory alone rather than a form. One instance
+  // is shared by every surface, so there is a single pending state and a single
+  // error banner rather than one per caller.
   const creator = useQuickCreateSession();
 
   // The Quick Start directory is resolved server-side; `~` cannot be expanded in
@@ -98,11 +100,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   }
 
   return (
-    <WorkspaceUIProvider
-      onNewSession={goToNewSession}
-      onQuickStart={quickStart}
-      onCreateSessionIn={createSession}
-    >
+    <WorkspaceUIProvider onQuickStart={quickStart} onCreateSessionIn={createSession}>
       <ShellFrame createPending={creator.isPending} createError={creator.error}>
         {children}
       </ShellFrame>
@@ -125,9 +123,27 @@ function ShellFrame({
     <div className="flex h-screen flex-col overflow-hidden bg-white text-gray-900">
       <TopBar />
 
-      {/* One banner for every dialog-free create path: Quick Start, the palette,
-          and the sidebar's "New session here" all run the same mutation, so a
-          failure has one place to appear regardless of which triggered it. */}
+      {/* One strip for every create path: Quick Start, the palette, `Mod+N`, and
+          the sidebar's "New session here" all run the same mutation, so its
+          pending and failed states have one place to appear regardless of which
+          triggered it.
+
+          Pending is shown, not just failure. Every create path is dialog-free, so
+          between the click and the route change there is otherwise no evidence the
+          click registered — and creating a session spawns a runner process, which
+          is not always fast enough for that to go unnoticed. `aria-live` on a
+          `role="status"` region announces it without stealing focus, which a
+          dialog would. */}
+      {createPending && (
+        <p
+          role="status"
+          aria-live="polite"
+          className="border-b border-gray-200 bg-gray-50 px-4 py-1.5 text-xs text-gray-600"
+        >
+          Starting a session...
+        </p>
+      )}
+
       {createError != null && (
         <p role="alert" className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
           {createError instanceof Error
@@ -162,6 +178,7 @@ function ShellFrame({
       {overlay === "palette" && <CommandPalette />}
       {overlay === "settings" && <SettingsPanel />}
       {overlay === "history" && <HistoryOverlay />}
+      {overlay === "newSession" && <NewSessionPicker />}
     </div>
   );
 }
@@ -285,4 +302,36 @@ export function Kbd({ children }: { children: ReactNode }) {
 /** Session label helper shared by the sidebar and the overlays. */
 export function sessionSubtitle(session: Session): string {
   return session.agent;
+}
+
+/**
+ * `Mod+N`: choose a directory, then create there.
+ *
+ * This replaced a four-field form, and the fields are worth naming because their
+ * absence is the design. `workdir` is the only one a session cannot start
+ * without, and it is the one a text input served worst — an absolute path typed
+ * from memory, with a mistake surfacing as a backend rejection. `agent` is
+ * switchable in the composer until the first turn. `model` and `effort` are
+ * composer controls on every turn, so choosing them once at creation was strictly
+ * less capable. `title` was optional and is derivable from the opening message,
+ * which is what the sidebar already labels a session with.
+ *
+ * So the form's only irreplaceable field is the directory, and a picker is a
+ * better control for it than a text box. Creation errors surface in the shell's
+ * shared banner, which is why this renders no error state of its own.
+ */
+function NewSessionPicker() {
+  const { closeOverlay, createSessionIn } = useWorkspaceUI();
+
+  return (
+    <DirectoryPicker
+      title="New session"
+      confirmLabel="Start session here"
+      onClose={closeOverlay}
+      onChoose={(path) => {
+        closeOverlay();
+        createSessionIn(path);
+      }}
+    />
+  );
 }

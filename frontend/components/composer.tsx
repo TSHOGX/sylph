@@ -174,9 +174,22 @@ export function Composer({
           }}
           // Focus-within on the container, so the whole composer reads as one
           // control rather than the textarea lighting up inside a static box.
-          className={`rounded-xl border bg-white transition-colors focus-within:border-gray-400 focus-within:ring-2 focus-within:ring-gray-900/10 ${
-            dragging ? "border-gray-900 bg-gray-50" : "border-gray-200"
-          } ${disabled ? "opacity-60" : ""}`}
+          //
+          // No `opacity` while disabled. It used to carry `opacity-60`, which is a
+          // blunt instrument: opacity composites the whole subtree against the
+          // page, so every descendant's contrast drops at once. Measured by axe
+          // during a live turn, `text-gray-600` fell to 2.87:1 and the Stop
+          // button's `text-red-800` to 3.7:1 — both below the 4.5:1 that WCAG
+          // 1.4.3 requires, and Stop is the one control a user needs *while* the
+          // turn runs. The muted background says "not accepting input" without
+          // touching foreground contrast, and the textarea dims its own text.
+          className={`rounded-xl border transition-colors focus-within:border-gray-400 focus-within:ring-2 focus-within:ring-gray-900/10 ${
+            dragging
+              ? "border-gray-900 bg-gray-50"
+              : disabled
+                ? "border-gray-200 bg-gray-50"
+                : "border-gray-200 bg-white"
+          }`}
         >
           {attachments.length > 0 && (
             <ul
@@ -254,7 +267,10 @@ export function Composer({
             }
             disabled={disabled}
             aria-describedby={problem ? problemId : undefined}
-            className="block max-h-60 w-full resize-none border-0 bg-transparent px-3 py-2.5 text-sm placeholder:text-gray-400 focus:outline-none disabled:cursor-not-allowed"
+            // `disabled:text-gray-500` rather than inheriting a container opacity:
+            // it dims the one thing that should read as inactive, and 500 on the
+            // disabled background still clears 4.5:1.
+            className="block max-h-60 w-full resize-none border-0 bg-transparent px-3 py-2.5 text-sm placeholder:text-gray-400 focus:outline-none disabled:cursor-not-allowed disabled:text-gray-500"
           />
 
           <div className="flex items-center gap-1.5 px-2 pb-2">
