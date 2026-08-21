@@ -196,9 +196,7 @@ frontend/
 │   ├── layout.tsx              # Root layout: providers + AppShell
 │   ├── page.tsx                # All-sessions list
 │   ├── search/page.tsx         # TraceDB archive search and import
-│   ├── sessions/
-│   │   ├── [id]/page.tsx       # Conversation canvas
-│   │   └── new/page.tsx        # Create session
+│   ├── sessions/[id]/page.tsx  # Conversation canvas
 │   └── globals.css
 │
 ├── components/
@@ -214,6 +212,9 @@ frontend/
 │   ├── search-overlay.tsx      # Cmd+K
 │   ├── command-palette.tsx     # Cmd+P
 │   ├── settings-panel.tsx      # Cmd+,
+│   ├── history-overlay.tsx     # Cmd+Shift+K, plus the workspace switcher
+│   ├── directory-picker.tsx    # Server-enumerated folder chooser
+│   ├── composer.tsx            # Message entry, model/effort, attachments
 │   ├── context-menu.tsx        # Right-click menus
 │   ├── attachment-picker.tsx
 │   ├── command-dialog.tsx      # Agent-declared commands
@@ -331,7 +332,7 @@ depend on mount order.
 | `Mod+K` | Global search (live sessions + archive) |
 | `Mod+Shift+K` | Browse this workspace's archived history |
 | `Mod+P` | Command palette |
-| `Mod+N` | New session |
+| `Mod+N` | New session (pick a directory) |
 | `Mod+Shift+N` | Quick Start in `~/.agents` |
 | `Mod+B` / `Mod+\` | Toggle left / right pane |
 | `Mod+,` | Settings |
@@ -352,26 +353,45 @@ shell, which has no access to the open session's state. The session page registe
 a handler with `registerSessionActions` and the shell forwards to it; with no
 session open, those actions are simply ignored.
 
-### Creating a session: mutation or form
+### Creating a session: one mutation, and a directory when it is unknown
 
-Two paths exist, and which one a surface uses follows from one question — is the
-working directory already known?
+There is no create form. Every surface runs the same mutation; the only question
+is whether the invocation already names a working directory.
 
 | Surface | Path | Why |
 | --- | --- | --- |
 | ⚡ Quick Start, `Mod+Shift+N`, palette | `useQuickCreateSession` | The directory is fixed: the backend-resolved `~/.agents`. |
 | Sidebar group → "New session here" | `useQuickCreateSession` | A group **is** a directory. The right-click already named it. |
-| Sidebar group → "New session here..." | `/sessions/new?workdir=` | Override the agent, model, or title; the directory is prefilled. |
-| `+ New session`, `Mod+N` | `/sessions/new` | No directory chosen yet, so the form's required field is the point. |
+| `Mod+N`, empty-state button | `overlay: "newSession"` → same mutation | No directory yet, so a picker asks for that and nothing else. |
 
-The directory is the only field a session needs beyond an agent, and the agent
-has a configured default. So whenever the invocation already carries a directory,
-a form has nothing left to ask: it is a dialog the user must dismiss to get what
-they clicked. `lib/create-session.ts` is that mutation, and it is what makes
-"Quick Start" a special case of a general action rather than its own mechanism —
-before it, Quick Start had a private hook in the shell and the sidebar routed to
-the form, which is why right-clicking the fixed `~/.agents` group still asked for
-a working directory.
+A session needs a directory. Nothing else is worth asking at creation time, and
+the four-field form that used to ask is worth recording because each field's
+removal has a different reason:
+
+- **`workdir`** — the one field a session cannot start without, and the one a text
+  input served worst. An absolute path typed from memory fails as a backend
+  rejection; `DirectoryPicker` enumerates server-side, so the path is chosen and
+  cannot be mistyped.
+- **`agent`** — switchable in the composer until the first turn (`AgentSwitcher`),
+  which is strictly more forgiving than deciding before the conversation exists.
+- **`model` / `effort`** — composer controls on every turn. Choosing once at
+  creation was less capable than the surface that replaced it.
+- **`title`** — optional, and the sidebar already labels a session from its
+  opening message. It stays on the model and the API, because an imported native
+  session carries the originating agent's title.
+
+So whenever the invocation carries a directory, a dialog has nothing left to ask
+and is only something to dismiss. `lib/create-session.ts` is that mutation, and it
+is what makes "Quick Start" a special case of a general action rather than its own
+mechanism — before it, Quick Start had a private hook in the shell and the sidebar
+routed to the form, which is why right-clicking the fixed `~/.agents` group still
+asked for a working directory.
+
+The sidebar group menu carried both variants for one release: "New session here"
+created directly, "New session here..." opened the prefilled form. Two entries
+with the same words and different behaviour is a coin flip, and the slower one
+reads as the careful choice. `workspace-shell.spec.ts` now asserts the menu holds
+exactly one.
 
 One instance lives in the shell and is shared through `WorkspaceUIProvider` as
 `createSessionIn`, so every dialog-free path reports one pending state and one
@@ -952,6 +972,22 @@ sidebar group whose `Browse all` was clicked.
 Filtering is deliberately local. TraceDB's full-text search is already `Mod+K`,
 and re-querying it per keystroke would spawn a subprocess per character to answer
 a narrower question; the footer says the filter covers loaded sessions only.
+
+Changing the scope goes through a **workspace switcher**, not a `<select>`. On a
+real archive that select is 200+ options sharing a `~/Workspace/` prefix, ordered
+by recency and reachable only by first letter — and it could not name a directory
+the archive has never seen at all. The switcher ranks known workspaces by recency,
+filters on the full path rather than the leaf name (the segment someone remembers
+is often in the middle: `huawei`, `sylph`), shows each one's archived and live
+counts so an empty directory is visible before it is opened, and falls back to
+`DirectoryPicker` for anything unlisted.
+
+It is a **mode swap inside the same modal**, not a second modal. Nesting `Overlay`
+in `Overlay` puts two focus traps on one DOM path: the outer trap's
+`querySelectorAll` also matches the inner dialog's controls, so Tab at the
+boundary depends on document order rather than on which dialog is on top. Swapping
+the content keeps exactly one trap alive, makes "back" a state change rather than
+an unmount, and leaves `Escape` meaning the same thing at every depth.
 
 This overlay carries the one piece of lineage work the client owns: collapsing a
 **fork** whose pair straddles a page boundary. A fork and its origin replay the

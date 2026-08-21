@@ -84,7 +84,8 @@ implemented either way yet.
 **Pages:**
 - `/` — Session list
 - `/sessions/[id]` — Conversation view
-- `/sessions/new` — Create session dialog
+- `/sessions/new` — Create session dialog (removed in Phase 7: creating a session
+  is a mutation, and the directory it needs comes from a picker)
 
 ## Phase 3: Feature Completion (Weeks 6-7) — Complete
 
