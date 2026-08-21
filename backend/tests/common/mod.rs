@@ -399,6 +399,17 @@ cat >/dev/null
 /// An archive holding no sessions for the requested filter.
 const EMPTY_LIST: &str = r#"{"sessions": []}"#;
 
+/// Wrap a payload as a POSIX single-quoted shell word, safe for any content.
+///
+/// The mock emits JSON from a `/bin/sh` script, so an apostrophe in test data —
+/// `"The directory's own work"` — would otherwise close the quote early and feed
+/// the client a truncated line, which surfaces as a JSON decoding error that looks
+/// like a protocol bug rather than a fixture bug. The standard escape is to end
+/// the quote, emit a quoted apostrophe, and reopen: `'\''`.
+fn shell_single_quote(payload: &str) -> String {
+    format!("'{}'", payload.replace('\'', r"'\''"))
+}
+
 pub struct MockTraceDb {
     /// Emitted verbatim as the `result` of every `search` request.
     search_result: String,
@@ -412,6 +423,9 @@ pub struct MockTraceDb {
     /// archive-browse endpoints pass their tests against a payload the real
     /// `trace-db` never emits.
     list_result: String,
+    /// Per-id `show` payloads, for tests where lineage or locality differs by
+    /// session. Keyed by TraceDB id; ids not listed fall back to `show_result`.
+    sessions: Vec<(String, String)>,
     /// When true, answer `{"ok": false, ...}` instead of a result.
     fails: bool,
 }
@@ -423,6 +437,7 @@ impl MockTraceDb {
             search_result: hits.to_string(),
             show_result: "null".to_string(),
             list_result: EMPTY_LIST.to_string(),
+            sessions: Vec::new(),
             fails: false,
         }
     }
@@ -441,6 +456,7 @@ impl MockTraceDb {
             search_result: "[]".to_string(),
             show_result: "null".to_string(),
             list_result: page.to_string(),
+            sessions: Vec::new(),
             fails: false,
         }
     }
@@ -459,6 +475,24 @@ impl MockTraceDb {
         self
     }
 
+    /// Register the `show` payload for one specific id.
+    ///
+    /// Needed wherever behaviour depends on *which* session is asked about — the
+    /// lineage rollup reads each row's `parent_session_id`/`forked_from`, then asks
+    /// whether that parent lives in the directory being listed. `metadata` is the
+    /// session header; `id` is filled in from the key.
+    pub fn and_session_for(mut self, id: &str, metadata: Value) -> Self {
+        let mut session = json!({"id": id, "agent": "claude"});
+        for (key, value) in metadata.as_object().expect("metadata must be an object") {
+            session[key] = value.clone();
+        }
+        self.sessions.push((
+            id.to_string(),
+            json!({"session": session, "mode": "metadata", "events": []}).to_string(),
+        ));
+        self
+    }
+
     /// Returns a `show` payload built from session metadata and events.
     ///
     /// `metadata` supplies the fields the import path reads; `id` and `agent`
@@ -468,6 +502,7 @@ impl MockTraceDb {
             search_result: "[]".to_string(),
             show_result: "null".to_string(),
             list_result: EMPTY_LIST.to_string(),
+            sessions: Vec::new(),
             fails: false,
         }
         .and_session(metadata, events)
@@ -480,6 +515,7 @@ impl MockTraceDb {
             search_result: "[]".to_string(),
             show_result: "null".to_string(),
             list_result: EMPTY_LIST.to_string(),
+            sessions: Vec::new(),
             fails: false,
         }
     }
@@ -490,6 +526,7 @@ impl MockTraceDb {
             search_result: "[]".to_string(),
             show_result: "null".to_string(),
             list_result: EMPTY_LIST.to_string(),
+            sessions: Vec::new(),
             fails: true,
         }
     }
@@ -524,10 +561,29 @@ done
             .to_string();
         }
 
-        let search = format!(r#"{{"ok": true, "result": {}}}"#, self.search_result);
-        let show = format!(r#"{{"ok": true, "result": {}}}"#, self.show_result);
-        let list = format!(r#"{{"ok": true, "result": {}}}"#, self.list_result);
-        let stats = r#"{"ok": true, "result": {"totalSessions": 2, "totalEvents": 9}}"#;
+        let search = shell_single_quote(&format!(
+            r#"{{"ok": true, "result": {}}}"#,
+            self.search_result
+        ));
+        let show =
+            shell_single_quote(&format!(r#"{{"ok": true, "result": {}}}"#, self.show_result));
+        let list =
+            shell_single_quote(&format!(r#"{{"ok": true, "result": {}}}"#, self.list_result));
+        let stats = shell_single_quote(
+            r#"{"ok": true, "result": {"totalSessions": 2, "totalEvents": 9}}"#,
+        );
+
+        // Per-id `show` branches, matched before the catch-all. The real archive
+        // answers each id differently, and the lineage rollup asks about specific
+        // ids -- a mock that returned one canned session for every `show` would
+        // report every parent as living in no directory at all.
+        let mut per_id = String::new();
+        for (id, payload) in &self.sessions {
+            let body = shell_single_quote(&format!(r#"{{"ok": true, "result": {payload}}}"#));
+            per_id.push_str(&format!(
+                "    *'\"show\"'*'\"{id}\"'*) printf '%s\\n' {body} ;;\n"
+            ));
+        }
 
         format!(
             r#"#!/bin/sh
@@ -535,10 +591,10 @@ set -eu
 
 while IFS= read -r line; do
   case "$line" in
-    *'"show"'*) printf '%s\n' '{show}' ;;
-    *'"list"'*) printf '%s\n' '{list}' ;;
-    *'"stats"'*) printf '%s\n' '{stats}' ;;
-    *) printf '%s\n' '{search}' ;;
+{per_id}    *'"show"'*) printf '%s\n' {show} ;;
+    *'"list"'*) printf '%s\n' {list} ;;
+    *'"stats"'*) printf '%s\n' {stats} ;;
+    *) printf '%s\n' {search} ;;
   esac
 done
 "#

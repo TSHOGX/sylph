@@ -1017,17 +1017,28 @@ async fn archive_listing_keeps_only_the_requested_directory() {
 async fn archive_listing_folds_subagents_into_the_session_that_spawned_them() {
     // Subagent sessions are 43% of a real archive. Listed as peers they bury the
     // sessions a user actually started, so they become a count instead.
-    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_listing(
-        json!([
-            {"id": "claude:root", "agent": "claude", "cwd": "/w/app",
-             "title": "Parent", "events": 40},
-            {"id": "claude:root/agent-one", "agent": "claude", "cwd": "/w/app",
-             "title": "Subagent one", "events": 9},
-            {"id": "claude:root/agent-two", "agent": "claude", "cwd": "/w/app",
-             "title": "Subagent two", "events": 9},
-        ]),
-        None,
-    ))
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(
+            json!([
+                {"id": "claude:root", "agent": "claude", "cwd": "/w/app",
+                 "title": "Parent", "events": 40},
+                {"id": "claude:root/agent-one", "agent": "claude", "cwd": "/w/app",
+                 "title": "Subagent one", "events": 9},
+                {"id": "claude:root/agent-two", "agent": "claude", "cwd": "/w/app",
+                 "title": "Subagent two", "events": 9},
+            ]),
+            None,
+        )
+        .and_session_for("claude:root", json!({"cwd": "/w/app", "title": "Parent"}))
+        .and_session_for(
+            "claude:root/agent-one",
+            json!({"cwd": "/w/app", "parent_session_id": "claude:root"}),
+        )
+        .and_session_for(
+            "claude:root/agent-two",
+            json!({"cwd": "/w/app", "parent_session_id": "claude:root"}),
+        ),
+    )
     .await;
 
     let body = json_body(
@@ -1044,18 +1055,151 @@ async fn archive_listing_folds_subagents_into_the_session_that_spawned_them() {
 }
 
 #[tokio::test]
+async fn archive_listing_rolls_up_a_subagent_that_records_only_a_parent() {
+    // The id suffix is not the signal: 199 non-empty sessions in the local archive
+    // record a `parent_session_id` while carrying no `/agent-` suffix, almost all
+    // of them codex. Reading the id alone left that delegated work at the top
+    // level, which is the gap this covers.
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(
+            json!([
+                {"id": "codex:parent", "agent": "codex", "cwd": "/w/app", "events": 300},
+                {"id": "codex:child-a", "agent": "codex", "cwd": "/w/app", "events": 40},
+                {"id": "codex:child-b", "agent": "codex", "cwd": "/w/app", "events": 30},
+            ]),
+            None,
+        )
+        .and_session_for("codex:parent", json!({"cwd": "/w/app", "title": "Parent"}))
+        .and_session_for(
+            "codex:child-a",
+            json!({"cwd": "/w/app", "parent_session_id": "codex:parent"}),
+        )
+        .and_session_for(
+            "codex:child-b",
+            json!({"cwd": "/w/app", "parent_session_id": "codex:parent"}),
+        ),
+    )
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+            .await,
+    )
+    .await;
+
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "a recorded parent must roll up even with no id suffix: {body}"
+    );
+    assert_eq!(sessions[0]["id"], "codex:parent");
+    assert_eq!(sessions[0]["subagentCount"], 2);
+}
+
+#[tokio::test]
+async fn archive_listing_keeps_a_subagent_that_ran_in_another_directory() {
+    // 484 of 2238 subagents in the local archive ran in a different directory than
+    // their parent -- a worktree or a subdirectory. Folding those into a parent
+    // that is not in this listing deleted them from the only directory that would
+    // ever show them, emptying 42 directories, one holding 193 sessions.
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(
+            json!([
+                {"id": "claude:root/agent-sub", "agent": "claude", "cwd": "/w/app/frontend",
+                 "title": "Work in the subdirectory", "events": 120},
+            ]),
+            None,
+        )
+        // The parent lives one directory up, so it is not a row here.
+        .and_session_for("claude:root", json!({"cwd": "/w/app", "title": "Parent"}))
+        .and_session_for(
+            "claude:root/agent-sub",
+            json!({"cwd": "/w/app/frontend", "parent_session_id": "claude:root"}),
+        ),
+    )
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app/frontend")
+            .await,
+    )
+    .await;
+
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "a cross-directory subagent is this directory's only history: {body}"
+    );
+    assert_eq!(sessions[0]["id"], "claude:root/agent-sub");
+}
+
+#[tokio::test]
+async fn archive_listing_shows_one_side_of_a_fork_and_names_the_other() {
+    // A fork replays its origin's whole prefix, so both sides share every early
+    // user turn and read as one conversation. Listing both shows it twice under one
+    // label. `list` is ordered newest-first, so the survivor is the one reached
+    // first -- and it is not a fixed side: measured locally, one pair has its later
+    // work in the fork and the other in the origin.
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(
+            json!([
+                {"id": "claude:resumed", "agent": "claude", "cwd": "/w/app",
+                 "title": "The conversation", "events": 1108, "endedAtMs": 2000},
+                {"id": "claude:origin", "agent": "claude", "cwd": "/w/app",
+                 "title": "The conversation", "events": 389, "endedAtMs": 1000},
+            ]),
+            None,
+        )
+        .and_session_for(
+            "claude:resumed",
+            json!({"cwd": "/w/app", "title": "The conversation",
+                   "forked_from": "claude:origin#ec58fee8-5801-431a-a51e-eb99e33d8c42"}),
+        )
+        .and_session_for("claude:origin", json!({"cwd": "/w/app", "title": "The conversation"})),
+    )
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+            .await,
+    )
+    .await;
+
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "one conversation must not list twice: {body}");
+    assert_eq!(sessions[0]["id"], "claude:resumed", "the newer side survives");
+    // Named so a client accumulating pages can drop the other side when the pair
+    // straddles two requests, which the server cannot see.
+    assert_eq!(sessions[0]["forkOf"], "claude:origin");
+    // A fork is not delegated work, so it must not be counted as a subagent.
+    assert_eq!(sessions[0]["subagentCount"], 0);
+}
+
+#[tokio::test]
 async fn archive_listing_counts_a_subagent_listed_before_its_parent() {
     // The archive orders by recency and a subagent commonly ends after the
     // session that spawned it, so the child's row can arrive first.
-    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_listing(
-        json!([
-            {"id": "claude:root/agent-late", "agent": "claude", "cwd": "/w/app",
-             "title": "Subagent", "events": 9},
-            {"id": "claude:root", "agent": "claude", "cwd": "/w/app",
-             "title": "Parent", "events": 40},
-        ]),
-        None,
-    ))
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(
+            json!([
+                {"id": "claude:root/agent-late", "agent": "claude", "cwd": "/w/app",
+                 "title": "Subagent", "events": 9},
+                {"id": "claude:root", "agent": "claude", "cwd": "/w/app",
+                 "title": "Parent", "events": 40},
+            ]),
+            None,
+        )
+        .and_session_for("claude:root", json!({"cwd": "/w/app", "title": "Parent"}))
+        .and_session_for(
+            "claude:root/agent-late",
+            json!({"cwd": "/w/app", "parent_session_id": "claude:root"}),
+        ),
+    )
     .await;
 
     let body = json_body(
@@ -1071,6 +1215,47 @@ async fn archive_listing_counts_a_subagent_listed_before_its_parent() {
         sessions[0]["subagentCount"], 1,
         "a child seen before its parent was dropped: {body}"
     );
+}
+
+#[tokio::test]
+async fn archive_listing_reaches_a_match_buried_behind_subdirectory_rows() {
+    // The upstream `cwd` filter is an unanchored substring match, so a parent
+    // directory's pattern also matches everything beneath it, and those sort by
+    // recency rather than depth. A real directory with 88 sessions of its own had
+    // its first exact match 1300 rows in, behind subdirectory work: a page-count
+    // cap gave up first and reported it empty, which is the very bug this endpoint
+    // exists to fix.
+    let mut rows: Vec<serde_json::Value> = (0..120)
+        .map(|i| {
+            json!({"id": format!("claude:deep-{i}"), "agent": "claude",
+                   "cwd": "/w/app/nested/deeper", "title": "Subdirectory work",
+                   "events": 10})
+        })
+        .collect();
+    // The only exact match sits last, after every deeper-path row.
+    rows.push(json!({"id": "claude:wanted", "agent": "claude", "cwd": "/w/app",
+                     "title": "The directory's own work", "events": 42}));
+
+    let backend = TestBackend::start_with_tracedb(
+        MockTraceDb::with_listing(json!(rows), None)
+            .and_session_for("claude:wanted", json!({"cwd": "/w/app"})),
+    )
+    .await;
+
+    let body = json_body(
+        backend
+            .get_authed("/api/v1/archive/sessions?workdir=/w/app")
+            .await,
+    )
+    .await;
+
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "a match behind many deeper-path rows must still be found: {body}"
+    );
+    assert_eq!(sessions[0]["id"], "claude:wanted");
 }
 
 #[tokio::test]
