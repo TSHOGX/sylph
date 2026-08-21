@@ -21,13 +21,14 @@ const backend = process.env.SYLPH_WEB_BACKEND ?? "http://localhost:4317";
 /**
  * Dev origins from which `/_next/*` requests are allowed. Next 16 blocks
  * cross-site requests to dev resources as DNS-rebinding defense; this permits
- * requests from cpolar tunnels and LAN IPs.
+ * requests from LAN IPs that reach the dev server directly.
  *
  * Comma-separated list of **hostnames only** (no protocol, no port):
- *   "44fb4bb.r8.cpolar.cn,100.125.12.35"
+ *   "100.125.12.35,192.168.1.100"
  *
- * Omit when `NODE_ENV=production` or when running without a tunnel or LAN
- * access scenario. localhost is always allowed.
+ * Omit when `NODE_ENV=production`, for localhost-only development, and for
+ * cpolar access that routes through a reverse proxy rewriting `Origin` to
+ * `localhost`. localhost is always allowed.
  */
 const allowedDevOrigins = process.env.SYLPH_WEB_DEV_ORIGINS
   ? process.env.SYLPH_WEB_DEV_ORIGINS.split(",")
