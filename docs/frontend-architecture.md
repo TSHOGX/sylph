@@ -148,10 +148,9 @@ nowhere in the UI yet.
 
 **UI components:**
 - Tailwind CSS 4 (utility-first styling)
-- **No component library.** The four interactive primitives needed — modal,
-  context menu, disclosure, listbox — are implemented directly in
-  `components/overlay.tsx`, `components/context-menu.tsx`, native `<details>`,
-  and the two picker overlays. Radix UI would have supplied them with better
+- **No component library.** The primitives needed — modal, menu, drawer, bottom
+  sheet, disclosure, listbox — are implemented directly in `components/ui/`,
+  `components/overlay.tsx`, native `<details>`, and the two picker overlays. Radix UI would have supplied them with better
   edge-case coverage, at roughly the whole remaining first-load budget. Native
   `<details>` in particular is *better* than a scripted disclosure: it gives
   keyboard operation, `aria-expanded`, and find-on-page behaviour with no script.
@@ -228,19 +227,27 @@ frontend/
 │   ├── settings-panel.tsx      # Cmd+,
 │   ├── history-overlay.tsx     # Cmd+Shift+K, plus the workspace switcher
 │   ├── directory-picker.tsx    # Server-enumerated folder chooser
-│   ├── composer.tsx            # Message entry, model/effort, attachments
-│   ├── context-menu.tsx        # Right-click menus
+│   ├── composer.tsx            # Message entry, + menu, flag chips, attachments
 │   ├── attachment-picker.tsx
 │   ├── command-dialog.tsx      # Agent-declared commands
-│   └── badges.tsx              # Origin and status badges
+│   ├── badges.tsx              # Origin and status badges
+│   ├── icons.tsx               # ~40 hand-authored SVG paths, no dependency
+│   └── ui/
+│       ├── button.tsx          # Button, IconButton, Kbd
+│       ├── menu.tsx            # Context menu, dropdown, mobile sheet fork
+│       └── sheet.tsx           # Bottom sheet and side drawer (mobile)
 │
 ├── lib/
 │   ├── api.ts                  # Typed client; mirrors the wire shape exactly
 │   ├── providers.tsx           # QueryClient + AuthGate
 │   ├── settings.tsx            # Preferences over localStorage
 │   ├── create-session.ts       # Dialog-free session creation + default resolution
-│   ├── workspace-ui.tsx        # Pane visibility, overlays, artifact selection
+│   ├── workspace-ui.tsx        # Panes, overlays, drawers, artifact selection
 │   ├── shortcuts.ts            # Combo grammar and platform resolution
+│   ├── theme.ts                # Pre-paint theme bootstrap + application
+│   ├── viewport.ts             # Is this a phone; the breakpoint constant
+│   ├── use-dialog.ts           # Focus trap, restoration, Escape
+│   ├── register-sw.tsx         # Service-worker registration (production only)
 │   ├── timeline-rows.test.ts   # (tests live beside the code they cover)
 │   ├── diff.ts                 # LCS line diff
 │   ├── tool-shape.ts           # Interprets tool_call payloads per agent
@@ -310,6 +317,115 @@ Flexbox with fixed sidebar widths, not a grid with `fr` units: sidebars must not
 shrink as conversation content grows, and only the centre pane scrolls. Panes
 toggle with `hidden`/`flex` rather than conditional rendering, so a hidden sidebar
 keeps its expanded groups and scroll position.
+
+**Height is `h-dvh`, never `h-screen`.** See "The viewport" below — this is the
+single most consequential line in the shell.
+
+### Below `md`: the panes become surfaces
+
+The three-pane layout cannot lay out in flow on a phone. A 240px sidebar on a
+390px viewport leaves ~150px for the conversation *and* the composer, and because
+`showLeftSidebar` defaults to true, that was the default state.
+
+```
+ phone (< 768px)                          drawer open
+┌─────────────────────────┐              ┌─────────────────────────┐
+│ [≡] Sylph      ⌕ ⚙ ▣    │              │┌───────────────┐        │
+├─────────────────────────┤              ││ Workspaces    │ scrim  │
+│                         │              ││ ▾ sylph-web   │        │
+│  conversation           │   tap [≡]    ││   ● session A │        │
+│  (full width)           │  ─────────▶  ││ ▾ trace-db    │        │
+│                         │              ││   ● session C │        │
+├─────────────────────────┤              │└───────────────┘        │
+│ [+] [Model ⌄]      (↑)  │              │                         │
+└─────────────────────────┘              └─────────────────────────┘
+
+ tap [▣] — files as a bottom sheet, drag down to dismiss
+┌─────────────────────────┐
+│  conversation (visible) │
+├═════════════════════════┤  ← grab handle; the sheet does not reach the top,
+│ ▬ Files            ✕    │    because files are inspection *of* what is above
+│ ▾ backend/              │
+│   ▫ auth.rs             │
+└─────────────────────────┘
+```
+
+**Sessions get a left drawer; files get a bottom sheet.** Not a width decision —
+it follows from what each pane is *for*. Sessions are navigation, so a left
+drawer is where a phone user reaches for it and it matches the hamburger that
+opens it. Files are inspection of the thing currently on screen, so the sheet
+leaves the conversation visible above it and a vertical drag is the gesture for
+"show me more / put it away". This is the split Claude's and ChatGPT's iOS apps
+use.
+
+The sheet is drag-dismissable and the drawer is not, deliberately: a rightward
+drag from the left edge is iOS Safari's own back-navigation gesture, and
+competing with it means the drawer sometimes closes and sometimes navigates
+history.
+
+**The split is a component swap, not a stylesheet.** An overlay surface has to
+trap focus, close on Escape, and dismiss on navigation, and none of those three is
+expressible as a CSS rule. `lib/viewport.ts` answers "is this a phone" through
+`useSyncExternalStore` over `matchMedia`, and exports the breakpoint constant that
+the `md:` classes in the shell must match — a focus trap running while CSS still
+lays the pane out in flow would trap focus inside a visible sidebar.
+
+Drawer state is **transient and separate from the persisted pane preferences**.
+`showLeftSidebar` means "I work with the sidebar hidden" and survives restarts; a
+drawer must not, because an app that reopens with a drawer over the conversation
+because that is how the tab was closed a week ago is broken. It is also derived
+rather than synchronised: the state holds the open drawer *plus the route it was
+opened on*, and `drawer` is computed from that against the current pathname and
+breakpoint. Written as effects, "navigating closes it" and "leaving mobile closes
+it" were both `setState` in an effect body — a cascading render, and what
+`react-hooks/set-state-in-effect` flags.
+
+### The viewport
+
+Three separate bugs presented as one symptom: "scrolling drags the whole screen
+up and reveals blank space". All three are mobile-only, and all three had to be
+closed together — fixing the height alone leaves the chain, and fixing the chain
+alone leaves a shell that does not fit.
+
+| Cause | Fix |
+| --- | --- |
+| `100vh` is the *large* viewport height — it measures as though the browser's collapsible toolbars were hidden, so a `h-screen` shell is taller than what is visible and the document scrolls to make up the difference | `h-dvh` on the shell, which tracks the toolbars as they collapse |
+| Nothing pinned the document, so a drag that began in a pane continued into the document once that pane hit its end. The blank area *is* the document scrolled past the shell | `html, body { height: 100%; overflow: hidden }` — the shell owns all scrolling |
+| Overscroll chained upward, so even a pinned document rubber-banded on iOS | `overscroll-behavior: none` on the document, and the `pane` utility carries `overscroll-behavior: contain` for every scroll container |
+
+Two further contributors, both of which move the page on their own:
+
+- **Mobile Safari zooms when a focused input's text is under 16px, and does not
+  zoom back out.** The composer's textarea is `text-base` on mobile (`md:text-sm`
+  above), and `globals.css` floors input text at 16px under `pointer: coarse`
+  only — dense chrome legitimately uses 11–12px, so the floor is not applied to
+  everything.
+- **The on-screen keyboard.** `interactiveWidget: "resizes-content"` makes it
+  shrink the layout viewport instead of sliding the page up, which is what keeps
+  `100dvh` honest while the keyboard is open.
+
+`viewportFit: "cover"` draws into the notch and home-indicator areas, and the
+`pb-safe` / `pt-safe` / `px-safe` utilities pad the chrome back out. They *add* to
+existing padding rather than replacing it, so a composer can be `pt-2 pb-safe`
+and get both. Zoom stays enabled (`maximumScale: 5`): pinch-zoom is an
+accessibility affordance under WCAG 1.4.4, and the usual reason to disable it is
+the small-input zoom, which is fixed properly above instead.
+
+### Touch targets
+
+`tap-target` and `tap-row` set a 44px minimum — Apple's HIG figure, close to
+Material's 48dp — under `pointer: coarse` **only**. The same control should not be
+finger-sized on a machine driven by a mouse: the desktop app keeps its dense 24px
+tree rows, and the phone gets hit areas it can actually hit.
+
+The corollary is that **every right-click-only action needed a button.** There is
+no right-click on a touch screen, so pin, rename, browse-history, copy-path, and
+the per-file actions were not merely inconvenient on a phone — they were
+unreachable. Every sidebar group, session row, archived row, and file-tree row now
+carries an overflow (`⋯`) button: revealed on hover with a fine pointer to keep
+the pane quiet, always present with a coarse one, where there is no hover to
+reveal it with. It is a *sibling* of the row rather than a child, because a button
+inside an anchor is invalid HTML and makes the row's own activation ambiguous.
 
 ### Artifacts pane: tree and viewer swap
 
@@ -695,29 +811,350 @@ which is why that logic is unit-tested and the component is not.
 mid-turn re-renders one row instead of the settled history above it. That is the
 mechanism the virtualization decision rests on.
 
-### Color System & Theming
+#### Shared primitives
 
-**Origin indicators:**
-- Sylph: `green-500` (#10b981) — trustworthy, managed
-- Native: `violet-500` (#8b5cf6) — preserved, external
+`components/ui/` holds what was previously re-decided per file: roughly forty
+hand-written button class strings that were not identical — padding drifted
+between `px-2 py-1` and `px-2.5 py-1`, disabled state was sometimes `opacity-50`
+and sometimes nothing, and hover was `gray-100` in the top bar but `gray-200/60`
+in the sidebar for the same kind of control.
 
-**Status colors:**
-- Idle: `gray-400`
-- Running: `blue-500` (pulsing)
-- Completed: `green-500`
-- Failed: `red-500`
-- Stopping: `amber-500`
+| Module | Exports | Notes |
+| --- | --- | --- |
+| `ui/button.tsx` | `Button`, `IconButton`, `Kbd` | Variants are semantic (`primary`, `secondary`, `ghost`, `danger`, `chip`), so a caller picks by meaning. `IconButton` requires `label` — an icon-only control with no accessible name is the most repeated shape in the app, so the failure is a type error rather than an audit finding |
+| `ui/menu.tsx` | `ContextMenu`, `Menu`, `MenuButton`, `MenuItem` | One behaviour, three positionings: anchored to a point (right-click), to a trigger (dropdown), or as a bottom sheet on mobile |
+| `ui/sheet.tsx` | `Sheet`, `Drawer` | The mobile surfaces |
+| `lib/use-dialog.ts` | `useDialog` | Focus trap, focus restoration, Escape |
 
-**Theme support:**
-- Light mode (default)
-- Dark mode (auto via `prefers-color-scheme`)
-- Explicit toggle in settings
-- CSS variables for all semantic colors
+`useDialog` exists because three surfaces had implemented this independently and
+disagreed in ways only a keyboard user finds. `CommandDialog` queried `"button,
+select, input, textarea, [href]"`, which matches a *disabled* button and could
+park focus on something inert; `Overlay` filtered on `offsetParent`, which is
+correct. Neither stopped Escape from also reaching the shell's document handler,
+so closing a dialog could close the overlay behind it. These are WCAG 2.4.3 and
+2.1.2 obligations, and the drawer and sheet would have been a fourth and fifth
+copy.
 
-**Typography:**
-- Headings: Inter (system font stack fallback)
-- Body: Inter
-- Code: JetBrains Mono (fallback to monospace)
+One subtlety worth recording, because it produced an unclosable dialog: the hook
+focuses the *container* when nothing inside the surface claims focus, even with
+`autoFocus: false`. `onKeyDown` is a React handler on the container, so with
+focus left on `<body>` the Escape key never arrives. The full-screen file viewer
+has no auto-focusing control of its own, so it opened and could not be dismissed
+by keyboard at all.
+
+#### Menus replaced every `<select>`
+
+Not a styling preference. **A `<select>` is sized by its longest option, not by
+its current value.** The composer's agent, model, and effort controls were
+native selects, so a runner declaring `claude-opus-5-20260501` made that control
+~180px wide regardless of what was selected; three of them plus Send exceeded a
+390px viewport. Because the width came from content the user could not see, no
+amount of `min-w-0` or `truncate` could recover it — the intrinsic minimum was
+already too large. This is the direct cause of the reported "composer runs off
+the screen".
+
+A button that renders the *current* value can truncate. A `<select>` cannot. The
+secondary benefit is that a native select cannot be styled: on iOS it renders as
+a system wheel with its own typography, which is exactly the
+assembled-from-parts quality this pass removed.
+
+Menus use `menu`/`menuitem` with `aria-activedescendant` for the virtual cursor,
+and `menuitemradio` + `aria-checked` where a group is a single choice. Two bugs
+found while building this are worth keeping:
+
+- **A menu measured before it is placed cannot take focus.** The panel carries
+  `invisible` until its position is measured, and `visibility: hidden` elements
+  are not focusable — so focusing inside the measuring effect silently did
+  nothing, and Escape never reached the handler. Focus happens in a second
+  effect, once `position` commits.
+- **A dismiss-on-outside-pointerdown listener must be inert on the sheet path.**
+  The ref it tests is the popover's, which the sheet path never attaches, so
+  every `contains()` was false and the very pointerdown beginning a tap on a
+  menu item closed the sheet before the click landed. Selecting a model silently
+  did nothing on a phone.
+
+### Icons
+
+`components/icons.tsx` — 48 hand-authored icons on a 24-unit grid, drawn
+at 16px, stroked in `currentColor` at 1.75. No dependency.
+
+The app previously drew its entire interface with Unicode dingbats: `⚙ ⚡ ⌕ ▾ ⌗ ⑂
+⚠ ⛶ ✕ ↗ ↪ ✻ ❯ ✎ ◆ ▤ ▦ ▩ ▧ ◈ ▪ ▫ ▮ ⎘ 📎` and more. The budget reasoning behind
+that was sound — an icon package did not fit — but the conclusion was wrong,
+because those characters are **font data**: what they look like is decided by
+the platform, not by this project. `📎` and `⚡` render as full-colour emoji on
+iOS and macOS, several of the geometric shapes are absent from the default CJK
+fallback chain and came out as `.notdef` boxes, and the ones that did render
+were semantically arbitrary — `▩` for an image and `▧` for a PDF are shapes with
+no relationship to their meaning, so they had to be learned rather than
+recognized.
+
+The real choice was never "dingbats or a 40 KB package". Thirty-odd paths cost
+about 2 KB and tree-shake per route.
+
+Conventions worth keeping:
+
+- **Every icon is `aria-hidden`.** None is ever the only thing carrying a
+  meaning: the control around it has a label, or a text node sits beside it. One
+  rule rather than a per-icon judgement, so an icon cannot become the sole
+  accessible name by accident.
+- **1.75 stroke, not Lucide's 2 at 24px.** A stroke thinner than ~1.5 device
+  pixels dithers on a non-retina display. Round caps and joins throughout,
+  because mitred joins at this size produce visible spikes at acute angles.
+- **Presentation stays out of the logic modules.** `lib/tool-shape.ts` returns a
+  `kind` and `lib/file-kind.ts` returns an icon *name*; the rendering layer maps
+  either to a component through a module-level table. Both modules are
+  unit-tested in a `node` environment, and a component reference returned from a
+  function and rendered as `<Glyph />` is also indistinguishable, to
+  `react-hooks/static-components`, from a component defined during render.
+- **Settings is sliders, not a gear.** A gear needs eight teeth to read as one,
+  and at 16px those merge into a blurred ring.
+- **Folder and file are different silhouettes**, not the same box with different
+  infill: the tab along a folder's top edge is visible at a glance where an
+  interior glyph is not, and the folder opens when its row expands. Colour is
+  reinforcement, not the distinction, so it survives greyscale (WCAG 1.4.1).
+
+**Hand-authored paths need a visual check, and nothing else substitutes.** A
+transposed coordinate type-checks, renders, and is simply wrong; an E2E test
+asserts an icon is *present*, not that it depicts anything.
+`scripts/icon-sheet.mjs` renders every icon at 28px and 16px in both themes to
+`/tmp/icon-sheet-*.png`. Run it after touching an icon. It found five broken
+ones on its first run: `Command` was an inkblot, `Chip` a flower, `Tool` a
+dagger, `FileImage` read as "blocked", and `FolderOpen` was indistinguishable
+from `FolderIcon` — which is the one distinction the file tree depends on.
+
+That sheet re-parses the source, so it can misreport a shared sub-component.
+When an icon looks wrong there, screenshot the real component before changing
+it: doing that revealed a genuine layout bug the sheet could not — an expanded
+directory's `<li>` contains its whole subtree, so an `inset-y-0` overflow button
+positioned against it stretched down the subtree and rendered beside a *child*
+row.
+
+A few characters are deliberately *kept*, because they are text rather than
+pictures: `›` as the prompt marker (the same convention a shell prompt uses),
+`↑↓↵` in keyboard hints, `+`/`−` in diffs (required for colour-blind readers),
+and `·`/`⋯` as punctuation.
+
+### The composer
+
+One bordered surface holding attachments, the message, and the runner
+configuration that turn will use. The layout rule is that **the message owns its
+own row** and the controls sit beneath it, which is what makes it usable on a
+phone.
+
+```
+┌──────────────────────────────────────────────┐
+│ ▣ screenshot.png  1.2 MB              ✕      │  attachments (when present)
+├──────────────────────────────────────────────┤
+│ Add logging to the auth module…              │  textarea, auto-grows to 35vh
+│                                              │
+├──────────────────────────────────────────────┤
+│ [+]  [▣ thorough ⌄] [✦ high ⌄]      [↑ Send] │  controls; middle scrolls
+└──────────────────────────────────────────────┘
+   │      └── declared flags, truncating chips
+   └── attach · save to workspace · run command · switch agent
+```
+
+Split by how often a turn changes it, following ChatGPT and Claude:
+
+- **Always visible**: the message, `+`, model, thinking, Send/Stop. Model and
+  thinking are per-turn decisions that change what the message will *do*, so
+  hiding them costs a click on the majority path and makes the current model
+  invisible mid-conversation.
+- **In the `+` menu**: attach a file, save attachments into the workspace, run a
+  command, switch agent. Each is occasional or session-scoped.
+
+The `+` replaced a paperclip. A paperclip claims the menu holds only
+attachments, so nothing else could ever be put there; `+` is also the affordance
+a phone user arrives with from every messaging app.
+
+The control row is `flex-nowrap` with a **horizontally scrolling middle
+section**, not `flex-wrap`. Wrapping would make the composer's height depend on
+how many flags a runner declares, so the transcript would reflow when a model
+name changed. Scrolling keeps the height fixed and Send pinned. Only `model` and
+`effort` are promoted to the row; anything else a runner declares still gets a
+control, in the menu — so the row is a fixed shape no matter what `--describe`
+returns.
+
+Two mobile-specific behaviours:
+
+- **Return inserts a newline on a phone; the Send button sends.** Enter-to-send
+  on a soft keyboard means a message cannot contain a line break at all — Return
+  is the only way to type one, and there is no Shift to hold. The "Enter to
+  send" hint is hidden there, because a hint describing the wrong platform is
+  worse than none.
+- **Send is icon-only below `md`.** The label costs the width the chips need,
+  and an upward arrow in a filled circle is the least ambiguous control in any
+  messaging app. `aria-label` carries the name either way.
+
+The disabled state uses a muted *background*, never `opacity`. Opacity
+composites the whole subtree, so every descendant's contrast drops at once:
+measured by axe during a live turn, muted text fell to 2.87:1 and the Stop
+button to 3.7:1 — both below WCAG 1.4.3's 4.5:1, and Stop is the one control a
+user needs *while* the turn runs.
+
+### PWA
+
+Installable, so a phone user gets an icon and a standalone window rather than a
+tab they have to find again.
+
+| Piece | Where | Why |
+| --- | --- | --- |
+| Manifest | `app/manifest.ts` | A route handler, not a static file, so `theme_color` stays in step with the `--canvas` token from one place |
+| Icons | `public/icons/*.svg` + generated PNGs | 192 and 512 for the manifest, 180 for `apple-touch-icon`, plus a separate maskable 512 |
+| Generator | `scripts/generate-icons.mjs` | Rasterises the SVGs through Playwright's Chromium |
+| Service worker | `public/sw.js` | Installability on Android, and an honest offline page |
+| Offline page | `public/offline.html` | Standalone, hand-styled, cached by the worker |
+| iOS metadata | `app/layout.tsx` | iOS reads these rather than the manifest |
+
+**`purpose: "any"` and `purpose: "maskable"` are separate files.** A launcher
+crops a maskable icon to its own shape — a circle on Android, a squircle on iOS
+— so its artwork must sit inside the safe zone with bleed around it. Declaring
+one file as both means either the browser crops a full-bleed icon and cuts the
+mark, or shows a padded icon unpadded and the mark floats small in a large box.
+The maskable variant scales the mark to ~62% and keeps a full-bleed square
+background.
+
+**The PNGs are committed, not built.** They change roughly never, and a build
+step needing a browser to produce a favicon would put Playwright on the critical
+path of `next build` — including in E2E and in `scripts/install.sh`. `sips`
+cannot read SVG and neither ImageMagick nor rsvg is present, so the generator
+uses the Chromium already installed for Playwright, which is also the renderer
+that will display them.
+
+**The service worker caches almost nothing, on purpose.** Sylph Web is
+local-first but not backend-independent: every screen needs the backend, so a
+cached shell without it is a shell that cannot do anything. Aggressive
+precaching would buy no working offline mode and cost a well-known failure — a
+stale HTML document pinning an old JS chunk hash after an upgrade, presenting as
+a blank page a reload does not fix. So it is network-first for navigations, with
+one cached document as the offline fallback.
+
+**`/api/v1/*` is never intercepted**, for two independent reasons either of
+which suffices. The turn event stream is a long-lived `text/event-stream`, and
+passing a streaming response through `fetch()` inside a worker risks buffering
+it — the same class of bug the `no-transform` header exists to prevent,
+presenting as a rendering fault rather than a transport one. And the session
+cookie's token rotates on every backend restart, so a cached API response could
+outlive the token that authorised it.
+
+Registration is production-only. Workers are scoped per *origin*, and
+`localhost` is shared with every other project on the machine, so a worker
+registered at port 3000 in development outlives this app and is served to
+whatever occupies that port next.
+
+### Design tokens
+
+Every colour resolves through a semantic token declared in `app/globals.css`. No
+component names a palette step: `bg-gray-50` and `text-gray-500` do not appear
+outside that file, and a build that reintroduces one is a regression.
+
+This replaced 28 files that each hardcoded `gray-*`, 139 uses of **10
+different** ad-hoc pixel font sizes (including `9.5px`, `11.5px`, and `12.5px`),
+and 92 copies of one focus-ring class string. The cost of that structure was not
+aesthetic: it made every visual change a 28-file edit, which is why several had
+been applied inconsistently, and inconsistency at that scale is what reads as
+unfinished.
+
+| Group | Tokens | Meaning |
+| --- | --- | --- |
+| Surface | `canvas`, `sunken`, `raised`, `hover`, `active` | Back to front: the page, a recessed well (sidebars, code blocks), anything sitting on the page (menus, the composer), then two interaction states |
+| Border | `line`, `line-strong` | Hairline, and the stronger edge for a control |
+| Ink | `ink`, `ink-soft`, `ink-muted`, `ink-faint` | By emphasis. `faint` is **decoration only** — it does not clear 4.5:1 on any surface |
+| Accent | `accent`, `accent-hover`, `accent-ink`, `accent-ink-muted` | The primary action and text placed on it. Inverts in dark mode, which is why `accent-ink` exists rather than a hardcoded `text-white` |
+| Status | `danger`, `success`, `warning`, `info`, `native`, each with `-bg`, `-line`, `-solid` | One ink per hue; the tint and edge derive from it |
+| Focus | `focus` | Blue, not the accent grey — see below |
+
+`*-bg` and `*-line` are `color-mix()` against `--canvas` rather than hand-picked
+steps, so the dark theme gets correct tints for free: overriding the base hue
+and the canvas re-derives both.
+
+**The light palette is byte-identical to what it replaced.** It is Tailwind's
+own `gray`/`red`/`emerald`/`amber`/`blue`/`violet` steps copied verbatim in
+oklch. That was deliberate: several components carry measured WCAG contrast
+ratios in their comments ("gray-500 on gray-900 measures 3.66:1"), and a token
+that merely *looked* similar would silently invalidate every one of them. Only
+dark mode introduces new values.
+
+Two consolidations changed meaning rather than just spelling, and both were
+deliberate:
+
+- **`ink-muted` is gray-600, not gray-500.** Both were in use for the same job.
+  gray-500 measures 4.83:1 on white and fails on `sunken`; gray-600 is 7.4:1 and
+  passes on both.
+- **`stopping` and `interrupted` share the warning hue.** They were amber and
+  orange — two adjacent hues, indistinguishable at badge size, carrying no
+  recoverable meaning. The distinction that matters is "is this still moving",
+  so `stopping` keeps the pulsing dot that `running` has, and hue is not asked
+  to carry it.
+
+#### Why the palette lives in plain `:root`
+
+Tailwind 4 can tree-shake unused `@theme` variables out of the emitted CSS. A
+token referenced *only* by another token's `color-mix()` — every `*-bg` and
+`*-line` — is exactly what that would drop, and the failure mode is an invisibly
+wrong colour rather than a build error. So the values live in a plain `:root`
+block Tailwind never rewrites, and `@theme inline` maps them onto utility names.
+
+#### Dark mode
+
+`<html data-theme>`, set by a **blocking inline script** in `app/layout.tsx`
+before first paint. It cannot be a React effect: an effect runs after paint by
+definition, so a dark-mode user would see a white page for the length of
+hydration — long enough on a cold load to read as a flash of the wrong app.
+`lib/theme.ts` builds that script from the same `STORAGE_KEY` the settings store
+uses, so the pre-paint read and the in-app read cannot drift.
+
+The attribute goes on `<html>` specifically, not `<body>`: a custom property
+containing `color-mix()` substitutes on the element carrying the declaration, so
+setting it lower would leave every derived tint mixed against the *light* canvas
+while the base hues had gone dark.
+
+Dark is not an inversion. `canvas` is a very dark blue-grey rather than black so
+`raised` can lift above it without going grey, and the ink ramp is compressed at
+the top because pure white on a dark surface halates. Measured against `canvas`:
+ink 17.6:1, `ink-soft` 11.4:1, `ink-muted` 6.2:1, every status ink above 7:1,
+and `ink-faint` 3.4:1 — decoration-only, exactly as in the light theme.
+
+Settings offers Light / Dark / System. `System` keeps following
+`prefers-color-scheme`, so a machine on a light-at-day schedule changes with it;
+an explicit choice overrides permanently.
+
+### Type scale
+
+Five steps, all on the scale: `text-3xs` (10px), `text-2xs` (11px), then
+Tailwind's `xs`, `sm`, `base`. The two smallest exist because dense chrome
+genuinely needs them; what did not need to exist was ten different sizes.
+Nothing smaller than `3xs` has a token, because it is not readable.
+
+Timeline density maps onto the same scale — compact `xs`, normal `sm`,
+comfortable `base` — replacing two one-off sizes (`13px`, `15px`) that existed
+only there and were within a pixel of a step.
+
+### Focus
+
+One utility, `focus-ring`, replacing 92 copies of `focus:outline-none
+focus-visible:ring-2 focus-visible:ring-gray-900`.
+
+It is an **outline**, not a ring, and that is a correctness fix rather than a
+preference: a ring is a `box-shadow`, so it is clipped by every
+`overflow-hidden` ancestor — which is why the focus indicator was invisible on
+file-tree rows and inside the code-block header. An outline is never clipped.
+The colour is blue rather than the accent grey, because a grey ring is invisible
+against the accent surfaces it has to appear on.
+
+### Typography
+
+A system stack, no webfont: `system-ui`, then `-apple-system`, `Segoe UI
+Variable Text`, and CJK faces (`PingFang SC`, `Hiragino Sans GB`, `Microsoft
+YaHei`) before the generic fallback.
+
+Three reasons, in order of weight. A local-first app should not need the network
+to render text; an installed PWA must work offline; and `next build` runs in E2E
+on whatever machine is to hand, so a build-time font fetch is a build-time
+network dependency. The CJK entries matter because this project's users read
+Chinese — without them a mixed string falls back per-glyph and one line ends up
+in two faces.
 
 ## State Management
 
@@ -1240,13 +1677,33 @@ fails is worse than one that explains itself. There is no composer.
 
 ### Bundle size management
 
-**Measured: 198.2 KB gzipped first-load JS.** The project maintains a compact bundle
+**Measured: 203.9 KB gzipped first-load JS.** The project maintains a compact bundle
 through deliberate architecture and dependency choices. Phase 4 measured 187.8 KB;
 Phase 6 added the shell, three overlays, the file browser, the Markdown renderer,
 the diff view, and the fuzzy ranker for **+8.4 KB**, reaching 196.2 KB. Archive
 browsing added **+1.2 KB** across 6.6 and 6.7, and the document viewers **+0.9 KB**:
 the history overlay, the read-only archived view, and every format viewer are all
 `next/dynamic`, so only their client-side entry points land here.
+
+The design-system pass measured **198.2 KB → 203.9 KB**, `+5.7 KB`, with the same
+recipe run on both trees — the baseline was re-measured rather than quoted, and
+reproduced at 198.2 KB exactly. What it buys:
+
+| Change | Cost |
+| --- | --- |
+| 48 hand-authored icons replacing Unicode dingbats | ~1.0 KB gz for the path data alone; the components tree-shake per route |
+| `ui/button`, `ui/menu` — the shared primitives | The largest single item. `menu` carries popover placement, arrow navigation, and the sheet fork, and is reached from the sidebar, which *is* first-load |
+| `lib/theme`, `lib/viewport`, `lib/use-dialog` | Small; two are `useSyncExternalStore` wrappers |
+| Service-worker registration | ~0.2 KB, production-only |
+| `Sheet`/`Drawer` split out of the shell | −0.2 KB. Small, but they are unreachable above `md`, so shipping them to every desktop route is wrong regardless of size |
+
+That is a 2.9% increase for the token layer, dark mode, the icon set, the mobile
+layout, and PWA installability. Judged against the stated policy — size should
+scale proportionally to value delivered, and no arbitrary ceiling should constrain
+valuable work — it is a straightforward trade. It is recorded rather than
+optimised away because the alternative reading is available too: the primitives
+would be cheaper if the sidebar were not in the first-load bundle, and moving it
+behind a dynamic boundary is the change to make if this number needs to come down.
 
 Replacing the all-sessions list with the start screen measured **198.4 KB → 198.2
 KB** — the two tracks of this work were measured against each other after merging,
@@ -1591,9 +2048,9 @@ that a passing test would not mean much. Those live in Playwright.
 
 ### E2E — Playwright (`npm run e2e`)
 
-**41 specs.** Both servers start automatically on offset ports with a throwaway
-data directory and a mock runner, so a run never touches the real journal,
-archive, or agents.
+**58 specs across two projects** — 51 at desktop width, 7 on a phone. Both
+servers start automatically on offset ports with a throwaway data directory and a
+mock runner, so a run never touches the real journal, archive, or agents.
 
 | File | Covers |
 | --- | --- |
@@ -1604,6 +2061,37 @@ archive, or agents.
 | `file-viewer.spec.ts` | Tree/viewer swap preserving expansion, fullscreen and focus return, dialog sizing to content vs filling for a page, single-modal invariant, CSV table, sandboxed HTML refusing script and cookie access, image zoom, axe over both scales |
 | `streaming.spec.ts` | Mid-turn painting against a deliberately paced runner |
 | `accessibility.spec.ts` | Skip link, focus trapping and restoration, axe-core audit of every surface including both start-screen states |
+| `mobile.spec.ts` | Phone-only: composer fits the viewport, sidebars out of flow, drawer and sheet behaviour, document cannot scroll, PWA installability, dark mode before paint |
+
+#### Why a second project exists
+
+The three reported mobile failures — a composer wider than the viewport,
+sidebars leaving ~150px for the conversation, and scrolling dragging the whole
+shell into blank space — were all invisible to a 41-spec suite that was not
+careless. Every spec in it ran at 1280px, where the same code is at worst
+slightly cramped. A layout bug that manifests only below a breakpoint can only
+be observed below that breakpoint, so a viewport is not an optional variant
+here; it is the only instrument that sees the defect.
+
+`devices["Pixel 7"]` rather than an iPhone profile. Only Chromium is installed
+in this checkout, and an iPhone profile silently runs *in Chromium* anyway —
+which would claim iOS coverage that does not exist. Pixel 7 is a Chromium
+device, so what it emulates is what actually runs: `pointer: coarse`, a 412px
+viewport, and a device pixel ratio above 1.
+
+**What it therefore does not cover** is iOS Safari specifically: `100dvh` under
+a collapsing toolbar, and zoom-on-small-input. Those are two of the mechanisms
+behind the scroll bug, so the specs assert the fix through consequences a
+Chromium phone *can* observe — nothing overflows the viewport, the document has
+nothing to scroll, `window.scrollY` stays 0 after a 4000px wheel — rather than
+by simulating a toolbar this browser does not have. A real device still wants a
+pass.
+
+**These specs assert invariants, not pixels.** A spec that knows the composer is
+358px wide fails on the next padding change and says nothing about whether it is
+usable. `overflowingElements()` instead reports every element whose box extends
+past the right edge, which is both the actual defect and actionable when it
+regresses.
 
 **Two states are reached by intercepting the listing, not by emptying the
 journal.** Specs share one backend and run serially, so by the time a spec runs
@@ -1817,10 +2305,11 @@ coverage. It was not taken because of one measured constraint: Phase 4 left ~12 
 of first-load budget, and the primitives needed here — modal, context menu,
 disclosure, listbox — cost roughly 30 KB of it.
 
-What was built instead: `components/overlay.tsx` (focus trap, Escape, focus
-restoration, scroll lock), `components/context-menu.tsx` (arrow navigation,
-viewport clamping, outside-dismiss), native `<details>`, and the combobox pattern in
-the two pickers. The axe audit and the focus tests exist to hold that decision
+What was built instead: `lib/use-dialog.ts` (focus trap, Escape, focus
+restoration), `components/overlay.tsx` (the modal frame), `components/ui/menu.tsx`
+(arrow navigation, viewport clamping, outside-dismiss, and the mobile sheet fork),
+`components/ui/sheet.tsx` (drag-to-dismiss), native `<details>`, and the combobox
+pattern in the two pickers. The axe audit and the focus tests exist to hold that decision
 honest, and they have already caught one ARIA bug a library would not have had.
 
 Reverse this if the budget rises or a primitive with real complexity is needed —

@@ -709,3 +709,178 @@ plus the backend suite unchanged from the Artifacts viewer section above.
 - **The message-block sketches in `docs/frontend-architecture.md`** still show
   avatars and bubbles from Phase 2, which the agent-first canvas rejected. Flagged
   in place rather than quietly rewritten.
+
+## Phase 9: Design System, Mobile, and PWA — Complete
+
+**Goal:** make the app read as a finished product rather than a capable
+prototype, and make it usable on a phone at all.
+
+**The diagnosis, because the reported symptoms were not the causes.** Six issues
+were reported. Measuring the tree first turned four of them into one structural
+problem and gave two of them a different cause than the symptom suggested:
+
+| Reported | Actual cause |
+| --- | --- |
+| "The composer runs off the screen on a phone" | A `<select>` is sized by its longest *option*, not its value. A runner declaring `claude-opus-5-20260501` made that control ~180px wide whatever was selected; three of them plus Send exceeded 390px. The width came from content the user could not see, so no `min-w-0` could recover it |
+| "A long model or agent name squeezes the input" | Same cause, milder presentation at desktop width |
+| "Scrolling slides the whole screen up into blank space" | Three separate bugs: `100vh` is the *large* viewport height, so `h-screen` was taller than the visible area; nothing pinned the document; overscroll chained upward. Plus mobile Safari zooming on a sub-16px input and not zooming back |
+| "The gear and lightning emoji look unprofessional" | 28 Unicode dingbats used as an icon set. They are font data, so appearance was decided by the platform: `📎` and `⚡` render as colour emoji on iOS, several shapes were absent from the CJK fallback chain and drew as `.notdef` boxes |
+| "The file tree needs better folder/file distinction" | Both drew as unrelated geometric shapes (`▮`, `▫`, `▦`), and every row action was right-click-only — so on a phone they were unreachable, not merely awkward |
+| "Support PWA install" | Nothing existed: no manifest, no icons, no viewport metadata |
+
+**And one cause behind all of them.** There was no design system — there were 28
+files each re-deciding. Measured before starting:
+
+| Symptom | Count |
+| --- | --- |
+| Files hardcoding `gray-*` | 28 |
+| Ad-hoc pixel font sizes | 139 uses across **10** values, incl. `9.5px`, `11.5px`, `12.5px` |
+| Copies of one focus-ring class string | 92 |
+| Responsive breakpoints in the entire app | **1** |
+
+That is why every earlier fix had to be applied 28 times, and why several had
+been applied inconsistently. It is the thing that read as unfinished.
+
+### Delivered
+
+- ✅ **Token layer** in `app/globals.css`: 37 semantic tokens across surface,
+  border, ink, accent, status, and focus. No component names a palette step
+  anywhere in the tree. The light palette is Tailwind's own steps copied
+  verbatim in oklch, so the measured WCAG ratios recorded in component comments
+  stay true and only dark mode introduces new values
+- ✅ **Dark mode**, applied by a blocking inline script before first paint — an
+  effect runs after paint by definition, so a dark-mode user would see a white
+  page for the length of hydration. Light / Dark / System in Settings, where
+  `System` keeps following the OS. Every value measured against `canvas`: ink
+  17.6:1, `ink-soft` 11.4:1, `ink-muted` 6.2:1, status inks above 7:1
+- ✅ **Type scale**: 10 ad-hoc sizes → 5 scale steps. Density's two one-off sizes
+  (`13px`, `15px`) moved onto it
+- ✅ **One focus treatment**: 92 copies → one `focus-ring` utility, changed from
+  a ring to an **outline** — a ring is a `box-shadow`, so it was being clipped
+  by every `overflow-hidden` ancestor and was invisible on file-tree rows and in
+  the code-block header
+- ✅ **48 hand-authored icons** (`components/icons.tsx`), replacing all 28
+  dingbats. No dependency: ~1.0 KB gz of path data against the ~40 KB package
+  the original budget decision correctly rejected — the conclusion, not the
+  budget, was what was wrong
+- ✅ **Composer rebuilt**: message on its own row, controls beneath it, a `+`
+  menu for attach / save-to-workspace / run-command / switch-agent, and every
+  `<select>` replaced by a menu whose trigger renders the current value and can
+  therefore truncate. The control row scrolls rather than wraps, so composer
+  height does not depend on how many flags a runner declares
+- ✅ **Mobile layout**: sidebars become a left drawer (navigation) and a
+  drag-dismissable bottom sheet (inspection of what is on screen). Drawer state
+  is transient and *derived* from the route and breakpoint rather than
+  synchronised by effects
+- ✅ **Touch targets** at 44px under `pointer: coarse` only, so the desktop keeps
+  its dense rows — and an overflow `⋯` button on every group, session, archived
+  row, and file row, because those actions were right-click-only
+- ✅ **Viewport fixed**: `h-dvh`, a pinned document, `overscroll-contain` on
+  every pane, `text-base` on the composer's textarea, a 16px input floor under
+  coarse pointers, and `interactiveWidget: "resizes-content"` so the keyboard
+  shrinks the layout instead of sliding the page
+- ✅ **PWA**: manifest route, generated 192/512/maskable/apple-touch icons with a
+  committed reproducible generator, iOS metadata, a service worker that caches
+  almost nothing on purpose, and an offline page that names the actual problem
+- ✅ **Shared primitives** (`components/ui/`) and `lib/use-dialog.ts`, replacing
+  ~40 near-duplicate button class strings and three divergent focus traps
+- ✅ **Dead code removed**: `useListNavigation`'s unused `activeRef`/`reset`,
+  `ToolShape.icon`, `Overlay`'s ineffective body-scroll lock, and five
+  unreferenced Next.js template SVGs
+
+### Bugs found while building, worth recording
+
+Each of these was found by a test or a probe rather than by reading, and each
+would have shipped:
+
+- **A menu measured before it is placed cannot take focus.** The panel carries
+  `invisible` until measured, and `visibility: hidden` elements are not
+  focusable — so `focus()` inside the measuring effect silently did nothing and
+  Escape never reached the handler. Confirmed by dumping
+  `document.activeElement`
+- **A dismiss-on-pointerdown listener made the mobile menu inert.** The ref it
+  tests belongs to the popover, which the sheet path never attaches, so every
+  `contains()` was false and the pointerdown *beginning* a tap on a menu item
+  closed the sheet before the click landed. Selecting a model silently did
+  nothing on a phone; confirmed by observing that no `PATCH` was issued
+- **A menu that does not restore focus breaks the next surface in a chain.**
+  "Run a command..." unmounts the menu in the same commit the dialog mounts, and
+  the dialog captures `document.activeElement` as the opener it will restore to
+  — which was `<body>`
+- **`useDialog` must focus its container even with `autoFocus: false`.**
+  `onKeyDown` is a React handler on that container, so the full-screen file
+  viewer — which has no auto-focusing control — opened and could not be closed
+  by keyboard
+- **An accessible name collision is a real defect, not test fragility.**
+  Labelling the `+` button "Add to this message" made it indistinguishable from
+  the textarea's own "Message" label; 40 specs failing was the symptom
+
+### Exit criteria — how each was checked
+
+- ✅ **No palette class survives** — `grep` across `app/`, `components/`, `lib/`
+  returns zero
+  `(bg|text|border|divide|ring|decoration)-(gray|red|emerald|amber|blue|violet|orange)-[0-9]`
+  outside `globals.css`, and zero `text-[Npx]`
+- ✅ **The composer cannot overflow** — a mobile spec asserts *no element on the
+  page* extends past the right edge, re-checked with a flag selected and with a
+  400-word message, and that Send stays inside the composer's own box
+- ✅ **The document cannot scroll** — asserts `body` overflow is `hidden`,
+  `scrollHeight <= clientHeight`, and `window.scrollY === 0` after a 4000px
+  wheel
+- ✅ **Sidebars are out of flow below `md`** — both `complementary` regions
+  hidden and `#main` exactly viewport-wide, *with the stored preference still
+  true*, which is the default that caused the bug
+- ✅ **Drawer and sheet behave** — drawer overlays rather than displaces, leaves
+  a dismiss sliver, closes on Escape and on navigation; the sheet does not reach
+  the top edge, because files are inspection of what is above them
+- ✅ **Installability** — manifest linked and parsing, `display: standalone`, 192
+  / 512 / maskable present, **every declared icon actually fetched** (a missing
+  `public/` copy step 404s icons while the manifest still parses),
+  `apple-touch-icon` and `mobile-web-app-capable` present
+- ✅ **Dark mode before paint** — `data-theme` set on `<html>` under an emulated
+  dark colour scheme, the canvas actually following the token, and an explicit
+  choice overriding the OS and surviving a reload
+- ✅ **No icon glyphs remain** — a script scans every `.tsx` for characters above
+  U+2000 outside comments, allowing only the typographic set that is genuinely
+  text (`›`, `↑↓↵`, `+`/`−` in diffs, `·`, `⋯`)
+- ✅ **First-load JS** — **measured 198.2 KB → 203.9 KB**, `+5.7 KB` (+2.9%),
+  same recipe on both trees; the baseline was re-measured rather than quoted and
+  reproduced at 198.2 KB exactly. Attributed per change in
+  `docs/frontend-architecture.md`
+- ✅ **No regressions** — 193 frontend unit + **58 E2E** (51 desktop, 7 mobile),
+  all passing; ESLint clean with zero errors and zero warnings
+
+### Carried forward
+
+- **iOS Safari is not covered by automated tests.** Only Chromium is installed,
+  and an iPhone device profile silently runs in Chromium — which would claim
+  coverage that does not exist. So `100dvh` under a collapsing toolbar and
+  Safari's zoom-on-focus are asserted through consequences a Chromium phone can
+  observe, and still want a pass on a real device. Installing WebKit is the fix
+  if that matters.
+- **`stopping` and `interrupted` now share the warning hue.** They were amber
+  and orange — indistinguishable at badge size, carrying no meaning a reader
+  could recover. `stopping` keeps a pulsing dot instead, since the useful
+  distinction is "still moving". If they must be told apart by colour, that
+  needs a third hue with measured contrast in both themes rather than an
+  adjacent step.
+- **Compact density is 12px, was 13px.** It moved onto the scale rather than
+  keeping a one-off size a pixel away from a step.
+- **The primitives would be cheaper if the sidebar were not first-load.**
+  `ui/menu` is the largest item in the `+5.7 KB`, and it is unavoidable only
+  because the sidebar imports it and the sidebar renders at first paint. Moving
+  the sidebar behind a dynamic boundary is the lever if that number needs to
+  come down.
+- **No i18n.** The UI is English-only; the token and icon work does not change
+  that, and a language picker still needs an i18n framework plus extraction of
+  every string.
+- **One E2E spec was still counting shared journal state**, and it failed during
+  this phase for exactly the reason `AGENTS.md` already documented — the shared
+  `.e2e-data/` journal crossed the sidebar's 200-row listing cap at 357
+  sessions, so a new session displaces an older row rather than adding one and
+  the count stays flat. It now asserts on the created session's id instead.
+  Worth noting that the pitfall was written down *before* this spec was, and the
+  note was not enough on its own: the failure is invisible until the cap is
+  crossed, so nothing prompted a re-read. Other specs that count rows against a
+  `mkdtemp` directory are unaffected, since those directories are unique per
+  run.
