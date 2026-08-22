@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Sylph">
+  <!--
+    The maskable variant.
+
+    A launcher crops a maskable icon to its own shape — a circle on Android, a
+    squircle on iOS — and the spec guarantees only the central circle of 80%
+    diameter. So the mark is scaled to ~62% and centred, leaving bleed on all sides,
+    and the background is full-bleed square so no crop can expose a transparent
+    corner.
+
+    This is a second file rather than the same artwork reused because the two
+    requirements are opposed: `purpose: "any"` wants the mark filling the tile, and
+    `purpose: "maskable"` wants it inset. Serving one file as both means either a
+    cropped mark or a small one floating in a large box.
+  -->
+  <rect width="512" height="512" fill="#101828" />
+  <g
+    transform="translate(256 256) scale(0.62) translate(-256 -256)"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="42"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d="M176 168 264 256 176 344" />
+    <path d="M300 344 h44" />
+  </g>
+</svg>

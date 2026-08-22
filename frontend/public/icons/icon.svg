@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Sylph">
+  <!--
+    The app mark: a chevron and a rule, on the accent surface.
+
+    Read as one thing at 16px and at 512px, which is the whole constraint on an app
+    icon — it appears as a favicon, a launcher tile, and a task-switcher thumbnail.
+    So it is two strokes and nothing else: no lettering (illegible below ~32px), no
+    gradient (banding at tile size), no fine detail.
+
+    The chevron is the shell prompt `>`, which is what a coding-agent session is
+    driven by, and the rule beneath it is the composer — the line you type into. The
+    two together are the app's actual shape: a prompt and an input.
+
+    Colours are the light-theme `--accent` and `--accent-ink` tokens, hardcoded
+    because a launcher icon is composited by the OS and cannot read CSS variables.
+    Dark on light in both themes: an icon that inverts with the system theme is
+    unrecognisable as the same app, and every platform composites launcher icons
+    against its own unpredictable background.
+  -->
+  <rect width="512" height="512" rx="112" fill="#101828" />
+  <g
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="42"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d="M176 168 264 256 176 344" />
+    <path d="M300 344 h44" />
+  </g>
+</svg>
