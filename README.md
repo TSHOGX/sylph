@@ -64,19 +64,28 @@ Open `http://localhost:3000`. The frontend proxies `/api/v1/*` to the backend
 on the same origin, which is required: authentication is a `SameSite=Strict`
 cookie that the browser would withhold across ports.
 
+The start screen walks a first run itself. In short:
+
 **Create a session and send one turn:**
 
-1. Click **New session**.
-2. Pick an agent from the dropdown. If it is empty, no runners were
-   discovered — check `SYLPH_RUNNERS_DIR` and click refresh.
-3. Set the working directory to a real path. The agent runs there.
-4. Create, type a message, and send.
+1. Click **New session** (or press `Cmd+N` / `Ctrl+N`) and choose a directory. That
+   is the only thing a session needs — the agent runs there and can read and write
+   nothing outside it.
+2. Type a message and send. The agent is switchable until that first message; model
+   and reasoning effort are per-turn controls in the composer.
+
+If the agent list is empty, no runners were discovered — check
+`SYLPH_RUNNERS_DIR`.
 
 Events stream in as the agent works: thinking, tool calls, then the reply.
 Closing the tab mid-turn is safe — reopening resumes the stream from where it
 left off rather than replaying from the start.
 
-**Import an archived session** (needs TraceDB): click **Search archive**, query for
+**Read what agents already did here** (needs TraceDB): press `Cmd+Shift+K` to page
+a directory's archived history, or `Cmd+K` to search every session and the archive
+together. Archived transcripts open read-only.
+
+**Import an archived session** (needs TraceDB): from **Search archive**, query for
 something you remember saying, and import a hit. The session is restored with
 its original agent identity and lifecycle. Sylph never injects `SOUL.md`,
 resets, or rewrites prompts for an imported native session.
@@ -144,8 +153,10 @@ implemented and deployed.
 - ✅ **Phase 4** — Production readiness: comprehensive test coverage, accessibility, performance optimization
 - ✅ **Phase 5** — Packaging and deployment: standalone install, LaunchAgent, rollback
 - ✅ **Phase 6** — Agent workspace redesign: three-pane layout, tool-first timeline, file browser, keyboard shortcuts
+- ✅ **Phase 7** — Interaction and composer redesign: creation by directory picker rather than a form, one composer surface for agent, model, and effort
+- ✅ **Phase 8** — The start screen: `/` begins and resumes work instead of listing and filtering it
 
-All six phases are complete. See [roadmap](docs/roadmap.md) for details and future enhancements.
+All phases are complete. See [roadmap](docs/roadmap.md) for details and future enhancements.
 
 ## Contributing
 

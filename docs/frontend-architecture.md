@@ -194,7 +194,7 @@ path alias resolves against.
 frontend/
 ├── app/
 │   ├── layout.tsx              # Root layout: providers + AppShell
-│   ├── page.tsx                # All-sessions list
+│   ├── page.tsx                # Start screen: begin, resume, learn the keys
 │   ├── search/page.tsx         # TraceDB archive search and import
 │   ├── sessions/[id]/page.tsx  # Conversation canvas
 │   └── globals.css
@@ -407,27 +407,110 @@ caused it. Both degrade to a silent, correct fallback instead, and only "no
 runners at all" surfaces as an error, because that is the one case with no
 sensible default.
 
+### `/` — the start screen, not a session list
+
+`/` used to be "All sessions": a listing with four filter controls (agent, origin,
+workdir substring, updated-after date). It was replaced by an IDE-style start
+screen, and the reason is that the list had become a second, weaker copy of
+navigation the shell already owned:
+
+| The list offered | The shell already offers |
+| --- | --- |
+| Every live session, `LIMIT`-capped | The sidebar, grouped by the directory each session runs in, plus that directory's archived history |
+| Filter by workdir substring | The sidebar's grouping *is* the workdir axis |
+| Filter by agent / origin / date | `Mod+K` searches live sessions and the archive by content, which is the question users actually arrive with |
+| A row per session | `Mod+Shift+K` pages one workspace's history, which the 50-row cap could not |
+
+A user opening the app has not asked to filter sessions by date. They have arrived
+to **start** work or **resume** it, and the filter form answered neither. It also
+cost two `GET /api/v1/sessions` round trips on first paint — the second only to
+populate the agent dropdown from an unfiltered listing, since deriving it from
+filtered results would collapse the menu to the agent already selected.
+
+What replaced it has three tiers, and two properties that constrain the design:
+
+1. **Identity and what a session is.** One line: a session pairs an agent with a
+   working directory, and archived history exists for directories agents have run
+   in. This is the only place the app states it, and it is not guessable — a user
+   who does not know it points a session at the wrong tree.
+2. **The two create paths**, as buttons running `runAction`, each showing its live
+   binding. Not links to a route: creation is a mutation, and pending and failure
+   belong in the shell's one banner.
+3. **The variable slot** — recents, or the first-run guide — then the key bindings.
+
+**It paints before any request settles.** Tiers 1, 2, and the key list are static.
+Only the middle slot waits on data, and it reserves its height rather than
+collapsing, because a start screen that reflows on every launch reads as broken.
+
+**It adds no request.** The listing is the sidebar's, shared through
+`lib/sessions-query.ts` and deduped by TanStack. Rendering `/` costs zero extra
+round trips, which is what lets it be the default route.
+
+#### Pending is not empty
+
+`selectStartState` (`lib/welcome.ts`) exists because an in-flight listing and an
+app with no sessions are both an empty array, and rendering the onboarding guide
+for the first flashes "getting started" at a user with hundreds of sessions, on
+every navigation to `/`. A failed listing is treated the same way: failing to load
+sessions is not evidence that none exist, and the sidebar already reports the
+failure with a retry. It is a pure function with unit tests, because the branch is
+one line of JSX away from being wrong and E2E cannot economically hold a listing
+open.
+
+#### First run teaches the first task, not the feature set
+
+The empty state is three numbered steps — choose a directory, say what you want
+done, watch the work — plus a pointer to browsing existing agent history without
+creating anything. Numbered because the order is real: a directory must exist
+before a turn can run.
+
+The Notion-style property worth borrowing is not the tour, it is that onboarding is
+**the empty state itself** rather than a dismissible layer. There is no "seen"
+flag, no banner, and no preference: the guide is what having no sessions looks
+like, so it disappears permanently after the first create and can never be stale.
+
+#### Recents are five *directories*, not five sessions
+
+The unit is the directory, because resuming work means returning to a place. One row
+per session looked right until a real listing was on screen: a directory worked in
+all week filled all five rows with entries differing only by a timestamp — and since
+`title` is set only by native import or the API, most sessions are untitled, so
+those rows were otherwise identical. Five rows for one destination, and every other
+place the user works pushed off the list.
+
+So a row is a directory, labelled by its path, and it opens the newest session
+there — which is what "resume" means. The rest are a count (`3 sessions`); reaching a
+specific older one is the sidebar's job, and it lists them all under that same
+directory. `recentWorkspaces` normalizes trailing slashes, because the backend does
+not guarantee a spelling and `/w/app` beside `/w/app/` is the same duplication in
+another form.
+
+The path carries the row's identity rather than `sessionLabel`, whose `agent · leaf`
+fallback reads as the directory named twice once the path is beside it. `native`
+origin is badged because it changes identity and lifecycle policy and must be
+recognizable before opening; `sylph` is not, because a marker on every row carries no
+information.
+
+A longer list is not the improvement it appears to be: the sidebar lists everything
+grouped this same way, and `Mod+K` searches all of it.
+
+#### The pending slot reserves height; the loaded one does not
+
+The reservation lives on the pending branch, not on the container. A container tall
+enough for five rows leaves visible dead space above the key list for every user who
+works in three directories — on screen every visit, which is strictly worse than the
+one-time settle it was preventing. Three rows' worth is reserved, so a cold load
+moves by a small amount in either direction rather than always dropping.
+
+#### Component sketches below predate the agent-first canvas
+
+The message-block sketches that follow are from Phase 2 and show avatars, bubbles,
+and per-message action buttons. The canvas deliberately has none of those — see
+"Conversation canvas: agent-first, not chat-first" above, which is the governing
+description. They are left in place rather than quietly rewritten, and reconciling
+them is its own task.
+
 ### Component Design
-
-#### Session Card
-
-```tsx
-<SessionCard>
-  <OriginBadge origin={session.origin} />
-  <Title>{session.title}</Title>
-  <Meta>
-    {session.agent} · {session.flags.model}
-  </Meta>
-  <Timestamp>{relativeTime(session.updatedAtMs)}</Timestamp>
-  <StatusDot status={session.status} />
-</SessionCard>
-```
-
-**Variants:**
-- Active: blue border, bold title
-- Idle: normal
-- Running: pulsing status dot
-- Native: violet badge, warning icon if user hovers
 
 #### Message Blocks
 
@@ -518,8 +601,11 @@ sensible default.
 Query keys follow a hierarchical structure:
 
 ```ts
-// Session list
-['sessions', filters] → useQuery
+// Live sessions. Declared once in `lib/sessions-query.ts` and shared by the
+// sidebar, the start screen, and the search overlay, so the three mount as one
+// request rather than three. Hand-written keys deduped only while every copy of
+// the limit agreed, and the drift was silent.
+['sessions', { limit }] → useQuery(liveSessionsQuery())
 
 // Session detail
 ['sessions', id] → useQuery
@@ -1030,6 +1116,12 @@ browsing added **+1.2 KB** across 6.6 and 6.7: the history overlay and the read-
 archived view are both `next/dynamic`, so only their client-side entry points land
 here.
 
+Replacing the all-sessions list with the start screen measured **197.8 KB → 197.8
+KB** — no change to one decimal place. The screen adds markup, the directory
+grouping, and a small pure module; it gives back the four filter controls, the
+query-building they fed, the debounce on that path, and a dead `sessionSubtitle`
+export.
+
 **The goal is to keep the bundle lean and fast-loading**, not to enforce a hard
 numeric ceiling. As features grow, bundle size should scale proportionally to value
 delivered. Monitor growth deliberately, optimize where reasonable, but never let an
@@ -1100,11 +1192,12 @@ checked.
 
 ### Automated: axe-core, in CI
 
-`e2e/accessibility.spec.ts` runs axe-core against four surfaces with real content —
-the session list, the create form, a conversation canvas holding tool calls, a
-diff, and a failed command with both sidebars open, and each of the three overlays
-while open. Tags: `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`. **Currently zero
-violations.**
+`e2e/accessibility.spec.ts` runs axe-core against every surface with real content —
+the start screen in both its states (recents, and the first-run guide, which is a
+different subtree reached by intercepting the listing), the create picker, a
+conversation canvas holding tool calls, a diff, and a failed command with both
+sidebars open, the composer mid-turn, and each of the three overlays while open.
+Tags: `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`. **Currently zero violations.**
 
 This is a floor, not a conformance claim. axe covers roughly a third of WCAG
 criteria; whether focus order makes sense and whether an alternative is
@@ -1202,7 +1295,6 @@ class ErrorBoundary extends Component {
 
 **Error boundaries wrap:**
 - Each route (page-level recovery)
-- Session list (isolated failure)
 - Conversation canvas (isolated failure)
 - Each turn (prevent cascade)
 
@@ -1239,26 +1331,12 @@ function useSessionMutation() {
 
 ### User-Facing Error States
 
-**Empty states:**
-```tsx
-function SessionList({ sessions }: Props) {
-  if (sessions.length === 0) {
-    return (
-      <EmptyState>
-        <Icon name="inbox" size={48} />
-        <Title>No sessions yet</Title>
-        <Description>
-          Create your first Sylph session to get started
-        </Description>
-        <Button onClick={openCreateDialog}>
-          <Icon name="plus" /> New Session
-        </Button>
-      </EmptyState>
-    )
-  }
-  // ...
-}
-```
+**Empty states.** The one empty state that matters — an app holding no sessions —
+is not a placeholder card. It is the start screen's first-run guide, described under
+"`/` — the start screen, not a session list", and the decision worth carrying is
+that it is only rendered once a listing has *settled* empty. `selectStartState`
+enforces that, because a pending or failed listing is also an empty array and
+treating it as "no sessions yet" flashes onboarding at users who have hundreds.
 
 **Loading states:**
 ```tsx
@@ -1295,10 +1373,10 @@ cd frontend && npm test          # once
 cd frontend && npm run test:watch
 ```
 
-**81 tests over the pure logic that replaced a dependency.** That is the
-selection rule: hand-rolling a diff, a Markdown parser, and a fuzzy ranker means
-taking on the test burden those libraries carried, and this is where that debt is
-paid.
+**140 tests over the pure logic that replaced a dependency, plus the state
+decisions that are one line of JSX away from being wrong.** That is the selection
+rule: hand-rolling a diff, a Markdown parser, and a fuzzy ranker means taking on
+the test burden those libraries carried, and this is where that debt is paid.
 
 | File | Covers |
 | --- | --- |
@@ -1308,6 +1386,7 @@ paid.
 | `lib/fuzzy.test.ts` | Subsequence matching and *relative ranking* — boundary and adjacency bonuses, field weighting |
 | `lib/shortcuts.test.ts` | Canonical combo spelling, Cmd/Ctrl unification, recorder and dispatcher agreeing |
 | `lib/timeline-rows.test.ts` | Delta accumulation, tool-result pairing, interleaved streams, referential stability of settled rows |
+| `lib/welcome.test.ts` | The start screen's three states — that a pending or failed listing is never mistaken for an empty app — and the directory grouping behind recents: one row per path however many sessions it holds, ranked by newest rather than by count, trailing slashes normalized, the cap applying to directories, and the shared query cache never reordered |
 
 Tests live beside the code they cover, not in a parallel `tests/` tree, so a
 reader of `lib/diff.ts` can see its tests without going looking.
@@ -1323,16 +1402,23 @@ that a passing test would not mean much. Those live in Playwright.
 
 ### E2E — Playwright (`npm run e2e`)
 
-**18 specs.** Both servers start automatically on offset ports with a throwaway
+**41 specs.** Both servers start automatically on offset ports with a throwaway
 data directory and a mock runner, so a run never touches the real journal,
 archive, or agents.
 
 | File | Covers |
 | --- | --- |
-| `session-lifecycle.spec.ts` | Create, send, stream, reload-replay, sidebar grouping |
+| `session-lifecycle.spec.ts` | Create, send, stream, reload-replay, sidebar grouping, resuming from `/` |
+| `start-screen.spec.ts` | Usable before the listing settles, first-run guide vs recents, create button matching its shortcut, key hints reflecting a rebind |
 | `timeline.spec.ts` | Tool calls as regions, inline diff, failure auto-expansion, Markdown, 1000-event render budget |
-| `workspace-shell.spec.ts` | Pane toggles and persistence, palette, search, focus restoration, settings round-trip, Artifacts tree |
-| `accessibility.spec.ts` | Skip link, focus trapping and restoration, axe-core audit of four surfaces |
+| `workspace-shell.spec.ts` | Pane toggles and persistence, palette, search, focus restoration, settings round-trip, Artifacts tree, history browser, dialog-free creation |
+| `streaming.spec.ts` | Mid-turn painting against a deliberately paced runner |
+| `accessibility.spec.ts` | Skip link, focus trapping and restoration, axe-core audit of every surface including both start-screen states |
+
+**Two states are reached by intercepting the listing, not by emptying the
+journal.** Specs share one backend and run serially, so by the time a spec runs
+other sessions exist. `page.route` is how the empty-app and slow-listing branches
+become deterministic, and it is the *client's* branch under test either way.
 
 The mock runner (`e2e/fixtures/runners/e2e/runner.sh`) branches on its prompt to
 emit three scenarios: a plain streamed reply, a tool sequence with a real diff and

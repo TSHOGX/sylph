@@ -129,7 +129,9 @@ Look for these lines in the frontend tab output:
 ### Full Stack Test
 
 1. **Open in browser:** http://localhost:3000
-2. **Verify UI loads:** Should see "Sylph Web" header and session list
+2. **Verify UI loads:** the start screen, with the workspaces sidebar beside it.
+   On a fresh install it shows the first-run guide; once sessions exist it lists
+   the most recent instead
 3. **Check auth:** Open DevTools Network tab, refresh page, verify no 401s on `/api/v1/*` requests
 4. **Test search:** Click search icon (requires TraceDB)
 

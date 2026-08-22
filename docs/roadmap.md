@@ -11,7 +11,8 @@
 - Phase 1: backend core on port 4317 — 11 routes, LiveStore, TurnSupervisor,
   EventHub, auth middleware, runner discovery, TraceDB client, integration tests
 - Phase 2: frontend foundation — session list, create dialog, SSE conversation
-  view, reconnection from `after_seq`
+  view, reconnection from `after_seq` (the list and the dialog are both gone: the
+  dialog in Phase 7, the list in Phase 8)
 - Phase 3: feature completion — attachments, TraceDB search, native import,
   server-side filters, error boundaries
 - Phase 4: production readiness — 55 unit + 53 integration + 6 E2E tests,
@@ -21,8 +22,8 @@
 - Phase 6: frontend redesign — three-pane agent workspace, tool-first timeline
   with inline diffs, file browser, `Cmd+K`/`Cmd+P`, settings panel
 
-All six phases are complete. Phase 7 (interaction and composer redesign) is
-complete; see the section at the end of this file.
+All six phases are complete, as are Phase 7 (interaction and composer redesign) and
+Phase 8 (the start screen); see the sections at the end of this file.
 
 ### Open Decisions
 
@@ -82,7 +83,8 @@ implemented either way yet.
 - ✅ Basic UI components (Tailwind)
 
 **Pages:**
-- `/` — Session list
+- `/` — Session list (replaced in Phase 8 by the start screen: the sidebar, `Cmd+K`,
+  and `Cmd+Shift+K` had each become a better answer to part of what it did)
 - `/sessions/[id]` — Conversation view
 - `/sessions/new` — Create session dialog (removed in Phase 7: creating a session
   is a mutation, and the directory it needs comes from a picker)
@@ -513,3 +515,84 @@ the UI never showed.
   one, because `agent` is fixed at creation server-side. On an empty session there
   is nothing to preserve, so this is correct rather than a workaround — but it
   means the switcher is unavailable exactly where conversion would be interesting.
+
+## Phase 8: The Start Screen — Complete
+
+**Goal:** replace `/`, which was still Phase 2's "All sessions" list with filters,
+with a surface that answers what a user actually arrives with.
+
+**The shift, concretely:** the list was a second, weaker copy of navigation the
+shell had grown around it. The sidebar groups every session by the directory it
+runs in and shows that directory's archived history; `Cmd+K` searches live sessions
+and the archive by content; `Cmd+Shift+K` pages one workspace's thousand-row
+history. Against those, a `LIMIT`-capped list with agent, origin, workdir, and date
+filters answered a question nobody opens the app to ask — and cost two
+`GET /api/v1/sessions` round trips on first paint, the second only to fill an agent
+dropdown.
+
+### Delivered
+
+- ✅ `app/page.tsx` is an IDE-style start screen: identity and what a session *is*,
+  the two create paths as buttons showing their live bindings, then either recents
+  or a first-run guide, then the key bindings
+- ✅ **Zero added requests.** `lib/sessions-query.ts` declares the live-sessions
+  query once; the sidebar, the start screen, and the search overlay all consume it,
+  so the three dedupe to one request instead of hand-writing keys that deduped only
+  while every copy of the limit agreed
+- ✅ **Paints before the network settles.** Only the middle slot waits on data, and
+  it reserves its height — no reflow on launch
+- ✅ **Onboarding is the empty state, not a layer.** Three numbered steps rendered
+  when the app holds no sessions, with no "seen" flag, no banner, and no
+  preference, so it cannot go stale and disappears for good after the first create
+- ✅ **Recents are five directories, not five sessions.** One row per session read
+  correctly until a real listing was on screen: a directory worked in all week filled
+  every row with entries differing only by a timestamp, since most sessions carry no
+  title. A row is now a directory, opening the newest session in it, with the rest as
+  a count
+- ✅ `lib/welcome.ts` + tests: a pending or failed listing is never mistaken for an
+  empty app, and the grouping is asserted directly — ranked by newest rather than by
+  session count, trailing slashes normalized, the cap applying to directories, and
+  the shared query cache never reordered
+- ✅ `useShortcutHint` in `lib/shortcuts.ts`, so a surface that teaches a shortcut
+  reads the binding in effect — correct after a rebind, and correct on Linux
+- ✅ Removed with the list: the four filter controls, `toQuery`, the second
+  unfiltered listing, and a dead `sessionSubtitle` export. `shortenHome` moved from
+  the sidebar to `lib/format.ts`, where its four callers can reach it without
+  importing a component
+
+### Exit criteria — how each was checked
+
+- ✅ **Usable before data lands** — E2E holds the listing open for 4s and asserts
+  the heading, both create buttons, and the key list are on screen, and that the
+  first-run guide is *not*.
+- ✅ **Pending is not empty** — unit tests over `selectStartState`; E2E intercepts
+  the listing to reach the genuinely-empty branch.
+- ✅ **A busy directory is one row** — E2E creates three sessions in `/tmp` and
+  asserts exactly one row for it, that the row names the session count, and that it
+  opens the newest of the three.
+- ✅ **Buttons match the shortcuts they advertise** — E2E clicks "New session",
+  gets the picker, then presses `Mod+N` and gets the same picker.
+- ✅ **Hints follow a rebind** — E2E rebinds `newSession` to `Mod+Shift+J` through
+  the settings panel and asserts both the key list and the button hint change.
+- ✅ **Accessibility holds in both states** — axe-core audits the recents state and
+  the first-run guide separately; zero violations.
+- ✅ **First-load JS** — **measured 197.8 KB → 197.8 KB**, both with the same recipe
+  on the same tree, so the screen costs nothing net over the form it replaced.
+- ✅ **No regressions** — 96 backend unit + 104 backend integration + 140 frontend
+  unit + 41 E2E, all passing; clippy and ESLint clean.
+
+**Test totals:** 96 backend unit + 104 backend integration + 140 frontend unit +
+41 E2E.
+
+### Carried forward
+
+- **`SessionFilters` keeps its `agent`, `origin`, `workdir`, and
+  `updatedAfterMs` fields** with no frontend caller. They mirror what
+  `GET /api/v1/sessions` accepts, and the type's contract is the wire, not current
+  usage — dropping them would misrepresent the endpoint.
+- **`/search` remains a route** as well as an overlay. It is reachable from the
+  palette and is where native-session import lives; folding it into `Cmd+K` is a
+  separate decision about where import belongs.
+- **The message-block sketches in `docs/frontend-architecture.md`** still show
+  avatars and bubbles from Phase 2, which the agent-first canvas rejected. Flagged
+  in place rather than quietly rewritten.
