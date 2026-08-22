@@ -124,10 +124,30 @@ async function audit(page: import("@playwright/test").Page, context?: string) {
   ).toEqual([]);
 }
 
-test("the session list has no automated accessibility violations", async ({ page }) => {
+test("the start screen has no automated accessibility violations", async ({ page }) => {
+  // With a session present, so the recents list is in scope rather than only the
+  // static chrome. Earlier specs in this serial run have created sessions.
+  await createSession(page);
   await page.goto("/");
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-  await audit(page, "session list");
+  await audit(page, "start screen");
+});
+
+/**
+ * The first-run guide, which the audit above never sees.
+ *
+ * It is a different subtree — a numbered list, the step markers, and a button
+ * inside prose — and it is the *only* thing a brand-new user looks at. Reaching it
+ * needs an empty listing, which a shared journal cannot provide, so the listing is
+ * intercepted; the markup being audited is the client's either way.
+ */
+test("the first-run guide has no automated accessibility violations", async ({ page }) => {
+  await page.route("**/api/v1/sessions?*", (route) =>
+    route.fulfill({ json: { sessions: [] } }),
+  );
+  await page.goto("/");
+  await expect(page.getByRole("region", { name: "Getting started" })).toBeVisible();
+  await audit(page, "start screen, first run");
 });
 
 test("the create picker has no automated accessibility violations", async ({ page }) => {

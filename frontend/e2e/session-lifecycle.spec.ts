@@ -54,16 +54,28 @@ test("a new session accepts a turn and streams the reply", async ({ page }) => {
   await expect(page.getByText("Hello from Playwright")).toBeVisible();
 });
 
-test("a created session appears in the list with its origin", async ({ page }) => {
+/**
+ * A created session is offered for resumption on the start screen.
+ *
+ * This replaced an assertion against the "All sessions" list. The screen no longer
+ * lists everything — it lists the few newest — so what is worth pinning is
+ * narrower: the session just created is reachable from `/` in one click. Origin is
+ * no longer asserted here because the row badges only `native`, which is the
+ * exception that changes identity and lifecycle policy; a `sylph` badge on every
+ * row of a five-row resume list was noise, and the sidebar carries the marker for
+ * both cases.
+ */
+test("a created session is offered for resumption on the start screen", async ({ page }) => {
   await createSession(page);
 
   await page.goto("/");
 
-  // Sessions created in the WebApp are Sylph-origin. Origin is durable product
-  // data, so it must be visible rather than inferred.
-  const rows = page.locator("#main").getByRole("listitem");
-  await expect(rows.first()).toContainText(/e2e/);
-  await expect(rows.first()).toContainText(/sylph/i);
+  const recents = page.locator("#main").getByRole("listitem");
+  await expect(recents.first()).toContainText(/e2e|tmp/);
+
+  // The row links to the conversation, which is the only thing this list is for.
+  await recents.first().getByRole("link").click();
+  await expect(page.getByLabel("Message")).toBeVisible();
 });
 
 test("reloading mid-conversation replays the journal", async ({ page }) => {
