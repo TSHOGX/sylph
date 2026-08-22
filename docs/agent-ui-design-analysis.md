@@ -602,13 +602,28 @@ Added 3 log statements at authentication checkpoints.
 
 ---
 
-## Next Steps
+## What Shipped
 
-1. **Prototype the layout**: Build a static HTML mockup with sample data
-2. **Test with real turns**: Use existing Sylph sessions to verify layout handles edge cases
-3. **Refine icons & colors**: Iterate on visual hierarchy
-4. **Implement streaming**: Ensure real-time updates don't cause jank
-5. **Accessibility audit**: Test with keyboard-only and screen reader
-6. **Performance test**: 1000-event turn should render in < 2s
+This document is the argument, written before the work. The design landed in Phase 6
+and `docs/frontend-architecture.md` describes what the code actually does; where the
+two differ, that file wins.
 
-This design positions Sylph Web as a professional agent workspace, not a chat toy.
+The six steps this section originally listed are all done. Three of their targets
+turned out to be worth keeping as measurements:
+
+- **1000-event turn renders in under 2s** — holds, through row memoization on event
+  identity rather than virtualization. Confirmed on a cold reload of durable history
+  in `e2e/timeline.spec.ts`.
+- **Streaming does not jank** — but the first implementation did not stream at all:
+  it batched the whole turn to the end, and every test passed anyway because each
+  asserted final state against a runner faster than one render. Two causes, both in
+  `AGENTS.md` Pitfalls. Asserting only the end state cannot distinguish streaming
+  from batching.
+- **Accessibility** — axe-core reports zero WCAG 2.1 AA violations across the canvas
+  and all overlays, and caught two real defects during the work. Screen-reader passes
+  (VoiceOver, NVDA) and forced-colours mode remain untested, so that step is done
+  only in its automated half.
+
+One thing this document argued for that the code deliberately does not have: icons
+per tool. `components/timeline.tsx` uses text labels and a status mark, because an
+icon set is a dependency and the tool name is already the clearest label available.

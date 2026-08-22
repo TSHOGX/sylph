@@ -76,7 +76,19 @@ side can break the other's tests.
 | `SYLPH_RUNNERS_DIR` | backend | `$HOME/.agents/skills/sylph/runners` |
 | `TRACEDB_BIN` | backend | `$HOME/Workspace/trace-db/target/release/trace-db` |
 | `SYLPH_WEB_BROWSE_ROOTS` | backend | `$HOME` |
+| `RUST_LOG` | backend | `info` |
 | `SYLPH_WEB_BACKEND` | frontend | `http://localhost:4317` |
+| `SYLPH_WEB_DEV_ORIGINS` | frontend, `next dev` only | *(none)* |
+| `SYLPH_WEB_PREFIX` | `scripts/install.sh` | `$HOME/.local/share/sylph-web` |
+| `SYLPH_WEB_BIN_DIR` | `scripts/install.sh` | `$HOME/.local/bin` |
+| `SYLPH_WEB_FRONTEND_PORT` | `scripts/install.sh` | `3000` |
+
+`SYLPH_WEB_DEV_ORIGINS` is comma-separated **hostnames**, no scheme and no port.
+Next 16 blocks cross-site requests to `/_next/*` as DNS-rebinding defence, so a
+browser reaching the dev server from a LAN IP gets 403s on every chunk and the page
+freezes before React hydrates — which reads as a backend failure rather than a
+dev-server policy. It is not needed for localhost, nor behind the loopback reverse
+proxy, which rewrites `Origin`. See `docs/development.md`.
 
 `SYLPH_WEB_BROWSE_ROOTS` is colon-separated and *adds* to `$HOME`, which is
 always browsable. It bounds `/api/v1/fs/*`, the only endpoint that lists
@@ -229,6 +241,23 @@ every session of that agent. `tracedb::is_injected_envelope` skips them, which o
 narrow: an earlier version also treated a leading `You are ` as boilerplate and
 discarded 44 genuine labels, because subagent task briefs legitimately open that
 way.
+
+**`output: "standalone"` omits `.next/static` and `public`.** The bundle is
+otherwise self-contained, so without those two copied in the server starts
+cleanly and every asset 404s — which reads as a broken app rather than a broken
+install. `scripts/install.sh` copies them and fails the install if `static` is
+missing.
+
+**launchd holds the log descriptors, and starts from a bare environment.** It
+opens `StandardOutPath` and `StandardErrorPath` before exec'ing `start.sh`, so
+rotating by rename sends the current run's output into the rotated file;
+`start.sh` copies and then truncates in place to keep the inode. launchd also
+provides only `HOME` — the backend's defaults are relative to it, but every other
+override has to be written into the plist, which the installer does for whatever
+was set when it ran. A moved Node install therefore needs a re-run.
+
+**macOS ships bash 3.2, so `wait -n` does not exist.** `start.sh` polls both PIDs
+with `kill -0` instead. Any new shell script here has to hold to 3.2 syntax.
 
 **Archived titles are per-agent, not universal.** `claude` records one for ~73% of
 sessions and `opencode` for all of them; `codex` and `pi` record none. Any surface

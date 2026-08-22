@@ -213,9 +213,18 @@ escape lives on disk rather than in the request.
 
 | Surface | Root | Scope |
 | --- | --- | --- |
-| `GET /sessions/{id}/files*` | the session's journalled `workdir` | read files and directories |
+| `GET /sessions/{id}/files` | the session's journalled `workdir` | list one directory |
+| `GET /sessions/{id}/files/content` | same | text and image bytes, encoding decided by the bytes |
+| `GET /sessions/{id}/files/document` | same | parsed structure for Office, CSV, PDF |
+| `GET /sessions/{id}/files/raw` | same | raw bytes the browser renders itself |
 | `POST /sessions/{id}/files` | same | create files, no overwrite by default |
-| `GET /fs/*` | `Config::browse_roots` (`$HOME` + `SYLPH_WEB_BROWSE_ROOTS`) | list directories only |
+| `GET /fs/{roots,tree}` | `Config::browse_roots` (`$HOME` + `SYLPH_WEB_BROWSE_ROOTS`) | list directories only |
+
+Containment is asserted per route rather than assumed inherited, because a new
+route added beside a safe one is exactly where the check goes missing. `/files/raw`
+also carries hardened response headers: dropping the CSP header there silently
+reintroduces cookie disclosure through previewed HTML, which was measured rather
+than assumed, so the headers are asserted server-side.
 
 Two decisions are worth recording, because both could reasonably have gone the
 other way:
@@ -249,40 +258,69 @@ Discovery:
 3. Parses JSON capability descriptor
 4. Caches in memory (refresh via API)
 
-**Descriptor schema:**
+**Descriptor schema** (`AgentSpec` in `backend/src/models/agent.rs`):
 ```json
 {
   "name": "claude",
   "version": "3.1.0",
-  "models": ["opus-5", "sonnet-5"],
-  "efforts": ["low", "medium", "high"],
-  "commands": [
-    {"name": "compact", "description": "Compact context"}
-  ]
+  "description": "Claude Code",
+  "flags": {
+    "model": {"choices": ["opus-5", "sonnet-5"], "default": "opus-5"},
+    "effort": {"choices": ["low", "medium", "high"], "default": "medium"}
+  },
+  "commands": {
+    "compact": {"description": "Compact context", "args": {}}
+  }
 }
 ```
 
+`flags` and `commands` are maps keyed by name, not arrays. A flag with an empty
+`choices` list is free-form; an enumerated one is validated against its own
+enumeration when `PATCH /sessions/{id}` writes it. This is the only source of what
+the composer offers, which is why `codex` correctly shows effort with no model
+selector — nothing in the UI hardcodes a model list.
+
 Turn invocation:
 ```sh
-runner.sh \
-  --session-id {backend_session_id} \
+SYLPH_STREAM_FORMAT=ndjson-v1 SYLPH_SOUL={path|""} runner.sh \
   --workdir {workdir} \
-  --model {flags.model} \
-  --effort {flags.effort} \
-  --message {text} \
-  --attachment {path}
+  --session-id {backend_session_id} \
+  --flag model=opus-5 --flag effort=high \
+  --attachment {path} \
+  --command {name} --arg {key}={value}
+# prompt on stdin, closed at EOF
 ```
 
-Runners stream NDJSON to stdout; backend consumes incrementally.
+The prompt is written to **stdin**, not passed as an argument: a turn's text is
+unbounded and would otherwise hit `ARG_MAX`. Flags are passed as repeated
+`--flag key=value` pairs rather than as named options, so a new flag an agent
+declares needs no backend change.
+
+`SYLPH_SOUL` is where the identity invariant is enforced. Injection is the runner's
+job, but *whether* it happens is the backend's: a native session sends the empty
+string, which the protocol reserves for "inject nothing". An unset variable means
+"resolve your default", which is not the same thing.
+
+The child runs in a new process group, so a stop signal reaches the CLI the runner
+exec'd rather than only the wrapper script. Runners stream NDJSON to stdout; the
+backend consumes it incrementally.
 
 ## Data Flow
 
 ### Create Sylph Session
 
-1. Client: `POST /api/v1/sessions`
-2. Backend: generate UUID, insert into `sessions` table
-3. Backend: return `201` with session object
-4. Frontend: navigate to `/sessions/{id}`
+1. Client: names a directory — from a sidebar group that already is one, from the
+   start screen, or through the `/fs/*` picker. There is no form on this path
+2. Client: `POST /api/v1/sessions`
+3. Backend: generate UUID, insert into `sessions` table
+4. Backend: return `201` with session object
+5. Frontend: navigate to `/sessions/{id}`
+
+The agent is switchable until the first turn, because `agent` is fixed at creation
+server-side; switching on an empty session creates a new one, which is correct
+rather than a workaround since there is nothing yet to preserve. A draft nobody
+sends anything in is removed by `DELETE /api/v1/sessions/{id}`, which refuses any
+session carrying a turn.
 
 ### Send Message
 
@@ -306,25 +344,36 @@ Runners stream NDJSON to stdout; backend consumes incrementally.
 
 ### Search
 
-1. Client: search input in session rail
-2. Frontend: query TraceDB via `/api/v1/search?q=...`
+1. Client: `Cmd+K` opens the search overlay
+2. Frontend: ranks live sessions client-side from the shared sessions query, and
+   queries the archive via `/api/v1/search?q=...`
 3. Backend: forward to TraceDB JSON API
-4. Backend: merge results with live sessions, deduplicate by `trace_session_id`
-5. Frontend: render unified session list
+4. Backend/frontend: deduplicate an archived hit that is already imported, by
+   `trace_session_id` or by the runner's `<agent>:<native-session-id>` identity
+5. Frontend: render live and archived results together, archived marked `⌗`
+
+Browsing by *directory* rather than by query is a different path:
+`Cmd+Shift+K` pages `GET /api/v1/archive/sessions` for one workspace, which is what
+answers "what happened here" when the user has no search term.
 
 ## Deployment Model
 
 **Development:**
 - `cargo run` for backend
-- `npm run dev` for frontend (Phase 2)
-- Live reload via cargo-watch and Turbopack
+- `npm run dev` for frontend, with Turbopack reload
 
-**Production (Phase 5):**
+**Production:**
 - Single Rust binary: `cargo build --release`
-- Static Next.js export (optional, or proxy)
+- Frontend as `output: "standalone"`, a self-contained bundle carrying its own
+  `node_modules`. **Not** a static export: `/sessions/[id]` and `/archive/[...id]`
+  are dynamic routes and the proxy rewrite to the backend is a server concern, so
+  neither survives one
 - LaunchAgent for macOS auto-start
 - Health checks on startup
-- Logging to `~/.agents/data/sylph/web/logs/`
+- Logs under the install prefix, rotated at 16 MB keeping one generation
+
+`SYLPH_WEB_BACKEND` is compiled into the route manifest, so it must be set for
+`next build` and not only for `next start`. See `docs/installation.md`.
 
 **Data directory:**
 - `~/.agents/data/sylph/web/live.db` — SQLite journal

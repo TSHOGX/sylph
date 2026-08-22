@@ -71,15 +71,26 @@ CREATE TABLE backend_incarnations (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   agent TEXT NOT NULL,
-  backend_session_id TEXT NOT NULL,
-  created_at_ms INTEGER NOT NULL,
-  last_used_at_ms INTEGER NOT NULL
+  backend_session_id TEXT,
+  started_at_ms INTEGER NOT NULL,
+  ended_at_ms INTEGER,
+  reset_reason TEXT,
+  source_trace_session_id TEXT,
+  resulting_trace_session_id TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'ended'))
 );
 
-CREATE INDEX incarnations_session_idx ON backend_incarnations(session_id);
-CREATE UNIQUE INDEX incarnations_backend_idx 
-  ON backend_incarnations(backend_session_id);
+CREATE INDEX incarnations_session_idx
+  ON backend_incarnations(session_id, started_at_ms DESC);
 ```
+
+An incarnation is a row rather than a mutated field, so a reset is recorded
+instead of overwritten. `backend_session_id` is nullable because the row is
+created before the runner reports the id it chose; `ended_at_ms` and
+`reset_reason` are written when it is retired, and the two trace columns record
+which archived session it continued from and which one it became. There is no
+unique index on `backend_session_id`: an agent may reuse an id across
+incarnations, and failing an insert on that is worse than recording it twice.
 
 An incarnation is created on first turn and discarded after:
 - 24 hours idle (for Sylph sessions)
@@ -94,30 +105,39 @@ Turn execution records.
 CREATE TABLE turns (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  incarnation_id TEXT REFERENCES backend_incarnations(id) ON DELETE SET NULL,
-  idempotency_key TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued' 
-    CHECK (status IN ('queued', 'starting', 'running', 'stopping', 
-                      'completed', 'failed', 'cancelled', 'interrupted')),
-  request_text TEXT NOT NULL,
+  incarnation_id TEXT REFERENCES backend_incarnations(id),
+  status TEXT NOT NULL CHECK (status IN (
+    'queued', 'starting', 'running', 'stopping',
+    'completed', 'failed', 'cancelled', 'interrupted'
+  )),
+  request_text TEXT NOT NULL DEFAULT '',
+  command_invocation_id TEXT,
+  idempotency_key TEXT,
   error_code TEXT,
   error_message TEXT,
   runner_exit_code INTEGER,
   created_at_ms INTEGER NOT NULL,
   started_at_ms INTEGER,
   completed_at_ms INTEGER,
-  stopped_at_ms INTEGER
+  stopped_at_ms INTEGER,
+  UNIQUE(session_id, idempotency_key)
 );
 
 CREATE INDEX turns_session_idx ON turns(session_id, created_at_ms DESC);
-CREATE UNIQUE INDEX turns_idempotency_idx 
-  ON turns(session_id, idempotency_key);
+CREATE INDEX turns_status_idx ON turns(status)
+  WHERE status IN ('queued', 'starting', 'running', 'stopping');
 ```
+
+`idempotency_key` is nullable, so a turn the server originates carries none while
+the `UNIQUE(session_id, idempotency_key)` constraint still de-duplicates every
+client retry. `command_invocation_id` links a turn to an agent command rather than
+to typed text. The partial `turns_status_idx` covers exactly the in-flight states,
+which is the query restart reconciliation runs.
 
 Status transitions:
 - `queued` → `starting` → `running` → `completed` / `failed` / `cancelled`
-- `running` → `stopping` → `stopped`
-- Any status → `interrupted` (on service restart)
+- `running` → `stopping` → `cancelled`
+- Any in-flight status → `interrupted` (on service restart)
 
 #### events
 
@@ -138,21 +158,30 @@ CREATE TABLE events (
   text TEXT NOT NULL DEFAULT '',
   data_json TEXT NOT NULL DEFAULT '{}',
   is_error INTEGER NOT NULL DEFAULT 0,
-  stability TEXT NOT NULL DEFAULT 'ephemeral'
+  stability TEXT NOT NULL DEFAULT 'stable'
     CHECK (stability IN ('ephemeral', 'stable')),
-  source TEXT NOT NULL DEFAULT 'runner'
+  source TEXT NOT NULL DEFAULT 'server'
     CHECK (source IN ('runner', 'server', 'tracedb')),
-  created_at_ms INTEGER NOT NULL
+  created_at_ms INTEGER NOT NULL,
+  reconciled_at_ms INTEGER,
+  UNIQUE(session_id, seq)
 );
 
-CREATE INDEX events_turn_idx ON events(turn_id, seq);
-CREATE INDEX events_session_idx ON events(session_id, created_at_ms DESC);
+CREATE INDEX events_session_idx ON events(session_id, seq);
+CREATE INDEX events_turn_idx ON events(turn_id, seq) WHERE turn_id IS NOT NULL;
 ```
 
 Event lifecycle:
 - `ephemeral` events (`started`, `delta`) exist only in live projection
 - `stable` events (`completed`) are persisted to journal
+- `reconciled_at_ms` is where an ingestion watermark would be recorded; nothing
+  writes it yet, which is why pruning is still future work
 - Once TraceDB ingests a turn, stable events can be pruned after retention window
+
+`UNIQUE(session_id, seq)` is what makes SSE resume-by-sequence safe: a replayed
+frame cannot be journalled twice. `seq` is per session, not per turn, so
+`events_session_idx` orders by it rather than by timestamp — two events written in
+the same millisecond still have one defined order.
 
 ## TraceDB
 
@@ -172,18 +201,24 @@ TraceDB writes come from the agent's native store (ingestion is external to Sylp
 
 ## Migrations
 
-Numbered SQL migrations in `backend/migrations/`:
+Numbered SQL migrations in `backend/migrations/`, applied by `sqlx::migrate!` on
+startup. There is currently exactly one:
 
 ```
 001_initial_schema.sql
-002_add_attachments.sql
-003_add_commands.sql
-...
 ```
 
-Migrations are applied transactionally on startup. The `app_meta.schema_version` tracks the current version.
+Attachments and commands need no migration of their own: attachments are staged on
+disk under the data directory rather than in a table, and a command invocation is a
+column on `turns`. `app_meta.schema_version` carries `1`, and `/api/v1/health`
+reports it so a packaged install can be checked against the binary running it.
 
 Migration rules:
 - Each migration is idempotent (use `IF NOT EXISTS`)
 - Migrations are append-only (never edit a deployed migration)
-- Before deployment, schemas are disposable (change in place)
+- Before deployment, schemas are disposable (change in place). Treat installed
+  state, not a date, as the signal that this has flipped
+
+There are no `sqlx::query!` macros here, only runtime `sqlx::query`, so there is no
+`DATABASE_URL` and no `.sqlx` offline directory. A schema mistake surfaces in the
+store tests rather than at compile time, which is why those tests matter.

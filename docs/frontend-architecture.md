@@ -13,24 +13,32 @@ is keyboard-first.
 > virtualization. All four are bundle-budget decisions, explained in
 > **Performance Optimization**.
 
-## Design Philosophy
+## Reference Implementations and Research
 
-**PRIMARY DIRECTIVE: DeepSeek Harness is the Reference Implementation**
+**DeepSeek Harness is a reference, no longer the directive**
 
-When implementing Phase 2, **directly reference DeepSeek Harness source code**:
+DSH source is still worth reading when a UI question has an established answer:
 
 ```
 /Users/hsw/Workspace/oss/deepseek-harness/repo/apps/web/
 /Users/hsw/Workspace/oss/deepseek-harness/repo/packages/web/
 ```
 
-**Implementation rules:**
-1. **When uncertain about UI/UX details** → Read DSH source code, do not guess
-2. **After implementing a feature** → Compare with DSH source to verify approach
-3. **Only deviate from DSH** when you are **highly confident** your design is superior
-4. **Default to DSH's patterns** — component structure, state management, event handling, styling
+This section originally read "PRIMARY DIRECTIVE: default to DSH's patterns" and
+scoped itself to Phase 2. Three of its instructions have since been overtaken by
+measurement, so it is recorded as history rather than followed:
 
-**Rationale:** DSH is a proven, production-ready coding-agent interface. Reinventing patterns wastes time and introduces risk. Copy what works, optimize only what Sylph requires differently (dual-origin sessions, TraceDB integration, lifecycle indicators).
+- **Not the canvas.** DSH renders message bubbles; Phase 6 rejected that shape for a
+  flat tool-anchored timeline. See "Conversation canvas: agent-first, not chat-first"
+  and `docs/agent-ui-design-analysis.md` for the argument.
+- **Not the transport.** The `EventSource` design copied from here shipped a bug that
+  dropped the entire stream. `lib/use-sse.ts` reads the body with `fetch` instead —
+  reasons at "Why not EventSource" below.
+- **Not the dependency choices.** DSH is measured against a different bundle; the
+  no-dependency decisions here are measured against this one.
+
+What still transfers: layout structure, streaming-text handling, and the general
+lesson that reading a production implementation beats guessing.
 
 ---
 
@@ -103,25 +111,25 @@ UI feedback after 3s. Pattern proven in both eventsource lib and DSH.
 5. **Performance** — Keep bundles compact, optimize rendering, maintain responsiveness
 6. **Architecture quality** — Balance performance, user experience, maintainability, and extensibility
 
-**What to copy from DeepSeek Harness:**
-- Overall layout structure (left rail + canvas)
-- Conversation canvas component hierarchy
-- Message bubble rendering (user/assistant/thinking/tool_call)
-- Streaming text animation patterns
-- Input area with attachment handling
-- Thinking block collapse/expand behavior
-- Tool call result formatting
-- Code block syntax highlighting setup
-- Error state UI patterns
-- Loading skeleton designs
+**Taken from DeepSeek Harness, and what was not:**
 
-**Sylph-specific additions (not in DSH):**
-- Dual-origin session indicators (🟢 Sylph / 🟣 Native)
-- Preservation policy warnings for native sessions
-- Lifecycle indicators (24h idle, 04:00 reset timing)
-- Per-session agent/model/effort flags in header
-- TraceDB search with deduplication
+| Borrowed | Diverged, with the reason recorded below |
+| --- | --- |
+| Layout: rail plus canvas, now three panes | Message bubbles → flat tool-anchored timeline |
+| Streaming text handling | `EventSource` → `fetch` body reading |
+| Attachment handling in the input area | Input area → one composer surface carrying agent, model, effort |
+| Thinking block collapse/expand | Uniform expansion → expansion by role (edits open, shell output on failure, reads closed) |
+| Error-state and loading patterns | Syntax-highlighting library → hand-rolled `code-block.tsx` |
+
+**Sylph-specific, with no DSH equivalent:**
+- Dual-origin session indicators (green Sylph / violet native)
+- Preservation policy warning on native session resume
+- Per-session agent, model, and effort flags, read from `--describe`
+- TraceDB archive browsing and search, with lineage rollup and deduplication
 - Session incarnation history (backend lifecycle tracking)
+
+Lifecycle indicators (24h idle, 04:00 reset) are modelled in the backend and surfaced
+nowhere in the UI yet.
 
 ## Technology Stack
 
@@ -657,73 +665,35 @@ works in three directories — on screen every visit, which is strictly worse th
 one-time settle it was preventing. Three rows' worth is reserved, so a cold load
 moves by a small amount in either direction rather than always dropping.
 
-#### Component sketches below predate the agent-first canvas
-
-The message-block sketches that follow are from Phase 2 and show avatars, bubbles,
-and per-message action buttons. The canvas deliberately has none of those — see
-"Conversation canvas: agent-first, not chat-first" above, which is the governing
-description. They are left in place rather than quietly rewritten, and reconciling
-them is its own task.
-
 ### Component Design
 
-#### Message Blocks
+#### Timeline rows
 
-**User Message:**
-```tsx
-<UserMessage>
-  <Avatar>👤</Avatar>
-  <Content>
-    <Text>{message.text}</Text>
-    {message.attachments.map(att => (
-      <Attachment type={att.type} name={att.name} />
-    ))}
-  </Content>
-</UserMessage>
-```
+`components/timeline.tsx` holds the whole canvas as one flat list of row renderers.
+There are no message components, no avatars, and no per-message action bars: those
+belong to the chat shape this canvas rejected, and the reasoning is under
+"Conversation canvas: agent-first, not chat-first" above.
 
-**Thinking Block (collapsible):**
-```tsx
-<ThinkingBlock expanded={uiState.expanded}>
-  <Header onClick={toggleExpand}>
-    💭 Thinking
-    <CollapseIcon />
-  </Header>
-  {expanded && (
-    <Content fade>
-      {thinkingText}
-    </Content>
-  )}
-</ThinkingBlock>
-```
+| Row renderer | Renders | Expansion |
+| --- | --- | --- |
+| `UserPrompt` | the typed ask, with attachment chips | always open |
+| `AssistantText` | prose through `Markdown`, streaming-aware | always open |
+| `ThinkingBlock` | reasoning | collapsed by default |
+| `ToolCall` | one operation: the call paired with its `tool_result` | by role, see below |
+| `OrphanResult` | a `tool_result` whose call never arrived | open |
+| `UsageLine` / `StatusLine` | token counts, lifecycle notices | single line |
 
-**Assistant Message:**
-```tsx
-<AssistantMessage>
-  <Avatar>🤖</Avatar>
-  <Content>
-    <Markdown>{message.text}</Markdown>
-  </Content>
-  <Actions>
-    <CopyButton />
-    <RetryButton />
-  </Actions>
-</AssistantMessage>
-```
+`ToolCall` is the anchor row. It draws a bordered region carrying the tool's
+target (`ToolTarget`) and outcome (`StatusMark`), and decides its own expansion
+from the shape rather than from a uniform default: edits open with their diff,
+shell output opens only on failure, reads stay closed. The pairing and the target
+extraction are not in the component — `lib/tool-shape.ts` normalizes all four
+runners' argument spellings into one `ToolShape` (`describeTool`, `resultStatus`),
+which is why that logic is unit-tested and the component is not.
 
-**Tool Call Block:**
-```tsx
-<ToolCallBlock>
-  <Header>
-    <ToolIcon name={toolCall.name} />
-    {toolCall.name}
-    <StatusBadge phase={toolCall.phase} />
-  </Header>
-  <CodeBlock language="typescript">
-    {toolCall.text}
-  </CodeBlock>
-</ToolCallBlock>
-```
+`MemoizedRow` wraps each row and is keyed on event identity, so a delta arriving
+mid-turn re-renders one row instead of the settled history above it. That is the
+mechanism the virtualization decision rests on.
 
 ### Color System & Theming
 
@@ -1788,44 +1758,40 @@ npm run start
   why; what is built and what is next belongs in the roadmap.
 -->
 
-## Future Enhancements (Phase 3+)
+## Future Enhancements
 
-### Advanced Features
+This list was written when most of it was unbuilt. What remains genuinely absent:
 
-- **Session management:**
-  - Rename sessions inline
-  - Archive/unarchive
-  - Export to JSON
-  - Fork session at specific turn
+**Session management** — delete, move, and export have no endpoint behind them. Rename
+has one (`PATCH /api/v1/sessions/{id}` accepts `title`) but no menu item calls it.
+Forking at a turn would need the runner protocol to support resuming from a prefix.
 
-- **Search:**
-  - Full-text search across all turns
-  - Filter by agent, status, date
-  - Highlight matches in context
+**Search** — `Cmd+F` filters turns rather than highlighting matches inside them.
+Highlighting means reaching into the Markdown, diff, and code renderers to rewrite
+their text nodes, which is why it is not a small change.
 
-- **Attachments:**
-  - Image previews in conversation
-  - PDF viewer
-  - Code file syntax highlighting
-  - Drag-and-drop upload
+**Lifecycle** — manual reset, native→Sylph conversion, and an incarnation history
+viewer are all unbuilt. Conversion is still an open decision about endpoint shape, not
+just missing UI; see `docs/roadmap.md`. Lifecycle timing (24h idle, 04:00) is modelled
+in the backend and surfaced nowhere.
 
-- **Lifecycle:**
-  - Manual reset for Sylph sessions
-  - Convert native → Sylph (with warning)
-  - Incarnation history viewer
+**Performance** — virtualization stays deferred, now with measurement behind it rather
+than as an aspiration: a 1000-event conversation renders inside budget through
+memoization. The evidence that would reverse it is scroll jank while *idle* on a large
+session, which indicates DOM size rather than render count. A service worker has no
+use case here — the app is already local-first and its data is a localhost backend.
 
-### Performance
+**Collaboration** — sharing, comments, and session-to-session diff remain out of
+scope, and each would need a story for a surface that is currently loopback-only.
 
-- **Virtual scrolling:** for 10K+ events
-- **Lazy loading:** below-fold content
-- **Code splitting:** per-route bundles
-- **Service worker:** offline support
+Already shipped, and listed here only because the original list predates them:
+attachments with drag-and-drop and paste, image and PDF viewers, code rendering,
+per-route code splitting, `Cmd+K` full-text search across live sessions and the
+archive, and inline diffs within a turn.
 
-### Collaboration (Post-MVP)
-
-- **Sharing:** export session as shareable HTML
-- **Comments:** annotate specific turns
-- **Diff view:** compare sessions side-by-side
+**Dark theme** is deliberately absent rather than half-built: it needs a `dark:` pass
+over every component plus a resolved `prefers-color-scheme` fallback, and a settings
+toggle storing a preference nothing reads would misrepresent that.
 
 ## Decision Log
 

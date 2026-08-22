@@ -139,24 +139,15 @@ differs from documentation:
 Do not silently rewrite specs to bless implementation accidents. Do not contort
 code around designs that evidence has invalidated.
 
-## What Was Removed
+## Design Documents vs Specs
 
-Several Phase 6 planning documents were removed because they described an approach
-that the actual implementation did not follow:
-- `PHASE6_DESIGN_SESSION_SUMMARY.md`
-- `PHASE6_FINAL_DELIVERABLES.md`
-- `PHASE6_QUICK_REFERENCE.md`
-- `phase6-design-index.md`
-- `phase6-frontend-redesign.md`
-- `phase6-quick-start.md`
-- `phase6-research-checklist.md`
+Two files here are pre-implementation design arguments rather than descriptions of
+the code: `agent-ui-design-analysis.md` and
+`keyboard-shortcuts-default-sessions-settings.md`. They are kept because the
+reasoning still governs the UI — the case against chat bubbles, and the shortcut map
+— and each marks where the shipped implementation diverged from it.
 
-These draft documents specified a bundle allocation (~80 KB of new dependencies)
-that measured reality did not permit. The shipped design and
-`frontend-architecture.md` supersede them. Two Phase 6 documents remain
-authoritative for intent:
-- `agent-ui-design-analysis.md` — the UI pattern rationale
-- `keyboard-shortcuts-default-sessions-settings.md` — shortcut map, Quick Start, Settings
-
-Keeping outdated planning scaffolding would be actively misleading to future
-contributors.
+When they disagree with `frontend-architecture.md` or `roadmap.md`, those win. A
+design document records what was intended; the architecture spec records what is
+true. Do not update one to match the other without deciding which should move, per
+"Document Evolution" below.

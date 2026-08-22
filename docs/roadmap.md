@@ -24,10 +24,20 @@
 - Phase 7 (Artifacts): file viewer taking the whole right pane, with fullscreen,
   and previews for Excel, Word, PowerPoint, CSV, images, HTML, and PDF
 
-All six phases are complete, including 6.6 and 6.7 (archive browsing). Phase 7 ran
+All eight phases are complete, including 6.6 and 6.7 (archive browsing). Phase 7 ran
 as two tracks — the interaction and composer redesign, and the Artifacts file
 viewer — both of which have landed, as has Phase 8 (the start screen); see the
 sections at the end of this file.
+
+**Current test totals, measured on the merged tree:** 132 backend unit, 116 backend
+integration (plus 3 ignored by default that parse files from real Office tooling),
+193 frontend unit, 49 E2E. The per-phase counts below are what each phase measured on
+its own branch and are left as its record; they do not add up to these, because the
+two Phase 7 tracks were developed in parallel and each counted only its own suite.
+Re-measure by running the suites, not by adding the sections.
+
+**Current first-load JS: 198.2 KB gzipped**, measured by summing the gzipped size of
+the scripts a prerendered route references after `npm run build`.
 
 ### Open Decisions
 
@@ -426,17 +436,18 @@ two hiding real work.
 
 ### Superseded design documents
 
-Phase 6 design was drafted across several documents, some of which were still
-being rewritten when implementation began. The two that remain authoritative for
-*intent* are `agent-ui-design-analysis.md` (the UI pattern argument) and
+Phase 6 design was drafted across several documents, some still being rewritten when
+implementation began. The planning scaffolding — `phase6-design-index.md`,
+`phase6-frontend-redesign.md`, `phase6-quick-start.md`,
+`phase6-research-checklist.md`, `PHASE6_*.md` — has been deleted. It described a
+bundle allocation (~80 KB of new dependencies) that the measured budget did not
+permit, so following it would have been actively misleading.
+
+Two remain, as arguments for *intent* rather than descriptions of the code:
+`agent-ui-design-analysis.md` (the UI pattern case) and
 `keyboard-shortcuts-default-sessions-settings.md` (shortcut map, Quick Start,
-settings). The rest — `phase6-design-index.md`, `phase6-frontend-redesign.md`,
-`phase6-quick-start.md`, `phase6-research-checklist.md`, `PHASE6_*.md` — are
-planning scaffolding that the shipped design and `docs/frontend-architecture.md`
-now supersede. They describe a bundle allocation (~80 KB of new dependencies) that
-the measured budget did not permit, so following them now would be actively
-misleading. **They should be deleted;** they are left in place only because
-removing another author's untracked drafts is not this change's call to make.
+settings). Each now marks where the shipped implementation diverged from it.
+`docs/frontend-architecture.md` is authoritative for what the code does.
 
 ## Phase 7: Interaction and Composer Redesign — Complete
 

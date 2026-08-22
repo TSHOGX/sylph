@@ -505,26 +505,24 @@ Deletes live.db, all sessions, all attachments
 
 ### Keyboard Shortcut System
 
-**Frontend:**
-```typescript
-// lib/use-keyboard-shortcuts.ts
-export function useKeyboardShortcuts() {
-  const settings = useSettings();  // Loads user's custom shortcuts
-  
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      const combo = keyCombo(e);  // e.g., "Cmd+K", "Shift+Cmd+N"
-      const action = settings.shortcuts[combo];
-      if (action) {
-        e.preventDefault();
-        dispatch(action);  // Redux/Zustand action
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [settings]);
-}
-```
+The sketch this section originally carried described a `lib/use-keyboard-shortcuts.ts`
+dispatching through Redux or Zustand. Neither exists. What shipped:
+
+- **`lib/shortcuts.ts`** — the grammar, and pure enough to unit-test:
+  `comboFromEvent` normalizes a `KeyboardEvent` into a `Combo`, `formatCombo` renders
+  one for display, `isTypingTarget` suppresses a binding inside an input, and
+  `useShortcutHint` returns the binding *currently* in effect for an action.
+- **`components/app-shell.tsx`** — one document-level `keydown` listener for the whole
+  app, dispatching through `runAction`. Not one listener per component: two components
+  both claiming `Cmd+K` is a bug that only appears when both are mounted.
+- **`lib/settings.tsx`** — bindings over `localStorage` through
+  `useSyncExternalStore`, so a rebind reaches every surface without a state library.
+
+Bindings are stored platform-neutral (`Mod` rather than `Cmd` or `Ctrl`) and resolved
+at render, which is what makes the same stored binding correct on macOS and Linux.
+`useShortcutHint` exists because a surface that *teaches* a shortcut has to read the
+binding in effect — a hardcoded "⌘N" is wrong the moment the user rebinds it, and the
+start screen teaches several.
 
 **Settings Storage:**
 - Stored in `localStorage` initially (Phase 6.1-6.4)
@@ -653,3 +651,28 @@ This design addresses:
    - Session and workspace management actions
 
 These features transform Sylph Web from a basic session viewer into a **full-featured agent workspace**.
+
+## What Shipped, and What Did Not
+
+All four areas landed in Phase 6. Four differences are worth knowing before treating
+this document as a description of the code:
+
+- **The Quick Start button is gone.** Phase 7 removed it from the top bar along with
+  "New session", because creating a session in a directory the user already clicked
+  should not route through a button that re-asks. The behaviour survives in `Mod+N` /
+  `Mod+Shift+N`, the command palette, and every sidebar group's context menu — all
+  through one shared creator (`lib/create-session.ts`). The "Quick Sessions" grouping
+  under `~/.agents` is unchanged.
+- **"Open in Default App" and "Reveal in Finder" are not implemented.** Both need the
+  backend to spawn a process against a client-supplied path, which is a local
+  code-execution surface and wants a threat-model decision rather than a menu entry.
+  The rest of section 4's menus exist.
+- **`Cmd+F` filters turns rather than highlighting matches inside them.** Highlighting
+  would mean reaching into the Markdown, diff, and code renderers to rewrite their
+  text nodes.
+- **Settings ships without the performance-tuning controls.** Density, expansion
+  defaults, default agent and per-agent model, the shortcut recorder, and workspace
+  management are all there. Bounded rendering is an architecture property, not a
+  preference to expose — see `docs/frontend-architecture.md`.
+
+The shortcut map itself is current.

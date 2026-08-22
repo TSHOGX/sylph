@@ -175,19 +175,29 @@ read/write access rather than the read-only direct frontend.
 
 ## Common Issues
 
-### Only seeing one session on the home page
+### The start screen lists few sessions, and the archive seems missing
 
-**This is expected.** The home page shows "active sessions" from the live journal
-(`live.db`). Your archived sessions (stored in TraceDB) are accessed via:
+**This is expected.** The start screen's recents come from the live journal
+(`live.db`), which holds only what this app created or imported. It lists
+directories rather than sessions, so a directory worked in all week is one row.
 
-1. **Search tab** — Click the search icon in the sidebar
-2. **Import** — Search for a session, then import it to make it active
+Archived coding-agent history lives in TraceDB and is reached three ways:
+
+1. **The sidebar** — selecting a directory shows its archived sessions alongside
+   live ones, marked `⌗`, with `⑂N` for rolled-up subagents
+2. **`Cmd+Shift+K`** — pages one directory's full archived history
+3. **`Cmd+K`** — searches live sessions and the archive together by content
 
 The architecture separates:
 - **Active sessions** (live.db) — ongoing work, resumable, editable
 - **Archived sessions** (TraceDB) — historical read-only records, searchable
 
-To see your 4,000+ archived sessions, use the search function.
+An archived session opens read-only and offers explicit continuation. Importing is
+not required to read one; it is required to make it a live, resumable session, and
+is disabled with its reason when the archive recorded no working directory.
+
+If a directory that you know holds history looks empty, check
+`/api/v1/health` for `tracedb.available` first.
 
 ### Cross-origin 403 errors on `/_next/*` chunks
 

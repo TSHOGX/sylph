@@ -251,6 +251,31 @@ Errors: `SESSION_NOT_FOUND` (404), `INVALID_REQUEST` (400) for an undeclared fla
 key, a value outside a declared enumeration, or an agent that is no longer
 installed.
 
+#### `DELETE /api/v1/sessions/{id}`
+
+Discard an empty draft. Returns `204 No Content`.
+
+```sql
+DELETE FROM sessions WHERE id = ? AND origin = 'sylph'
+  AND NOT EXISTS (SELECT 1 FROM turns WHERE turns.session_id = sessions.id)
+```
+
+The two conditions are the whole contract, and they are enforced in the statement
+rather than by a read-then-delete: a session that has run a turn, and any session
+imported from the archive, are both untouchable through this route. It exists for
+one narrow case — a user picks a directory, gets a session, and navigates away
+without sending anything. Creation is a mutation now rather than a form, so drafts
+are a normal consequence of browsing, and leaving them behind would fill the
+sidebar with rows representing nothing.
+
+**Idempotent, and deliberately not 404 on a miss.** A session that does not qualify,
+or does not exist at all, still answers `204`. The client's intent is "do not leave
+a draft behind", not "assert this row existed" — and the caller is usually an unload
+path that cannot act on an error anyway.
+
+There is no route that deletes a session with history. Session delete, move, and
+export are all still absent; see the roadmap.
+
 ### Turns
 
 #### `POST /api/v1/sessions/{id}/turns`
@@ -941,18 +966,45 @@ blaming the request.
 
 ## Authentication
 
-Process-local HttpOnly cookie set on root page load.
+Process-local HttpOnly cookie. Required for every call except `GET /api/v1/health`
+and `GET /api/v1/auth/token`, which are exempt inside the middleware rather than
+registered outside it, so the exempt list sits next to the checks it bypasses.
 
-Required for all API calls:
-- Cookie: `sylph_web_auth={random_token}`
-- Origin must match loopback (127.0.0.1, localhost, [::1])
-- Host header validated against allowlist
+- Cookie: `sylph_web_auth={random_token}`; `Path=/`, `HttpOnly`, `SameSite=Strict`
+- Origin must match loopback (`127.0.0.1`, `localhost`, `[::1]`)
+- Host header validated against the same allowlist
+
+#### `GET /api/v1/auth/token`
+
+Bootstraps the cookie for a loopback client and answers `{"ok": true}`. No
+credential is exchanged: the backend hands the cookie to any request that already
+passes the loopback `Host`/`Origin` checks, which is why a browser on the same
+machine is never prompted. Reaching the backend at all is the authorization.
+
+**`SameSite=Strict` is why the frontend must proxy `/api/v1/*` same-origin.** A
+browser will not send the cookie to a different port, so pointing the UI straight at
+`:4317` fails every authenticated call while `curl` succeeds.
+
+**The token is regenerated on every backend start**, which invalidates open browser
+sessions. That is the design — the cookie is process-local, and a token that
+outlived the process would be a persisted credential with no way to revoke it. Do
+not "fix" it by writing the token to disk; reload the page instead.
+
+Mutations additionally require a loopback `Origin`, which is what makes a tunnelled
+or LAN origin read-only unless it comes through a proxy that rewrites `Origin` to
+loopback. See `docs/development.md`.
 
 ## OpenAPI Specification
 
-Full machine-readable spec: `docs/api-v1.openapi.json`
+Full machine-readable spec: `docs/api-v1.openapi.json` — 22 paths, covering every
+route the router registers.
 
 Generate TypeScript types:
 ```sh
 npx openapi-typescript docs/api-v1.openapi.json -o frontend/src/types/api.ts
 ```
+
+The frontend does not currently consume generated types; `frontend/lib/api.ts`
+declares its own. Keep the spec authoritative for the wire contract regardless — a
+route added to `backend/src/lib.rs` without a matching path here is the gap that let
+`DELETE /sessions/{id}` and `/fs/*` go undocumented.

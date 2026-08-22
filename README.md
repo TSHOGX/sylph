@@ -93,10 +93,15 @@ resets, or rewrites prompts for an imported native session.
 ### Verifying a Checkout
 
 ```sh
-cd backend && cargo test && cargo clippy
-cd frontend && npm run build && npm run lint
+cd backend && cargo test && cargo clippy --all-targets
+cd frontend && npm test && npm run build && npx eslint .
 cd frontend && npm run e2e
 ```
+
+That is 132 backend unit + 116 backend integration + 193 frontend unit + 49 E2E.
+`npm run build` type-checks, so it is the TypeScript gate — there is no separate
+`tsc` step. `cargo` is not on the default `PATH`; use `~/.cargo/bin/cargo` or export
+it first.
 
 `npm run e2e` starts its own backend and frontend on separate ports with a
 throwaway data directory and a mock runner, so it does not touch your journal,
@@ -140,23 +145,43 @@ Comprehensive documentation lives in `docs/`:
 - [**Agent UI Design Analysis**](docs/agent-ui-design-analysis.md) — Why agent workspaces differ from chat UIs
 - [**Keyboard Shortcuts**](docs/keyboard-shortcuts-default-sessions-settings.md) — Shortcuts, Quick Start, Settings
 
+The last two are pre-implementation design arguments, kept for *why*. Where they
+differ from what shipped, `frontend-architecture.md` and `roadmap.md` win.
+
 See [**AGENTS.md**](AGENTS.md) for the project's development rules and conventions.
 
-## Project Status
+## What It Does
 
-Sylph Web is a complete, production-ready agent workspace. All planned phases are
-implemented and deployed.
+**Runs sessions.** A session is a directory plus an agent. Creating one means naming
+a directory — from the sidebar, the start screen, or a picker — not filling a form.
+The composer exposes the model and reasoning effort each runner declares for itself,
+so `codex` shows effort with no model selector and nothing is hardcoded.
 
-- ✅ **Phase 1** — Backend core: sessions, turns, SSE, runner discovery, auth
-- ✅ **Phase 2** — Frontend foundation: session list, conversation view, reconnection
-- ✅ **Phase 3** — Attachments, archive search, native import, filters
-- ✅ **Phase 4** — Production readiness: comprehensive test coverage, accessibility, performance optimization
-- ✅ **Phase 5** — Packaging and deployment: standalone install, LaunchAgent, rollback
-- ✅ **Phase 6** — Agent workspace redesign: three-pane layout, tool-first timeline, file browser, keyboard shortcuts
-- ✅ **Phase 7** — Interaction and composer redesign: creation by directory picker rather than a form, one composer surface for agent, model, and effort
-- ✅ **Phase 8** — The start screen: `/` begins and resumes work instead of listing and filtering it
+**Streams work as it happens.** Turns are server-side resources, not request
+lifetimes: closing the tab mid-turn and reopening resumes the stream from where it
+left off rather than replaying it, and a backend restart marks orphaned turns
+`interrupted` instead of leaving them running forever.
 
-All phases are complete. See [roadmap](docs/roadmap.md) for details and future enhancements.
+**Shows tool execution, not chat.** The timeline is flat and anchored by tool calls.
+An edit renders its diff inline; a failed command shows its output without being
+asked; a successful read stays closed. Clicking any file path opens it in the
+Artifacts pane, which previews Excel, Word, PowerPoint, CSV, images, HTML, and PDF
+alongside code and Markdown — parsed server-side, so no document parser runs in the
+browser.
+
+**Reads history that predates it.** The sidebar groups sessions by the directory they
+ran in and merges live rows with TraceDB's archive, so a directory shows what agents
+did there before this app existed. `Cmd+Shift+K` pages one directory's history;
+`Cmd+K` searches live sessions and the archive together. An archived session opens
+read-only and can be continued explicitly.
+
+**Keeps native sessions native.** A session imported from another agent preserves
+that agent's identity and lifecycle. Sylph never injects `SOUL.md`, resets, or
+rewrites prompts for one — the backend sends the empty `SYLPH_SOUL` that the runner
+protocol reserves for exactly that.
+
+Deliberately absent, with reasons in [roadmap](docs/roadmap.md): dark theme, session
+delete/move/export, "Open in Default App", and any non-loopback access story.
 
 ## Contributing
 
