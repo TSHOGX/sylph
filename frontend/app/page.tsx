@@ -33,7 +33,7 @@
 
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { Kbd } from "@/components/app-shell";
+import { Kbd } from "@/components/ui/button";
 import { OriginBadge } from "@/components/badges";
 import { api } from "@/lib/api";
 import { formatRelative, shortenHome } from "@/lib/format";
@@ -60,7 +60,7 @@ export default function StartPage() {
   });
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
+    <div className="min-h-0 flex-1 pane">
       {/* Anchored to a fixed offset from the top, not vertically centred. Centring
           made the wordmark's position depend on how tall the slot below it was, so
           the whole screen sat at a different height for a first-run user than for a
@@ -72,7 +72,7 @@ export default function StartPage() {
         {/* The subtitle states what a session *is*, because that is the one fact the
             rest of the UI assumes and never says. Without it, "New session" reads
             as "new chat" and the directory prompt that follows is a surprise. */}
-        <p className="mt-1.5 text-sm text-gray-600">
+        <p className="mt-1.5 text-sm text-ink-muted">
           A session pairs a coding agent with a working directory. Your agents&rsquo; past
           work is here too, read-only, for every directory they have ever run in.
         </p>
@@ -141,7 +141,7 @@ export default function StartPage() {
  */
 function FirstRun({ onBrowse }: { onBrowse: () => void }) {
   return (
-    <section aria-labelledby="first-run" className="rounded-xl border border-gray-200 p-5">
+    <section aria-labelledby="first-run" className="rounded-xl border border-line p-5">
       <h2 id="first-run" className="text-sm font-semibold">
         Getting started
       </h2>
@@ -159,12 +159,12 @@ function FirstRun({ onBrowse }: { onBrowse: () => void }) {
           the agent touches open in the Artifacts pane on the right.
         </Step>
       </ol>
-      <p className="mt-4 border-t border-gray-100 pt-3 text-sm text-gray-600">
+      <p className="mt-4 border-t border-line pt-3 text-sm text-ink-muted">
         Agents you have already used elsewhere have history here.{" "}
         <button
           type="button"
           onClick={onBrowse}
-          className="font-medium text-gray-900 underline decoration-gray-300 underline-offset-2 hover:decoration-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="font-medium text-ink underline decoration-line-strong underline-offset-2 hover:decoration-ink focus-ring"
         >
           Browse past work
         </button>{" "}
@@ -179,13 +179,13 @@ function Step({ n, title, children }: { n: number; title: string; children: stri
     <li className="flex gap-3">
       <span
         aria-hidden="true"
-        className="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-gray-900 text-[11px] font-semibold text-white"
+        className="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent text-2xs font-semibold text-accent-ink"
       >
         {n}
       </span>
       <div className="min-w-0">
         <p className="text-sm font-medium">{title}</p>
-        <p className="mt-0.5 text-sm text-gray-600">{children}</p>
+        <p className="mt-0.5 text-sm text-ink-muted">{children}</p>
       </div>
     </li>
   );
@@ -210,7 +210,7 @@ function Step({ n, title, children }: { n: number; title: string; children: stri
 function Recents({ rows, home }: { rows: RecentWorkspace[]; home?: string }) {
   return (
     <section aria-labelledby="recents">
-      <h2 id="recents" className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+      <h2 id="recents" className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
         Pick up where you left off
       </h2>
       <ul className="-mx-2 mt-1">
@@ -218,7 +218,7 @@ function Recents({ rows, home }: { rows: RecentWorkspace[]; home?: string }) {
           <li key={workdir}>
             <Link
               href={`/sessions/${session.id}`}
-              className="flex items-baseline gap-3 rounded-lg px-2 py-2 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              className="flex items-baseline gap-3 rounded-lg px-2 py-2 hover:bg-sunken focus-ring"
             >
               <span className="min-w-0 flex-1">
                 {/* The path is the row's identity, so it carries the stronger
@@ -228,7 +228,7 @@ function Recents({ rows, home }: { rows: RecentWorkspace[]; home?: string }) {
                 <span className="block truncate text-sm font-medium">
                   {shortenHome(workdir, home)}
                 </span>
-                <span className="mt-0.5 block truncate text-xs text-gray-500">
+                <span className="mt-0.5 block truncate text-xs text-ink-muted">
                   {session.title?.trim() ?? session.agent}
                   {otherCount > 0 && ` · ${otherCount + 1} sessions`}
                 </span>
@@ -240,9 +240,9 @@ function Recents({ rows, home }: { rows: RecentWorkspace[]; home?: string }) {
                   sidebar distinguishes both cases anyway. */}
               {session.origin === "native" && <OriginBadge origin={session.origin} />}
               {session.status === "running" && (
-                <span className="shrink-0 text-xs font-medium text-blue-700">running</span>
+                <span className="shrink-0 text-xs font-medium text-info">running</span>
               )}
-              <span className="shrink-0 text-xs text-gray-500">
+              <span className="shrink-0 text-xs text-ink-muted">
                 {formatRelative(session.updatedAtMs)}
               </span>
             </Link>
@@ -273,8 +273,8 @@ function ShortcutList({ hint }: { hint: (action: ShortcutAction) => string }) {
   ];
 
   return (
-    <section aria-labelledby="shortcuts" className="mt-9 border-t border-gray-100 pt-5">
-      <h2 id="shortcuts" className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+    <section aria-labelledby="shortcuts" className="mt-9 border-t border-line pt-5">
+      <h2 id="shortcuts" className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
         Keys
       </h2>
       <dl className="mt-2 grid gap-x-8 gap-y-1.5 sm:grid-cols-2">
@@ -283,7 +283,7 @@ function ShortcutList({ hint }: { hint: (action: ShortcutAction) => string }) {
           if (!combo) return null;
           return (
             <div key={action} className="flex items-baseline justify-between gap-3">
-              <dt className="truncate text-sm text-gray-600">{label}</dt>
+              <dt className="truncate text-sm text-ink-muted">{label}</dt>
               <dd className="shrink-0">
                 <Kbd>{combo}</Kbd>
               </dd>
@@ -313,15 +313,15 @@ function PrimaryAction({
       // `border-transparent`, not no border: the secondary action has a 1px border,
       // and without a matching one here the two buttons differ by 2px in both
       // dimensions and sit visibly misaligned in the same row.
-      className="flex min-w-52 flex-col items-start rounded-lg border border-transparent bg-gray-900 px-4 py-3 text-left hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+      className="flex min-w-52 flex-col items-start rounded-lg border border-transparent bg-accent px-4 py-3 text-left hover:bg-accent-hover focus-ring"
     >
-      <span className="flex w-full items-center justify-between gap-3 text-sm font-medium text-white">
+      <span className="flex w-full items-center justify-between gap-3 text-sm font-medium text-accent-ink">
         {label}
-        {/* `text-gray-300` on `bg-gray-900`, not the `Kbd` component: that one is
+        {/* `text-accent-ink-muted` on `bg-accent`, not the `Kbd` component: that one is
             styled for light chrome and measures 3.66:1 here. */}
-        {hint && <span className="font-mono text-xs text-gray-300">{hint}</span>}
+        {hint && <span className="font-mono text-xs text-accent-ink-muted">{hint}</span>}
       </span>
-      <span className="mt-0.5 text-xs text-gray-300">{description}</span>
+      <span className="mt-0.5 text-xs text-accent-ink-muted">{description}</span>
     </button>
   );
 }
@@ -341,13 +341,13 @@ function SecondaryAction({
     <button
       type="button"
       onClick={onClick}
-      className="flex min-w-52 flex-col items-start rounded-lg border border-gray-300 px-4 py-3 text-left hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+      className="flex min-w-52 flex-col items-start rounded-lg border border-line-strong px-4 py-3 text-left hover:bg-sunken focus-ring"
     >
       <span className="flex w-full items-center justify-between gap-3 text-sm font-medium">
         {label}
-        {hint && <span className="font-mono text-xs text-gray-500">{hint}</span>}
+        {hint && <span className="font-mono text-xs text-ink-muted">{hint}</span>}
       </span>
-      <span className="mt-0.5 text-xs text-gray-600">{description}</span>
+      <span className="mt-0.5 text-xs text-ink-muted">{description}</span>
     </button>
   );
 }

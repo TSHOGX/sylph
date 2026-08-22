@@ -29,6 +29,12 @@ import { formatRelative, shortenHome } from "@/lib/format";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Overlay, scrollActiveIntoView, useListNavigation } from "@/components/overlay";
+import {
+  ArchiveIcon,
+  ChevronDownIcon,
+  OriginNativeIcon,
+  SearchIcon,
+} from "@/components/icons";
 
 // Split out because it is reached only from the workspace switcher's fallback,
 // and the shell already pays for this chunk on the `Mod+N` path.
@@ -189,10 +195,10 @@ export function HistoryOverlay() {
           would take focus and the user's first keystroke would change the
           workspace instead of filtering. It is also what the user wants to type
           into, which is why the two agree. */}
-      <div className="border-b border-gray-200">
+      <div className="border-b border-line">
         <div className="flex items-center gap-2 px-3 pt-2.5 pb-1">
-          <span aria-hidden="true" className="text-gray-500">
-            ⌕
+          <span className="text-ink-muted">
+            <SearchIcon size={15} />
           </span>
           <input
             type="text"
@@ -206,7 +212,7 @@ export function HistoryOverlay() {
             onChange={(event) => setPicker({ query: event.target.value, active: 0 })}
             onKeyDown={(event) => onKeyDown(event, activeIndex, setActive)}
             placeholder="Filter loaded sessions..."
-            className="flex-1 bg-transparent text-sm outline-none placeholder:text-gray-500"
+            className="flex-1 bg-transparent text-sm outline-none placeholder:text-ink-muted"
           />
         </div>
 
@@ -220,16 +226,16 @@ export function HistoryOverlay() {
             type="button"
             onClick={() => setMode("switch")}
             aria-label={`Workspace: ${workdir ? shortenHome(workdir, home) : "none chosen"}. Change`}
-            className="flex min-w-0 flex-1 items-center gap-1 rounded border border-gray-200 bg-white px-1.5 py-1 text-left text-xs hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            className="flex min-w-0 flex-1 items-center gap-1 rounded border border-line bg-raised px-1.5 py-1 text-left text-xs hover:bg-sunken focus-ring"
           >
             <span className="min-w-0 flex-1 truncate" title={workdir ?? undefined}>
               {workdir ? shortenHome(workdir, home) : "Choose a workspace..."}
             </span>
-            <span aria-hidden="true" className="shrink-0 text-gray-500">
-              ⌄
+            <span className="shrink-0 text-ink-muted">
+              <ChevronDownIcon size={12} />
             </span>
           </button>
-          <span className="shrink-0 text-[10px] text-gray-600">
+          <span className="shrink-0 text-3xs text-ink-muted">
             {history.isFetching && sessions.length === 0
               ? "loading..."
               : `${sessions.length}${history.hasNextPage ? "+" : ""} loaded`}
@@ -242,29 +248,29 @@ export function HistoryOverlay() {
         id="history-results"
         role="listbox"
         aria-label="Archived sessions"
-        className="min-h-0 flex-1 overflow-y-auto py-1"
+        className="min-h-0 flex-1 pane py-1"
       >
         {!available ? (
-          <p className="px-3 py-6 text-center text-xs text-gray-600">
+          <p className="px-3 py-6 text-center text-xs text-ink-muted">
             The TraceDB archive is unavailable, so past sessions cannot be listed.
           </p>
         ) : history.isPending ? (
-          <output aria-live="polite" className="block px-3 py-6 text-center text-xs text-gray-500">
+          <output aria-live="polite" className="block px-3 py-6 text-center text-xs text-ink-muted">
             Loading history...
           </output>
         ) : history.error ? (
           <div role="alert" className="px-3 py-6 text-center text-xs">
-            <p className="font-medium text-red-800">Could not load history</p>
+            <p className="font-medium text-danger">Could not load history</p>
             <button
               type="button"
               onClick={() => void history.refetch()}
-              className="mt-1.5 rounded border border-red-300 px-2 py-1 font-medium text-red-800 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600"
+              className="mt-1.5 rounded border border-danger-line px-2 py-1 font-medium text-danger hover:bg-danger-bg focus-ring"
             >
               Retry
             </button>
           </div>
         ) : rows.length === 0 ? (
-          <p className="px-3 py-6 text-center text-xs text-gray-600">
+          <p className="px-3 py-6 text-center text-xs text-ink-muted">
             {query.trim() ? "No loaded session matches." : "No archived sessions here yet."}
           </p>
         ) : (
@@ -286,7 +292,7 @@ export function HistoryOverlay() {
               type="button"
               onClick={() => void history.fetchNextPage()}
               disabled={history.isFetchingNextPage}
-              className="w-full rounded border border-gray-200 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              className="w-full rounded border border-line px-2 py-1 text-xs font-medium text-ink-soft hover:bg-sunken disabled:opacity-60 focus-ring"
             >
               {history.isFetchingNextPage ? "Loading..." : "Load older sessions"}
             </button>
@@ -296,7 +302,7 @@ export function HistoryOverlay() {
 
       <footer
         id="history-hint"
-        className="shrink-0 border-t border-gray-200 bg-gray-50 px-3 py-1.5 text-[10px] text-gray-600"
+        className="shrink-0 border-t border-line bg-sunken px-3 py-1.5 text-3xs text-ink-muted"
       >
         ↑↓ navigate · ↵ open read-only · Esc close
         {history.hasNextPage && " · filter searches loaded sessions only"}
@@ -382,9 +388,9 @@ function WorkspaceSwitcher({
 
   return (
     <Overlay title="Choose a workspace" onClose={onClose} describedBy="switcher-hint">
-      <div className="flex items-center gap-2 border-b border-gray-200 px-3 py-2.5">
-        <span aria-hidden="true" className="text-gray-500">
-          ⌕
+      <div className="flex items-center gap-2 border-b border-line px-3 py-2.5">
+        <span className="text-ink-muted">
+          <SearchIcon size={15} />
         </span>
         <input
           type="text"
@@ -398,7 +404,7 @@ function WorkspaceSwitcher({
           onChange={(event) => setPicker({ query: event.target.value, active: 0 })}
           onKeyDown={(event) => onKeyDown(event, activeIndex, setActive)}
           placeholder="Filter by any part of the path..."
-          className="flex-1 bg-transparent text-sm outline-none placeholder:text-gray-500"
+          className="flex-1 bg-transparent text-sm outline-none placeholder:text-ink-muted"
         />
       </div>
 
@@ -407,10 +413,10 @@ function WorkspaceSwitcher({
         id="switcher-results"
         role="listbox"
         aria-label="Workspaces"
-        className="min-h-0 flex-1 overflow-y-auto py-1"
+        className="min-h-0 flex-1 pane py-1"
       >
         {rows.length === 0 ? (
-          <p className="px-3 py-6 text-center text-xs text-gray-600">
+          <p className="px-3 py-6 text-center text-xs text-ink-muted">
             {query.trim() ? "No workspace matches." : "No workspaces yet."}
           </p>
         ) : (
@@ -423,24 +429,24 @@ function WorkspaceSwitcher({
               aria-selected={index === activeIndex}
               onMouseEnter={() => setActive(index)}
               onClick={() => onChoose(workspace.path)}
-              className={`cursor-pointer px-3 py-1.5 ${index === activeIndex ? "bg-gray-100" : ""}`}
+              className={`cursor-pointer px-3 py-1.5 ${index === activeIndex ? "bg-hover" : ""}`}
             >
               <div className="flex items-baseline gap-2">
-                <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-900">
+                <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink">
                   {workspace.name}
                 </span>
                 {workspace.path === current && (
-                  <span className="shrink-0 rounded bg-gray-200 px-1 text-[9px] font-medium text-gray-700">
+                  <span className="shrink-0 rounded bg-active px-1 text-3xs font-medium text-ink-soft">
                     current
                   </span>
                 )}
-                <span className="shrink-0 text-[10px] text-gray-600">
+                <span className="shrink-0 text-3xs text-ink-muted">
                   {workspace.archivedCount > 0 && `${workspace.archivedCount} archived`}
                   {workspace.archivedCount > 0 && workspace.sessionCount > 0 && " · "}
                   {workspace.sessionCount > 0 && `${workspace.sessionCount} live`}
                 </span>
               </div>
-              <p className="truncate font-mono text-[10px] text-gray-600" title={workspace.path}>
+              <p className="truncate font-mono text-3xs text-ink-muted" title={workspace.path}>
                 {shortenHome(workspace.path, home)}
               </p>
             </div>
@@ -450,21 +456,21 @@ function WorkspaceSwitcher({
 
       <footer
         id="switcher-hint"
-        className="flex shrink-0 items-center justify-between gap-2 border-t border-gray-200 bg-gray-50 px-3 py-1.5"
+        className="flex shrink-0 items-center justify-between gap-2 border-t border-line bg-sunken px-3 py-1.5"
       >
-        <span className="text-[10px] text-gray-600">↑↓ navigate · ↵ choose · Esc close</span>
+        <span className="text-3xs text-ink-muted">↑↓ navigate · ↵ choose · Esc close</span>
         <div className="flex shrink-0 gap-1.5">
           <button
             type="button"
             onClick={onCancel}
-            className="rounded border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            className="rounded border border-line bg-raised px-2 py-0.5 text-3xs font-medium hover:bg-sunken focus-ring"
           >
             Back
           </button>
           <button
             type="button"
             onClick={() => setBrowsing(true)}
-            className="rounded border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            className="rounded border border-line bg-raised px-2 py-0.5 text-3xs font-medium hover:bg-sunken focus-ring"
           >
             Browse folders...
           </button>
@@ -497,29 +503,29 @@ function HistoryRow({
       aria-selected={active}
       onMouseEnter={onHover}
       onClick={onSelect}
-      className={`cursor-pointer px-3 py-1.5 ${active ? "bg-gray-100" : ""}`}
+      className={`cursor-pointer px-3 py-1.5 ${active ? "bg-hover" : ""}`}
     >
       <div className="flex items-baseline gap-2">
-        {/* Shape plus title, not colour alone (WCAG 1.4.1). `⌗` marks archived
-            history throughout the app; a live session is `●` or `◆`. */}
+        {/* Shape plus title, not colour alone (WCAG 1.4.1). The archive box marks
+            archived history throughout the app; an imported one carries the native
+            origin diamond, because that is what it becomes once imported. */}
         <span
-          aria-hidden="true"
           title={session.sessionId ? "imported session" : "archived session"}
-          className={`shrink-0 text-[9px] ${session.sessionId ? "text-violet-600" : "text-gray-500"}`}
+          className={`shrink-0 ${session.sessionId ? "text-native" : "text-ink-faint"}`}
         >
-          {session.sessionId ? "◆" : "⌗"}
+          {session.sessionId ? <OriginNativeIcon size={9} /> : <ArchiveIcon size={12} />}
         </span>
-        <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-900">
-          {session.label ?? <span className="text-gray-600">Untitled {session.agent} session</span>}
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink">
+          {session.label ?? <span className="text-ink-muted">Untitled {session.agent} session</span>}
         </span>
         {session.sessionId && (
-          <span className="shrink-0 rounded bg-violet-50 px-1 text-[9px] font-medium text-violet-700">
+          <span className="shrink-0 rounded bg-native-bg px-1 text-3xs font-medium text-native">
             imported
           </span>
         )}
-        <span className="shrink-0 text-[10px] text-gray-600">{formatRelative(when)}</span>
+        <span className="shrink-0 text-3xs text-ink-muted">{formatRelative(when)}</span>
       </div>
-      <p className="truncate pl-4 text-[10px] text-gray-600">
+      <p className="truncate pl-4 text-3xs text-ink-muted">
         {session.agent}
         {` · ${session.events} events`}
         {session.subagentCount > 0 &&

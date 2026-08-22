@@ -17,6 +17,14 @@
  * with some arguments" rather than throwing, because a fifth runner will spell
  * something differently and a timeline that crashes on it is worse than one that
  * renders it plainly.
+ *
+ * # No icon here
+ *
+ * `ToolShape` used to carry an `icon` string, and each rule below named a Unicode
+ * glyph. That put presentation in a pure, unit-tested logic module and forced the
+ * choice to be a *character* — which is decided by the reader's installed fonts,
+ * not by this project. `kind` is the semantic answer, and `components/timeline.tsx`
+ * maps it to an icon. This module stays free of React and testable in `node`.
  */
 
 import type { StreamEvent } from "@/lib/api";
@@ -35,8 +43,6 @@ export interface ToolShape {
   kind: ToolKind;
   /** Tool name as the agent reported it, for display. */
   name: string;
-  /** Glyph. Text rather than an icon font, so it costs no bytes. */
-  icon: string;
   /** File or directory the call targets, when it names one. */
   path?: string;
   /** Shell command, for shell tools. */
@@ -59,15 +65,15 @@ export interface ToolShape {
  * Names are matched by substring after that, because agents prefix and suffix
  * freely (`mcp__fs__read_file`).
  */
-const KIND_RULES: Array<{ kind: ToolKind; icon: string; patterns: string[] }> = [
+const KIND_RULES: Array<{ kind: ToolKind; patterns: string[] }> = [
   // Order matters: `multiedit` must be tested before `edit`, and `writefile`
   // before `file`, so the more specific rule wins.
-  { kind: "edit", icon: "✎", patterns: ["multiedit", "strreplace", "applypatch", "edit", "patch"] },
-  { kind: "write", icon: "◆", patterns: ["writefile", "createfile", "write", "create"] },
-  { kind: "read", icon: "▤", patterns: ["readfile", "read", "cat", "view", "notebookread"] },
-  { kind: "shell", icon: "❯", patterns: ["bash", "shell", "exec", "terminal", "command", "run"] },
-  { kind: "search", icon: "⌕", patterns: ["grep", "glob", "search", "find", "ripgrep", "ls", "list"] },
-  { kind: "task", icon: "◇", patterns: ["task", "agent", "todo", "plan", "delegate"] },
+  { kind: "edit", patterns: ["multiedit", "strreplace", "applypatch", "edit", "patch"] },
+  { kind: "write", patterns: ["writefile", "createfile", "write", "create"] },
+  { kind: "read", patterns: ["readfile", "read", "cat", "view", "notebookread"] },
+  { kind: "shell", patterns: ["bash", "shell", "exec", "terminal", "command", "run"] },
+  { kind: "search", patterns: ["grep", "glob", "search", "find", "ripgrep", "ls", "list"] },
+  { kind: "task", patterns: ["task", "agent", "todo", "plan", "delegate"] },
 ];
 
 /** Argument keys that name a file, in the order agents prefer them. */
@@ -95,7 +101,6 @@ export function describeTool(event: StreamEvent): ToolShape {
     candidate.patterns.some((pattern) => normalized.includes(pattern)),
   );
   const kind = rule?.kind ?? "other";
-  const icon = rule?.icon ?? "⚙";
 
   const path = firstString(args, PATH_KEYS);
   const command = firstString(args, COMMAND_KEYS);
@@ -105,7 +110,6 @@ export function describeTool(event: StreamEvent): ToolShape {
   return {
     kind,
     name,
-    icon,
     path,
     command,
     pattern,

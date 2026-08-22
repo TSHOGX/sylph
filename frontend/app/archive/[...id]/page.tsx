@@ -28,7 +28,7 @@ import { formatTimestamp } from "@/lib/format";
 import { densityClasses, useSettings } from "@/lib/settings";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Timeline } from "@/components/timeline";
-import { ContextMenu, type MenuItem } from "@/components/context-menu";
+import { ContextMenu, type MenuItem } from "@/components/ui/menu";
 
 /** Events fetched at once. The largest archived session here is 8167 events. */
 const EVENT_LIMIT = 2000;
@@ -79,7 +79,7 @@ export default function ArchivedSessionPage() {
     return (
       <output
         aria-live="polite"
-        className="flex flex-1 items-center justify-center text-sm text-gray-500"
+        className="flex flex-1 items-center justify-center text-sm text-ink-muted"
       >
         Loading archived session...
       </output>
@@ -93,14 +93,14 @@ export default function ArchivedSessionPage() {
     return (
       <div role="alert" className="flex flex-1 items-center justify-center px-4">
         <div className="max-w-md text-center">
-          <h1 className="text-lg font-semibold text-red-800">
+          <h1 className="text-lg font-semibold text-danger">
             {missing
               ? "Not in the archive"
               : unavailable
                 ? "Archive unavailable"
                 : "Could not load this session"}
           </h1>
-          <p className="mt-2 text-sm text-gray-600">
+          <p className="mt-2 text-sm text-ink-muted">
             {missing
               ? "TraceDB has no session with this id. It may not have been ingested yet."
               : error instanceof Error
@@ -111,13 +111,13 @@ export default function ArchivedSessionPage() {
             <button
               type="button"
               onClick={() => void transcript.refetch()}
-              className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-sunken focus-ring"
             >
               Retry
             </button>
             <Link
               href="/"
-              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-ink hover:bg-accent-hover focus-ring"
             >
               Start screen
             </Link>
@@ -149,7 +149,7 @@ export default function ArchivedSessionPage() {
   return (
     <>
       <header
-        className="shrink-0 border-b border-gray-200 px-4 py-2"
+        className="shrink-0 border-b border-line px-4 py-2"
         onContextMenu={(event) => {
           event.preventDefault();
           setMenu({ x: event.clientX, y: event.clientY });
@@ -157,27 +157,27 @@ export default function ArchivedSessionPage() {
       >
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="truncate text-sm font-semibold">{title}</h1>
-          <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-700">
+          <span className="shrink-0 rounded bg-hover px-1.5 py-0.5 text-3xs font-medium text-ink-soft">
             archived · read-only
           </span>
           <div className="ml-auto flex items-center gap-1">
             <button
               type="button"
               onClick={() => setExpandAll(expandAll === true ? null : true)}
-              className="rounded px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              className="rounded px-1.5 py-0.5 text-3xs text-ink-muted hover:bg-hover hover:text-ink focus-ring"
             >
               Expand all
             </button>
             <button
               type="button"
               onClick={() => setExpandAll(expandAll === false ? null : false)}
-              className="rounded px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              className="rounded px-1.5 py-0.5 text-3xs text-ink-muted hover:bg-hover hover:text-ink focus-ring"
             >
               Collapse all
             </button>
           </div>
         </div>
-        <p className="mt-0.5 truncate text-[11px] text-gray-500">
+        <p className="mt-0.5 truncate text-2xs text-ink-muted">
           {data.agent}
           {data.cwd && (
             <>
@@ -209,16 +209,16 @@ export default function ArchivedSessionPage() {
       {data.truncated && (
         <aside
           aria-label="Transcript truncated"
-          className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-1.5 text-[11px] text-amber-900"
+          className="shrink-0 border-b border-warning-line bg-warning-bg px-4 py-1.5 text-2xs text-warning"
         >
           Showing the first {EVENT_LIMIT.toLocaleString()} events of a longer session.
         </aside>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div className="min-h-0 flex-1 pane px-4 py-3">
         <div className={`mx-auto max-w-3xl ${density.text}`}>
           {data.events.length === 0 ? (
-            <p className="py-8 text-center text-sm text-gray-500">
+            <p className="py-8 text-center text-sm text-ink-muted">
               This archived session recorded no events.
             </p>
           ) : (
@@ -266,12 +266,12 @@ function ContinuationBar({
     return (
       <aside
         aria-label="Live session available"
-        className="flex shrink-0 flex-wrap items-center gap-2 border-b border-violet-200 bg-violet-50 px-4 py-1.5 text-[11px] text-violet-900"
+        className="flex shrink-0 flex-wrap items-center gap-2 border-b border-native-line bg-native-bg px-4 py-1.5 text-2xs text-native"
       >
         <span>This session has already been imported, so it can be continued.</span>
         <Link
           href={`/sessions/${sessionId}`}
-          className="rounded border border-violet-300 bg-white px-2 py-0.5 font-medium hover:bg-violet-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-700"
+          className="rounded border border-native-line bg-raised px-2 py-0.5 font-medium hover:bg-native-bg focus-ring"
         >
           Open live session
         </Link>
@@ -282,7 +282,7 @@ function ContinuationBar({
   return (
     <aside
       aria-label="Continue this session"
-      className="flex shrink-0 flex-wrap items-center gap-2 border-b border-gray-200 bg-gray-50 px-4 py-1.5 text-[11px] text-gray-700"
+      className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line bg-sunken px-4 py-1.5 text-2xs text-ink-soft"
     >
       <span>
         {resumable
@@ -296,12 +296,12 @@ function ContinuationBar({
         title={
           resumable ? undefined : "The archive recorded no working directory to resume into."
         }
-        className="rounded border border-gray-300 bg-white px-2 py-0.5 font-medium hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        className="rounded border border-line-strong bg-raised px-2 py-0.5 font-medium hover:bg-hover disabled:cursor-not-allowed disabled:opacity-60 focus-ring"
       >
         {pending ? "Continuing..." : "Continue this session"}
       </button>
       {error instanceof Error && (
-        <span role="alert" className="text-red-700">
+        <span role="alert" className="text-danger">
           {error.message}
         </span>
       )}

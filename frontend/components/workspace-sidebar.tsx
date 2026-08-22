@@ -40,8 +40,23 @@ const DirectoryPicker = dynamic(
   () => import("@/components/directory-picker").then((m) => m.DirectoryPicker),
   { ssr: false },
 );
-import { ContextMenu, type MenuItem } from "@/components/context-menu";
+import { ContextMenu, MenuButton, type MenuItem } from "@/components/ui/menu";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
+import { Button, IconButton } from "@/components/ui/button";
+import {
+  AlertTriangleIcon,
+  ArchiveIcon,
+  BranchIcon,
+  ChevronRightIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  MoreIcon,
+  OriginNativeIcon,
+  OriginSylphIcon,
+  PinIcon,
+  PlusIcon,
+  RunningIcon,
+} from "@/components/icons";
 
 /**
  * Archived sessions fetched per expanded group.
@@ -172,18 +187,18 @@ export function WorkspaceSidebar() {
           setPaneMenu({ x: event.clientX, y: event.clientY });
         }}
       >
-        <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
+        <div className="min-h-0 flex-1 pane px-1.5 py-2">
         {sessionsQuery.isPending ? (
-          <output aria-live="polite" className="block px-1.5 py-3 text-xs text-gray-500">
+          <output aria-live="polite" className="block px-1.5 py-3 text-xs text-ink-muted">
             Loading sessions...
           </output>
         ) : sessionsQuery.error ? (
           <div role="alert" className="px-1.5 py-3 text-xs">
-            <p className="font-medium text-red-800">Could not load sessions</p>
+            <p className="font-medium text-danger">Could not load sessions</p>
             <button
               type="button"
               onClick={() => void sessionsQuery.refetch()}
-              className="mt-1.5 rounded border border-red-300 bg-white px-2 py-1 font-medium text-red-800 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600"
+              className="mt-1.5 rounded border border-danger-line bg-raised px-2 py-1 font-medium text-danger hover:bg-danger-bg focus-ring"
             >
               Retry
             </button>
@@ -192,7 +207,6 @@ export function WorkspaceSidebar() {
           <>
             <GroupSection
               title="Quick Sessions"
-              icon="⚡"
               group={
                 quick ?? {
                   path: quickStartDir ?? "",
@@ -207,11 +221,11 @@ export function WorkspaceSidebar() {
               emptyHint="Quick Start puts scratch sessions here."
             />
 
-            <h2 className="mt-3 px-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+            <h2 className="mt-3 px-1.5 pb-1 text-3xs font-semibold uppercase tracking-wider text-ink-muted">
               Workspaces
             </h2>
             {projects.length === 0 ? (
-              <p className="px-1.5 py-2 text-xs text-gray-500">
+              <p className="px-1.5 py-2 text-xs text-ink-muted">
                 No project sessions yet. Create one to see its workspace here.
               </p>
             ) : (
@@ -246,15 +260,15 @@ export function WorkspaceSidebar() {
       {/* Also offered as a button, not only on right-click: this is the sole entry
           point for binding a directory that has no sessions yet, and a hidden
           gesture is a poor way to expose the only path to a feature. */}
-      <div className="shrink-0 border-t border-gray-200 p-1.5">
-        <button
-          type="button"
+      <div className="shrink-0 border-t border-line p-1.5 pb-safe md:pb-1.5">
+        <Button
+          variant="ghost"
           onClick={() => setPicking(true)}
-          className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs font-medium text-gray-600 hover:bg-gray-200/60 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          icon={<PlusIcon size={14} />}
+          className="w-full justify-start"
         >
-          <span aria-hidden="true">+</span>
           New Workspace...
-        </button>
+        </Button>
       </div>
 
       {paneMenu && (
@@ -295,7 +309,6 @@ function GroupSection({
   group,
   activeId,
   title,
-  icon,
   home,
   emptyHint,
   pinned,
@@ -305,7 +318,6 @@ function GroupSection({
   group: Group;
   activeId?: string;
   title?: string;
-  icon?: string;
   home?: string;
   emptyHint?: string;
   pinned?: boolean;
@@ -402,7 +414,7 @@ function GroupSection({
   ];
 
   return (
-    <section>
+    <section className="group/group relative">
       <h2 className="sr-only">{label}</h2>
       <button
         type="button"
@@ -413,45 +425,65 @@ function GroupSection({
         }}
         aria-expanded={open}
         title={group.path}
-        className="flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-xs font-medium text-gray-700 hover:bg-gray-200/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        className="tap-row flex w-full items-center gap-1.5 rounded-md py-1.5 pr-8 pl-1.5 text-left text-xs font-medium text-ink-soft hover:bg-hover focus-ring md:py-1"
       >
-        <span aria-hidden="true" className="w-3 shrink-0 text-gray-500">
-          {open ? "▾" : "▸"}
+        <ChevronRightIcon
+          size={12}
+          className={`shrink-0 text-ink-faint transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        {/* A workspace *is* a directory, so it gets the same folder icon the file
+            tree uses for one — including the open/closed distinction, which here
+            doubles as a second cue for the group's own expanded state. */}
+        <span className="shrink-0 text-info">
+          {open ? <FolderOpenIcon size={15} /> : <FolderIcon size={15} />}
         </span>
-        {icon && (
-          <span aria-hidden="true" className="shrink-0">
-            {icon}
-          </span>
-        )}
-        <span className="truncate">{label}</span>
+        <span className="min-w-0 flex-1 truncate">{label}</span>
         {pinned && (
-          <span aria-label="pinned" title="Pinned" className="shrink-0 text-[10px] text-gray-500">
-            ●
+          <span aria-label="pinned" title="Pinned" className="shrink-0 text-ink-muted">
+            <PinIcon size={11} />
           </span>
         )}
-        <span className="ml-auto shrink-0 text-[10px] text-gray-500">
+        <span className="flex shrink-0 items-center gap-1 text-3xs text-ink-muted">
           {running > 0 && (
-            <span className="mr-1 text-blue-600" title={`${running} running`}>
-              {running}▶
+            <span className="flex items-center gap-0.5 text-info" title={`${running} running`}>
+              {running}
+              <RunningIcon size={9} />
             </span>
           )}
           {/* Live count only. The archive count is unknown without paging the
               whole directory, and a live-plus-preview total would read as a
               complete tally while actually being an arbitrary partial sum. `+`
               says "there is more here" without inventing a number. */}
-          {group.sessions.length}
-          {archived.length > 0 && (
-            <span title="plus archived history" className="text-gray-400">
-              +
-            </span>
-          )}
+          <span>
+            {group.sessions.length}
+            {archived.length > 0 && (
+              <span title="plus archived history" className="text-ink-faint">
+                +
+              </span>
+            )}
+          </span>
           {!archiveAvailable && (
-            <span title="Archive unavailable — showing live sessions only" className="ml-0.5">
-              ⚠
+            <span
+              title="Archive unavailable — showing live sessions only"
+              className="text-warning"
+            >
+              <AlertTriangleIcon size={11} />
             </span>
           )}
         </span>
       </button>
+
+      {/* Pin, rename, browse history, and "new session here" are otherwise
+          right-click only, and there is no right-click on a phone. */}
+      <span className="absolute top-0 right-0 flex items-center pr-0.5 pt-0.5 opacity-0 group-hover/group:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
+        <MenuButton label={`${label} actions`} items={items} align="end">
+          {(trigger) => (
+            <IconButton label={`${label} actions`} {...trigger}>
+              <MoreIcon size={14} />
+            </IconButton>
+          )}
+        </MenuButton>
+      </span>
 
       {open && (
         // Named, because a bare `<ul>` announces only "list" and the sidebar has
@@ -459,7 +491,7 @@ function GroupSection({
         // screen readers but does not name this list, so the label is explicit.
         <ul
           aria-label={`Sessions in ${label}`}
-          className="mb-1 ml-2 border-l border-gray-200 pl-1"
+          className="mb-1 ml-2 border-l border-line pl-1"
         >
           {group.sessions.map((session) => (
             <SessionRow
@@ -475,7 +507,7 @@ function GroupSection({
           ))}
 
           {group.sessions.length === 0 && archived.length === 0 && (
-            <li className="px-1.5 py-1 text-[11px] text-gray-500">
+            <li className="px-1.5 py-1 text-2xs text-ink-muted">
               {archiveQuery.isFetching ? "Loading history..." : (emptyHint ?? "No sessions yet.")}
             </li>
           )}
@@ -485,9 +517,10 @@ function GroupSection({
               <button
                 type="button"
                 onClick={() => browseHistory(group.path)}
-                className="flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-[11px] text-gray-600 hover:bg-gray-200/60 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                className="tap-row flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-2xs text-ink-muted hover:bg-hover hover:text-ink focus-ring"
               >
-                Browse all history →
+                <ArchiveIcon size={13} />
+                Browse all history
               </button>
             </li>
           )}
@@ -546,7 +579,7 @@ function SessionRow({
   ];
 
   return (
-    <li>
+    <li className="group/row relative">
       <Link
         href={`/sessions/${session.id}`}
         aria-current={active ? "page" : undefined}
@@ -555,41 +588,67 @@ function SessionRow({
           setMenu({ x: event.clientX, y: event.clientY });
         }}
         title={`${sessionLabel(session)} — ${shortenHome(session.workdir, home)}`}
-        className={`flex items-center gap-1.5 rounded px-1.5 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 ${
-          active ? "bg-gray-900 text-white" : "text-gray-700 hover:bg-gray-200/60"
+        className={`tap-row flex items-center gap-1.5 rounded-md py-1.5 pr-8 pl-1.5 text-xs focus-ring md:py-1 ${
+          active ? "bg-accent text-accent-ink" : "text-ink-soft hover:bg-hover"
         }`}
       >
         {/* Origin is durable policy data, so it stays visible even at this size.
-            Shape plus title, not colour alone (WCAG 1.4.1). */}
+            Two different shapes, filled, not two colours of one dot — the
+            distinction has to survive greyscale and colour blindness (WCAG
+            1.4.1), because it decides identity and lifecycle policy. */}
         <span
-          aria-hidden="true"
           title={session.origin === "native" ? "native session" : "sylph session"}
-          className={`shrink-0 text-[9px] ${
+          className={`shrink-0 ${
             active
-              ? "text-gray-300"
+              ? "text-accent-ink-muted"
               : session.origin === "native"
-                ? "text-violet-600"
-                : "text-emerald-600"
+                ? "text-native"
+                : "text-success"
           }`}
         >
-          {session.origin === "native" ? "◆" : "●"}
+          {session.origin === "native" ? (
+            <OriginNativeIcon size={9} />
+          ) : (
+            <OriginSylphIcon size={9} />
+          )}
         </span>
         <span className="min-w-0 flex-1 truncate">{sessionLabel(session)}</span>
         {session.status === "running" ? (
           <span
-            className={`shrink-0 text-[9px] ${active ? "text-blue-200" : "text-blue-600"}`}
+            className={`shrink-0 ${active ? "text-accent-ink-muted" : "text-info"}`}
             title="A turn is running"
           >
-            ▶
+            <RunningIcon size={10} />
           </span>
         ) : (
-          // On the dark active row the muted grey inverts: gray-500 on gray-900
-          // measures 3.66:1, below the 4.5:1 minimum for this size.
-          <span className={`shrink-0 text-[9px] ${active ? "text-gray-300" : "text-gray-500"}`}>
+          // On the dark active row the muted grey inverts: `ink-muted` on the accent
+          // surface measures 3.66:1, below the 4.5:1 minimum for this size.
+          <span
+            className={`shrink-0 text-3xs ${
+              active ? "text-accent-ink-muted" : "text-ink-muted"
+            }`}
+          >
             {formatRelative(session.updatedAtMs).replace(" ago", "")}
           </span>
         )}
       </Link>
+
+      {/* Sibling of the link, not a child: a button inside an anchor is invalid
+          HTML, and the nested interactive element makes the row's own activation
+          ambiguous. Absolute positioning overlays it without nesting. */}
+      <span className="absolute inset-y-0 right-0 flex items-center pr-0.5 opacity-0 group-hover/row:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
+        <MenuButton label={`${sessionLabel(session)} actions`} items={items} align="end">
+          {(trigger) => (
+            <IconButton
+              label={`${sessionLabel(session)} actions`}
+              className={active ? "text-accent-ink-muted" : ""}
+              {...trigger}
+            >
+              <MoreIcon size={14} />
+            </IconButton>
+          )}
+        </MenuButton>
+      </span>
 
       {menu && (
         <ContextMenu
@@ -636,7 +695,7 @@ function ArchivedRow({ session }: { session: ArchiveSession }) {
   ];
 
   return (
-    <li>
+    <li className="group/row relative">
       <Link
         href={`/archive/${encodeURIComponent(session.id)}`}
         onContextMenu={(event) => {
@@ -644,24 +703,38 @@ function ArchivedRow({ session }: { session: ArchiveSession }) {
           setMenu({ x: event.clientX, y: event.clientY });
         }}
         title={`${label} — archived ${session.agent} session, read-only`}
-        className="flex items-center gap-1.5 rounded px-1.5 py-1 text-xs text-gray-600 hover:bg-gray-200/60 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        className="tap-row flex items-center gap-1.5 rounded-md py-1.5 pr-8 pl-1.5 text-xs text-ink-muted hover:bg-hover hover:text-ink focus-ring md:py-1"
       >
-        <span aria-hidden="true" title="archived session" className="shrink-0 text-[9px] text-gray-500">
-          ⌗
+        {/* An archive box, not a colour change: this is history, and the
+            distinction has to survive greyscale (WCAG 1.4.1). */}
+        <span title="archived session" className="shrink-0 text-ink-faint">
+          <ArchiveIcon size={12} />
         </span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
         {session.subagentCount > 0 && (
           <span
             title={`${session.subagentCount} subagent session${session.subagentCount === 1 ? "" : "s"}`}
-            className="shrink-0 text-[9px] text-gray-500"
+            className="flex shrink-0 items-center gap-0.5 text-3xs text-ink-muted"
           >
-            ⑂{session.subagentCount}
+            <BranchIcon size={10} />
+            {session.subagentCount}
           </span>
         )}
-        <span className="shrink-0 text-[9px] text-gray-500">
+        <span className="shrink-0 text-3xs text-ink-muted">
           {formatRelative(when).replace(" ago", "")}
         </span>
       </Link>
+
+      <span className="absolute inset-y-0 right-0 flex items-center pr-0.5 opacity-0 group-hover/row:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
+        <MenuButton label={`${label} actions`} items={items} align="end">
+          {(trigger) => (
+            <IconButton label={`${label} actions`} {...trigger}>
+              <MoreIcon size={14} />
+            </IconButton>
+          )}
+        </MenuButton>
+      </span>
+
       {menu && (
         <ContextMenu
           x={menu.x}

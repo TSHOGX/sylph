@@ -19,6 +19,12 @@ import { useCallback, useSyncExternalStore } from "react";
 
 export type Density = "compact" | "normal" | "comfortable";
 
+/**
+ * Colour theme. `system` follows `prefers-color-scheme` and keeps following it,
+ * so a machine on a light-at-day schedule changes with it.
+ */
+export type Theme = "light" | "dark" | "system";
+
 /** Actions a keyboard shortcut can be bound to. */
 export type ShortcutAction =
   | "search"
@@ -40,6 +46,8 @@ export interface Settings {
   /** Model flag applied to new sessions, per agent. */
   defaultModels: Record<string, string>;
   density: Density;
+  /** Colour theme. Applied to `<html data-theme>`; see `lib/theme.ts`. */
+  theme: Theme;
   /** Show thinking blocks expanded on arrival. Off by default: reasoning is
    *  debugging detail, not primary content. */
   expandThinking: boolean;
@@ -90,6 +98,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultAgent: "",
   defaultModels: {},
   density: "normal",
+  theme: "system",
   expandThinking: false,
   expandToolOutput: false,
   shortcuts: DEFAULT_SHORTCUTS,
@@ -99,7 +108,15 @@ export const DEFAULT_SETTINGS: Settings = {
   workspaceNames: {},
 };
 
-const STORAGE_KEY = "sylph-web.settings.v1";
+/**
+ * Exported because the theme has to be applied *before first paint* to avoid a
+ * white flash on a dark-mode phone, which means an inline script in the document
+ * head reads this key directly — before React, and therefore before this module,
+ * exists. Two spellings of the key would make the pre-paint theme and the
+ * in-app theme disagree, so there is one constant and `lib/theme.ts` builds the
+ * script from it.
+ */
+export const STORAGE_KEY = "sylph-web.settings.v1";
 
 interface SettingsContextValue {
   settings: Settings;
@@ -127,6 +144,7 @@ function hydrate(raw: string | null): Settings {
   const stored = parsed as Partial<Settings>;
 
   const densities: Density[] = ["compact", "normal", "comfortable"];
+  const themes: Theme[] = ["light", "dark", "system"];
 
   return {
     defaultAgent:
@@ -138,6 +156,10 @@ function hydrate(raw: string | null): Settings {
       typeof stored.density === "string" && densities.includes(stored.density as Density)
         ? (stored.density as Density)
         : DEFAULT_SETTINGS.density,
+    theme:
+      typeof stored.theme === "string" && themes.includes(stored.theme as Theme)
+        ? (stored.theme as Theme)
+        : DEFAULT_SETTINGS.theme,
     expandThinking:
       typeof stored.expandThinking === "boolean"
         ? stored.expandThinking
@@ -260,13 +282,18 @@ export function useSettings(): SettingsContextValue {
   return { settings, update, reset };
 }
 
-/** Spacing scale for the conversation timeline, driven by the density setting. */
+/**
+ * Spacing scale for the conversation timeline, driven by the density setting.
+ *
+ * On the type scale rather than beside it: these were `13px` and `15px`, two
+ * one-off sizes that existed only here and were within a pixel of scale steps.
+ */
 export function densityClasses(density: Density): { gap: string; text: string } {
   switch (density) {
     case "compact":
-      return { gap: "space-y-1", text: "text-[13px]" };
+      return { gap: "space-y-1", text: "text-xs" };
     case "comfortable":
-      return { gap: "space-y-4", text: "text-[15px]" };
+      return { gap: "space-y-4", text: "text-base" };
     default:
       return { gap: "space-y-2", text: "text-sm" };
   }

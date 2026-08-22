@@ -34,10 +34,43 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api, type FileEntry } from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
-import { glyphFor } from "@/lib/file-kind";
+import { iconFor, type FileIconName } from "@/lib/file-kind";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
-import { ContextMenu, type MenuItem } from "@/components/context-menu";
+import { ContextMenu, MenuButton, type MenuItem } from "@/components/ui/menu";
 import { FileViewer } from "@/components/file-viewer";
+import { IconButton } from "@/components/ui/button";
+import {
+  ChevronRightIcon,
+  ExternalLinkIcon,
+  FileCodeIcon,
+  FileIcon,
+  FileImageIcon,
+  FilePdfIcon,
+  FileTableIcon,
+  FileTextIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  GlobeIcon,
+  MoreIcon,
+  RefreshIcon,
+} from "@/components/icons";
+
+/**
+ * Icon name to component.
+ *
+ * Module-level, so the components are never created during render — the rule
+ * `react-hooks/static-components` enforces, and the reason `iconFor` returns a name
+ * rather than a component reference.
+ */
+const FILE_ICONS: Record<FileIconName, typeof FileIcon> = {
+  table: FileTableIcon,
+  image: FileImageIcon,
+  pdf: FilePdfIcon,
+  web: GlobeIcon,
+  prose: FileTextIcon,
+  code: FileCodeIcon,
+  plain: FileIcon,
+};
 
 /**
  * The full-screen viewer.
@@ -110,8 +143,8 @@ export function ArtifactsPane() {
 
   if (!sessionId) {
     return (
-      <div className="p-3 text-xs text-gray-500">
-        <p className="font-medium text-gray-700">No session open</p>
+      <div className="p-3 text-xs text-ink-muted">
+        <p className="font-medium text-ink-soft">No session open</p>
         <p className="mt-1">
           Open a session to browse the files in its working directory.
         </p>
@@ -125,7 +158,7 @@ export function ArtifactsPane() {
     <div className="flex min-h-0 flex-1 flex-col">
       {/* `hidden` rather than unmounting: see the module comment. */}
       <div className={`${viewing ? "hidden" : "flex"} min-h-0 flex-1 flex-col`}>
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 pane">
           <FileTree
             sessionId={sessionId}
             selected={selected}
@@ -138,7 +171,7 @@ export function ArtifactsPane() {
         </div>
       </div>
 
-      <div className={`${viewing ? "flex" : "hidden"} min-h-0 flex-1 flex-col bg-white`}>
+      <div className={`${viewing ? "flex" : "hidden"} min-h-0 flex-1 flex-col bg-raised`}>
         {selected && (
           <>
             {artifactFullscreen ? (
@@ -146,13 +179,13 @@ export function ArtifactsPane() {
               // They share a query key so there is no double fetch, but a
               // 3,000-cell table is worth not building twice.
               <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
-                <p className="text-[11px] text-gray-500">
+                <p className="text-2xs text-ink-muted">
                   This file is open in the expanded view.
                 </p>
                 <button
                   type="button"
                   onClick={handleCloseFullscreen}
-                  className="rounded border border-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                  className="rounded border border-line px-2 py-0.5 text-3xs font-medium text-ink-soft hover:bg-sunken focus-ring"
                 >
                   Show it here instead
                 </button>
@@ -249,26 +282,33 @@ function FileTree({
   );
 
   return (
-    <div className="px-1.5 py-2">
-      <div className="mb-1 flex items-center justify-between gap-2 px-1.5">
-        <h2 className="truncate text-[10px] font-semibold uppercase tracking-wider text-gray-500">
-          Files
-        </h2>
-        <button
-          type="button"
-          onClick={() => void queryClient.invalidateQueries({ queryKey: ["files", sessionId] })}
-          title="Reload the file tree"
-          className="rounded px-1 text-[10px] text-gray-500 hover:bg-gray-200/60 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-        >
-          Reload
-        </button>
-      </div>
+    <div className="px-1.5 py-1.5">
+      {/*
+        Sticky, so the workspace root stays identifiable while scrolling a deep tree.
+        It is the only thing on screen naming *which* project this is, and in the
+        mobile sheet there is no window title to fall back on.
 
-      {root.data?.root && (
-        <p className="mb-1 truncate px-1.5 font-mono text-[10px] text-gray-500" title={root.data.root}>
-          {root.data.root}
-        </p>
-      )}
+        The "Files" heading is desktop-only: the sheet already carries that title, and
+        a second heading directly beneath it is redundant chrome in the scarcest space.
+      */}
+      <div className="sticky top-0 z-10 -mx-1.5 mb-1 flex items-center gap-1 border-b border-line bg-sunken px-2.5 py-1 md:bg-transparent">
+        <div className="min-w-0 flex-1">
+          <h2 className="hidden text-3xs font-semibold uppercase tracking-wider text-ink-muted md:block">
+            Files
+          </h2>
+          {root.data?.root && (
+            <p className="truncate font-mono text-3xs text-ink-muted" title={root.data.root}>
+              {root.data.root}
+            </p>
+          )}
+        </div>
+        <IconButton
+          label="Reload the file tree"
+          onClick={() => void queryClient.invalidateQueries({ queryKey: ["files", sessionId] })}
+        >
+          <RefreshIcon size={14} />
+        </IconButton>
+      </div>
 
       <Directory
         sessionId={sessionId}
@@ -321,7 +361,7 @@ function Directory({
 
   if (isPending && (depth === 0 || expanded.has(path))) {
     return (
-      <p className="px-1.5 py-1 text-[11px] text-gray-500" style={{ paddingLeft: depth * 10 + 6 }}>
+      <p className="px-1.5 py-1 text-2xs text-ink-muted" style={{ paddingLeft: depth * 10 + 6 }}>
         Loading...
       </p>
     );
@@ -331,18 +371,18 @@ function Directory({
     return (
       <div
         role="alert"
-        className="px-1.5 py-1 text-[11px]"
+        className="px-1.5 py-1 text-2xs"
         style={{ paddingLeft: depth * 10 + 6 }}
       >
         {/* The heading names the directory, and the body carries the backend's
             message verbatim. Both are needed: a bare message in a tree reads as
             a property of the tree, which is how an absent *endpoint* came across
             as an absent *directory*. */}
-        <p className="text-red-800">{describeTreeError(error, path)}</p>
+        <p className="text-danger">{describeTreeError(error, path)}</p>
         <button
           type="button"
           onClick={() => void refetch()}
-          className="mt-0.5 rounded text-[10px] text-red-700 underline hover:text-red-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="mt-0.5 rounded text-3xs text-danger underline hover:text-danger focus-ring"
         >
           Retry
         </button>
@@ -356,7 +396,7 @@ function Directory({
     <ul role={depth === 0 ? "tree" : "group"} aria-label={depth === 0 ? "File tree" : undefined}>
       {data.entries.length === 0 && (
         <li
-          className="px-1.5 py-1 text-[11px] text-gray-500"
+          className="px-1.5 py-1 text-2xs text-ink-muted"
           style={{ paddingLeft: depth * 10 + 6 }}
         >
           Empty
@@ -378,7 +418,7 @@ function Directory({
       ))}
       {data.truncated && (
         <li
-          className="px-1.5 py-1 text-[10px] text-amber-700"
+          className="px-1.5 py-1 text-3xs text-warning"
           style={{ paddingLeft: depth * 10 + 6 }}
         >
           Listing truncated — this directory holds more entries than are shown.
@@ -396,6 +436,20 @@ function Directory({
  * and differ only by error code, and getting them confused is what makes a
  * stale-process problem look like a filesystem one.
  */
+/**
+ * The icon for one tree row.
+ *
+ * A folder that is expanded looks expanded, and only the tree knows whether it is —
+ * which is why `iconFor` covers files only and this component handles the fork.
+ */
+function TreeGlyph({ entry, isOpen }: { entry: FileEntry; isOpen: boolean }) {
+  if (entry.isDir) {
+    return isOpen ? <FolderOpenIcon size={15} /> : <FolderIcon size={15} />;
+  }
+  const Glyph = FILE_ICONS[iconFor(entry)];
+  return <Glyph size={15} />;
+}
+
 function describeTreeError(error: unknown, path: string): string {
   const where = path === "" ? "the working directory" : path;
   if (error instanceof ApiError) {
@@ -481,50 +535,115 @@ function TreeNode({
   );
 
   return (
-    <li role="treeitem" aria-expanded={entry.isDir ? isOpen : undefined} aria-selected={isSelected}>
-      <button
-        type="button"
-        // Registered so Back can return focus to the row that opened the viewer.
-        ref={(node) => registerRow(entry.path, node)}
-        onClick={() =>
-          entry.isDir ? onToggle(entry.path) : onSelect(entry.path, entry.previewKind)
-        }
-        onContextMenu={(event) => {
-          event.preventDefault();
-          setMenu({ x: event.clientX, y: event.clientY });
-        }}
-        title={entry.path}
-        style={{ paddingLeft: depth * 10 + 6 }}
-        className={`flex w-full items-center gap-1 rounded py-0.5 pr-1.5 text-left text-[11.5px] focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 ${
-          isSelected ? "bg-gray-900 text-white" : "text-gray-700 hover:bg-gray-200/60"
-        }`}
-      >
-        <span aria-hidden="true" className={`w-3 shrink-0 ${isSelected ? "text-gray-300" : "text-gray-500"}`}>
-          {entry.isDir ? (isOpen ? "▾" : "▸") : ""}
-        </span>
-        {/* A per-family glyph, so a spreadsheet is recognizable before opening. */}
-        <span aria-hidden="true" className="shrink-0 text-[10px]">
-          {glyphFor(entry)}
-        </span>
-        <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-        {entry.isSymlink && (
+    <li
+      role="treeitem"
+      aria-expanded={entry.isDir ? isOpen : undefined}
+      aria-selected={isSelected}
+      // Deliberately not `relative`. An expanded directory's `<li>` contains its
+      // whole subtree, so an `inset-y-0` overlay positioned against it stretches down
+      // that subtree and centres the overflow button beside a *child* row — which is
+      // exactly what a screenshot of the real tree showed. The positioning context is
+      // the row wrapper below.
+      className="group/row"
+    >
+      <div className="relative">
+        <button
+          type="button"
+          // Registered so Back can return focus to the row that opened the viewer.
+          ref={(node) => registerRow(entry.path, node)}
+          onClick={() =>
+            entry.isDir ? onToggle(entry.path) : onSelect(entry.path, entry.previewKind)
+          }
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setMenu({ x: event.clientX, y: event.clientY });
+          }}
+          title={entry.path}
+          // Indent is padding, not a nested margin, so a row's hover and selection
+          // background still spans the full pane width at every depth.
+          style={{ paddingLeft: depth * 12 + 6 }}
+          className={`tap-row flex w-full items-center gap-1.5 rounded-md py-1 pr-8 text-left text-xs focus-ring md:text-2xs ${
+            isSelected ? "bg-accent text-accent-ink" : "text-ink-soft hover:bg-hover"
+          }`}
+        >
+          {/*
+            The twist reserves its width for a file too, so names line up in a column
+            rather than shifting left when a sibling has no children. Rotated rather
+            than swapped for a second glyph: one element that turns reads as the same
+            control changing state.
+          */}
           <span
-            aria-label="symbolic link"
-            title="Symbolic link, resolving inside the workspace"
-            className={`shrink-0 text-[9px] ${isSelected ? "text-gray-300" : "text-gray-500"}`}
+            className={`w-3 shrink-0 ${isSelected ? "text-accent-ink-muted" : "text-ink-faint"}`}
           >
-            ↗
+            {entry.isDir && (
+              <ChevronRightIcon
+                size={12}
+                className={`transition-transform ${isOpen ? "rotate-90" : ""}`}
+              />
+            )}
           </span>
-        )}
-        {!entry.isDir && entry.size !== undefined && (
+          {/*
+            Directories are tinted and files are not. Folder and file are already
+            different silhouettes, so the colour reinforces rather than carries the
+            distinction — it survives greyscale (WCAG 1.4.1).
+          */}
           <span
-            className={`shrink-0 text-[9px] ${isSelected ? "text-gray-500" : "text-gray-500"}`}
-            title={`Modified ${formatRelative(entry.modifiedAtMs)}`}
+            className={`shrink-0 ${
+              isSelected ? "text-accent-ink" : entry.isDir ? "text-info" : "text-ink-muted"
+            }`}
           >
-            {formatBytes(entry.size)}
+            <TreeGlyph entry={entry} isOpen={isOpen} />
           </span>
-        )}
-      </button>
+          <span className={`min-w-0 flex-1 truncate ${entry.isDir ? "font-medium" : ""}`}>
+            {entry.name}
+          </span>
+          {entry.isSymlink && (
+            <span
+              aria-label="symbolic link"
+              title="Symbolic link, resolving inside the workspace"
+              className={`shrink-0 ${isSelected ? "text-accent-ink-muted" : "text-ink-muted"}`}
+            >
+              <ExternalLinkIcon size={11} />
+            </span>
+          )}
+          {/* Hidden on a touch pointer: the row is already at its 44px minimum, and
+              the size competes with the name for the width a phone does not have. */}
+          {!entry.isDir && entry.size !== undefined && (
+            <span
+              className={`shrink-0 text-3xs pointer-coarse:hidden ${
+                isSelected ? "text-accent-ink-muted" : "text-ink-muted"
+              }`}
+              title={`Modified ${formatRelative(entry.modifiedAtMs)}`}
+            >
+              {formatBytes(entry.size)}
+            </span>
+          )}
+        </button>
+
+        {/*
+          The same actions as the right-click menu, on a button.
+
+          Right-click is the only other way to reach them, and there is no right-click
+          on a touch screen — so on a phone every one of these was unreachable, not
+          merely awkward. Revealed on hover with a fine pointer to keep the tree quiet;
+          always present with a coarse one, where there is no hover to reveal it with.
+          A sibling of the row rather than a child, because a button nested inside the
+          row's own button is invalid HTML.
+        */}
+        <span className="absolute inset-y-0 right-0 flex items-center pr-0.5 opacity-0 group-hover/row:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
+          <MenuButton label={`${entry.name} actions`} items={items} align="end">
+            {(trigger) => (
+              <IconButton
+                label={`${entry.name} actions`}
+                className={isSelected ? "text-accent-ink-muted" : ""}
+                {...trigger}
+              >
+                <MoreIcon size={14} />
+              </IconButton>
+            )}
+          </MenuButton>
+        </span>
+      </div>
 
       {entry.isDir && isOpen && (
         <Directory

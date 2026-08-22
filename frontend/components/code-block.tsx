@@ -64,9 +64,9 @@ export const CodeBlock = memo(function CodeBlock({
   }
 
   return (
-    <figure className="group relative overflow-hidden rounded border border-gray-200 bg-gray-50">
-      <div className="flex items-center justify-between gap-2 border-b border-gray-200 bg-gray-100/70 px-2 py-0.5">
-        <figcaption className="font-mono text-[10px] uppercase tracking-wide text-gray-500">
+    <figure className="group relative overflow-hidden rounded border border-line bg-sunken">
+      <div className="flex items-center justify-between gap-2 border-b border-line bg-hover px-2 py-0.5">
+        <figcaption className="font-mono text-3xs uppercase tracking-wide text-ink-muted">
           {language || "text"}
           <span className="ml-1.5 normal-case tracking-normal">
             {lines.length} {lines.length === 1 ? "line" : "lines"}
@@ -75,20 +75,20 @@ export const CodeBlock = memo(function CodeBlock({
         <button
           type="button"
           onClick={() => void copy()}
-          className="rounded px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-white hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="rounded px-1.5 py-0.5 text-3xs text-ink-muted hover:bg-raised hover:text-ink focus-ring"
         >
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
 
       <div className="overflow-x-auto">
-        <pre className="min-w-full py-1 font-mono text-[11.5px] leading-[1.55] text-gray-800">
+        <pre className="min-w-full py-1 font-mono text-2xs leading-[1.55] text-ink">
           {visible.map((line, index) => (
             <span key={index} className="flex">
               {showLineNumbers && (
                 <span
                   aria-hidden="true"
-                  className="sticky left-0 shrink-0 select-none border-r border-gray-200 bg-gray-50 px-2 text-right text-gray-500"
+                  className="sticky left-0 shrink-0 select-none border-r border-line bg-sunken px-2 text-right text-ink-muted"
                   style={{ minWidth: `${String(startLine + lines.length).length + 1.5}ch` }}
                 >
                   {startLine + index}
@@ -104,7 +104,7 @@ export const CodeBlock = memo(function CodeBlock({
         <button
           type="button"
           onClick={() => setExpanded(!expanded)}
-          className="w-full border-t border-gray-200 bg-gray-100/70 px-2 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="w-full border-t border-line bg-hover px-2 py-1 text-2xs font-medium text-ink-muted hover:bg-active focus-ring"
         >
           {expanded
             ? `Show first ${maxLines} lines`
@@ -133,13 +133,13 @@ export const OutputBlock = memo(function OutputBlock({
   return (
     <div
       className={`overflow-hidden rounded border ${
-        tone === "error" ? "border-red-200 bg-red-50/60" : "border-gray-200 bg-gray-50"
+        tone === "error" ? "border-danger-line bg-danger-bg" : "border-line bg-sunken"
       }`}
     >
       <div className="overflow-x-auto">
         <pre
-          className={`whitespace-pre px-2 py-1.5 font-mono text-[11.5px] leading-[1.55] ${
-            tone === "error" ? "text-red-900" : "text-gray-700"
+          className={`whitespace-pre px-2 py-1.5 font-mono text-2xs leading-[1.55] ${
+            tone === "error" ? "text-danger" : "text-ink-soft"
           }`}
         >
           {visible.join("\n") || " "}
@@ -149,7 +149,7 @@ export const OutputBlock = memo(function OutputBlock({
         <button
           type="button"
           onClick={() => setExpanded(!expanded)}
-          className="w-full border-t border-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-600 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="w-full border-t border-line px-2 py-0.5 text-3xs font-medium text-ink-muted hover:bg-hover focus-ring"
         >
           {expanded ? "Show less" : `Show all ${lines.length} lines`}
         </button>

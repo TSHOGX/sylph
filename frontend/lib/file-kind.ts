@@ -94,26 +94,73 @@ export function servesRawBytes(path: string): boolean {
   return kind === "pdf" || kind === "html" || kind === "image";
 }
 
-/** Glyph for a tree row, so a spreadsheet is recognizable before opening it. */
-export function glyphFor(entry: Pick<FileEntry, "isDir" | "path" | "previewKind">): string {
-  if (entry.isDir) return "▮";
+/**
+ * Which icon a tree row gets, named rather than resolved.
+ *
+ * A name, not a component, for the same reason `tool-shape.ts` returns a `kind`:
+ * this module is pure logic with unit tests in a `node` environment, and importing
+ * React components here would put presentation in it. The tree maps the name to a
+ * component through a module-level table, which also satisfies
+ * `react-hooks/static-components` — a component *reference* returned from a
+ * function and then rendered as `<Glyph />` is indistinguishable, to the linter,
+ * from a component defined during render.
+ *
+ * A directory has no name here on purpose: the tree draws it open or closed
+ * depending on its expanded state, and only the tree knows that.
+ */
+export type FileIconName =
+  | "table"
+  | "image"
+  | "pdf"
+  | "web"
+  | "prose"
+  | "code"
+  | "plain";
+
+/**
+ * Icon name for a file, so a spreadsheet is recognizable before it is opened.
+ *
+ * This was `glyphFor`, mapping each family to a Unicode geometric shape — `▦` for a
+ * table, `▩` for an image, `▧` for a PDF. Those carry no relationship to their
+ * meaning, so they had to be learned rather than recognized, and several are absent
+ * from the default CJK fallback chain and rendered as `.notdef` boxes. Which one a
+ * reader got was a property of their installed fonts.
+ */
+export function iconFor(entry: Pick<FileEntry, "path" | "previewKind">): FileIconName {
   switch (viewerKindOf(entry.path, entry.previewKind)) {
     case "grid":
-      return "▦";
+      return "table";
     case "blocks":
-      return "▤";
+      return "prose";
     case "image":
-      return "▩";
+      return "image";
     case "pdf":
-      return "▧";
+      return "pdf";
     case "html":
-      return "◈";
+      return "web";
     case "markdown":
-      return "▪";
+      return "prose";
     default:
-      return "▫";
+      // Source code is distinguished from plain text here, which the server does
+      // not do — it only classifies the families it must parse differently.
+      return CODE_EXTENSIONS.has(extensionOf(entry.path)) ? "code" : "plain";
   }
 }
+
+/**
+ * Extensions that read as source rather than prose.
+ *
+ * Not exhaustive and does not need to be: the fallback is a plain document, which
+ * is never *wrong*, only less specific. Ordered by what a coding agent actually
+ * touches in this project.
+ */
+const CODE_EXTENSIONS = new Set([
+  "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "go", "rb", "java", "kt",
+  "swift", "c", "h", "cc", "cpp", "hpp", "cs", "php", "sh", "bash", "zsh", "fish",
+  "sql", "json", "jsonc", "yaml", "yml", "toml", "ini", "css", "scss", "less",
+  "vue", "svelte", "lua", "pl", "r", "scala", "clj", "ex", "exs", "erl", "hs",
+  "dart", "zig", "nim", "proto", "graphql", "gql", "tf", "hcl", "dockerfile",
+]);
 
 /** Human-readable family name, for the viewer header and the context menu. */
 export function describeKind(kind: ViewerKind): string {

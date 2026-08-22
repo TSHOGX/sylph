@@ -47,7 +47,7 @@ export class ErrorBoundary extends Component<Props, State> {
     return (
       <div
         role="alert"
-        className="m-4 rounded-lg border border-red-200 bg-red-50 p-4 text-red-900"
+        className="m-4 rounded-lg border border-danger-line bg-danger-bg p-4 text-danger"
       >
         <p className="font-medium">Something went wrong in {region}.</p>
         <p className="mt-1 text-sm break-words">{error.message}</p>
@@ -55,14 +55,14 @@ export class ErrorBoundary extends Component<Props, State> {
           <button
             type="button"
             onClick={this.reset}
-            className="rounded border border-red-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-red-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+            className="rounded border border-danger-line bg-raised px-3 py-1.5 text-sm font-medium hover:bg-danger-bg focus-ring"
           >
             Try again
           </button>
           <button
             type="button"
             onClick={() => window.location.reload()}
-            className="rounded border border-red-300 px-3 py-1.5 text-sm font-medium hover:bg-red-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+            className="rounded border border-danger-line px-3 py-1.5 text-sm font-medium hover:bg-danger-bg focus-ring"
           >
             Reload page
           </button>

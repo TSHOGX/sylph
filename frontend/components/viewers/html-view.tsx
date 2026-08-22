@@ -48,14 +48,14 @@ export function HtmlView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-b border-gray-200 bg-gray-50 px-2 py-1">
-        <span className="flex-1 text-[10px] text-gray-500">
+      <div className="flex shrink-0 items-center gap-2 border-b border-line bg-sunken px-2 py-1">
+        <span className="flex-1 text-3xs text-ink-muted">
           {rendered ? "Rendered without scripts or network access" : "Source"}
         </span>
         <button
           type="button"
           onClick={() => setRendered(!rendered)}
-          className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="rounded border border-line bg-raised px-1.5 py-0.5 text-3xs font-medium text-ink-soft hover:bg-hover focus-ring"
         >
           {rendered ? "View source" : "View rendered"}
         </button>
@@ -65,7 +65,7 @@ export function HtmlView({
         // Said plainly rather than shown as a broken page: `srcdoc` resolves
         // relative URLs against the parent document, so workspace-relative
         // images cannot load, and the CSP blocks external ones.
-        <p className="shrink-0 border-b border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-900">
+        <p className="shrink-0 border-b border-warning-line bg-warning-bg px-2 py-1 text-3xs text-warning">
           {blocked}
         </p>
       )}
@@ -83,10 +83,10 @@ export function HtmlView({
           referrerPolicy="no-referrer"
           srcDoc={sandboxed.html}
           title={`Rendered preview of ${name}`}
-          className="min-h-0 w-full flex-1 border-0 bg-white"
+          className="min-h-0 w-full flex-1 border-0 bg-raised"
         />
       ) : (
-        <div className="min-h-0 flex-1 overflow-auto p-2">
+        <div className="min-h-0 flex-1 overflow-auto overscroll-contain p-2">
           <CodeBlock code={html} language="html" maxLines={Number.MAX_SAFE_INTEGER} />
         </div>
       )}

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -49,6 +49,25 @@ async function openPane(page: Page, dir: string) {
 }
 
 /**
+ * The activating button of one tree row, addressed by its workdir-relative path.
+ *
+ * Every row now holds two buttons: the row itself, and an overflow menu named
+ * "<name> actions". The overflow button exists because a row's actions were
+ * otherwise reachable only by right-click, and there is no right-click on a touch
+ * screen — so on a phone every one of them was unreachable rather than merely
+ * inconvenient. Its label means a bare `getByRole("button", { name: /notes\.md/ })`
+ * now matches two elements.
+ *
+ * Matching on `title` rather than on the accessible name is what disambiguates
+ * them: the row carries the entry's path, the overflow carries "<name> actions".
+ * An `exact` *name* match would not work — a row's accessible name legitimately
+ * includes its file size and symlink marker, so it is not just the filename.
+ */
+function treeRow(pane: Locator, path: string): Locator {
+  return pane.getByTitle(path, { exact: true });
+}
+
+/**
  * The spec that pins the swap.
  *
  * It fails if anyone converts the `hidden` toggle to conditional rendering, which
@@ -66,10 +85,10 @@ test("opening a file swaps the tree for the viewer, and Back restores both", asy
   await expect(tree).toBeVisible();
 
   // Expand a directory, so there is state that unmounting would destroy.
-  await pane.getByRole("button", { name: /nested/ }).click();
-  await expect(pane.getByRole("button", { name: /inner\.txt/ })).toBeVisible();
+  await treeRow(pane, "nested").click();
+  await expect(treeRow(pane, "nested/inner.txt")).toBeVisible();
 
-  await pane.getByRole("button", { name: /notes\.md/ }).click();
+  await treeRow(pane, "notes.md").click();
 
   // The viewer takes the pane and the tree is gone from view *and* from the
   // accessibility tree, so a keyboard user cannot tab into an invisible tree.
@@ -79,7 +98,7 @@ test("opening a file swaps the tree for the viewer, and Back restores both", asy
   await pane.getByRole("button", { name: /Files/ }).click();
   await expect(tree).toBeVisible();
   // The expanded directory is still expanded: this is what `hidden` buys.
-  await expect(pane.getByRole("button", { name: /inner\.txt/ })).toBeVisible();
+  await expect(treeRow(pane, "nested/inner.txt")).toBeVisible();
 });
 
 test("the expand control opens a dialog that Escape closes, restoring focus", async ({
@@ -88,7 +107,7 @@ test("the expand control opens a dialog that Escape closes, restoring focus", as
   const dir = workdir({ "data.csv": "region,revenue\nAPAC,1200\n" });
   const pane = await openPane(page, dir);
 
-  await pane.getByRole("button", { name: /data\.csv/ }).click();
+  await treeRow(pane, "data.csv").click();
   const expand = pane.getByRole("button", { name: "Open full screen" });
   await expand.click();
 
@@ -122,7 +141,7 @@ test("the fullscreen dialog fits a table but fills for a rendered page", async (
   async function widthFor(file: string) {
     const back = pane.getByRole("button", { name: /Files/ });
     if ((await back.count()) && (await back.first().isVisible())) await back.first().click();
-    await pane.getByRole("button", { name: new RegExp(file.replace(".", "\\.")) }).click();
+    await treeRow(pane, file).click();
     await pane.getByRole("button", { name: "Open full screen" }).click();
     const box = await page.getByRole("dialog").boundingBox();
     await page.keyboard.press("Escape");
@@ -146,7 +165,7 @@ test("opening a picker dismisses the fullscreen viewer", async ({ page }) => {
   const dir = workdir({ "data.csv": "a,b\n1,2\n" });
   const pane = await openPane(page, dir);
 
-  await pane.getByRole("button", { name: /data\.csv/ }).click();
+  await treeRow(pane, "data.csv").click();
   await pane.getByRole("button", { name: "Open full screen" }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
@@ -174,7 +193,7 @@ test("a CSV renders as a table with real column letters and typed alignment", as
     "data.csv": 'region,revenue\n"Smith, Alice",1200\nBob,980\n',
   });
   const pane = await openPane(page, dir);
-  await pane.getByRole("button", { name: /data\.csv/ }).click();
+  await treeRow(pane, "data.csv").click();
 
   const table = pane.getByRole("table");
   await expect(table).toBeVisible();
@@ -203,7 +222,7 @@ test("HTML renders in a frame that cannot run scripts or reach the page", async 
   const pane = await openPane(page, dir);
   const titleBefore = await page.title();
 
-  await pane.getByRole("button", { name: /page\.html/ }).click();
+  await treeRow(pane, "page.html").click();
 
   const frame = pane.locator("iframe");
   await expect(frame).toBeVisible();
@@ -248,7 +267,7 @@ test("an image opens in a viewer offering fit and zoom", async ({ page }) => {
   );
 
   const pane = await openPane(page, dir);
-  await pane.getByRole("button", { name: /pixel\.gif/ }).click();
+  await treeRow(pane, "pixel.gif").click();
 
   await expect(pane.getByRole("img", { name: /pixel\.gif/ })).toBeVisible();
   await expect(pane.getByRole("button", { name: "Zoom in" })).toBeVisible();
@@ -262,7 +281,7 @@ test("the viewer and the fullscreen dialog have no accessibility violations", as
 }) => {
   const dir = workdir({ "data.csv": "region,revenue\nAPAC,1200\nEMEA,980\n" });
   const pane = await openPane(page, dir);
-  await pane.getByRole("button", { name: /data\.csv/ }).click();
+  await treeRow(pane, "data.csv").click();
   await expect(pane.getByRole("table")).toBeVisible();
 
   const { default: AxeBuilder } = await import("@axe-core/playwright");

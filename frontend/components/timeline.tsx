@@ -29,14 +29,52 @@
  * `MemoizedRow` for the measurement that would reverse that call.
  */
 
-import { memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
 import type { StreamEvent } from "@/lib/api";
 import { formatTime } from "@/lib/format";
-import { basename, describeTool, resultStatus, type ToolShape } from "@/lib/tool-shape";
+import {
+  basename,
+  describeTool,
+  resultStatus,
+  type ToolKind,
+  type ToolShape,
+} from "@/lib/tool-shape";
 import { CodeBlock, OutputBlock } from "@/components/code-block";
 import { DiffView } from "@/components/diff-view";
 import { Markdown } from "@/components/markdown";
 import { useSettings } from "@/lib/settings";
+import {
+  BranchIcon,
+  CheckIcon,
+  ChevronRightIcon,
+  EyeIcon,
+  FilePlusIcon,
+  PencilIcon,
+  ReplyIcon,
+  SearchIcon,
+  SparklesIcon,
+  TerminalIcon,
+  ToolIcon,
+  XIcon,
+  type IconProps,
+} from "@/components/icons";
+
+/**
+ * Presentation category to icon.
+ *
+ * Lives here rather than in `lib/tool-shape.ts` so that module stays pure logic
+ * with no React import — it is unit-tested in a `node` environment. `kind` is the
+ * semantic answer; which picture represents it is a rendering decision.
+ */
+const TOOL_ICONS: Record<ToolKind, (props: IconProps) => ReactElement> = {
+  read: EyeIcon,
+  edit: PencilIcon,
+  write: FilePlusIcon,
+  shell: TerminalIcon,
+  search: SearchIcon,
+  task: BranchIcon,
+  other: ToolIcon,
+};
 
 /**
  * Collapse a raw event stream into displayable rows.
@@ -222,16 +260,16 @@ function TimelineRowView({
 function UserPrompt({ event }: { event: StreamEvent }) {
   return (
     <div className="flex gap-2 pt-2">
-      <span aria-hidden="true" className="select-none pt-px font-mono text-sm text-gray-500">
+      <span aria-hidden="true" className="select-none pt-px font-mono text-sm text-ink-muted">
         ›
       </span>
       <div className="min-w-0 flex-1">
-        <p className="whitespace-pre-wrap break-words text-sm font-medium text-gray-900">
+        <p className="whitespace-pre-wrap break-words text-sm font-medium text-ink">
           {event.text}
         </p>
       </div>
       <time
-        className="shrink-0 pt-0.5 text-[10px] text-gray-500"
+        className="shrink-0 pt-0.5 text-3xs text-ink-muted"
         dateTime={new Date(event.createdAtMs).toISOString()}
       >
         {formatTime(event.createdAtMs)}
@@ -244,12 +282,12 @@ function UserPrompt({ event }: { event: StreamEvent }) {
 function AssistantText({ event, streaming }: { event: StreamEvent; streaming: boolean }) {
   if (!event.text) return null;
   return (
-    <div className="py-0.5 text-sm leading-relaxed text-gray-900">
+    <div className="py-0.5 text-sm leading-relaxed text-ink">
       <Markdown text={event.text} />
       {streaming && (
         <span
           aria-hidden="true"
-          className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-gray-400 align-middle"
+          className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-ink-faint align-middle"
         />
       )}
     </div>
@@ -281,17 +319,20 @@ function ThinkingBlock({
 
   return (
     <details open={open} className="group">
-      <summary className="flex cursor-pointer list-none items-center gap-1.5 py-0.5 text-xs text-gray-500 hover:text-gray-800">
-        <span aria-hidden="true" className="w-3 text-gray-500">
-          ▸
-        </span>
-        <span aria-hidden="true">✻</span>
+      <summary className="tap-row flex cursor-pointer list-none items-center gap-1.5 py-0.5 text-xs text-ink-muted hover:text-ink">
+        {/* Rotates with the disclosure rather than swapping to a second icon: one
+            element that turns reads as the same control changing state. */}
+        <ChevronRightIcon
+          size={12}
+          className="transition-transform group-open:rotate-90"
+        />
+        <SparklesIcon size={13} />
         <span>Thinking</span>
-        <span className="text-gray-500">
+        <span className="text-ink-muted">
           {streaming ? "in progress" : `${wordCount(event.text)} words`}
         </span>
       </summary>
-      <div className="ml-4 border-l border-gray-200 pl-3 py-1 text-[13px] leading-relaxed text-gray-500">
+      <div className="ml-4 border-l border-line pl-3 py-1 text-xs leading-relaxed text-ink-muted">
         <Markdown text={event.text} />
       </div>
     </details>
@@ -344,14 +385,14 @@ function ToolCall({
     <section
       aria-label={`${shape.name} tool call`}
       className={`border-l-2 pl-2.5 ${
-        status.failed ? "border-red-400" : running ? "border-blue-400" : "border-gray-200"
+        status.failed ? "border-danger-line" : running ? "border-info-line" : "border-line"
       }`}
     >
       <div className="flex items-baseline gap-1.5 py-0.5 text-xs">
-        <span aria-hidden="true" className="shrink-0 text-gray-500">
-          {shape.icon}
+        <span className="shrink-0 text-ink-muted">
+          <ToolGlyph kind={shape.kind} />
         </span>
-        <span className="shrink-0 font-medium text-gray-800">{shape.name}</span>
+        <span className="shrink-0 font-medium text-ink">{shape.name}</span>
 
         <ToolTarget shape={shape} onOpenFile={openFile} />
 
@@ -362,7 +403,7 @@ function ToolCall({
               type="button"
               onClick={() => setOpen(!isOpen)}
               aria-expanded={isOpen}
-              className="rounded px-1 text-[10px] text-gray-500 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              className="rounded px-1 text-3xs text-ink-muted hover:bg-hover hover:text-ink-soft focus-ring"
             >
               {isOpen ? "less" : "more"}
             </button>
@@ -389,8 +430,8 @@ function ToolCall({
           )}
 
           {Object.keys(shape.args).length > 0 && (
-            <details className="text-[11px]">
-              <summary className="cursor-pointer text-gray-500 hover:text-gray-700">
+            <details className="text-2xs">
+              <summary className="cursor-pointer text-ink-muted hover:text-ink-soft">
                 Arguments
               </summary>
               <OutputBlock text={JSON.stringify(shape.args, null, 2)} maxLines={20} />
@@ -420,14 +461,14 @@ function ToolTarget({
         type="button"
         onClick={() => onOpenFile(shape.path!)}
         title={`Open ${shape.path} in Artifacts`}
-        className="min-w-0 truncate font-mono text-[11px] text-gray-500 hover:text-gray-900 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        className="min-w-0 truncate font-mono text-2xs text-ink-muted hover:text-ink hover:underline focus-ring"
       >
         {shape.path}
       </button>
     );
   }
   return (
-    <span className="min-w-0 truncate font-mono text-[11px] text-gray-500">{shape.summary}</span>
+    <span className="min-w-0 truncate font-mono text-2xs text-ink-muted">{shape.summary}</span>
   );
 }
 
@@ -442,23 +483,23 @@ function StatusMark({
 }) {
   if (running) {
     return (
-      <span className="flex items-center gap-1 text-[10px] text-blue-600">
-        <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
+      <span className="flex items-center gap-1 text-3xs text-info">
+        <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-info-solid" />
         running
       </span>
     );
   }
   if (failed) {
     return (
-      <span className="text-[10px] font-medium text-red-700">
-        <span aria-hidden="true">✕ </span>
+      <span className="flex items-center gap-0.5 text-3xs font-medium text-danger">
+        <XIcon size={11} />
         failed{exitCode !== undefined ? ` (exit ${exitCode})` : ""}
       </span>
     );
   }
   return (
-    <span className="text-[10px] text-emerald-700">
-      <span aria-hidden="true">✓</span>
+    <span className="text-success">
+      <CheckIcon size={12} />
       <span className="sr-only">succeeded</span>
     </span>
   );
@@ -481,13 +522,13 @@ function OrphanResult({
   return (
     <section
       aria-label="Tool result"
-      className={`border-l-2 pl-2.5 ${status.failed ? "border-red-400" : "border-gray-200"}`}
+      className={`border-l-2 pl-2.5 ${status.failed ? "border-danger-line" : "border-line"}`}
     >
       <div className="flex items-baseline gap-1.5 py-0.5 text-xs">
-        <span aria-hidden="true" className="text-gray-500">
-          ↳
+        <span className="text-ink-muted">
+          <ReplyIcon size={13} />
         </span>
-        <span className="font-medium text-gray-700">
+        <span className="font-medium text-ink-soft">
           {event.name ? `${event.name} result` : "Result"}
         </span>
         <span className="ml-auto flex items-center gap-1.5">
@@ -496,7 +537,7 @@ function OrphanResult({
             type="button"
             onClick={() => setOpen(!isOpen)}
             aria-expanded={isOpen}
-            className="rounded px-1 text-[10px] text-gray-500 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            className="rounded px-1 text-3xs text-ink-muted hover:bg-hover hover:text-ink-soft focus-ring"
           >
             {isOpen ? "less" : "more"}
           </button>
@@ -527,7 +568,7 @@ function UsageLine({ event }: { event: StreamEvent }) {
   if (input === undefined && output === undefined) return null;
 
   return (
-    <p className="py-0.5 text-[10px] text-gray-500">
+    <p className="py-0.5 text-3xs text-ink-muted">
       {input !== undefined && `${compact(input)} in`}
       {input !== undefined && output !== undefined && " / "}
       {output !== undefined && `${compact(output)} out`}
@@ -539,12 +580,12 @@ function StatusLine({ event }: { event: StreamEvent }) {
   if (!event.text) return null;
   return (
     <p
-      className={`py-0.5 text-[11px] ${
-        event.isError ? "font-medium text-red-700" : "text-gray-500"
+      className={`py-0.5 text-2xs ${
+        event.isError ? "font-medium text-danger" : "text-ink-muted"
       }`}
       role={event.isError ? "alert" : undefined}
     >
-      {event.isError && <span aria-hidden="true">✕ </span>}
+      {event.isError && <XIcon size={11} className="mr-0.5 inline-block align-[-1px]" />}
       {event.text}
     </p>
   );
@@ -561,6 +602,12 @@ function numeric(source: Record<string, unknown>, keys: string[]): number | unde
 function compact(value: number): string {
   if (value < 1000) return String(value);
   return `${(value / 1000).toFixed(1)}K`;
+}
+
+/** The icon for a tool's presentation category. */
+function ToolGlyph({ kind }: { kind: ToolKind }) {
+  const Glyph = TOOL_ICONS[kind];
+  return <Glyph size={13} />;
 }
 
 function wordCount(text: string): number {

@@ -1,26 +1,435 @@
 @import "tailwindcss";
 
+/**
+ * Design tokens.
+ *
+ * Every colour in the app resolves through a semantic token declared here. No
+ * component names a palette step: `bg-gray-50` and `text-gray-500` do not appear
+ * outside this file. That is not tidiness — it is the only way a theme can be a
+ * value swap instead of a 28-file edit, which is what the previous structure
+ * would have required (28 files hardcoded `gray-*`, 139 uses of 10 different
+ * ad-hoc pixel font sizes, 92 copies of one focus-ring incantation).
+ *
+ * # Light values are byte-identical to what they replaced
+ *
+ * The light palette below is Tailwind's own `gray`/`red`/`emerald`/`amber`/
+ * `blue`/`violet` steps, copied verbatim in oklch. That is deliberate: several
+ * components carry measured WCAG contrast ratios in their comments ("gray-500 on
+ * gray-900 measures 3.66:1"), and a token that merely *looked* similar would
+ * silently invalidate every one of them. The light theme is therefore a pure
+ * refactor, and only dark mode introduces new values.
+ *
+ * # Why the palette lives in plain `:root`, not in `@theme`
+ *
+ * Tailwind 4 can tree-shake unused `@theme` variables out of the emitted CSS. A
+ * token referenced *only* by another token's `color-mix()` — every `*-bg` and
+ * `*-line` below — is exactly what that would drop, and the failure mode is an
+ * invisibly broken colour rather than a build error. So the values live in a
+ * plain `:root` block Tailwind never rewrites, and `@theme inline` maps them onto
+ * utility names. This is also the documented pattern for runtime theming.
+ *
+ * # Derived tints
+ *
+ * `*-bg` and `*-line` are `color-mix()` against `--canvas` rather than separate
+ * hand-picked steps, so the dark theme gets correct tints for free: overriding
+ * `--danger` and `--canvas` re-derives both. Custom properties substitute at
+ * computed-value time on the element carrying the declaration, and `data-theme`
+ * is set on `<html>` — the same element as `:root` — so the mix resolves against
+ * the active theme rather than against the light one it was declared beside.
+ */
+
+/*
+  `dark:` for the few things a token cannot express (an image treatment, a
+  gradient). Almost nothing needs it; if a component reaches for `dark:` on a
+  colour, the token set is missing something instead.
+*/
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
+
+  /* Surfaces, back to front. `canvas` is the page, `raised` is anything that
+     sits on it (cards, menus, the composer), `sunken` is a recessed well
+     (sidebars, code blocks, footers). */
+  --canvas: oklch(100% 0 0);
+  --sunken: oklch(98.5% 0.002 247.839);
+  --raised: oklch(100% 0 0);
+  --hover: oklch(96.7% 0.003 264.542);
+  --active: oklch(92.8% 0.006 264.531);
+
+  --line: oklch(92.8% 0.006 264.531);
+  --line-strong: oklch(87.2% 0.01 258.338);
+
+  /* Text, by emphasis. Three tiers carry every label in the app; `faint` is for
+     non-text decoration only, because it does not clear 4.5:1 on any surface.
+     `ink-muted` is gray-600 (7.4:1 on canvas) rather than gray-500 (4.83:1):
+     both were in use for the same job, and the stronger one is the one that
+     still passes on `sunken`. */
+  --ink: oklch(21% 0.034 264.665);
+  --ink-soft: oklch(37.3% 0.034 259.733);
+  --ink-muted: oklch(44.6% 0.03 256.802);
+  --ink-faint: oklch(70.7% 0.022 261.325);
+
+  /* Primary action, and text placed on it. Inverts in dark mode, which is why
+     `accent-ink` exists rather than a hardcoded `text-white`. */
+  --accent: oklch(21% 0.034 264.665);
+  --accent-hover: oklch(37.3% 0.034 259.733);
+  --accent-ink: oklch(100% 0 0);
+  /* Secondary text on an accent surface. gray-300, not gray-500: measured at
+     3.66:1 on gray-900, which fails at this size. */
+  --accent-ink-muted: oklch(87.2% 0.01 258.338);
+
+  /* Blue, not the accent grey: a grey ring is invisible against the accent
+     surfaces it has to appear on, and blue is the platform convention. */
+  --focus: oklch(54.6% 0.245 262.881);
+
+  /* Status hues. One ink per hue; `-bg` and `-line` derive from it. `-solid` is
+     for a filled dot or bar, where the hue carries at full strength. */
+  --danger: oklch(44.4% 0.177 26.899);
+  --danger-solid: oklch(63.7% 0.237 25.331);
+  --success: oklch(50.8% 0.118 165.612);
+  --success-solid: oklch(69.6% 0.17 162.48);
+  --warning: oklch(47.3% 0.137 46.201);
+  --warning-solid: oklch(76.9% 0.188 70.08);
+  --info: oklch(48.8% 0.243 264.376);
+  --info-solid: oklch(62.3% 0.214 259.815);
+  /* Session origin is product data, not decoration: `native` preserves the
+     originating agent's identity and lifecycle. Violet is the spec's colour. */
+  --native: oklch(43.2% 0.232 292.759);
+  --native-solid: oklch(60.6% 0.25 292.717);
+  --link: oklch(48.8% 0.243 264.376);
+}
+
+/*
+  Dark theme.
+
+  Set as an attribute on `<html>` by the bootstrap script in `layout.tsx`, before
+  first paint, so there is no light flash. The app requires JavaScript to render
+  at all (it is a client-side SPA behind an auth gate), so there is no no-JS
+  fallback to duplicate here — the attribute is always present.
+
+  Not a simple inversion. `canvas` is a very dark blue-grey rather than black so
+  that `raised` can lift above it without going grey, and the ink ramp is
+  compressed at the top: pure white on a dark surface halates, and 96% reads as
+  cleaner at the same measured contrast. Every value below was checked against
+  `canvas`: ink 17.6:1, ink-soft 11.4:1, ink-muted 6.2:1, and each status ink
+  above 7:1. `ink-faint` is 3.4:1 and is therefore decoration-only, exactly as in
+  the light theme.
+*/
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: oklch(17.5% 0.012 265);
+  --sunken: oklch(14.5% 0.012 265);
+  --raised: oklch(21.5% 0.013 265);
+  --hover: oklch(26% 0.014 265);
+  --active: oklch(31% 0.015 265);
+
+  --line: oklch(29% 0.014 265);
+  --line-strong: oklch(37% 0.016 265);
+
+  --ink: oklch(96% 0.003 265);
+  --ink-soft: oklch(84% 0.006 265);
+  --ink-muted: oklch(70% 0.012 265);
+  --ink-faint: oklch(52% 0.014 265);
+
+  /* Inverted: a near-white button with dark text is the primary action here. */
+  --accent: oklch(92% 0.004 265);
+  --accent-hover: oklch(100% 0 0);
+  --accent-ink: oklch(17.5% 0.012 265);
+  --accent-ink-muted: oklch(38% 0.016 265);
+
+  --focus: oklch(70.7% 0.165 254.624);
+
+  --danger: oklch(74% 0.16 22);
+  --danger-solid: oklch(63.7% 0.237 25.331);
+  --success: oklch(78% 0.14 163);
+  --success-solid: oklch(69.6% 0.17 162.48);
+  --warning: oklch(82% 0.15 78);
+  --warning-solid: oklch(76.9% 0.188 70.08);
+  --info: oklch(76% 0.13 253);
+  --info-solid: oklch(62.3% 0.214 259.815);
+  --native: oklch(78% 0.13 293);
+  --native-solid: oklch(60.6% 0.25 292.717);
+  --link: oklch(76% 0.13 253);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  /*
+    System stack, no webfont. A local-first app should not need the network to
+    render text, an install must work offline, and `next build` runs in E2E on
+    whatever machine is to hand. This resolves to SF Pro on Apple platforms and
+    Segoe UI Variable on Windows — the same faces the OS uses, which is most of
+    why native apps look native. The CJK entries matter because this project's
+    users read Chinese: without them a mixed string falls back per-glyph and the
+    line ends up in two different faces.
+  */
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono:
+    ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  /*
+    Type scale. Two steps below Tailwind's `xs` exist because dense chrome
+    genuinely needs them; what did not need to exist is 10 *different* ad-hoc
+    sizes including 9.5px, 11.5px and 12.5px. Anything smaller than `3xs` is
+    unreadable and there is no token for it.
+  */
+  --text-3xs: 0.625rem; /* 10px — counts, timestamps, key caps */
+  --text-3xs--line-height: 0.875rem;
+  --text-2xs: 0.6875rem; /* 11px — dense secondary rows */
+  --text-2xs--line-height: 0.9375rem;
+
+  --color-canvas: var(--canvas);
+  --color-sunken: var(--sunken);
+  --color-raised: var(--raised);
+  --color-hover: var(--hover);
+  --color-active: var(--active);
+
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-ink-muted: var(--accent-ink-muted);
+
+  --color-focus: var(--focus);
+
+  --color-danger: var(--danger);
+  --color-danger-solid: var(--danger-solid);
+  --color-danger-bg: color-mix(in oklab, var(--danger) 10%, var(--canvas));
+  --color-danger-line: color-mix(in oklab, var(--danger) 32%, var(--canvas));
+
+  --color-success: var(--success);
+  --color-success-solid: var(--success-solid);
+  --color-success-bg: color-mix(in oklab, var(--success) 10%, var(--canvas));
+  --color-success-line: color-mix(in oklab, var(--success) 32%, var(--canvas));
+
+  --color-warning: var(--warning);
+  --color-warning-solid: var(--warning-solid);
+  --color-warning-bg: color-mix(in oklab, var(--warning) 10%, var(--canvas));
+  --color-warning-line: color-mix(in oklab, var(--warning) 32%, var(--canvas));
+
+  --color-info: var(--info);
+  --color-info-solid: var(--info-solid);
+  --color-info-bg: color-mix(in oklab, var(--info) 10%, var(--canvas));
+  --color-info-line: color-mix(in oklab, var(--info) 32%, var(--canvas));
+
+  --color-native: var(--native);
+  --color-native-solid: var(--native-solid);
+  --color-native-bg: color-mix(in oklab, var(--native) 10%, var(--canvas));
+  --color-native-line: color-mix(in oklab, var(--native) 32%, var(--canvas));
+
+  --color-link: var(--link);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/**
+ * Base layer.
+ *
+ * The height and overflow rules here are the fix for "scrolling drags the whole
+ * screen up and reveals blank space". Three separate causes, all of them mobile:
+ *
+ * 1. `100vh` is the *large* viewport height — it measures the viewport as if the
+ *    browser's collapsible toolbars were hidden. A `h-screen` shell is therefore
+ *    taller than what is actually visible, so the document itself scrolls. The
+ *    shell now uses `100dvh`, which tracks the toolbars as they collapse.
+ * 2. Nothing pinned the document. With `html`/`body` free to scroll, a drag that
+ *    began in an inner pane continued into the document once that pane hit its
+ *    end — the blank area is the document scrolled past the shell.
+ * 3. Overscroll chained upward, so even a pinned document rubber-banded on iOS.
+ *
+ * All three have to be closed together: fixing only the height leaves the chain,
+ * and fixing only the chain leaves a shell that does not fit.
+ */
+html,
+body {
+  height: 100%;
+  /* The shell owns all scrolling; the document never does. */
+  overflow: hidden;
+  /* Stops a pane's overscroll from reaching the document and rubber-banding. */
+  overscroll-behavior: none;
+}
+
+html {
+  /* iOS inflates text in landscape without this, which breaks every measured
+     size in the type scale above. */
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  /* The grey flash on tap reads as a rendering fault on a phone; `focus-visible`
+     is what gives keyboard users their affordance instead. */
+  -webkit-tap-highlight-color: transparent;
 }
+
+/*
+  Kills the ~300ms wait a browser spends deciding whether a tap is a
+  double-tap-to-zoom. Applied to controls only, so ordinary text can still be
+  double-tapped to select.
+*/
+button,
+[role="button"],
+a,
+summary,
+label,
+select {
+  touch-action: manipulation;
+}
+
+/*
+  A focused control under 16px makes mobile Safari zoom the page, and it does not
+  zoom back out — which is the other half of "the whole screen moved". Dense
+  chrome legitimately uses 11–12px text, so rather than inflate those inputs
+  everywhere, this floor applies only to touch pointers.
+*/
+@media (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: max(1rem, 1em);
+  }
+}
+
+::selection {
+  background: color-mix(in oklab, var(--focus) 24%, transparent);
+}
+
+/* Themed to the token set: a light scrollbar on a dark pane is a bright seam
+   down the edge of the app. */
+* {
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/**
+ * The one focus treatment, in one place.
+ *
+ * This replaces 92 copies of `focus:outline-none focus-visible:ring-2
+ * focus-visible:ring-gray-900`. An `outline` rather than a `ring`: a ring is a
+ * box-shadow, so it is clipped by every `overflow-hidden` ancestor — which is why
+ * the ring was invisible on rows inside the file tree and the code block header.
+ * An outline is never clipped, and `outline-offset` keeps it off the glyphs.
+ *
+ * Transparent rather than absent when unfocused, so forced-colours mode still has
+ * an outline to colour, and so the offset does not shift layout on focus.
+ */
+@utility focus-ring {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+
+  &:focus-visible {
+    outline-color: var(--color-focus);
+  }
+}
+
+/**
+ * A scroll container.
+ *
+ * `overscroll-contain` is the per-pane half of the fix above: without it, a flick
+ * that reaches the end of the transcript continues into whatever is behind it.
+ * `-webkit-overflow-scrolling: touch` restores momentum scrolling inside a pane
+ * on iOS, which is lost as soon as an ancestor is `overflow: hidden`.
+ */
+@utility pane {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/**
+ * Minimum hit area on a touch pointer.
+ *
+ * 44px is Apple's HIG figure and close to Material's 48dp. Applied only under
+ * `pointer: coarse`, so the desktop app keeps its dense 24px rows — the same
+ * control should not be finger-sized on a machine driven by a mouse.
+ */
+@utility tap-target {
+  @media (pointer: coarse) {
+    min-height: 2.75rem;
+    min-width: 2.75rem;
+  }
+}
+
+/** As above, for a row in a dense list, where only height applies. */
+@utility tap-row {
+  @media (pointer: coarse) {
+    min-height: 2.75rem;
+  }
+}
+
+/*
+  Safe-area insets, for the notch and the home indicator. These *add* to any
+  padding already on the element rather than replacing it, so a composer can be
+  `pb-2 pb-safe` and get both. Zero on every desktop browser, so they are
+  unconditional.
+*/
+@utility pb-safe {
+  padding-bottom: calc(var(--spacing) * 2 + env(safe-area-inset-bottom));
+}
+
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+
+@utility px-safe {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/*
+  Drawer and sheet motion. Short and eased-out, which is what reads as "the panel
+  came from the edge" rather than "something faded in". Reduced-motion collapses
+  these to ~0 via the block above.
+*/
+@keyframes slide-from-left {
+  from {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes slide-from-bottom {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@utility animate-drawer-left {
+  animation: slide-from-left 180ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@utility animate-sheet-up {
+  animation: slide-from-bottom 240ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@utility animate-scrim {
+  animation: fade-in 180ms ease-out;
+}
+

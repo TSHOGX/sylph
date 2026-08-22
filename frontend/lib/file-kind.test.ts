@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   describeKind,
   extensionOf,
-  glyphFor,
+  iconFor,
   servesRawBytes,
   sourceFor,
   viewerKindFor,
@@ -119,29 +119,28 @@ describe("servesRawBytes", () => {
   });
 });
 
-describe("glyphFor", () => {
+describe("iconFor", () => {
   it("distinguishes families so a file is recognizable before opening", () => {
-    const glyphs = [
-      glyphFor({ isDir: false, path: "a.xlsx" }),
-      glyphFor({ isDir: false, path: "a.docx" }),
-      glyphFor({ isDir: false, path: "a.png" }),
-      glyphFor({ isDir: false, path: "a.pdf" }),
-      glyphFor({ isDir: false, path: "a.html" }),
-      glyphFor({ isDir: false, path: "a.rs" }),
+    const icons = [
+      iconFor({ path: "a.xlsx" }),
+      iconFor({ path: "a.png" }),
+      iconFor({ path: "a.pdf" }),
+      iconFor({ path: "a.html" }),
+      iconFor({ path: "a.rs" }),
     ];
-    expect(new Set(glyphs).size).toBe(glyphs.length);
+    expect(new Set(icons).size).toBe(icons.length);
   });
 
-  it("marks a directory regardless of its name", () => {
-    // A directory called `assets.css` is still a directory.
-    expect(glyphFor({ isDir: true, path: "assets.css" })).toBe(
-      glyphFor({ isDir: true, path: "src" }),
-    );
+  it("separates source from prose, which the server does not classify", () => {
+    expect(iconFor({ path: "main.rs" })).not.toBe(iconFor({ path: "notes.txt" }));
+    // Extension-driven, so a dotfile with no extension falls back rather than
+    // being called a "gitignore file".
+    expect(iconFor({ path: ".gitignore" })).toBe(iconFor({ path: "notes.txt" }));
   });
 
-  it("follows the server hint when present", () => {
-    expect(glyphFor({ isDir: false, path: "x.bin", previewKind: "grid" })).toBe(
-      glyphFor({ isDir: false, path: "y.xlsx" }),
+  it("follows the server hint over the extension", () => {
+    expect(iconFor({ path: "x.bin", previewKind: "grid" })).toBe(
+      iconFor({ path: "y.xlsx" }),
     );
   });
 });

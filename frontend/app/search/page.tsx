@@ -32,12 +32,12 @@ export default function SearchPage() {
   const archiveDown = data ? !data.available : false;
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-4 py-2">
+    <div className="min-h-0 flex-1 pane">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-2">
         <h1 className="text-sm font-semibold">Search archive</h1>
         <Link
           href="/"
-          className="rounded-md border border-gray-200 px-2.5 py-1 text-xs font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="rounded-md border border-line px-2.5 py-1 text-xs font-medium hover:bg-sunken focus-ring"
         >
           Start screen
         </Link>
@@ -56,9 +56,9 @@ export default function SearchPage() {
             autoFocus
             placeholder="error handling, sqlx migration, ..."
             aria-describedby="archive-query-hint"
-            className="mt-1 w-full rounded-lg border px-3 py-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            className="mt-1 w-full rounded-lg border px-3 py-2 focus-ring"
           />
-          <p id="archive-query-hint" className="mt-1 text-xs text-gray-500">
+          <p id="archive-query-hint" className="mt-1 text-xs text-ink-muted">
             Searches history recorded by Claude Code, Codex, and OpenCode outside
             Sylph Web. Importing adopts a session without altering what was recorded.
           </p>
@@ -70,23 +70,23 @@ export default function SearchPage() {
           ) : archiveDown ? (
             <ArchiveUnavailable detail={data?.detail} />
           ) : trimmed.length === 0 ? (
-            <p className="py-12 text-center text-sm text-gray-500">
+            <p className="py-12 text-center text-sm text-ink-muted">
               Type a query to search the archive.
             </p>
           ) : isFetching && results.length === 0 ? (
-            <p className="py-12 text-center text-sm text-gray-500">Searching...</p>
+            <p className="py-12 text-center text-sm text-ink-muted">Searching...</p>
           ) : results.length === 0 ? (
             <div className="py-12 text-center">
-              <p className="font-medium text-gray-800">
+              <p className="font-medium text-ink">
                 No archived sessions match “{trimmed}”
               </p>
-              <p className="mx-auto mt-1 max-w-sm text-sm text-gray-500">
+              <p className="mx-auto mt-1 max-w-sm text-sm text-ink-muted">
                 Try a shorter query, or a phrase you remember typing at the time.
               </p>
             </div>
           ) : (
             <>
-              <p className="text-xs text-gray-500">
+              <p className="text-xs text-ink-muted">
                 {results.length} {results.length === 1 ? "session" : "sessions"}
                 {isFetching && " · updating"}
               </p>
@@ -125,18 +125,18 @@ function ResultCard({ hit }: { hit: SearchResult }) {
     <article className="rounded-lg border p-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <h2 className="font-medium">{label}</h2>
-        <span className="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-800">
+        <span className="shrink-0 rounded-full bg-native-bg px-2 py-0.5 text-xs font-medium text-native">
           {hit.agent}
         </span>
       </div>
 
       {snippet && (
-        <p className="mt-2 border-l-2 border-gray-200 pl-3 text-sm text-gray-600">
+        <p className="mt-2 border-l-2 border-line pl-3 text-sm text-ink-muted">
           {snippet}
         </p>
       )}
 
-      <p className="mt-2 truncate text-xs text-gray-500">
+      <p className="mt-2 truncate text-xs text-ink-muted">
         {hit.cwd && <span className="font-mono">{hit.cwd}</span>}
         {hit.startedAtMs != null && <> · started {formatRelative(hit.startedAtMs)}</>}
         {hit.hits != null && (
@@ -151,7 +151,7 @@ function ResultCard({ hit }: { hit: SearchResult }) {
         {hit.sessionId ? (
           <Link
             href={`/sessions/${hit.sessionId}`}
-            className="rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            className="rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-sunken focus-ring"
           >
             Open session
           </Link>
@@ -160,18 +160,18 @@ function ResultCard({ hit }: { hit: SearchResult }) {
             type="button"
             onClick={() => importSession.mutate()}
             disabled={importSession.isPending}
-            className="rounded-lg bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+            className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover focus-ring disabled:opacity-50"
           >
             {importSession.isPending ? "Importing..." : "Import session"}
           </button>
         )}
-        <span className="text-xs text-gray-500">
+        <span className="text-xs text-ink-muted">
           {hit.sessionId ? "Already imported" : "Imported as a native session"}
         </span>
       </div>
 
       {importSession.error && (
-        <p role="alert" className="mt-2 text-sm text-red-800">
+        <p role="alert" className="mt-2 text-sm text-danger">
           {describeImportError(importSession.error)}
         </p>
       )}
@@ -209,9 +209,9 @@ function describeError(error: unknown): string {
 
 function ErrorPanel({ message }: { message: string }) {
   return (
-    <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4">
-      <p className="font-medium text-red-900">Search failed</p>
-      <p className="mt-1 text-sm text-red-800">{message}</p>
+    <div role="alert" className="rounded-lg border border-danger-line bg-danger-bg p-4">
+      <p className="font-medium text-danger">Search failed</p>
+      <p className="mt-1 text-sm text-danger">{message}</p>
     </div>
   );
 }
@@ -225,15 +225,15 @@ function ErrorPanel({ message }: { message: string }) {
  */
 function ArchiveUnavailable({ detail }: { detail?: string }) {
   return (
-    <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-4">
-      <p className="font-medium text-amber-900">Archive unavailable</p>
-      <p className="mt-1 text-sm text-amber-800">
+    <div role="alert" className="rounded-lg border border-warning-line bg-warning-bg p-4">
+      <p className="font-medium text-warning">Archive unavailable</p>
+      <p className="mt-1 text-sm text-warning">
         The TraceDB archive could not be reached, so past sessions cannot be
         searched right now. Live sessions are unaffected. Check that the{" "}
         <code className="font-mono text-xs">trace-db</code> binary is installed and
         that <code className="font-mono text-xs">TRACEDB_BIN</code> points at it.
       </p>
-      {detail && <p className="mt-2 font-mono text-xs text-amber-700">{detail}</p>}
+      {detail && <p className="mt-2 font-mono text-xs text-warning">{detail}</p>}
     </div>
   );
 }
