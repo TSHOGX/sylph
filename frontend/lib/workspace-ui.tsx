@@ -26,6 +26,7 @@ import {
 import { useSettings } from "@/lib/settings";
 import { comboFromEvent, isTypingTarget } from "@/lib/shortcuts";
 import type { ShortcutAction } from "@/lib/settings";
+import type { PreviewKind } from "@/lib/api";
 
 /**
  * At most one overlay is up at a time; they are all modal.
@@ -44,7 +45,17 @@ export interface ArtifactTarget {
   path: string;
   /** Line to scroll to, when the request came from a tool call that named one. */
   line?: number;
+  /**
+   * Viewer family, when the caller already knew it.
+   *
+   * Comes from the tree listing, which the server classified. Absent when a tool
+   * call opened the file, in which case the viewer falls back to the extension.
+   */
+  previewKind?: PreviewKind;
 }
+
+/** Which half of the Artifacts pane is showing. */
+export type ArtifactView = "tree" | "preview";
 
 /**
  * Actions the shell handles centrally. Session-scoped actions (`stopTurn`,
@@ -66,6 +77,21 @@ interface WorkspaceUIValue {
   /** Show a file in the Artifacts pane, opening the pane if it is hidden. */
   showArtifact: (target: ArtifactTarget) => void;
   clearArtifact: () => void;
+  /**
+   * Whether the pane is browsing the tree or viewing a file.
+   *
+   * Held here rather than derived from `artifact` because Back must return to the
+   * tree *without* deselecting: the row stays highlighted and its ancestors stay
+   * expanded, which is what makes returning feel like going back rather than
+   * starting over.
+   */
+  artifactView: ArtifactView;
+  /** Return to the tree, keeping the current file selected. */
+  backToTree: () => void;
+  /** Whether the viewer is showing full-screen over the workspace. */
+  artifactFullscreen: boolean;
+  openArtifactFullscreen: () => void;
+  closeArtifactFullscreen: () => void;
   /** Register the open session's shortcut handler. Returns an unsubscriber. */
   registerSessionActions: (handler: SessionActionHandler) => () => void;
   /**
@@ -116,12 +142,18 @@ export function WorkspaceUIProvider({
 
   const [overlay, setOverlay] = useState<Overlay>("none");
   const [artifact, setArtifact] = useState<ArtifactTarget | null>(null);
+  const [artifactView, setArtifactView] = useState<ArtifactView>("tree");
+  const [artifactFullscreen, setArtifactFullscreen] = useState(false);
   const [activeWorkdir, setActiveWorkdir] = useState<string | null>(null);
   const sessionHandlerRef = useRef<SessionActionHandler | null>(null);
 
   const browseHistory = useCallback((workdir?: string) => {
     if (workdir) setActiveWorkdir(workdir);
     setOverlay("history");
+    // Called directly from the sidebar as well as through `runAction`, so the
+    // one-modal-at-a-time invariant has to be enforced here too — otherwise the
+    // history overlay opens behind an already-open full-screen viewer.
+    setArtifactFullscreen(false);
   }, []);
 
   const toggleLeft = useCallback(
@@ -142,11 +174,39 @@ export function WorkspaceUIProvider({
   const showArtifact = useCallback(
     (target: ArtifactTarget) => {
       setArtifact(target);
+      // One atomic update rather than an effect keyed on the target: the action
+      // already knows a file was chosen, so deriving "show the preview" from a
+      // state change would cascade a render to re-establish a fact we have.
+      setArtifactView("preview");
       // Opening a file from a tool call is meaningless if the pane stays hidden.
       update({ showRightSidebar: true });
     },
     [update],
   );
+
+  // Deliberately keeps `artifact` set. The tree derives its expanded ancestors
+  // from the selection, so clearing it here would collapse the directories the
+  // user navigated through on the way to the file.
+  const backToTree = useCallback(() => {
+    setArtifactView("tree");
+    setArtifactFullscreen(false);
+  }, []);
+
+  const clearArtifact = useCallback(() => {
+    setArtifact(null);
+    setArtifactView("tree");
+    setArtifactFullscreen(false);
+  }, []);
+
+  // At most one modal surface at a time. Without this, Escape and focus
+  // restoration have to reason about which of two stacked dialogs owns them —
+  // the same rule `runAction` already applies to the overlays.
+  const openArtifactFullscreen = useCallback(() => {
+    setArtifactFullscreen(true);
+    setOverlay("none");
+  }, []);
+
+  const closeArtifactFullscreen = useCallback(() => setArtifactFullscreen(false), []);
 
   const registerSessionActions = useCallback((handler: SessionActionHandler) => {
     sessionHandlerRef.current = handler;
@@ -165,6 +225,14 @@ export function WorkspaceUIProvider({
       // the palette is the wrong outcome — and it hides the effect of the command
       // that just ran. A no-op when nothing is open, so shortcut dispatch is
       // unaffected.
+      //
+      // The fullscreen viewer is dismissed whichever branch runs, which is why
+      // that call sits outside the switch rather than being repeated in each
+      // arm: the one-modal-at-a-time invariant has to hold for overlays added
+      // later too, and a per-arm call is a rule every new `case` can forget.
+      // An overlay opening behind a full-screen viewer would be unreachable.
+      setArtifactFullscreen(false);
+
       switch (action) {
         case "search":
           setOverlay("search");
@@ -245,7 +313,12 @@ export function WorkspaceUIProvider({
       closeOverlay: () => setOverlay("none"),
       artifact,
       showArtifact,
-      clearArtifact: () => setArtifact(null),
+      clearArtifact,
+      artifactView,
+      backToTree,
+      artifactFullscreen,
+      openArtifactFullscreen,
+      closeArtifactFullscreen,
       registerSessionActions,
       activeWorkdir,
       setActiveWorkdir,
@@ -262,6 +335,12 @@ export function WorkspaceUIProvider({
       overlay,
       artifact,
       showArtifact,
+      clearArtifact,
+      artifactView,
+      backToTree,
+      artifactFullscreen,
+      openArtifactFullscreen,
+      closeArtifactFullscreen,
       registerSessionActions,
       activeWorkdir,
       browseHistory,

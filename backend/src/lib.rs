@@ -21,6 +21,9 @@ pub mod api;
 pub mod attachments;
 pub mod config;
 pub mod db;
+/// Parsing spreadsheets, documents, and presentations. A library with no HTTP
+/// knowledge, so it sits beside `attachments` rather than inside `api`.
+pub mod documents;
 pub mod error;
 pub mod events;
 pub mod middleware;
@@ -135,7 +138,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/sessions/import", post(api::sessions::import))
         .route(
             "/api/v1/sessions/{id}",
-            get(api::sessions::get).patch(api::sessions::update),
+            get(api::sessions::get)
+                .patch(api::sessions::update)
+                .delete(api::sessions::delete_empty),
         )
         .route(
             "/api/v1/sessions/{id}/turns",
@@ -143,7 +148,7 @@ pub fn router(state: AppState) -> Router {
         )
         // Files before `{id}` would be ambiguous the other way round: axum
         // matches literal segments before captures, so the more specific
-        // `files/content` route must be registered, but order among these three
+        // `files/content` route must be registered, but order among these
         // does not matter. They are grouped for readability.
         .route(
             "/api/v1/sessions/{id}/files",
@@ -153,6 +158,13 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/sessions/{id}/files/content",
             get(api::files::content),
         )
+        // Parsed documents and raw bytes, both rooted at the session workdir
+        // like the tree above.
+        .route(
+            "/api/v1/sessions/{id}/files/document",
+            get(api::files::document),
+        )
+        .route("/api/v1/sessions/{id}/files/raw", get(api::files::raw))
         // Machine-level directory browsing, bounded by configured roots rather
         // than by a session. Separate from the `sessions/{id}/files` tree
         // because the root differs: see `api::fs` for the threat model.

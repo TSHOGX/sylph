@@ -2,7 +2,10 @@
 name = "sylph-web-backend"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+# 1.88 rather than 1.85 because calamine 0.36 requires it. Left at 1.85 this
+# manifest would claim support it does not have: the build fails outright on a
+# 1.85 toolchain, and only a newer local toolchain hides that.
+rust-version = "1.88"
 
 [dependencies]
 # Web framework
@@ -46,6 +49,29 @@ base64 = "0.22"
 
 # Process management
 nix = { version = "0.29", features = ["signal", "process"] }
+
+# Office document parsing for the Artifacts pane.
+#
+# Server-side rather than in the browser: the npm alternative (SheetJS `xlsx`)
+# is frozen at 0.18.5 with two unpatched High CVEs — prototype pollution
+# (CVE-2023-30533) and ReDoS (CVE-2024-22363) — reachable on exactly the
+# "parse a file we did not write" path this feature needs, and is 7.5 MB
+# unpacked against a first-load budget with ~4 KB of headroom.
+#
+# `dates` pulls in chrono, already a dependency above, so it is free. It is
+# what turns an Excel serial into a real date instead of the number 46112.
+calamine = { version = "0.36.1", features = ["dates"] }
+# Word and PowerPoint have no equivalent crate worth taking, so their XML parts
+# are walked directly. Already in the tree as a calamine dependency.
+quick-xml = "0.41"
+csv = "1.4"
+# OOXML is deflate-only, so the default features (AES, bzip2, zstd, lzma) buy
+# nothing and cost ~26 transitive crates. These flags match calamine's own pin,
+# so declaring zip directly adds no crates.
+#
+# Cargo unions features across the graph: if any future dependency enables
+# zip's `aes` or `zstd`, they come back regardless of what is written here.
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3.14"

@@ -9,15 +9,15 @@ pub struct Session {
     pub identity_mode: String,
     pub lifecycle_mode: String,
     pub agent: String,
-    #[serde(skip_serializing)]
+    #[serde(rename = "nativeSessionId", skip_serializing_if = "Option::is_none")]
     pub backend_session_id: Option<String>,
     /// TraceDB id this session was imported from, when it was.
     ///
     /// Serialized because the archive browser needs it: without it the client
     /// cannot tell that an archived row it is about to list is the same
     /// conversation as a live session, and would offer the user two ways into one
-    /// history. `backend_session_id` stays hidden — that is runner-internal
-    /// plumbing with no client use.
+    /// history. The Web UUID remains the route id; this field is the durable
+    /// archive identity used by the originating agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_session_id: Option<String>,
     pub workdir: String,

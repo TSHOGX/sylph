@@ -18,7 +18,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, type Turn, type TurnWithEvents } from "@/lib/api";
+import { api, ApiError, type Session, type Turn, type TurnWithEvents } from "@/lib/api";
 import { ErrorBoundary } from "@/lib/error-boundary";
 import { formatTimestamp, sessionLabel } from "@/lib/format";
 import { densityClasses, useSettings } from "@/lib/settings";
@@ -53,6 +53,10 @@ export default function SessionPage() {
    *  defaults, so the timeline is not stuck open after one use. */
   const [expandAll, setExpandAll] = useState<boolean | null>(null);
   const [find, setFind] = useState<string | null>(null);
+  const hasCommittedWork = useRef(false);
+  const sessionRef = useRef<Session | undefined>(undefined);
+  const hasHistoryRef = useRef(false);
+  const cleanupTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const sessionQuery = useQuery({
     queryKey: ["session", sessionId],
@@ -66,6 +70,44 @@ export default function SessionPage() {
 
   const session = sessionQuery.data?.session;
   const history = useMemo(() => historyQuery.data?.turns ?? [], [historyQuery.data]);
+
+  // Mirrored into refs so the unmount cleanup below can read current values: it
+  // has an empty dependency array on purpose, because re-running it on every
+  // session or history change would schedule and cancel the discard repeatedly
+  // rather than once at unmount.
+  //
+  // Written in an effect rather than during render. A render-phase ref write is a
+  // side effect in a function React may call speculatively and discard, so it can
+  // publish a value from a render that never committed — and it is what
+  // `react-hooks/refs` flags. An effect runs only after commit, which is exactly
+  // the guarantee the cleanup needs.
+  useEffect(() => {
+    sessionRef.current = session;
+    hasHistoryRef.current = history.length > 0;
+  }, [session, history]);
+
+  useEffect(() => {
+    if (cleanupTimerRef.current !== undefined) {
+      clearTimeout(cleanupTimerRef.current);
+      cleanupTimerRef.current = undefined;
+    }
+    return () => {
+      // Defer one tick so React Strict Mode's development-only setup/cleanup
+      // probe can cancel this before it is mistaken for real navigation.
+      cleanupTimerRef.current = setTimeout(() => {
+        const current = sessionRef.current;
+        if (
+          hasCommittedWork.current ||
+          hasHistoryRef.current ||
+          !current ||
+          current.origin !== "sylph"
+        ) {
+          return;
+        }
+        void api.sessions.deleteEmpty(current.id);
+      }, 0);
+    };
+  }, []);
 
   // The turn to stream is derived, not stored: a turn this tab started takes
   // precedence, otherwise any unfinished turn in history is adopted so reopening
@@ -113,6 +155,7 @@ export default function SessionPage() {
         idempotencyKey: crypto.randomUUID(),
       }),
     onSuccess: (result) => {
+      hasCommittedWork.current = true;
       setSentTurnId(result.turn.id);
       setText("");
       setAttachments([]);
@@ -137,6 +180,7 @@ export default function SessionPage() {
         idempotencyKey: crypto.randomUUID(),
       }),
     onSuccess: (result) => {
+      hasCommittedWork.current = true;
       setSentTurnId(result.turn.id);
       setCommandOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });

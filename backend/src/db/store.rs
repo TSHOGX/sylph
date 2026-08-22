@@ -4,6 +4,7 @@ use sqlx::sqlite::{
 use std::path::Path;
 use crate::error::{Error, Result};
 use crate::models::{Event, Incarnation, Session, Turn};
+use crate::tracedb::summarize_line;
 
 #[derive(Clone)]
 pub struct LiveStore {
@@ -103,11 +104,15 @@ impl LiveStore {
     }
 
     pub async fn get_session(&self, id: &str) -> Result<Option<Session>> {
-        sqlx::query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
+        let mut session = sqlx::query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(Error::Database)
+            .map_err(Error::Database)?;
+        if let Some(session) = session.as_mut() {
+            self.hydrate_session_title(session).await?;
+        }
+        Ok(session)
     }
 
     /// List sessions newest-activity-first, narrowed by `filter`.
@@ -118,7 +123,7 @@ impl LiveStore {
     pub async fn list_sessions(&self, filter: &SessionFilter) -> Result<Vec<Session>> {
         // Every predicate is a no-op when its bound value is NULL, which keeps
         // one prepared statement covering all filter combinations.
-        sqlx::query_as::<_, Session>(
+        let mut sessions = sqlx::query_as::<_, Session>(
             r#"
             SELECT * FROM sessions
             WHERE (?1 IS NULL OR agent = ?1)
@@ -138,7 +143,84 @@ impl LiveStore {
         .bind(filter.limit)
         .fetch_all(&self.pool)
         .await
+        .map_err(Error::Database)?;
+        for session in &mut sessions {
+            self.hydrate_session_title(session).await?;
+        }
+        Ok(sessions)
+    }
+
+    /// Fill titles for older live rows created before title derivation existed.
+    /// The first user event is the user's actual opening ask, unlike the
+    /// runner's injected envelope, and therefore matches TraceDB's label rule.
+    async fn hydrate_session_title(&self, session: &mut Session) -> Result<()> {
+        if session.title.as_deref().is_some_and(|title| !title.trim().is_empty()) {
+            return Ok(());
+        }
+        let Some(text) = sqlx::query_scalar::<_, String>(
+            "SELECT text FROM events WHERE session_id = ? AND kind = 'user' ORDER BY seq LIMIT 1",
+        )
+        .bind(&session.id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::Database)? else {
+            return Ok(());
+        };
+        let title = summarize_line(&text);
+        if title.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE sessions SET title = ? WHERE id = ? AND (title IS NULL OR trim(title) = '')",
+        )
+        .bind(&title)
+        .bind(&session.id)
+        .execute(&self.pool)
+        .await?;
+        session.title = Some(title);
+        Ok(())
+    }
+
+    /// Associate an archived TraceDB id with a live session. Normal live turns
+    /// only know the runner's native id, so the fallback matches the stable
+    /// `<agent>:<native-id>` identity that TraceDB uses once ingestion occurs.
+    pub async fn find_session_by_archive_id(&self, archive_id: &str) -> Result<Option<Session>> {
+        if let Some(session) = self.find_session_by_trace_id(archive_id).await? {
+            return Ok(Some(session));
+        }
+        // A slash denotes a TraceDB subagent identity. Its root native id is
+        // shared with the parent, so matching only the prefix would incorrectly
+        // hide delegated work as if it were the live parent row.
+        if archive_id.contains('/') {
+            return Ok(None);
+        }
+        let Some((agent, native)) = archive_id.split_once(':') else {
+            return Ok(None);
+        };
+        sqlx::query_as::<_, Session>(
+            "SELECT s.* FROM sessions s
+             WHERE s.agent = ?
+               AND (s.backend_session_id = ? OR EXISTS (
+                 SELECT 1 FROM backend_incarnations i
+                 WHERE i.session_id = s.id AND i.backend_session_id = ?
+               ))
+             ORDER BY s.updated_at_ms DESC LIMIT 1",
+        )
+        .bind(agent)
+        .bind(native)
+        .bind(native)
+        .fetch_optional(&self.pool)
+        .await
         .map_err(Error::Database)
+    }
+
+    /// Remove a provisional Sylph session that never received a turn.
+    pub async fn delete_empty_sylph_session(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM sessions WHERE id = ? AND origin = 'sylph' AND NOT EXISTS (SELECT 1 FROM turns WHERE turns.session_id = sessions.id)")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn update_session_status(&self, id: &str, status: &str) -> Result<()> {
@@ -306,13 +388,22 @@ impl LiveStore {
     }
 
     pub async fn find_session_by_trace_id(&self, trace_id: &str) -> Result<Option<Session>> {
-        sqlx::query_as::<_, Session>("SELECT * FROM sessions WHERE trace_session_id = ?")
-            .bind(trace_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(Error::Database)
+        sqlx::query_as::<_, Session>(
+            "SELECT s.* FROM sessions s
+             WHERE s.trace_session_id = ? OR EXISTS (
+               SELECT 1 FROM backend_incarnations i
+               WHERE i.session_id = s.id
+                 AND (i.source_trace_session_id = ? OR i.resulting_trace_session_id = ?)
+             )
+             ORDER BY s.updated_at_ms DESC LIMIT 1",
+        )
+        .bind(trace_id)
+        .bind(trace_id)
+        .bind(trace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::Database)
     }
-
 
     pub async fn touch_session(&self, session_id: &str) -> Result<()> {
         sqlx::query("UPDATE sessions SET updated_at_ms = ? WHERE id = ?")
@@ -330,6 +421,24 @@ impl LiveStore {
             .bind(session_id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Set the opening title once, without changing activity ordering. This is
+    /// used when a turn starts so live and archived rows acquire the same label
+    /// before TraceDB ingestion catches up.
+    pub async fn set_session_title_if_empty(&self, session_id: &str, title: &str) -> Result<()> {
+        let title = summarize_line(title);
+        if title.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE sessions SET title = ? WHERE id = ? AND (title IS NULL OR trim(title) = '')",
+        )
+        .bind(&title)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -632,4 +741,74 @@ impl LiveStore {
 /// column in the schema.
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn archive_identity_matches_native_root_but_not_subagent_prefix() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = LiveStore::new(dir.path().join("live.db").to_str().unwrap())
+            .await
+            .expect("store");
+        store
+            .create_session(&Session {
+                id: "web-1".to_string(),
+                origin: "sylph".to_string(),
+                identity_mode: "sylph".to_string(),
+                lifecycle_mode: "sylph".to_string(),
+                agent: "claude".to_string(),
+                backend_session_id: Some("native-1".to_string()),
+                trace_session_id: None,
+                workdir: "/tmp/project".to_string(),
+                title: None,
+                flags_json: "{}".to_string(),
+                status: "idle".to_string(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            })
+            .await
+            .expect("session");
+        store
+            .create_incarnation(&Incarnation {
+                id: "inc-1".to_string(),
+                session_id: "web-1".to_string(),
+                agent: "claude".to_string(),
+                backend_session_id: Some("native-old".to_string()),
+                started_at_ms: 1,
+                ended_at_ms: Some(2),
+                reset_reason: Some("test".to_string()),
+                source_trace_session_id: None,
+                resulting_trace_session_id: None,
+                status: "ended".to_string(),
+            })
+            .await
+            .expect("incarnation");
+
+        assert_eq!(
+            store
+                .find_session_by_archive_id("claude:native-1")
+                .await
+                .expect("lookup")
+                .expect("root match")
+                .id,
+            "web-1"
+        );
+        assert_eq!(
+            store
+                .find_session_by_archive_id("claude:native-old")
+                .await
+                .expect("lookup")
+                .expect("historical match")
+                .id,
+            "web-1"
+        );
+        assert!(store
+            .find_session_by_archive_id("claude:native-1/agent-worker")
+            .await
+            .expect("lookup")
+            .is_none());
+    }
 }

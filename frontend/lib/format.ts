@@ -61,3 +61,15 @@ export function shortenHome(path: string, home?: string): string {
   if (home && path.startsWith(home)) return `~${path.slice(home.length)}`;
   return path;
 }
+
+/** The id users can paste into the originating agent or TraceDB. */
+export function originalSessionId(session: {
+  id: string;
+  agent: string;
+  nativeSessionId?: string;
+  traceSessionId?: string;
+}): string {
+  if (session.traceSessionId) return session.traceSessionId;
+  if (session.nativeSessionId) return `${session.agent}:${session.nativeSessionId}`;
+  return session.id;
+}

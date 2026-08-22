@@ -31,12 +31,15 @@ use std::path::{Path, PathBuf};
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
-    http::StatusCode,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
     Json,
 };
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    documents::{self, DocumentKind, Window},
     error::{Error, Result},
     paths::{self, SKIPPED_DIRS},
     AppState,
@@ -75,6 +78,14 @@ pub struct FileEntry {
     /// omitted from the listing entirely, so a listed symlink is always safe.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_symlink: bool,
+    /// Which viewer this file wants: `grid`, `blocks`, `html`, `pdf`, `image`.
+    ///
+    /// Present so a click knows which endpoint to call without first fetching the
+    /// file to find out. Advisory and extension-based — the document endpoint
+    /// still validates the bytes, and a mislabelled file falls back to
+    /// `/files/content`. Absent means "read it as text".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_kind: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -199,6 +210,7 @@ pub async fn tree(
             size: (!is_dir).then_some(metadata.len()),
             modified_at_ms: paths::modified_ms(&metadata),
             is_symlink,
+            preview_kind: (!is_dir).then(|| preview_kind(&resolved)).flatten(),
         });
     }
 
@@ -337,6 +349,245 @@ pub async fn content(
             modified_at_ms: paths::modified_ms(&metadata),
         })),
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentResponse {
+    pub path: String,
+    pub absolute_path: String,
+    pub size: u64,
+    pub modified_at_ms: i64,
+    /// The parsed payload, flattened so `kind`, `grid`, and `blocks` sit at the
+    /// top level rather than under a wrapper the client would have to unwrap.
+    #[serde(flatten)]
+    pub document: documents::Document,
+}
+
+#[derive(Deserialize)]
+pub struct DocumentQuery {
+    path: String,
+    /// Worksheet index. Meaningless for documents and presentations.
+    sheet: Option<usize>,
+    /// First row of the window, absolute within the sheet.
+    row: Option<usize>,
+    /// Rows to return. Clamped rather than validated.
+    rows: Option<usize>,
+}
+
+/// GET /api/v1/sessions/{id}/files/document?path=&sheet=&row=&rows=
+///
+/// A spreadsheet, CSV, Word document, or PowerPoint deck as structure rather than
+/// bytes. Sibling to [`content`] rather than an extension of it: a spreadsheet
+/// needs windowing and sheet-selection parameters that mean nothing for any other
+/// file, and paging must not re-send the file's metadata each time.
+pub async fn document(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<DocumentQuery>,
+) -> Result<Json<DocumentResponse>> {
+    let (_root, target) = resolve(&state, &id, &query.path).await?;
+
+    let metadata =
+        std::fs::metadata(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
+    if metadata.is_dir() {
+        return Err(Error::InvalidRequest(
+            "That path is a directory, not a document.".to_string(),
+        ));
+    }
+
+    let window = Window::new(query.sheet, query.row, query.rows);
+
+    // Parsing is CPU-bound and takes ~600 ms on a large sheet. Run in an async
+    // handler it would occupy a Tokio worker for that whole time, stalling every
+    // SSE stream this process is serving. The other handlers in this module do
+    // synchronous `std::fs` calls, which is tolerable for a bounded small read;
+    // a document parse is not the same thing.
+    let parsed = {
+        let target = target.clone();
+        tokio::task::spawn_blocking(move || documents::parse(&target, window))
+            .await
+            // A panic in a parser must not take down the request handler. It is
+            // still a bug, so it is logged rather than quietly mapped.
+            .map_err(|error| {
+                tracing::error!("document parser panicked: {error}");
+                Error::Internal("Failed to parse that document.".to_string())
+            })??
+    };
+
+    Ok(Json(DocumentResponse {
+        path: paths::normalize_relative(&query.path),
+        absolute_path: target.display().to_string(),
+        size: metadata.len(),
+        modified_at_ms: paths::modified_ms(&metadata),
+        document: parsed,
+    }))
+}
+
+/// Types served inline by [`raw`].
+///
+/// An allowlist, not a blocklist, and deliberately short. Everything absent from
+/// it is served as `application/octet-stream` with `Content-Disposition:
+/// attachment`, so an unrecognized file downloads rather than rendering.
+///
+/// `image/svg+xml` is **excluded on purpose**. An SVG served from this origin can
+/// execute script; the same file loaded through an `<img>` element cannot. SVG
+/// therefore stays on the [`content`] base64 path, and adding it here would
+/// silently convert an inert preview into a script-execution surface.
+const INLINE_TYPES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "image/vnd.microsoft.icon",
+    "image/avif",
+    "application/pdf",
+    "text/html",
+];
+
+/// GET /api/v1/sessions/{id}/files/raw?path=
+///
+/// The file's bytes, for content a browser renders natively: images, HTML, PDF.
+///
+/// # Why a byte route is acceptable here
+///
+/// The image preview previously went out as base64 inside JSON, justified by not
+/// wanting "a second unauthenticated path to the filesystem". This route is not
+/// unauthenticated: it sits behind the same auth middleware and the same
+/// canonical-path containment check as every other handler in this module. What
+/// base64 actually cost was 33% inflation, a JSON parse before first paint, no
+/// progressive decode, and no HTTP caching — and it cannot carry a PDF at all.
+///
+/// # Why the headers are load-bearing
+///
+/// The real risk is the browser treating a workspace file as privileged content
+/// in this origin. That is not hypothetical: serving an agent-generated HTML file
+/// from a same-origin route with no hardening, a script inside it reads
+/// `document.cookie` and gets the `sylph_session` token, which authorizes reads
+/// across the whole workdir. Measured in a headless browser before this was
+/// written.
+///
+/// `Content-Security-Policy: sandbox` is what closes it — the response lands in
+/// an opaque origin however it is loaded, including direct navigation, so the
+/// script cannot reach this origin's DOM or cookies. `nosniff` closes the sibling
+/// path where an `octet-stream` payload gets sniffed into `text/html`.
+///
+/// Removing either header silently reintroduces cookie disclosure, which is why
+/// an integration test asserts both.
+pub async fn raw(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ContentQuery>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response> {
+    let (_root, target) = resolve(&state, &id, &query.path).await?;
+
+    let metadata =
+        std::fs::metadata(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
+    if metadata.is_dir() {
+        return Err(Error::InvalidRequest(
+            "That path is a directory, not a file.".to_string(),
+        ));
+    }
+
+    let mime_type = guess_mime(&target);
+    let inline = INLINE_TYPES.contains(&mime_type.as_str());
+
+    // mtime and size, which is enough to notice an agent's edit. A content hash
+    // would be stronger but would mean reading the file to answer a request that
+    // may not need its body.
+    let etag = format!(
+        "\"{:x}-{:x}\"",
+        paths::modified_ms(&metadata).max(0) as u64,
+        metadata.len()
+    );
+
+    // `Cache-Control: no-cache` means "revalidate", not "do not store", so a
+    // repeat view is a 304 rather than a re-download while still never showing a
+    // stale file.
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag))
+    {
+        return Ok((StatusCode::NOT_MODIFIED, hardened_headers(&etag, &mime_type, inline)).into_response());
+    }
+
+    let bytes = std::fs::read(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
+
+    Ok((hardened_headers(&etag, &mime_type, inline), bytes).into_response())
+}
+
+/// The header set every [`raw`] response carries, including a 304.
+///
+/// Built in one place so a `Not Modified` cannot accidentally ship without the
+/// sandbox policy that the 200 has.
+fn hardened_headers(etag: &str, mime_type: &str, inline: bool) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+
+    let content_type = if inline {
+        mime_type
+    } else {
+        // Not on the allowlist: refuse to name a type the browser might render.
+        "application/octet-stream"
+    };
+    if let Ok(value) = HeaderValue::from_str(content_type) {
+        headers.insert(header::CONTENT_TYPE, value);
+    }
+
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    // The header that removes the cookie-disclosure path. See [`raw`].
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static(if inline { "inline" } else { "attachment" }),
+    );
+    // A filename is deliberately not included: it is client-supplied text
+    // reflected into a header, and the client already knows what it asked for.
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, private"),
+    );
+    if let Ok(value) = HeaderValue::from_str(etag) {
+        headers.insert(header::ETAG, value);
+    }
+
+    headers
+}
+
+/// Whether a file is worth offering to the document endpoint.
+///
+/// Used by [`tree`] to hint the viewer family, so a click knows which endpoint to
+/// call without a probe request. Advisory: extension-based, and the document
+/// endpoint still validates.
+fn preview_kind(path: &Path) -> Option<&'static str> {
+    let extension = path.extension().and_then(|e| e.to_str())?;
+    if let Some(format) = documents::DocumentFormat::from_extension(extension) {
+        return Some(match format.kind() {
+            DocumentKind::Grid => "grid",
+            DocumentKind::Blocks => "blocks",
+        });
+    }
+    let mime = guess_mime(path);
+    if mime == "text/html" {
+        return Some("html");
+    }
+    if mime == "application/pdf" {
+        return Some("pdf");
+    }
+    // SVG is an image to the viewer but must not reach the raw route, so it is
+    // reported as an image and served through the base64 path like the others.
+    if mime.starts_with("image/") {
+        return Some("image");
+    }
+    None
 }
 
 /// Read at most `limit` bytes, so an enormous file cannot be pulled into memory
@@ -537,36 +788,15 @@ fn guess_mime(path: &Path) -> String {
     mime.to_string()
 }
 
-/// Minimal base64 encoder for image previews.
+/// Base64 for an inline image preview.
 ///
-/// Written out rather than pulled in: `base64` is not currently a dependency,
-/// and this is the only encode site in the backend. Decoding attachments uses
-/// its own path in `attachments.rs`.
+/// Delegates to the `base64` crate, which is already a dependency and is what
+/// `attachments.rs` decodes with. An earlier hand-rolled encoder lived here
+/// justified by a comment claiming base64 was not a dependency; it was, so the
+/// justification was false and the code was an unnecessary second implementation
+/// of a standard transform.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
-        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 #[cfg(test)]

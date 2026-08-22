@@ -107,8 +107,9 @@ async fn create_and_read_back_a_session() {
     assert_eq!(session["lifecycleMode"], "sylph");
     assert_eq!(session["status"], "idle");
 
-    // Agent-native identifiers must never appear in an API response.
-    assert!(session.get("backendSessionId").is_none());
+    // A native id is absent until the first runner turn; the Web UUID remains
+    // the only id for an untouched draft.
+    assert!(session.get("nativeSessionId").is_none());
     assert!(session.get("traceSessionId").is_none());
 
     let id = session["id"].as_str().unwrap();
@@ -239,6 +240,29 @@ async fn session_history_returns_turns_oldest_first_with_events() {
 }
 
 #[tokio::test]
+async fn deleting_an_empty_session_is_idempotent_but_turns_make_it_durable() {
+    let backend = TestBackend::start().await;
+    let empty = backend.create_session("mock").await;
+
+    let response = backend
+        .delete_authed(&format!("/api/v1/sessions/{empty}"))
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(backend.get_authed(&format!("/api/v1/sessions/{empty}")).await.status(), StatusCode::NOT_FOUND);
+
+    let durable = backend.create_session("mock").await;
+    let response = backend
+        .post_authed(&format!("/api/v1/sessions/{durable}/turns"), json!({"text": "keep me"}))
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let response = backend
+        .delete_authed(&format!("/api/v1/sessions/{durable}"))
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(backend.get_authed(&format!("/api/v1/sessions/{durable}")).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn session_history_404s_for_an_unknown_session() {
     let backend = TestBackend::start().await;
 
@@ -255,7 +279,17 @@ async fn session_history_404s_for_an_unknown_session() {
 #[tokio::test]
 async fn turn_runs_to_completion_and_journals_its_events() {
     let backend = TestBackend::start().await;
-    let session_id = backend.create_session("mock").await;
+    let session_response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({"agent": "mock", "workdir": backend.workdir().display().to_string()}),
+        )
+        .await;
+    assert_eq!(session_response.status(), StatusCode::CREATED);
+    let session_id = json_body(session_response).await["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let response = backend
         .post_authed(
@@ -306,6 +340,18 @@ async fn turn_runs_to_completion_and_journals_its_events() {
         seqs.windows(2).all(|pair| pair[0] < pair[1]),
         "sequence numbers not increasing: {seqs:?}"
     );
+
+    // The live row exposes the same native identity that TraceDB will later
+    // ingest, and its title is derived from the opening ask immediately.
+    let session = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}"))
+            .await,
+    )
+    .await["session"]
+        .clone();
+    assert_eq!(session["nativeSessionId"], "mock-session-1");
+    assert_eq!(session["title"], "do the thing");
 }
 
 /// An event stream must forbid intermediaries from re-encoding it.
@@ -1750,12 +1796,12 @@ async fn importing_a_native_session_preserves_its_identity() {
     assert_eq!(session["title"], "审查冗余的代码");
     // The archive id is exposed so the archive browser can tell that an archived
     // row and this live session are one conversation, and list it once rather
-    // than twice. `backendSessionId` stays hidden: it is runner-internal.
+    // than twice. The imported session has no runner-native id until resumed.
     assert_eq!(
         session["traceSessionId"],
         "mock:f45ba2ed-3866-4dba-9769-801029b16aa3"
     );
-    assert!(session.get("backendSessionId").is_none());
+    assert!(session.get("nativeSessionId").is_none());
 }
 
 #[tokio::test]
@@ -3044,4 +3090,429 @@ async fn patch_on_a_missing_session_is_not_found() {
         )
         .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ------------------------------------------------- documents and raw bytes
+
+/// Build a minimal but valid xlsx, so no binary fixture enters the repo.
+///
+/// Mirrors `documents::testing`, which is `#[cfg(test)]` and therefore not
+/// reachable from an integration test binary. Kept deliberately small: the parser
+/// units cover format breadth, and what these tests need is one real file to
+/// drive the HTTP layer with.
+fn minimal_xlsx() -> Vec<u8> {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    let parts: [(&str, &str); 5] = [
+        (
+            "[Content_Types].xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#,
+        ),
+        (
+            "_rels/.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#,
+        ),
+        (
+            "xl/workbook.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Sales" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#,
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+<row r="1"><c r="A1" t="inlineStr"><is><t>Region</t></is></c><c r="B1" t="inlineStr"><is><t>Revenue</t></is></c></row>
+<row r="2"><c r="A2" t="inlineStr"><is><t>APAC</t></is></c><c r="B2"><v>1200</v></c></row>
+<row r="3"><c r="A3" t="inlineStr"><is><t>EMEA</t></is></c><c r="B3"><v>980.5</v></c></row>
+</sheetData></worksheet>"#,
+        ),
+    ];
+    for (name, body) in parts {
+        zip.start_file(name, options).unwrap();
+        zip.write_all(body.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap().into_inner()
+}
+
+#[tokio::test]
+async fn spreadsheets_are_served_as_a_windowed_grid() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::write(backend.workdir().join("sales.xlsx"), minimal_xlsx()).unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{session_id}/files/document?path=sales.xlsx"
+            ))
+            .await,
+    )
+    .await;
+
+    assert_eq!(body["kind"], "grid");
+    assert_eq!(body["format"], "xlsx");
+    assert_eq!(body["formatLabel"], "Excel workbook");
+    assert_eq!(body["grid"]["sheets"][0]["name"], "Sales");
+    assert_eq!(body["grid"]["rows"][0][0]["v"], "Region");
+    assert_eq!(body["grid"]["rows"][0][0]["t"], "text");
+
+    // The typed number is what lets the viewer right-align it, and `n` is what
+    // lets a client sort without re-parsing a formatted string.
+    assert_eq!(body["grid"]["rows"][1][1]["v"], "1200");
+    assert_eq!(body["grid"]["rows"][1][1]["t"], "number");
+    assert_eq!(body["grid"]["rows"][1][1]["n"], 1200.0);
+    assert_eq!(body["grid"]["hasHeaderRow"], true);
+    assert_eq!(body["grid"]["truncated"], false);
+}
+
+/// An out-of-range window is clamped and the response says what it served, so a
+/// paging control cannot 400 on an off-by-one.
+#[tokio::test]
+async fn a_document_window_is_clamped_and_echoed() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::write(backend.workdir().join("sales.xlsx"), minimal_xlsx()).unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{session_id}/files/document?path=sales.xlsx&row=1&rows=99999"
+            ))
+            .await,
+    )
+    .await;
+
+    assert_eq!(body["grid"]["row"], 1, "the window start is echoed");
+    // Two rows remain from row 1 of a three-row sheet, and the 99999 request was
+    // clamped to the 500 cap rather than refused.
+    assert_eq!(body["grid"]["rows"].as_array().unwrap().len(), 2);
+
+    let missing_sheet = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{session_id}/files/document?path=sales.xlsx&sheet=7"
+        ))
+        .await;
+    assert_eq!(missing_sheet.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(missing_sheet).await["error"]["code"],
+        "INVALID_REQUEST"
+    );
+}
+
+#[tokio::test]
+async fn csv_is_served_through_the_same_grid_shape_as_a_spreadsheet() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::write(
+        backend.workdir().join("data.csv"),
+        "name,amount\n\"Smith, Alice\",1200\nBob,980\n",
+    )
+    .unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{session_id}/files/document?path=data.csv"
+            ))
+            .await,
+    )
+    .await;
+
+    // One payload shape for both formats is what lets the frontend ship one
+    // table viewer instead of two.
+    assert_eq!(body["kind"], "grid");
+    assert_eq!(body["format"], "csv");
+    assert_eq!(body["grid"]["rows"][1][0]["v"], "Smith, Alice");
+    assert_eq!(body["grid"]["rows"][1][1]["t"], "number");
+}
+
+#[tokio::test]
+async fn unsupported_and_corrupt_documents_are_refused_with_a_usable_code() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::write(backend.workdir().join("notes.txt"), "plain text").unwrap();
+    std::fs::write(backend.workdir().join("broken.xlsx"), "not a zip at all").unwrap();
+    std::fs::create_dir_all(backend.workdir().join("adir")).unwrap();
+
+    for path in ["notes.txt", "broken.xlsx", "adir"] {
+        let response = backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{session_id}/files/document?path={path}"
+            ))
+            .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{path} should be a bad request"
+        );
+        // The client uses this code to decide to retry against /files/content,
+        // so it has to be the documented one.
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "INVALID_REQUEST",
+            "{path}"
+        );
+    }
+}
+
+/// The tree hints which viewer a file wants, so opening one costs a single
+/// request instead of a probe that guesses wrong.
+#[tokio::test]
+async fn the_tree_reports_a_preview_kind_per_file() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    let root = backend.workdir();
+    std::fs::write(root.join("sales.xlsx"), minimal_xlsx()).unwrap();
+    std::fs::write(root.join("data.csv"), "a,b\n").unwrap();
+    std::fs::write(root.join("report.docx"), "stub").unwrap();
+    std::fs::write(root.join("page.html"), "<p>hi</p>").unwrap();
+    std::fs::write(root.join("shot.png"), [0x89, 0x50, 0x4e, 0x47]).unwrap();
+    std::fs::write(root.join("paper.pdf"), b"%PDF-1.7").unwrap();
+    std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+    std::fs::write(root.join("icon.svg"), "<svg/>").unwrap();
+
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/files"))
+            .await,
+    )
+    .await;
+
+    let kind = |name: &str| -> Option<String> {
+        body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .and_then(|entry| entry["previewKind"].as_str().map(str::to_string))
+    };
+
+    assert_eq!(kind("sales.xlsx").as_deref(), Some("grid"));
+    assert_eq!(kind("data.csv").as_deref(), Some("grid"));
+    assert_eq!(kind("report.docx").as_deref(), Some("blocks"));
+    assert_eq!(kind("page.html").as_deref(), Some("html"));
+    assert_eq!(kind("shot.png").as_deref(), Some("image"));
+    assert_eq!(kind("paper.pdf").as_deref(), Some("pdf"));
+    // An SVG is an image to the viewer, but must travel the base64 path rather
+    // than the raw route, where it could execute script.
+    assert_eq!(kind("icon.svg").as_deref(), Some("image"));
+    assert_eq!(
+        kind("main.rs"),
+        None,
+        "source has no special viewer and is read as text"
+    );
+}
+
+/// The security test. Serving workspace HTML from this origin without these
+/// headers lets a script in an agent-generated file read the session cookie —
+/// measured in a browser, not hypothesized. A refactor that drops either header
+/// must fail here.
+#[tokio::test]
+async fn raw_bytes_are_served_with_sandbox_and_nosniff_headers() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::write(
+        backend.workdir().join("report.html"),
+        "<h1>Generated</h1><script>parent.document.cookie</script>",
+    )
+    .unwrap();
+
+    let response = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{session_id}/files/raw?path=report.html"
+        ))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(
+        headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
+        "sandbox",
+        "without this the framed document reaches this origin's cookies"
+    );
+    assert_eq!(
+        headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+        "nosniff"
+    );
+    assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), "text/html");
+    assert_eq!(headers.get(header::CONTENT_DISPOSITION).unwrap(), "inline");
+
+    assert!(body_string(response).await.contains("Generated"));
+}
+
+#[tokio::test]
+async fn raw_refuses_to_name_a_type_it_does_not_render() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    // An extension the allowlist does not carry. A browser told `text/html` here
+    // would render it; told octet-stream with nosniff, it downloads.
+    std::fs::write(backend.workdir().join("payload.xyz"), "<h1>not rendered</h1>").unwrap();
+
+    let response = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{session_id}/files/raw?path=payload.xyz"
+        ))
+        .await;
+
+    let headers = response.headers().clone();
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).unwrap(),
+        "application/octet-stream"
+    );
+    assert_eq!(
+        headers.get(header::CONTENT_DISPOSITION).unwrap(),
+        "attachment"
+    );
+    assert_eq!(headers.get(header::CONTENT_SECURITY_POLICY).unwrap(), "sandbox");
+}
+
+/// An SVG must never be served inline from this origin: as `image/svg+xml` it can
+/// execute script, whereas the same bytes inside an `<img>` cannot.
+#[tokio::test]
+async fn raw_never_serves_svg_inline() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::write(
+        backend.workdir().join("icon.svg"),
+        r#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#,
+    )
+    .unwrap();
+
+    let headers = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{session_id}/files/raw?path=icon.svg"
+        ))
+        .await
+        .headers()
+        .clone();
+
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).unwrap(),
+        "application/octet-stream",
+        "an SVG must not be served as a renderable type"
+    );
+    assert_eq!(
+        headers.get(header::CONTENT_DISPOSITION).unwrap(),
+        "attachment"
+    );
+}
+
+#[tokio::test]
+async fn raw_revalidates_with_an_etag_instead_of_resending_bytes() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::write(backend.workdir().join("shot.png"), [0x89, 0x50, 0x4e, 0x47]).unwrap();
+
+    let first = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{session_id}/files/raw?path=shot.png"
+        ))
+        .await;
+    let etag = first
+        .headers()
+        .get(header::ETAG)
+        .expect("an ETag, so a re-view is a 304 rather than a re-download")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let second = backend
+        .get_authed_with_header(
+            &format!("/api/v1/sessions/{session_id}/files/raw?path=shot.png"),
+            header::IF_NONE_MATCH,
+            &etag,
+        )
+        .await;
+
+    assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+    // A 304 must carry the policy too: it is still a response about this file.
+    assert_eq!(
+        second.headers().get(header::CONTENT_SECURITY_POLICY).unwrap(),
+        "sandbox"
+    );
+}
+
+/// The containment invariant must hold on every new route, not be re-established
+/// by accident. Mirrors the checks already covering `/files/content`.
+#[tokio::test]
+async fn the_new_file_routes_refuse_paths_outside_the_workdir() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let outside = backend.workdir().parent().unwrap().join("doc-secret.txt");
+    std::fs::write(&outside, "do not serve me").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, backend.workdir().join("escape.html")).unwrap();
+
+    for route in ["document", "raw"] {
+        for attempt in ["../doc-secret.txt", "src/../../doc-secret.txt", "/etc/hosts"] {
+            let response = backend
+                .get_authed(&format!(
+                    "/api/v1/sessions/{session_id}/files/{route}?path={}",
+                    urlencoding(attempt)
+                ))
+                .await;
+            let status = response.status();
+            assert!(
+                status == StatusCode::FORBIDDEN
+                    || status == StatusCode::NOT_FOUND
+                    || status == StatusCode::BAD_REQUEST,
+                "{route} did not refuse {attempt}: {status}"
+            );
+            assert!(
+                !body_string(response).await.contains("do not serve me"),
+                "{route} leaked {attempt}"
+            );
+        }
+    }
+
+    // A symlink pointing outside the root is refused after canonicalization,
+    // which is the check that cannot be done by inspecting the request string.
+    #[cfg(unix)]
+    {
+        let response = backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{session_id}/files/raw?path=escape.html"
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!body_string(response).await.contains("do not serve me"));
+    }
+}
+
+#[tokio::test]
+async fn the_new_file_routes_require_the_session_cookie() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    for route in ["document", "raw"] {
+        assert_eq!(
+            backend
+                .get(&format!(
+                    "/api/v1/sessions/{session_id}/files/{route}?path=any.xlsx"
+                ))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED,
+            "{route} must not be reachable without the cookie"
+        );
+    }
 }

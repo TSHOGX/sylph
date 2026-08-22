@@ -21,14 +21,19 @@ export function Overlay({
   title,
   onClose,
   children,
-  /** Wider layout for settings, which is a panel rather than a picker. */
+  /**
+   * Wider layout for settings, which is a panel rather than a picker. The two
+   * `viewer` variants are for the full-screen file viewer, where the content is
+   * the point and the chrome should get out of its way — see the sizing comment
+   * below for why one hugs its content and the other fills the viewport.
+   */
   size = "picker",
   describedBy,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
-  size?: "picker" | "panel";
+  size?: "picker" | "panel" | "viewer" | "viewer-full";
   describedBy?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -95,7 +100,14 @@ export function Overlay({
 
   return (
     <div
-      className="fixed inset-0 z-40 flex items-start justify-center bg-gray-900/30 p-4 pt-[10vh] backdrop-blur-[1px]"
+      // A picker sits below the top of the viewport; the viewer is centred and
+      // near-full-bleed, because vertical space is exactly what a spreadsheet or
+      // a rendered page needs.
+      className={`fixed inset-0 z-40 flex justify-center bg-gray-900/30 p-4 backdrop-blur-[1px] ${
+        size === "viewer" || size === "viewer-full"
+          ? "items-center"
+          : "items-start pt-[10vh]"
+      }`}
       // The backdrop closes on click, which every picker convention supports.
       // `onMouseDown` on the backdrop only, so a drag that ends outside a text
       // selection inside the dialog does not dismiss it.
@@ -111,8 +123,25 @@ export function Overlay({
         aria-describedby={describedBy}
         tabIndex={-1}
         onKeyDown={onKeyDown}
-        className={`flex max-h-[80vh] w-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl outline-none ${
-          size === "panel" ? "max-w-3xl" : "max-w-xl"
+        // Two viewer sizings, because content types differ in a way one rule
+        // cannot cover:
+        //
+        // `viewer` hugs its content and stops at the viewport. A seven-row table
+        // in a fixed 92vh x 95vw box reads as broken even though nothing is,
+        // while a 200-row sheet still fills the screen because its own height
+        // asks for it. The `min-w` floor keeps the dialog from snapping narrow to
+        // wide as the body loads.
+        //
+        // `viewer-full` claims the space outright, for content with no intrinsic
+        // size to measure — an iframe reports none, so a rendered page or a PDF
+        // would collapse to the floor under `w-fit`. Those are also the formats
+        // authored *for* a viewport, so filling one is what they expect.
+        className={`flex flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl outline-none ${
+          size === "viewer"
+            ? "h-fit max-h-[92vh] w-fit min-w-[32rem] max-w-[95vw]"
+            : size === "viewer-full"
+              ? "h-[92vh] w-full max-w-[95vw]"
+              : `w-full max-h-[80vh] ${size === "panel" ? "max-w-3xl" : "max-w-xl"}`
         }`}
       >
         <h2 id={titleId} className="sr-only">

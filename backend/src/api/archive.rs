@@ -335,7 +335,7 @@ pub async fn list(
 
             let session_id = state
                 .store
-                .find_session_by_trace_id(&summary.id)
+                .find_session_by_archive_id(&summary.id)
                 .await?
                 .map(|session| session.id);
 
@@ -443,7 +443,7 @@ pub async fn transcript(
 
     let session_id = state
         .store
-        .find_session_by_trace_id(trace_id)
+        .find_session_by_archive_id(trace_id)
         .await?
         .map(|session| session.id);
 

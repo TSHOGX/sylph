@@ -44,7 +44,7 @@ cargo run
 **Tab 2: `frontend`**
 ```sh
 cd /Users/hsw/Workspace/sylph-web/frontend
-export SYLPH_WEB_DEV_ORIGINS="44fb4bb.r8.cpolar.cn,100.125.12.35"
+export SYLPH_WEB_DEV_ORIGINS="100.125.12.35"
 npm run dev
 ```
 
@@ -52,13 +52,14 @@ npm run dev
 
 **Frontend tab:**
 - `SYLPH_WEB_DEV_ORIGINS` — Comma-separated hostnames (no protocol/port) for
-  cross-origin dev access. Needed only for cpolar tunnels or LAN IP access.
-  Omit for localhost-only development.
-  
+  cross-origin dev access. Needed only when the browser reaches the dev server
+  directly from a non-loopback origin, i.e. LAN IP access. Omit for
+  localhost-only development and for the cpolar setup below (its reverse proxy
+  rewrites `Origin` to `localhost`).
+
   Examples:
-  - cpolar tunnel: `"44fb4bb.r8.cpolar.cn"`
   - LAN IP: `"100.125.12.35"`
-  - Multiple: `"44fb4bb.r8.cpolar.cn,100.125.12.35,192.168.1.100"`
+  - Multiple LAN IPs: `"100.125.12.35,192.168.1.100"`
 
 **Backend tab (optional overrides):**
 - `SYLPH_WEB_PORT` — Backend port (default: `4317`)
@@ -141,10 +142,36 @@ Look for these lines in the frontend tab output:
 |-----|-------------|----------|
 | http://localhost:3000 | Same machine | Nothing (default) |
 | http://100.125.12.35:3000 | LAN devices | `SYLPH_WEB_DEV_ORIGINS="100.125.12.35"` |
-| https://xyz.r8.cpolar.cn | Internet (via cpolar) | `SYLPH_WEB_DEV_ORIGINS="xyz.r8.cpolar.cn"` |
+| https://<id>.r8.cpolar.cn | Internet (via cpolar) | loopback reverse proxy + cpolar (below) |
 
-**Note:** The cpolar hostname changes when the tunnel rotates. Update
-`SYLPH_WEB_DEV_ORIGINS` each time and restart the frontend.
+### Internet access via cpolar
+
+Tunnelling straight to `localhost:3000` is not enough: the backend rejects
+non-loopback `Host`/`Origin` headers (DNS-rebinding defense, see
+`backend/src/middleware/auth.rs`), and Next's rewrite forwards the browser's
+`Origin`, so every mutation (create/import/resume) 403s from a tunnel or LAN
+origin. Route through the loopback reverse proxy instead, which rewrites
+`Host`/`Origin` to loopback and sends `/api/*` straight to the backend:
+
+```sh
+python3 ~/.agents/data/cpolar/loopback-proxy.py 47317 3000 4317
+~/.agents/data/cpolar/cpolar http -httpauth="user:password" -region=cn 47317
+```
+
+- `-region=cn` is load-bearing. The default r17 international line runs about
+  110 KB/s, and the dev bundle (~3.5 MB of JS chunks) never finishes loading,
+  so the page stays frozen on "Connecting to backend...". The r8 line is ~5×
+  faster.
+- `-httpauth` is the second gate in front of the loopback proxy; never expose
+  the proxy without one.
+- The public hostname is random per restart and appears in cpolar's output or
+  the web UI at `http://127.0.0.1:4040`.
+- No `SYLPH_WEB_DEV_ORIGINS` entry is needed for the tunnel: the proxy rewrites
+  `Origin` to `localhost`, which Next already trusts.
+
+For LAN, the same proxy can bind `0.0.0.0` instead (`PROXY_BIND=0.0.0.0
+PROXY_AUTH=user:password`) so phones on the same network also get full
+read/write access rather than the read-only direct frontend.
 
 ## Common Issues
 
@@ -176,7 +203,7 @@ GET http://100.125.12.35:3000/_next/static/chunks/lib_1zew020._.js net::ERR_ABOR
 
 Example:
 ```sh
-export SYLPH_WEB_DEV_ORIGINS="100.125.12.35,44fb4bb.r8.cpolar.cn"
+export SYLPH_WEB_DEV_ORIGINS="100.125.12.35"
 npm run dev
 ```
 
@@ -274,6 +301,10 @@ Already visible in the herdr frontend tab. Next.js Turbopack shows:
    http://100.125.12.35:3000
    ```
 
+This direct LAN URL is read-only: mutations 403 because the backend rejects the
+non-loopback `Origin`. For full read/write access from the LAN, run the loopback
+proxy bound to `0.0.0.0` (see "Internet access via cpolar" above).
+
 ### Running tests
 
 **Backend:**
@@ -309,9 +340,12 @@ which is required for `SameSite=Strict` auth cookies to work.
 - Both default to `127.0.0.1` (loopback only)
 
 For remote access:
-- Use cpolar or similar tunnel to `localhost:3000`
-- Or bind Next.js to `0.0.0.0` (not recommended for security)
-- Backend stays on loopback; frontend proxies to it
+- Route through the loopback reverse proxy + cpolar (see "Internet access via
+  cpolar" above) — the only path with full read/write access, because the
+  backend rejects non-loopback `Origin` on mutations
+- Or bind Next.js to `0.0.0.0` for read-only LAN access (not recommended for
+  security)
+- Backend stays on loopback
 
 ### Data locations
 

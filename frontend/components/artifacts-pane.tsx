@@ -1,37 +1,112 @@
 "use client";
 
 /**
- * Right pane: the session's working directory, and a preview of one file.
+ * Right pane: the session's working directory, and a viewer for one file.
  *
  * The tree loads one directory per expansion rather than walking the whole tree
  * up front. A repository with 100k files would otherwise spend seconds building
  * a payload whose first screen is all anyone reads, and the pane would be blank
  * until it finished.
  *
+ * # Tree and viewer swap, they do not share
+ *
+ * Locating a file and reading it are sequential, not simultaneous: you navigate,
+ * then you read. So the viewer takes the whole pane with a back affordance, the
+ * way VS Code's explorer hands off to an editor and Finder hands off to Quick
+ * Look. The earlier layout gave the preview the bottom 55% of a 320px pane —
+ * roughly 350x300px — alongside a tree nobody was still looking at.
+ *
+ * Both views stay mounted and toggle with `hidden`, never conditional rendering.
+ * That is what preserves the tree's expanded directories and scroll offset:
+ * expansion lives in this component's state, scroll offset lives on the DOM node,
+ * and unmounting would discard both. `hidden` also removes the tree from the
+ * accessibility tree and the tab order, so a keyboard user cannot tab into an
+ * invisible tree.
+ *
  * Every path here is relative to the session's workdir. The backend resolves it
  * against the journal's record of that directory and refuses anything that
  * escapes, so this component never handles an absolute path except for display.
  */
 
+import dynamic from "next/dynamic";
 import { useParams } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api, type FileEntry } from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
+import { glyphFor } from "@/lib/file-kind";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { ContextMenu, type MenuItem } from "@/components/context-menu";
-import { FilePreview } from "@/components/file-preview";
+import { FileViewer } from "@/components/file-viewer";
+
+/**
+ * The full-screen viewer.
+ *
+ * Split out because it pulls in `Overlay` and is reached only by an explicit
+ * click, and kept out of the pane's own chunk for the same reason the pane is
+ * kept out of first-load JS.
+ */
+const FullscreenViewer = dynamic(
+  () => import("@/components/file-viewer-overlay").then((m) => m.FileViewerOverlay),
+  { ssr: false },
+);
 
 export function ArtifactsPane() {
   const params = useParams();
   const sessionId = typeof params?.id === "string" ? params.id : undefined;
-  const { artifact, showArtifact, clearArtifact } = useWorkspaceUI();
+  const {
+    artifact,
+    showArtifact,
+    clearArtifact,
+    artifactView,
+    backToTree,
+    artifactFullscreen,
+    openArtifactFullscreen,
+    closeArtifactFullscreen,
+  } = useWorkspaceUI();
 
   // The selected file lives in shell state, not here: a tool call in the
   // conversation opens a file, and that request has to survive this component's
   // own re-renders and reach it from outside.
   const selected =
     artifact && artifact.sessionId === sessionId ? artifact.path : null;
+  const selectedKind =
+    artifact && artifact.sessionId === sessionId ? artifact.previewKind : undefined;
+
+  /** Treeitem buttons by path, so Back can restore focus where it left. */
+  const rowRefs = useRef(new Map<string, HTMLButtonElement>());
+
+  const registerRow = useCallback((path: string, node: HTMLButtonElement | null) => {
+    if (node) rowRefs.current.set(path, node);
+    else rowRefs.current.delete(path);
+  }, []);
+
+  const handleBack = useCallback(() => {
+    backToTree();
+    // Focus returns to the row that was activated, not to the top of the tree.
+    // Deferred a frame because the tree is `hidden` until this update commits,
+    // and a hidden element cannot take focus.
+    const path = selected;
+    requestAnimationFrame(() => {
+      if (path) rowRefs.current.get(path)?.focus();
+    });
+  }, [backToTree, selected]);
+
+  /**
+   * The pane's expand button, so focus can return to it after fullscreen closes.
+   *
+   * `Overlay` restores focus to whatever was active when it opened, but this
+   * button is unmounted while the dialog is up — the pane shows a placeholder
+   * instead of a second copy of the viewer — so its `isConnected` guard correctly
+   * declines to focus a detached node. Restoring it here, once React has
+   * remounted the button, is what keeps the round trip WCAG-conformant.
+   */
+  const expandRef = useRef<HTMLButtonElement | null>(null);
+
+  const handleCloseFullscreen = useCallback(() => {
+    closeArtifactFullscreen();
+    requestAnimationFrame(() => expandRef.current?.focus());
+  }, [closeArtifactFullscreen]);
 
   if (!sessionId) {
     return (
@@ -44,23 +119,68 @@ export function ArtifactsPane() {
     );
   }
 
+  const viewing = selected !== null && artifactView === "preview";
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <FileTree
-          sessionId={sessionId}
-          selected={selected}
-          onSelect={(path) => showArtifact({ sessionId, path })}
-        />
+      {/* `hidden` rather than unmounting: see the module comment. */}
+      <div className={`${viewing ? "hidden" : "flex"} min-h-0 flex-1 flex-col`}>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <FileTree
+            sessionId={sessionId}
+            selected={selected}
+            onSelect={(path, previewKind) =>
+              showArtifact({ sessionId, path, previewKind })
+            }
+            registerRow={registerRow}
+            onExpand={openArtifactFullscreen}
+          />
+        </div>
       </div>
 
-      {selected && (
-        // Half the pane, so the tree stays navigable while a file is open. A
-        // full-height preview would mean losing your place in the tree on every
-        // file you look at.
-        <div className="flex max-h-[55%] min-h-0 flex-col border-t border-gray-200 bg-white">
-          <FilePreview sessionId={sessionId} path={selected} onClose={clearArtifact} />
-        </div>
+      <div className={`${viewing ? "flex" : "hidden"} min-h-0 flex-1 flex-col bg-white`}>
+        {selected && (
+          <>
+            {artifactFullscreen ? (
+              // Both viewers would otherwise render the same content at once.
+              // They share a query key so there is no double fetch, but a
+              // 3,000-cell table is worth not building twice.
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
+                <p className="text-[11px] text-gray-500">
+                  This file is open in the expanded view.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleCloseFullscreen}
+                  className="rounded border border-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                >
+                  Show it here instead
+                </button>
+              </div>
+            ) : (
+              <FileViewer
+                sessionId={sessionId}
+                path={selected}
+                previewKind={selectedKind}
+                onBack={handleBack}
+                onClose={clearArtifact}
+                onExpand={openArtifactFullscreen}
+                registerExpand={(node) => {
+                  expandRef.current = node;
+                }}
+              />
+            )}
+          </>
+        )}
+      </div>
+
+      {artifactFullscreen && selected && (
+        <FullscreenViewer
+          sessionId={sessionId}
+          path={selected}
+          previewKind={selectedKind}
+          onClose={handleCloseFullscreen}
+        />
       )}
     </div>
   );
@@ -70,10 +190,15 @@ function FileTree({
   sessionId,
   selected,
   onSelect,
+  registerRow,
+  onExpand,
 }: {
   sessionId: string;
   selected: string | null;
-  onSelect: (path: string) => void;
+  /** `previewKind` rides along so the viewer needs no probe request. */
+  onSelect: (path: string, previewKind?: FileEntry["previewKind"]) => void;
+  registerRow: (path: string, node: HTMLButtonElement | null) => void;
+  onExpand: () => void;
 }) {
   const queryClient = useQueryClient();
   /** Directories the user opened or closed by hand. */
@@ -153,6 +278,8 @@ function FileTree({
         onToggle={toggle}
         selected={selected}
         onSelect={onSelect}
+        registerRow={registerRow}
+        onExpand={onExpand}
       />
     </div>
   );
@@ -170,6 +297,8 @@ function Directory({
   onToggle,
   selected,
   onSelect,
+  registerRow,
+  onExpand,
 }: {
   sessionId: string;
   path: string;
@@ -177,7 +306,9 @@ function Directory({
   expanded: Set<string>;
   onToggle: (path: string) => void;
   selected: string | null;
-  onSelect: (path: string) => void;
+  onSelect: (path: string, previewKind?: FileEntry["previewKind"]) => void;
+  registerRow: (path: string, node: HTMLButtonElement | null) => void;
+  onExpand: () => void;
 }) {
   const { data, isPending, error, refetch } = useQuery({
     queryKey: ["files", sessionId, path],
@@ -241,6 +372,8 @@ function Directory({
           onToggle={onToggle}
           selected={selected}
           onSelect={onSelect}
+          registerRow={registerRow}
+          onExpand={onExpand}
         />
       ))}
       {data.truncated && (
@@ -294,6 +427,8 @@ function TreeNode({
   onToggle,
   selected,
   onSelect,
+  registerRow,
+  onExpand,
 }: {
   sessionId: string;
   entry: FileEntry;
@@ -301,7 +436,9 @@ function TreeNode({
   expanded: Set<string>;
   onToggle: (path: string) => void;
   selected: string | null;
-  onSelect: (path: string) => void;
+  onSelect: (path: string, previewKind?: FileEntry["previewKind"]) => void;
+  registerRow: (path: string, node: HTMLButtonElement | null) => void;
+  onExpand: () => void;
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const isOpen = expanded.has(entry.path);
@@ -311,8 +448,20 @@ function TreeNode({
     () => [
       {
         label: entry.isDir ? (isOpen ? "Collapse" : "Expand") : "Open preview",
-        onSelect: () => (entry.isDir ? onToggle(entry.path) : onSelect(entry.path)),
+        onSelect: () =>
+          entry.isDir ? onToggle(entry.path) : onSelect(entry.path, entry.previewKind),
       },
+      ...(entry.isDir
+        ? []
+        : [
+            {
+              label: "Open full screen",
+              onSelect: () => {
+                onSelect(entry.path, entry.previewKind);
+                onExpand();
+              },
+            },
+          ]),
       {
         label: "Copy relative path",
         onSelect: () => void navigator.clipboard.writeText(entry.path).catch(() => {}),
@@ -328,14 +477,18 @@ function TreeNode({
       // arbitrary path is a local code-execution surface, and adding it needs a
       // threat-model decision rather than a menu entry.
     ],
-    [entry, isOpen, onToggle, onSelect],
+    [entry, isOpen, onToggle, onSelect, onExpand],
   );
 
   return (
     <li role="treeitem" aria-expanded={entry.isDir ? isOpen : undefined} aria-selected={isSelected}>
       <button
         type="button"
-        onClick={() => (entry.isDir ? onToggle(entry.path) : onSelect(entry.path))}
+        // Registered so Back can return focus to the row that opened the viewer.
+        ref={(node) => registerRow(entry.path, node)}
+        onClick={() =>
+          entry.isDir ? onToggle(entry.path) : onSelect(entry.path, entry.previewKind)
+        }
         onContextMenu={(event) => {
           event.preventDefault();
           setMenu({ x: event.clientX, y: event.clientY });
@@ -349,8 +502,9 @@ function TreeNode({
         <span aria-hidden="true" className={`w-3 shrink-0 ${isSelected ? "text-gray-300" : "text-gray-500"}`}>
           {entry.isDir ? (isOpen ? "▾" : "▸") : ""}
         </span>
+        {/* A per-family glyph, so a spreadsheet is recognizable before opening. */}
         <span aria-hidden="true" className="shrink-0 text-[10px]">
-          {entry.isDir ? "▮" : "▫"}
+          {glyphFor(entry)}
         </span>
         <span className="min-w-0 flex-1 truncate">{entry.name}</span>
         {entry.isSymlink && (
@@ -381,6 +535,8 @@ function TreeNode({
           onToggle={onToggle}
           selected={selected}
           onSelect={onSelect}
+          registerRow={registerRow}
+          onExpand={onExpand}
         />
       )}
 
