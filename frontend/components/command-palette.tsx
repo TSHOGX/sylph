@@ -108,10 +108,10 @@ export function CommandPalette() {
         run: () => runAction("browseWorkspaceHistory"),
       },
       {
-        id: "all-sessions",
-        label: "Go to all sessions",
+        id: "start-screen",
+        label: "Go to the start screen",
         group: "Navigation",
-        keywords: "home list",
+        keywords: "home welcome recent start new session",
         run: () => {
           closeOverlay();
           router.push("/");

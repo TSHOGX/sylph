@@ -16,12 +16,11 @@ import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
 import { useCallback, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api, type Session } from "@/lib/api";
-import { useSettings } from "@/lib/settings";
+import { api } from "@/lib/api";
 import { useQuickCreateSession } from "@/lib/create-session";
 import { WorkspaceUIProvider, useWorkspaceUI } from "@/lib/workspace-ui";
 import { WorkspaceSidebar } from "@/components/workspace-sidebar";
-import { formatCombo, useIsMac } from "@/lib/shortcuts";
+import { useShortcutHint } from "@/lib/shortcuts";
 
 /**
  * Surfaces that are not on screen at first paint are code-split.
@@ -185,16 +184,7 @@ function ShellFrame({
 
 function TopBar() {
   const { toggleLeft, toggleRight, openOverlay, leftOpen, rightOpen } = useWorkspaceUI();
-  const { settings } = useSettings();
-  const isMac = useIsMac();
-
-  const hint = useCallback(
-    (action: string) => {
-      const combo = Object.entries(settings.shortcuts).find(([, value]) => value === action)?.[0];
-      return combo ? formatCombo(combo, isMac) : "";
-    },
-    [settings.shortcuts, isMac],
-  );
+  const hint = useShortcutHint();
 
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b border-gray-200 px-2">
@@ -297,11 +287,6 @@ export function Kbd({ children }: { children: ReactNode }) {
       {children}
     </kbd>
   );
-}
-
-/** Session label helper shared by the sidebar and the overlays. */
-export function sessionSubtitle(session: Session): string {
-  return session.agent;
 }
 
 /**

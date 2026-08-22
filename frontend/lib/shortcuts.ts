@@ -10,7 +10,8 @@
  * one spelling and the settings panel can use the string as a map key.
  */
 
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
+import { useSettings, type ShortcutAction } from "@/lib/settings";
 
 export type Combo = string;
 
@@ -97,6 +98,34 @@ const noopSubscribe = () => () => {};
 
 export function useIsMac(): boolean {
   return useSyncExternalStore(noopSubscribe, isMacPlatform, () => false);
+}
+
+/**
+ * Look up the display form of whatever combo is bound to an action.
+ *
+ * Reverse of the stored mapping, which is keyed by combo because that is what a
+ * keydown produces. Surfaces that *teach* a shortcut need the opposite direction
+ * — "how do I create a session" — and every one of them was writing the same
+ * `Object.entries(...).find(...)` before rendering a `<kbd>`. Hard-coding `⌘N`
+ * instead would be wrong for a rebound binding and wrong on Linux, which is the
+ * whole reason bindings are stored platform-neutral.
+ *
+ * Returns `""` when an action has no binding, so a caller can treat it as falsy
+ * and render no hint rather than an empty key cap.
+ */
+export function useShortcutHint(): (action: ShortcutAction) => string {
+  const { settings } = useSettings();
+  const isMac = useIsMac();
+
+  return useCallback(
+    (action: ShortcutAction) => {
+      const combo = Object.entries(settings.shortcuts).find(
+        ([, bound]) => bound === action,
+      )?.[0];
+      return combo ? formatCombo(combo, isMac) : "";
+    },
+    [settings.shortcuts, isMac],
+  );
 }
 
 /**

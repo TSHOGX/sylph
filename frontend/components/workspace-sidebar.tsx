@@ -23,7 +23,8 @@ import { useParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type ArchiveSession, type Session } from "@/lib/api";
-import { formatRelative, sessionLabel } from "@/lib/format";
+import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
+import { liveSessionsQuery } from "@/lib/sessions-query";
 import { useSettings } from "@/lib/settings";
 import dynamic from "next/dynamic";
 
@@ -36,10 +37,6 @@ const DirectoryPicker = dynamic(
 );
 import { ContextMenu, type MenuItem } from "@/components/context-menu";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
-
-/** Sessions the sidebar shows. Higher than the list default: the sidebar is the
- *  primary navigation surface, so truncating it hides work rather than paging it. */
-const SIDEBAR_LIMIT = 200;
 
 /**
  * Archived sessions fetched per expanded group.
@@ -72,12 +69,9 @@ export function WorkspaceSidebar() {
     setPicking(false);
   };
 
-  const sessionsQuery = useQuery({
-    queryKey: ["sessions", { limit: SIDEBAR_LIMIT }],
-    queryFn: () => api.sessions.list({ limit: SIDEBAR_LIMIT }),
-    // The sidebar shows running state, which changes without user action here.
-    refetchInterval: 10_000,
-  });
+  // Shared with the start screen, which lists the same rows to resume rather than
+  // to navigate. One declaration, so the two mount together on `/` as one request.
+  const sessionsQuery = useQuery(liveSessionsQuery());
 
   const workspacesQuery = useQuery({
     queryKey: ["workspaces"],
@@ -637,12 +631,6 @@ function ArchivedRow({ session }: { session: ArchiveSession }) {
 function leafName(path: string): string {
   const leaf = path.replace(/\/+$/, "").split("/").filter(Boolean).pop();
   return leaf ?? path;
-}
-
-/** Abbreviate the home prefix, the way a shell prompt does. */
-export function shortenHome(path: string, home?: string): string {
-  if (home && path.startsWith(home)) return `~${path.slice(home.length)}`;
-  return path;
 }
 
 function omit<T>(record: Record<string, T>, key: string): Record<string, T> {

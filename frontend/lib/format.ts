@@ -48,3 +48,16 @@ export function sessionLabel(session: {
   const leaf = session.workdir.replace(/\/+$/, "").split("/").filter(Boolean).pop();
   return leaf ? `${session.agent} · ${leaf}` : `Untitled ${session.agent} session`;
 }
+
+/**
+ * Abbreviate the home prefix, the way a shell prompt does.
+ *
+ * `home` is resolved server-side and arrives with the workspaces listing: a
+ * browser cannot expand `~`. It is optional because every caller renders before
+ * that listing settles, and an unabbreviated absolute path is a correct first
+ * paint — where waiting for the prefix would blank the path entirely.
+ */
+export function shortenHome(path: string, home?: string): string {
+  if (home && path.startsWith(home)) return `~${path.slice(home.length)}`;
+  return path;
+}

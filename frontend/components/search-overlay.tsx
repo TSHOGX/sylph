@@ -18,12 +18,12 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type SearchResult, type Session } from "@/lib/api";
-import { formatRelative, sessionLabel } from "@/lib/format";
+import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
+import { liveSessionsQuery } from "@/lib/sessions-query";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useDebounced } from "@/lib/use-debounced";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Overlay, scrollActiveIntoView, useListNavigation } from "@/components/overlay";
-import { shortenHome } from "@/components/workspace-sidebar";
 
 type Row =
   | { type: "live"; session: Session }
@@ -40,10 +40,11 @@ export function SearchOverlay() {
   const listRef = useRef<HTMLDivElement>(null);
   const debounced = useDebounced(query);
 
-  const sessionsQuery = useQuery({
-    queryKey: ["sessions", { limit: 200 }],
-    queryFn: () => api.sessions.list({ limit: 200 }),
-  });
+  // The same declaration the sidebar and the start screen use, so opening search
+  // reads their cache entry instead of issuing a listing of its own. This used to
+  // hand-write the key and the limit, which deduped only as long as both spellings
+  // happened to agree.
+  const sessionsQuery = useQuery(liveSessionsQuery());
 
   const workspacesQuery = useQuery({
     queryKey: ["workspaces"],

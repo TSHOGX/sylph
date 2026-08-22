@@ -25,11 +25,10 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api, type ArchiveSession, type Workspace } from "@/lib/api";
-import { formatRelative } from "@/lib/format";
+import { formatRelative, shortenHome } from "@/lib/format";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Overlay, scrollActiveIntoView, useListNavigation } from "@/components/overlay";
-import { shortenHome } from "@/components/workspace-sidebar";
 
 // Split out because it is reached only from the workspace switcher's fallback,
 // and the shell already pays for this chunk on the `Mod+N` path.

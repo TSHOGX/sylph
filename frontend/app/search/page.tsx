@@ -39,7 +39,7 @@ export default function SearchPage() {
           href="/"
           className="rounded-md border border-gray-200 px-2.5 py-1 text-xs font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
         >
-          All sessions
+          Start screen
         </Link>
       </header>
 
