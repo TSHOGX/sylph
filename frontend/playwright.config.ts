@@ -31,7 +31,43 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+      // The mobile project owns these, and running them at 1280px would assert the
+      // desktop layout against mobile expectations.
+      testIgnore: /mobile\.spec\.ts/,
+    },
+    /**
+     * A phone-sized project, for the specs that cannot be written any other way.
+     *
+     * The three reported mobile failures — a composer wider than the viewport,
+     * sidebars that crush the conversation to ~150px, and a scroll that drags the
+     * whole shell — are all *layout* bugs. Every one of them passed the desktop suite
+     * at 1280px, because at that width the same code is merely a little cramped. A
+     * viewport is therefore not an optional variant here; it is the only thing that
+     * can observe the defect.
+     *
+     * Pixel 7 rather than an iPhone profile: Playwright's WebKit browser is not
+     * installed in this checkout (only Chromium is), and an iPhone profile silently
+     * runs in Chromium anyway — which would claim iOS coverage it does not have.
+     * Pixel 7 is a Chromium device, so what it emulates is what actually runs:
+     * `pointer: coarse`, a 412px viewport, and a device pixel ratio above 1.
+     *
+     * What this therefore does *not* cover is iOS Safari specifically: `100dvh`
+     * behaviour under a collapsing toolbar, and Safari's zoom-on-small-input. Those
+     * are the two mechanisms behind the scroll bug, so they still need a real device
+     * — which is why the fix is asserted here through its observable consequences
+     * (nothing overflows, the document does not scroll) rather than by simulating a
+     * toolbar this browser does not have.
+     */
+    {
+      name: "mobile",
+      use: { ...devices["Pixel 7"] },
+      testMatch: /mobile\.spec\.ts/,
+    },
+  ],
   webServer: [
     {
       command: "cargo run --quiet",
