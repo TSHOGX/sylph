@@ -104,7 +104,13 @@ test("Escape closes an overlay and returns focus to its opener", async ({ page }
 
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog.locator(":focus")).toBeVisible();
+  // Focus is *within* the dialog, which includes the dialog element itself. A
+  // `dialog.locator(":focus")` matches descendants only, and the settings panel has
+  // no auto-focusing control of its own, so focus correctly lands on the container —
+  // which is what makes Escape reach its handler at all.
+  await expect(
+    dialog.evaluate((node) => node === document.activeElement || node.contains(document.activeElement)),
+  ).resolves.toBe(true);
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
@@ -201,17 +207,32 @@ function groupRows(page: Page, name: string) {
   return page.getByRole("list", { name: `Sessions in ${name}` }).getByRole("link");
 }
 
+/**
+ * A sidebar group's own header button.
+ *
+ * Every group now carries a second button — an overflow menu named "<name>
+ * actions" — because its actions were otherwise reachable only by right-click, and
+ * there is no right-click on a touch screen. A bare name match therefore resolves
+ * to two elements.
+ *
+ * `aria-expanded` is what distinguishes them, and it is the honest discriminator
+ * rather than a positional `.first()`: the header is the disclosure, so it is the
+ * only one of the two that has an expanded state at all.
+ */
+function groupHeader(page: Page, name: string) {
+  return page.locator("button[aria-expanded]").filter({ hasText: name }).first();
+}
+
 test("Quick Sessions creates a session from its menu with no dialog", async ({ page }) => {
   // The regression: "New session here" used to route to a create form and ask
   // again for a working directory the right-clicked group had already named.
   await createSession(page);
 
   const rows = groupRows(page, "Quick Sessions");
-  const before = await rows.count();
 
   // The default agent is unset here, so creation falls back to the first
   // discovered runner — the E2E fixture, which is the only one installed.
-  await page.getByRole("button", { name: /Quick Sessions/ }).click({ button: "right" });
+  await groupHeader(page, "Quick Sessions").click({ button: "right" });
   const menu = page.getByRole("menu");
   await expect(menu).toBeVisible();
   await menu.getByRole("menuitem", { name: "New session here", exact: true }).click();
@@ -221,9 +242,26 @@ test("Quick Sessions creates a session from its menu with no dialog", async ({ p
   await expect(page).toHaveURL(/\/sessions\/(?!new)[0-9a-f-]{36}/);
   await expect(page.getByLabel("Working directory")).toHaveCount(0);
 
-  // Created in the fixed Quick Start directory, so it joins that group rather
-  // than spawning a workspace of its own.
-  await expect(rows).toHaveCount(before + 1);
+  // Created in the fixed Quick Start directory, so it joins that group rather than
+  // spawning a workspace of its own.
+  //
+  // Asserted as "the new session is listed under Quick Sessions", not as
+  // `before + 1`. The count is not a safe assertion here and its failure mode is
+  // misleading: `.e2e-data/` is never wiped, so the shared journal accumulates every
+  // session from every past run — 357 at the time of writing — and the sidebar's
+  // listing is capped at `LIVE_SESSIONS_LIMIT` (200). Past that cap a new session
+  // displaces an older one instead of adding a row, so the count stays flat and the
+  // spec reports an off-by-one that looks like a UI bug and is not. It also only
+  // fails once the shared group crosses the cap, which is why it passed for months
+  // and then failed permanently.
+  //
+  // The identity check is what the test was actually for, and it does not depend on
+  // how many times the suite has run before.
+  const created = page.url().split("/").pop()!;
+  // The link itself carries the href, so this is an attribute match on the row rather
+  // than `filter({ has })` — which searches *descendants* and therefore matches
+  // nothing here.
+  await expect(rows.and(page.locator(`[href$="${created}"]`))).toHaveCount(1);
 });
 
 test("a workspace group creates in its own directory, with one menu item and no form", async ({
@@ -401,7 +439,7 @@ test("binding a workspace from the empty sidebar area needs no session first", a
   // binding it makes a group with no sessions of its own — which is the point:
   // a workspace can exist before any session does.
   await expect(dialog).toBeHidden();
-  await expect(sidebar.getByRole("button", { name: /tmp/ }).first()).toBeVisible();
+  await expect(groupHeader(page, "tmp")).toBeVisible();
 });
 
 // -------------------------------------------------------- Phase 7: composer
@@ -410,25 +448,86 @@ test("binding a workspace from the empty sidebar area needs no session first", a
 // controls are generated from `--describe`, so these assert against whatever the
 // E2E fixture declares rather than hardcoding a model list.
 
-test("the composer exposes the agent and its declared flags, and locks the agent after the first turn", async ({
+test("a declared flag is a truncating chip that opens a menu, not a <select>", async ({
   page,
 }) => {
   await createSession(page);
 
-  // Before any turn the agent is changeable: nothing has been produced by it yet.
-  const agent = page.getByLabel("Agent", { exact: true });
-  await expect(agent).toBeVisible();
-  await expect(agent).toHaveValue("e2e");
+  // The fixture declares `model` with two choices and no `effort`, so exactly one
+  // chip is expected — the row is generated from `--describe`, never hardcoded.
+  const model = page.getByRole("button", { name: "Model" });
+  await expect(model).toBeVisible();
+  // Unset shows the flag's name, not a blank control: "Model" reads as "choose one",
+  // where an empty chip reads as broken.
+  await expect(model).toHaveText(/Model/);
+
+  await model.click();
+  const menu = page.getByRole("menu", { name: "Model" });
+  await expect(menu).toBeVisible();
+  // "Runner default" is a real option, distinct from any choice: omitting the flag
+  // is not the same as sending one of the runner's values.
+  await expect(menu.getByRole("menuitemradio", { name: "Runner default" })).toBeChecked();
+  await menu.getByRole("menuitemradio", { name: "thorough" }).click();
+
+  // The chip now renders the *current value*. This is the whole reason it is a
+  // button and not a `<select>`: a select is sized by its longest option, so one
+  // long model name widened the control past the viewport on a phone regardless of
+  // what was selected.
+  await expect(page.getByRole("button", { name: /thorough/ })).toBeVisible();
+});
+
+test("no configuration can push Send outside the composer", async ({ page }) => {
+  await createSession(page);
+
+  // The reported bug: on a phone the composer "ran off the screen". The cause was a
+  // control whose intrinsic width came from content the user could not see, so this
+  // asserts the invariant that replaced it — the send control stays inside the
+  // composer's own box — rather than asserting a pixel width that would drift.
+  const form = page.locator("form").filter({ has: page.getByLabel("Message") });
+  const send = page.getByRole("button", { name: "Send", exact: true });
+
+  const formBox = await form.boundingBox();
+  const sendBox = await send.boundingBox();
+  expect(formBox).not.toBeNull();
+  expect(sendBox).not.toBeNull();
+  expect(sendBox!.x + sendBox!.width).toBeLessThanOrEqual(formBox!.x + formBox!.width + 1);
+
+  // And again with a flag selected, since selecting one is what used to widen the row.
+  await page.getByRole("button", { name: "Model" }).click();
+  await page.getByRole("menu", { name: "Model" }).getByRole("menuitemradio", { name: "thorough" }).click();
+
+  const after = await send.boundingBox();
+  expect(after!.x + after!.width).toBeLessThanOrEqual(formBox!.x + formBox!.width + 1);
+});
+
+test("the agent is switchable from the add menu until the first turn, then fixed", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  // Agent lives in the `+` menu rather than on the control row: it is session-scoped,
+  // where model and thinking are per-turn. Only one runner is installed, so the menu
+  // reports the current agent rather than offering a switch — which is the same
+  // branch a locked session takes, and is why the assertion is on the label.
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  const menu = page.getByRole("menu", { name: "Add" });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByText(/Agent.*e2e|e2e/)).toBeVisible();
+  await page.keyboard.press("Escape");
 
   const composer = page.getByLabel("Message");
   await composer.fill("First turn");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
 
-  // After a turn it is a plain label, not a disabled control: switching runner
-  // would hand an existing transcript to a different identity policy.
-  await expect(page.getByLabel("Agent", { exact: true })).toHaveCount(0);
-  await expect(page.getByTitle(/agent is fixed once a session has history/)).toBeVisible();
+  // After a turn the agent is stated as fixed, not offered as a disabled control:
+  // switching runner would hand an existing transcript to a different identity
+  // policy. The row says so rather than vanishing, because a control that
+  // disappears reads as a bug.
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  const after = page.getByRole("menu", { name: "Add" });
+  await expect(after.getByText("Agent: e2e")).toBeVisible();
+  await expect(after.getByText("fixed")).toBeVisible();
 });
 
 test("attachments stage inside the composer rather than in a separate dropzone", async ({
@@ -436,10 +535,15 @@ test("attachments stage inside the composer rather than in a separate dropzone",
 }) => {
   await createSession(page);
 
-  // The old stacked "Attach files or drop them here" strip is gone; the paperclip
-  // inside the composer replaces it.
+  // The old stacked "Attach files or drop them here" strip is gone. Attaching is now
+  // in the `+` menu rather than on a paperclip button: the paperclip claimed the menu
+  // held only attachments, so nothing else could be put there.
   await expect(page.getByText("Attach files or drop them here.")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Attach files" })).toBeVisible();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(
+    page.getByRole("menu", { name: "Add" }).getByRole("menuitem", { name: /Attach files/ }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
 
   await page.setInputFiles('input[type="file"]', {
     name: "note.txt",
@@ -453,7 +557,13 @@ test("attachments stage inside the composer rather than in a separate dropzone",
 
   // Offered only once something is staged, and writes into the workspace subtree
   // rather than the per-turn staging directory.
-  await expect(page.getByRole("button", { name: /Save to workspace/ })).toBeVisible();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(
+    page
+      .getByRole("menu", { name: "Add" })
+      .getByRole("menuitem", { name: /Save attachments to workspace/ }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
 
   await staged.getByRole("button", { name: "Remove note.txt" }).click();
   await expect(staged).toHaveCount(0);

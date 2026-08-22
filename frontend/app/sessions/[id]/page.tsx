@@ -29,6 +29,13 @@ import { Composer } from "@/components/composer";
 import { CommandDialog, type CommandInvocation } from "@/components/command-dialog";
 import { Timeline } from "@/components/timeline";
 import { OriginBadge, SessionStatusBadge, TurnStatusBadge } from "@/components/badges";
+import { Button, IconButton } from "@/components/ui/button";
+import { MenuButton } from "@/components/ui/menu";
+import {
+  CopyIcon,
+  MoreIcon,
+  RefreshIcon,
+} from "@/components/icons";
 
 const TERMINAL: ReadonlySet<Turn["status"]> = new Set([
   "completed",
@@ -247,7 +254,7 @@ export default function SessionPage() {
     return (
       <output
         aria-live="polite"
-        className="flex flex-1 items-center justify-center text-sm text-gray-500"
+        className="flex flex-1 items-center justify-center text-sm text-ink-muted"
       >
         Loading session...
       </output>
@@ -260,10 +267,10 @@ export default function SessionPage() {
     return (
       <div role="alert" className="flex flex-1 items-center justify-center px-4">
         <div className="max-w-md text-center">
-          <h1 className="text-lg font-semibold text-red-800">
+          <h1 className="text-lg font-semibold text-danger">
             {missing ? "Session not found" : "Could not load this session"}
           </h1>
-          <p className="mt-2 text-sm text-gray-600">
+          <p className="mt-2 text-sm text-ink-muted">
             {missing
               ? "It may have been created against a different data directory."
               : error instanceof Error
@@ -275,14 +282,14 @@ export default function SessionPage() {
               <button
                 type="button"
                 onClick={() => void sessionQuery.refetch()}
-                className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-sunken focus-ring"
               >
                 Retry
               </button>
             )}
             <Link
               href="/"
-              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+              className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-ink hover:bg-accent-hover focus-ring"
             >
               Start screen
             </Link>
@@ -297,31 +304,105 @@ export default function SessionPage() {
 
   return (
     <>
-      <header className="shrink-0 border-b border-gray-200 px-4 py-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <h1 className="truncate text-sm font-semibold">{sessionLabel(session)}</h1>
-          <OriginBadge origin={session.origin} />
-          <SessionStatusBadge status={session.status} />
-          <div className="ml-auto flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setExpandAll(expandAll === true ? null : true)}
-              className="rounded px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-            >
+      {/*
+        `flex-nowrap` with a truncating title, not `flex-wrap`. Wrapping let the
+        badges and the two buttons drop onto a second and third line on a phone, so
+        the header grew to three rows and took a third of the viewport before the
+        conversation started. Now the title yields and everything else holds its size.
+      */}
+      <header className="shrink-0 border-b border-line px-3 py-2 md:px-4">
+        <div className="flex items-center gap-2">
+          <h1 className="min-w-0 flex-1 truncate text-sm font-semibold">
+            {sessionLabel(session)}
+          </h1>
+          {/* `sylph` is the unremarkable case and the badge is on every row; the
+              status badge already says "running". On a phone both are noise
+              competing with the title, so only the exceptional ones survive. */}
+          {session.origin === "native" && <OriginBadge origin={session.origin} />}
+          {session.status === "running" && <SessionStatusBadge status={session.status} />}
+          <div className="hidden shrink-0 items-center gap-1 md:flex">
+            <Button variant="ghost" onClick={() => setExpandAll(expandAll === true ? null : true)}>
               Expand all
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="ghost"
               onClick={() => setExpandAll(expandAll === false ? null : false)}
-              className="rounded px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
             >
               Collapse all
-            </button>
+            </Button>
+          </div>
+          {/* The same two actions plus the ones that had no home, folded into one
+              button on a phone. `Cmd+F` and `Shift+E`/`Shift+C` reach three of these
+              on a desktop, and a phone has no modifier keys at all — so without this
+              they were unreachable rather than merely inconvenient. */}
+          <div className="shrink-0 md:hidden">
+            <MenuButton
+              label="Session actions"
+              align="end"
+              items={[
+                { label: "Expand all blocks", onSelect: () => setExpandAll(true) },
+                { label: "Collapse all blocks", onSelect: () => setExpandAll(false) },
+                {
+                  label: "Filter turns...",
+                  separated: true,
+                  onSelect: () => setFind((current) => (current === null ? "" : current)),
+                },
+                {
+                  label: "Copy workspace path",
+                  icon: <CopyIcon size={14} />,
+                  onSelect: () =>
+                    void navigator.clipboard.writeText(session.workdir).catch(() => {}),
+                },
+                {
+                  label: "Refresh transcript",
+                  icon: <RefreshIcon size={14} />,
+                  onSelect: () => {
+                    void queryClient.invalidateQueries({
+                      queryKey: ["session", sessionId, "history"],
+                    });
+                  },
+                },
+              ]}
+            >
+              {(trigger) => (
+                <IconButton label="Session actions" size={20} {...trigger}>
+                  <MoreIcon size={20} />
+                </IconButton>
+              )}
+            </MenuButton>
           </div>
         </div>
-        <p className="mt-0.5 truncate text-[11px] text-gray-500">
-          {session.agent} · <span className="font-mono">{session.workdir}</span> · created{" "}
-          {formatTimestamp(session.createdAtMs)}
+        {/*
+          The path is the session's identity, so it stays — but it is elided from the
+          *start*. An absolute path truncated at the end shows
+          `/Users/hsw/Workspace/proj…` for every session under a home directory, which
+          is the half identical across all of them; the leaf is the half that
+          identifies it.
+
+          `dir="rtl"` is how that is done, and the inner `<bdi>` is not optional.
+          Without it the bidi algorithm reorders the leading separator to the trailing
+          edge: `/tmp` renders as `tmp/`, and a long path as `…/sylph-web/frontend/`.
+          `<bdi>` isolates the path so it keeps its own direction while the container
+          still elides at the start. (`unicode-bidi: plaintext` fixes the short case
+          but reverts to end-truncation, so it does not work here — both were checked
+          in a browser.)
+
+          The creation time is desktop-only: the least useful field here, and the first
+          thing worth spending on a narrow line.
+        */}
+        <p className="mt-0.5 flex items-baseline gap-1 text-2xs text-ink-muted">
+          <span className="shrink-0">{session.agent}</span>
+          <span aria-hidden="true">·</span>
+          <span
+            dir="rtl"
+            title={session.workdir}
+            className="min-w-0 flex-1 truncate text-left font-mono"
+          >
+            <bdi>{session.workdir}</bdi>
+          </span>
+          <span className="hidden shrink-0 md:inline">
+            · created {formatTimestamp(session.createdAtMs)}
+          </span>
         </p>
       </header>
 
@@ -331,16 +412,29 @@ export default function SessionPage() {
 
       {isNative && (
         <aside
-          className="shrink-0 border-b border-violet-200 bg-violet-50 px-4 py-1.5 text-[11px] text-violet-900"
+          className="shrink-0 border-b border-native-line bg-native-bg px-3 py-1.5 text-2xs text-native md:px-4"
           aria-label="Native session policy"
         >
-          <span className="font-medium">Native session — identity preserved.</span> Sylph
-          does not inject an identity, reset, or compact it, and prompts pass through
-          unchanged.
+          <span className="font-medium">Native session — identity preserved.</span>
+          {/* The full policy statement is desktop-only. It is three lines on a phone,
+              and the headline already carries the fact that matters; the detail is in
+              the docs and in the badge's own tooltip. */}
+          <span className="hidden md:inline">
+            {" "}
+            Sylph does not inject an identity, reset, or compact it, and prompts pass
+            through unchanged.
+          </span>
         </aside>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      {/*
+        `data-scroller` rather than being found by its utility class. `LiveTurn` needs
+        this node to decide whether the user is pinned to the bottom, and it used to
+        locate it with `closest(".overflow-y-auto")` — which silently breaks the
+        moment a scroll container is expressed differently, and did break when this
+        became the `pane` utility. An explicit contract cannot drift.
+      */}
+      <div data-scroller className="pane min-h-0 flex-1 px-3 py-3 md:px-4">
         <div className={`mx-auto max-w-3xl ${density.text}`}>
           <ErrorBoundary label="the transcript">
             <Transcript
@@ -412,8 +506,8 @@ function FindBar({
   useEffect(() => ref.current?.focus(), []);
 
   return (
-    <div className="flex shrink-0 items-center gap-2 border-b border-gray-200 bg-gray-50 px-4 py-1">
-      <label htmlFor="find-in-session" className="text-[10px] font-medium text-gray-500">
+    <div className="flex shrink-0 items-center gap-2 border-b border-line bg-sunken px-4 py-1">
+      <label htmlFor="find-in-session" className="text-3xs font-medium text-ink-muted">
         Filter turns
       </label>
       <input
@@ -429,12 +523,12 @@ function FindBar({
           }
         }}
         placeholder="Text in a prompt or reply..."
-        className="flex-1 rounded border border-gray-200 bg-white px-2 py-0.5 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        className="flex-1 rounded border border-line bg-raised px-2 py-0.5 text-xs focus-ring"
       />
       <button
         type="button"
         onClick={onClose}
-        className="rounded px-1.5 text-[11px] text-gray-500 hover:bg-gray-200 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        className="rounded px-1.5 text-2xs text-ink-muted hover:bg-active hover:text-ink focus-ring"
       >
         Close
       </button>
@@ -497,7 +591,7 @@ function Transcript({
 
   if (isPending) {
     return (
-      <output aria-live="polite" className="block py-8 text-center text-sm text-gray-500">
+      <output aria-live="polite" className="block py-8 text-center text-sm text-ink-muted">
         Loading conversation...
       </output>
     );
@@ -505,17 +599,17 @@ function Transcript({
 
   if (error) {
     return (
-      <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4">
-        <p className="text-sm font-medium text-red-900">
+      <div role="alert" className="rounded-lg border border-danger-line bg-danger-bg p-4">
+        <p className="text-sm font-medium text-danger">
           Could not load the conversation history.
         </p>
-        <p className="mt-1 text-sm text-red-800">
+        <p className="mt-1 text-sm text-danger">
           {error instanceof Error ? error.message : "Unknown error."}
         </p>
         <button
           type="button"
           onClick={onRetry}
-          className="mt-3 rounded border border-red-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-red-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600"
+          className="mt-3 rounded border border-danger-line bg-raised px-3 py-1.5 text-sm font-medium hover:bg-danger-bg focus-ring"
         >
           Retry
         </button>
@@ -530,14 +624,14 @@ function Transcript({
     <div>
       {empty && !filtering && (
         <div className="py-12 text-center">
-          <p className="text-sm font-medium text-gray-700">No turns yet</p>
-          <p className="mt-1 text-sm text-gray-500">
+          <p className="text-sm font-medium text-ink-soft">No turns yet</p>
+          <p className="mt-1 text-sm text-ink-muted">
             Send a message below to start the conversation.
           </p>
         </div>
       )}
       {empty && filtering && (
-        <p className="py-12 text-center text-sm text-gray-500">No turns match that text.</p>
+        <p className="py-12 text-center text-sm text-ink-muted">No turns match that text.</p>
       )}
 
       {past.map((entry) => (
@@ -603,22 +697,22 @@ function TurnSection({
   }
 
   return (
-    <section aria-label={`Turn ${entry.turn.id}`} className="border-t border-gray-100 pt-1 first:border-t-0">
+    <section aria-label={`Turn ${entry.turn.id}`} className="border-t border-line pt-1 first:border-t-0">
       <Timeline events={entry.events} onOpenFile={onOpenFile} expandAll={expandAll} />
 
       {entry.turn.errorMessage && (
-        <p role="alert" className="mt-1 text-xs text-red-700">
+        <p role="alert" className="mt-1 text-xs text-danger">
           {entry.turn.errorMessage}
         </p>
       )}
 
-      <div className="flex items-center gap-2 py-1 text-[10px] text-gray-500">
+      <div className="flex items-center gap-2 py-1 text-3xs text-ink-muted">
         <TurnStatusBadge status={entry.turn.status} />
         {duration !== undefined && <span>{duration.toFixed(1)}s</span>}
         <button
           type="button"
           onClick={() => void copy()}
-          className="rounded px-1 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="rounded px-1 hover:bg-hover hover:text-ink-soft focus-ring"
         >
           {copied ? "Copied" : "Copy"}
         </button>
@@ -627,7 +721,7 @@ function TurnSection({
             type="button"
             onClick={() => onResend(entry.turn.requestText)}
             disabled={disabled}
-            className="rounded px-1 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+            className="rounded px-1 hover:bg-hover hover:text-ink-soft focus-ring disabled:opacity-50"
           >
             Resend
           </button>
@@ -657,7 +751,7 @@ function LiveTurn({
   useEffect(() => {
     const node = anchorRef.current;
     if (!node) return;
-    const scroller = node.closest(".overflow-y-auto");
+    const scroller = node.closest("[data-scroller]");
     if (!scroller) return;
     const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
     pinnedRef.current = distance < 120;
@@ -665,21 +759,21 @@ function LiveTurn({
   }, [events]);
 
   return (
-    <section aria-label="Current turn" className="border-t border-gray-100 pt-1">
+    <section aria-label="Current turn" className="border-t border-line pt-1">
       <Timeline events={events} onOpenFile={onOpenFile} expandAll={expandAll} />
 
-      <div className="flex items-center gap-1.5 py-1 text-[10px]">
+      <div className="flex items-center gap-1.5 py-1 text-3xs">
         <span
           aria-hidden="true"
           className={`h-1.5 w-1.5 rounded-full ${
             status === "open"
-              ? "animate-pulse bg-blue-500"
+              ? "animate-pulse bg-info-solid"
               : status === "reconnecting"
-                ? "bg-amber-500"
-                : "bg-gray-300"
+                ? "bg-warning-solid"
+                : "bg-line-strong"
           }`}
         />
-        <span aria-live="polite" className="text-gray-500">
+        <span aria-live="polite" className="text-ink-muted">
           {status === "open"
             ? events.length === 0
               ? "Waiting for the agent to respond..."

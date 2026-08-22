@@ -1,15 +1,36 @@
 "use client";
 
 /**
- * The three-pane frame: Workspaces | Conversation | Artifacts.
+ * The application frame.
  *
- * This sits in the root layout rather than inside a page, so the sidebars keep
- * their scroll position and open/closed state across navigation. A shell inside
- * a page would remount on every route change and lose both.
+ * # Two layouts, one component tree
  *
- * Panes are laid out with flexbox and fixed sidebar widths rather than a CSS
- * grid with `fr` units: sidebars must not shrink as conversation content grows,
- * and only the middle pane should scroll.
+ * On a desktop this is three in-flow panes: Workspaces | Conversation | Artifacts,
+ * with fixed sidebar widths so they do not shrink as conversation content grows,
+ * and only the middle pane scrolling.
+ *
+ * On a phone that layout cannot work — a 240px sidebar on a 390px viewport leaves
+ * ~150px for the conversation *and* the composer — so the conversation takes the
+ * full width and the two sidebars become overlay surfaces: a left drawer for
+ * sessions, a bottom sheet for files. Which one is right is not a width question,
+ * it is what each pane is *for*: sessions are navigation, and files are inspection
+ * of the thing currently on screen, which is why the sheet leaves the conversation
+ * visible above it.
+ *
+ * The split is a component swap, not a stylesheet: an overlay surface has to trap
+ * focus, close on Escape, and dismiss on navigation, and none of those three is
+ * expressible as a CSS rule. `useIsMobile` shares its breakpoint constant with the
+ * `md:` classes here so the two boundaries cannot drift — a focus trap running while
+ * CSS still lays the pane out in flow would trap focus inside a visible sidebar.
+ *
+ * # Height
+ *
+ * `h-dvh`, never `h-screen`. `100vh` is the *large* viewport height: it measures as
+ * though the browser's collapsible toolbars were hidden, so a `h-screen` shell is
+ * taller than what is visible and the document scrolls to make up the difference —
+ * dragging the whole UI up and exposing blank space below the composer. `100dvh`
+ * tracks the toolbars as they collapse. The document itself is pinned in
+ * `globals.css`; this shell owns all scrolling.
  */
 
 import dynamic from "next/dynamic";
@@ -21,6 +42,14 @@ import { useQuickCreateSession } from "@/lib/create-session";
 import { WorkspaceUIProvider, useWorkspaceUI } from "@/lib/workspace-ui";
 import { WorkspaceSidebar } from "@/components/workspace-sidebar";
 import { useShortcutHint } from "@/lib/shortcuts";
+import { IconButton, Kbd } from "@/components/ui/button";
+import {
+  MenuIcon,
+  PanelLeftIcon,
+  PanelRightIcon,
+  SearchIcon,
+  SettingsIcon,
+} from "@/components/icons";
 
 /**
  * Surfaces that are not on screen at first paint are code-split.
@@ -59,6 +88,20 @@ const DirectoryPicker = dynamic(
   () => import("@/components/directory-picker").then((m) => m.DirectoryPicker),
   { ssr: false },
 );
+
+/**
+ * The mobile surfaces, split for the same reason as the overlays above — with one
+ * extra: they are reachable only *below the `md` breakpoint*, so on a desktop they
+ * are not merely unopened, they are unreachable. A static import would put the drag
+ * gesture, the scrim, and the focus trap into the first-load bundle of every route
+ * for every desktop user. Measured at 1.1 KB gzipped.
+ */
+const Drawer = dynamic(() => import("@/components/ui/sheet").then((m) => m.Drawer), {
+  ssr: false,
+});
+const Sheet = dynamic(() => import("@/components/ui/sheet").then((m) => m.Sheet), {
+  ssr: false,
+});
 
 /**
  * Routes that own the full width and get no shell.
@@ -116,10 +159,10 @@ function ShellFrame({
   createPending: boolean;
   createError: unknown;
 }) {
-  const { leftOpen, rightOpen, overlay } = useWorkspaceUI();
+  const { leftOpen, rightOpen, overlay, drawer, closeDrawer, isMobile } = useWorkspaceUI();
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-white text-gray-900">
+    <div className="flex h-dvh flex-col overflow-hidden bg-canvas text-ink">
       <TopBar />
 
       {/* One strip for every create path: Quick Start, the palette, `Mod+N`, and
@@ -137,14 +180,17 @@ function ShellFrame({
         <p
           role="status"
           aria-live="polite"
-          className="border-b border-gray-200 bg-gray-50 px-4 py-1.5 text-xs text-gray-600"
+          className="shrink-0 border-b border-line bg-sunken px-4 py-1.5 text-2xs text-ink-muted"
         >
           Starting a session...
         </p>
       )}
 
       {createError != null && (
-        <p role="alert" className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
+        <p
+          role="alert"
+          className="shrink-0 border-b border-danger-line bg-danger-bg px-4 py-2 text-xs text-danger"
+        >
           {createError instanceof Error
             ? createError.message
             : "Could not create the session."}
@@ -152,11 +198,17 @@ function ShellFrame({
       )}
 
       <div className="flex min-h-0 flex-1">
-        {/* `hidden` rather than conditional rendering: the sidebar keeps its
-            expanded groups and scroll position when toggled back on. */}
+        {/*
+          Desktop only. `hidden` rather than conditional rendering, so the sidebar
+          keeps its expanded groups and scroll position when toggled back on.
+
+          `md:` on the visibility means the pane is never in flow on a phone even
+          if `showLeftSidebar` is true — which it is by default, and which is what
+          crushed the conversation to ~150px.
+        */}
         <aside
           aria-label="Workspaces"
-          className={`${leftOpen ? "flex" : "hidden"} w-60 shrink-0 flex-col border-r border-gray-200 bg-gray-50`}
+          className={`${leftOpen ? "md:flex" : "md:hidden"} hidden w-60 shrink-0 flex-col border-r border-line bg-sunken`}
         >
           <WorkspaceSidebar />
         </aside>
@@ -167,11 +219,29 @@ function ShellFrame({
 
         <aside
           aria-label="Artifacts"
-          className={`${rightOpen ? "flex" : "hidden"} w-80 shrink-0 flex-col border-l border-gray-200 bg-gray-50 xl:w-96`}
+          className={`${rightOpen ? "md:flex" : "md:hidden"} hidden w-80 shrink-0 flex-col border-l border-line bg-sunken xl:w-96`}
         >
           <ArtifactsPane />
         </aside>
       </div>
+
+      {/*
+        The mobile surfaces. Mounted only while open *and* only on mobile, unlike
+        the panes above: a drawer has no state worth preserving between openings —
+        it is dismissed by definition — and keeping a `fixed` overlay mounted but
+        hidden would leave its focus trap in the tree.
+      */}
+      {isMobile && drawer === "sessions" && (
+        <Drawer title="Workspaces" onClose={closeDrawer}>
+          <WorkspaceSidebar />
+        </Drawer>
+      )}
+
+      {isMobile && drawer === "files" && (
+        <Sheet title="Files" onClose={closeDrawer}>
+          <ArtifactsPane />
+        </Sheet>
+      )}
 
       {overlay === "search" && <SearchOverlay />}
       {overlay === "palette" && <CommandPalette />}
@@ -183,109 +253,96 @@ function ShellFrame({
 }
 
 function TopBar() {
-  const { toggleLeft, toggleRight, openOverlay, leftOpen, rightOpen } = useWorkspaceUI();
+  const { toggleLeft, toggleRight, openOverlay, leftOpen, rightOpen, drawer, isMobile } =
+    useWorkspaceUI();
   const hint = useShortcutHint();
 
   return (
-    <header className="flex h-11 shrink-0 items-center gap-2 border-b border-gray-200 px-2">
+    <header className="flex h-12 shrink-0 items-center gap-1 border-b border-line bg-canvas px-2 pt-safe md:h-11">
+      {/*
+        A hamburger on a phone, a pane toggle on a desktop. Not cosmetic: a pane
+        glyph depicts a column beside the content, and on a phone there is no such
+        column — the surface it opens covers the content. Using the same icon for
+        both would describe a layout that does not exist.
+      */}
       <IconButton
-        label={leftOpen ? "Hide workspaces sidebar" : "Show workspaces sidebar"}
+        label={
+          isMobile
+            ? drawer === "sessions"
+              ? "Close workspaces"
+              : "Open workspaces"
+            : leftOpen
+              ? "Hide workspaces sidebar"
+              : "Show workspaces sidebar"
+        }
         hint={hint("toggleLeftSidebar")}
         onClick={toggleLeft}
-        pressed={leftOpen}
+        pressed={isMobile ? drawer === "sessions" : leftOpen}
+        size={isMobile ? 20 : 16}
       >
-        <SidebarGlyph side="left" />
+        {isMobile ? <MenuIcon size={20} /> : <PanelLeftIcon />}
       </IconButton>
 
-      <span className="ml-1 text-sm font-semibold tracking-tight">Sylph</span>
+      <span className="ml-0.5 text-sm font-semibold tracking-tight">Sylph</span>
 
-      <div className="mx-2 flex-1">
-        {/* A button, not an input: it opens the search overlay rather than
-            accepting text inline, so two focusable search surfaces never exist. */}
+      <div className="mx-1 flex min-w-0 flex-1 justify-end md:justify-start">
+        {/*
+          A button, not an input: it opens the search overlay rather than accepting
+          text inline, so two focusable search surfaces never exist.
+
+          Two shapes for one action. The full-width field is the discoverable form
+          and it is what a desktop has room for; on a phone the same field would
+          consume the entire bar and leave no room for the title or the two pane
+          toggles, so it collapses to its icon. The overlay it opens is identical.
+        */}
         <button
           type="button"
           onClick={() => openOverlay("search")}
-          className="flex w-full max-w-md items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1 text-left text-xs text-gray-500 hover:border-gray-300 hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          aria-label="Search sessions and archive"
+          className="focus-ring tap-target hidden w-full max-w-md items-center gap-2 rounded-lg border border-line bg-sunken px-2.5 py-1 text-left text-2xs text-ink-muted transition-colors hover:border-line-strong hover:bg-raised md:flex"
         >
-          <span aria-hidden="true">⌕</span>
+          <SearchIcon size={14} />
           <span className="flex-1">Search sessions and archive</span>
           {hint("search") && <Kbd>{hint("search")}</Kbd>}
         </button>
+        <IconButton
+          label="Search sessions and archive"
+          hint={hint("search")}
+          onClick={() => openOverlay("search")}
+          size={20}
+          className="md:hidden"
+        >
+          <SearchIcon size={20} />
+        </IconButton>
       </div>
 
       <IconButton
         label="Open settings"
         hint={hint("openSettings")}
         onClick={() => openOverlay("settings")}
+        size={isMobile ? 20 : 16}
       >
-        <span aria-hidden="true" className="text-sm">
-          ⚙
-        </span>
+        <SettingsIcon size={isMobile ? 20 : 16} />
       </IconButton>
 
       <IconButton
-        label={rightOpen ? "Hide artifacts sidebar" : "Show artifacts sidebar"}
+        label={
+          isMobile
+            ? drawer === "files"
+              ? "Close files"
+              : "Open files"
+            : rightOpen
+              ? "Hide artifacts sidebar"
+              : "Show artifacts sidebar"
+        }
         hint={hint("toggleRightSidebar")}
         onClick={toggleRight}
-        pressed={rightOpen}
+        pressed={isMobile ? drawer === "files" : rightOpen}
+        size={isMobile ? 20 : 16}
       >
-        <SidebarGlyph side="right" />
+        <PanelRightIcon size={isMobile ? 20 : 16} />
       </IconButton>
     </header>
-  );
-}
-
-function IconButton({
-  label,
-  hint,
-  onClick,
-  pressed,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  onClick: () => void;
-  /** Present only for toggles, so screen readers announce the current state. */
-  pressed?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={label}
-      aria-pressed={pressed}
-      title={hint ? `${label} (${hint})` : label}
-      className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-    >
-      {children}
-    </button>
-  );
-}
-
-/** Pane toggle glyph. Inline SVG rather than an icon dependency: two shapes do
- *  not justify a package, and this keeps the first-load budget intact. */
-function SidebarGlyph({ side }: { side: "left" | "right" }) {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="1" y="2.5" width="14" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
-      <line
-        x1={side === "left" ? 5.5 : 10.5}
-        y1="2.5"
-        x2={side === "left" ? 5.5 : 10.5}
-        y2="13.5"
-        stroke="currentColor"
-        strokeWidth="1.2"
-      />
-    </svg>
-  );
-}
-
-export function Kbd({ children }: { children: ReactNode }) {
-  return (
-    <kbd className="rounded border border-gray-300 bg-white px-1 py-px font-sans text-[10px] text-gray-500">
-      {children}
-    </kbd>
   );
 }
 

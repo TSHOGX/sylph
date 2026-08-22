@@ -29,9 +29,15 @@ test("the skip link moves focus to main content", async ({ page }) => {
 test("the command dialog traps focus and returns it on close", async ({ page }) => {
   await createSession(page);
 
-  // The mock runner declares one command, so the button is present.
-  const opener = page.getByRole("button", { name: "Command" });
+  // The mock runner declares one command, so the item is present. Running a command
+  // moved from a standalone button into the composer's `+` menu: it is occasional,
+  // where the control row is reserved for what changes on every turn.
+  const opener = page.getByRole("button", { name: "Add", exact: true });
   await opener.click();
+  await page
+    .getByRole("menu", { name: "Add" })
+    .getByRole("menuitem", { name: /Run a command/ })
+    .click();
 
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
