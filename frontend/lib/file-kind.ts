@@ -9,6 +9,9 @@
  */
 
 import type { FileEntry, PreviewKind } from "@/lib/api";
+// Type-only, so no runtime dependency on the catalogue and no cycle: `messages`
+// imports nothing from here.
+import type { MessageKey } from "@/lib/i18n/messages";
 
 /**
  * A viewer family. Wider than `PreviewKind`, which only names the families the
@@ -162,22 +165,29 @@ const CODE_EXTENSIONS = new Set([
   "dart", "zig", "nim", "proto", "graphql", "gql", "tf", "hcl", "dockerfile",
 ]);
 
-/** Human-readable family name, for the viewer header and the context menu. */
-export function describeKind(kind: ViewerKind): string {
+/**
+ * The catalogue key naming this family, for the viewer's accessible name.
+ *
+ * A key rather than a string: this module is free of React and of the settings
+ * store, so it cannot read the active locale, and returning English here would
+ * put one untranslated word inside an otherwise translated sentence. The caller
+ * has `t` and passes the key through it.
+ */
+export function describeKind(kind: ViewerKind): MessageKey {
   switch (kind) {
     case "grid":
-      return "Table";
+      return "viewer.kind.grid";
     case "blocks":
-      return "Document";
+      return "viewer.kind.blocks";
     case "image":
-      return "Image";
+      return "viewer.kind.image";
     case "pdf":
-      return "PDF";
+      return "viewer.kind.pdf";
     case "html":
-      return "Web page";
+      return "viewer.kind.html";
     case "markdown":
-      return "Markdown";
+      return "viewer.kind.markdown";
     default:
-      return "Text";
+      return "viewer.kind.text";
   }
 }

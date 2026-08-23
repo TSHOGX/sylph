@@ -30,6 +30,7 @@
 
 import { useMemo, useState } from "react";
 import { buildSandboxDocument, describeBlocked } from "@/lib/sandbox-html";
+import { useT } from "@/lib/i18n";
 import { CodeBlock } from "@/components/code-block";
 
 export function HtmlView({
@@ -42,22 +43,23 @@ export function HtmlView({
   name: string;
   path: string;
 }) {
+  const t = useT();
   const [rendered, setRendered] = useState(true);
   const sandboxed = useMemo(() => buildSandboxDocument(html), [html]);
-  const blocked = describeBlocked(sandboxed);
+  const blocked = describeBlocked(sandboxed, t);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-line bg-sunken px-2 py-1">
         <span className="flex-1 text-3xs text-ink-muted">
-          {rendered ? "Rendered without scripts or network access" : "Source"}
+          {t(rendered ? "html.sandboxed" : "html.source")}
         </span>
         <button
           type="button"
           onClick={() => setRendered(!rendered)}
           className="rounded border border-line bg-raised px-1.5 py-0.5 text-3xs font-medium text-ink-soft hover:bg-hover focus-ring"
         >
-          {rendered ? "View source" : "View rendered"}
+          {t(rendered ? "action.viewSource" : "action.viewRendered")}
         </button>
       </div>
 
@@ -82,7 +84,7 @@ export function HtmlView({
           // still navigate the frame itself.
           referrerPolicy="no-referrer"
           srcDoc={sandboxed.html}
-          title={`Rendered preview of ${name}`}
+          title={t("html.renderedPreview", { name })}
           className="min-h-0 w-full flex-1 border-0 bg-raised"
         />
       ) : (

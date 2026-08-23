@@ -24,6 +24,8 @@
  * script execution wholesale rather than trying to enumerate what is dangerous.
  */
 
+import type { Translate } from "@/lib/i18n";
+
 /** What `buildSandboxDocument` produces. */
 export interface SandboxDocument {
   /** The markup to hand to `srcdoc`. */
@@ -152,19 +154,25 @@ function countReferences(raw: string): {
  * Returning null rather than an empty string so the caller renders no banner at
  * all for a self-contained page, which is the common case.
  */
-export function describeBlocked(document: SandboxDocument): string | null {
+export function describeBlocked(document: SandboxDocument, t: Translate): string | null {
   const { blockedExternal, blockedRelative } = document;
   const parts: string[] = [];
+  // The plural rule lives in the catalogue: English inflects both nouns, and a
+  // language that does not simply gives the two keys the same string.
   if (blockedRelative > 0) {
     parts.push(
-      `${blockedRelative} workspace ${blockedRelative === 1 ? "file" : "files"}`,
+      t(blockedRelative === 1 ? "html.blockedFilesOne" : "html.blockedFiles", {
+        count: blockedRelative,
+      }),
     );
   }
   if (blockedExternal > 0) {
     parts.push(
-      `${blockedExternal} external ${blockedExternal === 1 ? "resource" : "resources"}`,
+      t(blockedExternal === 1 ? "html.blockedExternalOne" : "html.blockedExternal", {
+        count: blockedExternal,
+      }),
     );
   }
   if (parts.length === 0) return null;
-  return `Not loaded in this preview: ${parts.join(" and ")}.`;
+  return t("html.blocked", { parts: parts.join(t("html.blockedJoin")) });
 }

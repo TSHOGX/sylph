@@ -27,9 +27,7 @@
 
 import { useCallback } from "react";
 import { useSettings } from "@/lib/settings";
-import { translate, type Locale, type MessageKey } from "./locale";
-
-export type Translate = (key: MessageKey, params?: Record<string, string | number>) => string;
+import { translate, type Locale, type MessageKey, type Translate } from "./locale";
 
 /**
  * The translation function for the active locale.
@@ -56,10 +54,11 @@ export {
   applyLocale,
   DEFAULT_LOCALE,
   format,
+  formatParts,
   isLocale,
   LOCALE_NAMES,
   LOCALE_TAGS,
   LOCALES,
   translate,
 } from "./locale";
-export type { Dictionary, Locale, MessageKey } from "./locale";
+export type { Dictionary, Locale, MessageKey, Translate } from "./locale";

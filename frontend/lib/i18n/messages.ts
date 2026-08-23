@@ -64,6 +64,14 @@ export const en = {
   "action.stop": "Stop",
   "action.stopping": "Stopping...",
   "action.add": "Add",
+  "action.create": "Create",
+  "action.delete": "Delete",
+  "action.replace": "Replace",
+  "action.download": "Download",
+  /** A dialog's confirm button while its mutation is in flight. */
+  "action.working": "Working...",
+  "action.viewSource": "View source",
+  "action.viewRendered": "View rendered",
 
   // Shell: panes, drawers, and the top bar.
   "shell.workspaces": "Workspaces",
@@ -124,6 +132,150 @@ export const en = {
   "composer.addToMessage": "Add to this message",
   "composer.saveFailed": "Could not save those files into the workspace.",
   "composer.configFailed": "Could not update the runner configuration.",
+
+  // Artifacts pane: the file tree and its actions.
+  "files.heading": "Files",
+  "files.treeLabel": "File tree",
+  "files.noSession.title": "No session open",
+  "files.noSession.hint": "Open a session to browse the files in its working directory.",
+  /**
+   * Deliberately short.
+   *
+   * "New folder in the working directory" collided with the directory picker's
+   * "Working directory" field under `getByLabel`'s substring match, and a screen
+   * reader user hears the same overlap. The root path renders beside the button,
+   * so the destination needs no spelling out.
+   */
+  "files.newFolder": "New folder",
+  "files.uploadFiles": "Upload files",
+  "files.uploadHere": "Upload files here",
+  "files.reloadTree": "Reload the file tree",
+  "files.rootActions": "Working directory actions",
+  "files.entryActions": "{name} actions",
+  "files.empty": "Empty",
+  "files.addFiles": "add files",
+  "files.truncated": "Listing truncated — this directory holds more entries than are shown.",
+  "files.symlink": "symbolic link",
+  "files.symlinkTitle": "Symbolic link, resolving inside the workspace",
+  "files.modified": "Modified {when}",
+  "files.openPreview": "Open preview",
+  "files.openFullScreen": "Open full screen",
+  "files.openInNewTab": "Open in new tab",
+  "files.copyRelativePath": "Copy relative path",
+  "files.copyName": "Copy name",
+  "files.openInExpanded": "This file is open in the expanded view.",
+  "files.showHere": "Show it here instead",
+
+  // Artifacts pane: a directory that could not be listed.
+  /** The root's name in a listing error, where a path would otherwise go. */
+  "files.error.workingDirectory": "the working directory",
+  "files.error.gone": "{where} no longer exists on disk.",
+  "files.error.sessionGone": "This session is no longer in the journal.",
+  "files.error.outside": "{where} is outside this session's working directory.",
+  "files.error.list": "Could not list {where}: {message}",
+  "files.error.listPlain": "Could not list {where}.",
+
+  // File operations: new folder, upload, delete.
+  "files.mkdir.title": "New folder",
+  /**
+   * Split around `{name}` by `formatParts`, which renders the path in a mono
+   * face. One key rather than a prefix and a suffix, because Chinese wraps the
+   * value ("在 X 内") where English precedes it.
+   */
+  "files.mkdir.inside": "Inside {name}",
+  "files.mkdir.inRoot": "In the session's working directory",
+  "files.mkdir.label": "Folder name",
+  "files.mkdir.placeholder": "name",
+  "files.delete.fileTitle": "Delete this file?",
+  "files.delete.folderTitle": "Delete this folder?",
+  "files.delete.file": "{name} will be deleted from disk.",
+  "files.delete.folder": "{name} and everything inside it will be deleted from disk.",
+  /** Said plainly: there is no trash on this path, by design. */
+  "files.delete.irreversible": "This cannot be undone.",
+  "files.overwrite.title": "Replace the existing file?",
+  "files.overwrite.body":
+    "{name} already exists in this folder. Replacing it overwrites its contents.",
+  "files.op.gone": "That path no longer exists on disk.",
+  "files.op.outside": "That path is outside the session's working directory.",
+  "files.op.failed": "Something went wrong.",
+  "files.op.tooLarge": "{name} is {size}; the limit is {limit}.",
+  "files.op.unreadable": "Could not read {name}. The file may be unreadable.",
+
+  // File viewer: header, notices, and errors.
+  "viewer.previewOf": "{kind} preview of {name}",
+  "viewer.loading": "Loading {label}...",
+  "viewer.back": "Back to the file tree",
+  "viewer.reload": "Reload this file from disk",
+  "viewer.openInNewTab": "Open in a new browser tab",
+  "viewer.download": "Download this file",
+  "viewer.expand": "Open full screen",
+  "viewer.close": "Close preview",
+  "viewer.truncated": "Showing the first {shown} of a {size} file.",
+  "viewer.openWhole": "Open the whole file in a new tab",
+  "viewer.errorTitle": "Could not read this file",
+  "viewer.error.gone": "This file no longer exists on disk.",
+  "viewer.error.outside": "This file is outside the session's working directory.",
+  "viewer.error.unknown": "Unknown error.",
+  "viewer.tooLargeImage": "This image is {size}, over the {limit} inline preview limit.",
+  "viewer.binary": "This is a binary file ({size}), so there is nothing to show as text.",
+  "viewer.openTab": "Open in a new tab",
+
+  // Viewer kinds. Also the `{label}` a loading line names.
+  "viewer.kind.grid": "Table",
+  "viewer.kind.blocks": "Document",
+  "viewer.kind.image": "Image",
+  "viewer.kind.pdf": "PDF",
+  "viewer.kind.html": "Web page",
+  "viewer.kind.markdown": "Markdown",
+  "viewer.kind.text": "Text",
+
+  // Table viewer.
+  "grid.worksheets": "Worksheets",
+  "grid.sheetTitle": "{name} — {rows} rows, {cols} columns",
+  "grid.row": "Row",
+  "grid.chartsheet":
+    "This sheet holds no cells — it is a chart or macro sheet rather than a worksheet.",
+  "grid.noRows": "No rows in this part of the sheet.",
+  "grid.previous": "Previous",
+  "grid.next": "Next",
+  "grid.loading": "loading...",
+  /**
+   * Two forms because English inflects the noun and the catalogue is where that
+   * belongs. Chinese uses one string for both, which is correct rather than lazy:
+   * the language marks no singular/plural distinction here.
+   */
+  "grid.rowCount": "{rows} rows",
+  "grid.rowCountOne": "{rows} row",
+  "grid.rowRange": "rows {from}–{to} of {total}",
+
+  // Image and PDF viewer.
+  "media.zoomOut": "Zoom out",
+  "media.zoomIn": "Zoom in",
+  "media.fit": "Fit",
+  "media.previewTitle": "{name} preview",
+
+  // HTML viewer.
+  "html.sandboxed": "Rendered without scripts or network access",
+  "html.source": "Source",
+  "html.renderedPreview": "Rendered preview of {name}",
+
+  "media.decodeFailed":
+    "This image could not be decoded. It may be truncated or not the format its extension claims.",
+
+  // What the HTML sandbox refused to load. Two forms per noun, for English.
+  "html.blocked": "Not loaded in this preview: {parts}.",
+  "html.blockedFiles": "{count} workspace files",
+  "html.blockedFilesOne": "{count} workspace file",
+  "html.blockedExternal": "{count} external resources",
+  "html.blockedExternalOne": "{count} external resource",
+  /** Joins the two clauses above. A word, so it is not assumed to be " and ". */
+  "html.blockedJoin": " and ",
+
+  // Document viewer.
+  "document.slide": "Slide {number}",
+
+  /** The full-screen viewer dialog's accessible name. */
+  "viewer.overlayTitle": "Preview of {name}",
 
   // Settings: shell and sections.
   "settings.title": "Settings",

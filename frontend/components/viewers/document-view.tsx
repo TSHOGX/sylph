@@ -17,6 +17,7 @@
 
 import { useMemo } from "react";
 import type { BlocksPayload, DocumentBlock, DocumentSection } from "@/lib/api";
+import { useT } from "@/lib/i18n";
 
 export function DocumentView({
   payload,
@@ -26,6 +27,7 @@ export function DocumentView({
   payload: BlocksPayload;
   slides: boolean;
 }) {
+  const t = useT();
   // Blocks are flat with sections pointing into them, so grouping happens here
   // rather than on the wire — the client is where the framing decision lives.
   const grouped = useMemo(() => groupBySection(payload), [payload]);
@@ -43,7 +45,7 @@ export function DocumentView({
         section && slides ? (
           <section
             key={section.index}
-            aria-label={section.title ?? `Slide ${section.index + 1}`}
+            aria-label={section.title ?? t("document.slide", { number: section.index + 1 })}
             className="mb-3 rounded border border-line bg-raised"
           >
             <header className="flex items-baseline gap-2 border-b border-line bg-sunken px-2.5 py-1">

@@ -8,6 +8,7 @@ import {
   viewerKindFor,
   viewerKindOf,
 } from "@/lib/file-kind";
+import { translate } from "@/lib/i18n/locale";
 
 describe("extensionOf", () => {
   it("lowercases and drops the dot", () => {
@@ -147,9 +148,18 @@ describe("iconFor", () => {
 
 describe("describeKind", () => {
   it("names every family", () => {
-    expect(describeKind("grid")).toBe("Table");
-    expect(describeKind("blocks")).toBe("Document");
-    expect(describeKind("html")).toBe("Web page");
-    expect(describeKind("text")).toBe("Text");
+    expect(describeKind("grid")).toBe("viewer.kind.grid");
+    expect(describeKind("blocks")).toBe("viewer.kind.blocks");
+    expect(describeKind("html")).toBe("viewer.kind.html");
+    expect(describeKind("text")).toBe("viewer.kind.text");
+  });
+
+  // The key is useless if the catalogue lacks it, and a missing key is a type
+  // error only at the call site — not here, where the union is the return type.
+  it("returns a key every locale can translate", () => {
+    for (const kind of ["grid", "blocks", "image", "pdf", "html", "markdown", "text"] as const) {
+      expect(translate("en", describeKind(kind))).toBeTruthy();
+      expect(translate("zh", describeKind(kind))).toBeTruthy();
+    }
   });
 });

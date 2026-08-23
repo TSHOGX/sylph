@@ -874,9 +874,9 @@ would have shipped:
   because the sidebar imports it and the sidebar renders at first paint. Moving
   the sidebar behind a dynamic boundary is the lever if that number needs to
   come down.
-- **No i18n.** The UI is English-only; the token and icon work does not change
-  that, and a language picker still needs an i18n framework plus extraction of
-  every string.
+- ~~**No i18n.** The UI is English-only.~~ **Retired.** A hand-rolled catalogue
+  and a language picker landed later; see Phase 10's carried-forward note for
+  what the extraction still does not cover.
 - **One E2E spec was still counting shared journal state**, and it failed during
   this phase for exactly the reason `AGENTS.md` already documented — the shared
   `.e2e-data/` journal crossed the sidebar's 200-row listing cap at 357
@@ -973,3 +973,14 @@ one gets made.
   `.e2e-data/` per run. That is the accumulation `AGENTS.md` documents; one full-suite
   failure during this phase was traced to it and disappeared after
   `rm -rf frontend/.e2e-data`. The fixture-level fix is still unwritten.
+- **This pane shipped untranslated and was extracted afterwards.** The file
+  browser was built while the i18n catalogue was landing on another branch, so
+  every string in it was hardcoded English and the merge reported clean. The
+  extraction is now done — the pane, its dialogs, the viewer, and the four format
+  viewers beneath it — and an E2E spec asserts the pane's own accessible names in
+  Chinese, since every previous i18n assertion looked only at the shell. What
+  remains open: **the E2E suite asserts English throughout**, which is sound
+  because English is the default locale, but means the suite catches a *missing*
+  translation and not a *wrong* one. And **backend `message` strings pass through
+  untranslated** by design — they are one process's report of what it refused,
+  and localizing them would mean cataloguing every string the API can emit.

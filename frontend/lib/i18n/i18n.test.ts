@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { en, type MessageKey } from "./messages";
 import { zh } from "./zh";
-import { format, isLocale, LOCALES, LOCALE_NAMES, LOCALE_TAGS, translate } from "./locale";
+import {
+  format,
+  formatParts,
+  isLocale,
+  LOCALES,
+  LOCALE_NAMES,
+  LOCALE_TAGS,
+  translate,
+} from "./locale";
 
 /**
  * The catalogue's own invariants.
@@ -92,6 +100,63 @@ describe("placeholder substitution", () => {
    */
   it("does not re-substitute inside a substituted value", () => {
     expect(format("{a}", { a: "{b}", b: "leaked" })).toBe("{b}");
+  });
+});
+
+describe("formatParts", () => {
+  it("splits around the slot, keeping both sides", () => {
+    expect(formatParts("Inside {name}", "name")).toEqual(["Inside ", ""]);
+  });
+
+  /**
+   * The reason this exists rather than a prefix key and a suffix key: Chinese
+   * wraps the value where English precedes it, so both halves have to come from
+   * one translated sentence.
+   */
+  it("keeps text on both sides when the language wraps the value", () => {
+    expect(formatParts("在 {name} 内", "name")).toEqual(["在 ", " 内"]);
+  });
+
+  it("substitutes the other placeholders in each half", () => {
+    expect(formatParts("{a} {name} {b}", "name", { a: "one", b: "two" })).toEqual([
+      "one ",
+      " two",
+    ]);
+  });
+
+  /**
+   * A sentence rendered without its value is visibly wrong, which gets it fixed.
+   * Returning two empty strings would drop the sentence and hide the mistake.
+   */
+  it("returns the whole string when the slot is absent", () => {
+    expect(formatParts("no slot here", "name")).toEqual(["no slot here", ""]);
+  });
+
+  it("splits on the first occurrence only", () => {
+    expect(formatParts("{x} and {x}", "x")).toEqual(["", " and {x}"]);
+  });
+});
+
+/**
+ * Every key the catalogue splits with `formatParts` must actually carry the slot
+ * in both languages. A translation that drops `{name}` type-checks and passes the
+ * placeholder-agreement test only because that test compares the two catalogues
+ * to each other — so if both were wrong together, nothing would catch it.
+ */
+describe("keys rendered around a value", () => {
+  const SPLIT_KEYS: MessageKey[] = [
+    "files.mkdir.inside",
+    "files.delete.file",
+    "files.delete.folder",
+    "files.overwrite.body",
+  ];
+
+  it("carries the {name} slot in every locale", () => {
+    for (const locale of LOCALES) {
+      for (const key of SPLIT_KEYS) {
+        expect(translate(locale, key), `${locale} ${key}`).toContain("{name}");
+      }
+    }
   });
 });
 

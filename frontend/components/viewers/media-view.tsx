@@ -15,6 +15,7 @@
  */
 
 import { useState } from "react";
+import { useT } from "@/lib/i18n";
 
 /** Zoom steps, in the ratios image viewers conventionally offer. */
 const STEPS = [0.25, 0.5, 1, 1.5, 2, 4] as const;
@@ -33,6 +34,7 @@ export function ImageView({ src, name }: { src: string; name: string }) {
 }
 
 function Image({ src, name }: { src: string; name: string }) {
+  const t = useT();
   /** `null` means fit-to-window, which is the useful default in a narrow pane. */
   const [zoom, setZoom] = useState<number | null>(null);
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
@@ -56,7 +58,7 @@ function Image({ src, name }: { src: string; name: string }) {
         <button
           type="button"
           onClick={() => step(-1)}
-          aria-label="Zoom out"
+          aria-label={t("media.zoomOut")}
           className="rounded px-1.5 text-2xs text-ink-muted hover:bg-hover focus-ring"
         >
           −
@@ -66,12 +68,12 @@ function Image({ src, name }: { src: string; name: string }) {
           onClick={() => setZoom(zoom === null ? 1 : null)}
           className="rounded border border-line bg-raised px-1.5 py-0.5 text-3xs font-medium text-ink-soft hover:bg-hover focus-ring"
         >
-          {zoom === null ? "Fit" : `${Math.round(zoom * 100)}%`}
+          {zoom === null ? t("media.fit") : `${Math.round(zoom * 100)}%`}
         </button>
         <button
           type="button"
           onClick={() => step(1)}
-          aria-label="Zoom in"
+          aria-label={t("media.zoomIn")}
           className="rounded px-1.5 text-2xs text-ink-muted hover:bg-hover focus-ring"
         >
           +
@@ -91,8 +93,7 @@ function Image({ src, name }: { src: string; name: string }) {
       >
         {failed ? (
           <p role="alert" className="text-2xs text-danger">
-            This image could not be decoded. It may be truncated or not the format
-            its extension claims.
+            {t("media.decodeFailed")}
           </p>
         ) : (
           <div className={zoom === null ? "flex h-full items-center justify-center" : ""}>
@@ -140,10 +141,11 @@ function Image({ src, name }: { src: string; name: string }) {
  * elsewhere.
  */
 export function PdfView({ src, name }: { src: string; name: string }) {
+  const t = useT();
   return (
     <iframe
       src={src}
-      title={`${name} preview`}
+      title={t("media.previewTitle", { name })}
       sandbox=""
       className="min-h-0 w-full flex-1 border-0 bg-hover"
     />

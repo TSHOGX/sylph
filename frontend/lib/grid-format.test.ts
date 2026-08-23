@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Cell, GridPayload } from "@/lib/api";
+import { translate, type Translate } from "@/lib/i18n/locale";
 import {
   alignmentFor,
   cellTitle,
@@ -132,6 +133,16 @@ describe("paging arithmetic", () => {
   });
 });
 
+/**
+ * The English translator, so these assertions stay readable strings.
+ *
+ * `describeWindow` and `describeBlocked` take `t` because the plural rules they
+ * apply belong in the catalogue rather than in this module. Binding English here
+ * keeps the test asserting on the sentence a reader sees, and it also checks the
+ * keys resolve — a renamed key fails these tests, not only the UI.
+ */
+const t: Translate = (key, params) => translate("en", key, params);
+
 describe("describeWindow", () => {
   it("states a whole small sheet plainly", () => {
     expect(
@@ -141,14 +152,31 @@ describe("describeWindow", () => {
           rows: [[], []],
           truncated: false,
         }),
+        t,
       ),
     ).toBe("2 rows");
+  });
+
+  // The English plural rule now lives in the catalogue, so this is the assertion
+  // that pins it: one row must not read "1 rows".
+  it("inflects the noun for a single row", () => {
+    expect(
+      describeWindow(
+        grid({
+          sheets: [{ name: "S", rows: 1, cols: 1 }],
+          rows: [[]],
+          truncated: false,
+        }),
+        t,
+      ),
+    ).toBe("1 row");
   });
 
   it("states the range and the total when windowed", () => {
     expect(
       describeWindow(
         grid({ sheets: [{ name: "S", rows: 5000, cols: 3 }], rows: Array(200).fill([]) }),
+        t,
       ),
     ).toBe("rows 1–200 of 5000");
   });
@@ -162,6 +190,7 @@ describe("describeWindow", () => {
           sheets: [{ name: "S", rows: 201, cols: 3, exact: false }],
           rows: Array(200).fill([]),
         }),
+        t,
       ),
     ).toBe("rows 1–200 of 201+");
   });

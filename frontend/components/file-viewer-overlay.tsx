@@ -22,6 +22,7 @@
 import { Overlay } from "@/components/overlay";
 import { FileViewer } from "@/components/file-viewer";
 import { viewerKindOf } from "@/lib/file-kind";
+import { useT } from "@/lib/i18n";
 import type { PreviewKind } from "@/lib/api";
 
 export function FileViewerOverlay({
@@ -35,6 +36,7 @@ export function FileViewerOverlay({
   previewKind?: PreviewKind;
   onClose: () => void;
 }) {
+  const t = useT();
   const name = path.split("/").pop() ?? path;
 
   // A rendered page or a PDF lives in an iframe, which reports no intrinsic size,
@@ -45,7 +47,7 @@ export function FileViewerOverlay({
   const size = kind === "html" || kind === "pdf" ? "viewer-full" : "viewer";
 
   return (
-    <Overlay title={`Preview of ${name}`} onClose={onClose} size={size}>
+    <Overlay title={t("viewer.overlayTitle", { name })} onClose={onClose} size={size}>
       {/* No `onBack`: there is no tree behind this surface to go back to, and
           Escape or the close button is how a dialog is left. */}
       <FileViewer

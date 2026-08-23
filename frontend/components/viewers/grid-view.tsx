@@ -26,6 +26,7 @@
 
 import { memo, useMemo } from "react";
 import type { Cell, GridPayload } from "@/lib/api";
+import { useT } from "@/lib/i18n";
 import {
   alignmentFor,
   cellTitle,
@@ -49,6 +50,7 @@ export function GridView({
   onPage: (row: number) => void;
   loading: boolean;
 }) {
+  const t = useT();
   const columns = useMemo(() => columnCount(grid.rows), [grid.rows]);
   const labels = useMemo(
     () => columnLabels(grid.column, columns),
@@ -69,7 +71,7 @@ export function GridView({
       {grid.sheets.length > 1 && (
         <div
           role="tablist"
-          aria-label="Worksheets"
+          aria-label={t("grid.worksheets")}
           className="flex shrink-0 gap-px overflow-x-auto border-b border-line bg-sunken px-1"
         >
           {grid.sheets.map((sheet, index) => (
@@ -79,7 +81,11 @@ export function GridView({
               role="tab"
               aria-selected={index === grid.sheet}
               onClick={() => onSelectSheet(index)}
-              title={`${sheet.name} — ${sheet.rows} rows, ${sheet.cols} columns`}
+              title={t("grid.sheetTitle", {
+                name: sheet.name,
+                rows: sheet.rows,
+                cols: sheet.cols,
+              })}
               className={`shrink-0 rounded-t border-x border-t px-2 py-1 text-2xs focus-ring ${
                 index === grid.sheet
                   ? "border-line bg-raised font-medium text-ink"
@@ -93,10 +99,7 @@ export function GridView({
       )}
 
       {isChartsheet ? (
-        <p className="p-3 text-2xs text-ink-muted">
-          This sheet holds no cells — it is a chart or macro sheet rather than a
-          worksheet.
-        </p>
+        <p className="p-3 text-2xs text-ink-muted">{t("grid.chartsheet")}</p>
       ) : (
         // Tinted, so the area past the last column reads as "outside the sheet"
         // rather than as empty cells. A narrow table in a dialog sized by its
@@ -109,7 +112,7 @@ export function GridView({
             style={{ tableLayout: columnWidth ? "fixed" : "auto" }}
           >
             <caption className="sr-only">
-              {active?.name ?? "Table"}, {describeWindow(grid)}
+              {active?.name ?? t("viewer.kind.grid")}, {describeWindow(grid, t)}
             </caption>
             <thead>
               <tr>
@@ -119,7 +122,7 @@ export function GridView({
                   scope="col"
                   className="sticky left-0 top-0 z-20 border border-line bg-hover px-1.5 py-0.5 text-right font-normal text-ink-muted"
                 >
-                  <span className="sr-only">Row</span>
+                  <span className="sr-only">{t("grid.row")}</span>
                 </th>
                 {labels.map((label) => (
                   <th
@@ -150,17 +153,15 @@ export function GridView({
           </table>
 
           {grid.rows.length === 0 && (
-            <p className="p-3 text-2xs text-ink-muted">
-              No rows in this part of the sheet.
-            </p>
+            <p className="p-3 text-2xs text-ink-muted">{t("grid.noRows")}</p>
           )}
         </div>
       )}
 
       <div className="flex shrink-0 items-center gap-2 border-t border-line bg-sunken px-2 py-1">
         <span className="flex-1 text-3xs text-ink-muted">
-          {describeWindow(grid)}
-          {loading && <span className="ml-1 text-ink-faint">loading...</span>}
+          {describeWindow(grid, t)}
+          {loading && <span className="ml-1 text-ink-faint">{t("grid.loading")}</span>}
         </span>
         <button
           type="button"
@@ -168,7 +169,7 @@ export function GridView({
           disabled={previous === null || loading}
           className="rounded border border-line bg-raised px-1.5 py-0.5 text-3xs font-medium text-ink-soft hover:bg-hover focus-ring disabled:opacity-40"
         >
-          Previous
+          {t("grid.previous")}
         </button>
         <button
           type="button"
@@ -176,7 +177,7 @@ export function GridView({
           disabled={next === null || loading}
           className="rounded border border-line bg-raised px-1.5 py-0.5 text-3xs font-medium text-ink-soft hover:bg-hover focus-ring disabled:opacity-40"
         >
-          Next
+          {t("grid.next")}
         </button>
       </div>
     </div>

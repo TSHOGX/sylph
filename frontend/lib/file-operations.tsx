@@ -34,6 +34,7 @@ import { useCallback, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
+import { formatParts, useT, type Translate } from "@/lib/i18n";
 import { MAX_ATTACHMENT_BYTES } from "@/components/attachment-picker";
 import { AlertDialog, PromptDialog } from "@/components/ui/dialog";
 
@@ -87,6 +88,7 @@ export function useFileOperations(
   sessionId: string,
   { onDeleted, onWrote }: FileOperationHooks = {},
 ): FileOperations {
+  const t = useT();
   const queryClient = useQueryClient();
   const [pending, setPending] = useState<Pending | null>(null);
   const [error, setError] = useState<string | undefined>();
@@ -129,7 +131,7 @@ export function useFileOperations(
       await refresh();
       close();
     },
-    onError: (cause) => setError(describe(cause)),
+    onError: (cause) => setError(describe(cause, t)),
   });
 
   const remove = useMutation({
@@ -140,7 +142,7 @@ export function useFileOperations(
       await refresh();
       close();
     },
-    onError: (cause) => setError(describe(cause)),
+    onError: (cause) => setError(describe(cause, t)),
   });
 
   /**
@@ -157,15 +159,17 @@ export function useFileOperations(
       for (const file of variables.files) {
         if (file.size > MAX_ATTACHMENT_BYTES) {
           throw new Error(
-            `${file.name} is ${formatBytes(file.size)}; the limit is ${formatBytes(
-              MAX_ATTACHMENT_BYTES,
-            )}.`,
+            t("files.op.tooLarge", {
+              name: file.name,
+              size: formatBytes(file.size),
+              limit: formatBytes(MAX_ATTACHMENT_BYTES),
+            }),
           );
         }
         await api.files.upload(sessionId, {
           path: variables.parent,
           name: file.name,
-          data: await readBase64(file),
+          data: await readBase64(file, t),
           overwrite: variables.overwrite,
         });
       }
@@ -191,7 +195,7 @@ export function useFileOperations(
         });
         return;
       }
-      setError(describe(cause));
+      setError(describe(cause, t));
     },
   });
 
@@ -242,19 +246,23 @@ export function useFileOperations(
 
         {pending?.kind === "mkdir" && (
           <PromptDialog
-            title="New folder"
+            title={t("files.mkdir.title")}
             description={
               pending.parent ? (
-                <>
-                  Inside <span className="font-mono">{pending.parent}</span>
-                </>
+                // `formatParts` rather than two keys: the path renders in a mono
+                // face, and English puts it last where Chinese wraps it.
+                <Around
+                  template={t("files.mkdir.inside")}
+                  slot="name"
+                  value={pending.parent}
+                />
               ) : (
-                "In the session's working directory"
+                t("files.mkdir.inRoot")
               )
             }
-            label="Folder name"
-            placeholder="name"
-            confirmLabel="Create"
+            label={t("files.mkdir.label")}
+            placeholder={t("files.mkdir.placeholder")}
+            confirmLabel={t("action.create")}
             busy={mkdir.isPending}
             error={error}
             onSubmit={(name) => {
@@ -267,19 +275,20 @@ export function useFileOperations(
 
         {pending?.kind === "delete" && (
           <AlertDialog
-            title={pending.isDir ? "Delete this folder?" : "Delete this file?"}
+            title={t(pending.isDir ? "files.delete.folderTitle" : "files.delete.fileTitle")}
             description={
               <>
-                <span className="font-mono text-ink">{pending.name}</span>
-                {pending.isDir
-                  ? " and everything inside it will be deleted from disk."
-                  : " will be deleted from disk."}{" "}
+                <Around
+                  template={t(pending.isDir ? "files.delete.folder" : "files.delete.file")}
+                  slot="name"
+                  value={pending.name}
+                />{" "}
                 {/* Said plainly, because it is the fact that decides the answer:
                     there is no trash on this path, by design. */}
-                This cannot be undone.
+                {t("files.delete.irreversible")}
               </>
             }
-            confirmLabel="Delete"
+            confirmLabel={t("action.delete")}
             danger
             busy={remove.isPending}
             error={error}
@@ -293,14 +302,11 @@ export function useFileOperations(
 
         {pending?.kind === "overwrite" && (
           <AlertDialog
-            title="Replace the existing file?"
+            title={t("files.overwrite.title")}
             description={
-              <>
-                <span className="font-mono text-ink">{pending.name}</span> already exists in
-                this folder. Replacing it overwrites its contents.
-              </>
+              <Around template={t("files.overwrite.body")} slot="name" value={pending.name} />
             }
-            confirmLabel="Replace"
+            confirmLabel={t("action.replace")}
             danger
             busy={upload.isPending}
             error={error}
@@ -321,6 +327,34 @@ export function useFileOperations(
 }
 
 /**
+ * A translated sentence with one value rendered in a mono face.
+ *
+ * A path or a filename inside prose needs the mono face to be readable as a path —
+ * where a space ends and a name begins is otherwise a guess. Splitting the
+ * *translated* string keeps the whole sentence in the catalogue, which is what
+ * lets a translator move the value: English writes "Inside src/", Chinese writes
+ * "在 src/ 内", and a prefix-plus-suffix pair cannot express both.
+ */
+function Around({
+  template,
+  slot,
+  value,
+}: {
+  template: string;
+  slot: string;
+  value: string;
+}) {
+  const [before, after] = formatParts(template, slot);
+  return (
+    <>
+      {before}
+      <span className="font-mono text-ink">{value}</span>
+      {after}
+    </>
+  );
+}
+
+/**
  * The filename in an overwrite refusal.
  *
  * The backend answers `INVALID_REQUEST` with "<name> already exists. Send
@@ -335,18 +369,24 @@ function collidingName(cause: unknown): string | null {
   return match?.[1] ?? null;
 }
 
-function describe(cause: unknown): string {
+/**
+ * `t` is a parameter rather than a hook call, because this runs inside a mutation
+ * callback. The backend's own `message` passes through untranslated: it is one
+ * process's report of what it refused, and localizing it would mean a catalogue
+ * of every error string the API can produce.
+ */
+function describe(cause: unknown, t: Translate): string {
   if (cause instanceof ApiError) {
     switch (cause.code) {
       case "FILE_NOT_FOUND":
-        return "That path no longer exists on disk.";
+        return t("files.op.gone");
       case "POLICY_VIOLATION":
-        return "That path is outside the session's working directory.";
+        return t("files.op.outside");
       default:
         return cause.message;
     }
   }
-  return cause instanceof Error ? cause.message : "Something went wrong.";
+  return cause instanceof Error ? cause.message : t("files.op.failed");
 }
 
 /**
@@ -357,7 +397,7 @@ function describe(cause: unknown): string {
  * budget across a *staged set* — limits that mean nothing for a directory
  * upload, where the destination is a filesystem rather than one message.
  */
-function readBase64(file: File): Promise<string> {
+function readBase64(file: File, t: Translate): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -365,8 +405,7 @@ function readBase64(file: File): Promise<string> {
       const comma = result.indexOf(",");
       resolve(comma === -1 ? result : result.slice(comma + 1));
     };
-    reader.onerror = () =>
-      reject(new Error(`Could not read ${file.name}. The file may be unreadable.`));
+    reader.onerror = () => reject(new Error(t("files.op.unreadable", { name: file.name })));
     reader.readAsDataURL(file);
   });
 }

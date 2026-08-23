@@ -31,6 +31,7 @@
 
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useDialog } from "@/lib/use-dialog";
+import { useT } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -135,6 +136,8 @@ export function AlertDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const t = useT();
+
   // Focus lands on Cancel: `useDialog`'s first-tabbable rule plus Cancel being
   // first in the DOM. Deliberate — an Enter keystroke in flight when the dialog
   // opens must not confirm a deletion.
@@ -152,10 +155,10 @@ export function AlertDialog({
             </p>
           )}
           <Button variant="ghost" className="ml-auto" onClick={onCancel} disabled={busy}>
-            Cancel
+            {t("action.cancel")}
           </Button>
           <Button variant={danger ? "danger" : "primary"} onClick={onConfirm} disabled={busy}>
-            {busy ? "Working..." : confirmLabel}
+            {busy ? t("action.working") : confirmLabel}
           </Button>
         </>
       }
@@ -187,6 +190,7 @@ export function PromptDialog({
   onSubmit: (value: string) => void;
   onCancel: () => void;
 }) {
+  const t = useT();
   const [value, setValue] = useState(initialValue);
   const inputRef = useRef<HTMLInputElement>(null);
   const inputId = useId();
@@ -215,14 +219,14 @@ export function PromptDialog({
             </p>
           )}
           <Button variant="ghost" className="ml-auto" onClick={onCancel} disabled={busy}>
-            Cancel
+            {t("action.cancel")}
           </Button>
           <Button
             variant="primary"
             onClick={() => onSubmit(trimmed)}
             disabled={busy || trimmed.length === 0}
           >
-            {busy ? "Working..." : confirmLabel}
+            {busy ? t("action.working") : confirmLabel}
           </Button>
         </>
       }

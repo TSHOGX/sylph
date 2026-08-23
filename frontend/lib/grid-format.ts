@@ -7,6 +7,7 @@
  */
 
 import type { Cell, GridPayload } from "@/lib/api";
+import type { Translate } from "@/lib/i18n";
 
 /**
  * Spreadsheet column label for a zero-based index: A, B, ... Z, AA, AB.
@@ -104,13 +105,18 @@ export function previousPageRow(grid: GridPayload): number | null {
 }
 
 /** Describe what is shown against what exists, for the viewer's status line. */
-export function describeWindow(grid: GridPayload): string {
+/**
+ * `t` is a parameter, not a hook call: this module is pure and unit-tested, and
+ * taking the translator as an argument keeps it that way while moving the English
+ * plural rule into the catalogue where a translator can see it.
+ */
+export function describeWindow(grid: GridPayload, t: Translate): string {
   const sheet = grid.sheets[grid.sheet];
   const shown = loadedThrough(grid);
-  if (!sheet) return `${shown} rows`;
+  if (!sheet) return t("grid.rowCount", { rows: shown });
   const total = sheet.exact === false ? `${sheet.rows}+` : `${sheet.rows}`;
   if (!grid.truncated && grid.row === 0) {
-    return `${sheet.rows} ${sheet.rows === 1 ? "row" : "rows"}`;
+    return t(sheet.rows === 1 ? "grid.rowCountOne" : "grid.rowCount", { rows: sheet.rows });
   }
-  return `rows ${grid.row + 1}–${shown} of ${total}`;
+  return t("grid.rowRange", { from: grid.row + 1, to: shown, total });
 }

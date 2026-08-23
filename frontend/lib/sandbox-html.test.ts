@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildSandboxDocument, describeBlocked } from "@/lib/sandbox-html";
+import { translate, type Translate } from "@/lib/i18n/locale";
 
 /** Where the policy landed, as an index, so ordering can be asserted. */
 function policyAt(html: string): number {
@@ -109,15 +110,26 @@ describe("buildSandboxDocument: reference counting", () => {
   });
 });
 
+/**
+ * The English translator, so these assertions stay readable strings.
+ *
+ * `describeWindow` and `describeBlocked` take `t` because the plural rules they
+ * apply belong in the catalogue rather than in this module. Binding English here
+ * keeps the test asserting on the sentence a reader sees, and it also checks the
+ * keys resolve — a renamed key fails these tests, not only the UI.
+ */
+const t: Translate = (key, params) => translate("en", key, params);
+
 describe("describeBlocked", () => {
   it("says nothing for a self-contained page", () => {
     // The common case for generated reports: inline CSS, inline SVG, no banner.
-    expect(describeBlocked(buildSandboxDocument("<p>inline only</p>"))).toBeNull();
+    expect(describeBlocked(buildSandboxDocument("<p>inline only</p>"), t)).toBeNull();
   });
 
   it("names both causes when both are present", () => {
     const message = describeBlocked(
       buildSandboxDocument(`<img src="./a.png"><img src="https://b/c.png">`),
+      t,
     );
     expect(message).toBe(
       "Not loaded in this preview: 1 workspace file and 1 external resource.",
@@ -127,6 +139,7 @@ describe("describeBlocked", () => {
   it("pluralizes on count", () => {
     const message = describeBlocked(
       buildSandboxDocument(`<img src="./a.png"><img src="./b.png">`),
+      t,
     );
     expect(message).toBe("Not loaded in this preview: 2 workspace files.");
   });

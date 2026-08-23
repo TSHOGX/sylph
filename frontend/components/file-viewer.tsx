@@ -30,6 +30,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ApiError, api, type PreviewKind } from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
 import { describeKind, sourceFor, viewerKindOf, type ViewerKind } from "@/lib/file-kind";
+import { useT, type MessageKey, type Translate } from "@/lib/i18n";
 import { CodeBlock } from "@/components/code-block";
 import { Markdown } from "@/components/markdown";
 import { Button, IconButton } from "@/components/ui/button";
@@ -42,25 +43,27 @@ import {
   XIcon,
 } from "@/components/icons";
 
+// `LoadingKind` rather than `Loading`, because these fallbacks are created at
+// module scope where no hook can run. It reads the locale itself.
 const GridView = dynamic(
   () => import("@/components/viewers/grid-view").then((m) => m.GridView),
-  { ssr: false, loading: () => <Loading label="table" /> },
+  { ssr: false, loading: () => <LoadingKind label="viewer.kind.grid" /> },
 );
 const DocumentView = dynamic(
   () => import("@/components/viewers/document-view").then((m) => m.DocumentView),
-  { ssr: false, loading: () => <Loading label="document" /> },
+  { ssr: false, loading: () => <LoadingKind label="viewer.kind.blocks" /> },
 );
 const HtmlView = dynamic(
   () => import("@/components/viewers/html-view").then((m) => m.HtmlView),
-  { ssr: false, loading: () => <Loading label="page" /> },
+  { ssr: false, loading: () => <LoadingKind label="viewer.kind.html" /> },
 );
 const ImageView = dynamic(
   () => import("@/components/viewers/media-view").then((m) => m.ImageView),
-  { ssr: false, loading: () => <Loading label="image" /> },
+  { ssr: false, loading: () => <LoadingKind label="viewer.kind.image" /> },
 );
 const PdfView = dynamic(
   () => import("@/components/viewers/media-view").then((m) => m.PdfView),
-  { ssr: false, loading: () => <Loading label="PDF" /> },
+  { ssr: false, loading: () => <LoadingKind label="viewer.kind.pdf" /> },
 );
 
 export function FileViewer({
@@ -91,6 +94,7 @@ export function FileViewer({
   registerExpand?: (node: HTMLButtonElement | null) => void;
   scale?: "pane" | "full";
 }) {
+  const t = useT();
   const kind = viewerKindOf(path, previewKind);
   const name = path.split("/").pop() ?? path;
   const directory = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
@@ -118,7 +122,7 @@ export function FileViewer({
     <section
       ref={sectionRef}
       tabIndex={-1}
-      aria-label={`${describeKind(kind)} preview of ${name}`}
+      aria-label={t("viewer.previewOf", { kind: t(describeKind(kind)), name })}
       className="flex min-h-0 flex-1 flex-col overflow-hidden outline-none"
     >
       <header className="flex shrink-0 items-center gap-1 border-b border-line bg-raised px-1.5 py-1">
@@ -129,11 +133,11 @@ export function FileViewer({
           <Button
             variant="ghost"
             onClick={onBack}
-            title="Back to the file tree"
+            title={t("viewer.back")}
             icon={<ArrowLeftIcon size={13} />}
             className="shrink-0"
           >
-            Files
+            {t("files.heading")}
           </Button>
         )}
 
@@ -152,7 +156,7 @@ export function FileViewer({
         </div>
 
         <IconButton
-          label="Reload this file from disk"
+          label={t("viewer.reload")}
           onClick={() => setReloadToken((token) => token + 1)}
         >
           <RefreshIcon size={14} />
@@ -166,14 +170,14 @@ export function FileViewer({
           menu on a row two views back.
         */}
         <IconButton
-          label="Open in a new browser tab"
+          label={t("viewer.openInNewTab")}
           onClick={() => window.open(api.files.rawUrl(sessionId, path), "_blank", "noopener,noreferrer")}
         >
           <ExternalLinkIcon size={14} />
         </IconButton>
 
         <IconButton
-          label="Download this file"
+          label={t("viewer.download")}
           onClick={() =>
             window.location.assign(api.files.rawUrl(sessionId, path, { download: true }))
           }
@@ -182,13 +186,13 @@ export function FileViewer({
         </IconButton>
 
         {onExpand && (
-          <IconButton label="Open full screen" ref={registerExpand} onClick={onExpand}>
+          <IconButton label={t("viewer.expand")} ref={registerExpand} onClick={onExpand}>
             <MaximizeIcon size={14} />
           </IconButton>
         )}
 
         {onClose && (
-          <IconButton label="Close preview" onClick={onClose}>
+          <IconButton label={t("viewer.close")} onClick={onClose}>
             <XIcon size={14} />
           </IconButton>
         )}
@@ -237,6 +241,7 @@ function DocumentBody({
   path: string;
   name: string;
 }) {
+  const t = useT();
   const [sheet, setSheet] = useState(0);
   const [row, setRow] = useState(0);
 
@@ -256,8 +261,8 @@ function DocumentBody({
 
   const grid = data?.grid;
 
-  if (isPending && !grid) return <Loading label={name} />;
-  if (error) return <BodyError error={error} />;
+  if (isPending && !grid) return <Loading label={name} t={t} />;
+  if (error) return <BodyError error={error} t={t} />;
 
   if (data?.kind === "grid" && grid) {
     return (
@@ -289,6 +294,7 @@ function ContentBody({
   name: string;
   kind: ViewerKind;
 }) {
+  const t = useT();
   const [renderedMarkdown, setRenderedMarkdown] = useState(true);
 
   // PDF is the one kind needing no JSON at all: the browser fetches the bytes
@@ -308,8 +314,8 @@ function ContentBody({
     return <PdfView src={api.files.rawUrl(sessionId, path)} name={name} />;
   }
 
-  if (isPending) return <Loading label={name} />;
-  if (error) return <BodyError error={error} />;
+  if (isPending) return <Loading label={name} t={t} />;
+  if (error) return <BodyError error={error} t={t} />;
   if (!data) return null;
 
   if (kind === "image") {
@@ -326,9 +332,11 @@ function ContentBody({
         <TooLarge
           sessionId={sessionId}
           path={path}
-          message={`This image is ${formatBytes(data.size)}, over the ${formatBytes(
-            PREVIEW_LIMIT_BYTES,
-          )} inline preview limit.`}
+          message={t("viewer.tooLargeImage", {
+            size: formatBytes(data.size),
+            limit: formatBytes(PREVIEW_LIMIT_BYTES),
+          })}
+          t={t}
         />
       );
     }
@@ -344,7 +352,8 @@ function ContentBody({
       <TooLarge
         sessionId={sessionId}
         path={path}
-        message={`This is a binary file (${formatBytes(data.size)}), so there is nothing to show as text.`}
+        message={t("viewer.binary", { size: formatBytes(data.size) })}
+        t={t}
         // Nothing will render this in a tab either — the backend serves an
         // unrecognized binary as an attachment — so only the download is offered.
         offerTab={false}
@@ -360,7 +369,7 @@ function ContentBody({
       {isMarkdown && (
         <div className="mb-1.5 flex justify-end">
           <Button variant="secondary" onClick={() => setRenderedMarkdown(!renderedMarkdown)}>
-            {renderedMarkdown ? "View source" : "View rendered"}
+            {t(renderedMarkdown ? "action.viewSource" : "action.viewRendered")}
           </Button>
         </div>
       )}
@@ -374,8 +383,10 @@ function ContentBody({
       {data.truncated && (
         <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 rounded border border-warning-line bg-warning-bg px-2 py-1 text-3xs text-warning">
           <span>
-            Showing the first {formatBytes(TRUNCATE_TO_BYTES)} of a{" "}
-            {formatBytes(data.size)} file.
+            {t("viewer.truncated", {
+              shown: formatBytes(TRUNCATE_TO_BYTES),
+              size: formatBytes(data.size),
+            })}
           </span>
           <button
             type="button"
@@ -384,7 +395,7 @@ function ContentBody({
             }
             className="rounded font-medium underline hover:no-underline focus-ring"
           >
-            Open the whole file in a new tab
+            {t("viewer.openWhole")}
           </button>
         </div>
       )}
@@ -404,7 +415,7 @@ function ContentBody({
       )}
 
       <p className="mt-1.5 text-3xs text-ink-muted">
-        Modified {formatRelative(data.modifiedAtMs)} ·{" "}
+        {t("files.modified", { when: formatRelative(data.modifiedAtMs) })} ·{" "}
         <span className="font-mono">{data.absolutePath}</span>
       </p>
     </div>
@@ -418,15 +429,18 @@ function ContentBody({
  * file and a backend that cannot serve this kind of file arrive with the same
  * status and differ only by code.
  */
-function BodyError({ error }: { error: unknown }) {
-  let message = "Unknown error.";
+function BodyError({ error, t }: { error: unknown; t: Translate }) {
+  // `t` is a prop rather than a hook call so the callers above can pass the one
+  // they already hold; the backend's own `message` still passes through
+  // untranslated, being that process's report of what it refused.
+  let message = t("viewer.error.unknown");
   if (error instanceof ApiError) {
     switch (error.code) {
       case "FILE_NOT_FOUND":
-        message = "This file no longer exists on disk.";
+        message = t("viewer.error.gone");
         break;
       case "POLICY_VIOLATION":
-        message = "This file is outside the session's working directory.";
+        message = t("viewer.error.outside");
         break;
       default:
         message = error.message;
@@ -437,7 +451,7 @@ function BodyError({ error }: { error: unknown }) {
 
   return (
     <div role="alert" className="p-3 text-2xs">
-      <p className="font-medium text-danger">Could not read this file</p>
+      <p className="font-medium text-danger">{t("viewer.errorTitle")}</p>
       <p className="mt-1 text-danger">{message}</p>
     </div>
   );
@@ -468,11 +482,14 @@ function TooLarge({
   sessionId,
   path,
   message,
+  t,
   offerTab = true,
 }: {
   sessionId: string;
   path: string;
+  /** Already translated by the caller, which knows the sizes to interpolate. */
   message: string;
+  t: Translate;
   offerTab?: boolean;
 }) {
   return (
@@ -487,7 +504,7 @@ function TooLarge({
               window.open(api.files.rawUrl(sessionId, path), "_blank", "noopener,noreferrer")
             }
           >
-            Open in a new tab
+            {t("viewer.openTab")}
           </Button>
         )}
         <Button
@@ -497,19 +514,32 @@ function TooLarge({
             window.location.assign(api.files.rawUrl(sessionId, path, { download: true }))
           }
         >
-          Download
+          {t("action.download")}
         </Button>
       </div>
     </div>
   );
 }
 
-function Loading({ label }: { label: string }) {
+/** A filename is the label here, so `t` comes from the caller. */
+function Loading({ label, t }: { label: string; t: Translate }) {
   return (
     <output aria-live="polite" className="block p-3 text-2xs text-ink-muted">
-      Loading {label}...
+      {t("viewer.loading", { label })}
     </output>
   );
+}
+
+/**
+ * The same line, for a viewer chunk still downloading.
+ *
+ * Its own component because `next/dynamic`'s `loading` is created at module
+ * scope, where no hook can run — so this one reads the locale itself rather than
+ * taking `t` as a prop.
+ */
+function LoadingKind({ label }: { label: MessageKey }) {
+  const t = useT();
+  return <Loading label={t(label)} t={t} />;
 }
 
 /** Re-indent JSON so a minified file is readable. Invalid JSON passes through. */

@@ -83,6 +83,35 @@ test("switching language repaints the UI and retags the document", async ({ page
 });
 
 /**
+ * The Artifacts pane, in the other language.
+ *
+ * Its own spec rather than more assertions above, because the gap it covers is a
+ * *whole surface* left out of the extraction rather than one missed string: the
+ * file pane shipped with its labels hardcoded while the shell around it
+ * translated, and every existing i18n assertion looked at the shell. A pane
+ * reached by a shortcut and rendered by a lazy chunk is exactly the surface a
+ * catalogue sweep misses, so the check is on the pane's own controls.
+ *
+ * Asserting the accessible names, not visible text: they are what a screen reader
+ * announces and what an untranslated `label` prop leaves in English even when the
+ * body text around it changes.
+ */
+test("the file pane translates, including its accessible names", async ({ page }) => {
+  await gotoReady(page);
+  const settings = await openSettings(page);
+  await settings.getByRole("button", { name: "中文", exact: true }).click();
+  await page.keyboard.press("Escape");
+
+  await page.keyboard.press("ControlOrMeta+Backslash");
+  const pane = page.getByRole("complementary", { name: "产物" });
+  await expect(pane).toBeVisible();
+
+  // With no session open the pane is its empty state, which is the one part of it
+  // that renders without a workdir — and it was hardcoded English too.
+  await expect(pane.getByText("未打开会话")).toBeVisible();
+});
+
+/**
  * The defect this whole change started from.
  *
  * `Mod+N` shipped as the default for "new session" and in a real browser it opens

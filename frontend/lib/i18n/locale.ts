@@ -76,6 +76,44 @@ export function format(template: string, params?: Record<string, string | number
 }
 
 /**
+ * A bound translator: a key and optional parameters in, a string out.
+ *
+ * Declared here rather than beside `useT` so a non-React caller can take one as a
+ * parameter — `describeWindow` and `describeBlocked` do, which is what keeps their
+ * plural rules in the catalogue while leaving them pure and unit-testable.
+ */
+export type Translate = (key: MessageKey, params?: Record<string, string | number>) => string;
+
+/**
+ * Split a translated string around one placeholder.
+ *
+ * For the case a plain string cannot serve: a sentence whose interpolated value
+ * is a *path* or a *filename* and has to render in a mono face, inside a `<span>`
+ * of its own. Concatenating a prefix and a suffix key would be the usual answer
+ * and it is the wrong one here — English puts the value first ("Inside src/") and
+ * Chinese wraps it ("在 src/ 内"), so the two halves are not independently
+ * translatable and a translator cannot see the whole sentence.
+ *
+ * Returns the text before and after the slot, each with any remaining
+ * placeholders substituted. An absent slot yields the whole string as the prefix,
+ * which renders the sentence intact minus the value — visibly wrong rather than
+ * silently empty.
+ */
+export function formatParts(
+  template: string,
+  slot: string,
+  params?: Record<string, string | number>,
+): [string, string] {
+  const token = `{${slot}}`;
+  const at = template.indexOf(token);
+  if (at === -1) return [format(template, params), ""];
+  return [
+    format(template.slice(0, at), params),
+    format(template.slice(at + token.length), params),
+  ];
+}
+
+/**
  * Translate one key against an explicit locale.
  *
  * Falls back to English for a key the dictionary lacks. That cannot happen for a

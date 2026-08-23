@@ -49,6 +49,7 @@ import { ApiError, api, type FileEntry } from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
 import { iconFor, type FileIconName } from "@/lib/file-kind";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
+import { useT, type Translate } from "@/lib/i18n";
 import { ContextMenu, MenuButton, type MenuItem } from "@/components/ui/menu";
 import { FileViewer } from "@/components/file-viewer";
 import { IconButton } from "@/components/ui/button";
@@ -105,6 +106,7 @@ const FullscreenViewer = dynamic(
 );
 
 export function ArtifactsPane() {
+  const t = useT();
   const params = useParams();
   const sessionId = typeof params?.id === "string" ? params.id : undefined;
   const {
@@ -256,10 +258,8 @@ export function ArtifactsPane() {
   if (!sessionId) {
     return (
       <div className="p-3 text-xs text-ink-muted">
-        <p className="font-medium text-ink-soft">No session open</p>
-        <p className="mt-1">
-          Open a session to browse the files in its working directory.
-        </p>
+        <p className="font-medium text-ink-soft">{t("files.noSession.title")}</p>
+        <p className="mt-1">{t("files.noSession.hint")}</p>
       </div>
     );
   }
@@ -300,15 +300,13 @@ export function ArtifactsPane() {
               // They share a query key so there is no double fetch, but a
               // 3,000-cell table is worth not building twice.
               <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
-                <p className="text-2xs text-ink-muted">
-                  This file is open in the expanded view.
-                </p>
+                <p className="text-2xs text-ink-muted">{t("files.openInExpanded")}</p>
                 <button
                   type="button"
                   onClick={handleCloseFullscreen}
                   className="rounded border border-line px-2 py-0.5 text-3xs font-medium text-ink-soft hover:bg-sunken focus-ring"
                 >
-                  Show it here instead
+                  {t("files.showHere")}
                 </button>
               </div>
             ) : (
@@ -361,6 +359,7 @@ function FileTree({
   expanded: Set<string>;
   onToggle: (path: string) => void;
 }) {
+  const t = useT();
   const queryClient = useQueryClient();
 
   const root = useQuery({
@@ -375,17 +374,17 @@ function FileTree({
   const rootItems: MenuItem[] = useMemo(
     () => [
       {
-        label: "New folder",
+        label: t("files.newFolder"),
         icon: <FolderPlusIcon size={13} />,
         onSelect: () => operations.requestMkdir(""),
       },
       {
-        label: "Upload files here",
+        label: t("files.uploadHere"),
         icon: <UploadIcon size={13} />,
         onSelect: () => operations.requestUpload(""),
       },
       {
-        label: "Copy workspace path",
+        label: t("sidebar.copyWorkspacePath"),
         icon: <CopyIcon size={13} />,
         separated: true,
         onSelect: () => {
@@ -395,7 +394,7 @@ function FileTree({
         disabled: !root.data?.root,
       },
     ],
-    [operations, root.data?.root],
+    [operations, root.data?.root, t],
   );
 
   return (
@@ -446,7 +445,7 @@ function FileTree({
           y={rootMenu.y}
           items={rootItems}
           onClose={() => setRootMenu(null)}
-          label="Working directory actions"
+          label={t("files.rootActions")}
         />
       )}
       {/*
@@ -460,7 +459,7 @@ function FileTree({
       <div className="sticky top-0 z-10 -mx-1.5 mb-1 flex items-center gap-1 border-b border-line bg-sunken px-2.5 py-1 md:bg-transparent">
         <div className="min-w-0 flex-1">
           <h2 className="hidden text-3xs font-semibold uppercase tracking-wider text-ink-muted md:block">
-            Files
+            {t("files.heading")}
           </h2>
           {root.data?.root && (
             <p className="truncate font-mono text-3xs text-ink-muted" title={root.data.root}>
@@ -486,21 +485,21 @@ function FileTree({
           rendered immediately to the left of these two buttons.
         */}
         <IconButton
-          label="New folder"
+          label={t("files.newFolder")}
           onClick={() => operations.requestMkdir("")}
           disabled={operations.busy}
         >
           <FolderPlusIcon size={14} />
         </IconButton>
         <IconButton
-          label="Upload files"
+          label={t("files.uploadFiles")}
           onClick={() => operations.requestUpload("")}
           disabled={operations.busy}
         >
           <UploadIcon size={14} />
         </IconButton>
         <IconButton
-          label="Reload the file tree"
+          label={t("files.reloadTree")}
           onClick={() => void queryClient.invalidateQueries({ queryKey: ["files", sessionId] })}
         >
           <RefreshIcon size={14} />
@@ -550,6 +549,7 @@ function Directory({
   onExpand: () => void;
   operations: FileOperations;
 }) {
+  const t = useT();
   const { data, isPending, error, refetch } = useQuery({
     queryKey: ["files", sessionId, path],
     queryFn: () => api.files.tree(sessionId, path),
@@ -562,7 +562,7 @@ function Directory({
   if (isPending && (depth === 0 || expanded.has(path))) {
     return (
       <p className="px-1.5 py-1 text-2xs text-ink-muted" style={{ paddingLeft: depth * 10 + 6 }}>
-        Loading...
+        {t("action.loading")}
       </p>
     );
   }
@@ -578,13 +578,13 @@ function Directory({
             message verbatim. Both are needed: a bare message in a tree reads as
             a property of the tree, which is how an absent *endpoint* came across
             as an absent *directory*. */}
-        <p className="text-danger">{describeTreeError(error, path)}</p>
+        <p className="text-danger">{describeTreeError(error, path, t)}</p>
         <button
           type="button"
           onClick={() => void refetch()}
           className="mt-0.5 rounded text-3xs text-danger underline hover:text-danger focus-ring"
         >
-          Retry
+          {t("app.retry")}
         </button>
       </div>
     );
@@ -593,7 +593,10 @@ function Directory({
   if (!data) return null;
 
   return (
-    <ul role={depth === 0 ? "tree" : "group"} aria-label={depth === 0 ? "File tree" : undefined}>
+    <ul
+      role={depth === 0 ? "tree" : "group"}
+      aria-label={depth === 0 ? t("files.treeLabel") : undefined}
+    >
       {data.entries.length === 0 && (
         <li
           className="px-1.5 py-1 text-2xs text-ink-muted"
@@ -602,14 +605,14 @@ function Directory({
           {/* An empty directory is the one place an upload affordance is *needed*
               rather than convenient: there is no row here to right-click, so
               "Empty" alone would be a dead end. */}
-          Empty ·{" "}
+          {t("files.empty")} ·{" "}
           <button
             type="button"
             onClick={() => operations.requestUpload(path)}
             disabled={operations.busy}
             className="rounded text-3xs text-ink-soft underline hover:text-ink focus-ring disabled:opacity-50"
           >
-            add files
+            {t("files.addFiles")}
           </button>
         </li>
       )}
@@ -633,7 +636,7 @@ function Directory({
           className="px-1.5 py-1 text-3xs text-warning"
           style={{ paddingLeft: depth * 10 + 6 }}
         >
-          Listing truncated — this directory holds more entries than are shown.
+          {t("files.truncated")}
         </li>
       )}
     </ul>
@@ -721,16 +724,16 @@ function TreeGlyph({ entry, isOpen }: { entry: FileEntry; isOpen: boolean }) {
   return <Glyph size={15} />;
 }
 
-function describeTreeError(error: unknown, path: string): string {
-  const where = path === "" ? "the working directory" : path;
+function describeTreeError(error: unknown, path: string, t: Translate): string {
+  const where = path === "" ? t("files.error.workingDirectory") : path;
   if (error instanceof ApiError) {
     switch (error.code) {
       case "FILE_NOT_FOUND":
-        return `${where} no longer exists on disk.`;
+        return t("files.error.gone", { where });
       case "SESSION_NOT_FOUND":
-        return "This session is no longer in the journal.";
+        return t("files.error.sessionGone");
       case "POLICY_VIOLATION":
-        return `${where} is outside this session's working directory.`;
+        return t("files.error.outside", { where });
       // Router-level and envelopeless failures: the endpoint, not the path.
       // `api.ts` has already written the actionable message for these, so it is
       // passed through rather than restated.
@@ -739,9 +742,9 @@ function describeTreeError(error: unknown, path: string): string {
       case "http_404":
         return error.message;
     }
-    return `Could not list ${where}: ${error.message}`;
+    return t("files.error.list", { where, message: error.message });
   }
-  return `Could not list ${where}.`;
+  return t("files.error.listPlain", { where });
 }
 
 function TreeNode({
@@ -767,6 +770,7 @@ function TreeNode({
   onExpand: () => void;
   operations: FileOperations;
 }) {
+  const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   /** True while a file drag is over this row, for the drop target's outline. */
   const [dropping, setDropping] = useState(false);
@@ -776,7 +780,9 @@ function TreeNode({
   const items: MenuItem[] = useMemo(
     () => [
       {
-        label: entry.isDir ? (isOpen ? "Collapse" : "Expand") : "Open preview",
+        label: entry.isDir
+          ? t(isOpen ? "action.collapse" : "action.expand")
+          : t("files.openPreview"),
         icon: entry.isDir ? <ChevronRightIcon size={13} /> : <FileIcon size={13} />,
         onSelect: () =>
           entry.isDir ? onToggle(entry.path) : onSelect(entry.path, entry.previewKind),
@@ -784,20 +790,20 @@ function TreeNode({
       ...(entry.isDir
         ? [
             {
-              label: "New folder",
+              label: t("files.newFolder"),
               icon: <FolderPlusIcon size={13} />,
               onSelect: () => operations.requestMkdir(entry.path),
               separated: true,
             },
             {
-              label: "Upload files here",
+              label: t("files.uploadHere"),
               icon: <UploadIcon size={13} />,
               onSelect: () => operations.requestUpload(entry.path),
             },
           ]
         : [
             {
-              label: "Open full screen",
+              label: t("files.openFullScreen"),
               icon: <MaximizeIcon size={13} />,
               onSelect: () => {
                 onSelect(entry.path, entry.previewKind);
@@ -812,7 +818,7 @@ function TreeNode({
                 streams, finds, zooms, and prints — and the backend serves the
                 file whole on that route.
               */
-              label: "Open in new tab",
+              label: t("files.openInNewTab"),
               icon: <ExternalLinkIcon size={13} />,
               onSelect: () => openInNewTab(api.files.rawUrl(sessionId, entry.path)),
             },
@@ -821,25 +827,25 @@ function TreeNode({
               // browser *can* display a type is not the same question as whether
               // the user wants a copy of it, and guessing the answer means a PNG
               // opens a tab when Download was pressed.
-              label: "Download",
+              label: t("action.download"),
               icon: <DownloadIcon size={13} />,
               onSelect: () =>
                 downloadFile(api.files.rawUrl(sessionId, entry.path, { download: true })),
             },
           ]),
       {
-        label: "Copy relative path",
+        label: t("files.copyRelativePath"),
         icon: <CopyIcon size={13} />,
         onSelect: () => void navigator.clipboard.writeText(entry.path).catch(() => {}),
         separated: true,
       },
       {
-        label: "Copy name",
+        label: t("files.copyName"),
         icon: <CopyIcon size={13} />,
         onSelect: () => void navigator.clipboard.writeText(entry.name).catch(() => {}),
       },
       {
-        label: "Delete",
+        label: t("action.delete"),
         icon: <TrashIcon size={13} />,
         danger: true,
         separated: true,
@@ -858,7 +864,7 @@ function TreeNode({
       // arbitrary path is a local code-execution surface, and adding it needs a
       // threat-model decision rather than a menu entry.
     ],
-    [entry, isOpen, onToggle, onSelect, onExpand, operations, sessionId],
+    [entry, isOpen, onToggle, onSelect, onExpand, operations, sessionId, t],
   );
 
   return (
@@ -983,8 +989,8 @@ function TreeNode({
           </span>
           {entry.isSymlink && (
             <span
-              aria-label="symbolic link"
-              title="Symbolic link, resolving inside the workspace"
+              aria-label={t("files.symlink")}
+              title={t("files.symlinkTitle")}
               className={`shrink-0 ${isSelected ? "text-accent-ink-muted" : "text-ink-muted"}`}
             >
               <ExternalLinkIcon size={11} />
@@ -997,7 +1003,7 @@ function TreeNode({
               className={`shrink-0 text-3xs pointer-coarse:hidden ${
                 isSelected ? "text-accent-ink-muted" : "text-ink-muted"
               }`}
-              title={`Modified ${formatRelative(entry.modifiedAtMs)}`}
+              title={t("files.modified", { when: formatRelative(entry.modifiedAtMs) })}
             >
               {formatBytes(entry.size)}
             </span>
@@ -1015,10 +1021,14 @@ function TreeNode({
           row's own button is invalid HTML.
         */}
         <span className="absolute inset-y-0 right-0 flex items-center pr-0.5 opacity-0 group-hover/row:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
-          <MenuButton label={`${entry.name} actions`} items={items} align="end">
+          <MenuButton
+            label={t("files.entryActions", { name: entry.name })}
+            items={items}
+            align="end"
+          >
             {(trigger) => (
               <IconButton
-                label={`${entry.name} actions`}
+                label={t("files.entryActions", { name: entry.name })}
                 className={isSelected ? "text-accent-ink-muted" : ""}
                 {...trigger}
               >
@@ -1050,7 +1060,7 @@ function TreeNode({
           y={menu.y}
           items={items}
           onClose={() => setMenu(null)}
-          label={`${entry.name} actions`}
+          label={t("files.entryActions", { name: entry.name })}
         />
       )}
     </li>
