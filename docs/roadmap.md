@@ -1069,3 +1069,65 @@ mobile-breakpoint blind spot: a suite can only see what its environment can expr
   a false green, and the worst possible output from a flake-detection script.
 - **Identity conversion is still not implemented.** Changing `identityMode` on a
   session with history remains a separate explicit operation, unbuilt.
+
+## Phase 12: Native Sessions — In progress
+
+The goal is parity with a terminal: slash commands the project actually defines,
+approval prompts, interrupt that keeps the session, subagents rendered as
+subagents. Plus the seam that lets the same session run in a Khora sandbox
+instead of on the host, without the record changing.
+
+### What forced a redesign rather than features
+
+Measured, not assumed. `claude -p --input-format stream-json
+--permission-prompt-tool stdio` against a project with an `ask` rule sends a
+`can_use_tool` request back over stdin and waits for a reply. The v1 runner
+protocol closes stdin as its "prompt ended" signal, so the turn dies with
+`Tool permission request failed: AbortError: Stream closed`. Holding stdin open,
+the request arrives and is answerable.
+
+So approvals, interrupt, mid-turn steering, and live capability were not missing
+features — they were unreachable through a one-shot pipe. The same handshake
+returns **46 real slash commands** and 5 subagent definitions on this machine,
+against the 1–2 a runner hand-declares in `--describe`.
+
+Governing specs, written before the code:
+
+- `docs/session-protocol.md` — `sylph.agent.v2`, the duplex adapter contract
+- `docs/environments.md` — the `Environment` seam, local / khora / ssh
+- `docs/control-plane.md` — one server, many frontends; Discord as a frontend
+
+### Decisions taken
+
+- **A session, not a turn, is the unit.** A live adapter process is a *link*;
+  sessions are `attached` or `detached`. Links are disposable — they idle out, die
+  with a restart, and a turn on a detached session establishes one first. That
+  path is v1's behaviour, which makes it the floor rather than an error case.
+- **v1 stays supported.** A directory with only `runner.sh` is driven one-shot and
+  presented as an adapter whose `supports` is the v1 subset, so nothing above the
+  seam branches on protocol version.
+- **The server records.** The normalized event stream is journaled as durable
+  history and feeds TraceDB, because the server is the only component present for
+  work in every environment. This makes `live.db` real history rather than a
+  bounded projection — a deliberate reversal of the earlier decision, taken
+  because a sandbox's native store dies with the sandbox and the archive would
+  otherwise have a hole exactly where isolated work happened.
+- **Pending requests are resources, not stream messages.** An approval survives a
+  client disconnect and is answerable from any frontend. A stream-only design
+  strands the request and blocks the agent indefinitely.
+- **`interrupt` is not `stop`.** Stop kills the process group; interrupt asks the
+  agent to end the turn and stay alive. Conflating them loses one intention.
+- **Discord becomes a thin frontend**, keeping only channel→session bindings.
+  Ends the two-control-plane split, and Discord inherits approvals, live command
+  lists, and real interrupt.
+
+### Open items
+
+- **Multi-user is not solved by this work**, only un-foreclosed: authorization has
+  one place to live, and request resolution records a resolver. Authentication
+  beyond the bootstrap cookie, per-user visibility, and credential isolation
+  remain unbuilt, and non-loopback binding stays a separate explicit change.
+- **Khora needs a Template carrying the agent CLIs and adapters**, since the
+  adapter runs inside the environment. None exists yet.
+- **Journal retention needs a real policy** once it is authoritative history.
+  Unbounded growth was acceptable for a projection and is not for a record.
