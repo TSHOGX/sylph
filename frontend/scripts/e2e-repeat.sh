@@ -63,7 +63,7 @@ def failures(path):
         walk(s)
     return found, data.get("stats", {})
 
-per_run, all_fails = {}, collections.Counter()
+per_run, all_fails, did_not_run = {}, collections.Counter(), []
 print()
 print("=" * 78)
 for i in range(1, runs + 1):
@@ -75,14 +75,28 @@ for i in range(1, runs + 1):
     per_run[i] = fails
     all_fails.update(fails)
     mins = (stats.get("duration") or 0) / 60000
+    ran = (stats.get("expected", 0) or 0) + (stats.get("unexpected", 0) or 0)
     print(f"run {i}: {stats.get('expected',0)} passed, {stats.get('unexpected',0)} failed, "
           f"{stats.get('flaky',0)} flaky, {mins:.1f} min")
+    # A run where nothing executed is not a passing run. Reporting "no failures"
+    # for it is worse than reporting an error, because it reads as a green result:
+    # the suite cannot start at all when the backend does not compile, and six
+    # consecutive non-runs were once summarised here as "No failures in any run."
+    if ran == 0:
+        did_not_run.append(i)
+        print("    DID NOT RUN — no tests executed. Check the run log for a")
+        print("    webServer startup failure (a backend that does not compile")
+        print("    exits 101 before any spec is reached).")
     for f in fails:
         print(f"    FAIL {f}")
 
 print("=" * 78)
-if not all_fails:
-    print("No failures in any run.")
+if did_not_run:
+    print(f"INCONCLUSIVE: {len(did_not_run)} of {len(per_run)} run(s) executed no tests "
+          f"(runs {', '.join(map(str, did_not_run))}).")
+    print("Fix the startup failure and re-run. Nothing below is evidence about the code.")
+elif not all_fails:
+    print(f"No failures across {len(per_run)} run(s), all of which executed tests.")
 else:
     n = len(per_run)
     print(f"Failure frequency across {n} run(s):")
