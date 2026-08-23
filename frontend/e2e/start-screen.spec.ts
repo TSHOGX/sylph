@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createSession } from "./fixtures/session";
+import { createSession, gotoReady } from "./fixtures/session";
 
 /**
  * `/` — the start screen.
@@ -120,7 +120,10 @@ test("the start screen's create button runs the same path as its shortcut", asyn
 test("the keys shown are the bindings in effect, not hard-coded captions", async ({
   page,
 }) => {
-  await page.goto("/");
+  // `gotoReady` waits for a client-rendered control, because the shortcut below is
+  // dropped if it arrives before the shell's keydown effect runs — which is exactly
+  // how this spec failed in 1 of 4 identical suite runs.
+  await gotoReady(page);
 
   // Rebind through the settings panel, then check the start screen reports the new
   // combo. A hard-coded `⌘N` would satisfy every assertion above and still be
