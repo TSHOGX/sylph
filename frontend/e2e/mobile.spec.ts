@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { createSession } from "./fixtures/session";
+import { createSession, gotoReady } from "./fixtures/session";
 
 /**
  * The phone layout.
@@ -158,12 +158,22 @@ test("the sessions drawer overlays the conversation and dismisses on navigation"
   await page.keyboard.press("Escape");
   await expect(drawer).toBeHidden();
 
-  // Navigating dismisses it. Tapping a session *is* a navigation, and leaving the
-  // drawer over the conversation the user just chose costs a second tap every time.
+  // Tapping a row dismisses it. Leaving the drawer over the conversation the user
+  // just chose costs a second tap on every visit.
+  //
+  // Specifically the row for the session *already open*, which is the case that was
+  // broken: the drawer's dismissal was derived from the pathname changing, and a
+  // same-route navigation never changes it, so the drawer stayed put and the row
+  // looked dead. Addressed by `aria-current` rather than by position, so this keeps
+  // testing the same-route case even if sidebar ordering changes — `.first()` only
+  // happened to be the current session on a clean journal.
   await page.getByRole("button", { name: "Open workspaces" }).click();
   await expect(drawer).toBeVisible();
-  await drawer.getByRole("link").first().click();
+  const current = drawer.locator('a[aria-current="page"]');
+  await expect(current).toHaveCount(1);
+  await current.click();
   await expect(drawer).toBeHidden();
+  await expect(page.getByLabel("Message")).toBeVisible();
   await expect(page.getByLabel("Message")).toBeVisible();
 });
 
@@ -271,7 +281,9 @@ test("the app is installable: manifest, icons, and a standalone display mode", a
 
 test("dark mode applies before paint and follows an explicit choice", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
-  await page.goto("/");
+  // `gotoReady` rather than `goto`, because a shortcut is pressed further down and is
+  // silently dropped if it arrives before the shell's keydown effect has run.
+  await gotoReady(page);
 
   // Resolved by the inline bootstrap script, not by a React effect: an effect runs
   // after paint by definition, so a dark-mode user would see a white page for the
@@ -286,6 +298,11 @@ test("dark mode applies before paint and follows an explicit choice", async ({ p
   expect(canvas).not.toBe("rgb(255, 255, 255)");
 
   // An explicit choice overrides the OS and keeps overriding it.
+  //
+  // Note that neither assertion above proves hydration, which is why the gate is on
+  // the navigation rather than here: `data-theme` is set by the blocking inline
+  // script *before* React runs, and `getComputedStyle` reads CSS. Both pass on a
+  // page that has not hydrated at all.
   await page.keyboard.press("ControlOrMeta+,");
   const settings = page.getByRole("dialog");
   await expect(settings).toBeVisible();

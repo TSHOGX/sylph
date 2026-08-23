@@ -233,7 +233,32 @@ function ShellFrame({
       */}
       {isMobile && drawer === "sessions" && (
         <Drawer title="Workspaces" onClose={closeDrawer}>
-          <WorkspaceSidebar />
+          {/*
+            Any link tap dismisses the drawer, by delegation.
+
+            The route-tagged derivation in `workspace-ui` closes the drawer when the
+            *pathname changes*, which covers most taps and the back button — but not
+            tapping the session you are already viewing. That is a same-route
+            navigation, so the pathname never changes and the drawer stayed open: the
+            user taps a row and nothing happens, which reads as a broken row rather
+            than as a no-op. Found by the mobile spec on a clean journal, where the
+            first row in the drawer *is* the current session; an accumulated journal
+            hid it, because some other session sorted first.
+
+            Delegation rather than a callback threaded into the sidebar: it catches
+            every link the drawer will ever contain — session rows, archived rows,
+            "Browse all history" — without the sidebar needing to know it is inside a
+            drawer. `closest("a[href]")` because the tap usually lands on a span
+            inside the anchor.
+          */}
+          <div
+            onClick={(event) => {
+              if ((event.target as HTMLElement).closest("a[href]")) closeDrawer();
+            }}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <WorkspaceSidebar />
+          </div>
         </Drawer>
       )}
 

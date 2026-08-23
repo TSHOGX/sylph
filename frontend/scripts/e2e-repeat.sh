@@ -90,6 +90,10 @@ else:
         verdict = "DEFECT (every run)" if count == n else f"flake ({count}/{n})"
         print(f"  {count}/{n}  {verdict:22} {spec}")
     print()
-    print("A spec failing in every run is a defect. A spec failing in some runs,")
-    print("with the set changing between runs, is contention against the 30s budget.")
+    print("A spec failing in every run is a defect in the code under test.")
+    print("A spec failing in only some runs is a race — in the spec or the app —")
+    print("not automatically 'flake to be ignored'. Read the error before deciding:")
+    print("  - timed out at the *test* budget (30s)  -> the machine, or a slow suite")
+    print("  - timed out at an *expect* budget (10s) -> something never happened;")
+    print("    a keypress dropped before hydration looks exactly like this")
 PY

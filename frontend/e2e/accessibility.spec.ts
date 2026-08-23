@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createSession } from "./fixtures/session";
+import { createSession, gotoReady } from "./fixtures/session";
 
 /**
  * Keyboard reachability, checked in a real browser.
@@ -62,7 +62,9 @@ test("the command dialog traps focus and returns it on close", async ({ page }) 
  * have been.
  */
 test("every control in the create picker has an accessible name", async ({ page }) => {
-  await page.goto("/");
+  // `gotoReady`, not `goto`: the shortcut below is discarded if it lands before the
+  // shell's keydown effect has run. See the helper.
+  await gotoReady(page);
   await page.keyboard.press("ControlOrMeta+n");
   await expect(page.getByRole("dialog")).toBeVisible();
   // Wait for the listing, so the audit sees folder rows rather than the spinner.
@@ -157,7 +159,7 @@ test("the first-run guide has no automated accessibility violations", async ({ p
 });
 
 test("the create picker has no automated accessibility violations", async ({ page }) => {
-  await page.goto("/");
+  await gotoReady(page);
   await page.keyboard.press("ControlOrMeta+n");
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.getByRole("list", { name: "Folders" })).toBeVisible();
