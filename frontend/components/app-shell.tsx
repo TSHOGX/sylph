@@ -41,6 +41,7 @@ import { api } from "@/lib/api";
 import { useQuickCreateSession } from "@/lib/create-session";
 import { WorkspaceUIProvider, useWorkspaceUI } from "@/lib/workspace-ui";
 import { WorkspaceSidebar } from "@/components/workspace-sidebar";
+import { useT } from "@/lib/i18n";
 import { useShortcutHint } from "@/lib/shortcuts";
 import { IconButton, Kbd } from "@/components/ui/button";
 import {
@@ -160,12 +161,14 @@ function ShellFrame({
   createError: unknown;
 }) {
   const { leftOpen, rightOpen, overlay, drawer, closeDrawer, isMobile } = useWorkspaceUI();
+  const t = useT();
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-canvas text-ink">
       <TopBar />
 
-      {/* One strip for every create path: Quick Start, the palette, `Mod+N`, and
+      {/* One strip for every create path: Quick Start, the palette, the new-session
+          shortcut, and
           the sidebar's "New session here" all run the same mutation, so its
           pending and failed states have one place to appear regardless of which
           triggered it.
@@ -193,7 +196,7 @@ function ShellFrame({
         >
           {createError instanceof Error
             ? createError.message
-            : "Could not create the session."}
+            : t("shell.createFailed")}
         </p>
       )}
 
@@ -207,7 +210,7 @@ function ShellFrame({
           crushed the conversation to ~150px.
         */}
         <aside
-          aria-label="Workspaces"
+          aria-label={t("shell.workspaces")}
           className={`${leftOpen ? "md:flex" : "md:hidden"} hidden w-60 shrink-0 flex-col border-r border-line bg-sunken`}
         >
           <WorkspaceSidebar />
@@ -218,7 +221,7 @@ function ShellFrame({
         </main>
 
         <aside
-          aria-label="Artifacts"
+          aria-label={t("shell.artifacts")}
           className={`${rightOpen ? "md:flex" : "md:hidden"} hidden w-80 shrink-0 flex-col border-l border-line bg-sunken xl:w-96`}
         >
           <ArtifactsPane />
@@ -232,7 +235,7 @@ function ShellFrame({
         hidden would leave its focus trap in the tree.
       */}
       {isMobile && drawer === "sessions" && (
-        <Drawer title="Workspaces" onClose={closeDrawer}>
+        <Drawer title={t("shell.workspaces")} onClose={closeDrawer}>
           {/*
             Any link tap dismisses the drawer, by delegation.
 
@@ -263,7 +266,7 @@ function ShellFrame({
       )}
 
       {isMobile && drawer === "files" && (
-        <Sheet title="Files" onClose={closeDrawer}>
+        <Sheet title={t("shell.files")} onClose={closeDrawer}>
           <ArtifactsPane />
         </Sheet>
       )}
@@ -281,6 +284,7 @@ function TopBar() {
   const { toggleLeft, toggleRight, openOverlay, leftOpen, rightOpen, drawer, isMobile } =
     useWorkspaceUI();
   const hint = useShortcutHint();
+  const t = useT();
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-1 border-b border-line bg-canvas px-2 pt-safe md:h-11">
@@ -294,11 +298,11 @@ function TopBar() {
         label={
           isMobile
             ? drawer === "sessions"
-              ? "Close workspaces"
-              : "Open workspaces"
+              ? t("shell.closeWorkspaces")
+              : t("shell.openWorkspaces")
             : leftOpen
-              ? "Hide workspaces sidebar"
-              : "Show workspaces sidebar"
+              ? t("shell.hideWorkspaces")
+              : t("shell.showWorkspaces")
         }
         hint={hint("toggleLeftSidebar")}
         onClick={toggleLeft}
@@ -323,7 +327,7 @@ function TopBar() {
         <button
           type="button"
           onClick={() => openOverlay("search")}
-          aria-label="Search sessions and archive"
+          aria-label={t("shell.search")}
           className="focus-ring tap-target hidden w-full max-w-md items-center gap-2 rounded-lg border border-line bg-sunken px-2.5 py-1 text-left text-2xs text-ink-muted transition-colors hover:border-line-strong hover:bg-raised md:flex"
         >
           <SearchIcon size={14} />
@@ -331,7 +335,7 @@ function TopBar() {
           {hint("search") && <Kbd>{hint("search")}</Kbd>}
         </button>
         <IconButton
-          label="Search sessions and archive"
+          label={t("shell.search")}
           hint={hint("search")}
           onClick={() => openOverlay("search")}
           size={20}
@@ -342,7 +346,7 @@ function TopBar() {
       </div>
 
       <IconButton
-        label="Open settings"
+        label={t("shortcut.openSettings")}
         hint={hint("openSettings")}
         onClick={() => openOverlay("settings")}
         size={isMobile ? 20 : 16}
@@ -354,11 +358,11 @@ function TopBar() {
         label={
           isMobile
             ? drawer === "files"
-              ? "Close files"
-              : "Open files"
+              ? t("shell.closeFiles")
+              : t("shell.openFiles")
             : rightOpen
-              ? "Hide artifacts sidebar"
-              : "Show artifacts sidebar"
+              ? t("shell.hideArtifacts")
+              : t("shell.showArtifacts")
         }
         hint={hint("toggleRightSidebar")}
         onClick={toggleRight}
@@ -389,11 +393,12 @@ function TopBar() {
  */
 function NewSessionPicker() {
   const { closeOverlay, createSessionIn } = useWorkspaceUI();
+  const t = useT();
 
   return (
     <DirectoryPicker
-      title="New session"
-      confirmLabel="Start session here"
+      title={t("shell.newSession.title")}
+      confirmLabel={t("shell.newSession.confirm")}
       onClose={closeOverlay}
       onChoose={(path) => {
         closeOverlay();

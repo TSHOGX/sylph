@@ -115,6 +115,19 @@ export interface Agent {
   commands?: Record<string, AgentCommand>;
 }
 
+/**
+ * `GET /agents` and `POST /agents`.
+ *
+ * `broken` maps a runner directory name to why its `--describe` failed. Omitted
+ * by the backend when empty, hence optional. It was previously absent from this
+ * type, which is why a runner that failed to describe itself was invisible in the
+ * settings panel — the one place a user looks to ask why their agent is missing.
+ */
+export interface AgentsResponse {
+  agents: Agent[];
+  broken?: Record<string, string>;
+}
+
 export interface CreateSessionRequest {
   agent: string;
   workdir: string;
@@ -124,6 +137,39 @@ export interface CreateSessionRequest {
   flags?: Record<string, string>;
   /** TraceDB session id to adopt when importing a native session. */
   traceSessionId?: string;
+  /**
+   * Whether this session gets Sylph's identity: `sylph` appends `SOUL.md`,
+   * `preserve` runs the agent as it comes. Omitted means `sylph`, which is the
+   * backend's default.
+   *
+   * Only meaningful at creation. Identity describes what the stored transcript
+   * was produced by, so `PATCH /sessions` refuses it — see `settings.injectSoul`,
+   * which is the preference this is derived from.
+   */
+  identityMode?: IdentityMode;
+}
+
+/** Identity policy for a session. Mirrors the backend's closed enum. */
+export type IdentityMode = "sylph" | "preserve";
+
+/**
+ * `GET /soul`.
+ *
+ * `available: false` means no readable `SOUL.md` was resolved, so every session
+ * runs on the agent's own identity whatever the client asks for. That is an
+ * ordinary install state, not an error — which is why it arrives as a 200 with a
+ * flag rather than a 404, and why `error` is a separate field: a file that exists
+ * but cannot be read is a different problem with a different fix.
+ */
+export interface SoulResponse {
+  available: boolean;
+  path?: string;
+  content?: string;
+  bytes?: number;
+  modifiedMs?: number;
+  /** True when `content` holds only the first 128 KB. */
+  truncated?: boolean;
+  error?: string;
 }
 
 /** Attachment payload. `type` is the MIME type; `data` is base64, no data: prefix. */
@@ -697,6 +743,16 @@ export const api = {
     roots: () => fetchAPI<BrowseRootsResponse>("/fs/roots"),
     tree: (path = "") => fetchAPI<BrowseResponse>(`/fs/tree${queryString({ path })}`),
   },
+  /**
+   * The identity text Sylph appends to an agent's prompt.
+   *
+   * Read-only by design: editing `SOUL.md` is a filesystem act, and a loopback
+   * HTTP surface that could rewrite a prompt preamble would be a much larger
+   * security question than one that displays it.
+   */
+  soul: {
+    get: () => fetchAPI<SoulResponse>("/soul"),
+  },
   workspaces: {
     /**
      * `includeArchived` also reports directories that exist only in the TraceDB
@@ -762,8 +818,19 @@ export const api = {
       fetchAPI<{ turn: Turn }>(`/turns/${turnId}/stop`, { method: "POST" }),
   },
   agents: {
-    list: () => fetchAPI<{ agents: Agent[] }>("/agents"),
-    refresh: () => fetchAPI<{ agents: Agent[] }>("/agents", { method: "POST" }),
+    list: () => fetchAPI<AgentsResponse>("/agents"),
+    /**
+     * Re-run `--describe` against every runner script.
+     *
+     * Worth being precise about what this does and does not do: it re-executes
+     * the runner scripts, so a newly installed or newly fixed runner appears. It
+     * does not re-read the agent's own configuration — a runner that prints its
+     * model list as a literal in its `--describe` output keeps reporting the same
+     * models until that script changes, however many providers were added to the
+     * agent behind it. The settings panel says so, because otherwise "refreshed
+     * and nothing changed" reads as a broken button.
+     */
+    refresh: () => fetchAPI<AgentsResponse>("/agents", { method: "POST" }),
   },
   search: (query: string, limit?: number) =>
     fetchAPI<SearchResponse>(`/search${queryString({ q: query, limit })}`),

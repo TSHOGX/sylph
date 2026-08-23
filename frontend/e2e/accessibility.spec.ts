@@ -65,7 +65,7 @@ test("every control in the create picker has an accessible name", async ({ page 
   // `gotoReady`, not `goto`: the shortcut below is discarded if it lands before the
   // shell's keydown effect has run. See the helper.
   await gotoReady(page);
-  await page.keyboard.press("ControlOrMeta+n");
+  await page.keyboard.press("ControlOrMeta+Shift+o");
   await expect(page.getByRole("dialog")).toBeVisible();
   // Wait for the listing, so the audit sees folder rows rather than the spinner.
   await expect(page.getByRole("list", { name: "Folders" })).toBeVisible();
@@ -160,7 +160,7 @@ test("the first-run guide has no automated accessibility violations", async ({ p
 
 test("the create picker has no automated accessibility violations", async ({ page }) => {
   await gotoReady(page);
-  await page.keyboard.press("ControlOrMeta+n");
+  await page.keyboard.press("ControlOrMeta+Shift+o");
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.getByRole("list", { name: "Folders" })).toBeVisible();
   await audit(page, "create session picker");

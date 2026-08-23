@@ -25,7 +25,7 @@ describe("resolveSessionDefaults", () => {
       AGENTS,
       settings({ defaultAgent: "codex", defaultModels: { codex: "gpt-5" } }),
     );
-    expect(resolved).toEqual({ agent: "codex", flags: { model: "gpt-5" } });
+    expect(resolved).toEqual({ agent: "codex", flags: { model: "gpt-5" }, identityMode: "sylph" });
   });
 
   it("falls back to the first discovered runner when no default is configured", () => {
@@ -47,7 +47,7 @@ describe("resolveSessionDefaults", () => {
       AGENTS,
       settings({ defaultAgent: "codex", defaultModels: { codex: "opus" } }),
     );
-    expect(resolved).toEqual({ agent: "codex", flags: undefined });
+    expect(resolved).toEqual({ agent: "codex", flags: undefined, identityMode: "sylph" });
   });
 
   it("omits flags entirely for a runner that declares no model flag", () => {
@@ -55,7 +55,7 @@ describe("resolveSessionDefaults", () => {
       AGENTS,
       settings({ defaultAgent: "plain", defaultModels: { plain: "opus" } }),
     );
-    expect(resolved).toEqual({ agent: "plain", flags: undefined });
+    expect(resolved).toEqual({ agent: "plain", flags: undefined, identityMode: "sylph" });
   });
 
   it("resolves the model per agent, not globally", () => {
@@ -74,5 +74,41 @@ describe("resolveSessionDefaults", () => {
     // The one case with no sensible default: the caller must report it rather
     // than sending an empty agent name.
     expect(resolveSessionDefaults([], settings({ defaultAgent: "claude" }))).toBeNull();
+  });
+});
+
+/**
+ * Identity is the one resolved field that becomes durable session data rather
+ * than a display preference, and it is fixed at creation — so if it were dropped
+ * anywhere on this path, a user who turned SOUL.md off would go on getting it with
+ * nothing on screen saying so.
+ */
+describe("identity in resolved defaults", () => {
+  it("asks for Sylph identity when the preference is on", () => {
+    expect(resolveSessionDefaults(AGENTS, settings({ injectSoul: true }))?.identityMode).toBe(
+      "sylph",
+    );
+  });
+
+  it("asks for the agent's own identity when the preference is off", () => {
+    expect(resolveSessionDefaults(AGENTS, settings({ injectSoul: false }))?.identityMode).toBe(
+      "preserve",
+    );
+  });
+
+  it("defaults to Sylph identity, matching the backend's own default", () => {
+    expect(resolveSessionDefaults(AGENTS, settings())?.identityMode).toBe("sylph");
+  });
+
+  /**
+   * Unlike agent and model, identity is never checked against a descriptor: it is
+   * a policy the backend accepts from any client, not a value a runner declares.
+   * A runner offering no model must still be able to run without Sylph identity.
+   */
+  it("is resolved for a runner that declares no flags at all", () => {
+    expect(
+      resolveSessionDefaults(AGENTS, settings({ defaultAgent: "plain", injectSoul: false }))
+        ?.identityMode,
+    ).toBe("preserve");
   });
 });

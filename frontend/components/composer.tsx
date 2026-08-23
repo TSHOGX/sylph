@@ -61,6 +61,7 @@ import {
   type Session,
 } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
+import { useT, type Translate } from "@/lib/i18n";
 import { useIsMobile } from "@/lib/viewport";
 import {
   MAX_ATTACHMENTS,
@@ -99,10 +100,17 @@ const DirectoryPicker = dynamic(
  */
 const ROW_FLAGS = ["model", "effort"] as const;
 
-/** Human label for a flag key. `effort` is the reasoning budget. */
-function flagLabel(key: string): string {
-  if (key === "effort") return "Thinking";
-  if (key === "model") return "Model";
+/**
+ * Human label for a flag key. `effort` is the reasoning budget.
+ *
+ * `t` is a parameter rather than a hook call: this is module-level, and the two
+ * call sites are already inside components that hold one. An unrecognized flag
+ * falls back to its protocol key, which is more honest than inventing a label —
+ * a runner may declare any flag it likes.
+ */
+function flagLabel(key: string, t: Translate): string {
+  if (key === "effort") return t("composer.thinking");
+  if (key === "model") return t("composer.model");
   return key;
 }
 
@@ -147,6 +155,7 @@ export function Composer({
   const queryClient = useQueryClient();
   const router = useRouter();
   const isMobile = useIsMobile();
+  const t = useT();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messageId = useId();
@@ -221,7 +230,16 @@ export function Composer({
    */
   const recreate = useMutation({
     mutationFn: (agent: string) =>
-      api.sessions.create({ agent, workdir: session.workdir }),
+      api.sessions.create({
+        agent,
+        workdir: session.workdir,
+        // Carried from the session being replaced, not re-read from settings.
+        // The user is changing one thing — the agent — and identity is fixed at
+        // creation, so re-deriving it here would silently flip a session started
+        // with the agent's own identity back to Sylph's the moment its model was
+        // switched, with nothing on screen saying so.
+        identityMode: session.identityMode === "preserve" ? "preserve" : "sylph",
+      }),
     onSuccess: ({ session: created }) => {
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
       void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
@@ -273,7 +291,7 @@ export function Composer({
   /** Choices for one flag, as menu items. */
   const flagItems = (key: string, choices: string[]): MenuItem[] => [
     {
-      label: "Runner default",
+      label: t("composer.runnerDefault"),
       checked: !flags[key],
       onSelect: () => patchFlags.mutate({ key, value: "" }),
     },
@@ -301,7 +319,7 @@ export function Composer({
 
   const menuItems: MenuItem[] = [
     {
-      label: "Attach files...",
+      label: t("composer.attachEllipsis"),
       icon: <PaperclipIcon size={14} />,
       hint: `${MAX_ATTACHMENTS} max`,
       disabled: disabled || encoding,
@@ -310,7 +328,7 @@ export function Composer({
     ...(attachments.length > 0
       ? [
           {
-            label: "Save attachments to workspace...",
+            label: t("composer.saveToWorkspace"),
             icon: <FileTextIcon size={14} />,
             disabled: disabled || uploadToWorkspace.isPending,
             onSelect: () => setUploadTarget(attachments),
@@ -320,7 +338,7 @@ export function Composer({
     ...(hasCommands
       ? [
           {
-            label: "Run a command...",
+            label: t("composer.runCommand"),
             icon: <CommandIcon size={14} />,
             separated: true,
             disabled,
@@ -346,7 +364,7 @@ export function Composer({
           } satisfies MenuItem,
         ]
       : [
-          heading("Agent"),
+          heading(t("composer.agent")),
           ...agents.map((agent) => ({
             label: agent.name,
             checked: agent.name === session.agent,
@@ -360,7 +378,7 @@ export function Composer({
     // Anything the runner declares beyond model and effort. Rare, but it must have
     // a control: the runner declared it, so it is real configuration.
     ...menuFlags.flatMap(([key, spec]) => [
-      heading(flagLabel(key)),
+      heading(flagLabel(key, t)),
       ...flagItems(key, spec.choices ?? []),
     ]),
   ];
@@ -408,7 +426,7 @@ export function Composer({
         >
           {attachments.length > 0 && (
             <ul
-              aria-label="Staged attachments"
+              aria-label={t("composer.stagedAttachments")}
               className="flex flex-wrap gap-1.5 border-b border-line px-2 pt-2 pb-2"
             >
               {attachments.map((item) => (
@@ -479,7 +497,7 @@ export function Composer({
               }
             }}
             placeholder={
-              isLive ? "Waiting for the current turn to finish..." : "Send a message..."
+              isLive ? t("composer.placeholderBusy") : t("composer.placeholder")
             }
             disabled={disabled}
             aria-describedby={problem ? problemId : undefined}
@@ -515,14 +533,18 @@ export function Composer({
               tabIndex={-1}
             />
 
-            {/* "Add", not "Add to this message": the longer name contained
-                "Message", which is the textarea's own label, so the two controls
-                became indistinguishable by accessible name. The sheet heading keeps
-                the phrase, where there is room for it. */}
-            <MenuButton label="Add" title="Add to this message" items={menuItems}>
+            {/* The trigger's name is "Add" while the panel's is the longer phrase:
+                the phrase contains "Message", which is the textarea's own label, so
+                reusing it here left two controls a screen reader could not tell
+                apart. See the note in AGENTS.md — this cost 40 E2E specs once. */}
+            <MenuButton
+              label={t("action.add")}
+              title={t("composer.addToMessage")}
+              items={menuItems}
+            >
               {(trigger) => (
                 <IconButton
-                  label="Add"
+                  label={t("action.add")}
                   variant="ghost"
                   disabled={disabled && !hasCommands}
                   size={isMobile ? 20 : 16}
@@ -542,7 +564,7 @@ export function Composer({
               {rowFlags.map(([key, spec]) => (
                 <MenuButton
                   key={key}
-                  label={flagLabel(key)}
+                  label={flagLabel(key, t)}
                   items={flagItems(key, spec.choices ?? [])}
                 >
                   {(trigger) => (
@@ -557,7 +579,7 @@ export function Composer({
                       {...trigger}
                     >
                       <span className="min-w-0 truncate">
-                        {flags[key] ?? flagLabel(key)}
+                        {flags[key] ?? flagLabel(key, t)}
                       </span>
                       <ChevronDownIcon size={12} />
                     </Button>
@@ -574,7 +596,7 @@ export function Composer({
                 icon={<StopIcon size={14} />}
                 className="shrink-0"
               >
-                {stopping ? "Stopping..." : "Stop"}
+                {stopping ? t("action.stopping") : t("action.stop")}
               </Button>
             ) : (
               // Icon-only on a phone: the label costs the width the chips need, and
@@ -584,11 +606,11 @@ export function Composer({
                 type="submit"
                 variant="primary"
                 disabled={!canSend}
-                aria-label={sending ? "Sending" : "Send"}
+                aria-label={sending ? t("action.sending") : t("action.send")}
                 className="shrink-0 max-md:h-9 max-md:w-9 max-md:rounded-full max-md:p-0"
               >
                 <SendIcon size={16} />
-                <span className="max-md:hidden">{sending ? "Sending..." : "Send"}</span>
+                <span className="max-md:hidden">{sending ? t("action.sendingEllipsis") : t("action.send")}</span>
               </Button>
             )}
           </div>
@@ -610,7 +632,7 @@ export function Composer({
           <p role="alert" className="mt-1 text-2xs text-danger">
             {uploadToWorkspace.error instanceof Error
               ? uploadToWorkspace.error.message
-              : "Could not save those files into the workspace."}
+              : t("composer.saveFailed")}
           </p>
         )}
 
@@ -618,7 +640,7 @@ export function Composer({
           <p role="alert" className="mt-1 text-2xs text-danger">
             {patchFlags.error instanceof Error
               ? patchFlags.error.message
-              : "Could not update the runner configuration."}
+              : t("composer.configFailed")}
           </p>
         )}
 

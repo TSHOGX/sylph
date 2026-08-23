@@ -21,7 +21,7 @@ test("a new session accepts a turn and streams the reply", async ({ page }) => {
   // drives that path through the UI — the rest create their precondition through
   // the API — so it pins both that the shortcut dispatches through `runAction`
   // and that choosing a folder is the whole interaction.
-  await page.keyboard.press("ControlOrMeta+n");
+  await page.keyboard.press("ControlOrMeta+Shift+o");
   const picker = page.getByRole("dialog");
   await expect(picker).toBeVisible();
 

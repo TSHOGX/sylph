@@ -10,6 +10,7 @@ import { ApiError } from "@/lib/api";
 import { ErrorBoundary } from "@/lib/error-boundary";
 import { useSettings } from "@/lib/settings";
 import { applyTheme, watchSystemTheme } from "@/lib/theme";
+import { applyLocale } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -33,6 +34,30 @@ function ThemeSync() {
     // Re-resolves on an OS change, and only while the preference is `system`.
     return watchSystemTheme(theme, () => applyTheme(theme));
   }, [theme]);
+
+  return null;
+}
+
+/**
+ * Keeps `<html lang>` in step with the language preference.
+ *
+ * Unlike the theme there is no pre-paint script for this, and none is needed: the
+ * attribute is not visual, so setting it after hydration costs nothing a user can
+ * see. What it does affect is assistive technology — a screen reader picks its
+ * voice and pronunciation from `lang`, so a Chinese UI still labelled `en` is read
+ * as English attempting Chinese. The document ships `lang="en"`, which is correct
+ * until this runs.
+ *
+ * Separate from `ThemeSync` rather than merged into one `DocumentSync`: they are
+ * driven by different preferences, and keeping them apart means a language change
+ * does not re-run theme resolution or vice versa.
+ */
+function LocaleSync() {
+  const locale = useSettings().settings.locale;
+
+  useEffect(() => {
+    applyLocale(locale);
+  }, [locale]);
 
   return null;
 }
@@ -134,6 +159,7 @@ export function Providers({ children }: { children: ReactNode }) {
           backend..." screen and on the failure screen too, both of which render
           before the gate resolves. */}
       <ThemeSync />
+      <LocaleSync />
       <ErrorBoundary label="Sylph Web">
         <AuthGate>{children}</AuthGate>
       </ErrorBoundary>

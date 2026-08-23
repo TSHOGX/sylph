@@ -16,6 +16,11 @@
  */
 
 import { useCallback, useSyncExternalStore } from "react";
+// Both imports reach for the *pure* half of their module on purpose: `lib/i18n`
+// and `lib/shortcuts` each read this store, so importing either here would be a
+// cycle. See the notes at the top of `i18n/locale.ts` and `combo.ts`.
+import { DEFAULT_LOCALE, isLocale, type Locale } from "@/lib/i18n/locale";
+import { pruneReserved } from "@/lib/combo";
 
 export type Density = "compact" | "normal" | "comfortable";
 
@@ -48,6 +53,22 @@ export interface Settings {
   density: Density;
   /** Colour theme. Applied to `<html data-theme>`; see `lib/theme.ts`. */
   theme: Theme;
+  /** UI language. Applied to `<html lang>`; see `lib/i18n`. */
+  locale: Locale;
+  /**
+   * Whether a session started from this app gets Sylph's identity.
+   *
+   * This one is unlike its neighbours: every other field here is a display
+   * preference the backend never sees, while this is sent as `identityMode` on
+   * `POST /sessions` and stored on the row. It lives here because it is a
+   * *default for new sessions* — the same kind of thing as `defaultAgent`, which
+   * is also a preference that becomes durable session data at creation.
+   *
+   * It cannot be anything but a creation-time default: identity decides what a
+   * transcript was produced by, so changing it later would misdescribe history
+   * the runner already wrote. An open session keeps whatever it was created with.
+   */
+  injectSoul: boolean;
   /** Show thinking blocks expanded on arrival. Off by default: reasoning is
    *  debugging detail, not primary content. */
   expandThinking: boolean;
@@ -71,20 +92,22 @@ export interface Settings {
  * Linear, and Raycast. The earlier draft bound both to search, which wasted the
  * more discoverable of the two shortcuts on a duplicate.
  *
- * `Cmd+P` is a browser print binding, and `Cmd+N` opens a browser window. Both
- * are preventable from a page and are what a user of a workspace app expects to
- * be taken over; the settings panel exists so anyone who disagrees can rebind.
- *
  * `Cmd+Shift+K` browses one workspace's archived history, deliberately adjacent
  * to `Cmd+K`: both answer "find a session", and the shifted form is the one
  * scoped to where you are working.
+ *
+ * `Cmd+Shift+O` creates a session and `Cmd+J` quick-starts one. Neither is the
+ * obvious choice — `Cmd+N` is — and that is the point: see `RESERVED_COMBOS` in
+ * `lib/shortcuts.ts` for why `Cmd+N` cannot work in a browser tab. `Cmd+Shift+O`
+ * follows ChatGPT and Claude's own "new chat" binding, so it is what a user of
+ * those arrives expecting.
  */
 export const DEFAULT_SHORTCUTS: Record<string, ShortcutAction> = {
   "Mod+k": "search",
   "Mod+Shift+k": "browseWorkspaceHistory",
   "Mod+p": "commandPalette",
-  "Mod+n": "newSession",
-  "Mod+Shift+n": "quickStart",
+  "Mod+Shift+o": "newSession",
+  "Mod+j": "quickStart",
   "Mod+b": "toggleLeftSidebar",
   "Mod+\\": "toggleRightSidebar",
   "Mod+,": "openSettings",
@@ -99,6 +122,10 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultModels: {},
   density: "normal",
   theme: "system",
+  locale: DEFAULT_LOCALE,
+  // Sylph identity on by default: this is Sylph's own interface, and the
+  // backend's own default for a session created without the field.
+  injectSoul: true,
   expandThinking: false,
   expandToolOutput: false,
   shortcuts: DEFAULT_SHORTCUTS,
@@ -160,6 +187,12 @@ function hydrate(raw: string | null): Settings {
       typeof stored.theme === "string" && themes.includes(stored.theme as Theme)
         ? (stored.theme as Theme)
         : DEFAULT_SETTINGS.theme,
+    // A locale that was removed from the app, or a hand-edited value, falls back
+    // to English rather than leaving every string looked up in a dictionary that
+    // does not exist.
+    locale: isLocale(stored.locale) ? stored.locale : DEFAULT_SETTINGS.locale,
+    injectSoul:
+      typeof stored.injectSoul === "boolean" ? stored.injectSoul : DEFAULT_SETTINGS.injectSoul,
     expandThinking:
       typeof stored.expandThinking === "boolean"
         ? stored.expandThinking
@@ -170,8 +203,18 @@ function hydrate(raw: string | null): Settings {
         : DEFAULT_SETTINGS.expandToolOutput,
     // Custom bindings layer over the defaults rather than replacing them, so a
     // shortcut added in a later release still works for an existing user.
+    //
+    // Then pruned, which is a migration and not merely a filter. A settings write
+    // persists the whole merged map, so anyone who had ever opened the shortcuts
+    // panel has `Mod+n` stored from when it was a default — and that binding
+    // cannot fire, because the browser takes the keystroke first. Left in place it
+    // would keep opening a new browser window with the app's dialog behind it,
+    // and would shadow the replacement binding in the panel's reverse lookup.
     shortcuts: isStringRecord(stored.shortcuts)
-      ? { ...DEFAULT_SHORTCUTS, ...(stored.shortcuts as Record<string, ShortcutAction>) }
+      ? pruneReserved({
+          ...DEFAULT_SHORTCUTS,
+          ...(stored.shortcuts as Record<string, ShortcutAction>),
+        })
       : DEFAULT_SHORTCUTS,
     showLeftSidebar:
       typeof stored.showLeftSidebar === "boolean"

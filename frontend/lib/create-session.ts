@@ -16,14 +16,24 @@
 import { useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Agent } from "@/lib/api";
+import { api, type Agent, type IdentityMode } from "@/lib/api";
 import { useSettings, type Settings } from "@/lib/settings";
 
-/** Agent and flags a new session gets when nobody picks them explicitly. */
+/** Agent, flags, and identity a new session gets when nobody picks them. */
 export interface SessionDefaults {
   agent: string;
   /** Omitted rather than empty when no usable model default applies. */
   flags?: Record<string, string>;
+  /**
+   * Identity policy for the session.
+   *
+   * Always explicit, never omitted, even though `sylph` is also the backend's
+   * default. An omitted field would make "the user chose Sylph identity" and "an
+   * old client that does not know about identity" the same request, and the
+   * created session's own record is the only place this decision is ever
+   * readable afterwards.
+   */
+  identityMode: IdentityMode;
 }
 
 /**
@@ -43,7 +53,7 @@ export interface SessionDefaults {
  */
 export function resolveSessionDefaults(
   agents: Agent[],
-  settings: Pick<Settings, "defaultAgent" | "defaultModels">,
+  settings: Pick<Settings, "defaultAgent" | "defaultModels" | "injectSoul">,
 ): SessionDefaults | null {
   const agent = agents.find((a) => a.name === settings.defaultAgent) ?? agents[0];
   if (!agent) return null;
@@ -52,7 +62,15 @@ export function resolveSessionDefaults(
   const declared = agent.flags?.model?.choices ?? [];
   const usable = model && declared.includes(model) ? model : undefined;
 
-  return { agent: agent.name, flags: usable ? { model: usable } : undefined };
+  return {
+    agent: agent.name,
+    flags: usable ? { model: usable } : undefined,
+    // Not validated against anything, unlike the two above: identity is a policy
+    // choice the backend accepts from any client, not a value that has to exist
+    // in a runner's descriptor. A missing SOUL.md makes `sylph` behave like
+    // `preserve` anyway, decided at spawn time by the runner rather than here.
+    identityMode: settings.injectSoul ? "sylph" : "preserve",
+  };
 }
 
 export interface QuickCreate {
@@ -94,6 +112,7 @@ export function useQuickCreateSession(): QuickCreate {
         agent: defaults.agent,
         workdir,
         flags: defaults.flags,
+        identityMode: defaults.identityMode,
       });
     },
     onSuccess: ({ session }) => {

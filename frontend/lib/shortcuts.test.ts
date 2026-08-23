@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { comboFromEvent, formatCombo, makeCombo } from "@/lib/shortcuts";
+import { comboFromEvent, formatCombo, makeCombo, pruneReserved, reservedReason } from "@/lib/shortcuts";
+import { DEFAULT_SHORTCUTS } from "@/lib/settings";
 
 /**
  * The combo grammar.
@@ -99,3 +100,90 @@ describe("formatCombo", () => {
  * nothing. Its real behaviour — that `Shift+E` in the composer does not expand
  * the timeline — is covered in `e2e/workspace-shell.spec.ts`, in a browser.
  */
+
+/**
+ * The browser's reserved set.
+ *
+ * These pin the fix for a real defect: `Mod+N` and `Mod+Shift+N` shipped as the
+ * defaults for "new session" and "Quick Start", and in a browser tab they open a
+ * new window and an incognito window instead. `preventDefault` does not reach
+ * them — Chrome has reserved the set since version 4 — so the only remedies are
+ * to not bind them and to refuse them when a user tries.
+ */
+describe("reserved combos", () => {
+  it("does not bind a reserved combo by default", () => {
+    const reserved = Object.keys(DEFAULT_SHORTCUTS).filter((combo) => reservedReason(combo));
+    expect(reserved).toEqual([]);
+  });
+
+  it("still binds every action to something", () => {
+    // The fix moved two bindings. An action left unbound would be a shortcut
+    // silently removed rather than relocated.
+    const bound = new Set(Object.values(DEFAULT_SHORTCUTS));
+    for (const action of [
+      "search",
+      "commandPalette",
+      "browseWorkspaceHistory",
+      "newSession",
+      "quickStart",
+      "toggleLeftSidebar",
+      "toggleRightSidebar",
+      "openSettings",
+      "stopTurn",
+      "expandAll",
+      "collapseAll",
+      "findInSession",
+    ]) {
+      expect(bound.has(action as never), `${action} has no default binding`).toBe(true);
+    }
+  });
+
+  it("binds each default combo to exactly one action", () => {
+    // Stored as combo -> action, so a duplicated combo cannot exist by
+    // construction; a duplicated *action* would mean two combos race and the
+    // panel's reverse lookup would show whichever came first.
+    const actions = Object.values(DEFAULT_SHORTCUTS);
+    expect(new Set(actions).size).toBe(actions.length);
+  });
+
+  it("explains what the browser does instead, not merely that it refuses", () => {
+    expect(reservedReason("Mod+n")).toContain("new browser window");
+    expect(reservedReason("Mod+Shift+n")).toContain("incognito");
+    expect(reservedReason("Mod+t")).toContain("tab");
+  });
+
+  it("treats a bindable combo as bindable", () => {
+    expect(reservedReason("Mod+k")).toBeNull();
+    expect(reservedReason("Mod+Shift+o")).toBeNull();
+    expect(reservedReason("Mod+j")).toBeNull();
+  });
+
+  /**
+   * The migration. A settings write persists the whole merged map, so anyone who
+   * had ever opened the shortcuts panel has `Mod+n` stored from when it was a
+   * default — and it would keep opening a browser window while shadowing the
+   * replacement binding in the panel's reverse lookup.
+   */
+  it("prunes a stored binding the browser will never deliver", () => {
+    const stored = {
+      "Mod+n": "newSession",
+      "Mod+Shift+n": "quickStart",
+      "Mod+k": "search",
+    } as const;
+
+    expect(pruneReserved(stored)).toEqual({ "Mod+k": "search" });
+  });
+
+  it("leaves a map with nothing reserved untouched", () => {
+    expect(pruneReserved(DEFAULT_SHORTCUTS)).toEqual(DEFAULT_SHORTCUTS);
+  });
+
+  /** A combo is matched by its canonical spelling, so the table must use it. */
+  it("keys the table by the same spelling comboFromEvent produces", () => {
+    const combo = comboFromEvent(keyEvent({ key: "n", metaKey: true }));
+    expect(reservedReason(combo)).toBeTruthy();
+
+    const shifted = comboFromEvent(keyEvent({ key: "N", metaKey: true, shiftKey: true }));
+    expect(reservedReason(shifted)).toBeTruthy();
+  });
+});

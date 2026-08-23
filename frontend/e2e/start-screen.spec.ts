@@ -113,7 +113,7 @@ test("the start screen's create button runs the same path as its shortcut", asyn
   await page.keyboard.press("Escape");
   await expect(picker).toBeHidden();
 
-  await page.keyboard.press("ControlOrMeta+n");
+  await page.keyboard.press("ControlOrMeta+Shift+o");
   await expect(page.getByRole("dialog")).toBeVisible();
 });
 

@@ -306,7 +306,11 @@ test("dark mode applies before paint and follows an explicit choice", async ({ p
   await page.keyboard.press("ControlOrMeta+,");
   const settings = page.getByRole("dialog");
   await expect(settings).toBeVisible();
-  await settings.getByRole("button", { name: "light", exact: true }).click();
+  // "Light", capitalized: the label is now real text rather than lowercase DOM
+  // text with a CSS `capitalize` on top, so the accessible name matches what is
+  // on screen. That is the point of the change — a screen reader was previously
+  // announcing "light" while the button read "Light".
+  await settings.getByRole("button", { name: "Light", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 
   await page.reload();

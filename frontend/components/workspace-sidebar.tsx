@@ -30,6 +30,7 @@ import {
   shortenHome,
 } from "@/lib/format";
 import { liveSessionsQuery } from "@/lib/sessions-query";
+import { useT } from "@/lib/i18n";
 import { useSettings } from "@/lib/settings";
 import dynamic from "next/dynamic";
 
@@ -78,6 +79,7 @@ interface Group {
 
 export function WorkspaceSidebar() {
   const { settings, update } = useSettings();
+  const t = useT();
   const params = useParams();
   const activeId = typeof params?.id === "string" ? params.id : undefined;
   const [picking, setPicking] = useState(false);
@@ -179,7 +181,7 @@ export function WorkspaceSidebar() {
           click". A row's own menu therefore wins, and everything else in the pane
           falls through to the pane menu. */}
       <nav
-        aria-label="Sessions by workspace"
+        aria-label={t("sidebar.title")}
         className="flex min-h-0 flex-1 flex-col"
         onContextMenu={(event) => {
           if (event.defaultPrevented) return;
@@ -206,7 +208,7 @@ export function WorkspaceSidebar() {
         ) : (
           <>
             <GroupSection
-              title="Quick Sessions"
+              title={t("sidebar.quickSessions")}
               group={
                 quick ?? {
                   path: quickStartDir ?? "",
@@ -218,7 +220,7 @@ export function WorkspaceSidebar() {
               }
               activeId={activeId}
               home={home}
-              emptyHint="Quick Start puts scratch sessions here."
+              emptyHint={t("sidebar.quickSessionsHint")}
             />
 
             <h2 className="mt-3 px-1.5 pb-1 text-3xs font-semibold uppercase tracking-wider text-ink-muted">
@@ -278,11 +280,11 @@ export function WorkspaceSidebar() {
           // "list", to distinguish it from a *single* workspace's menu. Both open
           // on right-click in the same pane, so an unqualified "Workspace actions"
           // is ambiguous to a screen reader reading only the menu's name.
-          label="Workspace list actions"
+          label={t("sidebar.listActions")}
           onClose={() => setPaneMenu(null)}
           items={[
             {
-              label: "New Workspace...",
+              label: t("sidebar.newWorkspaceEllipsis"),
               onSelect: () => {
                 setPaneMenu(null);
                 setPicking(true);
@@ -295,8 +297,8 @@ export function WorkspaceSidebar() {
 
     {picking && (
       <DirectoryPicker
-        title="New Workspace"
-        confirmLabel="Bind workspace"
+        title={t("sidebar.newWorkspace")}
+        confirmLabel={t("sidebar.bindWorkspace")}
         onChoose={bindWorkspace}
         onClose={() => setPicking(false)}
       />
@@ -326,6 +328,7 @@ function GroupSection({
 }) {
   const queryClient = useQueryClient();
   const { browseHistory, createSessionIn } = useWorkspaceUI();
+  const t = useT();
   // Groups start expanded: a collapsed-by-default sidebar hides the thing the
   // user came here to click. Collapse is per-group and not persisted, because it
   // is a transient focusing action rather than a preference.
@@ -368,7 +371,7 @@ function GroupSection({
     // to confirm what they just said. "New session here..." below covers the
     // cases where the agent, model, or title needs overriding.
     {
-      label: "New session here",
+      label: t("sidebar.newSessionHere"),
       // Disabled only for the placeholder Quick Sessions group, whose path is
       // empty until `GET /workspaces` resolves it. Dimmed rather than hidden, so
       // the menu does not change shape between renders.
@@ -376,7 +379,7 @@ function GroupSection({
       onSelect: () => createSessionIn(group.path),
     },
     {
-      label: "Browse history...",
+      label: t("sidebar.browseHistory"),
       // Separated from the create actions: reading past work and starting new
       // work are different intents, and the archive one is disabled for the
       // placeholder group whose path is not resolved yet.
@@ -384,16 +387,16 @@ function GroupSection({
       disabled: !group.path,
       onSelect: () => browseHistory(group.path),
     },
-    { label: open ? "Collapse" : "Expand", separated: true, onSelect: () => setOpen(!open) },
+    { label: open ? t("action.collapse") : t("action.expand"), separated: true, onSelect: () => setOpen(!open) },
     ...(onTogglePin
-      ? [{ label: pinned ? "Unpin from sidebar" : "Pin to sidebar", onSelect: onTogglePin }]
+      ? [{ label: pinned ? t("sidebar.unpin") : t("sidebar.pin"), onSelect: onTogglePin }]
       : []),
     ...(onRename
       ? [
           {
-            label: "Rename workspace...",
+            label: t("sidebar.renameEllipsis"),
             onSelect: () => {
-              const next = window.prompt("Workspace display name", label);
+              const next = window.prompt(t("sidebar.renameLabel"), label);
               // `null` is cancel; an empty string is "clear the override".
               if (next !== null) onRename(next.trim());
             },
@@ -401,11 +404,11 @@ function GroupSection({
         ]
       : []),
     {
-      label: "Copy path",
+      label: t("sidebar.copyPath"),
       onSelect: () => void navigator.clipboard.writeText(group.path).catch(() => {}),
     },
     {
-      label: "Refresh",
+      label: t("action.refresh"),
       onSelect: () => {
         void queryClient.invalidateQueries({ queryKey: ["sessions"] });
         void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
@@ -439,7 +442,7 @@ function GroupSection({
         </span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
         {pinned && (
-          <span aria-label="pinned" title="Pinned" className="shrink-0 text-ink-muted">
+          <span aria-label="pinned" title={t("sidebar.pinned")} className="shrink-0 text-ink-muted">
             <PinIcon size={11} />
           </span>
         )}
@@ -464,7 +467,7 @@ function GroupSection({
           </span>
           {!archiveAvailable && (
             <span
-              title="Archive unavailable — showing live sessions only"
+              title={t("sidebar.archiveUnavailable")}
               className="text-warning"
             >
               <AlertTriangleIcon size={11} />
@@ -508,7 +511,7 @@ function GroupSection({
 
           {group.sessions.length === 0 && archived.length === 0 && (
             <li className="px-1.5 py-1 text-2xs text-ink-muted">
-              {archiveQuery.isFetching ? "Loading history..." : (emptyHint ?? "No sessions yet.")}
+              {archiveQuery.isFetching ? t("sidebar.loadingHistory") : (emptyHint ?? t("sidebar.noSessions"))}
             </li>
           )}
 
@@ -550,29 +553,30 @@ function SessionRow({
   home?: string;
 }) {
   const queryClient = useQueryClient();
+  const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const items: MenuItem[] = [
     {
       label:
         session.traceSessionId || session.nativeSessionId
-          ? "Copy original session ID"
-          : "Copy Web session ID",
+          ? t("sidebar.copyOriginalId")
+          : t("sidebar.copyWebId"),
       onSelect: () =>
         void navigator.clipboard.writeText(originalSessionId(session)).catch(() => {}),
     },
     ...(session.traceSessionId || session.nativeSessionId
       ? [{
-          label: "Copy Web session ID",
+          label: t("sidebar.copyWebId"),
           onSelect: () => void navigator.clipboard.writeText(session.id).catch(() => {}),
         }]
       : []),
     {
-      label: "Copy workspace path",
+      label: t("sidebar.copyWorkspacePath"),
       onSelect: () => void navigator.clipboard.writeText(session.workdir).catch(() => {}),
     },
     {
-      label: "Refresh transcript",
+      label: t("sidebar.refreshTranscript"),
       onSelect: () =>
         void queryClient.invalidateQueries({ queryKey: ["session", session.id] }),
     },
@@ -616,7 +620,7 @@ function SessionRow({
         {session.status === "running" ? (
           <span
             className={`shrink-0 ${active ? "text-accent-ink-muted" : "text-info"}`}
-            title="A turn is running"
+            title={t("sidebar.turnRunning")}
           >
             <RunningIcon size={10} />
           </span>
@@ -673,20 +677,21 @@ function SessionRow({
  */
 function ArchivedRow({ session }: { session: ArchiveSession }) {
   const queryClient = useQueryClient();
+  const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const when = session.endedAtMs ?? session.startedAtMs;
   const label = session.label ?? `Untitled ${session.agent} session`;
   const items: MenuItem[] = [
     {
-      label: "Copy original session ID",
+      label: t("sidebar.copyOriginalId"),
       onSelect: () => void navigator.clipboard.writeText(session.id).catch(() => {}),
     },
     {
-      label: "Copy workspace path",
+      label: t("sidebar.copyWorkspacePath"),
       onSelect: () => void navigator.clipboard.writeText(session.cwd).catch(() => {}),
     },
     {
-      label: "Refresh transcript",
+      label: t("sidebar.refreshTranscript"),
       onSelect: () => {
         void queryClient.invalidateQueries({ queryKey: ["archive", "transcript", session.id] });
         void queryClient.invalidateQueries({ queryKey: ["archive", "sessions"] });
