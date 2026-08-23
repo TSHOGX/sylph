@@ -35,6 +35,8 @@ import { Markdown } from "@/components/markdown";
 import { Button, IconButton } from "@/components/ui/button";
 import {
   ArrowLeftIcon,
+  DownloadIcon,
+  ExternalLinkIcon,
   MaximizeIcon,
   RefreshIcon,
   XIcon,
@@ -154,6 +156,29 @@ export function FileViewer({
           onClick={() => setReloadToken((token) => token + 1)}
         >
           <RefreshIcon size={14} />
+        </IconButton>
+
+        {/*
+          Open and Download sit in the header, not only in the tree's row menu.
+          This is where the need is actually felt: the reader is looking at a
+          preview that says "showing the first part of a 40 MB file", and the fix
+          for that has to be reachable from the thing complaining, not from a
+          menu on a row two views back.
+        */}
+        <IconButton
+          label="Open in a new browser tab"
+          onClick={() => window.open(api.files.rawUrl(sessionId, path), "_blank", "noopener,noreferrer")}
+        >
+          <ExternalLinkIcon size={14} />
+        </IconButton>
+
+        <IconButton
+          label="Download this file"
+          onClick={() =>
+            window.location.assign(api.files.rawUrl(sessionId, path, { download: true }))
+          }
+        >
+          <DownloadIcon size={14} />
         </IconButton>
 
         {onExpand && (
@@ -298,9 +323,13 @@ function ContentBody({
 
     if (data.truncated && data.encoding !== "image") {
       return (
-        <p className="p-3 text-2xs text-ink-muted">
-          This image is {formatBytes(data.size)}, larger than the preview limit.
-        </p>
+        <TooLarge
+          sessionId={sessionId}
+          path={path}
+          message={`This image is ${formatBytes(data.size)}, over the ${formatBytes(
+            PREVIEW_LIMIT_BYTES,
+          )} inline preview limit.`}
+        />
       );
     }
     return <ImageView src={src} name={name} />;
@@ -312,9 +341,14 @@ function ContentBody({
 
   if (data.encoding === "binary") {
     return (
-      <p className="p-3 text-2xs text-ink-muted">
-        Binary file ({formatBytes(data.size)}). No text preview available.
-      </p>
+      <TooLarge
+        sessionId={sessionId}
+        path={path}
+        message={`This is a binary file (${formatBytes(data.size)}), so there is nothing to show as text.`}
+        // Nothing will render this in a tab either — the backend serves an
+        // unrecognized binary as an attachment — so only the download is offered.
+        offerTab={false}
+      />
     );
   }
 
@@ -331,10 +365,28 @@ function ContentBody({
         </div>
       )}
 
+      {/*
+        A truncation notice that only *reports* the truncation is a dead end. The
+        reader's next question is always "so how do I see the rest", and the answer
+        is one button away, so it belongs in the notice rather than in a header
+        icon they have to go looking for.
+      */}
       {data.truncated && (
-        <p className="mb-1.5 rounded border border-warning-line bg-warning-bg px-2 py-1 text-3xs text-warning">
-          Showing the first part of a {formatBytes(data.size)} file.
-        </p>
+        <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 rounded border border-warning-line bg-warning-bg px-2 py-1 text-3xs text-warning">
+          <span>
+            Showing the first {formatBytes(TRUNCATE_TO_BYTES)} of a{" "}
+            {formatBytes(data.size)} file.
+          </span>
+          <button
+            type="button"
+            onClick={() =>
+              window.open(api.files.rawUrl(sessionId, path), "_blank", "noopener,noreferrer")
+            }
+            className="rounded font-medium underline hover:no-underline focus-ring"
+          >
+            Open the whole file in a new tab
+          </button>
+        </div>
       )}
 
       {isMarkdown && renderedMarkdown ? (
@@ -387,6 +439,67 @@ function BodyError({ error }: { error: unknown }) {
     <div role="alert" className="p-3 text-2xs">
       <p className="font-medium text-danger">Could not read this file</p>
       <p className="mt-1 text-danger">{message}</p>
+    </div>
+  );
+}
+
+/**
+ * Limits mirrored from `backend/src/api/files.rs`.
+ *
+ * Duplicated deliberately, and only for *phrasing*: the backend is the authority
+ * and reports `truncated` itself, so a drift here shows up as a slightly wrong
+ * number in a sentence, never as a wrong decision. Saying "the first 256 KB of a
+ * 40 MB file" instead of "the first part" is what tells the reader how much they
+ * are missing, which is what decides whether they need the full file.
+ */
+const PREVIEW_LIMIT_BYTES = 1024 * 1024;
+const TRUNCATE_TO_BYTES = 256 * 1024;
+
+/**
+ * A file the pane cannot usefully show, and what to do about it.
+ *
+ * The previous version of both these cases was a single grey sentence. That is
+ * accurate and useless: it explains why the pane is empty without offering the
+ * one thing the reader wants, which is the file. A limit the user cannot get past
+ * reads as a missing feature; the same limit with a way through reads as a
+ * sensible default.
+ */
+function TooLarge({
+  sessionId,
+  path,
+  message,
+  offerTab = true,
+}: {
+  sessionId: string;
+  path: string;
+  message: string;
+  offerTab?: boolean;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
+      <p className="max-w-xs text-2xs leading-relaxed text-ink-soft">{message}</p>
+      <div className="flex flex-wrap items-center justify-center gap-1.5">
+        {offerTab && (
+          <Button
+            variant="secondary"
+            icon={<ExternalLinkIcon size={13} />}
+            onClick={() =>
+              window.open(api.files.rawUrl(sessionId, path), "_blank", "noopener,noreferrer")
+            }
+          >
+            Open in a new tab
+          </Button>
+        )}
+        <Button
+          variant={offerTab ? "ghost" : "secondary"}
+          icon={<DownloadIcon size={13} />}
+          onClick={() =>
+            window.location.assign(api.files.rawUrl(sessionId, path, { download: true }))
+          }
+        >
+          Download
+        </Button>
+      </div>
     </div>
   );
 }

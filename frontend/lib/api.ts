@@ -471,6 +471,17 @@ export interface UploadFileResponse {
   size: number;
 }
 
+export interface MkdirRequest {
+  /** Parent directory relative to the workdir. Empty means the root. */
+  path?: string;
+  name: string;
+}
+
+export interface MkdirResponse {
+  path: string;
+  absolutePath: string;
+}
+
 /** A read-only archived transcript, normalized into live timeline events. */
 export interface ArchiveTranscript {
   id: string;
@@ -683,8 +694,32 @@ export const api = {
      * caching. Same-origin through the Next rewrite, so the `SameSite=Strict`
      * session cookie is sent.
      */
-    rawUrl: (sessionId: string, path: string) =>
-      `${API_BASE}/sessions/${sessionId}/files/raw${queryString({ path })}`,
+    rawUrl: (sessionId: string, path: string, options: { download?: boolean } = {}) =>
+      `${API_BASE}/sessions/${sessionId}/files/raw${queryString({
+        path,
+        download: options.download ? "true" : undefined,
+      })}`,
+    /** Create one directory. Reports a collision rather than succeeding quietly. */
+    mkdir: (sessionId: string, req: MkdirRequest) =>
+      fetchAPI<MkdirResponse>(`/sessions/${sessionId}/files/directory`, {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    /**
+     * Delete one file or directory. Irreversible: there is no trash to restore
+     * from, which is why every caller confirms first.
+     *
+     * `recursive` is refused by default for a non-empty directory, so deleting a
+     * subtree is a second, explicit answer rather than a silent consequence.
+     */
+    remove: (sessionId: string, path: string, options: { recursive?: boolean } = {}) =>
+      fetchAPI<void>(
+        `/sessions/${sessionId}/files${queryString({
+          path,
+          recursive: options.recursive ? "true" : undefined,
+        })}`,
+        { method: "DELETE" },
+      ),
   },
   /**
    * Machine-level directory browsing, for choosing a workspace to bind.
@@ -730,26 +765,6 @@ export const api = {
       fetchAPI<ArchiveTranscript>(
         `/archive/sessions/${encodeURIComponent(traceId)}${queryString({ limit })}`,
       ),
-    /** A spreadsheet, CSV, Word document, or deck as structure. */
-    document: (sessionId: string, path: string, window: DocumentWindow = {}) =>
-      fetchAPI<FileDocumentResponse>(
-        `/sessions/${sessionId}/files/document${queryString({
-          path,
-          sheet: window.sheet,
-          row: window.row,
-          rows: window.rows,
-        })}`,
-      ),
-    /**
-     * URL for the file's bytes, for content the browser loads itself.
-     *
-     * A URL builder rather than a fetch: an `<img>`, `<iframe>`, or `<object>`
-     * requests this itself, which is what buys progressive decode and HTTP
-     * caching. Same-origin through the Next rewrite, so the `SameSite=Strict`
-     * session cookie is sent.
-     */
-    rawUrl: (sessionId: string, path: string) =>
-      `${API_BASE}/sessions/${sessionId}/files/raw${queryString({ path })}`,
   },
   turns: {
     create: (sessionId: string, req: CreateTurnRequest) =>

@@ -23,6 +23,19 @@
  * accessibility tree and the tab order, so a keyboard user cannot tab into an
  * invisible tree.
  *
+ * # It manages files, it does not only show them
+ *
+ * New folder, upload, and delete live in `lib/file-operations.tsx`, mounted once
+ * here rather than per row — 2000 rows must not mean 2000 file inputs, and one
+ * owner is what makes the confirmation unskippable: a row can only *request* a
+ * delete. Its dialogs render outside the `hidden` wrapper below, because a dialog
+ * inside a hidden ancestor is invisible *and* unfocusable, so a tool call opening
+ * a file in the background would strand it.
+ *
+ * Expansion state therefore lives here rather than in `FileTree`: a mutation has
+ * to be able to reveal its own result, and an upload into a collapsed folder is
+ * otherwise indistinguishable from an upload that did nothing.
+ *
  * Every path here is relative to the session's workdir. The backend resolves it
  * against the journal's record of that directory and refuses anything that
  * escapes, so this component never handles an absolute path except for display.
@@ -39,8 +52,11 @@ import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { ContextMenu, MenuButton, type MenuItem } from "@/components/ui/menu";
 import { FileViewer } from "@/components/file-viewer";
 import { IconButton } from "@/components/ui/button";
+import { useFileOperations, type FileOperations } from "@/lib/file-operations";
 import {
   ChevronRightIcon,
+  CopyIcon,
+  DownloadIcon,
   ExternalLinkIcon,
   FileCodeIcon,
   FileIcon,
@@ -50,9 +66,13 @@ import {
   FileTextIcon,
   FolderIcon,
   FolderOpenIcon,
+  FolderPlusIcon,
   GlobeIcon,
+  MaximizeIcon,
   MoreIcon,
   RefreshIcon,
+  TrashIcon,
+  UploadIcon,
 } from "@/components/icons";
 
 /**
@@ -141,6 +161,98 @@ export function ArtifactsPane() {
     requestAnimationFrame(() => expandRef.current?.focus());
   }, [closeArtifactFullscreen]);
 
+  /**
+   * Stop showing a file that no longer exists.
+   *
+   * A delete leaves the viewer pointed at a path whose next fetch is a 404, which
+   * would report "this file no longer exists" as if something had gone wrong —
+   * when in fact the user just deleted it deliberately. Clearing the selection
+   * returns them to the tree, which is where the result of the delete is visible.
+   *
+   * Matched by prefix as well as identity: deleting a folder removes everything
+   * beneath it, and the open file may be one of those descendants.
+   */
+  const handleDeleted = useCallback(
+    (path: string) => {
+      if (selected === path || selected?.startsWith(`${path}/`)) {
+        clearArtifact();
+        closeArtifactFullscreen();
+      }
+    },
+    [selected, clearArtifact, closeArtifactFullscreen],
+  );
+
+  /**
+   * Which directories are open.
+   *
+   * Lifted out of `FileTree` so the operations hook can reach it. A mutation has
+   * to be able to *reveal its own result*: uploading into a collapsed folder
+   * otherwise looks like nothing happened, because the row it created is inside a
+   * subtree that is not rendered. Since `useFileOperations` is mounted here — its
+   * dialogs must sit outside the `hidden` wrapper below — the state it needs to
+   * touch has to be here too.
+   *
+   * Two sets rather than one: `toggled` is what the user opened, `collapsed` is
+   * what they deliberately closed. The second is what keeps an ancestor of the
+   * selected file from re-opening under them; see `expandedFrom`.
+   */
+  const [toggled, setToggled] = useState<Set<string>>(new Set());
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  const expanded = useMemo(
+    () => expandedFrom(toggled, collapsed, selected),
+    [toggled, collapsed, selected],
+  );
+
+  const toggle = useCallback(
+    (path: string) => {
+      const isOpen = expanded.has(path);
+      setToggled((current) => {
+        const next = new Set(current);
+        if (isOpen) next.delete(path);
+        else next.add(path);
+        return next;
+      });
+      setCollapsed((current) => {
+        const next = new Set(current);
+        if (isOpen) next.add(path);
+        else next.delete(path);
+        return next;
+      });
+    },
+    [expanded],
+  );
+
+  /**
+   * Open a directory and every directory above it.
+   *
+   * Called after a mutation so its result is on screen. Also clears the path from
+   * `collapsed`: the user closed that folder earlier, but they have just put
+   * something in it, which supersedes the older intent.
+   */
+  const revealDirectory = useCallback((path: string) => {
+    if (!path) return;
+    const ancestors: string[] = [];
+    let prefix = "";
+    for (const part of path.split("/")) {
+      prefix = prefix ? `${prefix}/${part}` : part;
+      ancestors.push(prefix);
+    }
+    setToggled((current) => new Set([...current, ...ancestors]));
+    setCollapsed((current) => {
+      const next = new Set(current);
+      for (const ancestor of ancestors) next.delete(ancestor);
+      return next;
+    });
+  }, []);
+
+  // `?? ""` so the hook order is unconditional. With no session the tree renders
+  // nothing, so nothing can reach the operations it exposes.
+  const operations = useFileOperations(sessionId ?? "", {
+    onDeleted: handleDeleted,
+    onWrote: revealDirectory,
+  });
+
   if (!sessionId) {
     return (
       <div className="p-3 text-xs text-ink-muted">
@@ -167,9 +279,18 @@ export function ArtifactsPane() {
             }
             registerRow={registerRow}
             onExpand={openArtifactFullscreen}
+            operations={operations}
+            expanded={expanded}
+            onToggle={toggle}
           />
         </div>
       </div>
+
+      {/* The dialogs and the file input, mounted once for the pane. Outside the
+          `hidden` wrapper above: a dialog opened from a row must survive the tree
+          being swapped out for the viewer, and a `hidden` ancestor would make it
+          both invisible and unfocusable. */}
+      {operations.surface}
 
       <div className={`${viewing ? "flex" : "hidden"} min-h-0 flex-1 flex-col bg-raised`}>
         {selected && (
@@ -225,6 +346,9 @@ function FileTree({
   onSelect,
   registerRow,
   onExpand,
+  operations,
+  expanded,
+  onToggle,
 }: {
   sessionId: string;
   selected: string | null;
@@ -232,57 +356,99 @@ function FileTree({
   onSelect: (path: string, previewKind?: FileEntry["previewKind"]) => void;
   registerRow: (path: string, node: HTMLButtonElement | null) => void;
   onExpand: () => void;
+  operations: FileOperations;
+  /** Expansion is owned by the pane, so a mutation can reveal its own result. */
+  expanded: Set<string>;
+  onToggle: (path: string) => void;
 }) {
   const queryClient = useQueryClient();
-  /** Directories the user opened or closed by hand. */
-  const [toggled, setToggled] = useState<Set<string>>(new Set());
-  /** Directories explicitly closed, so a manual collapse survives re-selection. */
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-
-  // A selected file's ancestors are expanded, so opening a file from a tool call
-  // also shows where it lives. Derived during render rather than pushed into
-  // state by an effect: the ancestor set is a function of the selected path, and
-  // storing it would mean two sources of truth for the same fact.
-  const expanded = useMemo(() => {
-    const set = new Set(toggled);
-    if (selected) {
-      let prefix = "";
-      for (const part of selected.split("/").slice(0, -1)) {
-        prefix = prefix ? `${prefix}/${part}` : part;
-        // An ancestor the user deliberately collapsed stays collapsed: the file
-        // is still selected, and re-opening it under them would fight the click.
-        if (!collapsed.has(prefix)) set.add(prefix);
-      }
-    }
-    return set;
-  }, [toggled, collapsed, selected]);
 
   const root = useQuery({
     queryKey: ["files", sessionId, ""],
     queryFn: () => api.files.tree(sessionId, ""),
   });
 
-  const toggle = useCallback(
-    (path: string) => {
-      const isOpen = expanded.has(path);
-      setToggled((current) => {
-        const next = new Set(current);
-        if (isOpen) next.delete(path);
-        else next.add(path);
-        return next;
-      });
-      setCollapsed((current) => {
-        const next = new Set(current);
-        if (isOpen) next.add(path);
-        else next.delete(path);
-        return next;
-      });
-    },
-    [expanded],
+  /** Right-click on empty space: the root's own menu. */
+  const [rootMenu, setRootMenu] = useState<{ x: number; y: number } | null>(null);
+  const [rootDropping, setRootDropping] = useState(false);
+
+  const rootItems: MenuItem[] = useMemo(
+    () => [
+      {
+        label: "New folder",
+        icon: <FolderPlusIcon size={13} />,
+        onSelect: () => operations.requestMkdir(""),
+      },
+      {
+        label: "Upload files here",
+        icon: <UploadIcon size={13} />,
+        onSelect: () => operations.requestUpload(""),
+      },
+      {
+        label: "Copy workspace path",
+        icon: <CopyIcon size={13} />,
+        separated: true,
+        onSelect: () => {
+          const absolute = root.data?.root;
+          if (absolute) void navigator.clipboard.writeText(absolute).catch(() => {});
+        },
+        disabled: !root.data?.root,
+      },
+    ],
+    [operations, root.data?.root],
   );
 
   return (
-    <div className="px-1.5 py-1.5">
+    <div
+      // `min-h-full` is what makes the blank area below the last row part of this
+      // element. Sized to its content, the container ends at the final row, and
+      // the large empty region a user would naturally right-click or drop onto
+      // belonged to the scroll wrapper instead — so both gestures did nothing in
+      // exactly the space that looks most like "the folder's background".
+      className={`min-h-full px-1.5 py-1.5 ${
+        rootDropping ? "outline outline-2 -outline-offset-2 outline-accent" : ""
+      }`}
+      /*
+        The empty space below the tree is the workspace root, and treating it that
+        way is what makes the pane behave like a file browser rather than a list
+        widget: right-click there for the root's actions, drop there to upload into
+        it. The header buttons cover the same ground for a keyboard and a phone —
+        this is the mouse idiom, added alongside them, not instead.
+
+        A row's own handlers call `stopPropagation`, so a right-click or a drop that
+        lands on a row is that row's, never both.
+      */
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setRootMenu({ x: event.clientX, y: event.clientY });
+      }}
+      onDragOver={(event) => {
+        if (!event.dataTransfer.types.includes("Files")) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        setRootDropping(true);
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node)) {
+          setRootDropping(false);
+        }
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        setRootDropping(false);
+        const files = Array.from(event.dataTransfer.files);
+        if (files.length > 0) operations.uploadInto("", files);
+      }}
+    >
+      {rootMenu && (
+        <ContextMenu
+          x={rootMenu.x}
+          y={rootMenu.y}
+          items={rootItems}
+          onClose={() => setRootMenu(null)}
+          label="Working directory actions"
+        />
+      )}
       {/*
         Sticky, so the workspace root stays identifiable while scrolling a deep tree.
         It is the only thing on screen naming *which* project this is, and in the
@@ -302,6 +468,37 @@ function FileTree({
             </p>
           )}
         </div>
+        {/*
+          Root-level create and upload live in the header, not only in a row menu.
+          Adding a file *to the workspace* has no row to right-click: the root is
+          the one directory the tree never draws, so without these two buttons the
+          only way to reach it would be to pick some child folder and get it wrong.
+        */}
+        {/*
+          Labelled "New folder", not "New folder in the working directory".
+
+          The longer phrasing collided with the directory picker's "Working
+          directory" field: `getByLabel` substring-matches, so two buttons in an
+          unrelated pane started answering a query meant for one text input, and a
+          workspace-shell spec failed. That is the accessible-name collision this
+          project has already been bitten by — a screen reader user hears the same
+          overlap. The destination needs no spelling out anyway: the root path is
+          rendered immediately to the left of these two buttons.
+        */}
+        <IconButton
+          label="New folder"
+          onClick={() => operations.requestMkdir("")}
+          disabled={operations.busy}
+        >
+          <FolderPlusIcon size={14} />
+        </IconButton>
+        <IconButton
+          label="Upload files"
+          onClick={() => operations.requestUpload("")}
+          disabled={operations.busy}
+        >
+          <UploadIcon size={14} />
+        </IconButton>
         <IconButton
           label="Reload the file tree"
           onClick={() => void queryClient.invalidateQueries({ queryKey: ["files", sessionId] })}
@@ -315,11 +512,12 @@ function FileTree({
         path=""
         depth={0}
         expanded={expanded}
-        onToggle={toggle}
+        onToggle={onToggle}
         selected={selected}
         onSelect={onSelect}
         registerRow={registerRow}
         onExpand={onExpand}
+        operations={operations}
       />
     </div>
   );
@@ -339,6 +537,7 @@ function Directory({
   onSelect,
   registerRow,
   onExpand,
+  operations,
 }: {
   sessionId: string;
   path: string;
@@ -349,6 +548,7 @@ function Directory({
   onSelect: (path: string, previewKind?: FileEntry["previewKind"]) => void;
   registerRow: (path: string, node: HTMLButtonElement | null) => void;
   onExpand: () => void;
+  operations: FileOperations;
 }) {
   const { data, isPending, error, refetch } = useQuery({
     queryKey: ["files", sessionId, path],
@@ -399,7 +599,18 @@ function Directory({
           className="px-1.5 py-1 text-2xs text-ink-muted"
           style={{ paddingLeft: depth * 10 + 6 }}
         >
-          Empty
+          {/* An empty directory is the one place an upload affordance is *needed*
+              rather than convenient: there is no row here to right-click, so
+              "Empty" alone would be a dead end. */}
+          Empty ·{" "}
+          <button
+            type="button"
+            onClick={() => operations.requestUpload(path)}
+            disabled={operations.busy}
+            className="rounded text-3xs text-ink-soft underline hover:text-ink focus-ring disabled:opacity-50"
+          >
+            add files
+          </button>
         </li>
       )}
       {data.entries.map((entry) => (
@@ -414,6 +625,7 @@ function Directory({
           onSelect={onSelect}
           registerRow={registerRow}
           onExpand={onExpand}
+          operations={operations}
         />
       ))}
       {data.truncated && (
@@ -426,6 +638,65 @@ function Directory({
       )}
     </ul>
   );
+}
+
+/**
+ * The set of open directories, given what the user toggled and what is selected.
+ *
+ * A selected file's ancestors are expanded, so opening a file from a tool call
+ * also shows where it lives. Derived during render rather than pushed into state
+ * by an effect: the ancestor set is a function of the selected path, and storing
+ * it would mean two sources of truth for the same fact.
+ */
+function expandedFrom(
+  toggled: Set<string>,
+  collapsed: Set<string>,
+  selected: string | null,
+): Set<string> {
+  const set = new Set(toggled);
+  if (selected) {
+    let prefix = "";
+    for (const part of selected.split("/").slice(0, -1)) {
+      prefix = prefix ? `${prefix}/${part}` : part;
+      // An ancestor the user deliberately collapsed stays collapsed: the file is
+      // still selected, and re-opening it under them would fight the click.
+      if (!collapsed.has(prefix)) set.add(prefix);
+    }
+  }
+  return set;
+}
+
+/**
+ * Open a workspace file in a new browser tab.
+ *
+ * `noopener` is load-bearing rather than habitual. The raw route serves HTML with
+ * `Content-Security-Policy: sandbox`, so the document lands in an opaque origin
+ * and cannot reach this one — but `window.open` without it still hands the new
+ * document a `window.opener` reference, and the pairing of "sandboxed document"
+ * with "live handle back to the app" is exactly the shape that turns into a
+ * navigation attack. `noreferrer` is included for the same reason it usually is:
+ * the URL carries the file's path, and there is no third party that needs it.
+ *
+ * A plain anchor with `target="_blank"` would be the more idiomatic form and is
+ * not available here: these are menu items, and an anchor inside a `menuitem`
+ * either breaks the role or nests interactive elements.
+ */
+function openInNewTab(url: string) {
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+/**
+ * Save a workspace file to disk.
+ *
+ * The `download` parameter on the URL is what does the work, not a `download`
+ * attribute on an element: the attribute is same-origin-only and silently ignored
+ * otherwise, whereas `Content-Disposition: attachment` from the backend is
+ * authoritative and also carries the filename. Assigning `location` rather than
+ * opening a tab means no window is created for a response the browser will hand
+ * to the download manager instead of rendering.
+ */
+function downloadFile(url: string) {
+  window.location.assign(url);
 }
 
 /**
@@ -483,6 +754,7 @@ function TreeNode({
   onSelect,
   registerRow,
   onExpand,
+  operations,
 }: {
   sessionId: string;
   entry: FileEntry;
@@ -493,8 +765,11 @@ function TreeNode({
   onSelect: (path: string, previewKind?: FileEntry["previewKind"]) => void;
   registerRow: (path: string, node: HTMLButtonElement | null) => void;
   onExpand: () => void;
+  operations: FileOperations;
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /** True while a file drag is over this row, for the drop target's outline. */
+  const [dropping, setDropping] = useState(false);
   const isOpen = expanded.has(entry.path);
   const isSelected = selected === entry.path;
 
@@ -502,28 +777,80 @@ function TreeNode({
     () => [
       {
         label: entry.isDir ? (isOpen ? "Collapse" : "Expand") : "Open preview",
+        icon: entry.isDir ? <ChevronRightIcon size={13} /> : <FileIcon size={13} />,
         onSelect: () =>
           entry.isDir ? onToggle(entry.path) : onSelect(entry.path, entry.previewKind),
       },
       ...(entry.isDir
-        ? []
+        ? [
+            {
+              label: "New folder",
+              icon: <FolderPlusIcon size={13} />,
+              onSelect: () => operations.requestMkdir(entry.path),
+              separated: true,
+            },
+            {
+              label: "Upload files here",
+              icon: <UploadIcon size={13} />,
+              onSelect: () => operations.requestUpload(entry.path),
+            },
+          ]
         : [
             {
               label: "Open full screen",
+              icon: <MaximizeIcon size={13} />,
               onSelect: () => {
                 onSelect(entry.path, entry.previewKind);
                 onExpand();
               },
             },
+            {
+              /*
+                The reason this exists: the pane's preview is capped at 256 KB of
+                text and 1 MB of image, so a large file is legitimately
+                unreadable there. A tab has the browser's own viewer — which
+                streams, finds, zooms, and prints — and the backend serves the
+                file whole on that route.
+              */
+              label: "Open in new tab",
+              icon: <ExternalLinkIcon size={13} />,
+              onSelect: () => openInNewTab(api.files.rawUrl(sessionId, entry.path)),
+            },
+            {
+              // Offered for every file, not only unrenderable ones. Whether the
+              // browser *can* display a type is not the same question as whether
+              // the user wants a copy of it, and guessing the answer means a PNG
+              // opens a tab when Download was pressed.
+              label: "Download",
+              icon: <DownloadIcon size={13} />,
+              onSelect: () =>
+                downloadFile(api.files.rawUrl(sessionId, entry.path, { download: true })),
+            },
           ]),
       {
         label: "Copy relative path",
+        icon: <CopyIcon size={13} />,
         onSelect: () => void navigator.clipboard.writeText(entry.path).catch(() => {}),
         separated: true,
       },
       {
         label: "Copy name",
+        icon: <CopyIcon size={13} />,
         onSelect: () => void navigator.clipboard.writeText(entry.name).catch(() => {}),
+      },
+      {
+        label: "Delete",
+        icon: <TrashIcon size={13} />,
+        danger: true,
+        separated: true,
+        // Requests, never performs: the confirmation lives in the hook, so no
+        // caller can reach a delete without passing through it.
+        onSelect: () =>
+          operations.requestDelete({
+            path: entry.path,
+            name: entry.name,
+            isDir: entry.isDir,
+          }),
       },
       // "Open in Default App" and "Reveal in Finder" are deliberately absent.
       // Both require the backend to spawn a process on the host, and this build
@@ -531,7 +858,7 @@ function TreeNode({
       // arbitrary path is a local code-execution surface, and adding it needs a
       // threat-model decision rather than a menu entry.
     ],
-    [entry, isOpen, onToggle, onSelect, onExpand],
+    [entry, isOpen, onToggle, onSelect, onExpand, operations, sessionId],
   );
 
   return (
@@ -546,7 +873,58 @@ function TreeNode({
       // the row wrapper below.
       className="group/row"
     >
-      <div className="relative">
+      <div
+        className="relative"
+        /*
+          Drop onto a folder uploads into it. This is the gesture people already
+          have for "put this file there", and the menu route requires knowing the
+          menu exists — but it is an *addition* to that route, never the only one,
+          because a drag is unavailable to a keyboard and awkward on a phone.
+
+          `onDragOver` must preventDefault or the browser navigates to the dropped
+          file instead, replacing the app with a file:// view of it. Only folders
+          accept: dropping on a file has no meaning here, and highlighting a
+          target that will refuse is worse than not highlighting.
+        */
+        onDragOver={
+          entry.isDir
+            ? (event) => {
+                if (!event.dataTransfer.types.includes("Files")) return;
+                event.preventDefault();
+                // Stopped so the root does not also light up as a target while the
+                // pointer is over a folder: two highlighted destinations for one
+                // drag is worse than none.
+                event.stopPropagation();
+                event.dataTransfer.dropEffect = "copy";
+                setDropping(true);
+              }
+            : undefined
+        }
+        // `relatedTarget` check: dragging across a child element fires leave on
+        // the parent, which would flicker the outline off mid-drag.
+        onDragLeave={
+          entry.isDir
+            ? (event) => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node)) {
+                  setDropping(false);
+                }
+              }
+            : undefined
+        }
+        onDrop={
+          entry.isDir
+            ? (event) => {
+                event.preventDefault();
+                // Stopped, or the same files upload twice: once here and once into
+                // the root as the event bubbles.
+                event.stopPropagation();
+                setDropping(false);
+                const files = Array.from(event.dataTransfer.files);
+                if (files.length > 0) operations.uploadInto(entry.path, files);
+              }
+            : undefined
+        }
+      >
         <button
           type="button"
           // Registered so Back can return focus to the row that opened the viewer.
@@ -556,6 +934,9 @@ function TreeNode({
           }
           onContextMenu={(event) => {
             event.preventDefault();
+            // Stopped, or the tree container also opens the root's menu behind
+            // this one — two menus for one right-click.
+            event.stopPropagation();
             setMenu({ x: event.clientX, y: event.clientY });
           }}
           title={entry.path}
@@ -564,7 +945,10 @@ function TreeNode({
           style={{ paddingLeft: depth * 12 + 6 }}
           className={`tap-row flex w-full items-center gap-1.5 rounded-md py-1 pr-8 text-left text-xs focus-ring md:text-2xs ${
             isSelected ? "bg-accent text-accent-ink" : "text-ink-soft hover:bg-hover"
-          }`}
+          } ${
+            // `outline`, not `ring`: a ring is a box-shadow and the pane clips it.
+            dropping ? "outline outline-2 -outline-offset-2 outline-accent" : ""
+          } ${operations.uploadingInto === entry.path ? "animate-pulse" : ""}`}
         >
           {/*
             The twist reserves its width for a file too, so names line up in a column
@@ -656,6 +1040,7 @@ function TreeNode({
           onSelect={onSelect}
           registerRow={registerRow}
           onExpand={onExpand}
+          operations={operations}
         />
       )}
 
