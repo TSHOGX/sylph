@@ -23,6 +23,9 @@ pub mod config;
 pub mod db;
 /// Parsing spreadsheets, documents, and presentations. A library with no HTTP
 /// knowledge, so it sits beside `attachments` rather than inside `api`.
+/// The duplex agent-session protocol. A live adapter process is a *link*, and
+/// what it can do is negotiated rather than assumed.
+pub mod adapter;
 pub mod documents;
 /// Where a session's work happens: local today, a Khora sandbox or SSH next.
 /// The seam local fork/exec used to occupy implicitly.
