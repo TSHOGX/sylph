@@ -171,6 +171,19 @@ Assert on identity — "the session I just created is listed here", matched by i
 — or create a `mkdtemp` directory per spec and count against that. This has now
 bitten twice, in exactly the same place.
 
+**That same accumulation also makes the suite progressively slower, and it looks
+like flakiness.** The `mkdtemp` directory each spec creates becomes a *permanent
+sidebar group*, because grouping is by workdir and the journal is never cleared.
+After enough runs the sidebar renders 151 groups of which 148 hold one dead
+single-session directory each, and every page load pays for all of them.
+Measured during Phase 9: the suite went from 1.5 minutes to 35 minutes, and two
+or three specs failed per run on the 30s default timeout — a *different* two or
+three each time, which is what makes it read as flakiness rather than as a
+fixture problem. `rm -rf frontend/.e2e-data` is the fix, and it is free: the
+directory is gitignored and the backend recreates `live.db` on start. Do that
+before trusting a timing result or diagnosing an intermittent E2E failure.
+Raising the timeout does not help, because the cost grows without bound.
+
 **A clean `git merge` can still lose code.** Both sides adding methods to the same
 object literal merges without a conflict marker and silently keeps only one set —
 this happened to `api.files` during the Phase 7 merge, dropping two client methods.
