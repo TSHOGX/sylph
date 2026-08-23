@@ -24,6 +24,12 @@ import { fuzzyRank } from "@/lib/fuzzy";
 import { useDebounced } from "@/lib/use-debounced";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Overlay, scrollActiveIntoView, useListNavigation } from "@/components/overlay";
+import {
+  ArchiveIcon,
+  OriginNativeIcon,
+  OriginSylphIcon,
+  SearchIcon,
+} from "@/components/icons";
 
 type Row =
   | { type: "live"; session: Session }
@@ -126,9 +132,9 @@ export function SearchOverlay() {
 
   return (
     <Overlay title="Search sessions" onClose={closeOverlay} describedBy="search-hint">
-      <div className="flex items-center gap-2 border-b border-gray-200 px-3 py-2.5">
-        <span aria-hidden="true" className="text-gray-500">
-          ⌕
+      <div className="flex items-center gap-2 border-b border-line px-3 py-2.5">
+        <span className="text-ink-muted">
+          <SearchIcon size={15} />
         </span>
         <input
           type="text"
@@ -142,10 +148,10 @@ export function SearchOverlay() {
           onChange={(event) => setPicker({ query: event.target.value, active: 0 })}
           onKeyDown={(event) => onKeyDown(event, activeIndex, setActive)}
           placeholder="Search live sessions and the TraceDB archive..."
-          className="flex-1 bg-transparent text-sm outline-none placeholder:text-gray-500"
+          className="flex-1 bg-transparent text-sm outline-none placeholder:text-ink-muted"
         />
         {archiveQuery.isFetching && (
-          <span className="text-[10px] text-gray-500">searching archive...</span>
+          <span className="text-3xs text-ink-muted">searching archive...</span>
         )}
       </div>
 
@@ -154,10 +160,10 @@ export function SearchOverlay() {
         id="search-results"
         role="listbox"
         aria-label="Search results"
-        className="min-h-0 flex-1 overflow-y-auto py-1"
+        className="min-h-0 flex-1 pane py-1"
       >
         {rows.length === 0 ? (
-          <p className="px-3 py-6 text-center text-xs text-gray-500">
+          <p className="px-3 py-6 text-center text-xs text-ink-muted">
             {query.trim() ? "No matching sessions." : "No sessions yet."}
           </p>
         ) : (
@@ -178,16 +184,16 @@ export function SearchOverlay() {
 
       <footer
         id="search-hint"
-        className="flex shrink-0 items-center justify-between gap-2 border-t border-gray-200 bg-gray-50 px-3 py-1.5 text-[10px] text-gray-500"
+        className="flex shrink-0 items-center justify-between gap-2 border-t border-line bg-sunken px-3 py-1.5 text-3xs text-ink-muted"
       >
         <span>↑↓ navigate · ↵ open · Esc close</span>
         {archiveQuery.data && !archiveQuery.data.available && (
-          <span className="text-amber-700">
+          <span className="text-warning">
             Archive unavailable — live sessions only
           </span>
         )}
         {importSession.error && (
-          <span role="alert" className="text-red-700">
+          <span role="alert" className="text-danger">
             {importSession.error instanceof Error
               ? importSession.error.message
               : "Import failed."}
@@ -230,35 +236,43 @@ function SearchRow({
       aria-selected={active}
       onMouseEnter={onHover}
       onClick={onSelect}
-      className={`cursor-pointer px-3 py-1.5 ${active ? "bg-gray-100" : ""}`}
+      className={`cursor-pointer px-3 py-1.5 ${active ? "bg-hover" : ""}`}
     >
       <div className="flex items-baseline gap-2">
         <span
           aria-hidden="true"
-          className={`shrink-0 text-[9px] ${
+          className={`shrink-0 text-3xs ${
             isLive
               ? row.session.origin === "native"
-                ? "text-violet-600"
-                : "text-emerald-600"
-              : "text-gray-500"
+                ? "text-native"
+                : "text-success"
+              : "text-ink-muted"
           }`}
         >
-          {isLive ? (row.session.origin === "native" ? "◆" : "●") : "⌗"}
+          {isLive ? (
+            row.session.origin === "native" ? (
+              <OriginNativeIcon size={9} />
+            ) : (
+              <OriginSylphIcon size={9} />
+            )
+          ) : (
+            <ArchiveIcon size={12} />
+          )}
         </span>
-        <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-900">{title}</span>
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink">{title}</span>
         {!isLive && (
-          <span className="shrink-0 rounded bg-gray-100 px-1 text-[9px] font-medium text-gray-600">
+          <span className="shrink-0 rounded bg-hover px-1 text-3xs font-medium text-ink-muted">
             {importing ? "importing..." : "archive"}
           </span>
         )}
-        <span className="shrink-0 text-[10px] text-gray-600">{formatRelative(when)}</span>
+        <span className="shrink-0 text-3xs text-ink-muted">{formatRelative(when)}</span>
       </div>
-      <p className="truncate pl-4 text-[10px] text-gray-600">
+      <p className="truncate pl-4 text-3xs text-ink-muted">
         {agent}
         {path && ` · ${shortenHome(path, home)}`}
       </p>
       {snippet && (
-        <p className="truncate pl-4 text-[10px] text-gray-600">{snippet.replace(/\s+/g, " ")}</p>
+        <p className="truncate pl-4 text-3xs text-ink-muted">{snippet.replace(/\s+/g, " ")}</p>
       )}
     </div>
   );

@@ -90,20 +90,20 @@ export function CommandDialog({ commands, onSubmit, onClose, busy }: Props) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/35 p-4">
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="command-dialog-title"
-        className="w-full max-w-md rounded-lg bg-white p-5 shadow-xl"
+        className="w-full max-w-md rounded-lg bg-raised p-5 shadow-xl"
       >
         <h2 id="command-dialog-title" className="text-lg font-semibold">
           Run a command
         </h2>
 
         <div className="mt-4">
-          <label htmlFor="command-name" className="block text-xs font-medium text-gray-600">
+          <label htmlFor="command-name" className="block text-xs font-medium text-ink-muted">
             Command
           </label>
           <select
@@ -116,7 +116,7 @@ export function CommandDialog({ commands, onSubmit, onClose, busy }: Props) {
               // value the newly selected command never declared.
               setArgs({});
             }}
-            className="mt-1 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            className="mt-1 w-full rounded border px-2 py-1.5 text-sm focus-ring"
           >
             {names.map((name) => (
               <option key={name} value={name}>
@@ -125,7 +125,7 @@ export function CommandDialog({ commands, onSubmit, onClose, busy }: Props) {
             ))}
           </select>
           {spec?.description && (
-            <p className="mt-1 text-xs text-gray-500">{spec.description}</p>
+            <p className="mt-1 text-xs text-ink-muted">{spec.description}</p>
           )}
         </div>
 
@@ -133,9 +133,9 @@ export function CommandDialog({ commands, onSubmit, onClose, busy }: Props) {
           const fieldId = `command-arg-${name}`;
           return (
             <div key={name} className="mt-3">
-              <label htmlFor={fieldId} className="block text-xs font-medium text-gray-600">
+              <label htmlFor={fieldId} className="block text-xs font-medium text-ink-muted">
                 {name}
-                {arg.required && <span className="text-red-700"> (required)</span>}
+                {arg.required && <span className="text-danger"> (required)</span>}
               </label>
               <input
                 id={fieldId}
@@ -144,10 +144,10 @@ export function CommandDialog({ commands, onSubmit, onClose, busy }: Props) {
                 required={arg.required}
                 aria-describedby={arg.description ? `${fieldId}-hint` : undefined}
                 onChange={(e) => setArgs({ ...args, [name]: e.target.value })}
-                className="mt-1 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                className="mt-1 w-full rounded border px-2 py-1.5 text-sm focus-ring"
               />
               {arg.description && (
-                <p id={`${fieldId}-hint`} className="mt-1 text-xs text-gray-500">
+                <p id={`${fieldId}-hint`} className="mt-1 text-xs text-ink-muted">
                   {arg.description}
                 </p>
               )}
@@ -159,7 +159,7 @@ export function CommandDialog({ commands, onSubmit, onClose, busy }: Props) {
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-sunken focus-ring"
           >
             Cancel
           </button>
@@ -167,7 +167,7 @@ export function CommandDialog({ commands, onSubmit, onClose, busy }: Props) {
             type="button"
             onClick={submit}
             disabled={missingRequired || busy || !selected}
-            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-ink hover:bg-accent-hover focus-ring disabled:opacity-50"
           >
             {busy ? "Running..." : "Run"}
           </button>

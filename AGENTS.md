@@ -162,11 +162,27 @@ whose line numbers do not match the source. Re-run before believing it.
 
 **The E2E data directory is never wiped, so specs must not count shared state.**
 `frontend/.e2e-data/` accumulates every session across every run — it passed 240
-during Phase 7 — and the sidebar caps its listing at 200. A spec that creates a
-session in `/tmp` and asserts "the group grew by one" therefore passes for months
-and then fails permanently once the shared group reaches that cap, with a
-diff-by-one that looks like a UI bug and is not. Create a `mkdtemp` directory per
-spec and assert exact counts against it.
+during Phase 7 and 357 during Phase 9 — and the sidebar caps its listing at 200. A
+spec that creates a session in `/tmp` and asserts "the group grew by one" therefore
+passes for months and then fails permanently once the shared group reaches that
+cap, with a diff-by-one that looks like a UI bug and is not. Past the cap a new
+session *displaces* an older row instead of adding one, so the count stays flat.
+Assert on identity — "the session I just created is listed here", matched by its id
+— or create a `mkdtemp` directory per spec and count against that. This has now
+bitten twice, in exactly the same place.
+
+**That same accumulation also makes the suite progressively slower, and it looks
+like flakiness.** The `mkdtemp` directory each spec creates becomes a *permanent
+sidebar group*, because grouping is by workdir and the journal is never cleared.
+After enough runs the sidebar renders 151 groups of which 148 hold one dead
+single-session directory each, and every page load pays for all of them.
+Measured during Phase 9: the suite went from 1.5 minutes to 35 minutes, and two
+or three specs failed per run on the 30s default timeout — a *different* two or
+three each time, which is what makes it read as flakiness rather than as a
+fixture problem. `rm -rf frontend/.e2e-data` is the fix, and it is free: the
+directory is gitignored and the backend recreates `live.db` on start. Do that
+before trusting a timing result or diagnosing an intermittent E2E failure.
+Raising the timeout does not help, because the cost grows without bound.
 
 **A clean `git merge` can still lose code.** Both sides adding methods to the same
 object literal merges without a conflict marker and silently keeps only one set —
@@ -263,6 +279,64 @@ with `kill -0` instead. Any new shell script here has to hold to 3.2 syntax.
 sessions and `opencode` for all of them; `codex` and `pi` record none. Any surface
 showing an archived title needs the opening-ask fallback, or most rows read as
 untitled.
+
+**`100vh` is taller than the screen on a phone.** It is the *large* viewport
+height: it measures as though the browser's collapsible toolbars were hidden, so
+a `h-screen` shell overflows the visible area and the document scrolls to make
+up the difference — dragging the whole UI up and exposing blank space below the
+composer. Use `h-dvh`. This is only half the fix: the document must also be
+pinned (`html, body { height: 100%; overflow: hidden }`) and every scroll
+container needs `overscroll-behavior: contain`, or a flick that reaches the end
+of a pane continues into the document anyway. All three together, or the symptom
+persists in a different form.
+
+**Mobile Safari zooms when a focused input's text is under 16px, and does not
+zoom back out.** This presents as "the whole screen moved" and is easily
+mistaken for a layout bug. Floor input text at 16px under `pointer: coarse` only
+— dense chrome legitimately uses 11–12px, and inflating every input to fix a
+mobile-only problem is the wrong trade.
+
+**A `<select>` is sized by its longest option, not by its current value.** So a
+runner declaring one long model name widens that control permanently, and
+because the width comes from content the user cannot see, `min-w-0` and
+`truncate` cannot recover it — the intrinsic minimum is already too large. This
+is what pushed the composer off the right edge of a phone. A button rendering
+the current value can truncate; a `<select>` cannot. It also cannot be styled:
+on iOS it renders as a system wheel with its own typography.
+
+**A `ring` is a `box-shadow`, so `overflow-hidden` clips it.** Focus indicators
+built with `focus-visible:ring-*` disappear on rows inside a clipping ancestor —
+which is where they matter most, since those are the dense lists a keyboard user
+navigates. Use `outline` with `outline-offset`; an outline is never clipped.
+
+**Unicode dingbats are font data, not icons.** `📎` and `⚡` render as full-colour
+emoji on iOS and macOS, and several geometric shapes (`▩`, `▧`, `▮`) are absent
+from the default CJK fallback chain and draw as `.notdef` boxes. What a glyph
+looks like is decided by the reader's installed fonts, so an interface built
+from them looks different per platform and cannot be corrected. Inline SVG paths
+cost ~1 KB gzipped for a whole set and tree-shake per route.
+
+**A menu that is `invisible` while it measures cannot take focus.** `visibility:
+hidden` elements are not focusable, so `node.focus()` in the same effect that
+sets the position silently does nothing — and since `onKeyDown` is a React
+handler on that node, Escape never arrives and the surface cannot be dismissed
+by keyboard. Focus in a second effect, after the position commits. The same
+class of failure applies to any dialog with no auto-focusing control of its own:
+focus the container, or the key handler is unreachable.
+
+**An accessible-name collision is a defect, not test fragility.** Labelling a
+button "Add to this message" beside a textarea labelled "Message" leaves two
+controls a screen reader cannot distinguish — and `getByLabel("Message")` then
+matches both, which is how 40 E2E specs failed at once. When a trigger needs a
+short name and its panel needs a phrase, pass them separately rather than
+reusing one string.
+
+**A layout bug below a breakpoint is invisible to a suite that runs above it.**
+Three mobile failures survived 41 green specs because every one of them ran at
+1280px, where the same code is merely cramped. A viewport is an instrument, not
+a variant. Note also that a `devices["iPhone …"]` profile runs in *Chromium*
+unless WebKit is installed, so it claims iOS coverage it does not have — prefer
+a Chromium device profile and be explicit about what is therefore untested.
 
 ## Spec and Code Evolution
 

@@ -13,6 +13,7 @@
  * here so a toggle repaints immediately rather than after a storage round trip.
  */
 
+import { usePathname } from "next/navigation";
 import {
   createContext,
   useCallback,
@@ -25,6 +26,7 @@ import {
 } from "react";
 import { useSettings } from "@/lib/settings";
 import { comboFromEvent, isTypingTarget } from "@/lib/shortcuts";
+import { useIsMobile } from "@/lib/viewport";
 import type { ShortcutAction } from "@/lib/settings";
 import type { PreviewKind } from "@/lib/api";
 
@@ -58,6 +60,19 @@ export interface ArtifactTarget {
 export type ArtifactView = "tree" | "preview";
 
 /**
+ * Which mobile surface is open, if any.
+ *
+ * Separate from `leftOpen`/`rightOpen` rather than reusing them, because they mean
+ * different things and must not share a value. Those two are *persisted
+ * preferences* — "I work with the sidebar hidden" — and they survive restarts. A
+ * drawer is transient: an app that reopens on a phone with a drawer already over
+ * the conversation, because that is how the tab was closed a week ago, is broken.
+ * Held here rather than in the shell so `showArtifact` can open the file sheet
+ * from a tool call in the conversation, which is a different component subtree.
+ */
+export type MobileDrawer = "none" | "sessions" | "files";
+
+/**
  * Actions the shell handles centrally. Session-scoped actions (`stopTurn`,
  * `expandAll`) cannot be: they need state that only the open session owns, so
  * the session page registers a handler and the shell forwards to it.
@@ -67,9 +82,20 @@ export type SessionActionHandler = (action: ShortcutAction) => boolean;
 interface WorkspaceUIValue {
   leftOpen: boolean;
   rightOpen: boolean;
+  /**
+   * Toggle the sessions surface: the persisted pane on a desktop, the transient
+   * drawer on a phone. One function for both so every caller — the top bar, the
+   * palette, `Mod+B` — expresses the intent and not the mechanism.
+   */
   toggleLeft: () => void;
   toggleRight: () => void;
   setRightOpen: (open: boolean) => void;
+  /** Open mobile surface. Always `"none"` above the mobile breakpoint. */
+  drawer: MobileDrawer;
+  openDrawer: (drawer: MobileDrawer) => void;
+  closeDrawer: () => void;
+  /** True on a phone-sized viewport; see `lib/viewport.ts`. */
+  isMobile: boolean;
   overlay: Overlay;
   openOverlay: (overlay: Overlay) => void;
   closeOverlay: () => void;
@@ -147,6 +173,46 @@ export function WorkspaceUIProvider({
   const [activeWorkdir, setActiveWorkdir] = useState<string | null>(null);
   const sessionHandlerRef = useRef<SessionActionHandler | null>(null);
 
+  const isMobile = useIsMobile();
+  const pathname = usePathname();
+
+  /**
+   * The open drawer, tagged with the route it was opened on.
+   *
+   * The route is stored *with* the state rather than watched by an effect, because
+   * two rules apply and both are derivations rather than synchronisations:
+   *
+   * - **Navigating dismisses it.** Tapping a session in the drawer is a navigation,
+   *   and leaving the drawer over the conversation the user just chose costs a
+   *   second tap on every visit.
+   * - **Leaving mobile dismisses it.** A rotation or a window resize must not leave
+   *   a `fixed` overlay stranded above a three-pane desktop layout.
+   *
+   * Written as effects, each of these was a `setState` in an effect body — a
+   * cascading render, and what `react-hooks/set-state-in-effect` flags. Both are
+   * answerable during render from values already in hand: the current pathname and
+   * the current breakpoint. So the state is the raw request and `drawer` below is
+   * the derived truth, which is also self-correcting — there is no window in which
+   * a stale drawer is renderable.
+   */
+  const [drawerRequest, setDrawerRequest] = useState<{
+    drawer: MobileDrawer;
+    at: string;
+  }>({ drawer: "none", at: pathname });
+
+  const drawer: MobileDrawer =
+    isMobile && drawerRequest.at === pathname ? drawerRequest.drawer : "none";
+
+  const openDrawer = useCallback(
+    (next: MobileDrawer) => setDrawerRequest({ drawer: next, at: pathname }),
+    [pathname],
+  );
+
+  const closeDrawer = useCallback(
+    () => setDrawerRequest({ drawer: "none", at: pathname }),
+    [pathname],
+  );
+
   const browseHistory = useCallback((workdir?: string) => {
     if (workdir) setActiveWorkdir(workdir);
     setOverlay("history");
@@ -156,15 +222,25 @@ export function WorkspaceUIProvider({
     setArtifactFullscreen(false);
   }, []);
 
-  const toggleLeft = useCallback(
-    () => update({ showLeftSidebar: !leftOpen }),
-    [update, leftOpen],
-  );
+  // Each toggle dispatches on form factor: a phone has no pane to show or hide, so
+  // the same intent has to reach the drawer instead. Doing this here rather than at
+  // each call site is what keeps `Mod+B`, the top bar, and the palette in agreement
+  // — they were all calling `toggleLeft`, and none of them should have to know.
+  const toggleLeft = useCallback(() => {
+    if (isMobile) {
+      openDrawer(drawer === "sessions" ? "none" : "sessions");
+      return;
+    }
+    update({ showLeftSidebar: !leftOpen });
+  }, [isMobile, openDrawer, drawer, update, leftOpen]);
 
-  const toggleRight = useCallback(
-    () => update({ showRightSidebar: !rightOpen }),
-    [update, rightOpen],
-  );
+  const toggleRight = useCallback(() => {
+    if (isMobile) {
+      openDrawer(drawer === "files" ? "none" : "files");
+      return;
+    }
+    update({ showRightSidebar: !rightOpen });
+  }, [isMobile, openDrawer, drawer, update, rightOpen]);
 
   const setRightOpenPersisted = useCallback(
     (open: boolean) => update({ showRightSidebar: open }),
@@ -178,10 +254,18 @@ export function WorkspaceUIProvider({
       // already knows a file was chosen, so deriving "show the preview" from a
       // state change would cascade a render to re-establish a fact we have.
       setArtifactView("preview");
+      if (isMobile) {
+        // The file sheet, not the persisted pane. Writing `showRightSidebar` here
+        // would silently change what the user sees when they next open a desktop
+        // browser, because a tap on a path in the transcript is not a statement
+        // about how they want their panes arranged.
+        openDrawer("files");
+        return;
+      }
       // Opening a file from a tool call is meaningless if the pane stays hidden.
       update({ showRightSidebar: true });
     },
-    [update],
+    [update, isMobile, openDrawer],
   );
 
   // Deliberately keeps `artifact` set. The tree derives its expanded ancestors
@@ -280,6 +364,10 @@ export function WorkspaceUIProvider({
 
       // Escape is not user-rebindable: it closes the top overlay, which every
       // dialog convention and WCAG 2.1.2 expects it to do.
+      //
+      // The drawer and sheet stop Escape themselves (see `useDialog`), so this only
+      // ever runs when neither is open — it is the fallback for a key press that
+      // reached the document, not a second handler competing with them.
       if (event.key === "Escape") {
         setOverlay((current) => (current === "none" ? current : "none"));
         return;
@@ -308,6 +396,10 @@ export function WorkspaceUIProvider({
       toggleLeft,
       toggleRight,
       setRightOpen: setRightOpenPersisted,
+      drawer,
+      openDrawer,
+      closeDrawer,
+      isMobile,
       overlay,
       openOverlay: setOverlay,
       closeOverlay: () => setOverlay("none"),
@@ -332,6 +424,10 @@ export function WorkspaceUIProvider({
       toggleLeft,
       toggleRight,
       setRightOpenPersisted,
+      drawer,
+      openDrawer,
+      closeDrawer,
+      isMobile,
       overlay,
       artifact,
       showArtifact,

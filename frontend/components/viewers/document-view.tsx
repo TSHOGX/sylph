@@ -31,9 +31,9 @@ export function DocumentView({
   const grouped = useMemo(() => groupBySection(payload), [payload]);
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto px-3 py-2">
+    <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-3 py-2">
       {payload.blocks.length === 0 && payload.sections.length === 0 && (
-        <p className="text-[11px] text-gray-500">
+        <p className="text-2xs text-ink-muted">
           This document holds no readable text. It may be made up entirely of
           images or shapes.
         </p>
@@ -44,15 +44,15 @@ export function DocumentView({
           <section
             key={section.index}
             aria-label={section.title ?? `Slide ${section.index + 1}`}
-            className="mb-3 rounded border border-gray-200 bg-white"
+            className="mb-3 rounded border border-line bg-raised"
           >
-            <header className="flex items-baseline gap-2 border-b border-gray-200 bg-gray-50 px-2.5 py-1">
-              <span className="shrink-0 font-mono text-[10px] text-gray-500">
+            <header className="flex items-baseline gap-2 border-b border-line bg-sunken px-2.5 py-1">
+              <span className="shrink-0 font-mono text-3xs text-ink-muted">
                 {section.index + 1}
               </span>
-              <h4 className="min-w-0 flex-1 truncate text-[12px] font-semibold text-gray-900">
+              <h4 className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">
                 {section.title ?? (
-                  <span className="font-normal italic text-gray-500">Untitled slide</span>
+                  <span className="font-normal italic text-ink-muted">Untitled slide</span>
                 )}
               </h4>
             </header>
@@ -62,11 +62,11 @@ export function DocumentView({
                 // Notes are frequently where a deck's actual argument lives, so
                 // they are shown rather than dropped — but set apart, because
                 // they are not what the slide displays.
-                <aside className="mt-2 border-t border-dashed border-gray-200 pt-1.5">
-                  <p className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
+                <aside className="mt-2 border-t border-dashed border-line pt-1.5">
+                  <p className="text-3xs font-medium uppercase tracking-wide text-ink-muted">
                     Speaker notes
                   </p>
-                  <p className="mt-0.5 text-[12px] leading-relaxed text-gray-600">
+                  <p className="mt-0.5 text-xs leading-relaxed text-ink-muted">
                     {section.notes}
                   </p>
                 </aside>
@@ -74,14 +74,14 @@ export function DocumentView({
             </div>
           </section>
         ) : (
-          <div key={section?.index ?? `flow-${index}`} className="text-gray-800">
+          <div key={section?.index ?? `flow-${index}`} className="text-ink">
             <Blocks blocks={blocks} />
           </div>
         ),
       )}
 
       {payload.truncated && (
-        <p className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-900">
+        <p className="mt-2 rounded border border-warning-line bg-warning-bg px-2 py-1 text-3xs text-warning">
           This document is longer than the preview shows.
         </p>
       )}
@@ -106,7 +106,7 @@ function Block({ block }: { block: DocumentBlock }) {
 
     case "paragraph":
       return (
-        <p className="mb-1.5 text-[13px] leading-relaxed">
+        <p className="mb-1.5 text-xs leading-relaxed">
           {block.spans.map((span, index) => {
             // Nested rather than combined so bold-italic renders as both, which
             // a single className ternary would get wrong.
@@ -124,11 +124,11 @@ function Block({ block }: { block: DocumentBlock }) {
         // is a flat list with levels, and reconstructing nesting would mean
         // guessing where each list starts and ends.
         <div
-          className="mb-0.5 flex gap-1.5 text-[13px] leading-relaxed"
+          className="mb-0.5 flex gap-1.5 text-xs leading-relaxed"
           style={{ paddingLeft: block.level * 14 }}
         >
-          <span aria-hidden="true" className="shrink-0 text-gray-400">
-            {block.ordered ? "•" : "–"}
+          <span aria-hidden="true" className="shrink-0 text-ink-faint">
+            {block.ordered ? "·" : "–"}
           </span>
           <span className="min-w-0">{block.text}</span>
         </div>
@@ -137,23 +137,23 @@ function Block({ block }: { block: DocumentBlock }) {
     case "table":
       return (
         <div className="mb-2 overflow-x-auto">
-          <table className="border-collapse text-[12px]">
+          <table className="border-collapse text-xs">
             <tbody>
               {block.rows.map((row, rowIndex) => (
-                <tr key={rowIndex} className={rowIndex === 0 ? "bg-gray-50" : undefined}>
+                <tr key={rowIndex} className={rowIndex === 0 ? "bg-sunken" : undefined}>
                   {row.map((cell, cellIndex) =>
                     rowIndex === 0 ? (
                       <th
                         key={cellIndex}
                         scope="col"
-                        className="border border-gray-200 px-2 py-0.5 text-left font-medium text-gray-900"
+                        className="border border-line px-2 py-0.5 text-left font-medium text-ink"
                       >
                         {cell}
                       </th>
                     ) : (
                       <td
                         key={cellIndex}
-                        className="border border-gray-200 px-2 py-0.5 text-gray-800"
+                        className="border border-line px-2 py-0.5 text-ink"
                       >
                         {cell}
                       </td>
@@ -178,8 +178,8 @@ function Block({ block }: { block: DocumentBlock }) {
 function Heading({ level, text }: { level: number; text: string }) {
   const clamped = Math.min(Math.max(level, 1), 3);
   const className = [
-    "mb-1 mt-2 font-semibold text-gray-900",
-    clamped === 1 ? "text-[15px]" : clamped === 2 ? "text-[13.5px]" : "text-[12.5px]",
+    "mb-1 mt-2 font-semibold text-ink",
+    clamped === 1 ? "text-base" : clamped === 2 ? "text-sm" : "text-xs",
   ].join(" ");
 
   if (clamped === 1) return <h4 className={className}>{text}</h4>;

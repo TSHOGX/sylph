@@ -6,16 +6,27 @@
  * Focus handling is the reason this is one component rather than three: a modal
  * that does not trap focus leaves a keyboard user tabbing through the page behind
  * it, and one that does not restore focus on close drops them at the top of the
- * document. Both are WCAG 2.4.3 failures and both are easy to get subtly wrong,
- * so they are implemented once.
+ * document. Both are WCAG 2.4.3 failures and both are easy to get subtly wrong.
+ * They now live in `lib/use-dialog.ts`, shared with the mobile drawer and sheet —
+ * this component had its own copy, and `CommandDialog` had a third that differed in
+ * ways only a keyboard user would find.
  *
  * `<dialog>` is not used: `showModal()` gives focus trapping and a top-layer
  * backdrop for free, but it also renders outside React's tree for stacking
- * purposes and its `::backdrop` cannot be styled by Tailwind utilities. The trap
- * below is short enough that the trade is not worth it.
+ * purposes and its `::backdrop` cannot be styled by Tailwind utilities.
+ *
+ * # On a phone, a picker is full-height
+ *
+ * A dialog capped at `max-h-[80vh]` and offset `pt-[10vh]` is a small box floating
+ * in the middle of a phone screen with its list clipped to a few rows. On mobile
+ * the picker variants therefore fill the viewport: the search overlay, the palette,
+ * and the history browser are *the* task while they are open, and a list is what
+ * they are made of. `dvh`, not `vh`, so the browser's collapsing toolbars do not
+ * push the footer out of reach.
  */
 
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useId, type ReactNode } from "react";
+import { useDialog } from "@/lib/use-dialog";
 
 export function Overlay({
   title,
@@ -36,77 +47,27 @@ export function Overlay({
   size?: "picker" | "panel" | "viewer" | "viewer-full";
   describedBy?: string;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const openerRef = useRef<HTMLElement | null>(null);
   const titleId = useId();
+  // `autoFocus: false` — the pickers all carry an `autoFocus` input, and taking
+  // focus to the container first would move the caret out of it.
+  const { ref, onKeyDown } = useDialog<HTMLDivElement>({ onClose, autoFocus: false });
 
-  useEffect(() => {
-    // Remember who opened this before moving focus, so it can be handed back.
-    openerRef.current = document.activeElement as HTMLElement | null;
+  // No body-scroll lock. This used to set `body.style.overflow = "hidden"`, which
+  // was both ineffective against iOS rubber-banding and is now redundant: the
+  // document is pinned in `globals.css` and the shell owns all scrolling. Two
+  // mechanisms for one invariant is how a stale inline style gets left behind when
+  // two dialogs unmount out of order.
 
-    const node = ref.current;
-    // Focus the first control, or the container itself when there is none, so
-    // the first Tab stays inside the modal rather than starting from the page.
-    const focusable = node?.querySelector<HTMLElement>(FOCUSABLE);
-    (focusable ?? node)?.focus();
-
-    return () => {
-      // `isConnected` guards the case where the opener was itself unmounted by
-      // the action that closed the modal; focusing a detached node silently
-      // moves focus to <body>, which is worse than leaving it alone.
-      const opener = openerRef.current;
-      if (opener?.isConnected) opener.focus();
-    };
-  }, []);
-
-  useEffect(() => {
-    // Background scroll is locked because a scrolling page behind a modal makes
-    // the modal look detached and lets a trackpad move content the user cannot
-    // interact with.
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  }, []);
-
-  function onKeyDown(event: React.KeyboardEvent) {
-    if (event.key === "Escape") {
-      // Stopped here so it closes this modal only, and does not also reach the
-      // shell's document-level handler.
-      event.stopPropagation();
-      onClose();
-      return;
-    }
-    if (event.key !== "Tab") return;
-
-    const node = ref.current;
-    if (!node) return;
-    const items = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-      (element) => element.offsetParent !== null || element === document.activeElement,
-    );
-    if (items.length === 0) return;
-
-    const first = items[0];
-    const last = items[items.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
+  const viewer = size === "viewer" || size === "viewer-full";
 
   return (
     <div
       // A picker sits below the top of the viewport; the viewer is centred and
       // near-full-bleed, because vertical space is exactly what a spreadsheet or
-      // a rendered page needs.
-      className={`fixed inset-0 z-40 flex justify-center bg-gray-900/30 p-4 backdrop-blur-[1px] ${
-        size === "viewer" || size === "viewer-full"
-          ? "items-center"
-          : "items-start pt-[10vh]"
+      // a rendered page needs. On a phone both fill it: there is no spare room to
+      // frame a dialog in, and the inset would only clip the content.
+      className={`fixed inset-0 z-40 flex justify-center bg-ink/35 backdrop-blur-[1px] max-md:p-0 md:p-4 ${
+        viewer ? "items-center" : "items-start md:pt-[10vh]"
       }`}
       // The backdrop closes on click, which every picker convention supports.
       // `onMouseDown` on the backdrop only, so a drag that ends outside a text
@@ -136,12 +97,19 @@ export function Overlay({
         // size to measure — an iframe reports none, so a rendered page or a PDF
         // would collapse to the floor under `w-fit`. Those are also the formats
         // authored *for* a viewport, so filling one is what they expect.
-        className={`flex flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl outline-none ${
+        // `dvh` throughout, never `vh`: `vh` measures as though the browser's
+        // toolbars were hidden, so a `92vh` dialog on a phone extends behind them
+        // and its own footer — the confirm button, the paging control — is
+        // unreachable.
+        //
+        // On mobile every variant is full-screen. `min-w-[32rem]` on the `viewer`
+        // variant is wider than a phone on its own, so it must not apply there.
+        className={`flex flex-col overflow-hidden border-line bg-raised shadow-2xl outline-none max-md:h-dvh max-md:w-full max-md:pt-safe md:rounded-xl md:border ${
           size === "viewer"
-            ? "h-fit max-h-[92vh] w-fit min-w-[32rem] max-w-[95vw]"
+            ? "md:h-fit md:max-h-[92dvh] md:w-fit md:min-w-[32rem] md:max-w-[95vw]"
             : size === "viewer-full"
-              ? "h-[92vh] w-full max-w-[95vw]"
-              : `w-full max-h-[80vh] ${size === "panel" ? "max-w-3xl" : "max-w-xl"}`
+              ? "md:h-[92dvh] md:w-full md:max-w-[95vw]"
+              : `md:w-full md:max-h-[80dvh] ${size === "panel" ? "md:max-w-3xl" : "md:max-w-xl"}`
         }`}
       >
         <h2 id={titleId} className="sr-only">
@@ -153,9 +121,6 @@ export function Overlay({
   );
 }
 
-const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
 /**
  * The list behaviour every picker needs: arrow keys move a virtual cursor, Enter
  * commits, and the input keeps focus throughout.
@@ -166,12 +131,12 @@ const FOCUSABLE =
  * only one where typing and navigating do not fight over focus.
  */
 export function useListNavigation(count: number, onCommit: (index: number) => void) {
-  const activeRef = useRef(0);
-
-  function reset() {
-    activeRef.current = 0;
-  }
-
+  // Stateless on purpose: the caller owns `active`, because in all four pickers it
+  // is one field of a state object that also holds the query — which is what makes
+  // "a query edit resets the cursor" a single update rather than an effect. This
+  // hook previously also kept an `activeRef` and exported a `reset`, neither of
+  // which any caller used, so the cursor existed in two places and only one of them
+  // was read.
   function onKeyDown(event: React.KeyboardEvent, active: number, setActive: (n: number) => void) {
     if (count === 0) return;
     if (event.key === "ArrowDown") {
@@ -192,7 +157,7 @@ export function useListNavigation(count: number, onCommit: (index: number) => vo
     }
   }
 
-  return { onKeyDown, reset };
+  return { onKeyDown };
 }
 
 /** Scroll the active row into view without yanking the whole page. */

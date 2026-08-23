@@ -105,7 +105,11 @@ test("the sidebar groups a new session under its workspace", async ({ page }) =>
   await expect(sidebar).toBeVisible();
 
   // Grouping is by workdir, so `/tmp` becomes a workspace named `tmp`.
-  const group = sidebar.getByRole("button", { name: /tmp/ });
+  //
+  // `aria-expanded` addresses the group's own header rather than the overflow menu
+  // button beside it, which shares its name — that button exists because a group's
+  // actions were otherwise right-click-only, and a phone has no right-click.
+  const group = sidebar.locator("button[aria-expanded]").filter({ hasText: "tmp" });
   await expect(group.first()).toBeVisible();
 
   // The open session is marked as the current page for assistive technology.

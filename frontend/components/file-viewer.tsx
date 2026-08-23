@@ -32,6 +32,13 @@ import { formatBytes, formatRelative } from "@/lib/format";
 import { describeKind, sourceFor, viewerKindOf, type ViewerKind } from "@/lib/file-kind";
 import { CodeBlock } from "@/components/code-block";
 import { Markdown } from "@/components/markdown";
+import { Button, IconButton } from "@/components/ui/button";
+import {
+  ArrowLeftIcon,
+  MaximizeIcon,
+  RefreshIcon,
+  XIcon,
+} from "@/components/icons";
 
 const GridView = dynamic(
   () => import("@/components/viewers/grid-view").then((m) => m.GridView),
@@ -112,26 +119,29 @@ export function FileViewer({
       aria-label={`${describeKind(kind)} preview of ${name}`}
       className="flex min-h-0 flex-1 flex-col overflow-hidden outline-none"
     >
-      <header className="flex shrink-0 items-center gap-1 border-b border-gray-200 bg-white px-1.5 py-1">
+      <header className="flex shrink-0 items-center gap-1 border-b border-line bg-raised px-1.5 py-1">
         {onBack && (
-          <button
-            type="button"
+          // Keeps its "Files" label rather than becoming an icon: this is the only
+          // route back to the tree, and an unlabelled arrow beside a filename reads
+          // as "previous file". E2E matches it by name.
+          <Button
+            variant="ghost"
             onClick={onBack}
             title="Back to the file tree"
-            className="shrink-0 rounded px-1 py-0.5 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            icon={<ArrowLeftIcon size={13} />}
+            className="shrink-0"
           >
-            <span aria-hidden="true">‹</span>
-            <span className="ml-0.5">Files</span>
-          </button>
+            Files
+          </Button>
         )}
 
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-[11.5px] font-medium text-gray-900" title={path}>
+          <h3 className="truncate text-2xs font-medium text-ink" title={path}>
             {name}
           </h3>
           {directory && (
             <p
-              className="truncate font-mono text-[9.5px] leading-tight text-gray-500"
+              className="truncate font-mono text-3xs leading-tight text-ink-muted"
               title={directory}
             >
               {directory}
@@ -139,37 +149,23 @@ export function FileViewer({
           )}
         </div>
 
-        <button
-          type="button"
+        <IconButton
+          label="Reload this file from disk"
           onClick={() => setReloadToken((token) => token + 1)}
-          title="Reload this file from disk"
-          className="shrink-0 rounded px-1 text-[10px] text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
         >
-          Reload
-        </button>
+          <RefreshIcon size={14} />
+        </IconButton>
 
         {onExpand && (
-          <button
-            type="button"
-            ref={registerExpand}
-            onClick={onExpand}
-            aria-label="Open full screen"
-            title="Open full screen"
-            className="shrink-0 rounded px-1 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-          >
-            <span aria-hidden="true">⛶</span>
-          </button>
+          <IconButton label="Open full screen" ref={registerExpand} onClick={onExpand}>
+            <MaximizeIcon size={14} />
+          </IconButton>
         )}
 
         {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close preview"
-            className="shrink-0 rounded px-1 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-          >
-            ✕
-          </button>
+          <IconButton label="Close preview" onClick={onClose}>
+            <XIcon size={14} />
+          </IconButton>
         )}
       </header>
 
@@ -302,7 +298,7 @@ function ContentBody({
 
     if (data.truncated && data.encoding !== "image") {
       return (
-        <p className="p-3 text-[11px] text-gray-500">
+        <p className="p-3 text-2xs text-ink-muted">
           This image is {formatBytes(data.size)}, larger than the preview limit.
         </p>
       );
@@ -316,7 +312,7 @@ function ContentBody({
 
   if (data.encoding === "binary") {
     return (
-      <p className="p-3 text-[11px] text-gray-500">
+      <p className="p-3 text-2xs text-ink-muted">
         Binary file ({formatBytes(data.size)}). No text preview available.
       </p>
     );
@@ -326,27 +322,23 @@ function ContentBody({
   const isJson = data.mimeType === "application/json" || name.endsWith(".json");
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto p-2">
+    <div className="min-h-0 flex-1 overflow-auto overscroll-contain p-2">
       {isMarkdown && (
         <div className="mb-1.5 flex justify-end">
-          <button
-            type="button"
-            onClick={() => setRenderedMarkdown(!renderedMarkdown)}
-            className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
-          >
+          <Button variant="secondary" onClick={() => setRenderedMarkdown(!renderedMarkdown)}>
             {renderedMarkdown ? "View source" : "View rendered"}
-          </button>
+          </Button>
         </div>
       )}
 
       {data.truncated && (
-        <p className="mb-1.5 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-900">
+        <p className="mb-1.5 rounded border border-warning-line bg-warning-bg px-2 py-1 text-3xs text-warning">
           Showing the first part of a {formatBytes(data.size)} file.
         </p>
       )}
 
       {isMarkdown && renderedMarkdown ? (
-        <div className="text-[13px] leading-relaxed text-gray-800">
+        <div className="text-xs leading-relaxed text-ink">
           <Markdown text={data.content ?? ""} />
         </div>
       ) : (
@@ -359,7 +351,7 @@ function ContentBody({
         />
       )}
 
-      <p className="mt-1.5 text-[10px] text-gray-500">
+      <p className="mt-1.5 text-3xs text-ink-muted">
         Modified {formatRelative(data.modifiedAtMs)} ·{" "}
         <span className="font-mono">{data.absolutePath}</span>
       </p>
@@ -392,16 +384,16 @@ function BodyError({ error }: { error: unknown }) {
   }
 
   return (
-    <div role="alert" className="p-3 text-[11px]">
-      <p className="font-medium text-red-800">Could not read this file</p>
-      <p className="mt-1 text-red-700">{message}</p>
+    <div role="alert" className="p-3 text-2xs">
+      <p className="font-medium text-danger">Could not read this file</p>
+      <p className="mt-1 text-danger">{message}</p>
     </div>
   );
 }
 
 function Loading({ label }: { label: string }) {
   return (
-    <output aria-live="polite" className="block p-3 text-[11px] text-gray-500">
+    <output aria-live="polite" className="block p-3 text-2xs text-ink-muted">
       Loading {label}...
     </output>
   );

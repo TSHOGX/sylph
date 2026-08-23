@@ -70,7 +70,7 @@ export function GridView({
         <div
           role="tablist"
           aria-label="Worksheets"
-          className="flex shrink-0 gap-px overflow-x-auto border-b border-gray-200 bg-gray-50 px-1"
+          className="flex shrink-0 gap-px overflow-x-auto border-b border-line bg-sunken px-1"
         >
           {grid.sheets.map((sheet, index) => (
             <button
@@ -80,10 +80,10 @@ export function GridView({
               aria-selected={index === grid.sheet}
               onClick={() => onSelectSheet(index)}
               title={`${sheet.name} — ${sheet.rows} rows, ${sheet.cols} columns`}
-              className={`shrink-0 rounded-t border-x border-t px-2 py-1 text-[11px] focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 ${
+              className={`shrink-0 rounded-t border-x border-t px-2 py-1 text-2xs focus-ring ${
                 index === grid.sheet
-                  ? "border-gray-200 bg-white font-medium text-gray-900"
-                  : "border-transparent text-gray-600 hover:bg-gray-200/60"
+                  ? "border-line bg-raised font-medium text-ink"
+                  : "border-transparent text-ink-muted hover:bg-hover"
               }`}
             >
               {sheet.name}
@@ -93,7 +93,7 @@ export function GridView({
       )}
 
       {isChartsheet ? (
-        <p className="p-3 text-[11px] text-gray-500">
+        <p className="p-3 text-2xs text-ink-muted">
           This sheet holds no cells — it is a chart or macro sheet rather than a
           worksheet.
         </p>
@@ -103,9 +103,9 @@ export function GridView({
         // header leaves real space to the right, and undifferentiated white there
         // looks like a grid that failed to load its data. Every spreadsheet
         // application distinguishes the two the same way.
-        <div className="min-h-0 flex-1 overflow-auto bg-gray-50/70">
+        <div className="min-h-0 flex-1 overflow-auto overscroll-contain bg-sunken">
           <table
-            className="border-collapse font-mono text-[11.5px]"
+            className="border-collapse font-mono text-2xs"
             style={{ tableLayout: columnWidth ? "fixed" : "auto" }}
           >
             <caption className="sr-only">
@@ -117,7 +117,7 @@ export function GridView({
                     under the header row when scrolling diagonally. */}
                 <th
                   scope="col"
-                  className="sticky left-0 top-0 z-20 border border-gray-200 bg-gray-100 px-1.5 py-0.5 text-right font-normal text-gray-500"
+                  className="sticky left-0 top-0 z-20 border border-line bg-hover px-1.5 py-0.5 text-right font-normal text-ink-muted"
                 >
                   <span className="sr-only">Row</span>
                 </th>
@@ -126,7 +126,7 @@ export function GridView({
                     key={label}
                     scope="col"
                     style={columnWidth ? { width: columnWidth } : undefined}
-                    className="sticky top-0 z-10 border border-gray-200 bg-gray-100 px-1.5 py-0.5 text-left font-normal text-gray-500"
+                    className="sticky top-0 z-10 border border-line bg-hover px-1.5 py-0.5 text-left font-normal text-ink-muted"
                   >
                     {label}
                   </th>
@@ -150,23 +150,23 @@ export function GridView({
           </table>
 
           {grid.rows.length === 0 && (
-            <p className="p-3 text-[11px] text-gray-500">
+            <p className="p-3 text-2xs text-ink-muted">
               No rows in this part of the sheet.
             </p>
           )}
         </div>
       )}
 
-      <div className="flex shrink-0 items-center gap-2 border-t border-gray-200 bg-gray-50 px-2 py-1">
-        <span className="flex-1 text-[10px] text-gray-500">
+      <div className="flex shrink-0 items-center gap-2 border-t border-line bg-sunken px-2 py-1">
+        <span className="flex-1 text-3xs text-ink-muted">
           {describeWindow(grid)}
-          {loading && <span className="ml-1 text-gray-400">loading...</span>}
+          {loading && <span className="ml-1 text-ink-faint">loading...</span>}
         </span>
         <button
           type="button"
           onClick={() => previous !== null && onPage(previous)}
           disabled={previous === null || loading}
-          className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-40"
+          className="rounded border border-line bg-raised px-1.5 py-0.5 text-3xs font-medium text-ink-soft hover:bg-hover focus-ring disabled:opacity-40"
         >
           Previous
         </button>
@@ -174,7 +174,7 @@ export function GridView({
           type="button"
           onClick={() => next !== null && onPage(next)}
           disabled={next === null || loading}
-          className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-40"
+          className="rounded border border-line bg-raised px-1.5 py-0.5 text-3xs font-medium text-ink-soft hover:bg-hover focus-ring disabled:opacity-40"
         >
           Next
         </button>
@@ -203,10 +203,10 @@ const Row = memo(function Row({
   width?: number;
 }) {
   return (
-    <tr className={isHeader ? "bg-gray-50" : undefined}>
+    <tr className={isHeader ? "bg-sunken" : undefined}>
       <th
         scope="row"
-        className="sticky left-0 z-10 border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-right font-normal text-gray-400"
+        className="sticky left-0 z-10 border border-line bg-sunken px-1.5 py-0.5 text-right font-normal text-ink-faint"
       >
         {rowNumber}
       </th>
@@ -217,10 +217,10 @@ const Row = memo(function Row({
             key={column}
             style={width ? { width } : undefined}
             title={cellTitle(cell)}
-            className={`max-w-[28rem] truncate border border-gray-200 bg-white px-1.5 py-0.5 ${
+            className={`max-w-[28rem] truncate border border-line bg-raised px-1.5 py-0.5 ${
               alignmentFor(cell) === "right" ? "text-right" : "text-left"
-            } ${isErrorCell(cell) ? "text-red-700" : "text-gray-800"} ${
-              isHeader ? "bg-gray-50 font-medium text-gray-900" : ""
+            } ${isErrorCell(cell) ? "text-danger" : "text-ink"} ${
+              isHeader ? "bg-sunken font-medium text-ink" : ""
             }`}
           >
             {cell?.v ?? ""}

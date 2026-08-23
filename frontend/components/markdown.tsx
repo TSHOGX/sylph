@@ -199,7 +199,7 @@ function renderBlocks(text: string): ReactNode {
         const Tag = `h${level}` as "h4" | "h5" | "h6";
         const size = block.level <= 1 ? "text-base" : block.level === 2 ? "text-sm" : "text-sm";
         return (
-          <Tag key={index} className={`${size} font-semibold text-gray-900`}>
+          <Tag key={index} className={`${size} font-semibold text-ink`}>
             {renderInline(block.content)}
           </Tag>
         );
@@ -222,7 +222,7 @@ function renderBlocks(text: string): ReactNode {
         return (
           <blockquote
             key={index}
-            className="border-l-2 border-gray-300 pl-3 text-gray-600 italic"
+            className="border-l-2 border-line-strong pl-3 text-ink-muted italic"
           >
             {renderInline(block.content)}
           </blockquote>
@@ -234,7 +234,7 @@ function renderBlocks(text: string): ReactNode {
               <thead>
                 <tr>
                   {block.header.map((cell, at) => (
-                    <th key={at} className="border border-gray-200 bg-gray-50 px-2 py-1 font-semibold">
+                    <th key={at} className="border border-line bg-sunken px-2 py-1 font-semibold">
                       {renderInline(cell)}
                     </th>
                   ))}
@@ -244,7 +244,7 @@ function renderBlocks(text: string): ReactNode {
                 {block.rows.map((row, rowAt) => (
                   <tr key={rowAt}>
                     {row.map((cell, cellAt) => (
-                      <td key={cellAt} className="border border-gray-200 px-2 py-1 align-top">
+                      <td key={cellAt} className="border border-line px-2 py-1 align-top">
                         {renderInline(cell)}
                       </td>
                     ))}
@@ -255,7 +255,7 @@ function renderBlocks(text: string): ReactNode {
           </div>
         );
       case "rule":
-        return <hr key={index} className="border-gray-200" />;
+        return <hr key={index} className="border-line" />;
       default:
         return (
           <p key={index} className="whitespace-pre-wrap break-words">
@@ -473,7 +473,7 @@ function renderInline(text: string, inLink = false): ReactNode {
             return (
               <code
                 key={index}
-                className="rounded bg-gray-100 px-1 py-px font-mono text-[0.9em] text-gray-800"
+                className="rounded bg-hover px-1 py-px font-mono text-[0.9em] text-ink"
               >
                 {token.value}
               </code>
@@ -492,7 +492,7 @@ function renderInline(text: string, inLink = false): ReactNode {
             return <em key={index}>{renderInline(token.value, inLink)}</em>;
           case "strike":
             return (
-              <del key={index} className="text-gray-500">
+              <del key={index} className="text-ink-muted">
                 {renderInline(token.value, inLink)}
               </del>
             );
@@ -536,7 +536,7 @@ function renderLink(
       // `noreferrer` implies `noopener`, but both are named because the pairing
       // is what prevents reverse tabnabbing on older engines.
       {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
-      className="text-blue-700 underline decoration-blue-300 hover:decoration-blue-700"
+      className="text-info underline decoration-link/40 hover:decoration-link"
     >
       {literal ? label : renderInline(label, true)}
     </a>
@@ -575,14 +575,14 @@ function renderImage(
         target="_blank"
         rel="noopener noreferrer"
         title={`Image: ${src}`}
-        className="text-blue-700 underline decoration-dotted decoration-blue-300 hover:decoration-blue-700"
+        className="text-info underline decoration-dotted decoration-link/40 hover:decoration-link"
       >
         [{label}]
       </a>
     );
   }
   return (
-    <span key={key} title={`Image: ${src}`} className="text-gray-500">
+    <span key={key} title={`Image: ${src}`} className="text-ink-muted">
       [{label}]
     </span>
   );

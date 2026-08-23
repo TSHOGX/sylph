@@ -40,15 +40,15 @@ export const DiffView = memo(function DiffView({
 
   if (result.lines.length === 0) {
     return (
-      <p className="rounded border border-gray-200 bg-gray-50 px-2 py-1 text-[11px] text-gray-500">
+      <p className="rounded border border-line bg-sunken px-2 py-1 text-2xs text-ink-muted">
         No textual change.
       </p>
     );
   }
 
   return (
-    <div className="overflow-hidden rounded border border-gray-200">
-      <div className="flex items-center justify-between gap-2 border-b border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px]">
+    <div className="overflow-hidden rounded border border-line">
+      <div className="flex items-center justify-between gap-2 border-b border-line bg-sunken px-2 py-0.5 text-3xs">
         <div className="flex min-w-0 items-center gap-2">
           {path && (
             <button
@@ -56,18 +56,18 @@ export const DiffView = memo(function DiffView({
               onClick={() => onOpenFile?.(path)}
               disabled={!onOpenFile}
               title={onOpenFile ? `Open ${path} in Artifacts` : path}
-              className="truncate font-mono text-gray-600 hover:text-gray-900 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:hover:no-underline"
+              className="truncate font-mono text-ink-muted hover:text-ink hover:underline focus-ring disabled:hover:no-underline"
             >
               {path}
             </button>
           )}
           <span className="shrink-0 font-medium">
-            <span className="text-emerald-700">+{result.added}</span>{" "}
-            <span className="text-red-700">−{result.removed}</span>
+            <span className="text-success">+{result.added}</span>{" "}
+            <span className="text-danger">−{result.removed}</span>
           </span>
           {result.degraded && (
             <span
-              className="shrink-0 text-amber-700"
+              className="shrink-0 text-warning"
               title="The change was too large to align line by line, so it is shown as a full replacement."
             >
               unaligned
@@ -78,7 +78,7 @@ export const DiffView = memo(function DiffView({
           <button
             type="button"
             onClick={() => setExpanded(!expanded)}
-            className="shrink-0 rounded px-1 font-medium text-gray-600 hover:bg-white hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            className="shrink-0 rounded px-1 font-medium text-ink-muted hover:bg-raised hover:text-ink focus-ring"
           >
             {expanded ? "Collapse" : `Show ${changed} changed lines`}
           </button>
@@ -86,8 +86,8 @@ export const DiffView = memo(function DiffView({
       </div>
 
       {expanded && (
-        <div className="overflow-x-auto bg-white">
-          <table className="w-full border-collapse font-mono text-[11.5px] leading-[1.55]">
+        <div className="overflow-x-auto bg-raised">
+          <table className="w-full border-collapse font-mono text-2xs leading-[1.55]">
             {/* A table gives the gutter columns a shared width without
                 measuring, and keeps each line's numbers aligned with its text. */}
             <tbody>
@@ -111,7 +111,7 @@ function DiffSegment({ lines, skipped }: { lines: DiffLine[]; skipped: number })
     <>
       {skipped > 0 && (
         <tr>
-          <td colSpan={3} className="bg-gray-50 px-2 py-px text-[10px] text-gray-500">
+          <td colSpan={3} className="bg-sunken px-2 py-px text-3xs text-ink-muted">
             ⋯ {skipped} unchanged {skipped === 1 ? "line" : "lines"}
           </td>
         </tr>
@@ -126,10 +126,10 @@ function DiffSegment({ lines, skipped }: { lines: DiffLine[]; skipped: number })
 function DiffRow({ line }: { line: DiffLine }) {
   const tone =
     line.op === "add"
-      ? "bg-emerald-50 text-emerald-950"
+      ? "bg-success-bg text-success"
       : line.op === "remove"
-        ? "bg-red-50 text-red-950"
-        : "text-gray-700";
+        ? "bg-danger-bg text-danger"
+        : "text-ink-soft";
 
   // The sign is real text, not a background colour alone: colour-blind readers
   // and monochrome printing both need it (WCAG 1.4.1).
@@ -139,13 +139,13 @@ function DiffRow({ line }: { line: DiffLine }) {
     <tr className={tone}>
       <td
         aria-hidden="true"
-        className="w-10 select-none border-r border-gray-100 px-1 text-right align-top text-gray-500"
+        className="w-10 select-none border-r border-line px-1 text-right align-top text-ink-muted"
       >
         {line.beforeLine ?? ""}
       </td>
       <td
         aria-hidden="true"
-        className="w-10 select-none border-r border-gray-100 px-1 text-right align-top text-gray-500"
+        className="w-10 select-none border-r border-line px-1 text-right align-top text-ink-muted"
       >
         {line.afterLine ?? ""}
       </td>

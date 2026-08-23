@@ -22,6 +22,7 @@ import {
   useSettings,
   type Density,
   type ShortcutAction,
+  type Theme,
 } from "@/lib/settings";
 import { comboFromEvent, formatCombo, useIsMac } from "@/lib/shortcuts";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
@@ -42,19 +43,19 @@ export function SettingsPanel() {
 
   return (
     <Overlay title="Settings" onClose={closeOverlay} size="panel">
-      <div className="flex items-center justify-between border-b border-gray-200 px-3 py-2">
+      <div className="flex items-center justify-between border-b border-line px-3 py-2">
         <h3 className="text-sm font-semibold">Settings</h3>
         <button
           type="button"
           onClick={closeOverlay}
-          className="rounded px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="rounded px-2 py-0.5 text-xs text-ink-muted hover:bg-hover hover:text-ink focus-ring"
         >
           Close
         </button>
       </div>
 
       <div className="flex min-h-0 flex-1">
-        <nav aria-label="Settings sections" className="w-40 shrink-0 border-r border-gray-200 p-2">
+        <nav aria-label="Settings sections" className="w-40 shrink-0 border-r border-line p-2">
           <ul className="space-y-0.5">
             {SECTIONS.map((entry) => (
               <li key={entry.id}>
@@ -62,10 +63,10 @@ export function SettingsPanel() {
                   type="button"
                   onClick={() => setSection(entry.id)}
                   aria-current={section === entry.id ? "true" : undefined}
-                  className={`w-full rounded px-2 py-1 text-left text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 ${
+                  className={`w-full rounded px-2 py-1 text-left text-xs focus-ring ${
                     section === entry.id
-                      ? "bg-gray-900 text-white"
-                      : "text-gray-700 hover:bg-gray-100"
+                      ? "bg-accent text-accent-ink"
+                      : "text-ink-soft hover:bg-hover"
                   }`}
                 >
                   {entry.label}
@@ -75,7 +76,7 @@ export function SettingsPanel() {
           </ul>
         </nav>
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        <div className="min-h-0 flex-1 pane p-3">
           {section === "general" && <GeneralSection />}
           {section === "agents" && <AgentsSection />}
           {section === "workspaces" && <WorkspacesSection />}
@@ -96,6 +97,41 @@ function GeneralSection() {
 
   return (
     <div className="space-y-4">
+      {/*
+        First, because it is the setting a user goes looking for. `System` follows
+        `prefers-color-scheme` and keeps following it, so a machine on a
+        light-at-day schedule changes with it; an explicit choice overrides that
+        permanently.
+
+        This is a real control now. It was listed in the design sketch and
+        deliberately omitted, on the grounds that a theme needed a `dark:` pass over
+        every component — true at the time, because 28 files hardcoded their
+        palette. They now resolve through semantic tokens, so a theme is a value
+        swap in `globals.css` and this toggle drives something real.
+      */}
+      <Field
+        label="Theme"
+        hint="System follows your operating system's appearance setting."
+      >
+        <div className="flex gap-1.5">
+          {(["light", "dark", "system"] as Theme[]).map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => update({ theme: value })}
+              aria-pressed={settings.theme === value}
+              className={`tap-target focus-ring rounded-md border px-2 py-1 text-xs capitalize ${
+                settings.theme === value
+                  ? "border-accent bg-accent text-accent-ink"
+                  : "border-line hover:bg-hover"
+              }`}
+            >
+              {value}
+            </button>
+          ))}
+        </div>
+      </Field>
+
       <Field label="Timeline density" hint="Controls spacing and text size in the conversation.">
         <div className="flex gap-1.5">
           {(["compact", "normal", "comfortable"] as Density[]).map((value) => (
@@ -104,10 +140,10 @@ function GeneralSection() {
               type="button"
               onClick={() => update({ density: value })}
               aria-pressed={settings.density === value}
-              className={`rounded border px-2 py-1 text-xs capitalize focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 ${
+              className={`rounded border px-2 py-1 text-xs capitalize focus-ring ${
                 settings.density === value
-                  ? "border-gray-900 bg-gray-900 text-white"
-                  : "border-gray-200 hover:bg-gray-50"
+                  ? "border-accent bg-accent text-accent-ink"
+                  : "border-line hover:bg-sunken"
               }`}
             >
               {value}
@@ -133,17 +169,18 @@ function GeneralSection() {
       </Field>
 
       <Field label="Data directory" hint="Set with SYLPH_WEB_DATA_DIR; read-only here.">
-        <p className="rounded border border-gray-200 bg-gray-50 px-2 py-1 font-mono text-[11px] text-gray-600">
+        <p className="rounded border border-line bg-sunken px-2 py-1 font-mono text-2xs text-ink-muted">
           {workspaces.data?.dataDir ?? "loading..."}
         </p>
       </Field>
 
       {/*
-        Theme, UI language, and cache management are in the design sketch but not
-        here. Theme needs a `dark:` pass over every component plus a resolved
-        `prefers-color-scheme` fallback; language needs an i18n framework and
-        extraction of every string. Both are real work, not a toggle, and a
-        control that stores a preference nothing reads would misrepresent that.
+        UI language and cache management are in the design sketch but not here.
+        Language needs an i18n framework and extraction of every string — real work,
+        not a toggle, and a control that stored a preference nothing reads would
+        misrepresent that. Cache management has nothing to manage: TanStack holds the
+        only client cache and the palette's "Reload sessions and workspaces" already
+        invalidates it.
       */}
 
       <Field label="Reset" hint="Clears stored preferences. Sessions and history are untouched.">
@@ -152,7 +189,7 @@ function GeneralSection() {
           onClick={() => {
             if (window.confirm("Reset all preferences to their defaults?")) reset();
           }}
-          className="rounded border border-gray-300 px-2 py-1 text-xs font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="rounded border border-line-strong px-2 py-1 text-xs font-medium hover:bg-sunken focus-ring"
         >
           Reset preferences
         </button>
@@ -178,7 +215,7 @@ function AgentsSection() {
           value={settings.defaultAgent}
           onChange={(event) => update({ defaultAgent: event.target.value })}
           aria-label="Default agent"
-          className="w-full rounded border border-gray-200 px-2 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="w-full rounded border border-line px-2 py-1 text-xs focus-ring"
         >
           <option value="">First discovered runner</option>
           {agents.map((agent) => (
@@ -191,7 +228,7 @@ function AgentsSection() {
 
       <Field label="Default model per agent" hint="Applied as the `model` flag on new sessions.">
         {agents.length === 0 ? (
-          <p className="text-xs text-gray-500">
+          <p className="text-xs text-ink-muted">
             No runners discovered. Check SYLPH_RUNNERS_DIR, then refresh.
           </p>
         ) : (
@@ -205,7 +242,7 @@ function AgentsSection() {
                 <li key={agent.name} className="flex items-center gap-2">
                   <span className="w-24 shrink-0 truncate text-xs font-medium">{agent.name}</span>
                   {choices.length === 0 ? (
-                    <span className="text-[11px] text-gray-500">
+                    <span className="text-2xs text-ink-muted">
                       declares no model flag
                     </span>
                   ) : (
@@ -220,7 +257,7 @@ function AgentsSection() {
                         })
                       }
                       aria-label={`Default model for ${agent.name}`}
-                      className="flex-1 rounded border border-gray-200 px-2 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                      className="flex-1 rounded border border-line px-2 py-1 text-xs focus-ring"
                     >
                       <option value="">Runner default</option>
                       {choices.map((choice) => (
@@ -250,7 +287,7 @@ function AgentsSection() {
               setRefreshing(false);
             }
           }}
-          className="rounded border border-gray-300 px-2 py-1 text-xs font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+          className="rounded border border-line-strong px-2 py-1 text-xs font-medium hover:bg-sunken focus-ring disabled:opacity-50"
         >
           {refreshing ? "Refreshing..." : "Refresh runners"}
         </button>
@@ -292,12 +329,12 @@ function WorkspacesSection() {
         label="Quick Start directory"
         hint={`Where ${quickStartCombo} starts a session. Resolved by the backend, which is the only side that can expand ~.`}
       >
-        <p className="rounded border border-gray-200 bg-gray-50 px-2 py-1 font-mono text-[11px] text-gray-600">
+        <p className="rounded border border-line bg-sunken px-2 py-1 font-mono text-2xs text-ink-muted">
           {data?.quickStartDir ?? "loading..."}
         </p>
       </Field>
 
-      <p className="text-xs text-gray-500">
+      <p className="text-xs text-ink-muted">
         Workspaces themselves are managed in the sidebar, where each one lists its
         sessions: right-click a workspace to pin, rename, or browse its history.
       </p>
@@ -360,12 +397,12 @@ function ShortcutsSection() {
 
   return (
     <div className="space-y-3">
-      <p className="text-[11px] text-gray-500">
+      <p className="text-2xs text-ink-muted">
         Click a binding, then press the keys. Escape cancels. A combo already in use
         is taken over, so two actions never share one shortcut.
       </p>
 
-      <ul className="divide-y divide-gray-100 rounded border border-gray-200">
+      <ul className="divide-y divide-line rounded border border-line">
         {(Object.keys(ACTION_LABELS) as ShortcutAction[]).map((action) => {
           const combo = bindings.get(action);
           const isRecording = recording === action;
@@ -377,10 +414,10 @@ function ShortcutsSection() {
                 onClick={() => setRecording(isRecording ? null : action)}
                 onKeyDown={(event) => isRecording && record(action, event)}
                 aria-label={`${ACTION_LABELS[action]} shortcut${combo ? `, currently ${formatCombo(combo, isMac)}` : ", unbound"}`}
-                className={`shrink-0 rounded border px-2 py-0.5 font-mono text-[11px] focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 ${
+                className={`shrink-0 rounded border px-2 py-0.5 font-mono text-2xs focus-ring ${
                   isRecording
-                    ? "border-blue-500 bg-blue-50 text-blue-800"
-                    : "border-gray-300 hover:bg-gray-50"
+                    ? "border-info-line bg-info-bg text-info"
+                    : "border-line-strong hover:bg-sunken"
                 }`}
               >
                 {isRecording ? "press keys..." : combo ? formatCombo(combo, isMac) : "unbound"}
@@ -393,7 +430,7 @@ function ShortcutsSection() {
       <button
         type="button"
         onClick={() => update({ shortcuts: DEFAULT_SHORTCUTS })}
-        className="rounded border border-gray-300 px-2 py-1 text-xs font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        className="rounded border border-line-strong px-2 py-1 text-xs font-medium hover:bg-sunken focus-ring"
       >
         Reset to defaults
       </button>
@@ -412,8 +449,8 @@ function Field({
 }) {
   return (
     <section>
-      <h4 className="text-xs font-semibold text-gray-900">{label}</h4>
-      {hint && <p className="mt-0.5 text-[11px] text-gray-500">{hint}</p>}
+      <h4 className="text-xs font-semibold text-ink">{label}</h4>
+      {hint && <p className="mt-0.5 text-2xs text-ink-muted">{hint}</p>}
       <div className="mt-1.5 space-y-1.5">{children}</div>
     </section>
   );
@@ -434,7 +471,7 @@ function Checkbox({
         type="checkbox"
         checked={checked}
         onChange={(event) => onChange(event.target.checked)}
-        className="h-3.5 w-3.5 rounded border-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        className="h-3.5 w-3.5 rounded border-line-strong focus-ring"
       />
       {label}
     </label>

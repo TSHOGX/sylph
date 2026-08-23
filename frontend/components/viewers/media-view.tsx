@@ -49,22 +49,22 @@ function Image({ src, name }: { src: string; name: string }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center gap-1.5 border-b border-gray-200 bg-gray-50 px-2 py-1">
-        <span className="flex-1 truncate text-[10px] text-gray-500">
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-line bg-sunken px-2 py-1">
+        <span className="flex-1 truncate text-3xs text-ink-muted">
           {natural ? `${natural.w} × ${natural.h}` : ""}
         </span>
         <button
           type="button"
           onClick={() => step(-1)}
           aria-label="Zoom out"
-          className="rounded px-1.5 text-[11px] text-gray-600 hover:bg-gray-200/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="rounded px-1.5 text-2xs text-ink-muted hover:bg-hover focus-ring"
         >
           −
         </button>
         <button
           type="button"
           onClick={() => setZoom(zoom === null ? 1 : null)}
-          className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="rounded border border-line bg-raised px-1.5 py-0.5 text-3xs font-medium text-ink-soft hover:bg-hover focus-ring"
         >
           {zoom === null ? "Fit" : `${Math.round(zoom * 100)}%`}
         </button>
@@ -72,7 +72,7 @@ function Image({ src, name }: { src: string; name: string }) {
           type="button"
           onClick={() => step(1)}
           aria-label="Zoom in"
-          className="rounded px-1.5 text-[11px] text-gray-600 hover:bg-gray-200/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+          className="rounded px-1.5 text-2xs text-ink-muted hover:bg-hover focus-ring"
         >
           +
         </button>
@@ -81,7 +81,7 @@ function Image({ src, name }: { src: string; name: string }) {
       {/* A checkerboard, so a transparent PNG reads as transparent rather than
           as white-on-white. */}
       <div
-        className="min-h-0 flex-1 overflow-auto p-2"
+        className="min-h-0 flex-1 overflow-auto overscroll-contain p-2"
         style={{
           backgroundImage:
             "linear-gradient(45deg, #f3f4f6 25%, transparent 25%, transparent 75%, #f3f4f6 75%), linear-gradient(45deg, #f3f4f6 25%, transparent 25%, transparent 75%, #f3f4f6 75%)",
@@ -90,7 +90,7 @@ function Image({ src, name }: { src: string; name: string }) {
         }}
       >
         {failed ? (
-          <p role="alert" className="text-[11px] text-red-800">
+          <p role="alert" className="text-2xs text-danger">
             This image could not be decoded. It may be truncated or not the format
             its extension claims.
           </p>
@@ -145,7 +145,7 @@ export function PdfView({ src, name }: { src: string; name: string }) {
       src={src}
       title={`${name} preview`}
       sandbox=""
-      className="min-h-0 w-full flex-1 border-0 bg-gray-100"
+      className="min-h-0 w-full flex-1 border-0 bg-hover"
     />
   );
 }

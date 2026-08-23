@@ -5,9 +5,37 @@ import {
   QueryClientProvider,
   useQuery,
 } from "@tanstack/react-query";
-import { ReactNode, useState } from "react";
+import { ReactNode, useEffect, useState } from "react";
 import { ApiError } from "@/lib/api";
 import { ErrorBoundary } from "@/lib/error-boundary";
+import { useSettings } from "@/lib/settings";
+import { applyTheme, watchSystemTheme } from "@/lib/theme";
+import { Button } from "@/components/ui/button";
+
+/**
+ * Keeps `<html data-theme>` in step with the preference.
+ *
+ * The bootstrap script in `layout.tsx` has already set the attribute before this
+ * mounts, so on a first load this re-applies the value that is already there — a
+ * deliberate no-op. What it exists for is the two cases the script cannot cover: a
+ * change made in the settings panel, and the OS flipping while a `system`
+ * preference is in effect.
+ *
+ * Renders nothing. It is a component rather than a hook inside `Providers` so that
+ * a settings change re-renders only this, not the whole application tree.
+ */
+function ThemeSync() {
+  const { settings } = useSettings();
+  const theme = settings.theme;
+
+  useEffect(() => {
+    applyTheme(theme);
+    // Re-resolves on an OS change, and only while the preference is `system`.
+    return watchSystemTheme(theme, () => applyTheme(theme));
+  }, [theme]);
+
+  return null;
+}
 
 /**
  * Fetch the session cookie before anything else runs.
@@ -43,7 +71,7 @@ function AuthGate({ children }: { children: ReactNode }) {
     return (
       <output
         aria-live="polite"
-        className="flex min-h-screen items-center justify-center text-sm text-gray-500"
+        className="flex h-dvh items-center justify-center text-sm text-ink-muted"
       >
         Connecting to backend...
       </output>
@@ -52,28 +80,24 @@ function AuthGate({ children }: { children: ReactNode }) {
 
   if (error) {
     return (
-      <div
-        role="alert"
-        className="flex min-h-screen items-center justify-center px-4"
-      >
+      <div role="alert" className="flex h-dvh items-center justify-center px-4">
         <div className="max-w-md text-center">
-          <h1 className="text-lg font-semibold text-red-800">
-            Cannot reach the backend
-          </h1>
-          <p className="mt-2 text-sm text-gray-600">
+          <h1 className="text-lg font-semibold text-danger">Cannot reach the backend</h1>
+          <p className="mt-2 text-sm text-ink-muted">
             Sylph Web needs the Rust backend running on{" "}
-            <code className="rounded bg-gray-100 px-1">localhost:4317</code>.
+            <code className="rounded bg-hover px-1">localhost:4317</code>.
           </p>
-          <pre className="mt-3 overflow-x-auto rounded bg-gray-900 p-3 text-left text-xs text-gray-100">
+          <pre className="mt-3 overflow-x-auto rounded-lg bg-sunken p-3 text-left text-xs text-ink-soft">
             cd backend &amp;&amp; cargo run
           </pre>
-          <button
-            type="button"
+          <Button
+            variant="primary"
+            size="md"
             onClick={() => window.location.reload()}
-            className="mt-4 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+            className="mt-4"
           >
             Retry
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -106,6 +130,10 @@ export function Providers({ children }: { children: ReactNode }) {
 
   return (
     <QueryClientProvider client={queryClient}>
+      {/* Outside the auth gate: the theme has to be right on the "Connecting to
+          backend..." screen and on the failure screen too, both of which render
+          before the gate resolves. */}
+      <ThemeSync />
       <ErrorBoundary label="Sylph Web">
         <AuthGate>{children}</AuthGate>
       </ErrorBoundary>

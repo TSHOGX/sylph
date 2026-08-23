@@ -4,22 +4,54 @@
  * The message composer.
  *
  * One bordered surface holding everything a turn needs: attachments, the message,
- * and the runner configuration that turn will use. It replaces a layout where the
- * textarea, the attachment dropzone, and the buttons were three stacked blocks —
- * which read as three unrelated form fields rather than one input, and left the
- * agent and model invisible even though both decide what the message will do.
+ * and the runner configuration that turn will use.
  *
- * The controls are generated from the runner's `--describe` output, never
- * hardcoded. This is not defensiveness: the four installed runners genuinely
- * disagree. `codex` declares no `model` at all, and every runner declares a
- * different `effort` enumeration — `claude` has `xhigh`/`max`, `codex` has
- * `minimal`, `pi` has `off`. A fixed pair of dropdowns would be wrong for `codex`
- * on the first render.
+ * # Layout: the message owns its own row
+ *
+ * The textarea spans the full width and the controls sit on a row beneath it. That
+ * is what makes the composer usable on a phone, and the previous shape is worth
+ * recording because it looked reasonable and was not:
+ *
+ * The controls used to share one non-wrapping flex row with `ml-auto` on the right
+ * group, and the agent, model, and effort controls were native `<select>`s. A
+ * `<select>` is sized by its *longest option*, not by its current value, so a
+ * runner declaring `claude-opus-5-20260501` made that control ~180px wide
+ * regardless of what was selected. Three of them plus Send exceeded a 390px
+ * viewport, and because the width came from content the user could not see, no
+ * amount of `min-w-0` or `truncate` could recover it — the intrinsic minimum was
+ * already too large. On a desktop the same effect merely squeezed the textarea.
+ *
+ * So the controls are buttons that render the *current* value and open a menu.
+ * A button can truncate. Everything on the control row is `min-w-0` and the row
+ * itself scrolls horizontally rather than growing, so no configuration can push
+ * Send off screen.
+ *
+ * # What is on the row, and what is in the `+` menu
+ *
+ * Split by how often a turn changes it, following ChatGPT and Claude:
+ *
+ * - **Always visible**: the message, `+`, model, thinking, Send/Stop. Model and
+ *   thinking are per-turn decisions that change what the message will *do*, so
+ *   hiding them costs a click on the majority path and makes the current model
+ *   invisible — which matters when a session is mid-conversation.
+ * - **In the `+` menu**: attach a file, save attachments into the workspace, run a
+ *   command, switch agent. Each is either occasional or session-scoped. The `+` is
+ *   also the affordance a phone user already knows from every messaging app, which
+ *   the paperclip it replaced is not: a paperclip claims the menu holds only
+ *   attachments, so nothing else could ever be put there.
+ *
+ * # The controls are generated, never hardcoded
+ *
+ * From the runner's `--describe` output. Not defensiveness — the four installed
+ * runners genuinely disagree: `codex` declares no `model` at all, and every runner
+ * declares a different `effort` enumeration (`claude` has `xhigh`/`max`, `codex`
+ * has `minimal`, `pi` has `off`). A fixed pair of dropdowns would be wrong for
+ * `codex` on the first render.
  */
 
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   api,
@@ -29,26 +61,53 @@ import {
   type Session,
 } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
+import { useIsMobile } from "@/lib/viewport";
 import {
   MAX_ATTACHMENTS,
   MAX_TOTAL_BYTES,
   readAttachments,
   type StagedAttachment,
 } from "@/components/attachment-picker";
+import { Button, IconButton } from "@/components/ui/button";
+import { MenuButton, type MenuItem } from "@/components/ui/menu";
+import {
+  ChevronDownIcon,
+  ChipIcon,
+  CommandIcon,
+  FileImageIcon,
+  FileTextIcon,
+  PaperclipIcon,
+  PlusIcon,
+  SendIcon,
+  SparklesIcon,
+  StopIcon,
+  XIcon,
+} from "@/components/icons";
 
 const DirectoryPicker = dynamic(
   () => import("@/components/directory-picker").then((m) => m.DirectoryPicker),
   { ssr: false },
 );
 
-/** Order flags are shown in, left to right. Anything else follows, sorted. */
-const FLAG_ORDER = ["model", "effort"];
+/**
+ * Flags promoted to the control row, in order, with the icon each gets.
+ *
+ * Everything a runner declares beyond these still gets a control — it goes in the
+ * `+` menu instead. That keeps the row a fixed shape no matter what a runner
+ * declares, which is the property the old sorted-and-spread version lacked: a
+ * runner adding a third enumerated flag silently made the row wider.
+ */
+const ROW_FLAGS = ["model", "effort"] as const;
 
 /** Human label for a flag key. `effort` is the reasoning budget. */
 function flagLabel(key: string): string {
   if (key === "effort") return "Thinking";
   if (key === "model") return "Model";
   return key;
+}
+
+function flagIcon(key: string) {
+  return key === "effort" ? <SparklesIcon size={14} /> : <ChipIcon size={14} />;
 }
 
 export function Composer({
@@ -86,6 +145,8 @@ export function Composer({
   onOpenCommands: () => void;
 }) {
   const queryClient = useQueryClient();
+  const router = useRouter();
+  const isMobile = useIsMobile();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messageId = useId();
@@ -108,12 +169,14 @@ export function Composer({
 
   // Auto-grow to the content, bounded. A fixed two-row box hides the start of a
   // long message while it is being written, and a freely growing one eats the
-  // transcript.
+  // transcript. The cap is a share of the viewport rather than a fixed 240px: on a
+  // phone in landscape, 240px is most of the screen.
   useEffect(() => {
     const node = textareaRef.current;
     if (!node) return;
+    const cap = Math.max(120, Math.min(240, window.innerHeight * 0.35));
     node.style.height = "auto";
-    node.style.height = `${Math.min(node.scrollHeight, 240)}px`;
+    node.style.height = `${Math.min(node.scrollHeight, cap)}px`;
   }, [text]);
 
   const totalBytes = attachments.reduce((sum, item) => sum + item.size, 0);
@@ -150,8 +213,160 @@ export function Composer({
     },
   });
 
+  /**
+   * Changing the agent replaces the session: `agent` is fixed at creation
+   * server-side, and identity policy hangs off it. On an empty session there is
+   * nothing to preserve, so this creates a fresh one in the same directory and
+   * navigates to it — which is why it is only offered at turn zero.
+   */
+  const recreate = useMutation({
+    mutationFn: (agent: string) =>
+      api.sessions.create({ agent, workdir: session.workdir }),
+    onSuccess: ({ session: created }) => {
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+      router.push(`/sessions/${created.id}`);
+    },
+  });
+
+  /**
+   * One mutation for every flag.
+   *
+   * Sends the whole flag set, because `PATCH` replaces rather than merges — a
+   * partial send would clear the flag the user is not touching. Previously each
+   * control owned its own mutation, which meant N pending states and N error
+   * states for what is one endpoint.
+   */
+  const patchFlags = useMutation({
+    mutationFn: ({ key, value }: { key: string; value: string }) => {
+      const next = { ...flags };
+      // Empty means "let the runner decide", expressed by omitting the flag rather
+      // than sending a blank value the runner would pass through.
+      if (value) next[key] = value;
+      else delete next[key];
+      return api.sessions.update(session.id, { flags: next });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["session", session.id] });
+    },
+  });
+
+  // A free-form flag has nothing to enumerate, so there is no sensible control to
+  // draw for it. Omitted rather than shown as an empty menu.
+  //
+  // `descriptor?.flags ?? {}` is inside the memo, not above it: a fresh `{}` every
+  // render makes it a new dependency every render, which defeats the memo entirely.
+  const enumerated = useMemo(
+    () =>
+      Object.entries(descriptor?.flags ?? {}).filter(
+        ([, spec]) => (spec.choices ?? []).length > 0,
+      ),
+    [descriptor?.flags],
+  );
+  const rowFlags = enumerated.filter(([key]) =>
+    (ROW_FLAGS as readonly string[]).includes(key),
+  );
+  const menuFlags = enumerated.filter(
+    ([key]) => !(ROW_FLAGS as readonly string[]).includes(key),
+  );
+
+  /** Choices for one flag, as menu items. */
+  const flagItems = (key: string, choices: string[]): MenuItem[] => [
+    {
+      label: "Runner default",
+      checked: !flags[key],
+      onSelect: () => patchFlags.mutate({ key, value: "" }),
+    },
+    ...choices.map((choice) => ({
+      label: choice,
+      checked: flags[key] === choice,
+      onSelect: () => patchFlags.mutate({ key, value: choice }),
+    })),
+  ];
+
+  /**
+   * A disabled row used as a group heading.
+   *
+   * The menu has no nesting: a submenu on a touch screen is a reliable miss-tap
+   * generator, because the parent row is still a target while the child list is
+   * opening. So a group of choices is introduced by an inert labelled row instead,
+   * which is also what makes the whole menu one flat arrow-key sequence.
+   */
+  const heading = (label: string): MenuItem => ({
+    label,
+    separated: true,
+    disabled: true,
+    onSelect: () => {},
+  });
+
+  const menuItems: MenuItem[] = [
+    {
+      label: "Attach files...",
+      icon: <PaperclipIcon size={14} />,
+      hint: `${MAX_ATTACHMENTS} max`,
+      disabled: disabled || encoding,
+      onSelect: () => fileInputRef.current?.click(),
+    },
+    ...(attachments.length > 0
+      ? [
+          {
+            label: "Save attachments to workspace...",
+            icon: <FileTextIcon size={14} />,
+            disabled: disabled || uploadToWorkspace.isPending,
+            onSelect: () => setUploadTarget(attachments),
+          },
+        ]
+      : []),
+    ...(hasCommands
+      ? [
+          {
+            label: "Run a command...",
+            icon: <CommandIcon size={14} />,
+            separated: true,
+            disabled,
+            onSelect: onOpenCommands,
+          },
+        ]
+      : []),
+
+    // Agent, which is session-scoped rather than per-turn and so sits below a
+    // separator. Two shapes: the choices when it is still switchable, and a single
+    // inert row naming the current agent once it is not. Present-but-inert rather
+    // than absent — a control that vanishes reads as a bug, where one that states
+    // it is fixed explains the rule.
+    ...(agentLocked || agents.length < 2
+      ? [
+          {
+            label: `Agent: ${session.agent}`,
+            icon: <ChipIcon size={14} />,
+            hint: agentLocked ? "fixed" : undefined,
+            separated: true,
+            disabled: true,
+            onSelect: () => {},
+          } satisfies MenuItem,
+        ]
+      : [
+          heading("Agent"),
+          ...agents.map((agent) => ({
+            label: agent.name,
+            checked: agent.name === session.agent,
+            disabled: disabled || recreate.isPending,
+            onSelect: () => {
+              if (agent.name !== session.agent) recreate.mutate(agent.name);
+            },
+          })),
+        ]),
+
+    // Anything the runner declares beyond model and effort. Rare, but it must have
+    // a control: the runner declared it, so it is real configuration.
+    ...menuFlags.flatMap(([key, spec]) => [
+      heading(flagLabel(key)),
+      ...flagItems(key, spec.choices ?? []),
+    ]),
+  ];
+
   return (
-    <div className="shrink-0 border-t border-gray-200 px-4 py-2">
+    <div className="shrink-0 border-t border-line bg-canvas px-2 pt-2 pb-safe md:px-4">
       <div className="mx-auto max-w-3xl">
         <form
           onSubmit={(event) => {
@@ -178,55 +393,54 @@ export function Composer({
           // No `opacity` while disabled. It used to carry `opacity-60`, which is a
           // blunt instrument: opacity composites the whole subtree against the
           // page, so every descendant's contrast drops at once. Measured by axe
-          // during a live turn, `text-gray-600` fell to 2.87:1 and the Stop
-          // button's `text-red-800` to 3.7:1 — both below the 4.5:1 that WCAG
-          // 1.4.3 requires, and Stop is the one control a user needs *while* the
-          // turn runs. The muted background says "not accepting input" without
-          // touching foreground contrast, and the textarea dims its own text.
-          className={`rounded-xl border transition-colors focus-within:border-gray-400 focus-within:ring-2 focus-within:ring-gray-900/10 ${
+          // during a live turn, the muted text fell to 2.87:1 and the Stop button
+          // to 3.7:1 — both below the 4.5:1 that WCAG 1.4.3 requires, and Stop is
+          // the one control a user needs *while* the turn runs. The muted
+          // background says "not accepting input" without touching foreground
+          // contrast, and the textarea dims its own text.
+          className={`rounded-2xl border transition-colors focus-within:border-line-strong ${
             dragging
-              ? "border-gray-900 bg-gray-50"
+              ? "border-focus bg-sunken"
               : disabled
-                ? "border-gray-200 bg-gray-50"
-                : "border-gray-200 bg-white"
+                ? "border-line bg-sunken"
+                : "border-line bg-raised"
           }`}
         >
           {attachments.length > 0 && (
             <ul
               aria-label="Staged attachments"
-              className="flex flex-wrap gap-1.5 border-b border-gray-100 px-2.5 pb-2 pt-2"
+              className="flex flex-wrap gap-1.5 border-b border-line px-2 pt-2 pb-2"
             >
               {attachments.map((item) => (
                 <li
                   key={item.id}
-                  className="flex items-center gap-1.5 rounded-md border border-gray-200 bg-gray-50 py-1 pl-1 pr-1.5 text-xs"
+                  className="flex max-w-full items-center gap-1.5 rounded-lg border border-line bg-sunken py-1 pr-1 pl-1 text-2xs"
                 >
                   {item.previewUrl ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={item.previewUrl} alt="" className="h-6 w-6 rounded object-cover" />
+                    <img
+                      src={item.previewUrl}
+                      alt=""
+                      className="h-6 w-6 shrink-0 rounded object-cover"
+                    />
                   ) : (
-                    <span
-                      aria-hidden="true"
-                      className="flex h-6 w-6 items-center justify-center rounded bg-gray-200 text-gray-600"
-                    >
-                      ⎘
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-active text-ink-muted">
+                      <FileImageIcon size={14} />
                     </span>
                   )}
-                  <span className="max-w-[10rem] truncate font-medium" title={item.name}>
+                  <span className="min-w-0 flex-1 truncate font-medium" title={item.name}>
                     {item.name}
                   </span>
-                  <span className="text-gray-500">{formatBytes(item.size)}</span>
-                  <button
-                    type="button"
+                  <span className="shrink-0 text-ink-muted">{formatBytes(item.size)}</span>
+                  <IconButton
+                    label={`Remove ${item.name}`}
+                    disabled={disabled}
                     onClick={() =>
                       onAttachmentsChange(attachments.filter((a) => a.id !== item.id))
                     }
-                    disabled={disabled}
-                    aria-label={`Remove ${item.name}`}
-                    className="rounded px-1 text-gray-500 hover:bg-gray-200 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
                   >
-                    ×
-                  </button>
+                    <XIcon size={14} />
+                  </IconButton>
                 </li>
               ))}
             </ul>
@@ -242,16 +456,18 @@ export function Composer({
             rows={1}
             onChange={(event) => onTextChange(event.target.value)}
             onKeyDown={(event) => {
-              // Enter sends; Shift+Enter and Cmd/Ctrl+Enter insert a newline.
-              if (
-                event.key === "Enter" &&
-                !event.shiftKey &&
-                !event.metaKey &&
-                !event.ctrlKey
-              ) {
-                event.preventDefault();
-                if (canSend) onSend();
-              }
+              if (event.key !== "Enter") return;
+              // On a phone, Return inserts a newline and the Send button sends.
+              // Enter-to-send on a soft keyboard means a message cannot contain a
+              // line break at all — the Return key is the only way to type one, and
+              // there is no Shift to hold. Every mobile messaging app behaves this
+              // way for the same reason.
+              if (isMobile) return;
+              // On a desktop, Enter sends; Shift+Enter and Cmd/Ctrl+Enter insert a
+              // newline.
+              if (event.shiftKey || event.metaKey || event.ctrlKey) return;
+              event.preventDefault();
+              if (canSend) onSend();
             }}
             onPaste={(event) => {
               // Pasted images are attachments. Without this a screenshot in the
@@ -267,13 +483,23 @@ export function Composer({
             }
             disabled={disabled}
             aria-describedby={problem ? problemId : undefined}
-            // `disabled:text-gray-500` rather than inheriting a container opacity:
-            // it dims the one thing that should read as inactive, and 500 on the
-            // disabled background still clears 4.5:1.
-            className="block max-h-60 w-full resize-none border-0 bg-transparent px-3 py-2.5 text-sm placeholder:text-gray-400 focus:outline-none disabled:cursor-not-allowed disabled:text-gray-500"
+            // `text-base` on mobile is not a style choice: mobile Safari zooms the
+            // page when a focused field's text is under 16px and does not zoom back
+            // out, which is the other half of the reported "the whole screen moves".
+            //
+            // `disabled:text-ink-muted` rather than inheriting a container opacity:
+            // it dims the one thing that should read as inactive, and still clears
+            // 4.5:1 on the disabled background.
+            className="block w-full resize-none border-0 bg-transparent px-3 py-2.5 text-base placeholder:text-ink-muted focus:outline-none disabled:cursor-not-allowed disabled:text-ink-muted md:text-sm"
           />
 
-          <div className="flex items-center gap-1.5 px-2 pb-2">
+          {/*
+            The control row. `flex-nowrap` with a scrolling middle section rather
+            than `flex-wrap`: wrapping makes the composer's height depend on how
+            many flags a runner declares, so the transcript would reflow when a
+            model name changed. Scrolling keeps the height fixed and Send pinned.
+          */}
+          <div className="flex items-center gap-1 px-2 pb-2">
             <input
               ref={fileInputRef}
               type="file"
@@ -288,128 +514,136 @@ export function Composer({
               aria-hidden="true"
               tabIndex={-1}
             />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={disabled || encoding}
-              title={`Attach files — up to ${MAX_ATTACHMENTS}, ${formatBytes(MAX_TOTAL_BYTES)} total`}
-              aria-label="Attach files"
-              className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
-            >
-              <span aria-hidden="true">📎</span>
-            </button>
 
-            {attachments.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setUploadTarget(attachments)}
-                disabled={disabled || uploadToWorkspace.isPending}
-                title="Copy the staged files into a folder in this workspace"
-                className="rounded-md px-1.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
-              >
-                {uploadToWorkspace.isPending ? "Saving..." : "Save to workspace..."}
-              </button>
-            )}
+            {/* "Add", not "Add to this message": the longer name contained
+                "Message", which is the textarea's own label, so the two controls
+                became indistinguishable by accessible name. The sheet heading keeps
+                the phrase, where there is room for it. */}
+            <MenuButton label="Add" title="Add to this message" items={menuItems}>
+              {(trigger) => (
+                <IconButton
+                  label="Add"
+                  variant="ghost"
+                  disabled={disabled && !hasCommands}
+                  size={isMobile ? 20 : 16}
+                  {...trigger}
+                >
+                  <PlusIcon size={isMobile ? 20 : 16} />
+                </IconButton>
+              )}
+            </MenuButton>
 
-            <AgentControl
-              session={session}
-              agents={agents}
-              locked={agentLocked}
-              disabled={disabled}
-            />
-
-            <div className="ml-auto flex items-center gap-1.5">
-              {descriptor?.flags &&
-                Object.entries(descriptor.flags)
-                  .sort(([a], [b]) => {
-                    const ai = FLAG_ORDER.indexOf(a);
-                    const bi = FLAG_ORDER.indexOf(b);
-                    if (ai !== -1 || bi !== -1) {
-                      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-                    }
-                    return a.localeCompare(b);
-                  })
-                  .map(([key, spec]) => (
-                    <FlagControl
-                      key={key}
-                      sessionId={session.id}
-                      flagKey={key}
-                      label={flagLabel(key)}
-                      choices={spec.choices ?? []}
-                      value={flags[key] ?? ""}
-                      allFlags={flags}
+            {/*
+              Scrolls rather than grows. The `[scrollbar-width:none]` pair hides the
+              bar itself: a visible scrollbar under two chips reads as a rendering
+              artefact, and the chips are self-evidently swipeable on a touch screen.
+            */}
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {rowFlags.map(([key, spec]) => (
+                <MenuButton
+                  key={key}
+                  label={flagLabel(key)}
+                  items={flagItems(key, spec.choices ?? [])}
+                >
+                  {(trigger) => (
+                    <Button
+                      variant="chip"
                       // Mid-turn the runner is already running with the old value,
                       // so a change now would silently apply to the *next* turn
                       // while appearing to affect this one.
-                      disabled={isLive}
-                    />
-                  ))}
-
-              {hasCommands && (
-                <button
-                  type="button"
-                  onClick={onOpenCommands}
-                  disabled={disabled}
-                  className="rounded-md border border-gray-200 px-2 py-1 text-xs font-medium hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
-                >
-                  Command
-                </button>
-              )}
-
-              {isLive ? (
-                <button
-                  type="button"
-                  onClick={onStop}
-                  disabled={stopping}
-                  className="rounded-md border border-red-300 px-2.5 py-1 text-xs font-medium text-red-800 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:opacity-50"
-                >
-                  {stopping ? "Stopping..." : "Stop"}
-                </button>
-              ) : (
-                <button
-                  type="submit"
-                  disabled={!canSend}
-                  className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
-                >
-                  {sending ? "Sending..." : "Send"}
-                </button>
-              )}
+                      disabled={isLive || patchFlags.isPending}
+                      icon={flagIcon(key)}
+                      className="max-w-40 shrink-0"
+                      {...trigger}
+                    >
+                      <span className="min-w-0 truncate">
+                        {flags[key] ?? flagLabel(key)}
+                      </span>
+                      <ChevronDownIcon size={12} />
+                    </Button>
+                  )}
+                </MenuButton>
+              ))}
             </div>
+
+            {isLive ? (
+              <Button
+                variant="danger"
+                onClick={onStop}
+                disabled={stopping}
+                icon={<StopIcon size={14} />}
+                className="shrink-0"
+              >
+                {stopping ? "Stopping..." : "Stop"}
+              </Button>
+            ) : (
+              // Icon-only on a phone: the label costs the width the chips need, and
+              // an upward arrow in a filled circle is the least ambiguous control in
+              // any messaging app. `aria-label` carries the name either way.
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={!canSend}
+                aria-label={sending ? "Sending" : "Send"}
+                className="shrink-0 max-md:h-9 max-md:w-9 max-md:rounded-full max-md:p-0"
+              >
+                <SendIcon size={16} />
+                <span className="max-md:hidden">{sending ? "Sending..." : "Send"}</span>
+              </Button>
+            )}
           </div>
         </form>
 
         {encoding && (
-          <output aria-live="polite" className="mt-1 block text-xs text-gray-500">
+          <output aria-live="polite" className="mt-1 block text-2xs text-ink-muted">
             Encoding attachments...
           </output>
         )}
 
         {problem && (
-          <p id={problemId} role="alert" className="mt-1 text-xs text-red-700">
+          <p id={problemId} role="alert" className="mt-1 text-2xs text-danger">
             {problem}
           </p>
         )}
 
         {uploadToWorkspace.error != null && (
-          <p role="alert" className="mt-1 text-xs text-red-700">
+          <p role="alert" className="mt-1 text-2xs text-danger">
             {uploadToWorkspace.error instanceof Error
               ? uploadToWorkspace.error.message
               : "Could not save those files into the workspace."}
           </p>
         )}
 
+        {patchFlags.error != null && (
+          <p role="alert" className="mt-1 text-2xs text-danger">
+            {patchFlags.error instanceof Error
+              ? patchFlags.error.message
+              : "Could not update the runner configuration."}
+          </p>
+        )}
+
+        {recreate.error != null && (
+          <p role="alert" className="mt-1 text-2xs text-danger">
+            {recreate.error instanceof Error
+              ? recreate.error.message
+              : "Could not switch agent."}
+          </p>
+        )}
+
         {sendError != null && (
-          <p role="alert" className="mt-1 text-xs text-red-700">
+          <p role="alert" className="mt-1 text-2xs text-danger">
             {describeSendError(sendError)}
           </p>
         )}
 
         <div className="mt-1 flex items-center justify-between gap-3 px-1">
-          <p className="text-[10px] text-gray-500">
+          {/* Hidden on a phone, where it would be false: Return inserts a newline
+              there. A hint that describes the wrong platform is worse than none. */}
+          <p className="hidden text-3xs text-ink-muted md:block">
             Enter to send · Shift+Enter for a new line
           </p>
           {attachments.length > 0 && (
-            <p className="text-[10px] text-gray-500">
+            <p className="text-3xs text-ink-muted">
               {attachments.length} of {MAX_ATTACHMENTS} files · {formatBytes(totalBytes)} of{" "}
               {formatBytes(MAX_TOTAL_BYTES)}
             </p>
@@ -429,155 +663,6 @@ export function Composer({
         />
       )}
     </div>
-  );
-}
-
-/**
- * The agent this session runs on.
- *
- * Interactive only before the first turn. After that it renders as a plain
- * label — not a disabled control — because a disabled `<select>` invites the user
- * to keep trying. The tooltip says why.
- */
-function AgentControl({
-  session,
-  agents,
-  locked,
-  disabled,
-}: {
-  session: Session;
-  agents: Agent[];
-  locked: boolean;
-  disabled: boolean;
-}) {
-  const queryClient = useQueryClient();
-  const router = useRouter();
-  const labelId = useId();
-
-  // Changing the agent replaces the session: `agent` is fixed at creation
-  // server-side, and identity policy hangs off it. On an empty session there is
-  // nothing to preserve, so this creates a fresh one in the same directory and
-  // navigates to it — which is why it is only offered at turn zero.
-  const recreate = useMutation({
-    mutationFn: (agent: string) =>
-      api.sessions.create({ agent, workdir: session.workdir }),
-    onSuccess: ({ session: created }) => {
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      router.push(`/sessions/${created.id}`);
-    },
-  });
-
-  if (locked) {
-    return (
-      <span
-        title="The agent is fixed once a session has history: its transcript and identity policy belong to this runner."
-        className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium text-gray-600"
-      >
-        <span aria-hidden="true" className="text-emerald-600">
-          ●
-        </span>
-        {session.agent}
-      </span>
-    );
-  }
-
-  return (
-    <>
-      <label id={labelId} className="sr-only">
-        Agent
-      </label>
-      <select
-        aria-labelledby={labelId}
-        value={session.agent}
-        disabled={disabled || recreate.isPending}
-        onChange={(event) => recreate.mutate(event.target.value)}
-        title="Switch agent. Available until this session has its first turn."
-        className="cursor-pointer rounded-md px-1.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
-      >
-        {agents.map((agent) => (
-          <option key={agent.name} value={agent.name}>
-            {agent.name}
-          </option>
-        ))}
-      </select>
-    </>
-  );
-}
-
-/**
- * One runner flag, rendered from its declared choices.
- *
- * Sends the whole flag set on change, because `PATCH` replaces rather than
- * merges — a partial send would clear the flag the user is not touching.
- */
-function FlagControl({
-  sessionId,
-  flagKey,
-  label,
-  choices,
-  value,
-  allFlags,
-  disabled,
-}: {
-  sessionId: string;
-  flagKey: string;
-  label: string;
-  choices: string[];
-  value: string;
-  allFlags: Record<string, string>;
-  disabled: boolean;
-}) {
-  const queryClient = useQueryClient();
-  const labelId = useId();
-
-  const patch = useMutation({
-    mutationFn: (next: string) => {
-      const flags = { ...allFlags };
-      // Empty means "let the runner decide", which is expressed by omitting the
-      // flag rather than sending a blank value the runner would pass through.
-      if (next) flags[flagKey] = next;
-      else delete flags[flagKey];
-      return api.sessions.update(sessionId, { flags });
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-    },
-  });
-
-  // A free-form flag has nothing to enumerate, so there is no sensible control to
-  // draw for it here. Omitted rather than shown as an empty dropdown.
-  if (choices.length === 0) return null;
-
-  return (
-    <>
-      <label id={labelId} className="sr-only">
-        {label}
-      </label>
-      <select
-        aria-labelledby={labelId}
-        value={value}
-        disabled={disabled || patch.isPending}
-        onChange={(event) => patch.mutate(event.target.value)}
-        title={
-          patch.error instanceof Error
-            ? patch.error.message
-            : `${label} for the next turn`
-        }
-        className={`cursor-pointer rounded-md border px-1.5 py-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50 ${
-          patch.error != null
-            ? "border-red-300 text-red-800"
-            : "border-gray-200 text-gray-700 hover:bg-gray-50"
-        }`}
-      >
-        <option value="">{label}: default</option>
-        {choices.map((choice) => (
-          <option key={choice} value={choice}>
-            {label}: {choice}
-          </option>
-        ))}
-      </select>
-    </>
   );
 }
 

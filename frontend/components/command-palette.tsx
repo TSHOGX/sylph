@@ -21,7 +21,8 @@ import { formatCombo, useIsMac } from "@/lib/shortcuts";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Overlay, scrollActiveIntoView, useListNavigation } from "@/components/overlay";
-import { Kbd } from "@/components/app-shell";
+import { Kbd } from "@/components/ui/button";
+import { CommandIcon } from "@/components/icons";
 
 interface Command {
   id: string;
@@ -296,9 +297,9 @@ export function CommandPalette() {
 
   return (
     <Overlay title="Command palette" onClose={closeOverlay} describedBy="palette-hint">
-      <div className="flex items-center gap-2 border-b border-gray-200 px-3 py-2.5">
-        <span aria-hidden="true" className="text-xs text-gray-500">
-          ⌘
+      <div className="flex items-center gap-2 border-b border-line px-3 py-2.5">
+        <span className="text-ink-muted">
+          <CommandIcon size={15} />
         </span>
         <input
           type="text"
@@ -312,7 +313,7 @@ export function CommandPalette() {
           onChange={(event) => setPicker({ query: event.target.value, active: 0 })}
           onKeyDown={(event) => onKeyDown(event, activeIndex, setActive)}
           placeholder="Run a command..."
-          className="flex-1 bg-transparent text-sm outline-none placeholder:text-gray-500"
+          className="flex-1 bg-transparent text-sm outline-none placeholder:text-ink-muted"
         />
       </div>
 
@@ -321,10 +322,10 @@ export function CommandPalette() {
         id="palette-results"
         role="listbox"
         aria-label="Commands"
-        className="min-h-0 flex-1 overflow-y-auto py-1"
+        className="min-h-0 flex-1 pane py-1"
       >
         {ranked.length === 0 ? (
-          <p className="px-3 py-6 text-center text-xs text-gray-500">No matching command.</p>
+          <p className="px-3 py-6 text-center text-xs text-ink-muted">No matching command.</p>
         ) : (
           ranked.map((command, index) => {
             const previous = index > 0 ? ranked[index - 1] : undefined;
@@ -338,7 +339,7 @@ export function CommandPalette() {
             return (
               <div key={command.id}>
                 {showHeading && (
-                  <p className="px-3 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+                  <p className="px-3 pb-0.5 pt-2 text-3xs font-semibold uppercase tracking-wider text-ink-muted">
                     {heading}
                   </p>
                 )}
@@ -350,10 +351,10 @@ export function CommandPalette() {
                   onMouseEnter={() => setActive(index)}
                   onClick={() => commit(index)}
                   className={`flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs ${
-                    index === activeIndex ? "bg-gray-100" : ""
+                    index === activeIndex ? "bg-hover" : ""
                   }`}
                 >
-                  <span className="min-w-0 flex-1 truncate text-gray-800">{command.label}</span>
+                  <span className="min-w-0 flex-1 truncate text-ink">{command.label}</span>
                   {combo && <Kbd>{formatCombo(combo, isMac)}</Kbd>}
                 </div>
               </div>
@@ -364,7 +365,7 @@ export function CommandPalette() {
 
       <footer
         id="palette-hint"
-        className="shrink-0 border-t border-gray-200 bg-gray-50 px-3 py-1.5 text-[10px] text-gray-500"
+        className="shrink-0 border-t border-line bg-sunken px-3 py-1.5 text-3xs text-ink-muted"
       >
         ↑↓ navigate · ↵ run · Esc close
       </footer>
