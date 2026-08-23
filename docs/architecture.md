@@ -43,15 +43,36 @@ Rust Backend (127.0.0.1:4317)
 
 ### Session Origins
 
-| Origin | Created by | Identity | Lifecycle | SOUL.md injection |
-|--------|-----------|----------|-----------|-------------------|
-| `sylph` | WebApp | Sylph-managed | 24h idle / 04:00 reset | Yes |
-| `native` | CLI/TUI import | Preserved | No implicit reset | Never |
+| Origin | Created by | Lifecycle | SOUL.md injection |
+|--------|-----------|-----------|-------------------|
+| `sylph` | WebApp | 24h idle / 04:00 reset | Per `identityMode`, default yes |
+| `native` | CLI/TUI import | No implicit reset | Never |
 
 **Invariants:**
 - Origin is immutable after creation
 - Native sessions never receive SOUL.md or lifecycle resets
 - Sylph sessions follow managed lifecycle (24h idle, 04:00 cutoff)
+
+### Identity is a second axis, not a synonym for origin
+
+`identityMode` is `sylph` (inject `SOUL.md`) or `preserve` (run the agent on its own
+identity). It is chosen when a session is created, defaults to `sylph`, and `PATCH`
+refuses it — identity describes what a stored transcript was *produced by*, so
+changing it on a session with history would rewrite what that history means.
+
+**A Sylph session that declines injection is still a Sylph session.** Origin stays
+`sylph`, and managed lifecycle still applies. Collapsing the two axes would make
+"run this agent as itself" indistinguishable from an imported session that must
+never be reset or compacted — the invariant above. So:
+
+| | `identityMode: sylph` | `identityMode: preserve` |
+| --- | --- | --- |
+| `origin: sylph` | The default. Injects, resets. | Agent's own identity, still resets. |
+| `origin: native` | Never produced. | Every imported session. |
+
+An import sets both `identityMode` and `lifecycleMode` to `preserve`, derived from
+the archive rather than the request. `GET /api/v1/soul` serves the text this
+governs, so the toggle is not consent to something invisible.
 
 ### Backend Incarnations
 

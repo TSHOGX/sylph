@@ -35,6 +35,24 @@
         }
       }
     },
+    "/api/v1/soul": {
+      "get": {
+        "summary": "Read the Sylph identity preamble",
+        "description": "Returns the resolved SOUL.md with its path, size, and mtime. Exists because the toggle governing injection is meaningless without it: SOUL.md lives under ~/.agents/skills/sylph/, outside the repo and outside any other surface the app offers, so a user asked to consent to appending it has nowhere else to read it. A missing SOUL.md is a 200 carrying available:false rather than a 404 — an install without one is ordinary and runs every session natively, which the client has to be able to say. A file that resolved but cannot be read is a separate error field rather than a 5xx, because the settings panel must render the toggle either way. Resolution mirrors the runners' own rule (<runners_dir>/../SOUL.md, overridden by SYLPH_SOUL, where an explicit empty value means no identity).",
+        "responses": {
+          "200": {
+            "description": "Resolved identity text, or available:false when no SOUL.md exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SoulResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents": {
       "get": {
         "responses": {
@@ -1115,6 +1133,15 @@
             "additionalProperties": {
               "type": "string"
             }
+          },
+          "identityMode": {
+            "type": "string",
+            "enum": [
+              "sylph",
+              "preserve"
+            ],
+            "default": "sylph",
+            "description": "Whether SOUL.md is appended to the agent's prompt. Defaults to sylph, so a client that omits it keeps the original behaviour. A closed enumeration so a misspelling is a 422 naming the field, rather than a journal row carrying a value nothing downstream matches — which would read as \"not sylph\" everywhere and silently disable injection. Separate from origin: opting out of injection does not make a session native. The WebApp created it, so Sylph lifecycle policy still applies and origin stays sylph."
           }
         }
       },
@@ -2159,6 +2186,45 @@
           },
           "absolutePath": {
             "type": "string"
+          }
+        }
+      },
+      "SoulResponse": {
+        "type": "object",
+        "required": [
+          "available"
+        ],
+        "description": "The identity text Sylph appends to an agent's prompt. Read from disk per request rather than cached at startup: SOUL.md is hand-edited between sessions, and a cached copy shown beside a toggle claiming to control the live file would be stale.",
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "A readable SOUL.md resolved. false means every session on this install runs on the agent's own identity whatever the client requests, which the UI needs to state plainly rather than offering a toggle over nothing."
+          },
+          "path": {
+            "type": "string",
+            "description": "Absolute path, so the user can go edit it."
+          },
+          "content": {
+            "type": "string",
+            "description": "The text as the agent receives it, absent when the file resolved but could not be read."
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size on disk, before any truncation."
+          },
+          "modifiedMs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "mtime in epoch milliseconds."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Present only when true: content holds just the first 128 KiB, cut on a char boundary so the tail is not rendered as U+FFFD."
+          },
+          "error": {
+            "type": "string",
+            "description": "Why no content is present, when a path resolved but could not be read. Distinguishes \"there is no SOUL.md\" from \"there is one and it is unreadable\" — different problems with different fixes."
           }
         }
       }

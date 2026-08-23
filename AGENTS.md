@@ -74,6 +74,7 @@ side can break the other's tests.
 | `SYLPH_WEB_PORT` | backend | `4317` |
 | `SYLPH_WEB_DATA_DIR` | backend | `$HOME/.agents/data/sylph/web` |
 | `SYLPH_RUNNERS_DIR` | backend | `$HOME/.agents/skills/sylph/runners` |
+| `SYLPH_SOUL` | backend | `<runners_dir>/../SOUL.md` |
 | `TRACEDB_BIN` | backend | `$HOME/Workspace/trace-db/target/release/trace-db` |
 | `SYLPH_WEB_BROWSE_ROOTS` | backend | `$HOME` |
 | `RUST_LOG` | backend | `info` |
@@ -94,6 +95,14 @@ proxy, which rewrites `Origin`. See `docs/development.md`.
 always browsable. It bounds `/api/v1/fs/*`, the only endpoint that lists
 directories the client names — so widening it widens what any client of this
 backend can enumerate. Set it when projects live outside the home directory.
+
+`SYLPH_SOUL` points at the identity preamble, and the backend resolves it the way
+the runners do so the two cannot disagree about whether injection is active. An
+explicit *empty* value is meaningful rather than missing — the runner protocol
+reserves it for "no identity" — and a configured path that does not exist also
+resolves to none, matching the runner's `[[ -f "$SOUL_PATH" ]] || SOUL_PATH=""`.
+Reporting a configured-but-absent file as present would let the UI promise an
+injection that never happens. `GET /api/v1/soul` reports what resolved.
 
 The journal is always `live.db` inside the data dir; it is derived, not
 separately configurable. `TRACEDB_BIN` defaults to a release build in a sibling

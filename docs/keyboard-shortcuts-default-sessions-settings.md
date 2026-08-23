@@ -659,8 +659,8 @@ this document as a description of the code:
 
 - **The Quick Start button is gone.** Phase 7 removed it from the top bar along with
   "New session", because creating a session in a directory the user already clicked
-  should not route through a button that re-asks. The behaviour survives in `Mod+N` /
-  `Mod+Shift+N`, the command palette, and every sidebar group's context menu — all
+  should not route through a button that re-asks. The behaviour survives in
+  `Mod+Shift+O` / `Mod+J`, the command palette, and every sidebar group's context menu — all
   through one shared creator (`lib/create-session.ts`). The "Quick Sessions" grouping
   under `~/.agents` is unchanged.
 - **"Open in Default App" and "Reveal in Finder" are not implemented.** Both need the
@@ -675,4 +675,14 @@ this document as a description of the code:
   management are all there. Bounded rendering is an architecture property, not a
   preference to expose — see `docs/frontend-architecture.md`.
 
-The shortcut map itself is current.
+- **`Cmd+N` and `Shift+Cmd+N` are not the bindings, and never could have been.**
+  Every table in this document proposes them for New Session and Quick Start, and a
+  browser takes both before the page sees them — Chrome has reserved `Ctrl/Cmd+N`,
+  `+T`, `+W` and their shifted forms since version 4, beyond the reach of
+  `preventDefault`. The shipped defaults are **`Mod+Shift+O`** and **`Mod+J`**, and
+  the recorder now refuses any reserved combo, naming what the browser does instead.
+  Read the tables below as "New Session has a binding, and it is rebindable" — the
+  specific keys they name are wrong. `docs/frontend-architecture.md` has the current
+  map and the reasoning.
+
+The rest of the shortcut map is current.

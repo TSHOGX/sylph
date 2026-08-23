@@ -52,6 +52,72 @@ Detailed system state (sessions, turns, runners).
 }
 ```
 
+### Identity
+
+#### `GET /api/v1/soul`
+
+The identity text Sylph appends to an agent's prompt, read from disk per request.
+
+This endpoint exists because the toggle that governs injection is meaningless
+without it. `SOUL.md` lives under `~/.agents/skills/sylph/` — outside this repo and
+outside any other surface the app exposes — so asking a user to decide whether to
+append it to every session, with no way to read what it says, is asking for consent
+to something invisible.
+
+**Response 200 — a file resolved and was readable:**
+```json
+{
+  "available": true,
+  "path": "/Users/hsw/.agents/skills/sylph/SOUL.md",
+  "content": "# Sylph\n\nYou are ...",
+  "bytes": 3184,
+  "modifiedMs": 1724058000000
+}
+```
+
+**Response 200 — no `SOUL.md` on this install:**
+```json
+{ "available": false }
+```
+
+| Field | Present when | Meaning |
+| --- | --- | --- |
+| `available` | always | A readable `SOUL.md` resolved |
+| `path` | `available` | Absolute path, so the user can go edit it |
+| `content` | resolved and read | The text as the agent receives it |
+| `bytes` | `available` | Size on disk, before any truncation |
+| `modifiedMs` | `available` | mtime, epoch milliseconds |
+| `truncated` | only when `true` | `content` holds just the first 128 KiB |
+| `error` | resolved but unreadable | Why, e.g. `Could not read SOUL.md: PermissionDenied` |
+
+Four decisions this shape encodes:
+
+- **Read per request, not cached at startup.** `SOUL.md` is hand-edited between
+  sessions. A cached copy rendered beside a toggle that claims to control the live
+  file would be a lie, and the file is a few kilobytes from the page cache — the
+  cost of being correct is not measurable.
+- **A missing file is `200 {"available": false}`, not `404`.** An install without
+  `SOUL.md` is ordinary and runs every session on the agent's own identity whatever
+  the client asks for. The UI has to *say* that plainly rather than offer a choice
+  over a file that does not exist, and a `404` only reports that a request failed.
+- **Unreadable is a separate `error` field, not a `5xx`.** "There is no `SOUL.md`"
+  and "there is one and it cannot be read" are different problems with different
+  fixes, and the settings panel must render the toggle either way.
+- **Truncated at 128 KiB.** A prompt preamble is prose and the real one is ~3 KiB.
+  The bound keeps the response a preview: a file that grew to megabytes is a mistake
+  worth seeing the head of, not worth shipping to a browser in one string. It cuts
+  on a `char` boundary, since slicing raw bytes would render the tail as U+FFFD —
+  visible corruption in something meant to be faithful.
+
+Authenticated, like every route but `/health`: it returns an absolute filesystem
+path and the full text of a personal file.
+
+Resolution lives in `Config` (`backend/src/config.rs`), mirroring what the runners
+do — `<runners_dir>/../SOUL.md`, overridden by `SYLPH_SOUL`. An explicit empty
+`SYLPH_SOUL` yields no identity, matching the runner protocol's spelling. The two
+resolving it independently is exactly how the settings panel and the spawned runner
+would come to disagree about whether injection is active.
+
 ### Agents
 
 #### `GET /api/v1/agents`
@@ -127,12 +193,26 @@ Create a Sylph-managed session.
   "agent": "claude",
   "workdir": "/Users/hsw/Workspace/project",
   "title": "Feature implementation",
+  "identityMode": "sylph",
   "flags": {
     "model": "opus-5",
     "effort": "high"
   }
 }
 ```
+
+`identityMode` is `sylph` (append `SOUL.md`) or `preserve` (run the agent on its
+own identity, no injection). It defaults to `sylph`, so a client that omits it
+keeps the original behaviour. A closed enumeration rather than a free string: a
+misspelling is a `422` naming the field, instead of a journal row carrying a value
+nothing downstream matches — which would read as "not sylph" everywhere and
+silently disable injection.
+
+**`identityMode` and `origin` are separate axes.** Opting out of injection does
+*not* make a session `native`. The WebApp created it, so Sylph lifecycle policy
+still applies and it may be reset or compacted; `origin` stays `sylph`. Collapsing
+the two would make "run this agent as itself" indistinguishable from an imported
+session that must never be reset. See `GET /api/v1/soul` for the text this governs.
 
 **Response 201:**
 ```json
@@ -144,6 +224,7 @@ Create a Sylph-managed session.
 **Errors:**
 - `400` — invalid agent, workdir missing, flags validation
 - `409` — session already exists (rare, UUID collision)
+- `422` — `identityMode` outside the enumeration
 
 #### `POST /api/v1/sessions/import`
 

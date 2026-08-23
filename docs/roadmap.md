@@ -26,15 +26,17 @@
 - Phase 9: design system, mobile layout, and PWA
 - Phase 10: the Artifacts pane manages files — new folder, upload, delete behind a
   confirmation, and full-file reads in a browser tab past the preview limits
+- Phase 11: identity as a creation-time choice with `GET /api/v1/soul` to read it,
+  English/Chinese i18n, and shortcut defaults a browser does not intercept
 
-All eight phases are complete, including 6.6 and 6.7 (archive browsing). Phase 7 ran
-as two tracks — the interaction and composer redesign, and the Artifacts file
+Every phase through 11 is complete, including 6.6 and 6.7 (archive browsing). Phase 7
+ran as two tracks — the interaction and composer redesign, and the Artifacts file
 viewer — both of which have landed, as has Phase 8 (the start screen); see the
 sections at the end of this file.
 
-**Current test totals, measured on the merged tree:** 136 backend unit, 127 backend
-integration (plus 3 ignored by default that parse files from real Office tooling),
-193 frontend unit, 74 E2E. The per-phase counts below are what each phase measured on
+**Current test totals, measured on the merged tree at Phase 11:** 141 backend unit,
+134 backend integration (plus 3 ignored by default that parse files from real Office
+tooling), 230 frontend unit, 79 E2E. The per-phase counts below are what each phase measured on
 its own branch and are left as its record; they do not add up to these, because the
 two Phase 7 tracks were developed in parallel and each counted only its own suite.
 Re-measure by running the suites, not by adding the sections.
@@ -481,6 +483,9 @@ the UI never showed.
   rendered pinned paths as empty groups
 - ✅ Top-bar "New session" and "⚡ Quick Start" removed; `Mod+N`,
   `Mod+Shift+N`, and both palette entries still work through `runAction`
+  — those two bindings were **rebound in Phase 11**, which found a browser takes
+  both before the page sees them. Read them here as "the shortcut path works"; the
+  current keys are `Mod+Shift+O` and `Mod+J`
 - ✅ One shared creator in the shell, so every path reports one pending state
   and one error banner
 
@@ -984,3 +989,83 @@ one gets made.
   translation and not a *wrong* one. And **backend `message` strings pass through
   untranslated** by design — they are one process's report of what it refused,
   and localizing them would mean cataloguing every string the API can emit.
+
+## Phase 11: Identity, Language, and Bindings That Fire — Complete
+
+Three things that share one settings panel. They landed together because splitting
+them would have produced commits that did not compile: `locale`, `injectSoul`, and the
+shortcut prune all live in one interface block.
+
+### Identity became a choice, and readable
+
+Every session the WebApp created was given Sylph identity unconditionally, and there
+was no surface anywhere showing what that identity *says* — `SOUL.md` lives under
+`~/.agents/skills/sylph/`, outside this repo.
+
+- ✅ `GET /api/v1/soul` returns the resolved text with its path, size, and mtime.
+  Read per request, not cached: the file is hand-edited between sessions.
+- ✅ Missing is `200 {"available": false}`, not `404`. An install without `SOUL.md`
+  is ordinary; the client has to be able to say so rather than offer a toggle over
+  nothing. Unreadable is a separate `error` field — a different problem.
+- ✅ `POST /sessions` accepts `identityMode`, a closed enum defaulting to `sylph`.
+- ✅ Resolution moved into `Config`, mirroring the runners' own rule. The two
+  resolving it independently is exactly how the panel and the spawned runner would
+  come to disagree about whether injection is active. The env read is a parameter,
+  so the rules are testable without `set_var` — process-global and unsafe in a
+  threaded test binary.
+- ✅ The settings section renders `SOUL.md` in a `<pre>`, not through the Markdown
+  renderer: this is the text as the agent receives it, and rendering it would hide
+  the `#` and `---` that are part of what gets sent.
+
+Origin stays `sylph` when identity is preserved. See `docs/architecture.md` for why
+the two axes cannot collapse.
+
+### i18n: English default, Chinese optional
+
+- ✅ Hand-rolled catalogue, no framework. `next-intl` and `next-i18next` are built
+  around locale-in-the-URL; this locale is a preference in `localStorage`. Revisit at
+  a third locale or ~1000 keys.
+- ✅ `zh` typed as a total `Dictionary`, so an untranslated key is a build error. A
+  test covers what the compiler cannot: a translation that drops a `{placeholder}`
+  compiles and renders a sentence with a hole in it.
+- ✅ Both catalogues at 263 keys, verified equal. Coverage: settings, shell, sidebar,
+  composer, and the whole file pane including its dialogs and four format viewers.
+- ✅ `<html lang>` syncs, because a screen reader picks its voice from it.
+- ✅ Locale names are endonyms, so someone who switched into a language they cannot
+  read can find their way back.
+
+**Still English:** the command palette, the history and search overlays, and the
+timeline.
+
+### `Cmd+N` could never have worked
+
+The defaults bound New Session to `Mod+N` and Quick Start to `Mod+Shift+N`, both
+reserved by Chrome since version 4 and beyond `preventDefault`. The browser acted
+*and* the app acted: a new window, with the app's dialog behind it. The code comment
+asserting these were "preventable from a page" was simply wrong.
+
+- ✅ Defaults are now `Mod+Shift+O` (matching ChatGPT and Claude) and `Mod+J`.
+- ✅ `RESERVED_COMBOS` records the set with what each does instead; the recorder
+  refuses one naming that reason.
+- ✅ `pruneReserved` runs at hydration as a **migration**, not a filter: a settings
+  write persists the whole merged map, so anyone who had opened that panel had
+  `Mod+N` stored.
+
+**41 green specs pressed `Mod+N` happily**, because Playwright's Chromium opens no
+real window. The new spec asserts on the recorder's refusal, which is observable,
+rather than on browser chrome, which is not. This is the same shape as the
+mobile-breakpoint blind spot: a suite can only see what its environment can express.
+
+### Open items
+
+- **The E2E suite asserts English throughout.** Sound, since English is the default,
+  but it catches a *missing* translation and not a *wrong* one.
+- **Backend `message` strings are not localized**, by design — they are one process's
+  report of what it refused, and cataloguing every string the API can emit is a
+  different project. Both call sites say so in a comment.
+- **`e2e-repeat.sh` now reports `INCONCLUSIVE`** for a run where nothing executed
+  (a backend that fails to compile, a `webServer` that exits before any spec is
+  reached). It previously read `expected=0, failed=0` as "no failures in any run" —
+  a false green, and the worst possible output from a flake-detection script.
+- **Identity conversion is still not implemented.** Changing `identityMode` on a
+  session with history remains a separate explicit operation, unbuilt.

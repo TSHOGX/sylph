@@ -699,8 +699,8 @@ depend on mount order.
 | `Mod+K` | Global search (live sessions + archive) |
 | `Mod+Shift+K` | Browse this workspace's archived history |
 | `Mod+P` | Command palette |
-| `Mod+N` | New session (pick a directory) |
-| `Mod+Shift+N` | Quick Start in `~/.agents` |
+| `Mod+Shift+O` | New session (pick a directory) |
+| `Mod+J` | Quick Start in `~/.agents` |
 | `Mod+B` / `Mod+\` | Toggle left / right pane |
 | `Mod+,` | Settings |
 | `Mod+.` | Stop the running turn |
@@ -711,6 +711,35 @@ depend on mount order.
 `Mod` is Cmd on macOS and Ctrl elsewhere, resolved at match time. Bindings are
 stored platform-neutral, so a stored `Meta+k` cannot silently stop working for the
 same user on another machine.
+
+**Some combos the browser takes first, and a page cannot have them.** New session
+and Quick Start were originally `Mod+N` and `Mod+Shift+N`, which Chrome has reserved
+for a new window and an incognito window since version 4. `preventDefault` does not
+reach them, so *both* handlers ran: a new browser window opened, with the app's own
+dialog behind it. The current defaults follow ChatGPT and Claude's new-chat binding,
+so a user of those arrives expecting `Mod+Shift+O`.
+
+`RESERVED_COMBOS` in `lib/combo.ts` records the set with what each one does instead
+— `Mod+N/T/W` and their shifted forms, plus `Mod+Q`. Three consequences:
+
+- The recorder **refuses** a reserved combo *naming what the browser will do*, which
+  is the difference between a refusal a user can act on and an arbitrary
+  restriction. That is why `reservedReason` returns a string rather than a boolean.
+- `pruneReserved` drops them at hydration — a **migration, not a filter**. A settings
+  write persists the whole merged map, so anyone who had ever opened that panel had
+  `Mod+N` stored and would keep hitting it.
+- `Mod+Q` and `Mod+W` are listed but must never be *offered*: they quit and close, so
+  a page that captured them would trap the user.
+
+`Mod+Shift+Enter` was considered for Quick Start and rejected: the composer uses
+`Cmd+Enter` for newlines and `Mod` combos fire globally even inside a textarea, so
+it would have broken typing.
+
+**The suite could not have caught this**, which is the part worth remembering.
+Playwright's Chromium opens no real window, so 41 green specs pressed `Mod+N`
+happily — the same shape of blind spot as the mobile-breakpoint entry in `AGENTS.md`.
+The spec that covers it asserts on the recorder's refusal, which is observable,
+rather than on browser chrome, which is not.
 
 Bare-key combos (`Shift+E`) are suppressed while a text field has focus, so the
 composer keeps its keystrokes; `Mod`-prefixed combos are global on purpose.
@@ -727,9 +756,9 @@ is whether the invocation already names a working directory.
 
 | Surface | Path | Why |
 | --- | --- | --- |
-| ⚡ Quick Start, `Mod+Shift+N`, palette | `useQuickCreateSession` | The directory is fixed: the backend-resolved `~/.agents`. |
+| ⚡ Quick Start, `Mod+J`, palette | `useQuickCreateSession` | The directory is fixed: the backend-resolved `~/.agents`. |
 | Sidebar group → "New session here" | `useQuickCreateSession` | A group **is** a directory. The right-click already named it. |
-| `Mod+N`, empty-state button | `overlay: "newSession"` → same mutation | No directory yet, so a picker asks for that and nothing else. |
+| `Mod+Shift+O`, empty-state button | `overlay: "newSession"` → same mutation | No directory yet, so a picker asks for that and nothing else. |
 
 A session needs a directory. Nothing else is worth asking at creation time, and
 the four-field form that used to ask is worth recording because each field's
@@ -1341,6 +1370,81 @@ accounts, which is already gated behind a separate authentication change.
 Pane visibility is read straight from settings rather than mirrored into local
 state: the mirror needed an effect to adopt the stored value after hydration, and
 could disagree with storage when a write failed.
+
+### Internationalization
+
+English is the source of truth and the fallback; Chinese is optional. The locale is
+a settings field, so it rides the store above — no provider, no context, and
+switching language re-renders exactly the components that read a translation.
+
+```
+lib/i18n/locale.ts   Locale set, tags, message lookup, format, formatParts.
+                     No React, no settings import.
+lib/i18n/messages.ts en — the `Dictionary` type and the source of truth
+lib/i18n/zh.ts       zh — typed as a total `Dictionary`
+lib/i18n/index.ts    "use client": useT(), useLocale(), re-exports
+```
+
+**The `locale.ts` / `index.ts` split is load-bearing, not cosmetic.** `lib/settings`
+must know what a `Locale` is in order to store and validate one, while `useT` must
+read `lib/settings` to know which locale is active. Keeping the primitives free of
+both React and the store makes the dependency run one way. It is also the half worth
+unit-testing: placeholder substitution and fallback are pure functions, testable
+without rendering.
+
+**An untranslated key is a build error, not a surprise in the UI.** `zh` is typed as
+a total `Record` over the key set, so adding an English string without its
+translation fails `npm run build`. What the compiler *cannot* catch is a translation
+that drops a `{placeholder}` — that compiles and renders a sentence with a hole in
+it — so a unit test asserts placeholder agreement across catalogues. Both catalogues
+currently sit at 263 keys, verified equal.
+
+**No framework.** `next-intl` and `next-i18next` are built around locale-in-the-URL:
+a `[locale]` segment, negotiating middleware, per-request catalogue loads on the
+server. None of it applies. This is one user's loopback tool, its language sits
+beside theme in `localStorage`, and every string lives in a client component.
+Adopting that model would mean restructuring `app/` around a segment carrying a
+value storage already holds. What a framework would genuinely buy — ICU
+MessageFormat, per-locale splitting, plural and date rules — is either already
+provided by `Intl` (see `lib/format.ts`) or not worth its weight at this size: both
+catalogues together are a few kilobytes gzipped, less than the machinery to load one
+lazily. Revisit at a third locale with translators who need a standard file format,
+or past roughly a thousand keys.
+
+Three details that are easy to get wrong:
+
+- **Locale names are endonyms** (`English`, `中文`), so the picker's own labels are
+  deliberately untranslated. Someone who has switched into a language they cannot
+  read still needs a way back, which they only have if the entry they want is
+  written in the language they know.
+- **`<html lang>` syncs client-side** via `applyLocale`. The attribute is not
+  decoration: a screen reader picks its voice from it, so a Chinese UI still tagged
+  `en` is read aloud as English attempting Chinese. The document ships `lang="en"`,
+  correct for the default.
+- **Substitution is one regex pass, never a template literal or `eval`.** These
+  values reach the DOM, so a substitution that could execute would turn a
+  translation file into a script. An unmatched placeholder is left verbatim, which
+  is visible in the UI and therefore gets fixed.
+
+**A sentence with a value in a mono face cannot be a prefix key plus a suffix key.**
+English precedes the value ("Inside `src/`"), Chinese wraps it ("在 `src/` 内"), so
+the halves are not independently translatable and a translator cannot see the whole
+sentence. `formatParts` splits the *translated* string around one placeholder
+instead, keeping the sentence whole in the catalogue; `Around` in
+`lib/file-operations.tsx` renders the result. An absent slot yields the whole string
+as the prefix — visibly wrong rather than silently empty.
+
+**Pure modules take `t` as a parameter rather than reading the locale.**
+`describeWindow` and `describeBlocked` do, which moves their English plural rules
+("1 row" vs "2 rows") into the catalogue where a translator can see them while
+leaving both functions unit-testable. `describeKind` in `lib/file-kind.ts` returns a
+`MessageKey` and lets the caller translate it, for the same reason. The one
+exception is `next/dynamic`'s `loading` fallbacks: they are created at module scope
+where no hook can run, so `LoadingKind` reads the locale itself.
+
+**Backend `message` strings pass through untranslated, by design.** They are one
+process's report of what it refused; localizing them would mean cataloguing every
+string the API can emit. Both call sites say so in a comment.
 
 ## Real-Time Event Streaming
 
@@ -2215,6 +2319,17 @@ the 30s timeout: a different two or three each time, which reads as flakiness
 rather than as accumulated fixture state. `rm -rf frontend/.e2e-data` is free —
 it is gitignored and the backend recreates it. Raising the timeout does not
 help, because the cost grows without bound.
+
+**`scripts/e2e-repeat.sh` separates a flake from a defect**, since a single red run
+cannot. It runs the suite N times and reports each failing spec's frequency: every
+run is `DEFECT`, some runs is `flake (3/10)`.
+
+It reports `INCONCLUSIVE` when a run executed *no* tests — a backend that fails to
+compile, a `webServer` that exits before any spec is reached. Such a run yields
+`expected=0, failed=0`, which the summary originally read as "no failures in any
+run": a false green, and the worst possible output from the one script whose job is
+to tell you whether to trust a result. A run that never started is not evidence about
+the code, and the script now says so instead of averaging it in.
 
 **Two states are reached by intercepting the listing, not by emptying the
 journal.** Specs share one backend and run serially, so by the time a spec runs

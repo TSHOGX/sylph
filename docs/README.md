@@ -34,6 +34,9 @@ development practices.
 | UI structure and conventions | [frontend-architecture.md](frontend-architecture.md) |
 | How to install/deploy | [installation.md](installation.md) |
 | How to develop locally | [development.md](development.md) |
+| Identity, origin, and `SOUL.md` | [architecture.md](architecture.md#session-model) |
+| Translations and locale | [frontend-architecture.md](frontend-architecture.md#internationalization) |
+| Which shortcuts a browser reserves | [frontend-architecture.md](frontend-architecture.md#keyboard-model) |
 
 ### Design Decisions
 
@@ -144,8 +147,13 @@ code around designs that evidence has invalidated.
 Two files here are pre-implementation design arguments rather than descriptions of
 the code: `agent-ui-design-analysis.md` and
 `keyboard-shortcuts-default-sessions-settings.md`. They are kept because the
-reasoning still governs the UI — the case against chat bubbles, and the shortcut map
-— and each marks where the shipped implementation diverged from it.
+reasoning still governs the UI — the case against chat bubbles, and the shape of the
+shortcut map — and each marks where the shipped implementation diverged from it.
+
+Note one divergence that is easy to trip over: the shortcuts document proposes
+`Cmd+N` and `Shift+Cmd+N` throughout, and a browser reserves both. The shipped
+bindings are `Mod+Shift+O` and `Mod+J`. Its "What Shipped, and What Did Not" section
+records this; `frontend-architecture.md` carries the current map.
 
 When they disagree with `frontend-architecture.md` or `roadmap.md`, those win. A
 design document records what was intended; the architecture spec records what is

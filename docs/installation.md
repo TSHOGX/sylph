@@ -52,6 +52,7 @@ not come up, so a broken install does not look like a successful one.
 | `SYLPH_WEB_PORT` | `4317` | Backend port |
 | `SYLPH_WEB_FRONTEND_PORT` | `3000` | Frontend port |
 | `SYLPH_RUNNERS_DIR` | `~/.agents/skills/sylph/runners` | Runner discovery |
+| `SYLPH_SOUL` | `<runners_dir>/../SOUL.md` | The identity preamble. An explicit empty value means no identity, so every session runs on the agent's own |
 | `TRACEDB_BIN` | `~/Workspace/trace-db/target/release/trace-db` | TraceDB binary |
 | `SYLPH_WEB_BROWSE_ROOTS` | *(none; `$HOME` is implicit)* | Extra directories the workspace picker may browse |
 | `RUST_LOG` | `info` | Backend log verbosity |
