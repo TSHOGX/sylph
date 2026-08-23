@@ -23,15 +23,18 @@
   with inline diffs, file browser, `Cmd+K`/`Cmd+P`, settings panel
 - Phase 7 (Artifacts): file viewer taking the whole right pane, with fullscreen,
   and previews for Excel, Word, PowerPoint, CSV, images, HTML, and PDF
+- Phase 9: design system, mobile layout, and PWA
+- Phase 10: the Artifacts pane manages files — new folder, upload, delete behind a
+  confirmation, and full-file reads in a browser tab past the preview limits
 
 All eight phases are complete, including 6.6 and 6.7 (archive browsing). Phase 7 ran
 as two tracks — the interaction and composer redesign, and the Artifacts file
 viewer — both of which have landed, as has Phase 8 (the start screen); see the
 sections at the end of this file.
 
-**Current test totals, measured on the merged tree:** 132 backend unit, 116 backend
+**Current test totals, measured on the merged tree:** 136 backend unit, 127 backend
 integration (plus 3 ignored by default that parse files from real Office tooling),
-193 frontend unit, 49 E2E. The per-phase counts below are what each phase measured on
+193 frontend unit, 74 E2E. The per-phase counts below are what each phase measured on
 its own branch and are left as its record; they do not add up to these, because the
 two Phase 7 tracks were developed in parallel and each counted only its own suite.
 Re-measure by running the suites, not by adding the sections.
@@ -884,3 +887,89 @@ would have shipped:
   crossed, so nothing prompted a re-read. Other specs that count rows against a
   `mkdtemp` directory are unaffected, since those directories are unique per
   run.
+
+## Phase 10: Managing files, not only reading them — Complete
+
+**Goal:** make the Artifacts pane a file browser rather than a file *viewer* — and
+make the preview limits stop being dead ends.
+
+**The diagnosis.** Two symptoms were reported. Measuring found the first had a
+different cause than it appeared to, and the second was a missing capability with
+an unstated boundary:
+
+| Reported | Actual cause |
+| --- | --- |
+| "The file preview seems to have a size limit" | It does, correctly: 1 MiB read, 256 KiB of text returned, because a 320px panel cannot render a 40 MiB log and pushing one through JSON stalls the pane. The defect was not the limit but that it *terminated* — the notice reported truncation and offered nothing, so a sensible default read as a missing feature |
+| "The right-click menu could support new folder, upload, delete" | No mkdir or delete endpoint existed, and the pane had no dialog primitive at all — the only confirm available was `window.confirm`, which blocks the SSE stream, cannot be styled, names the origin on iOS, and puts "OK" rather than "Delete" on the button the user presses |
+
+**Delivered:**
+- ✅ `files/raw` serves any file **whole**, and now renders text inline whatever
+  the extension — decided by sniffing a 64 KiB prefix for a NUL and UTF-8
+  validity, not by an extension table that would need an entry per language and
+  would still be wrong about a `.log` full of binary
+- ✅ `?download=true` forces an attachment, with the filename in both RFC 6266
+  spellings. Separate from the type allowlist because "safe to render" and "what
+  the user asked for" are different questions
+- ✅ **Open in a new tab** and **Download** in the row menu, the viewer header, and
+  the truncation notice itself — the notice now names both sizes and carries the
+  way out, since "so how do I see the rest" is the reader's next question
+- ✅ `POST .../files/directory` and `DELETE .../files`, each refusing its
+  destructive default: no overwrite, no replace, no recursion, and the workdir root
+  refused outright
+- ✅ `ui/dialog.tsx` — `AlertDialog` and `PromptDialog`, reusing `useDialog`
+- ✅ New folder, upload, and delete reachable from the header, a row menu, a
+  right-click on the tree background, a drop on a folder or on the background, and
+  the "add files" link beside an empty listing
+- ✅ **No regressions** — 136 backend unit, 127 backend integration, 193 frontend
+  unit, **74 E2E** (16 of them new), all passing; ESLint and clippy clean
+
+### What the tests caught that review did not
+
+Three defects were found by writing the specs rather than by reading the code, and
+all three are the kind that survive review:
+
+- **The destructive button was the first tab stop.** The footer used
+  `flex-row-reverse` so the affirmative button could be written first and still land
+  on the right — which made Delete the control `useDialog` focuses on open, so an
+  Enter keystroke in flight when the dialog appeared would confirm it. Fixed by
+  ordering the DOM Cancel-first and right-aligning with `ml-auto`.
+- **`remove` deleted a symlink's target, not the symlink.** `resolve` canonicalizes,
+  which is right for reading and wrong for deleting: `link` became the directory it
+  pointed at. The fix resolves the *parent* and appends the final component
+  verbatim, which keeps containment while leaving the last component unfollowed.
+- **The tree background was not the tree's.** The container was sized to its
+  content, so it ended at the final row and the large blank area a user would
+  naturally right-click or drop onto belonged to the scroll wrapper. `min-h-full`.
+
+An accessible-name collision was also reintroduced, in the same shape `AGENTS.md`
+already documents: labelling the header buttons "New folder in the working
+directory" made them answer `getByLabel("Working directory")`, which is a substring
+match, and a workspace-shell spec failed. Shortened to "New folder" and "Upload
+files" — the root path is rendered immediately beside them, so the destination
+needed no spelling out. Worth noting the pitfall was written down beforehand and did
+not prevent it: the phrasing looked *more* descriptive, which is exactly how this
+one gets made.
+
+### Carried forward
+
+- **There is no trash.** Delete is permanent, because reaching the platform's trash
+  means either a new dependency or spawning `osascript`, and a browser page that can
+  invoke a host process is a larger concession than the delete. If undo matters, that
+  is the decision to revisit — not the confirmation dialog.
+- **No rename, and no write-in-place.** Both are plausible next steps and neither
+  is needed by anything today. Rename is the cheaper one: it is `mkdir`'s validation
+  plus a containment check on two paths.
+- **The tree is still a list of tab stops, not an ARIA tree widget.** Arrow-key
+  navigation with a single tab stop is what `role="tree"` implies and what a native
+  file browser does. It was left alone deliberately: it would rewrite the focus model
+  every existing spec depends on, and it is a keyboard-ergonomics improvement rather
+  than a fix for anything currently broken.
+- **Uploads are capped at 8 MiB per file**, shared with turn attachments, because
+  both are browser uploads over the same JSON transport. A directory upload has no
+  real reason to share that ceiling; raising it means a multipart or streaming route
+  rather than a larger base64 body.
+- **Each spec in `e2e/file-operations.spec.ts` mkdtemps its own workdir**, which
+  follows the existing convention and adds 16 more permanent sidebar groups to
+  `.e2e-data/` per run. That is the accumulation `AGENTS.md` documents; one full-suite
+  failure during this phase was traced to it and disappeared after
+  `rm -rf frontend/.e2e-data`. The fixture-level fix is still unwritten.

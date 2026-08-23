@@ -629,11 +629,23 @@ degraded form, so it reports the failure rather than rendering an empty one.
 
 ### Files
 
-Browsing a session's working directory, for the Artifacts pane. Reads are
-unrestricted within the root; writing is confined to one endpoint
-(`POST .../files`) that creates files and refuses to overwrite by default. There
-is still deliberately no rename or delete endpoint: the agent mutates the
-workspace, the browser adds inputs for it to read.
+Browsing and managing a session's working directory, for the Artifacts pane. Reads
+are unrestricted within the root. Writes are three narrow endpoints — create a
+file (`POST .../files`), create a directory (`POST .../files/directory`), delete
+one entry (`DELETE .../files`) — and each refuses its destructive default: an
+upload will not overwrite unless asked, a mkdir will not replace, and a delete
+will not recurse unless asked and will not touch the root at all.
+
+There is still deliberately no rename and no write-in-place: the agent mutates
+file *contents*, the browser manages the files around them.
+
+**Why delete is here at all**, when an earlier version of this document said it
+never would be: the pane is the only view of the workspace a user has while a
+session runs, and a file browser that cannot remove the file it just showed you is
+incomplete in a way that pushes the user to a terminal. What made it acceptable is
+that the guards are enforceable server-side and are not merely UI conventions —
+see the endpoint below. What it costs is honest: this is the one irreversible
+operation in the API, because there is no trash to restore from.
 
 **Path safety.** These are the only endpoints that turn a client string into a
 filesystem read, so containment is enforced on the *canonical* path, never on the
@@ -807,9 +819,22 @@ does not handle, a file that is too large, or a corrupt, encrypted, or truncated
 container. A client that receives `INVALID_REQUEST` for a mislabelled file may
 retry once against `/files/content`, which decides text-vs-binary from the bytes.
 
-#### `GET /api/v1/sessions/{id}/files/raw?path=`
+#### `GET /api/v1/sessions/{id}/files/raw?path=&download=`
 
-The file's bytes, for content a browser renders natively: images, HTML, and PDF.
+The file's bytes, whole: images, HTML, PDF, and any file whose bytes are text.
+
+**This is the route "open in a new tab" uses, and why it serves text.** The pane's
+preview is bounded on purpose — 1 MiB read, 256 KiB of text returned — because a
+side panel cannot usefully render a 40 MiB log and pushing one through JSON stalls
+the pane. But "the preview is truncated" must not mean "you cannot see this file",
+so the same file is reachable here in full and rendered by the browser's own
+viewer, which streams, finds, zooms, and prints better than anything this pane
+would reimplement. Nothing is truncated on this route.
+
+`download=true` forces `Content-Disposition: attachment`. It is a separate
+parameter from the type allowlist because the two answer different questions: the
+allowlist decides what is *safe to render*, this decides what the user *asked
+for*. Without it, Download on a PNG would open a tab showing the image.
 
 This is what the image viewer uses, replacing base64-through-JSON. Base64 costs
 33% inflation, a JSON parse before first paint, no progressive decode, and no
@@ -824,15 +849,39 @@ hypothetical.
 
 | Header | Value | Why |
 | --- | --- | --- |
-| `Content-Type` | from a strict inert allowlist | An unknown type becomes `application/octet-stream`, never a guess |
-| `X-Content-Type-Options` | `nosniff` | Stops an octet-stream payload being sniffed into `text/html` |
+| `Content-Type` | allowlisted type, else `text/plain` for text, else `application/octet-stream` | Three tiers, never a guess — see below |
+| `X-Content-Type-Options` | `nosniff` | Stops an octet-stream or `text/plain` payload being sniffed into `text/html` |
 | `Content-Security-Policy` | `sandbox` | Forces an opaque origin however the response is loaded, so even direct navigation reaches neither DOM nor cookie |
-| `Content-Disposition` | `inline` for allowlisted types, else `attachment` | A type we will not render is a download, not a page |
+| `Content-Disposition` | `inline` for renderable types, else `attachment`; always with the filename | A type we will not render is a download; without the filename it saves as `raw` |
 | `ETag` / `Cache-Control` | mtime+size / `no-cache` | Re-viewing revalidates, so an agent's edit is still noticed |
 
-`.svg` is deliberately **not** served inline: an SVG from our own origin can
-execute script, whereas the same file inside an `<img>` element cannot. SVG stays
-on the `/files/content` base64 path for that reason.
+**The three content-type tiers**, narrowest first:
+
+1. An allowlisted type (`image/png`, `application/pdf`, `text/html`, …) is served
+   as itself, because the browser has a real viewer for it.
+2. Anything else whose bytes *are text* is served as `text/plain; charset=utf-8` —
+   never as its own `text/…` label. A tab showing source is the point of this
+   route, and `text/plain` cannot execute whatever the extension claimed.
+3. Everything else downloads.
+
+Tier 2 asks the bytes, not the extension: a prefix is checked for a NUL and for
+UTF-8 validity. An extension table would need an entry per language to keep
+`.svelte` or `.rb` from downloading and would still be wrong about a `.log` full
+of binary — the same reason `/files/content` decides text-vs-binary by decoding.
+
+`.svg` is deliberately never served as `image/svg+xml`: at that type a script
+inside it runs in our origin, whereas the same file inside an `<img>` cannot. It is
+text, so it lands in tier 2 and a tab shows its *source*. That is duller than
+rendering the drawing and is the intended trade — the pane renders SVG through the
+`/files/content` base64 path, inside an `<img>`, so nothing needs this route to
+render it.
+
+The filename in `Content-Disposition` is taken from the *canonical server-side
+path*, never from the request, and is sent in both RFC 6266 spellings: the ASCII
+`filename=` fallback plus the percent-encoded `filename*=UTF-8''`. Both, because a
+CJK filename cannot be expressed in the plain parameter at all — a bare
+`filename="报告.pdf"` is an invalid header value, which would have dropped the
+disposition entirely.
 
 Errors: `FILE_NOT_FOUND` (404), `POLICY_VIOLATION` (403) — including a symlink
 resolving outside the workdir — and `INVALID_REQUEST` (400) for a directory.
@@ -868,6 +917,68 @@ true. Per-file size shares the 8 MiB attachment ceiling.
 Errors: `POLICY_VIOLATION` (403) outside the workdir, `INVALID_REQUEST` (400) for
 an existing file without `overwrite`, `ATTACHMENT_INVALID` (400) for malformed
 base64 or an oversized payload.
+
+#### `POST /api/v1/sessions/{id}/files/directory`
+
+Create one directory.
+
+```json
+{ "path": "docs", "name": "drafts" }
+```
+
+`path` is the *parent*, relative to the workdir; empty means the root.
+
+**Response 201:**
+```json
+{ "path": "docs/drafts", "absolutePath": "/Users/you/p/docs/drafts" }
+```
+
+Its own route rather than a mode of `POST .../files`: one takes a body of bytes and
+the other a name, and a handler switching on which field is present is how an
+upload with a typo'd key silently becomes a mkdir.
+
+Non-recursive, and it refuses an existing path rather than succeeding quietly, so
+"New folder" twice reports the collision instead of looking like a no-op.
+
+`name` is **rejected, not rewritten**, when it is unusable — a separator, `.`,
+`..`, a control character, over 255 bytes. Deliberately not the upload sanitizer,
+which strips non-ASCII: that is right for a filename derived from an upload, where
+the name is incidental, and wrong for a folder the user is naming, where `文档`
+silently becoming `attachment` is data loss with no visible cause.
+
+Errors: `INVALID_REQUEST` (400) for a bad or taken name, `POLICY_VIOLATION` (403)
+outside the workdir.
+
+#### `DELETE /api/v1/sessions/{id}/files?path=&recursive=`
+
+Delete one file or one directory. **Response 204**, no body.
+
+This is the only irreversible operation in the API. There is no trash to restore
+from, because reaching the platform's trash means either a new dependency or
+spawning `osascript`, and a browser page that can invoke a host process is a larger
+concession than the delete itself. The guards are therefore the safety, and they
+hold for any client, not only this project's UI:
+
+- **The root is refused** with `403`. `path=""`, `"."`, and `"/"` all normalize to
+  the workdir, and a client bug that sent one would otherwise erase the project.
+  No legitimate request means "delete the working directory".
+- **A non-empty directory needs `recursive=true`**, else `400`. Deleting one stray
+  file and deleting a subtree are different intentions. An empty directory needs no
+  flag, because there is nothing to lose.
+- **A symlink is unlinked, never followed.** This one needs care: the read path
+  canonicalizes, which resolves a link to its target, so deleting `link` would
+  delete the *directory it points at*. So this endpoint canonicalizes the
+  **parent** and appends the final component verbatim. Containment still holds —
+  every `..` and every symlinked directory in the path is resolved and checked —
+  and a final component that is itself an escaping symlink is only ever unlinked.
+
+The UI sends `recursive` for any directory and states in one dialog that the
+contents go too. Confirm-fail-confirm would be two dialogs for one decision, and
+Finder does not ask twice either; the backend guard stays as protection against a
+client bug rather than as a step in the flow.
+
+Errors: `FILE_NOT_FOUND` (404), `FORBIDDEN` (403) for the root or an escape,
+`INVALID_REQUEST` (400) for a non-empty directory without `recursive`.
 
 ### Machine-level browsing
 
