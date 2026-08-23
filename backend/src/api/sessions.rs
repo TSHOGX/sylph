@@ -187,11 +187,19 @@ pub async fn create(
         ));
     }
 
+    // Origin stays `sylph`: this session was created by the WebApp, and origin
+    // records who created it. Identity is a separate axis, and opting out of
+    // injection does not make the session native — Sylph lifecycle policy still
+    // applies, and its history was not produced elsewhere. Collapsing the two
+    // would make "run this agent as itself" indistinguishable from an imported
+    // session, which must never be reset or compacted.
+    let identity_mode = req.identity_mode.unwrap_or_default();
+
     let now = chrono::Utc::now().timestamp_millis();
     let session = Session {
         id: uuid::Uuid::new_v4().to_string(),
         origin: "sylph".to_string(),
-        identity_mode: "sylph".to_string(),
+        identity_mode: identity_mode.as_str().to_string(),
         lifecycle_mode: "sylph".to_string(),
         agent: req.agent.clone(),
         backend_session_id: None,

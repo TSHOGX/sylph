@@ -3516,3 +3516,148 @@ async fn the_new_file_routes_require_the_session_cookie() {
         );
     }
 }
+
+/// # SOUL.md visibility and the identity choice
+///
+/// The injection toggle in settings is a decision about what every session's
+/// prompt contains, so these pin two things: that the text is readable, and that
+/// opting out is recorded durably rather than being a client-side preference the
+/// backend forgets.
+mod soul {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_soul_endpoint_returns_the_resolved_text_and_its_path() {
+        let backend = TestBackend::start_with_soul("# SOUL.md\n\nI am Sylph.\n").await;
+
+        let response = backend.get_authed("/api/v1/soul").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+
+        assert_eq!(body["available"], true);
+        assert_eq!(body["content"], "# SOUL.md\n\nI am Sylph.\n");
+        assert_eq!(body["bytes"], 23);
+        assert!(
+            body["path"].as_str().unwrap().ends_with("SOUL.md"),
+            "the path is shown so a user can find the file they are being asked about"
+        );
+        assert!(
+            body["modifiedMs"].as_i64().unwrap() > 0,
+            "a mtime lets the panel show how current the identity is"
+        );
+        assert!(body["truncated"].is_null(), "a small file is not truncated");
+    }
+
+    /// An install with no SOUL.md is ordinary, not broken: every session runs
+    /// natively. The UI has to be able to say that instead of offering a toggle
+    /// over a file that does not exist.
+    #[tokio::test]
+    async fn a_missing_soul_is_reported_as_unavailable_rather_than_an_error() {
+        let backend = TestBackend::start().await;
+
+        let response = backend.get_authed("/api/v1/soul").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+
+        assert_eq!(body["available"], false);
+        assert!(body["path"].is_null());
+        assert!(body["content"].is_null());
+    }
+
+    /// The text is a personal file and the response carries an absolute path.
+    #[tokio::test]
+    async fn the_soul_endpoint_requires_authentication() {
+        let backend = TestBackend::start_with_soul("secret identity").await;
+        assert_eq!(
+            backend.get("/api/v1/soul").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_defaults_to_sylph_identity_when_the_client_says_nothing() {
+        let backend = TestBackend::start().await;
+        let id = backend.create_session("mock").await;
+
+        let body = json_body(backend.get_authed(&format!("/api/v1/sessions/{id}")).await).await;
+        assert_eq!(body["session"]["identityMode"], "sylph");
+    }
+
+    /// The point of the setting: a WebApp session that runs the agent as it
+    /// comes. Origin stays `sylph` — the WebApp created it, and Sylph lifecycle
+    /// policy still applies — so this must not be confused with an import.
+    #[tokio::test]
+    async fn a_session_can_be_created_with_identity_preserved_without_becoming_native() {
+        let backend = TestBackend::start().await;
+
+        let response = backend
+            .post_authed(
+                "/api/v1/sessions",
+                serde_json::json!({
+                    "agent": "mock",
+                    "workdir": backend.workdir().display().to_string(),
+                    "identityMode": "preserve",
+                }),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = json_body(response).await;
+
+        assert_eq!(body["session"]["identityMode"], "preserve");
+        assert_eq!(
+            body["session"]["origin"], "sylph",
+            "opting out of injection does not make a session native"
+        );
+        assert_eq!(
+            body["session"]["lifecycleMode"], "sylph",
+            "lifecycle policy is a separate axis from identity"
+        );
+    }
+
+    /// A misspelling must fail loudly. Stored as a free string it would read as
+    /// "not sylph" everywhere downstream and silently disable injection.
+    #[tokio::test]
+    async fn an_unknown_identity_mode_is_rejected_rather_than_stored() {
+        let backend = TestBackend::start().await;
+
+        let response = backend
+            .post_authed(
+                "/api/v1/sessions",
+                serde_json::json!({
+                    "agent": "mock",
+                    "workdir": backend.workdir().display().to_string(),
+                    "identityMode": "syplh",
+                }),
+            )
+            .await;
+
+        assert!(
+            response.status().is_client_error(),
+            "an unrecognized identity mode must not be accepted"
+        );
+    }
+
+    /// Identity decides what a stored transcript was produced by, so it is fixed
+    /// at creation. `PATCH` accepts flags and title only.
+    #[tokio::test]
+    async fn identity_mode_cannot_be_changed_after_creation() {
+        let backend = TestBackend::start().await;
+        let id = backend.create_session("mock").await;
+
+        let response = backend
+            .patch_authed(
+                &format!("/api/v1/sessions/{id}"),
+                serde_json::json!({"identityMode": "preserve"}),
+            )
+            .await;
+        // Unknown fields are ignored by the update payload, so the assertion
+        // that matters is the stored value, not the status.
+        assert!(response.status().is_success() || response.status().is_client_error());
+
+        let body = json_body(backend.get_authed(&format!("/api/v1/sessions/{id}")).await).await;
+        assert_eq!(
+            body["session"]["identityMode"], "sylph",
+            "identity must not be patchable"
+        );
+    }
+}

@@ -5,6 +5,7 @@ pub mod fs;
 pub mod health;
 pub mod search;
 pub mod sessions;
+pub mod soul;
 pub mod turns;
 pub mod workspaces;
 

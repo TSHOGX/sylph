@@ -43,7 +43,7 @@ impl TestBackend {
 
     /// Start a backend whose runners directory contains exactly `runners`.
     pub async fn start_with_runners(runners: &[MockRunner]) -> Self {
-        Self::start_with(runners, None).await
+        Self::start_with(runners, None, None).await
     }
 
     /// Start a backend wired to a stub `trace-db api` process.
@@ -51,12 +51,29 @@ impl TestBackend {
     /// The stub speaks the real line protocol so the client stays on its
     /// production path: one JSON request per line in, one response line out.
     pub async fn start_with_tracedb(tracedb: MockTraceDb) -> Self {
-        Self::start_with(&[MockRunner::success("mock")], Some(tracedb)).await
+        Self::start_with(&[MockRunner::success("mock")], Some(tracedb), None).await
     }
 
-    async fn start_with(runners: &[MockRunner], tracedb: Option<MockTraceDb>) -> Self {
+    /// Start a backend whose resolved `SOUL.md` holds `text`.
+    ///
+    /// The file must exist before [`Config`] is built, because resolution
+    /// requires a readable file — the same order production runs in, where
+    /// `SOUL.md` predates the process.
+    pub async fn start_with_soul(text: &str) -> Self {
+        Self::start_with(&[MockRunner::success("mock")], None, Some(text)).await
+    }
+
+    async fn start_with(
+        runners: &[MockRunner],
+        tracedb: Option<MockTraceDb>,
+        soul: Option<&str>,
+    ) -> Self {
         let temp = TempDir::new().expect("failed to create temp dir");
         let root = temp.path();
+
+        if let Some(text) = soul {
+            std::fs::write(root.join("SOUL.md"), text).unwrap();
+        }
 
         let data_dir = root.join("data");
         let runners_dir = root.join("runners");
@@ -85,6 +102,14 @@ impl TestBackend {
             // the throwaway tree so they assert the real containment rule
             // without depending on the developer's home directory.
             browse_roots: vec![root.to_path_buf()],
+            // Resolved the way production does — `<runners_dir>/../SOUL.md`,
+            // which is the harness root — but only when a test wrote one. Left
+            // `None` otherwise, so identity-injection tests opt in and every
+            // other test keeps running with no soul, as it did before.
+            soul_path: {
+                let candidate = root.join("SOUL.md");
+                candidate.is_file().then_some(candidate)
+            },
             cookie_secret: "test-secret-token".to_string(),
         };
 

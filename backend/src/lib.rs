@@ -81,12 +81,10 @@ impl AppState {
             );
         }
 
-        // An explicit empty SYLPH_SOUL disables injection, which is how the
-        // runner protocol spells "no identity" and how tests keep runs cheap.
-        let soul_path = std::env::var("SYLPH_SOUL")
-            .ok()
-            .filter(|path| !path.is_empty())
-            .map(std::path::PathBuf::from);
+        // Resolved once, in `Config`, so the supervisor injects the same file
+        // `GET /soul` displays. Deriving it here as well is how the two would
+        // drift into disagreeing about whether identity is active.
+        let soul_path = config.soul_path.clone();
 
         let hub = EventHub::new();
         let supervisor =
@@ -170,6 +168,11 @@ pub fn router(state: AppState) -> Router {
         // because the root differs: see `api::fs` for the threat model.
         .route("/api/v1/fs/roots", get(api::fs::roots))
         .route("/api/v1/fs/tree", get(api::fs::tree))
+        // The identity text itself, so the injection toggle is not a decision
+        // made blind. Read-only: editing SOUL.md is a filesystem act, and a
+        // loopback HTTP surface that rewrote a prompt preamble would be a much
+        // larger security question than one that displays it.
+        .route("/api/v1/soul", get(api::soul::get))
         .route("/api/v1/workspaces", get(api::workspaces::list))
         .route("/api/v1/search", get(api::search::search))
         .route("/api/v1/archive/sessions", get(api::archive::list))
