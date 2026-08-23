@@ -24,6 +24,9 @@ pub mod db;
 /// Parsing spreadsheets, documents, and presentations. A library with no HTTP
 /// knowledge, so it sits beside `attachments` rather than inside `api`.
 pub mod documents;
+/// Where a session's work happens: local today, a Khora sandbox or SSH next.
+/// The seam local fork/exec used to occupy implicitly.
+pub mod env;
 pub mod error;
 pub mod events;
 pub mod middleware;
@@ -87,8 +90,18 @@ impl AppState {
         let soul_path = config.soul_path.clone();
 
         let hub = EventHub::new();
-        let supervisor =
-            TurnSupervisor::new(store.clone(), registry.clone(), hub.clone(), soul_path);
+        // The host is the only environment today. It is constructed here rather
+        // than inside the supervisor so a session-chosen environment later
+        // replaces one argument instead of reaching into the supervisor.
+        let environment: Arc<dyn crate::env::Environment> =
+            Arc::new(crate::env::LocalEnvironment::new());
+        let supervisor = TurnSupervisor::new(
+            store.clone(),
+            registry.clone(),
+            hub.clone(),
+            soul_path,
+            environment,
+        );
         let tracedb = TraceDbClient::new(config.tracedb_bin.clone());
 
         Ok(Self {

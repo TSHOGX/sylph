@@ -50,6 +50,12 @@ base64 = "0.22"
 # Process management
 nix = { version = "0.29", features = ["signal", "process"] }
 
+# The `Environment` seam is dyn-dispatched: the supervisor holds a
+# `dyn Environment` chosen per session at runtime, so its async methods need
+# boxing that native `async fn` in traits still does not provide for trait
+# objects. See `docs/environments.md`.
+async-trait = "0.1"
+
 # Office document parsing for the Artifacts pane.
 #
 # Server-side rather than in the browser: the npm alternative (SheetJS `xlsx`)

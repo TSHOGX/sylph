@@ -19,19 +19,16 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use nix::sys::signal::{killpg, Signal};
-use nix::unistd::Pid;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::db::LiveStore;
+use crate::env::{Environment, ProcessHandle, ProcessSignal, ProcessSpec, Signal};
 use crate::events::{EventHub, RunnerEnvelope, RunnerStreamLine, StreamEvent};
 use crate::runners::Registry;
 
@@ -62,9 +59,10 @@ pub struct TurnRequest {
 /// A live child process, tracked so `stop` can signal it.
 struct ActiveTurn {
     session_id: String,
-    /// Process-group id, equal to the child's pid because the child is spawned
-    /// into a new group. Signaling the group reaches the CLI the runner exec'd.
-    pgid: i32,
+    /// Signal channel for the running process, held rather than a pid because
+    /// the environment decides what addressing a signal even means — a pgid
+    /// locally, an RPC by sandbox and process id in Khora.
+    signaler: Arc<dyn ProcessSignal>,
     /// Set when a stop was requested, so the outcome is reported as `cancelled`
     /// rather than a runner failure.
     stop_requested: bool,
@@ -84,6 +82,10 @@ pub struct TurnSupervisor {
     active: Arc<RwLock<HashMap<String, ActiveTurn>>>,
     seq_counters: SeqCounters,
     soul_path: Option<PathBuf>,
+    /// Where turns run. One environment today; a session will name its own once
+    /// sandboxes land, which is why this is a trait object from the start rather
+    /// than a concrete type to be generalized later.
+    environment: Arc<dyn Environment>,
 }
 
 impl TurnSupervisor {
@@ -92,6 +94,7 @@ impl TurnSupervisor {
         registry: Arc<Mutex<Registry>>,
         hub: EventHub,
         soul_path: Option<PathBuf>,
+        environment: Arc<dyn Environment>,
     ) -> Self {
         Self {
             store,
@@ -100,6 +103,7 @@ impl TurnSupervisor {
             active: Arc::new(RwLock::new(HashMap::new())),
             seq_counters: Arc::new(RwLock::new(HashMap::new())),
             soul_path,
+            environment,
         }
     }
 
@@ -141,22 +145,20 @@ impl TurnSupervisor {
     /// Returns false when the turn has no live process, in which case the caller
     /// reports `STOP_ALREADY_COMPLETED`.
     pub async fn stop(&self, turn_id: &str) -> crate::error::Result<bool> {
-        let pgid = {
+        let signaler = {
             let mut active = self.active.write().await;
             match active.get_mut(turn_id) {
                 Some(turn) => {
                     turn.stop_requested = true;
-                    turn.pgid
+                    turn.signaler.clone()
                 }
                 None => return Ok(false),
             }
         };
 
-        info!("Stopping turn {} (pgid {})", turn_id, pgid);
-        // ESRCH here means the group already exited between the lookup and the
-        // signal, which is a benign race — the reaper will record the outcome.
-        if let Err(error) = killpg(Pid::from_raw(pgid), Signal::SIGTERM) {
-            debug!("SIGTERM to pgid {} failed: {}", pgid, error);
+        info!("Stopping turn {}", turn_id);
+        if let Err(error) = signaler.signal(Signal::Term).await {
+            debug!("SIGTERM for turn {} failed: {}", turn_id, error);
         }
 
         let active = self.active.clone();
@@ -166,7 +168,7 @@ impl TurnSupervisor {
             // Still registered means the process ignored SIGTERM.
             if active.read().await.contains_key(&turn_id) {
                 warn!("Turn {} survived SIGTERM; sending SIGKILL", turn_id);
-                let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
+                let _ = signaler.signal(Signal::Kill).await;
             }
         });
 
@@ -307,64 +309,73 @@ impl TurnSupervisor {
         )
         .await?;
 
-        let mut cmd = Command::new(&runner_path);
-        cmd.arg("--workdir").arg(&workdir);
+        let mut args: Vec<String> = vec!["--workdir".into(), workdir.clone()];
 
         if let Some(sid) = backend_session_id.as_deref() {
-            cmd.arg("--session-id").arg(sid);
+            args.push("--session-id".into());
+            args.push(sid.to_string());
         }
         for (key, value) in &flags {
-            cmd.arg("--flag").arg(format!("{}={}", key, value));
+            args.push("--flag".into());
+            args.push(format!("{}={}", key, value));
         }
         for path in &attachments {
-            cmd.arg("--attachment").arg(path);
+            args.push("--attachment".into());
+            args.push(path.to_string_lossy().into_owned());
         }
         if let Some(command) = command.as_deref() {
-            cmd.arg("--command").arg(command);
+            args.push("--command".into());
+            args.push(command.to_string());
             for (key, value) in &command_args {
-                cmd.arg("--arg").arg(format!("{}={}", key, value));
+                args.push("--arg".into());
+                args.push(format!("{}={}", key, value));
             }
         }
 
-        cmd.current_dir(&workdir)
-            .env("SYLPH_STREAM_FORMAT", "ndjson-v1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // A new process group means SIGTERM on stop reaches the CLI the
-            // runner exec'd, not just the wrapper script.
-            .process_group(0);
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert("SYLPH_STREAM_FORMAT".into(), "ndjson-v1".into());
 
         // Identity injection is the runner's job, but whether it happens at all
         // is ours: native sessions must never receive SOUL.md, and the protocol
         // reserves the empty string for exactly that.
         match (inject_soul, self.soul_path.as_ref()) {
             (true, Some(path)) => {
-                cmd.env("SYLPH_SOUL", path);
+                env.insert("SYLPH_SOUL".into(), path.to_string_lossy().into_owned());
             }
             (true, None) => {} // Let the runner resolve its default location.
             (false, _) => {
-                cmd.env("SYLPH_SOUL", "");
+                env.insert("SYLPH_SOUL".into(), String::new());
             }
         }
 
-        let mut child = cmd.spawn().with_context(|| {
-            format!("Failed to spawn runner {:?} for agent '{}'", runner_path, agent)
-        })?;
+        let mut child = self
+            .environment
+            .spawn(ProcessSpec {
+                program: runner_path.clone(),
+                args,
+                cwd: workdir.clone(),
+                env,
+                // A v1 runner learns the prompt ended from EOF, so its stdin is
+                // written once and dropped. This is the flag the v2 adapter
+                // protocol inverts.
+                duplex_stdin: false,
+            })
+            .await
+            .with_context(|| {
+                format!("Failed to spawn runner {:?} for agent '{}'", runner_path, agent)
+            })?;
 
-        let pid = child.id().context("Runner exited before its pid was available")?;
         self.active.write().await.insert(
             turn_id.clone(),
             ActiveTurn {
                 session_id: session_id.clone(),
-                // The child leads its own group, so pgid == pid.
-                pgid: pid as i32,
+                signaler: child.signaler(),
                 stop_requested: false,
             },
         );
 
-        // Feed the prompt and close stdin: runners read to EOF.
-        if let Some(mut stdin) = child.stdin.take() {
+        // Feed the prompt and close stdin: v1 runners read to EOF.
+        if let Some(mut stdin) = child.take_stdin() {
             let prompt_bytes = prompt.clone().into_bytes();
             tokio::spawn(async move {
                 if let Err(error) = stdin.write_all(&prompt_bytes).await {
@@ -376,8 +387,7 @@ impl TurnSupervisor {
 
         let stderr_tail = Self::drain_stderr(&mut child);
         let outcome = self.consume_stdout(&mut child, &session_id, &turn_id).await;
-        let status = child.wait().await.context("Failed to await runner exit")?;
-        let exit_code = status.code();
+        let exit_code = child.wait().await.context("Failed to await runner exit")?;
         let stderr_tail = stderr_tail.await.unwrap_or_default();
 
         let stop_requested = self
@@ -402,8 +412,8 @@ impl TurnSupervisor {
 
     /// Collect stderr concurrently with stdout so a chatty runner cannot fill
     /// the stderr pipe and deadlock. Only the tail is kept, for error reporting.
-    fn drain_stderr(child: &mut Child) -> tokio::task::JoinHandle<String> {
-        let stderr = child.stderr.take();
+    fn drain_stderr(child: &mut Box<dyn ProcessHandle>) -> tokio::task::JoinHandle<String> {
+        let stderr = child.take_stderr();
         tokio::spawn(async move {
             const TAIL_LIMIT: usize = 4096;
             let Some(stderr) = stderr else {
@@ -429,11 +439,11 @@ impl TurnSupervisor {
     /// diagnostics: the protocol allows them, so they are logged and skipped.
     async fn consume_stdout(
         &self,
-        child: &mut Child,
+        child: &mut Box<dyn ProcessHandle>,
         session_id: &str,
         turn_id: &str,
     ) -> Option<RunnerEnvelope> {
-        let stdout = child.stdout.take()?;
+        let stdout = child.take_stdout()?;
 
         let mut lines = BufReader::new(stdout).lines();
         let mut envelope = None;
