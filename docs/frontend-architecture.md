@@ -235,6 +235,7 @@ frontend/
 │   └── ui/
 │       ├── button.tsx          # Button, IconButton, Kbd
 │       ├── menu.tsx            # Context menu, dropdown, mobile sheet fork
+│       ├── dialog.tsx          # AlertDialog, PromptDialog (not window.confirm)
 │       └── sheet.tsx           # Bottom sheet and side drawer (mobile)
 │
 ├── lib/
@@ -252,6 +253,7 @@ frontend/
 │   ├── diff.ts                 # LCS line diff
 │   ├── tool-shape.ts           # Interprets tool_call payloads per agent
 │   ├── file-kind.ts            # Extension -> viewer family, in one table
+│   ├── file-operations.tsx     # New folder, upload, delete: one owner, one dialog
 │   ├── grid-format.ts          # Column labels, alignment, paging arithmetic
 │   ├── sandbox-html.ts         # CSP injection for previewed HTML
 │   ├── fuzzy.ts                # Subsequence ranking
@@ -453,8 +455,8 @@ pane — roughly 350x300px — which no spreadsheet, document, or rendered page 
 read in.
 
 **Both views stay mounted and toggle with `hidden`.** Expansion state lives in the
-tree component and scroll offset lives on the DOM node, so unmounting would
-discard both and every file you looked at would cost you your place. `hidden` also
+pane and scroll offset lives on the DOM node, so unmounting would discard both and
+every file you looked at would cost you your place. `hidden` also
 removes the tree from the accessibility tree and the tab order, so a keyboard user
 cannot tab into an invisible tree. `e2e/file-viewer.spec.ts` pins this by
 expanding a directory, opening a file, and asserting the directory is still
@@ -501,6 +503,92 @@ placeholder instead of a second copy of the viewer, so the expand button is
 unmounted and `Overlay` cannot restore focus to it — its `isConnected` guard
 correctly refuses a detached node. The pane holds a live reference and restores
 focus once React remounts the button.
+
+### Artifacts pane: managing files, not only reading them
+
+The pane creates folders, uploads files, and deletes entries. `lib/file-operations.tsx`
+owns all three, and the pane mounts it **once** rather than per row.
+
+That is not tidiness. A directory can hold 2000 rows; giving each row its own
+dialog state, its own mutation, and its own hidden `<input type="file">` would put
+three pieces of machinery on every row to serve the one the user acts on, and would
+mount 2000 file inputs. One owner also makes the dialog unambiguous — there is one
+modal question on screen because there is one place able to ask one.
+
+It also makes confirmation unskippable. A row cannot *call* delete; it can only
+`requestDelete`, and the hook is what decides a dialog comes first. Delete is
+irreversible here — the backend has no trash, deliberately — so "every caller
+remembered to confirm" is not a property worth relying on.
+
+**Reaching each destination.** The root is the one directory the tree never draws a
+row for, so it needs its own affordances:
+
+| Gesture | Destination |
+| --- | --- |
+| Header **New folder** / **Upload files** buttons | The working directory |
+| Right-click the tree's empty space | The working directory |
+| Drop files on the tree's empty space | The working directory |
+| A row's overflow menu or right-click | That entry |
+| Drop files on a folder row | That folder |
+| "add files" beside an **Empty** listing | That empty directory |
+
+The buttons are the keyboard and touch route; right-click and drop are the mouse
+idiom, added *alongside* them rather than instead. The container carries `min-h-full`
+so the blank area below the last row belongs to it — sized to its content it ended
+at the final row, and the region that looks most like "the folder's background" did
+nothing. Row handlers call `stopPropagation`, or one gesture opens two menus and one
+drop uploads twice.
+
+**A mutation reveals its own result.** Uploading into a collapsed folder otherwise
+reports success and changes nothing on screen, which reads as a broken feature
+rather than a hidden one. That is why expansion state was lifted from the tree into
+the pane: `useFileOperations` has to be able to expand the directory it just wrote
+to, and its dialogs must sit outside the `hidden` wrapper — a dialog inside a
+`hidden` ancestor is both invisible and unfocusable, so a background `showArtifact`
+from a tool call would strand it.
+
+**Cache invalidation is deliberately broad**: every `["files", sessionId]` query,
+not the parent alone. Only *mounted* directories refetch, so the cost is the subtree
+the user is looking at, and it is correct where a targeted invalidation is not — an
+overwrite changes a file's size, and a recursive delete removes descendants whose
+own queries are still cached.
+
+**Uploads are sequential, not parallel.** Each file is base64 inside a JSON body, so
+five 8 MiB files at once is ~53 MiB of encoded payload held in memory while the
+event loop is also doing the encoding. Sequential also makes failure attributable:
+the user learns *which* file collided, which a `Promise.all` rejection cannot say. A
+collision is then treated as a question — a Replace dialog — rather than as an
+error, because the user picked those files; retrying with `overwrite` automatically
+would destroy a file they never chose to replace.
+
+### Reading a file the pane cannot preview
+
+The preview is bounded on purpose: 1 MiB read, 256 KiB of text returned. A side
+panel cannot usefully render a 40 MiB log, and pushing one through JSON stalls the
+pane. But a limit the user cannot get past reads as a missing feature, so every
+bounded case offers the way through:
+
+- **Open in a new tab** — `files/raw`, which truncates nothing and hands the file
+  to the browser's own viewer. It streams, finds, zooms, and prints better than
+  anything this pane would reimplement, and it renders text whatever the extension.
+- **Download** — the same route with `download=true`. Offered for *every* file, not
+  only unrenderable ones: whether the browser can display a type is a different
+  question from whether the user wants a copy.
+
+Both sit in the viewer header *and* in the truncation notice itself, because the
+reader's next question after "showing the first 256 KB of a 40 MB file" is "so how
+do I see the rest", and the answer belongs in the thing raising it. The notice names
+both numbers so the reader can tell how much is missing.
+
+`window.open(..., "noopener,noreferrer")` rather than an anchor: these are menu
+items, and an anchor inside a `menuitem` either breaks the role or nests interactive
+elements. `noopener` is load-bearing rather than habitual — the raw route sandboxes
+its response into an opaque origin, and pairing a sandboxed document with a live
+`window.opener` handle back to the app is the shape that becomes a navigation
+attack. Download assigns `location` rather than opening a tab, since no window is
+needed for a response the browser hands to its download manager; and it relies on
+`Content-Disposition` from the backend rather than a `download` attribute, which is
+same-origin-only and silently ignored otherwise.
 
 ### File viewers
 
@@ -824,7 +912,32 @@ in the sidebar for the same kind of control.
 | `ui/button.tsx` | `Button`, `IconButton`, `Kbd` | Variants are semantic (`primary`, `secondary`, `ghost`, `danger`, `chip`), so a caller picks by meaning. `IconButton` requires `label` — an icon-only control with no accessible name is the most repeated shape in the app, so the failure is a type error rather than an audit finding |
 | `ui/menu.tsx` | `ContextMenu`, `Menu`, `MenuButton`, `MenuItem` | One behaviour, three positionings: anchored to a point (right-click), to a trigger (dropdown), or as a bottom sheet on mobile |
 | `ui/sheet.tsx` | `Sheet`, `Drawer` | The mobile surfaces |
+| `ui/dialog.tsx` | `AlertDialog`, `PromptDialog` | Decision dialogs: confirm a destructive action, ask for one short value. See below for why they are two components |
 | `lib/use-dialog.ts` | `useDialog` | Focus trap, focus restoration, Escape |
+
+**`ui/dialog.tsx` replaced `window.confirm`**, which was the obvious first answer
+for "confirm delete" and wrong on every axis that matters here. It blocks the main
+thread, so the SSE stream driving the timeline stalls while it is up. It cannot be
+styled, and on iOS it names the origin — "localhost:3000 says" — which is the same
+"assembled from different kits" quality that removing the composer's `<select>`
+elements fixed. Playwright cannot see into one without a dialog handler that
+swallows real failures too. And it offers only OK/Cancel, so the *name* of the
+action is not on the button the user presses, which is what makes a destructive
+confirm safe to read quickly.
+
+`AlertDialog` and `PromptDialog` are separate because they differ in what holds
+focus on open, and that is not cosmetic. A confirm focuses **Cancel**, so a
+keystroke already in flight when the dialog appears cannot delete anything; a
+prompt focuses its input, because typing is the task. One component with a flag
+would put that behind a boolean a caller has to know to set, and the safe default
+is the one nobody sets.
+
+Getting that right required ordering the footer as Cancel-then-confirm in the DOM
+and right-aligning with `ml-auto`. The first version used `flex-row-reverse` so the
+affirmative button could be written first and still land on the right — which made
+the *destructive* button the first tab stop, and therefore the one `useDialog`
+focuses. `e2e/file-operations.spec.ts` asserts Cancel has focus, which is what
+caught it.
 
 `useDialog` exists because three surfaces had implemented this independently and
 disagreed in ways only a keyboard user finds. `CommandDialog` queried `"button,

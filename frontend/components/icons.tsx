@@ -579,6 +579,50 @@ export function MoreIcon(props: IconProps) {
   );
 }
 
+/** Save to disk. An arrow *into* a tray, mirroring the upload glyph below. */
+export function DownloadIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 3.5v11m0 0-3.5-3.5M12 14.5l3.5-3.5" />
+      <path d="M4.5 16.5v2A2 2 0 0 0 6.5 20.5h11a2 2 0 0 0 2-2v-2" />
+    </Icon>
+  );
+}
+
+/** Send from disk. The same tray as `DownloadIcon`, arrow reversed. */
+export function UploadIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 14.5v-11m0 0L8.5 7M12 3.5 15.5 7" />
+      <path d="M4.5 16.5v2A2 2 0 0 0 6.5 20.5h11a2 2 0 0 0 2-2v-2" />
+    </Icon>
+  );
+}
+
+/** A folder with a plus. Distinct from `FilePlusIcon`, which adds a file. */
+export function FolderPlusIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h3.2a2 2 0 0 1 1.4.6l1 1h7.4a2 2 0 0 1 2 2v7.4a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+      <path d="M12 12v4.5M9.75 14.25h4.5" />
+    </Icon>
+  );
+}
+
+/**
+ * Delete. A trash can, not an X: an X reads as "close" beside the close buttons
+ * this sits near in menus, and the two must not be one glyph apart.
+ */
+export function TrashIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4.5 7.5h15M9.5 7.5V5.75A1.25 1.25 0 0 1 10.75 4.5h2.5a1.25 1.25 0 0 1 1.25 1.25V7.5" />
+      <path d="M6.5 7.5l.8 11a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-11" />
+      <path d="M10.5 11v5.5M13.5 11v5.5" />
+    </Icon>
+  );
+}
+
 /* ── Session origin ───────────────────────────────────────────────────────── */
 
 /**

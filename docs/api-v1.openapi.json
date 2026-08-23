@@ -555,6 +555,91 @@
             "$ref": "#/components/responses/Error"
           }
         }
+      },
+      "delete": {
+        "summary": "Delete one file or directory from the session's working directory",
+        "description": "The only irreversible operation in this API: there is no trash to restore from, because reaching the platform's trash means a new dependency or spawning a host process. Three guards hold for any client, not only this project's UI. The workdir root is refused with 403, since path='', '.', and '/' all normalize to it and a client bug sending one would erase the project. A non-empty directory is refused with 400 unless recursive is true; an empty one needs no flag. A symlink is unlinked rather than followed, which requires canonicalizing the parent and appending the final component verbatim - canonicalizing the whole path would resolve the link and delete its target instead.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Entry to delete, relative to the session workdir. The root itself is refused."
+          },
+          {
+            "name": "recursive",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Required to delete a directory that is not empty."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/files/directory": {
+      "post": {
+        "summary": "Create one directory in the session's working directory",
+        "description": "Its own route rather than a mode of POST .../files: one takes a body of bytes and the other a name, and a handler switching on which field is present is how an upload with a typo'd key silently becomes a mkdir. Non-recursive, and it refuses an existing path rather than succeeding quietly, so 'New folder' twice reports the collision. The name is rejected rather than rewritten when unusable - a separator, '.', '..', a control character - deliberately unlike the upload sanitizer, which strips non-ASCII: that is right for an incidental filename and wrong for a folder the user is naming, where a CJK name silently becoming 'attachment' is invisible data loss.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "description": "Parent directory and new name",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileMkdir"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The directory as created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileMkdirResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/api/v1/sessions/{sessionId}/files/content": {
@@ -676,7 +761,7 @@
     "/api/v1/sessions/{sessionId}/files/raw": {
       "get": {
         "summary": "Read a file's bytes, for content the browser renders natively",
-        "description": "Serves images, HTML, and PDF as bytes rather than base64-in-JSON, which costs 33% inflation, a JSON parse before first paint, no progressive decode, and no HTTP caching, and cannot carry a PDF at all. Behind the same auth middleware and the same canonical-path containment check as the other file endpoints. The response headers are load-bearing: serving workspace HTML from this origin without `Content-Security-Policy: sandbox` lets a script in an agent-generated file read the sylph_session cookie. `Content-Type` comes from a strict inert allowlist and anything unrecognized becomes application/octet-stream with Content-Disposition: attachment. SVG is deliberately excluded and stays on the /files/content base64 path, because an SVG served from our origin can execute script whereas the same file inside an <img> element cannot.",
+        "description": "Serves the file's bytes whole - nothing on this route is truncated, which is what makes it the target of 'open in a new tab' for a file the pane can only preview in part. Content-Type has three tiers: an allowlisted type is served as itself; anything else whose bytes are text is served as text/plain (never its own text/* label, so smuggled markup is shown as source rather than executed); everything else is application/octet-stream with Content-Disposition: attachment. Tier 2 asks the bytes, not the extension, so .svelte and .rb render while a .log full of binary downloads. The response headers are load-bearing: serving workspace HTML from this origin without Content-Security-Policy: sandbox lets a script in an agent-generated file read the sylph_session cookie. SVG is never served as image/svg+xml, because at that type a script inside it runs in our origin; it is text, so a tab shows its source, and the pane renders it through the /files/content base64 path inside an <img> instead. Content-Disposition always carries the filename, taken from the canonical server-side path and sent in both RFC 6266 spellings, because a download without one saves as 'raw'.",
         "parameters": [
           {
             "$ref": "#/components/parameters/SessionId"
@@ -689,6 +774,16 @@
               "type": "string"
             },
             "description": "File relative to the session workdir."
+          },
+          {
+            "name": "download",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Force Content-Disposition: attachment. Separate from the type allowlist because the allowlist decides what is safe to render and this decides what the user asked for; without it Download on a PNG opens a tab showing the image."
           }
         ],
         "responses": {
@@ -2032,6 +2127,38 @@
         "properties": {
           "ok": {
             "type": "boolean"
+          }
+        }
+      },
+      "FileMkdir": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Parent directory relative to the workdir. Empty means the root."
+          },
+          "name": {
+            "type": "string",
+            "description": "New directory's name, one path component. Rejected rather than rewritten when unusable."
+          }
+        }
+      },
+      "FileMkdirResponse": {
+        "type": "object",
+        "required": [
+          "path",
+          "absolutePath"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the workdir, as the Artifacts pane addresses entries."
+          },
+          "absolutePath": {
+            "type": "string"
           }
         }
       }

@@ -150,7 +150,17 @@ pub fn router(state: AppState) -> Router {
         // does not matter. They are grouped for readability.
         .route(
             "/api/v1/sessions/{id}/files",
-            get(api::files::tree).post(api::files::upload),
+            get(api::files::tree)
+                .post(api::files::upload)
+                .delete(api::files::remove),
+        )
+        // Creating a directory is its own route rather than a mode of the POST
+        // above: one takes a body of bytes and the other takes a name, and a
+        // handler switching on which field is present is how an upload with a
+        // typo'd key silently becomes a mkdir.
+        .route(
+            "/api/v1/sessions/{id}/files/directory",
+            post(api::files::mkdir),
         )
         .route(
             "/api/v1/sessions/{id}/files/content",

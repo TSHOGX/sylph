@@ -22,10 +22,13 @@
 //! machine-level browser in [`crate::api::fs`]: a containment rule implemented
 //! twice is one that will diverge.
 //!
-//! Reads are unrestricted within the root. Writing is deliberately narrower —
-//! [`upload`] is the only mutating operation, it creates files and refuses to
-//! overwrite by default, and there is still no rename or delete endpoint. The
-//! agent mutates the workspace; the browser adds inputs for it to read.
+//! Reads are unrestricted within the root. The mutating operations — [`upload`],
+//! [`mkdir`], [`remove`] — are each confined to the same subtree by the same
+//! resolver, and each refuses the destructive default: an upload will not
+//! overwrite unless asked, a mkdir will not replace, and a delete will not
+//! recurse unless asked and will not touch the root at all. There is still no
+//! rename or write-in-place: the agent mutates file *contents*, the browser
+//! manages the files around it.
 
 use std::path::{Path, PathBuf};
 
@@ -434,6 +437,14 @@ pub async fn document(
 /// execute script; the same file loaded through an `<img>` element cannot. SVG
 /// therefore stays on the [`content`] base64 path, and adding it here would
 /// silently convert an inert preview into a script-execution surface.
+/// Bytes sniffed to decide whether an unrecognized file is text.
+///
+/// A prefix, not the whole file: the question is "would a browser tab show
+/// something readable", and a file whose first 64 KB decode as UTF-8 answers it.
+/// Reading the rest to be certain would make a 304 — which sends no body — pay
+/// for a full read of a file it is not going to send.
+const SNIFF_BYTES: usize = 64 * 1024;
+
 const INLINE_TYPES: &[&str] = &[
     "image/png",
     "image/jpeg",
@@ -446,9 +457,36 @@ const INLINE_TYPES: &[&str] = &[
     "text/html",
 ];
 
-/// GET /api/v1/sessions/{id}/files/raw?path=
+#[derive(Deserialize)]
+pub struct RawQuery {
+    path: String,
+    /// Force a download instead of letting the browser render the file.
+    ///
+    /// Separate from the type allowlist because the two answer different
+    /// questions: the allowlist decides what is *safe* to render, this decides
+    /// what the user *asked* for. Without it, "Download" on a PNG would open a
+    /// tab showing the image, which is the one thing the user did not want.
+    #[serde(default)]
+    download: bool,
+}
+
+/// GET /api/v1/sessions/{id}/files/raw?path=&download=
 ///
-/// The file's bytes, for content a browser renders natively: images, HTML, PDF.
+/// The file's bytes, for content a browser renders natively: images, HTML, PDF,
+/// and any file whose bytes turn out to be text.
+///
+/// # Why this is the "open in a new tab" route
+///
+/// The pane's viewer is bounded on purpose — [`MAX_PREVIEW_BYTES`] and
+/// [`TRUNCATE_TO_BYTES`] keep a 40 MB log from being pushed through JSON into a
+/// 320px panel. But "the preview is truncated" should not mean "you cannot see
+/// this file", so the same file is reachable here in full, rendered by the
+/// browser's own viewer, which streams, finds, and zooms better than anything
+/// this pane would reimplement. Nothing is truncated on this route.
+///
+/// Whether that lands as a rendered tab or a download is decided by type, and
+/// only ever downwards: an unrecognized type is never *promoted* into something
+/// the browser will execute.
 ///
 /// # Why a byte route is acceptable here
 ///
@@ -478,7 +516,7 @@ const INLINE_TYPES: &[&str] = &[
 pub async fn raw(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-    Query(query): Query<ContentQuery>,
+    Query(query): Query<RawQuery>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response> {
     let (_root, target) = resolve(&state, &id, &query.path).await?;
@@ -491,8 +529,17 @@ pub async fn raw(
         ));
     }
 
-    let mime_type = guess_mime(&target);
-    let inline = INLINE_TYPES.contains(&mime_type.as_str());
+    let (content_type, mut inline) = serve_type(&target);
+    // An explicit download overrides a renderable type, never the reverse.
+    if query.download {
+        inline = false;
+    }
+    // The name the browser saves under. Taken from the *canonical* path rather
+    // than from the request, so nothing client-supplied is reflected into a
+    // response header.
+    let filename = target
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string());
 
     // mtime and size, which is enough to notice an agent's edit. A content hash
     // would be stronger but would mean reading the file to answer a request that
@@ -511,25 +558,88 @@ pub async fn raw(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag))
     {
-        return Ok((StatusCode::NOT_MODIFIED, hardened_headers(&etag, &mime_type, inline)).into_response());
+        return Ok((
+            StatusCode::NOT_MODIFIED,
+            hardened_headers(&etag, &content_type, inline, filename.as_deref()),
+        )
+            .into_response());
     }
 
     let bytes = std::fs::read(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
 
-    Ok((hardened_headers(&etag, &mime_type, inline), bytes).into_response())
+    Ok((
+        hardened_headers(&etag, &content_type, inline, filename.as_deref()),
+        bytes,
+    )
+        .into_response())
+}
+
+/// The `Content-Type` this file goes out as, and whether it renders inline.
+///
+/// Three tiers, narrowest first:
+///
+/// 1. An allowlisted type is served as itself — the browser has a real viewer
+///    for it, and [`hardened_headers`] is what makes that safe.
+/// 2. Anything else that *is text* is served as `text/plain`, never as its own
+///    `text/…` label. A tab showing source is the whole point of this route, and
+///    `text/plain` cannot execute whatever the extension claimed the file was.
+/// 3. Everything else downloads.
+///
+/// Tier 2 asks the bytes, not the extension. An extension table would need an
+/// entry per language to keep `.rb` or `.svelte` from downloading, and would
+/// still be wrong about a `.log` full of binary — the same reason [`content`]
+/// decides text-vs-binary by decoding rather than by name.
+fn serve_type(path: &Path) -> (String, bool) {
+    let mime = guess_mime(path);
+    if INLINE_TYPES.contains(&mime.as_str()) {
+        return (mime, true);
+    }
+    if looks_like_text(path) {
+        return ("text/plain; charset=utf-8".to_string(), true);
+    }
+    // Not on the allowlist and not text: refuse to name a type the browser
+    // might render.
+    ("application/octet-stream".to_string(), false)
+}
+
+/// Whether a prefix of this file decodes as UTF-8.
+///
+/// A trailing `Utf8Error` with no `error_len` is an *incomplete* codepoint at the
+/// cut, not invalid data, so it counts as text — otherwise a multi-byte character
+/// straddling the 64 KB boundary would demote a perfectly readable file to a
+/// download, with the outcome depending on where in the file it happened to sit.
+fn looks_like_text(path: &Path) -> bool {
+    let Ok(bytes) = read_prefix(path, SNIFF_BYTES) else {
+        return false;
+    };
+    // A NUL is the one byte no text file has and every binary format does. Cheap
+    // to check, and it rejects UTF-16 and most binaries before the decode.
+    if bytes.contains(&0) {
+        return false;
+    }
+    match std::str::from_utf8(&bytes) {
+        Ok(_) => true,
+        Err(error) => error.error_len().is_none() && error.valid_up_to() > 0,
+    }
 }
 
 /// The header set every [`raw`] response carries, including a 304.
 ///
 /// Built in one place so a `Not Modified` cannot accidentally ship without the
 /// sandbox policy that the 200 has.
-fn hardened_headers(etag: &str, mime_type: &str, inline: bool) -> HeaderMap {
+fn hardened_headers(
+    etag: &str,
+    content_type: &str,
+    inline: bool,
+    filename: Option<&str>,
+) -> HeaderMap {
     let mut headers = HeaderMap::new();
 
+    // An attachment is never labelled with a renderable type: if the browser is
+    // saving it, naming the type buys nothing and a sniffed rename costs.
     let content_type = if inline {
-        mime_type
+        content_type
     } else {
-        // Not on the allowlist: refuse to name a type the browser might render.
         "application/octet-stream"
     };
     if let Ok(value) = HeaderValue::from_str(content_type) {
@@ -545,12 +655,18 @@ fn hardened_headers(etag: &str, mime_type: &str, inline: bool) -> HeaderMap {
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("sandbox"),
     );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_static(if inline { "inline" } else { "attachment" }),
-    );
-    // A filename is deliberately not included: it is client-supplied text
-    // reflected into a header, and the client already knows what it asked for.
+    // The filename is included now, unlike the first version of this route,
+    // because a download without one saves as `raw` with no extension — the
+    // browser has nothing else to name it from. What made that unsafe was
+    // reflecting *client* text into a header; this name comes from the canonical
+    // path and is then encoded rather than trusted.
+    let disposition = match filename {
+        Some(name) => content_disposition(inline, name),
+        None => (if inline { "inline" } else { "attachment" }).to_string(),
+    };
+    if let Ok(value) = HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, value);
+    }
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("no-cache, private"),
@@ -560,6 +676,52 @@ fn hardened_headers(etag: &str, mime_type: &str, inline: bool) -> HeaderMap {
     }
 
     headers
+}
+
+/// A `Content-Disposition` value carrying both spellings of the filename.
+///
+/// RFC 6266 wants the plain `filename=` for old clients and `filename*=` for
+/// anything non-ASCII, and every current browser prefers the latter. Both are
+/// sent because a CJK or emoji filename — ordinary in this project's own
+/// workspaces — cannot be expressed in the plain parameter at all: a bare
+/// `filename="报告.pdf"` is an invalid header value that `HeaderValue::from_str`
+/// rejects, which would have silently dropped the disposition entirely.
+fn content_disposition(inline: bool, filename: &str) -> String {
+    let kind = if inline { "inline" } else { "attachment" };
+    // The ASCII fallback: quotes and backslashes would end the parameter early,
+    // and control characters cannot appear in a header value.
+    let ascii: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii() && !c.is_ascii_control() && c != '"' && c != '\\' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!(
+        "{kind}; filename=\"{ascii}\"; filename*=UTF-8''{}",
+        percent_encode(filename)
+    )
+}
+
+/// Percent-encode for RFC 5987, keeping only the unreserved set.
+///
+/// Hand-rolled rather than adding `percent-encoding`: this is the only caller in
+/// the codebase, and the conservative rule — encode everything that is not
+/// `A-Za-z0-9-._~` — is shorter than the argument for a dependency.
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// Whether a file is worth offering to the document endpoint.
@@ -745,6 +907,224 @@ pub async fn upload(
     ))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MkdirRequest {
+    /// Parent directory, relative to the workdir. Empty means the root.
+    #[serde(default)]
+    pub path: String,
+    /// New directory's name; reduced to one path component.
+    pub name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MkdirResponse {
+    pub path: String,
+    pub absolute_path: String,
+}
+
+/// POST /api/v1/sessions/{id}/files/directory
+///
+/// Create one directory inside the session's working directory.
+///
+/// Non-recursive on purpose: `create_dir_all` would turn a name with a typo'd
+/// separator into a silent two-level tree, and the sanitizer means a separator
+/// cannot survive anyway — so the recursive variant could only ever hide a bug.
+/// It refuses an existing path rather than succeeding quietly, so "New folder"
+/// twice reports the collision instead of appearing to have done nothing.
+pub async fn mkdir(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<MkdirRequest>,
+) -> Result<(StatusCode, Json<MkdirResponse>)> {
+    let (root, parent) = resolve(&state, &id, &req.path).await?;
+
+    let metadata = std::fs::metadata(&parent)
+        .map_err(|e| paths::describe_io_error(&e, "read that directory"))?;
+    if !metadata.is_dir() {
+        return Err(Error::InvalidRequest(
+            "The parent of a new folder must be a directory.".to_string(),
+        ));
+    }
+
+    let name = sanitize_component(&req.name)?;
+    let target = parent.join(&name);
+    // Containment re-asserted on the joined path, for the same reason `upload`
+    // does it: one comparison, versus trusting a sanitizer at a distance.
+    if !target.starts_with(&root) {
+        return Err(Error::Forbidden(
+            "That path is outside the session's working directory.".to_string(),
+        ));
+    }
+    if target.exists() {
+        return Err(Error::InvalidRequest(format!("{name} already exists.")));
+    }
+
+    tokio::fs::create_dir(&target)
+        .await
+        .map_err(|e| paths::describe_io_error(&e, "create that folder"))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(MkdirResponse {
+            path: paths::join_relative(&req.path, &name),
+            absolute_path: target.display().to_string(),
+        }),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct RemoveQuery {
+    /// Path to delete, relative to the workdir.
+    path: String,
+    /// Required to delete a directory that is not empty.
+    #[serde(default)]
+    recursive: bool,
+}
+
+/// DELETE /api/v1/sessions/{id}/files?path=&recursive=
+///
+/// Delete one file, or one directory.
+///
+/// # Why this is permitted, and where it stops
+///
+/// This is the only irreversible operation in the API: there is no trash to
+/// restore from, because reaching the platform's trash means either a new
+/// dependency or spawning `osascript`, and a browser page that can invoke a host
+/// process is a larger concession than the delete itself. So the guards are the
+/// safety, and they are chosen against the ways this actually goes wrong:
+///
+/// - **The root is refused.** `path=""` normalizes to the workdir, and a client
+///   bug that sent an empty path would otherwise erase the user's project. There
+///   is no legitimate request that means "delete the working directory".
+/// - **A non-empty directory needs `recursive`.** Deleting one stray file and
+///   deleting a subtree are different intentions; the client asks the user which
+///   one they meant, and the default answer here is the narrow one.
+/// - **Confirmation is the client's job, and it does it** — but the guards above
+///   hold whether or not the caller is this project's UI.
+/// - **A symlink is unlinked, never followed.** See [`resolve_parent`] for why
+///   that requires resolving the parent instead of the target.
+pub async fn remove(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<RemoveQuery>,
+) -> Result<StatusCode> {
+    let cleaned = paths::normalize_relative(&query.path);
+    if cleaned.is_empty() {
+        return Err(Error::Forbidden(
+            "The session's working directory cannot be deleted.".to_string(),
+        ));
+    }
+
+    let (_root, target) = resolve_parent(&state, &id, &cleaned).await?;
+
+    // `symlink_metadata`, not `metadata`: a symlink must be unlinked, not walked.
+    // This is only *able* to see the link because `resolve_parent` left the last
+    // component unresolved — through `resolve` the path would already have been
+    // canonicalized to the target, and deleting a link to a populated directory
+    // would have deleted the directory.
+    let metadata = std::fs::symlink_metadata(&target)
+        .map_err(|e| paths::describe_io_error(&e, "read that path"))?;
+
+    if metadata.is_dir() {
+        let empty = std::fs::read_dir(&target)
+            .map_err(|e| paths::describe_io_error(&e, "read that directory"))?
+            .next()
+            .is_none();
+        if !empty && !query.recursive {
+            return Err(Error::InvalidRequest(
+                "That folder is not empty. Send recursive to delete it and everything in it."
+                    .to_string(),
+            ));
+        }
+        tokio::fs::remove_dir_all(&target)
+            .await
+            .map_err(|e| paths::describe_io_error(&e, "delete that folder"))?;
+    } else {
+        tokio::fs::remove_file(&target)
+            .await
+            .map_err(|e| paths::describe_io_error(&e, "delete that file"))?;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Resolve a path whose *last component must not be followed*.
+///
+/// [`resolve`] canonicalizes the whole path, which is right for reading — a
+/// symlink is transparent, and resolving it is what the containment check needs
+/// to see. It is wrong for deleting: canonicalized, `link` becomes the directory
+/// it points at, and unlinking becomes recursive deletion of the target. That is
+/// not a hypothetical; it is what the first version of [`remove`] did, and the
+/// symlink test caught it.
+///
+/// So the parent is canonicalized and contained, and the final component is
+/// appended to it verbatim. Containment still holds: every `..` and every
+/// symlinked *directory* in the path is resolved and checked, and a final
+/// component that is itself an escaping symlink is only ever unlinked, never
+/// opened or walked.
+async fn resolve_parent(
+    state: &AppState,
+    session_id: &str,
+    cleaned: &str,
+) -> Result<(PathBuf, PathBuf)> {
+    let (parent, name) = match cleaned.rsplit_once('/') {
+        Some((parent, name)) => (parent, name),
+        None => ("", cleaned),
+    };
+    // Rejects the names that would re-target the operation at a directory the
+    // caller did not name — `..` most of all, which would climb.
+    let name = sanitize_component(name)?;
+
+    let (root, directory) = resolve(state, session_id, parent).await?;
+    let target = directory.join(&name);
+    if !target.starts_with(&root) {
+        return Err(Error::Forbidden(
+            "That path is outside the session's working directory.".to_string(),
+        ));
+    }
+    Ok((root, target))
+}
+
+/// Reduce a user-supplied name to exactly one path component.
+///
+/// Deliberately *not* [`crate::attachments::sanitize_filename`], which strips
+/// every non-ASCII character: that is right for a filename derived from an
+/// upload, where the name is incidental, and wrong for a folder the user is
+/// naming, where `文档` would silently become `attachment`. So this rejects
+/// rather than rewrites — the user gets to fix their own name — and rejects only
+/// what a path component cannot contain.
+fn sanitize_component(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(Error::InvalidRequest("A name is required.".to_string()));
+    }
+    if trimmed.len() > 255 {
+        return Err(Error::InvalidRequest(
+            "That name is too long for a directory entry.".to_string(),
+        ));
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err(Error::InvalidRequest(
+            "That name refers to a directory that already exists.".to_string(),
+        ));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(Error::InvalidRequest(
+            "A name cannot contain a path separator.".to_string(),
+        ));
+    }
+    // A NUL terminates the string the OS actually receives, so a name containing
+    // one creates a different path than the one shown in the request.
+    if trimmed.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(Error::InvalidRequest(
+            "A name cannot contain control characters.".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Extension-based MIME guess, for choosing a viewer and a highlighter.
 ///
 /// Deliberately a small table rather than a dependency: the Artifacts pane needs
@@ -837,6 +1217,96 @@ mod tests {
         assert_eq!(guess_mime(Path::new("a/B.JPEG")), "image/jpeg");
         assert_eq!(guess_mime(Path::new("a/readme.md")), "text/markdown");
         assert_eq!(guess_mime(Path::new("Makefile")), "text/plain");
+    }
+
+    /// The three tiers of [`serve_type`], each pinned by the outcome that would
+    /// be a defect: a PDF that downloads, source that downloads, a binary that
+    /// renders.
+    #[test]
+    fn serve_type_renders_allowlisted_and_textual_files_and_downloads_the_rest() {
+        let dir = std::env::temp_dir().join(format!("sylph-serve-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let pdf = dir.join("a.pdf");
+        std::fs::write(&pdf, b"%PDF-1.4 not really").unwrap();
+        assert_eq!(serve_type(&pdf), ("application/pdf".to_string(), true));
+
+        // An extension with no MIME entry at all: the bytes decide, and they are
+        // text. This is the case an extension table gets wrong.
+        let source = dir.join("main.svelte");
+        std::fs::write(&source, "<script>let a = 1;</script>").unwrap();
+        assert_eq!(
+            serve_type(&source),
+            ("text/plain; charset=utf-8".to_string(), true)
+        );
+
+        // A `.log` holding binary output — the inverse mistake.
+        let binary = dir.join("core.log");
+        std::fs::write(&binary, [0x00, 0x01, 0xff, 0xfe]).unwrap();
+        assert_eq!(
+            serve_type(&binary),
+            ("application/octet-stream".to_string(), false)
+        );
+
+        // HTML keeps its own type, because a rendered page is the point. It is
+        // safe only because of the sandbox header; see `raw`.
+        let page = dir.join("report.html");
+        std::fs::write(&page, "<p>hi</p>").unwrap();
+        assert_eq!(serve_type(&page), ("text/html".to_string(), true));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A codepoint split by the sniff boundary is incomplete data, not invalid
+    /// data. Getting this wrong makes a file's renderability depend on where a
+    /// multi-byte character happens to fall.
+    #[test]
+    fn a_codepoint_straddling_the_sniff_boundary_still_counts_as_text() {
+        let dir = std::env::temp_dir().join(format!("sylph-sniff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.txt");
+
+        let mut content = "a".repeat(SNIFF_BYTES - 1);
+        content.push('中'); // 3 bytes, so it is cut after the first
+        content.push_str(&"b".repeat(100));
+        std::fs::write(&path, &content).unwrap();
+
+        assert!(looks_like_text(&path));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn content_disposition_carries_both_filename_spellings() {
+        assert_eq!(
+            content_disposition(false, "report.pdf"),
+            "attachment; filename=\"report.pdf\"; filename*=UTF-8''report.pdf"
+        );
+        // The case the plain parameter cannot express, and the reason both are
+        // sent: the ASCII fallback degrades, the encoded one is exact.
+        assert_eq!(
+            content_disposition(true, "报告.pdf"),
+            "inline; filename=\"__.pdf\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf"
+        );
+        // A quote would otherwise end the parameter and let the rest of the name
+        // be read as header syntax.
+        assert!(!content_disposition(false, "a\"b.txt").contains("a\"b"));
+    }
+
+    /// Rejecting beats rewriting for a name the user typed: `文档` must not
+    /// become `attachment`, and `../etc` must not become `etc`.
+    #[test]
+    fn component_names_are_rejected_rather_than_rewritten() {
+        assert_eq!(sanitize_component(" src ").unwrap(), "src");
+        assert_eq!(sanitize_component("文档").unwrap(), "文档");
+        assert_eq!(sanitize_component("a.b-c_d").unwrap(), "a.b-c_d");
+
+        for bad in ["", "   ", ".", "..", "a/b", "a\\b", "a\0b", "a\nb"] {
+            assert!(
+                sanitize_component(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        assert!(sanitize_component(&"x".repeat(300)).is_err());
     }
 
     #[test]

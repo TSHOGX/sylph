@@ -2919,6 +2919,190 @@ async fn upload_refuses_to_escape_the_workdir() {
     );
 }
 
+#[tokio::test]
+async fn mkdir_creates_one_directory_and_reports_its_relative_path() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::create_dir_all(backend.workdir().join("docs")).unwrap();
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/files/directory"),
+            json!({ "path": "docs", "name": "drafts" }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = json_body(response).await;
+    // The relative path is what the pane addresses files by, so the client can
+    // expand straight to the new folder without re-deriving it.
+    assert_eq!(body["path"], "docs/drafts");
+    assert!(backend.workdir().join("docs/drafts").is_dir());
+}
+
+/// A folder the user names keeps the name they typed.
+///
+/// The upload sanitizer strips non-ASCII, which is right for an incidental
+/// filename and wrong here: `文档` becoming `attachment` is data loss the user
+/// cannot see the cause of.
+#[tokio::test]
+async fn mkdir_preserves_a_non_ascii_name() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/files/directory"),
+            json!({ "path": "", "name": "文档" }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(backend.workdir().join("文档").is_dir());
+}
+
+#[tokio::test]
+async fn mkdir_refuses_a_separator_a_collision_and_an_escape() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::create_dir_all(backend.workdir().join("existing")).unwrap();
+    let route = format!("/api/v1/sessions/{session_id}/files/directory");
+
+    // A separator is rejected rather than silently creating a two-level tree.
+    let response = backend
+        .post_authed(&route, json!({ "path": "", "name": "a/b" }))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!backend.workdir().join("a").exists());
+
+    // A collision is reported, so "New folder" twice does not look like a no-op.
+    let response = backend
+        .post_authed(&route, json!({ "path": "", "name": "existing" }))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // And the parent still goes through the containment check.
+    let response = backend
+        .post_authed(&route, json!({ "path": "../..", "name": "escaped" }))
+        .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!backend.workdir().parent().unwrap().join("escaped").exists());
+}
+
+#[tokio::test]
+async fn delete_removes_a_file() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    let target = backend.workdir().join("stale.txt");
+    std::fs::write(&target, "x").unwrap();
+
+    let response = backend
+        .delete_authed(&format!(
+            "/api/v1/sessions/{session_id}/files?path=stale.txt"
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(!target.exists());
+}
+
+/// The guard that matters most: an empty path normalizes to the workdir, and a
+/// client bug that sent one would otherwise erase the user's project. No
+/// legitimate request means "delete the working directory".
+#[tokio::test]
+async fn delete_refuses_the_working_directory_itself() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::write(backend.workdir().join("keep.txt"), "x").unwrap();
+
+    for path in ["", ".", "/"] {
+        let response = backend
+            .delete_authed(&format!(
+                "/api/v1/sessions/{session_id}/files?path={path}"
+            ))
+            .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "path={path:?} must not delete the workdir"
+        );
+    }
+    assert!(backend.workdir().join("keep.txt").exists());
+    assert!(backend.workdir().is_dir());
+}
+
+/// Deleting one stray file and deleting a subtree are different intentions, so the
+/// second one has to be asked for.
+#[tokio::test]
+async fn delete_refuses_a_non_empty_directory_unless_recursive() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::create_dir_all(backend.workdir().join("tree/nested")).unwrap();
+    std::fs::write(backend.workdir().join("tree/nested/deep.txt"), "x").unwrap();
+
+    let response = backend
+        .delete_authed(&format!("/api/v1/sessions/{session_id}/files?path=tree"))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(backend.workdir().join("tree/nested/deep.txt").exists());
+
+    // An empty directory needs no flag: there is nothing to lose.
+    std::fs::create_dir_all(backend.workdir().join("blank")).unwrap();
+    let response = backend
+        .delete_authed(&format!("/api/v1/sessions/{session_id}/files?path=blank"))
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = backend
+        .delete_authed(&format!(
+            "/api/v1/sessions/{session_id}/files?path=tree&recursive=true"
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(!backend.workdir().join("tree").exists());
+}
+
+#[tokio::test]
+async fn delete_refuses_to_escape_the_workdir() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    let outside = backend.workdir().parent().unwrap().join("outside.txt");
+    std::fs::write(&outside, "x").unwrap();
+
+    let response = backend
+        .delete_authed(&format!(
+            "/api/v1/sessions/{session_id}/files?path=../outside.txt"
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(outside.exists(), "a path outside the root must survive");
+    std::fs::remove_file(&outside).ok();
+}
+
+/// A symlink is unlinked, not followed.
+///
+/// Following it would delete the *target's* contents. `resolve` has already
+/// confirmed the target is inside the workspace, so this is not a containment
+/// hole — but "delete this link" and "delete what it points at" are different
+/// operations, and only one of them was asked for.
+#[tokio::test]
+async fn delete_unlinks_a_symlink_without_touching_its_target() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    let real = backend.workdir().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join("keep.txt"), "x").unwrap();
+    std::os::unix::fs::symlink(&real, backend.workdir().join("link")).unwrap();
+
+    let response = backend
+        .delete_authed(&format!("/api/v1/sessions/{session_id}/files?path=link"))
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(!backend.workdir().join("link").exists());
+    assert!(
+        real.join("keep.txt").exists(),
+        "the link's target must be untouched"
+    );
+}
+
 /// An upload must not quietly destroy source the user did not mean to touch.
 #[tokio::test]
 async fn upload_refuses_to_overwrite_unless_asked() {
@@ -3353,17 +3537,103 @@ async fn raw_bytes_are_served_with_sandbox_and_nosniff_headers() {
         "nosniff"
     );
     assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), "text/html");
-    assert_eq!(headers.get(header::CONTENT_DISPOSITION).unwrap(), "inline");
+    // Prefix, not equality: the disposition also carries the filename now, so a
+    // download saves under the file's own name instead of as `raw`. What this
+    // assertion pins is `inline` versus `attachment`.
+    assert!(
+        disposition_of(&headers).starts_with("inline"),
+        "an allowlisted type renders rather than downloading"
+    );
 
     assert!(body_string(response).await.contains("Generated"));
 }
 
+fn disposition_of(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get(header::CONTENT_DISPOSITION)
+        .expect("every raw response carries a disposition")
+        .to_str()
+        .expect("the disposition is header-safe even for a CJK filename")
+        .to_string()
+}
+
+/// `?download=true` overrides a renderable type.
+///
+/// The allowlist answers "is this safe to render"; this answers "did the user ask
+/// to save it". Conflating them is how Download on a PNG opens a tab showing the
+/// image instead of saving it.
+#[tokio::test]
+async fn raw_download_forces_an_attachment_for_a_renderable_type() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::write(backend.workdir().join("report.html"), "<h1>Generated</h1>").unwrap();
+
+    let headers = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{session_id}/files/raw?path=report.html&download=true"
+        ))
+        .await
+        .headers()
+        .clone();
+
+    let disposition = disposition_of(&headers);
+    assert!(disposition.starts_with("attachment"), "{disposition}");
+    assert!(
+        disposition.contains("filename=\"report.html\""),
+        "a download with no filename saves as `raw`: {disposition}"
+    );
+    // Nor is it labelled with a renderable type, so a client ignoring the
+    // disposition still would not render it.
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).unwrap(),
+        "application/octet-stream"
+    );
+}
+
+/// Text renders in a tab whatever its extension.
+///
+/// This is what makes "open in a new tab" work for source: the pane's preview is
+/// truncated at 256 KB by design, so the whole file has to be readable somewhere.
+/// An extension table cannot decide this — `.svelte` and `.rb` are absent from it,
+/// and a `.log` full of binary is present wrongly — so the bytes decide.
+#[tokio::test]
+async fn raw_renders_text_inline_whatever_the_extension() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    std::fs::write(
+        backend.workdir().join("Component.svelte"),
+        "<script>let count = 0;</script>",
+    )
+    .unwrap();
+
+    let response = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{session_id}/files/raw?path=Component.svelte"
+        ))
+        .await;
+
+    let headers = response.headers().clone();
+    // `text/plain`, never the extension's own label. That the bytes are text says
+    // nothing about whether it is safe to *interpret* them, and this file holds a
+    // `<script>` element to make the distinction concrete.
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).unwrap(),
+        "text/plain; charset=utf-8"
+    );
+    assert!(disposition_of(&headers).starts_with("inline"));
+    assert!(body_string(response).await.contains("let count = 0;"));
+}
+
+/// An unrecognized extension is never *promoted* into a renderable type.
+///
+/// The file here holds HTML under a `.xyz` name — the shape of an attack where
+/// markup is smuggled past the allowlist by renaming it. Since the bytes are text
+/// it is served as `text/plain`, which shows the markup as source rather than
+/// executing it; what must never happen is `text/html`.
 #[tokio::test]
 async fn raw_refuses_to_name_a_type_it_does_not_render() {
     let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
     let session_id = backend.create_session("agent").await;
-    // An extension the allowlist does not carry. A browser told `text/html` here
-    // would render it; told octet-stream with nosniff, it downloads.
     std::fs::write(backend.workdir().join("payload.xyz"), "<h1>not rendered</h1>").unwrap();
 
     let response = backend
@@ -3375,19 +3645,58 @@ async fn raw_refuses_to_name_a_type_it_does_not_render() {
     let headers = response.headers().clone();
     assert_eq!(
         headers.get(header::CONTENT_TYPE).unwrap(),
-        "application/octet-stream"
+        "text/plain; charset=utf-8",
+        "smuggled markup is shown as source, never labelled as HTML"
     );
-    assert_eq!(
-        headers.get(header::CONTENT_DISPOSITION).unwrap(),
-        "attachment"
-    );
+    assert_eq!(headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
     assert_eq!(headers.get(header::CONTENT_SECURITY_POLICY).unwrap(), "sandbox");
+    // The body is the markup verbatim, which is the point: it was not
+    // interpreted, and `nosniff` above is what stops the browser reconsidering.
+    assert!(body_string(response).await.contains("<h1>not rendered</h1>"));
 }
 
-/// An SVG must never be served inline from this origin: as `image/svg+xml` it can
-/// execute script, whereas the same bytes inside an `<img>` cannot.
+/// A file whose bytes are not text still downloads.
+///
+/// The other half of the rule above: broadening the route to serve text must not
+/// broaden it to serve *everything*, or an unknown binary lands in a tab as
+/// mojibake instead of in the user's downloads.
 #[tokio::test]
-async fn raw_never_serves_svg_inline() {
+async fn raw_downloads_a_file_whose_bytes_are_not_text() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+    // A NUL and an invalid UTF-8 sequence: what any real binary carries, and what
+    // no source file does.
+    std::fs::write(
+        backend.workdir().join("blob.bin"),
+        [0x00, 0x01, 0xff, 0xfe, 0x42],
+    )
+    .unwrap();
+
+    let headers = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{session_id}/files/raw?path=blob.bin"
+        ))
+        .await
+        .headers()
+        .clone();
+
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).unwrap(),
+        "application/octet-stream"
+    );
+    assert!(disposition_of(&headers).starts_with("attachment"));
+}
+
+/// An SVG must never be served as `image/svg+xml` from this origin: at that type
+/// it can execute script, whereas the same bytes inside an `<img>` cannot.
+///
+/// It is text, so it now goes out as `text/plain` rather than as an attachment —
+/// a tab shows its source. That is a deliberately duller outcome than rendering
+/// the drawing, and the trade is documented in `files.rs`: the pane already
+/// renders SVG through the base64 `content` path, where an `<img>` element is the
+/// container and script cannot run, so nothing needs this route to render it.
+#[tokio::test]
+async fn raw_never_serves_svg_as_an_executable_type() {
     let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
     let session_id = backend.create_session("agent").await;
     std::fs::write(
@@ -3404,15 +3713,16 @@ async fn raw_never_serves_svg_inline() {
         .headers()
         .clone();
 
-    assert_eq!(
-        headers.get(header::CONTENT_TYPE).unwrap(),
-        "application/octet-stream",
-        "an SVG must not be served as a renderable type"
+    let content_type = headers.get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+    assert_ne!(
+        content_type, "image/svg+xml",
+        "at this type a script inside the SVG runs in this origin"
     );
-    assert_eq!(
-        headers.get(header::CONTENT_DISPOSITION).unwrap(),
-        "attachment"
-    );
+    assert_eq!(content_type, "text/plain; charset=utf-8");
+    // The script survives in the body, unexecuted. That is the whole distinction:
+    // the bytes are delivered, the type refuses to interpret them.
+    assert_eq!(headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+    assert_eq!(headers.get(header::CONTENT_SECURITY_POLICY).unwrap(), "sandbox");
 }
 
 #[tokio::test]
