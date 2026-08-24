@@ -24,6 +24,8 @@ import { formatTimestamp, sessionLabel } from "@/lib/format";
 import { densityClasses, useSettings } from "@/lib/settings";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useSSE } from "@/lib/use-sse";
+import { useAgentSession } from "@/lib/use-agent-session";
+import { ApprovalDialog } from "@/components/approval-dialog";
 import { type StagedAttachment } from "@/components/attachment-picker";
 import { Composer } from "@/components/composer";
 import { CommandDialog, type CommandInvocation } from "@/components/command-dialog";
@@ -196,6 +198,18 @@ export default function SessionPage() {
   });
 
   const agentsQuery = useQuery({ queryKey: ["agents"], queryFn: () => api.agents.list() });
+
+  // The session's live agent: its real command list, and anything it is blocked
+  // on. Owned by its own hook because both are session facts rather than turn
+  // facts - an approval outlives the turn that raised it, and a capability list
+  // changes while no turn is running.
+  const agent = useAgentSession(sessionId);
+  // Dismissing hides the panel without answering, so the request stays open and
+  // the agent stays blocked. Keyed by request id, or dismissing one approval
+  // would hide the next one too.
+  const [dismissedRequest, setDismissedRequest] = useState<string | null>(null);
+  const pendingRequest =
+    agent.current && agent.current.id !== dismissedRequest ? agent.current : undefined;
   const commands = useMemo(() => {
     const descriptor = agentsQuery.data?.agents.find((a) => a.name === session?.agent);
     return descriptor?.commands ?? {};
@@ -453,6 +467,20 @@ export default function SessionPage() {
         </div>
       </div>
 
+      {pendingRequest && (
+        <div className="border-t border-line bg-canvas px-3 pt-3">
+          <ApprovalDialog
+            request={pendingRequest}
+            busy={agent.resolving}
+            onResolve={(option, input) => {
+              agent.resolve(option, input);
+              setDismissedRequest(null);
+            }}
+            onDismiss={() => setDismissedRequest(pendingRequest.id)}
+          />
+        </div>
+      )}
+
       <Composer
         session={session}
         agents={agentsQuery.data?.agents ?? []}
@@ -469,6 +497,13 @@ export default function SessionPage() {
         sendError={sendTurn.error ?? runCommand.error}
         onStop={() => stopTurn.mutate()}
         stopping={stopTurn.isPending}
+        // The agent's own list, read from its live handshake. A detached
+        // session reports none, which is why the menu simply does not open
+        // rather than offering a command that may no longer exist.
+        commands={agent.link?.capabilities?.commands ?? []}
+        onRunCommand={(name, rest) =>
+          runCommand.mutate({ command: name, args: rest ? { args: rest } : {} })
+        }
         hasCommands={hasCommands}
         onOpenCommands={() => setCommandOpen(true)}
       />

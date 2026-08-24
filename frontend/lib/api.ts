@@ -92,10 +92,130 @@ export interface TurnWithEvents {
   events: StreamEvent[];
 }
 
-/** A flag declared by a runner's `--describe` output. */
+/** A flag declared by an agent's handshake. */
 export interface AgentFlag {
   choices: string[];
   description?: string;
+}
+
+/**
+ * A slash command the *session's own agent* reports.
+ *
+ * Distinct from `AgentCommand` in where it comes from, which is the whole point
+ * of the v2 protocol: this list is read from a live agent that has loaded the
+ * project, so it holds the real skills, project commands, and plugins — dozens on
+ * a real checkout. `AgentCommand` is what an agent declares about itself before
+ * any session exists, and is usually empty.
+ */
+export interface SessionCommand {
+  name: string;
+  description?: string;
+  /** What follows the command, e.g. `[target]`. Free-form. */
+  argHint?: string;
+  /** `skill` | `project` | `plugin` | `builtin`. Advisory, for grouping. */
+  source?: string;
+}
+
+export interface SessionModel {
+  id: string;
+  label?: string;
+}
+
+export interface SessionSubagent {
+  name: string;
+  description?: string;
+}
+
+/** What a session's agent can do right now, read from its live link. */
+export interface SessionCapabilities {
+  commands: SessionCommand[];
+  subagents: SessionSubagent[];
+  models: SessionModel[];
+  permissionMode?: string;
+  contextWindow?: number;
+}
+
+/**
+ * Whether a session has a live agent, and what it can do.
+ *
+ * `supports` is empty when detached, deliberately: capability is a property of a
+ * live link, and reporting a remembered list would offer the user an interrupt
+ * button for a session with no process to interrupt.
+ */
+export interface LinkState {
+  attached: boolean;
+  agent?: string;
+  /** Closed vocabulary: `interrupt`, `steer`, `approval`, `subagent`, `slash`, … */
+  supports: string[];
+  capabilities?: SessionCapabilities;
+}
+
+/** One option an agent offered on a request. */
+export interface RequestOption {
+  id: string;
+  label: string;
+  /** Whether choosing this is a lasting decision rather than a one-off. */
+  persistent?: boolean;
+}
+
+/**
+ * A question an agent is blocked on.
+ *
+ * A resource rather than a stream message: the agent waits until someone
+ * answers, so this survives a client disconnecting and is answerable from any
+ * frontend — including one that connects later.
+ */
+export interface PendingRequest {
+  id: string;
+  sessionId: string;
+  turnId: string;
+  /** `approval` | `dialog` | `elicitation` | `choice`. */
+  kind: string;
+  tool?: string;
+  toolUseId?: string;
+  title: string;
+  /** JSON: what the agent proposed. For an approval, the tool input. */
+  detailJson: string;
+  /** JSON array of `RequestOption`. */
+  optionsJson: string;
+  defaultOption?: string;
+  /** `safe` | `destructive` | `network`. Advisory, for emphasis. */
+  risk?: string;
+  status: string;
+  chosenOption?: string;
+  createdAtMs: number;
+  resolvedAtMs?: number;
+}
+
+/** Parse a request's proposed input. Never throws: a malformed payload renders
+ * as no detail rather than breaking the dialog that has to display it. */
+export function requestDetail(request: PendingRequest): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(request.detailJson);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Parse a request's offered options, falling back to a bare allow/deny.
+ *
+ * The fallback matters: a request whose options failed to parse would otherwise
+ * render as a dialog with no buttons, leaving the agent blocked with no way for
+ * the user to answer. Allow and deny are the two the backend validates against
+ * whatever the agent actually offered, so a wrong guess is refused rather than
+ * silently accepted. */
+export function requestOptions(request: PendingRequest): RequestOption[] {
+  try {
+    const parsed = JSON.parse(request.optionsJson);
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+  } catch {
+    // fall through
+  }
+  return [
+    { id: "allow", label: "Allow" },
+    { id: "deny", label: "Deny" },
+  ];
 }
 
 export interface AgentCommand {
@@ -705,6 +825,59 @@ export const api = {
       }),
     deleteEmpty: (id: string) =>
       fetchAPI<void>(`/sessions/${id}`, { method: "DELETE" }),
+    /**
+     * What this session's agent can do, read from a live handshake.
+     *
+     * Establishes a link if there is none, because the answer is only knowable
+     * from a running agent — a project's command list depends on files the CLI
+     * reads at startup. That makes this call slow the first time (seconds, while
+     * the agent loads the project) and instant afterwards.
+     */
+    capabilities: (id: string) =>
+      fetchAPI<LinkState>(`/sessions/${id}/capabilities`),
+    /** Start the agent eagerly, before the user finishes typing. */
+    attach: (id: string) =>
+      fetchAPI<LinkState>(`/sessions/${id}/link`, { method: "POST" }),
+    /** Stop the agent without ending the session. */
+    detach: (id: string) =>
+      fetchAPI<LinkState>(`/sessions/${id}/link`, { method: "DELETE" }),
+    /** What the agent is currently blocked on. */
+    requests: (id: string) =>
+      fetchAPI<PendingRequest[]>(`/sessions/${id}/requests`),
+    /**
+     * End the current turn but keep the agent loaded.
+     *
+     * Distinct from `turns.stop`, which ends the agent too. These are different
+     * intentions — "that is not what I meant" against "stop everything" — and the
+     * UI should offer whichever the agent declares it supports.
+     */
+    interrupt: (id: string) =>
+      fetchAPI<{ interrupted: boolean }>(`/sessions/${id}/interrupt`, {
+        method: "POST",
+      }),
+    /** Add text to a turn already in flight. */
+    steer: (id: string, text: string) =>
+      fetchAPI<{ steered: boolean }>(`/sessions/${id}/steer`, {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      }),
+  },
+  requests: {
+    /**
+     * Answer a request an agent raised.
+     *
+     * `input` carries an edited version of what the agent proposed, which is how
+     * "allow, but change the command" works. Omitting it means "as proposed".
+     *
+     * Fails with `REQUEST_ALREADY_RESOLVED` when someone else answered first, and
+     * that is worth surfacing rather than swallowing: it means the dialog on
+     * screen was stale.
+     */
+    resolve: (requestId: string, option: string, input?: unknown) =>
+      fetchAPI<PendingRequest>(`/requests/${requestId}/resolve`, {
+        method: "POST",
+        body: JSON.stringify({ option, input }),
+      }),
   },
   files: {
     tree: (sessionId: string, path = "") =>

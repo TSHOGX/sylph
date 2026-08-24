@@ -7,6 +7,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
+use tokio_stream::StreamExt;
 
 use crate::error::{Error, Result};
 use crate::links::LinkState;
@@ -190,6 +191,45 @@ pub async fn steer(
 #[derive(serde::Deserialize)]
 pub struct SteerRequest {
     pub text: String,
+}
+
+/// Session-scoped facts, as SSE.
+///
+/// Separate from the turn stream because links, capability changes, and requests
+/// are properties of a session: they happen with no turn running, and a client
+/// watching only turns would miss an approval raised while it was idle.
+///
+/// Carries no replay. These are notifications that state changed, and the state
+/// itself is a resource — `/requests` and `/capabilities` — so a client that
+/// reconnects re-reads rather than replaying. That is what keeps a missed frame
+/// from stranding an approval.
+pub async fn events(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<impl axum::response::IntoResponse> {
+    require_session(&state, &session_id).await?;
+
+    let live = state.hub.attach_session(&session_id).await;
+    let stream = tokio_stream::wrappers::BroadcastStream::new(live)
+        .filter_map(|result| result.ok())
+        .map(|event| {
+            let data = serde_json::to_string(&event).unwrap_or_default();
+            Ok::<axum::response::sse::Event, std::convert::Infallible>(
+                axum::response::sse::Event::default().event(&event.kind).data(data),
+            )
+        });
+
+    Ok((
+        // `no-transform` for the reason recorded in AGENTS.md: a proxy that gzips
+        // an SSE body buffers it invisibly, and the symptom reads as a rendering
+        // bug rather than a transport one.
+        [
+            ("Cache-Control", "no-cache, no-store, no-transform"),
+            ("X-Accel-Buffering", "no"),
+        ],
+        axum::response::sse::Sse::new(stream)
+            .keep_alive(axum::response::sse::KeepAlive::default()),
+    ))
 }
 
 /// 404 for an unknown session before anything expensive happens.

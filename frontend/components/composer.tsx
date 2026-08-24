@@ -59,9 +59,11 @@ import {
   sessionFlags,
   type Agent,
   type Session,
+  type SessionCommand,
 } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
 import { useT, type Translate } from "@/lib/i18n";
+import { SlashMenu, useSlashMatches } from "@/components/slash-menu";
 import { useIsMobile } from "@/lib/viewport";
 import {
   MAX_ATTACHMENTS,
@@ -129,6 +131,8 @@ export function Composer({
   attachments,
   onAttachmentsChange,
   onSend,
+  commands = [],
+  onRunCommand,
   sending,
   sendError,
   onStop,
@@ -145,6 +149,17 @@ export function Composer({
   attachments: StagedAttachment[];
   onAttachmentsChange: (next: StagedAttachment[]) => void;
   onSend: () => void;
+  /**
+   * Slash commands the session's agent reported.
+   *
+   * Empty for an agent that declares none, and for a detached session - which
+   * is correct rather than a gap: the list is only knowable from a live agent,
+   * so offering a remembered one would promise a command that may no longer
+   * exist.
+   */
+  commands?: SessionCommand[];
+  /** Invoke a command instead of sending the text as a message. */
+  onRunCommand?: (name: string, rest: string) => void;
   sending: boolean;
   sendError: unknown;
   onStop: () => void;
@@ -158,7 +173,61 @@ export function Composer({
   const t = useT();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [slashIndex, setSlashIndex] = useState(0);
+  // The query the highlight belongs to, so a narrowing query can reset it during
+  // render rather than in an effect.
+  const [slashIndexFor, setSlashIndexFor] = useState<string | undefined>(undefined);
+
+  // The menu is open when the text *is* a command being typed: a leading slash,
+  // no whitespace yet. Derived rather than a state flag, so there is no way to
+  // be in command mode while the text says otherwise - and deleting the slash
+  // closes it without anything having to notice.
+  const slashQuery = /^\/([^\s]*)$/.exec(text)?.[1];
+  const slashOpen = slashQuery !== undefined && commands.length > 0;
+  const slashMatches = useSlashMatches(commands, slashQuery ?? "");
+  const slashActive = slashOpen && slashMatches.length > 0;
+
+  // Reset the highlight when the candidate set changes, or a narrowing query
+  // leaves the selection pointing past the end of a shorter list.
+  //
+  // Done during render, which is what React prescribes for state derived from a
+  // changing input. In an effect it would paint one frame with the stale index -
+  // briefly highlighting the wrong command, which is exactly the frame a fast
+  // typist would press Enter on.
+  if (slashIndexFor !== slashQuery) {
+    setSlashIndexFor(slashQuery);
+    setSlashIndex(0);
+  }
+
+  /**
+   * Send, routing a leading slash to the command API.
+   *
+   * Both Enter and the Send button call this, so there is no way for one to
+   * treat `/verify the auth change` as a command and the other as a message.
+   * An unknown command is deliberately *not* intercepted: it goes through as
+   * text, and the agent says it does not recognize it - which is what a
+   * terminal does, and is more honest than this UI guessing.
+   */
+  function submit() {
+    const match = /^\/([^\s]+)\s*([\s\S]*)$/.exec(text.trim());
+    const known =
+      match && commands.some((command) => command.name === match[1]);
+    if (known && onRunCommand) {
+      onRunCommand(match[1], match[2].trim());
+      return;
+    }
+    onSend();
+  }
+
+  function pickCommand(command: SessionCommand) {
+    // Completed into the input rather than sent, because most commands take an
+    // argument and sending on selection would deny the user the chance to type
+    // one. A trailing space is what makes the next keystroke an argument.
+    onTextChange(`/${command.name} `);
+    textareaRef.current?.focus();
+  }
   const messageId = useId();
+  const slashListboxId = useId();
   const problemId = useId();
 
   const [dragging, setDragging] = useState(false);
@@ -389,7 +458,7 @@ export function Composer({
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            if (canSend) onSend();
+            if (canSend) submit();
           }}
           // Drop anywhere on the composer, not only on a dedicated strip: the
           // whole surface is the input, so the whole surface accepts files.
@@ -467,13 +536,69 @@ export function Composer({
           <label htmlFor={messageId} className="sr-only">
             Message
           </label>
+          {slashActive && (
+            <div className="absolute bottom-full left-0 right-0 z-20 mb-2">
+              <SlashMenu
+                commands={commands}
+                query={slashQuery ?? ""}
+                activeIndex={slashIndex}
+                onActiveIndexChange={setSlashIndex}
+                onPick={pickCommand}
+                listboxId={slashListboxId}
+              />
+            </div>
+          )}
           <textarea
             id={messageId}
+            role={slashActive ? "combobox" : undefined}
+            aria-expanded={slashActive ? true : undefined}
+            aria-controls={slashActive ? slashListboxId : undefined}
+            aria-activedescendant={
+              slashActive ? `${slashListboxId}-${slashIndex}` : undefined
+            }
             ref={textareaRef}
             value={text}
             rows={1}
             onChange={(event) => onTextChange(event.target.value)}
             onKeyDown={(event) => {
+              // The command menu owns these keys while it is open, which is what
+              // lets it be navigated without focus leaving the input.
+              if (slashActive) {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setSlashIndex((index) => (index + 1) % slashMatches.length);
+                  return;
+                }
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setSlashIndex(
+                    (index) => (index - 1 + slashMatches.length) % slashMatches.length,
+                  );
+                  return;
+                }
+                if (event.key === "Tab") {
+                  event.preventDefault();
+                  pickCommand(slashMatches[slashIndex]);
+                  return;
+                }
+                if (event.key === "Enter" && !event.shiftKey) {
+                  // Enter completes rather than sends: the highlighted row is a
+                  // suggestion the user has not committed to, and sending it
+                  // unseen is how a wrong command gets run.
+                  event.preventDefault();
+                  pickCommand(slashMatches[slashIndex]);
+                  return;
+                }
+                if (event.key === "Escape") {
+                  // Leaves the text alone. Clearing it would discard what the user
+                  // typed to dismiss a menu they never asked for.
+                  event.preventDefault();
+                  setSlashIndex(0);
+                  textareaRef.current?.blur();
+                  textareaRef.current?.focus();
+                  return;
+                }
+              }
               if (event.key !== "Enter") return;
               // On a phone, Return inserts a newline and the Send button sends.
               // Enter-to-send on a soft keyboard means a message cannot contain a
@@ -485,7 +610,7 @@ export function Composer({
               // newline.
               if (event.shiftKey || event.metaKey || event.ctrlKey) return;
               event.preventDefault();
-              if (canSend) onSend();
+              if (canSend) submit();
             }}
             onPaste={(event) => {
               // Pasted images are attachments. Without this a screenshot in the

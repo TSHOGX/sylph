@@ -118,6 +118,15 @@ export const en = {
   "sidebar.turnRunning": "A turn is running",
 
   // Composer.
+  "approval.fallbackTitle": "The agent needs permission",
+  "approval.agentWants": "Waiting for your decision.",
+  "approval.agentWantsTool": "Wants to use {tool}.",
+  "approval.proposed": "Proposed",
+  "approval.edited": "Edited - the agent will run this instead.",
+  "approval.waiting": "Agent is waiting for permission",
+  "approval.pendingCount": "{count} waiting",
+  "approval.review": "Review",
+  "approval.stale": "Someone already answered this.",
   "composer.agent": "Agent",
   "composer.model": "Model",
   "composer.thinking": "Thinking",

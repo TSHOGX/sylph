@@ -304,6 +304,10 @@ pub fn router(state: AppState) -> Router {
         // Replay is session-scoped and server-paced: reconstruction is subtle
         // enough that doing it per frontend would let frontends disagree.
         .route("/api/v1/sessions/{id}/replay", get(api::replay::replay))
+        // Session-scoped facts: a link attaching or dying, capabilities changing,
+        // a request raised. Distinct from the turn stream, which only exists while
+        // a turn does.
+        .route("/api/v1/sessions/{id}/events", get(api::links::events))
         .route("/api/v1/turns/{id}", get(api::turns::get))
         .route("/api/v1/turns/{id}/events", get(api::turns::events))
         .route("/api/v1/turns/{id}/stop", post(api::turns::stop))
