@@ -275,10 +275,10 @@ async fn steering_with_empty_text_is_refused_before_reaching_the_agent() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
-/// A session with no adapter reports detached with no capabilities, rather than
-/// failing. The session is still valid and its history still readable.
+/// Capabilities come from a live handshake, so asking for them establishes a link
+/// and reports what the agent actually said — not a descriptor read from disk.
 #[tokio::test]
-async fn capabilities_report_detached_when_no_adapter_exists_for_the_agent() {
+async fn capabilities_are_read_from_the_live_agent() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
 
@@ -288,6 +288,35 @@ async fn capabilities_report_detached_when_no_adapter_exists_for_the_agent() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = json_body(response).await;
+    assert_eq!(body["attached"], true);
+    assert_eq!(body["agent"], "mock");
+    // Declared in the handshake, and what a UI reads before offering the control.
+    let supports = body["supports"].as_array().unwrap();
+    assert!(supports.iter().any(|s| s == "interrupt"));
+    assert!(supports.iter().any(|s| s == "approval"));
+    // The command list is the session's own, learned at open rather than declared
+    // in a static descriptor.
+    assert_eq!(body["capabilities"]["commands"][0]["name"], "noop");
+}
+
+/// An agent with no adapter installed reports detached rather than failing. The
+/// session is still valid and its history still readable.
+#[tokio::test]
+async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    // Remove the adapter behind an already-created session, which is what an
+    // uninstalled agent looks like to a session that predates its removal.
+    std::fs::remove_dir_all(server.browse_root().join("runners").join("mock")).unwrap();
+
+    let body = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}/capabilities", session_id))
+            .await,
+    )
+    .await;
+
     assert_eq!(body["attached"], false);
     assert_eq!(body["supports"].as_array().unwrap().len(), 0);
     // Capability is a property of a live link. Reporting a remembered list would

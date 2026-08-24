@@ -80,6 +80,13 @@ pub struct LinkManager {
     agents_dir: PathBuf,
     soul_path: Option<PathBuf>,
     seq: SeqAllocator,
+    /// Turns waiting to be told how they ended.
+    ///
+    /// A turn's completion arrives here as an event, and the supervisor is what
+    /// records terminal state. Rather than call back into it — which would be a
+    /// cycle, since it calls `ensure` — the drain task resolves the channel the
+    /// supervisor is parked on. Set once at startup.
+    waiters: Arc<RwLock<Option<crate::supervisor::turn::TurnWaiters>>>,
     links: Arc<RwLock<HashMap<String, Entry>>>,
     /// Serializes establishment per session.
     ///
@@ -105,11 +112,43 @@ impl LinkManager {
             agents_dir,
             soul_path,
             seq,
+            waiters: Arc::new(RwLock::new(None)),
             links: Arc::new(RwLock::new(HashMap::new())),
             establishing: Arc::new(Mutex::new(HashMap::new())),
         };
         manager.spawn_reaper();
         manager
+    }
+
+    /// Hand the manager the supervisor's waiter registry.
+    ///
+    /// Wired after construction because the two reference each other: the
+    /// supervisor asks the manager for a link, and the manager settles the
+    /// supervisor's turns. One of the two edges has to be late, and this is the
+    /// cheaper one — a manager with no waiters yet simply cannot settle a turn,
+    /// and no turn exists before the supervisor does.
+    pub async fn set_waiters(&self, waiters: crate::supervisor::turn::TurnWaiters) {
+        *self.waiters.write().await = Some(waiters);
+    }
+
+    /// Tell a waiting turn how it ended.
+    async fn settle_turn(&self, turn_id: &str, outcome: crate::supervisor::turn::Outcome) {
+        // Cloned out from under the read guard, so the guard is not held across
+        // the `lock().await` below — holding both would order two locks and
+        // invite a deadlock the moment anything takes them the other way.
+        let waiters = self.waiters.read().await.clone();
+        let Some(waiters) = waiters else {
+            return;
+        };
+        // Taken out of the map in its own statement so the guard drops before the
+        // send. An `if let` here would hold the lock across it, and the receiving
+        // supervisor may re-enter this manager while draining.
+        let waiting = waiters.lock().await.remove(turn_id);
+        if let Some(tx) = waiting {
+            // A send error means the supervisor stopped waiting, which happens
+            // when a stop already settled the turn. Benign.
+            let _ = tx.send(outcome);
+        }
     }
 
     /// Tear down links nobody has used for [`IDLE_TIMEOUT`].
@@ -345,6 +384,10 @@ impl LinkManager {
     }
 
     /// Journal a normalized event and publish it to attached clients.
+    ///
+    /// A `turn` event with `phase: completed` is also the signal that settles the
+    /// waiting turn, because on a link a turn's outcome is an event rather than a
+    /// process exit.
     async fn absorb_event(&self, session_id: &str, body: serde_json::Value) {
         let turn_id = match self.store.running_turn_id(session_id).await {
             Ok(Some(id)) => id,
@@ -374,16 +417,57 @@ impl LinkManager {
         if event.is_stable() {
             // Journaled before publishing, so a client that reconnects the
             // instant after seeing an event always finds it in replay.
+            //
+            // A failure here is loud on purpose. This was a real bug: a CHECK
+            // constraint rejected every adapter event, and because the error was
+            // only logged at debug level the turn streamed perfectly and came
+            // back empty on reload. An event published but not journaled is worse
+            // than one that never arrived, because the client has already been
+            // told it happened.
             if let Err(error) = self
                 .store
                 .append_event(&event.to_row(session_id, &turn_id))
                 .await
             {
-                error!("Failed to journal event: {}", error);
+                error!(
+                    "DATA LOSS: event seq {} kind '{}' on session {} was published but not journaled: {}",
+                    event.seq, event.kind, session_id, error
+                );
             }
         }
 
+        let settles = event.kind == "turn" && event.phase.as_deref() == Some("completed");
+        let is_error = event.is_error;
+        let stop_reason = event
+            .data
+            .as_ref()
+            .and_then(|d| d.get("stopReason"))
+            .and_then(|r| r.as_str())
+            .map(|s| s.to_string());
+        let text = event.text.clone();
+
         self.hub.publish(&turn_id, event).await;
+
+        if settles {
+            use crate::supervisor::turn::Outcome;
+            // The agent's own error flag decides this, not the transport: a turn
+            // that ran and reported failure is a completed exchange the user
+            // needs to see, not a broken link.
+            let outcome = if is_error {
+                Outcome::Failed {
+                    message: if text.is_empty() {
+                        "The agent reported a failure".to_string()
+                    } else {
+                        text
+                    },
+                }
+            } else if stop_reason.as_deref() == Some("interrupted") {
+                Outcome::Interrupted
+            } else {
+                Outcome::Completed { stop_reason }
+            };
+            self.settle_turn(&turn_id, outcome).await;
+        }
     }
 
     /// Persist a request and announce it.
@@ -449,6 +533,21 @@ impl LinkManager {
     /// A link died. Record why, and free anything waiting on it.
     async fn handle_close(&self, session_id: &str, exit_code: Option<i32>, stderr_tail: String) {
         self.links.write().await.remove(session_id);
+
+        // A turn still in flight will never hear from this agent again, so it is
+        // settled here rather than left waiting on a channel whose sender is
+        // about to drop. Doing it explicitly carries the stderr tail, which is the
+        // only diagnostic there is — without it the timeline cannot distinguish
+        // "the agent stopped" from "the agent finished".
+        if let Ok(Some(turn_id)) = self.store.running_turn_id(session_id).await {
+            self.settle_turn(
+                &turn_id,
+                crate::supervisor::turn::Outcome::LinkLost {
+                    stderr_tail: stderr_tail.clone(),
+                },
+            )
+            .await;
+        }
 
         match self.store.abandon_open_requests(session_id).await {
             Ok(0) => {}

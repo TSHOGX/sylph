@@ -15,7 +15,6 @@ use crate::{
     error::{Error, Result},
     events::{Attachment, StreamEvent},
     models::{CreateTurnRequest, Incarnation, Turn},
-    supervisor::TurnRequest,
     AppState,
 };
 
@@ -59,7 +58,7 @@ pub async fn create(
     }
 
     // One turn at a time per session.
-    if state.supervisor.session_busy(&session_id).await {
+    if state.turns.session_busy(&session_id).await {
         return Err(Error::SessionAlreadyRunning);
     }
 
@@ -128,23 +127,23 @@ pub async fn create(
 
     let created = state.store.create_turn(&turn).await?;
 
-    let inject_soul = session.identity_mode == "sylph";
-
+    // Every session runs on a link. The v1 supervisor below is still reachable
+    // only from the paths that have not moved yet, and `docs/session-protocol.md`
+    // records why it is being removed rather than kept as a fallback.
     state
-        .supervisor
-        .spawn(TurnRequest {
+        .turns
+        .spawn(crate::supervisor::turn::TurnRequest {
             session_id: session_id.clone(),
             turn_id: created.id.clone(),
             incarnation_id: incarnation.id.clone(),
-            agent: session.agent.clone(),
-            workdir: session.workdir.clone(),
-            backend_session_id: incarnation.backend_session_id.clone(),
             prompt: text,
             flags,
-            attachments: staged_attachments,
+            attachments: staged_attachments
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             command: req.command,
             command_args: req.args.unwrap_or_default(),
-            inject_soul,
         })
         .await;
 
@@ -274,7 +273,7 @@ pub async fn stop(
         return Err(Error::StopAlreadyCompleted);
     }
 
-    if !state.supervisor.stop(&turn_id).await? {
+    if !state.turns.stop(&turn_id).await? {
         // No live process; the turn finished between the is_terminal check and
         // now, which is a benign race with the same meaning for the client.
         return Err(Error::StopAlreadyCompleted);

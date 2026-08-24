@@ -10,7 +10,7 @@
 
 pub mod link;
 #[cfg(test)]
-mod tests;
+mod adapter_tests;
 pub mod wire;
 
 pub use link::{Link, LinkConfig, LinkEvent};

@@ -38,8 +38,8 @@ const PROJECTION_CAPACITY: usize = 512;
 /// lag error and resubscribe from the journal rather than blocking the runner.
 const BROADCAST_CAPACITY: usize = 1024;
 
-/// A normalized event as it appears on the wire, both from runners
-/// (`sylph.runner.v1` NDJSON lines) and to browsers (SSE `data:` payloads).
+/// A normalized event as it appears on the wire, both from adapters
+/// (`sylph.agent.v2` event messages) and to browsers (SSE `data:` payloads).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
@@ -172,49 +172,6 @@ impl StreamEvent {
             created_at_ms: row.created_at_ms,
         }
     }
-}
-
-/// The `event` object inside a `sylph.runner.v1` NDJSON line.
-///
-/// Only `kind` and `phase` are required by the protocol; everything else is
-/// optional and must survive being absent. Unknown fields are tolerated so a
-/// newer runner can add them without breaking this consumer.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RunnerEvent {
-    pub kind: String,
-    pub phase: Option<String>,
-    pub id: Option<String>,
-    pub name: Option<String>,
-    #[serde(default)]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub data: Option<serde_json::Value>,
-    /// The protocol spells this `isError` and every shipped runner emits that
-    /// form; the snake_case alias is kept for hand-written or older runners.
-    #[serde(default, alias = "isError")]
-    pub is_error: Option<bool>,
-}
-
-/// A full `sylph.runner.v1` NDJSON line.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RunnerStreamLine {
-    pub stream: String,
-    pub event: RunnerEvent,
-}
-
-/// The runner protocol's final envelope: the last non-empty stdout line.
-///
-/// Authoritative for the turn outcome, the assistant reply, and the session id
-/// to store — the protocol says to trust this over the exit code.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RunnerEnvelope {
-    pub ok: bool,
-    #[serde(default)]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub error: Option<String>,
 }
 
 /// Live fan-out for one in-flight turn.

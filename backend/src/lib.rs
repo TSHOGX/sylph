@@ -47,7 +47,6 @@ use crate::error::Error;
 use crate::db::LiveStore;
 use crate::events::EventHub;
 use crate::runners::Registry;
-use crate::supervisor::TurnSupervisor;
 use crate::tracedb::Client as TraceDbClient;
 
 #[derive(Clone)]
@@ -56,7 +55,8 @@ pub struct AppState {
     pub config: Config,
     pub registry: Arc<Mutex<Registry>>,
     pub hub: EventHub,
-    pub supervisor: TurnSupervisor,
+    /// Runs turns on live links.
+    pub turns: crate::supervisor::turn::LinkedSupervisor,
     pub links: crate::links::LinkManager,
     pub tracedb: TraceDbClient,
 }
@@ -71,11 +71,22 @@ impl AppState {
         let store = LiveStore::new(&config.database_path).await?;
         tracing::info!("Database initialized at {}", config.database_path);
 
-        let registry = Arc::new(Mutex::new(Registry::new(&config.runners_dir).await?));
+        // Bundled adapters first, so a user-installed one of the same name
+        // shadows rather than duplicates. Discovery handshakes with each, which
+        // is why it needs the environment.
+        let discovery_env: Arc<dyn crate::env::Environment> =
+            Arc::new(crate::env::LocalEnvironment::new());
+        let registry = Arc::new(Mutex::new(
+            Registry::new(
+                vec![config.agents_dir.clone(), config.runners_dir.clone()],
+                discovery_env,
+            )
+            .await?,
+        ));
         {
             let registry = registry.lock().await;
             tracing::info!(
-                "Runner discovery: {} agents found, {} broken",
+                "Agent discovery: {} usable, {} broken",
                 registry.list_agents().len(),
                 registry.broken_runners().len()
             );
@@ -118,23 +129,25 @@ impl AppState {
         // the same sequence number.
         let seq = crate::events::SeqAllocator::new(store.clone());
 
-        let supervisor = TurnSupervisor::new(
-            store.clone(),
-            registry.clone(),
-            hub.clone(),
-            soul_path.clone(),
-            environment.clone(),
-            seq.clone(),
-        );
-
         let links = crate::links::LinkManager::new(
             store.clone(),
             hub.clone(),
             environment,
             config.agents_dir.clone(),
             soul_path,
+            seq.clone(),
+        );
+
+        // Turns on a live link. The two reference each other — the supervisor
+        // asks for a link, the manager settles the supervisor's turns — so the
+        // waiter registry is handed over after both exist.
+        let turns = crate::supervisor::turn::LinkedSupervisor::new(
+            store.clone(),
+            hub.clone(),
+            links.clone(),
             seq,
         );
+        links.set_waiters(turns.waiters()).await;
         let tracedb = TraceDbClient::new(config.tracedb_bin.clone());
 
         Ok(Self {
@@ -142,7 +155,7 @@ impl AppState {
             config,
             registry,
             hub,
-            supervisor,
+            turns,
             links,
             tracedb,
         })

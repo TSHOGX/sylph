@@ -18,8 +18,10 @@ async fn health_is_public() {
     let body = json_body(response).await;
     assert_eq!(body["ok"], true);
     assert_eq!(body["apiVersion"], "1");
-    // Migrations ran, so the recorded schema version must be present.
-    assert_eq!(body["schemaVersion"], 1);
+    // Migrations ran, so the recorded schema version must be present. Pinned to
+    // the current number rather than asserted non-zero: a client that does not
+    // understand the journal shape needs this to change when the shape does.
+    assert_eq!(body["schemaVersion"], 3);
 }
 
 #[tokio::test]
@@ -306,7 +308,10 @@ async fn turn_runs_to_completion_and_journals_its_events() {
 
     let finished = backend.await_turn(&turn_id).await;
     assert_eq!(finished["turn"]["status"], "completed");
-    assert_eq!(finished["turn"]["runnerExitCode"], 0);
+    // No exit code: a turn on a live link has no process of its own. Its outcome
+    // arrives as an event, which is why the field is null rather than 0 — a 0
+    // here would be inventing a process that never existed.
+    assert!(finished["turn"]["runnerExitCode"].is_null());
 
     // Replaying from -1 yields the whole journal for the turn.
     let response = backend
@@ -499,14 +504,19 @@ async fn runner_failure_is_reported_as_a_failed_turn() {
 }
 
 #[tokio::test]
-async fn missing_envelope_is_a_protocol_error() {
+async fn an_agent_that_produces_nothing_still_ends_its_turn() {
+    // v1 had a protocol violation to detect here: a runner that printed no final
+    // envelope. v2 has no envelope to omit, because the turn event *is* the
+    // outcome. What remains is the real failure this stands in for — an agent that
+    // ends a turn having produced nothing — and the turn must still reach a
+    // terminal state rather than hanging.
     let backend = TestBackend::start_with_runners(&[MockRunner::no_envelope("mock")]).await;
     let session_id = backend.create_session("mock").await;
 
     let response = backend
         .post_authed(
             &format!("/api/v1/sessions/{session_id}/turns"),
-            json!({"text": "no envelope"}),
+            json!({"text": "no output"}),
         )
         .await;
     let turn_id = json_body(response).await["turn"]["id"]
@@ -516,16 +526,7 @@ async fn missing_envelope_is_a_protocol_error() {
 
     let finished = backend.await_turn(&turn_id).await;
     assert_eq!(finished["turn"]["status"], "failed");
-    assert_eq!(finished["turn"]["errorCode"], "RUNNER_PROTOCOL_ERROR");
-    // The stderr tail is the only diagnostic available, so it must be kept.
-    assert!(
-        finished["turn"]["errorMessage"]
-            .as_str()
-            .unwrap()
-            .contains("forgot its envelope"),
-        "stderr tail missing: {}",
-        finished["turn"]["errorMessage"]
-    );
+    assert_eq!(finished["turn"]["errorCode"], "TURN_FAILED");
 }
 
 #[tokio::test]

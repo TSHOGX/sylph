@@ -115,6 +115,6 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         agents,
         broken_runners,
         tracedb: state.tracedb.archive_counts().await,
-        active_processes: state.supervisor.active_turn_count().await,
+        active_processes: state.turns.active_turn_count().await,
     }))
 }

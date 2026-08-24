@@ -352,22 +352,32 @@ pub async fn json_body(response: Response<Body>) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("body was not JSON ({}): {}", e, text))
 }
 
-/// A generated runner script conforming to the runner protocol.
+/// A generated adapter conforming to `sylph.agent.v2`.
+///
+/// Python rather than bash: an adapter holds a duplex read loop and parses JSON,
+/// which bash does badly enough that a fixture written in it would be testing the
+/// fixture. Named `MockRunner` still, because every spec refers to it that way and
+/// renaming it would obscure a protocol change behind a diff of test churn.
 pub struct MockRunner {
     name: String,
     behavior: Behavior,
 }
 
 enum Behavior {
-    /// Stream events, then a successful envelope.
+    /// Stream a full turn, then report it completed.
     Success,
-    /// Stream nothing, return a failure envelope.
+    /// Report the turn failed.
     Failure,
-    /// Emit no final envelope at all — a protocol violation.
-    NoEnvelope,
-    /// Sleep long enough for a stop request to arrive.
+    /// Complete the turn with no assistant output at all.
+    ///
+    /// Under v1 this was "emit no final envelope", a protocol violation the
+    /// supervisor had to detect. v2 has no envelope to omit: the turn event *is*
+    /// the outcome. The nearest real failure is an agent that ends a turn having
+    /// produced nothing, which is what this now exercises.
+    NoOutput,
+    /// Accept the turn and never finish it, so a stop or interrupt can arrive.
     Slow,
-    /// Fail `--describe`, so discovery marks the runner broken.
+    /// Fail the handshake, so the agent is unusable.
     BrokenDescribe,
 }
 
@@ -381,7 +391,7 @@ impl MockRunner {
     }
 
     pub fn no_envelope(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::NoEnvelope }
+        Self { name: name.to_string(), behavior: Behavior::NoOutput }
     }
 
     pub fn slow(name: &str) -> Self {
@@ -392,13 +402,12 @@ impl MockRunner {
         Self { name: name.to_string(), behavior: Behavior::BrokenDescribe }
     }
 
-    fn install(&self, runners_dir: &Path) {
-        let dir = runners_dir.join(&self.name);
+    fn install(&self, agents_dir: &Path) {
+        let dir = agents_dir.join(&self.name);
         std::fs::create_dir_all(&dir).unwrap();
-        let script_path = dir.join("runner.sh");
+        let script_path = dir.join("adapter.sh");
         std::fs::write(&script_path, self.script()).unwrap();
 
-        // Discovery only considers executable runners.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -408,85 +417,119 @@ impl MockRunner {
         }
     }
 
-    fn script(&self) -> String {
-        let describe = if matches!(self.behavior, Behavior::BrokenDescribe) {
-            r#"  echo "describe is broken" >&2
-  exit 1"#
-                .to_string()
-        } else {
-            format!(
-                r#"  cat <<'JSON'
-{{
-  "name": "{}",
-  "description": "Mock runner for tests",
-  "session_key": "{}",
-  "flags": {{
-    "model": {{"choices": ["fast", "slow"], "description": "Mock model"}},
-    "effort": {{"choices": ["low", "high"], "description": "Mock reasoning effort"}}
-  }},
-  "commands": {{
-    "noop": {{"description": "Does nothing", "args": {{}}}}
-  }}
-}}
-JSON
-  exit 0"#,
-                self.name, self.name
-            )
-        };
-
-        // The turn body mirrors what a real runner emits: stream lines only
-        // when SYLPH_STREAM_FORMAT requests them, then the final envelope.
-        let turn = match self.behavior {
+    /// What this adapter does when a turn arrives.
+    fn on_send(&self) -> &'static str {
+        match self.behavior {
             Behavior::Success | Behavior::BrokenDescribe => {
                 r#"
-if [ "${SYLPH_STREAM_FORMAT:-}" = "ndjson-v1" ]; then
-  echo '{"stream":"sylph.runner.v1","event":{"kind":"thinking","phase":"started","id":"t1"}}'
-  echo '{"stream":"sylph.runner.v1","event":{"kind":"thinking","phase":"delta","id":"t1","text":"think"}}'
-  echo '{"stream":"sylph.runner.v1","event":{"kind":"thinking","phase":"completed","id":"t1","text":"thinking done"}}'
-  echo '{"stream":"sylph.runner.v1","event":{"kind":"tool_call","phase":"completed","id":"c1","name":"Read","data":{"path":"/tmp/x"}}}'
-  echo '{"stream":"sylph.runner.v1","event":{"kind":"assistant","phase":"delta","id":"a1","text":"mock "}}'
-  echo '{"stream":"sylph.runner.v1","event":{"kind":"assistant","phase":"completed","id":"a1","text":"mock reply"}}'
-  echo '{"stream":"sylph.runner.v1","event":{"kind":"usage","phase":"completed","data":{"inputTokens":10,"outputTokens":3}}}'
-fi
-printf '%s\n' '{"ok":true,"text":"mock reply","session_id":"mock-session-1"}'
-exit 0
+        ok(mid)
+        ev("thinking", "started", streamId="t1")
+        ev("thinking", "delta", streamId="t1", text="think")
+        ev("thinking", "completed", streamId="t1", text="thinking done")
+        ev("tool_call", "completed", streamId="c1", name="Read",
+           data={"path": "/tmp/x"})
+        ev("assistant", "delta", streamId="a1", text="mock ")
+        ev("assistant", "completed", streamId="a1", text="mock reply")
+        ev("usage", "completed", data={"inputTokens": 10, "outputTokens": 3})
+        ev("turn", "completed", text="mock reply")
 "#
             }
             Behavior::Failure => {
                 r#"
-printf '%s\n' '{"ok":false,"error":"mock runner failed on purpose"}'
-exit 1
+        ok(mid)
+        ev("turn", "completed", text="mock runner failed on purpose", isError=True)
 "#
             }
-            Behavior::NoEnvelope => {
+            Behavior::NoOutput => {
                 r#"
-echo "this runner forgot its envelope" >&2
-exit 3
+        ok(mid)
+        sys.stderr.write("this adapter produced nothing\n")
+        sys.stderr.flush()
+        ev("turn", "completed", text="", isError=True)
 "#
             }
             Behavior::Slow => {
                 r#"
-if [ "${SYLPH_STREAM_FORMAT:-}" = "ndjson-v1" ]; then
-  echo '{"stream":"sylph.runner.v1","event":{"kind":"status","phase":"started","text":"working"}}'
-fi
-sleep 30
-printf '%s\n' '{"ok":true,"text":"should not be reached","session_id":"slow-1"}'
-exit 0
+        ok(mid)
+        ev("status", "started", text="working")
+        # Never completes: the turn stays in flight until interrupted or the
+        # link is torn down, which is what a stop test needs.
 "#
             }
+        }
+    }
+
+    fn script(&self) -> String {
+        // A broken agent fails at `hello`, which is where discovery learns it is
+        // unusable — the v2 equivalent of a failing `--describe`.
+        let hello = if matches!(self.behavior, Behavior::BrokenDescribe) {
+            r#"
+        sys.stderr.write("handshake is broken\n")
+        sys.exit(1)
+"#
+        } else {
+            r#"
+        ok(mid, adapter="mock/1.0.0",
+           agent={"name": NAME, "version": "0.0.0"},
+           supports=["interrupt", "steer", "approval", "slash"],
+           flags={"model": {"choices": ["fast", "slow"], "description": "Mock model"},
+                  "effort": {"choices": ["low", "high"], "description": "Mock effort"}})
+"#
         };
 
+        let on_send = self.on_send();
+
         format!(
-            r#"#!/usr/bin/env bash
-set -u
+            r#"#!/usr/bin/env python3
+import json, sys
 
-if [ "${{1:-}}" = "--describe" ]; then
-{describe}
-fi
+NAME = {name:?}
 
-# Consume stdin so the writer never blocks on a full pipe.
-cat >/dev/null
-{turn}"#
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def ok(mid, **fields):
+    emit({{"t": "ok", "id": mid, **fields}})
+
+
+def ev(kind, phase=None, **fields):
+    body = {{"t": "event", "kind": kind}}
+    if phase:
+        body["phase"] = phase
+    body.update({{k: v for k, v in fields.items() if v is not None}})
+    emit(body)
+
+
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    msg = json.loads(raw)
+    t, mid = msg.get("t"), msg.get("id")
+
+    if t == "hello":{hello}
+    elif t == "open":
+        ok(mid, sessionId="mock-session-1",
+           commands=[{{"name": "noop", "description": "Does nothing"}}],
+           models=[{{"id": "fast", "label": "Fast"}}],
+           permissionMode="default")
+    elif t == "send":{on_send}
+    elif t == "interrupt":
+        ok(mid)
+        ev("turn", "completed", text="interrupted",
+           data={{"stopReason": "interrupted"}})
+    elif t == "close":
+        ok(mid)
+        break
+    else:
+        ok(mid)
+"#,
+            name = self.name,
+            hello = hello,
+            on_send = on_send,
         )
     }
 }
