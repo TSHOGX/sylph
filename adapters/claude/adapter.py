@@ -62,6 +62,35 @@ FLAGS = {
     },
 }
 
+# Dialog kinds this adapter can render, declared at `initialize`.
+#
+# This declaration is load-bearing, and its absence was a real bug: the CLI's own
+# schema says it "treats ABSENCE as 'cannot display' and fails closed: without the
+# kind declared here, a dialog-gated flow degrades". So an undeclared client gets
+# prose where a TUI gets a picker — `/plan` returns a paragraph instead of an
+# approve/reject choice, and AskUserQuestion returns a question instead of options.
+#
+# Every kind here must actually be answerable through `resolve`. Declaring one we
+# cannot render is worse than declaring none: the CLI would park a dialog waiting
+# on a reply no UI will produce, which blocks the turn until its deadline.
+SUPPORTED_DIALOG_KINDS = [
+    # The interactive surfaces that make a session feel native.
+    "permission_ask_user_question",   # AskUserQuestion: pick among options
+    "permission_enter_plan_mode",     # a plan to approve or reject
+    # Tool permissions that carry richer payloads than `can_use_tool`.
+    "permission_bash",
+    "permission_file",
+    "permission_webfetch",
+    "permission_skill",
+    "permission_prompt",
+    "permission_workflow",
+    # Consent gates a user must be able to answer, or the turn stalls.
+    "cost_threshold",
+    "sandbox_network_access",
+    "refusal_fallback_prompt",
+    "mcp_url_elicitation",
+]
+
 # Claude permission modes that route decisions to us rather than deciding alone.
 # `bypassPermissions` auto-approves before any callback runs, so an approval
 # prompt under it would never fire — worth knowing rather than discovering.
@@ -126,6 +155,15 @@ class Session:
         self.message_id = "claude"
         self.message_seq = 0
         self.turn_open = False
+        # vendor request id -> 'can_use_tool' | 'dialog'. A permission and a dialog
+        # take different response shapes, and guessing wrong parks the turn.
+        self.request_kinds = {}
+        # vendor request id -> the labels AskUserQuestion offered, so a picked
+        # index can be resolved back to the label the CLI expects.
+        self.dialog_options = {}
+        # vendor request id -> the AskUserQuestion input, so a picked option can
+        # be written back into the shape the tool expects.
+        self.question_inputs = {}
         self.lock = threading.Lock()
 
     # ---- vendor process -------------------------------------------------
@@ -206,6 +244,98 @@ class Session:
             raise RuntimeError("claude did not answer {} in time".format(subtype))
         return box["response"] or {}
 
+    def answer(self, vendor_id, option, user_input):
+        """Reply to a vendor request in the shape its kind expects.
+
+        A `can_use_tool` request wants `{behavior}`; a `request_user_dialog` wants
+        a payload shaped by its dialog kind. Sending the wrong one is not a
+        validation error the CLI reports — it parks the dialog and the turn stalls
+        until its deadline, which reads as the agent hanging. So the kind each
+        request arrived as is remembered rather than inferred from the answer.
+        """
+        kind = self.request_kinds.pop(vendor_id, "can_use_tool")
+        allow = option in ("allow", "allow_always")
+
+        if kind == "question":
+            labels = self.dialog_options.pop(vendor_id, [])
+            picked = None
+            if str(option).startswith("option:"):
+                index = int(str(option).split(":", 1)[1])
+                if index < len(labels):
+                    picked = labels[index]
+
+            if picked is None:
+                # Declining to answer is a denied tool call, which the agent
+                # handles as "the user did not pick one" rather than as an error.
+                self.to_claude({
+                    "type": "control_response",
+                    "response": {"subtype": "success", "request_id": vendor_id,
+                                 "response": {"behavior": "deny",
+                                              "message": "The user declined to answer."}},
+                })
+                return
+
+            # Allowed, with the answer written into the tool input. The CLI reads
+            # the choice back from `updatedInput`, so this is the channel by which
+            # a picked option reaches the model.
+            base = dict(self.question_inputs.pop(vendor_id, {}) or {})
+            questions = base.get("questions") or []
+            if questions:
+                questions = [dict(q) for q in questions]
+                questions[0]["selectedOptions"] = [picked]
+                base["questions"] = questions
+            self.to_claude({
+                "type": "control_response",
+                "response": {"subtype": "success", "request_id": vendor_id,
+                             "response": {"behavior": "allow",
+                                          "updatedInput": base or None}},
+            })
+            return
+
+        if kind == "can_use_tool":
+            if allow:
+                body = {"behavior": "allow"}
+                if user_input is not None:
+                    body["updatedInput"] = user_input
+                if option == "allow_always":
+                    # A lasting grant, which is a policy change rather than one
+                    # decision — hence a separate option in the UI.
+                    body["updatedPermissions"] = [{"behavior": "allow"}]
+            else:
+                body = {"behavior": "deny",
+                        "message": "The user declined this request."}
+            self.to_claude({
+                "type": "control_response",
+                "response": {"subtype": "success", "request_id": vendor_id,
+                             "response": body},
+            })
+            return
+
+        # A dialog. `cancelled` is the CLI's own spelling for "the user declined",
+        # and it is distinct from a permission's `deny`: the flow was abandoned
+        # rather than refused, so Claude continues differently.
+        if not allow and option != "submit" and not str(option).startswith("option:"):
+            body = {"behavior": "cancelled"}
+        elif str(option).startswith("option:"):
+            # AskUserQuestion: the index the user picked, resolved back to the
+            # option's own label — the CLI matches on what it offered, not on an
+            # index it never sent us.
+            index = int(str(option).split(":", 1)[1])
+            offered = self.dialog_options.pop(vendor_id, [])
+            chosen = offered[index] if index < len(offered) else None
+            body = {"behavior": "completed",
+                    "result": {"choice": chosen} if chosen is not None else {}}
+        else:
+            body = {"behavior": "completed"}
+            if user_input is not None:
+                body["result"] = user_input
+
+        self.to_claude({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": vendor_id,
+                         "response": body},
+        })
+
     # ---- vendor -> sylph ------------------------------------------------
 
     def _read_vendor(self):
@@ -282,8 +412,23 @@ class Session:
         subtype = request.get("subtype")
         vendor_id = msg.get("request_id")
 
+        if os.environ.get("SYLPH_ADAPTER_DEBUG"):
+            log("VENDOR REQUEST {} {}".format(
+                subtype, json.dumps(request)[:600]))
+
         if subtype == "can_use_tool":
+            self.request_kinds[vendor_id] = "can_use_tool"
             tool = request.get("tool_name")
+
+            # AskUserQuestion is a permission request in form and a question in
+            # substance: its input carries the agent's own options, and answering
+            # it "allow" merely lets the agent ask — which is what made a TUI's
+            # picker come back as a paragraph here. Verified against the real CLI;
+            # there is no separate dialog for this.
+            if tool == "AskUserQuestion":
+                self._forward_question(vendor_id, request)
+                return
+
             options = [
                 {"id": "allow", "label": "Allow once"},
                 {"id": "allow_always", "label": "Always allow {}".format(tool or "this"),
@@ -306,16 +451,7 @@ class Session:
             return
 
         if subtype == "request_user_dialog":
-            emit({
-                "t": "request",
-                "id": vendor_id,
-                "kind": "dialog",
-                "title": request.get("title") or request.get("prompt") or "Claude asks",
-                "detail": request,
-                "options": [{"id": "submit", "label": "Answer"},
-                            {"id": "cancel", "label": "Cancel"}],
-                "default": "cancel",
-            })
+            self._forward_dialog(vendor_id, request)
             return
 
         # Anything else is acknowledged so claude is never left blocking on a
@@ -325,6 +461,171 @@ class Session:
             "type": "control_response",
             "response": {"subtype": "error", "request_id": vendor_id,
                          "error": "unsupported by the Sylph adapter"},
+        })
+
+    def _forward_question(self, vendor_id, request):
+        """Turn an AskUserQuestion tool call into a choice the user can make.
+
+        Only the first question is offered. The tool can carry several, but Sylph's
+        request shape is one question with one set of options, and answering a
+        multi-question call partially would hand Claude an incomplete reply. The
+        remaining questions stay in `detail`, so a client can show what else was
+        asked rather than silently dropping it.
+        """
+        payload = request.get("input") or {}
+        questions = payload.get("questions") or []
+        first = questions[0] if questions else {}
+
+        labels = []
+        options = []
+        for index, option in enumerate(first.get("options") or []):
+            if isinstance(option, dict):
+                label = option.get("label") or ""
+                description = option.get("description")
+            else:
+                label, description = str(option), None
+            labels.append(label)
+            options.append({
+                "id": "option:{}".format(index),
+                "label": label or "Option {}".format(index + 1),
+                # Carried so a client can explain a choice rather than only name
+                # it, which is most of what makes the terminal's picker readable.
+                **({"description": description} if description else {}),
+            })
+
+        # Deny is still offered: the user must be able to decline to answer, and
+        # the agent handles that as a refused tool call.
+        options.append({"id": "deny", "label": "Don't answer"})
+
+        self.dialog_options[vendor_id] = labels
+        self.question_inputs[vendor_id] = payload
+        # Answered through the permission path, because that is what it is on the
+        # wire — the option index is translated back into the tool input.
+        self.request_kinds[vendor_id] = "question"
+
+        emit({
+            "t": "request",
+            "id": vendor_id,
+            "kind": "choice",
+            "tool": "AskUserQuestion",
+            "toolUseId": request.get("tool_use_id"),
+            "title": first.get("question") or "Claude has a question",
+            "detail": {
+                "header": first.get("header"),
+                "multiSelect": bool(first.get("multiSelect")),
+                "questions": questions,
+            },
+            "options": options,
+            "default": "deny",
+            "risk": "safe",
+        })
+
+    def _forward_dialog(self, vendor_id, request):
+        """Project one `request_user_dialog` onto Sylph's request shape.
+
+        The payload differs per `dialog_kind`, and the options are what make the
+        difference between a picker and a paragraph. A kind whose payload we cannot
+        read still forwards as a two-option accept/reject rather than being
+        dropped, because the turn is blocked either way and a coarse choice beats
+        no choice.
+        """
+        kind = request.get("dialog_kind") or ""
+        payload = request.get("payload") or {}
+        self.request_kinds[vendor_id] = "dialog"
+
+        # AskUserQuestion: the agent offers concrete options, and forwarding them
+        # verbatim is the whole point — this is the one dialog where the *agent*
+        # decided what the choices are.
+        if kind == "permission_ask_user_question":
+            questions = payload.get("questions") or []
+            first = questions[0] if questions else {}
+            options = []
+            labels = []
+            for index, option in enumerate(first.get("options") or []):
+                label = option.get("label") if isinstance(option, dict) else str(option)
+                labels.append(label)
+                options.append({"id": "option:{}".format(index), "label": label or "Option"})
+            options.append({"id": "cancel", "label": "Cancel"})
+            self.dialog_options[vendor_id] = labels
+            emit({
+                "t": "request",
+                "id": vendor_id,
+                "kind": "choice",
+                "title": first.get("question") or "Claude has a question",
+                "detail": {"header": first.get("header"), "questions": questions},
+                "options": options,
+                "default": "cancel",
+            })
+            return
+
+        if kind == "permission_enter_plan_mode":
+            emit({
+                "t": "request",
+                "id": vendor_id,
+                "kind": "dialog",
+                "title": "Approve this plan?",
+                # The plan text is the thing being decided on, so it goes where a
+                # client renders content rather than into a label.
+                "detail": {"plan": payload.get("plan") or payload.get("message") or ""},
+                "options": [
+                    {"id": "allow", "label": "Approve"},
+                    {"id": "allow_always", "label": "Approve and auto-accept edits"},
+                    {"id": "deny", "label": "Keep planning"},
+                ],
+                "default": "deny",
+            })
+            return
+
+        if kind == "cost_threshold":
+            emit({
+                "t": "request",
+                "id": vendor_id,
+                "kind": "dialog",
+                "title": "Continue past the spending threshold?",
+                "detail": payload,
+                "options": [
+                    {"id": "allow", "label": "Continue"},
+                    {"id": "deny", "label": "Stop here"},
+                ],
+                "default": "deny",
+            })
+            return
+
+        # A permission-shaped dialog carries the tool call it is gating.
+        if kind.startswith("permission_"):
+            emit({
+                "t": "request",
+                "id": vendor_id,
+                "kind": "approval",
+                "tool": payload.get("tool_name") or kind.removeprefix("permission_"),
+                "toolUseId": request.get("tool_use_id"),
+                "title": payload.get("title")
+                         or payload.get("message")
+                         or "Allow this action?",
+                "detail": payload.get("input") or payload,
+                "options": [
+                    {"id": "allow", "label": "Allow once"},
+                    {"id": "allow_always", "label": "Always allow", "persistent": True},
+                    {"id": "deny", "label": "Deny"},
+                ],
+                "default": "deny",
+                "risk": self._risk(payload.get("tool_name"), payload.get("input")),
+            })
+            return
+
+        # Unrecognized kind. Still answerable, because a parked dialog blocks the
+        # turn until its deadline and a coarse choice beats silence.
+        emit({
+            "t": "request",
+            "id": vendor_id,
+            "kind": "dialog",
+            "title": payload.get("title") or payload.get("message") or "Claude asks",
+            "detail": {"dialogKind": kind, **payload},
+            "options": [
+                {"id": "allow", "label": "Continue"},
+                {"id": "deny", "label": "Cancel"},
+            ],
+            "default": "deny",
         })
 
     @staticmethod
@@ -646,8 +947,14 @@ def serve():
                     permission_mode=msg.get("permissionMode"),
                 )
                 # The handshake that turns a process into a session: this is
-                # where the project's real command list comes from.
-                surface = capabilities_from(session.control("initialize"))
+                # where the project's real command list comes from, and where we
+                # declare which dialogs we can render.
+                surface = capabilities_from(
+                    session.control(
+                        "initialize",
+                        supportedDialogKinds=SUPPORTED_DIALOG_KINDS,
+                    )
+                )
                 ok(mid, sessionId=session.native_session_id, **surface)
 
             elif t == "send":
@@ -688,23 +995,7 @@ def serve():
             elif t == "resolve":
                 # `id` addresses the vendor request this answers, so it is passed
                 # straight back through as claude's own request_id.
-                option = msg.get("option")
-                if option in ("allow", "allow_always"):
-                    body = {"behavior": "allow"}
-                    if msg.get("input") is not None:
-                        body["updatedInput"] = msg["input"]
-                    if option == "allow_always":
-                        body["updatedPermissions"] = [{"behavior": "allow"}]
-                elif option == "submit":
-                    body = {"response": msg.get("input")}
-                else:
-                    body = {"behavior": "deny",
-                            "message": "The user declined this request."}
-                session.to_claude({
-                    "type": "control_response",
-                    "response": {"subtype": "success", "request_id": mid,
-                                 "response": body},
-                })
+                session.answer(mid, msg.get("option"), msg.get("input"))
 
             elif t == "query":
                 what = msg.get("what")

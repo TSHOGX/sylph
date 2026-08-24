@@ -94,6 +94,10 @@ export function ApprovalDialog({ request, onResolve, onDismiss, busy }: Props) {
   }
 
   const risky = request.risk === "destructive";
+  // A question the agent asked, rather than permission it needs. The options
+  // carry their own descriptions and there is no proposed input to edit, so it
+  // renders as a list of answers instead of a row of verbs.
+  const asking = request.kind === "choice";
   const changed = field !== null && edited !== proposed;
 
   const { ref, onKeyDown } = useDialog<HTMLDivElement>({
@@ -150,7 +154,33 @@ export function ApprovalDialog({ request, onResolve, onDismiss, busy }: Props) {
         </div>
       </div>
 
-      {field ? (
+      {asking ? (
+        <div className="flex flex-col gap-1.5">
+          {options.map((option) => {
+            const declining = option.id.startsWith("deny");
+            const description = option.description;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                data-deny={declining ? "true" : undefined}
+                disabled={busy}
+                onClick={() => resolve(option.id)}
+                className={`focus-ring tap-target flex flex-col items-start gap-0.5 rounded-lg border px-3 py-2 text-left transition-colors disabled:opacity-50 ${
+                  declining
+                    ? "border-line text-ink-muted hover:bg-hover"
+                    : "border-line-strong text-ink hover:bg-active"
+                }`}
+              >
+                <span className="text-sm font-medium">{option.label}</span>
+                {description ? (
+                  <span className="text-xs text-ink-muted">{description}</span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : field ? (
         <label className="flex flex-col gap-1">
           <span className="text-xs font-medium text-ink-muted">
             {t("approval.proposed")}
@@ -175,6 +205,7 @@ export function ApprovalDialog({ request, onResolve, onDismiss, busy }: Props) {
         </pre>
       ) : null}
 
+      {!asking && (
       <div className="flex flex-wrap gap-2">
         {options.map((option) => {
           const denying = option.id.startsWith("deny");
@@ -192,6 +223,7 @@ export function ApprovalDialog({ request, onResolve, onDismiss, busy }: Props) {
           );
         })}
       </div>
+      )}
     </div>
   );
 }

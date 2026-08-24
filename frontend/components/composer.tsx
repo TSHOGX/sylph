@@ -454,7 +454,11 @@ export function Composer({
 
   return (
     <div className="shrink-0 border-t border-line bg-canvas px-2 pt-2 pb-safe md:px-4">
-      <div className="mx-auto max-w-3xl">
+      {/* `relative` is load-bearing: the slash menu is positioned against this
+          box. Without it the menu resolves against the document, which puts it
+          above the viewport - in the DOM, styled correctly, and permanently
+          offscreen. */}
+      <div className="relative mx-auto max-w-3xl">
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -537,7 +541,7 @@ export function Composer({
             Message
           </label>
           {slashActive && (
-            <div className="absolute bottom-full left-0 right-0 z-20 mb-2">
+            <div className="absolute inset-x-0 bottom-full z-30 mb-2">
               <SlashMenu
                 commands={commands}
                 query={slashQuery ?? ""}

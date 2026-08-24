@@ -156,6 +156,14 @@ export interface RequestOption {
   label: string;
   /** Whether choosing this is a lasting decision rather than a one-off. */
   persistent?: boolean;
+  /**
+   * What this option means, when the agent explained it.
+   *
+   * Present on a `choice` request, where the agent authored the options and its
+   * own descriptions are most of what makes them readable — a picker listing
+   * bare labels loses the reasoning the agent offered.
+   */
+  description?: string;
 }
 
 /**
