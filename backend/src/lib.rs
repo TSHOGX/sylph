@@ -31,6 +31,9 @@ pub mod documents;
 /// The seam local fork/exec used to occupy implicitly.
 pub mod env;
 pub mod error;
+/// The pool of live agent sessions, and the one place a link's output becomes
+/// durable state.
+pub mod links;
 pub mod events;
 pub mod middleware;
 pub mod models;
@@ -54,6 +57,7 @@ pub struct AppState {
     pub registry: Arc<Mutex<Registry>>,
     pub hub: EventHub,
     pub supervisor: TurnSupervisor,
+    pub links: crate::links::LinkManager,
     pub tracedb: TraceDbClient,
 }
 
@@ -87,6 +91,17 @@ impl AppState {
             );
         }
 
+        // No link survives a restart, so a request still marked pending is
+        // waiting on a process that no longer exists. Left alone it would show a
+        // session forever blocked on a question nobody can answer.
+        let abandoned = store.abandon_all_open_requests().await?;
+        if abandoned > 0 {
+            tracing::warn!(
+                "Abandoned {} unanswered agent request(s) from a previous backend session",
+                abandoned
+            );
+        }
+
         // Resolved once, in `Config`, so the supervisor injects the same file
         // `GET /soul` displays. Deriving it here as well is how the two would
         // drift into disagreeing about whether identity is active.
@@ -98,12 +113,27 @@ impl AppState {
         // replaces one argument instead of reaching into the supervisor.
         let environment: Arc<dyn crate::env::Environment> =
             Arc::new(crate::env::LocalEnvironment::new());
+        // One allocator, shared. Both the supervisor and each link's drain task
+        // emit events for the same session, and separate counters would hand out
+        // the same sequence number.
+        let seq = crate::events::SeqAllocator::new(store.clone());
+
         let supervisor = TurnSupervisor::new(
             store.clone(),
             registry.clone(),
             hub.clone(),
-            soul_path,
+            soul_path.clone(),
+            environment.clone(),
+            seq.clone(),
+        );
+
+        let links = crate::links::LinkManager::new(
+            store.clone(),
+            hub.clone(),
             environment,
+            config.agents_dir.clone(),
+            soul_path,
+            seq,
         );
         let tracedb = TraceDbClient::new(config.tracedb_bin.clone());
 
@@ -113,6 +143,7 @@ impl AppState {
             registry,
             hub,
             supervisor,
+            links,
             tracedb,
         })
     }
@@ -208,6 +239,28 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/archive/sessions/{*trace_id}",
             get(api::archive::transcript),
         )
+        // A session's live agent: what it can do, and what it is waiting on.
+        .route(
+            "/api/v1/sessions/{id}/capabilities",
+            get(api::links::capabilities),
+        )
+        .route(
+            "/api/v1/sessions/{id}/link",
+            post(api::links::attach).delete(api::links::detach),
+        )
+        .route(
+            "/api/v1/sessions/{id}/requests",
+            get(api::links::list_requests),
+        )
+        .route("/api/v1/requests/{id}/resolve", post(api::links::resolve))
+        // Scoped to the session rather than the turn: both act on the agent, and
+        // the session is what holds a link. A turn-scoped route would need the
+        // caller to know a turn id to interrupt the only turn running.
+        .route(
+            "/api/v1/sessions/{id}/interrupt",
+            post(api::links::interrupt),
+        )
+        .route("/api/v1/sessions/{id}/steer", post(api::links::steer))
         .route("/api/v1/turns/{id}", get(api::turns::get))
         .route("/api/v1/turns/{id}/events", get(api::turns::events))
         .route("/api/v1/turns/{id}/stop", post(api::turns::stop))

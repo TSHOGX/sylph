@@ -8,6 +8,15 @@ pub struct Config {
     pub database_path: String,
     pub data_dir: PathBuf,
     pub runners_dir: PathBuf,
+    /// Where `<agent>/adapter.sh` lives.
+    ///
+    /// Separate from `runners_dir` because the two answer different questions:
+    /// bundled adapters ship with the server and are versioned with the protocol
+    /// they implement, while a user-added agent lives outside the install. Both
+    /// are searched, bundled first, so a user can shadow a bundled adapter by
+    /// name — which is the escape hatch for a vendor change the bundled one has
+    /// not caught up with.
+    pub agents_dir: PathBuf,
     pub tracedb_bin: PathBuf,
     /// Directories the browser may enumerate when picking a workspace.
     ///
@@ -76,6 +85,14 @@ impl Config {
                 .unwrap_or_else(|_| format!("{}/.agents/skills/sylph/runners", home)),
         );
 
+        // Bundled adapters sit beside the binary in an install and at the repo
+        // root in development, so the env var is what makes both work without a
+        // build-time path baked in.
+        let agents_dir = PathBuf::from(
+            env::var("SYLPH_AGENTS_DIR")
+                .unwrap_or_else(|_| format!("{}/.local/share/sylph-web/adapters", home)),
+        );
+
         let tracedb_bin = env::var("TRACEDB_BIN")
             .unwrap_or_else(|_| format!("{}/Workspace/trace-db/target/release/trace-db", home))
             .into();
@@ -109,6 +126,7 @@ impl Config {
             database_path,
             data_dir,
             runners_dir,
+            agents_dir,
             tracedb_bin,
             browse_roots,
             soul_path,

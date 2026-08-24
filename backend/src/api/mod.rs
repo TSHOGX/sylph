@@ -3,6 +3,7 @@ pub mod archive;
 pub mod files;
 pub mod fs;
 pub mod health;
+pub mod links;
 pub mod search;
 pub mod sessions;
 pub mod soul;

@@ -74,6 +74,32 @@ pub enum Error {
     #[error("Method not allowed for this endpoint")]
     MethodNotAllowed,
 
+    #[error("Request not found")]
+    RequestNotFound,
+
+    /// Someone already answered this request.
+    ///
+    /// Distinct from `InvalidRequest` because the request was well-formed and
+    /// would have been valid moments earlier. A client showing a stale approval
+    /// dialog needs to tell "you were too late" from "you sent something wrong".
+    #[error("Request was already answered")]
+    RequestAlreadyResolved,
+
+    /// The agent that raised a request has exited, so nothing is waiting for the
+    /// answer any more.
+    #[error("The agent that raised this request has exited")]
+    LinkGone,
+
+    /// A link could not be established, or the agent refused to open a session.
+    #[error("Could not start the agent: {0}")]
+    LinkFailed(String),
+
+    /// The agent does not support what was asked — interrupt on an adapter that
+    /// never declared it, for instance. A capability failure rather than a bad
+    /// request, so a UI can disable the control instead of retrying.
+    #[error("The agent does not support this: {0}")]
+    Unsupported(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -141,6 +167,36 @@ impl Error {
                 StatusCode::CONFLICT,
                 "STOP_ALREADY_COMPLETED",
                 "Turn has already finished".to_string(),
+            ),
+            Error::RequestNotFound => (
+                StatusCode::NOT_FOUND,
+                "REQUEST_NOT_FOUND",
+                "No such request".to_string(),
+            ),
+            // 409 rather than 404: the request exists, and a client racing
+            // another needs to know it lost rather than that it was wrong.
+            Error::RequestAlreadyResolved => (
+                StatusCode::CONFLICT,
+                "REQUEST_ALREADY_RESOLVED",
+                "This request was already answered".to_string(),
+            ),
+            Error::LinkGone => (
+                StatusCode::CONFLICT,
+                "LINK_GONE",
+                "The agent that raised this request has exited".to_string(),
+            ),
+            // 502-ish in spirit but reported as 503: the agent is a dependency
+            // this server starts, and the useful signal is "try again once it
+            // can start" rather than "your request was malformed".
+            Error::LinkFailed(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LINK_FAILED",
+                msg.clone(),
+            ),
+            Error::Unsupported(msg) => (
+                StatusCode::CONFLICT,
+                "AGENT_UNSUPPORTED",
+                msg.clone(),
             ),
             Error::Unauthorized => (
                 StatusCode::UNAUTHORIZED,

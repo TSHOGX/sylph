@@ -1,0 +1,296 @@
+//! Pending agent requests, end to end through the API.
+//!
+//! These pin the guarantees that make an approval trustworthy: it outlives every
+//! client, exactly one answer wins, and an option the agent never offered cannot
+//! be smuggled in. Each is a property a stream-only design does not have.
+
+mod common;
+
+use axum::http::StatusCode;
+use common::{json_body, TestBackend};
+use serde_json::json;
+use sylph_web_backend::models::PendingRequest;
+
+/// Insert a request the way the link drain task would, so these tests exercise
+/// the API and the store without needing a live adapter process.
+async fn raise_request(server: &TestBackend, session_id: &str, tool: &str) -> PendingRequest {
+    let request = PendingRequest {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.to_string(),
+        turn_id: "turn-1".to_string(),
+        adapter_request_id: "adapter-req-1".to_string(),
+        kind: "approval".to_string(),
+        tool: Some(tool.to_string()),
+        tool_use_id: Some("toolu_01".to_string()),
+        title: format!("Allow {}?", tool),
+        detail_json: json!({"command": "rm -rf build"}).to_string(),
+        options_json: json!([
+            {"id": "allow", "label": "Allow once"},
+            {"id": "deny", "label": "Deny"}
+        ])
+        .to_string(),
+        default_option: Some("deny".to_string()),
+        risk: Some("destructive".to_string()),
+        status: "pending".to_string(),
+        chosen_option: None,
+        resolved_input_json: None,
+        resolved_by: None,
+        created_at_ms: 1_700_000_000_000,
+        resolved_at_ms: None,
+    };
+    server
+        .state
+        .store
+        .create_pending_request(&request)
+        .await
+        .expect("request must persist")
+}
+
+#[tokio::test]
+async fn a_pending_request_is_listed_with_what_the_agent_proposed() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    raise_request(&server, &session_id, "Bash").await;
+
+    let response = server
+        .get_authed(&format!("/api/v1/sessions/{}/requests", session_id))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    let requests = body.as_array().expect("an array of requests");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["kind"], "approval");
+    assert_eq!(requests[0]["tool"], "Bash");
+    assert_eq!(requests[0]["risk"], "destructive");
+    // The proposed input has to reach the client, or an approval dialog can only
+    // say "allow Bash?" without saying which command.
+    assert!(requests[0]["detailJson"]
+        .as_str()
+        .unwrap()
+        .contains("rm -rf build"));
+}
+
+/// The adapter's own request id must not be exposed. A client that could send it
+/// could answer a request that was never raised.
+#[tokio::test]
+async fn the_adapter_request_id_is_never_serialized_to_a_client() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    raise_request(&server, &session_id, "Bash").await;
+
+    let body = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}/requests", session_id))
+            .await,
+    )
+    .await;
+
+    let rendered = body.to_string();
+    assert!(
+        !rendered.contains("adapter-req-1"),
+        "the adapter's id leaked to the client: {rendered}"
+    );
+}
+
+/// The durability guarantee. A request survives the server restarting — except
+/// that a restart also proves no link survived, so it is abandoned rather than
+/// left pending, because nothing can answer it any more.
+#[tokio::test]
+async fn a_restart_abandons_pending_requests_rather_than_leaving_them_answerable() {
+    let mut server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    let request = raise_request(&server, &session_id, "Bash").await;
+
+    server.restart().await;
+
+    // No longer listed as open: the agent that raised it is gone.
+    let body = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}/requests", session_id))
+            .await,
+    )
+    .await;
+    assert_eq!(body.as_array().unwrap().len(), 0);
+
+    // But the row is kept, so the timeline can explain why the turn stopped
+    // instead of showing an unexplained gap.
+    let stored = server
+        .state
+        .store
+        .get_request(&request.id)
+        .await
+        .unwrap()
+        .expect("the row must be retained");
+    assert_eq!(stored.status, "abandoned");
+    assert!(stored.resolved_at_ms.is_some());
+}
+
+/// An option the agent never offered must be refused. Reaching the adapter with
+/// an unrecognized string leaves its handling undefined, and for an approval
+/// "undefined" must never be able to mean "allow".
+#[tokio::test]
+async fn an_option_the_agent_never_offered_is_refused() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    let request = raise_request(&server, &session_id, "Bash").await;
+
+    let response = server
+        .post_authed(
+            &format!("/api/v1/requests/{}/resolve", request.id),
+            json!({"option": "allow_everything_forever"}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "INVALID_REQUEST");
+
+    // Still open: a refused answer must not consume the request.
+    let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "pending");
+}
+
+#[tokio::test]
+async fn resolving_an_unknown_request_is_a_404() {
+    let server = TestBackend::start().await;
+    let response = server
+        .post_authed(
+            "/api/v1/requests/does-not-exist/resolve",
+            json!({"option": "allow"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "REQUEST_NOT_FOUND");
+}
+
+/// First resolution wins, and the loser is told it lost rather than silently
+/// succeeding. Two people answering one approval is a defined outcome.
+#[tokio::test]
+async fn a_second_answer_to_one_request_is_a_conflict() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    let request = raise_request(&server, &session_id, "Bash").await;
+
+    // No link exists in this harness, so the first answer claims the row and then
+    // reports that nothing is waiting for it. That is the correct order: the
+    // claim is what must be exclusive.
+    let first = server
+        .post_authed(
+            &format!("/api/v1/requests/{}/resolve", request.id),
+            json!({"option": "allow"}),
+        )
+        .await;
+    assert_eq!(first.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(first).await["error"]["code"], "LINK_GONE");
+
+    let claimed = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    assert_eq!(claimed.status, "resolved");
+    assert_eq!(claimed.chosen_option.as_deref(), Some("allow"));
+
+    // The second answer finds it already claimed.
+    let second = server
+        .post_authed(
+            &format!("/api/v1/requests/{}/resolve", request.id),
+            json!({"option": "deny"}),
+        )
+        .await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(second).await["error"]["code"],
+        "REQUEST_ALREADY_RESOLVED"
+    );
+
+    // The first decision stands. An approval overwritten by a later "deny" would
+    // be bad; overwritten by a later "allow" would be a security hole.
+    let final_row = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    assert_eq!(final_row.chosen_option.as_deref(), Some("allow"));
+}
+
+/// Edited input is recorded, because "allow, but change the command" is the
+/// affordance a yes/no dialog drops.
+#[tokio::test]
+async fn an_answer_can_carry_an_edited_version_of_the_proposed_input() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    let request = raise_request(&server, &session_id, "Bash").await;
+
+    server
+        .post_authed(
+            &format!("/api/v1/requests/{}/resolve", request.id),
+            json!({"option": "allow", "input": {"command": "rm -rf build/tmp"}}),
+        )
+        .await;
+
+    let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    let recorded = stored.resolved_input_json.expect("the edit must be recorded");
+    assert!(
+        recorded.contains("build/tmp"),
+        "what was actually approved is the audit trail: {recorded}"
+    );
+}
+
+#[tokio::test]
+async fn requests_on_an_unknown_session_are_a_404() {
+    let server = TestBackend::start().await;
+    let response = server.get_authed("/api/v1/sessions/nope/requests").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// Interrupt and steer need a live agent. Without one they report that rather
+/// than appearing to succeed, so a UI does not show a turn as interrupted when
+/// nothing was.
+#[tokio::test]
+async fn interrupt_and_steer_report_a_missing_agent_rather_than_succeeding() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    let interrupted = server
+        .post_authed(&format!("/api/v1/sessions/{}/interrupt", session_id), json!({}))
+        .await;
+    assert_eq!(interrupted.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(interrupted).await["error"]["code"], "LINK_GONE");
+
+    let steered = server
+        .post_authed(
+            &format!("/api/v1/sessions/{}/steer", session_id),
+            json!({"text": "also check the tests"}),
+        )
+        .await;
+    assert_eq!(steered.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn steering_with_empty_text_is_refused_before_reaching_the_agent() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    let response = server
+        .post_authed(
+            &format!("/api/v1/sessions/{}/steer", session_id),
+            json!({"text": "   "}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A session with no adapter reports detached with no capabilities, rather than
+/// failing. The session is still valid and its history still readable.
+#[tokio::test]
+async fn capabilities_report_detached_when_no_adapter_exists_for_the_agent() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    let response = server
+        .get_authed(&format!("/api/v1/sessions/{}/capabilities", session_id))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    assert_eq!(body["attached"], false);
+    assert_eq!(body["supports"].as_array().unwrap().len(), 0);
+    // Capability is a property of a live link. Reporting a remembered list would
+    // promise interrupt on a session with no process to interrupt.
+    assert!(body["capabilities"].is_null());
+}

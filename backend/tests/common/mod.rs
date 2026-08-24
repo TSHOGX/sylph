@@ -32,6 +32,13 @@ pub struct TestBackend {
     /// Kept so a test can rebuild the backend against the same journal, which
     /// is how a restart is simulated.
     config: Config,
+    /// The live state behind the router.
+    ///
+    /// Exposed because some state has no endpoint that creates it: an agent
+    /// request is raised by a link's drain task, so a test for the *resolve* API
+    /// has to seed one directly. Driving a real adapter to produce one would make
+    /// these tests depend on a live agent process to exercise a store guarantee.
+    pub state: AppState,
 }
 
 impl TestBackend {
@@ -91,6 +98,10 @@ impl TestBackend {
             port: 0,
             database_path: data_dir.join("live.db").display().to_string(),
             data_dir,
+            // v2 adapters live beside the v1 runners in the harness tree, so a
+            // test that installs one gets it discovered without a second root to
+            // set up.
+            agents_dir: runners_dir.clone(),
             runners_dir,
             // Absent unless a test opts in: TraceDB-dependent paths must
             // degrade rather than make every test depend on an external binary.
@@ -119,11 +130,12 @@ impl TestBackend {
         let cookie = format!("sylph_session={}", state.config.cookie_secret);
 
         Self {
-            router: router(state),
+            router: router(state.clone()),
             temp,
             workdir,
             cookie,
             config,
+            state,
         }
     }
 
@@ -136,7 +148,10 @@ impl TestBackend {
         let state = AppState::build(self.config.clone())
             .await
             .expect("failed to rebuild state");
-        self.router = router(state);
+        self.router = router(state.clone());
+        // Replaced too, or a test would keep querying the pre-restart store and
+        // miss exactly the recovery it is asserting on.
+        self.state = state;
     }
 
     pub fn workdir(&self) -> &Path {

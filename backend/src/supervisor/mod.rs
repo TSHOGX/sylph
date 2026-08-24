@@ -19,7 +19,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -29,7 +28,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::db::LiveStore;
 use crate::env::{Environment, ProcessHandle, ProcessSignal, ProcessSpec, Signal};
-use crate::events::{EventHub, RunnerEnvelope, RunnerStreamLine, StreamEvent};
+use crate::events::{EventHub, RunnerEnvelope, RunnerStreamLine, SeqAllocator, StreamEvent};
 use crate::runners::Registry;
 
 /// Grace period between SIGTERM and SIGKILL on stop, matching the runner
@@ -68,11 +67,6 @@ struct ActiveTurn {
     stop_requested: bool,
 }
 
-/// Per-session monotonic event sequence counter.
-///
-/// Seeded from the journal so sequence numbers keep climbing across restarts
-/// and never collide with the `UNIQUE(session_id, seq)` constraint.
-type SeqCounters = Arc<RwLock<HashMap<String, Arc<AtomicI32>>>>;
 
 #[derive(Clone)]
 pub struct TurnSupervisor {
@@ -80,7 +74,9 @@ pub struct TurnSupervisor {
     registry: Arc<Mutex<Registry>>,
     hub: EventHub,
     active: Arc<RwLock<HashMap<String, ActiveTurn>>>,
-    seq_counters: SeqCounters,
+    /// Shared with the link drain task, because both emit events for one session
+    /// and separate counters would collide on `UNIQUE(session_id, seq)`.
+    seq: SeqAllocator,
     soul_path: Option<PathBuf>,
     /// Where turns run. One environment today; a session will name its own once
     /// sandboxes land, which is why this is a trait object from the start rather
@@ -95,13 +91,14 @@ impl TurnSupervisor {
         hub: EventHub,
         soul_path: Option<PathBuf>,
         environment: Arc<dyn Environment>,
+        seq: SeqAllocator,
     ) -> Self {
         Self {
             store,
             registry,
             hub,
             active: Arc::new(RwLock::new(HashMap::new())),
-            seq_counters: Arc::new(RwLock::new(HashMap::new())),
+            seq,
             soul_path,
             environment,
         }
@@ -175,33 +172,9 @@ impl TurnSupervisor {
         Ok(true)
     }
 
-    /// Next sequence number for a session, seeded from the journal on first use.
-    async fn next_seq(&self, session_id: &str) -> crate::error::Result<i32> {
-        let counter = {
-            let counters = self.seq_counters.read().await;
-            counters.get(session_id).cloned()
-        };
-
-        let counter = match counter {
-            Some(counter) => counter,
-            None => {
-                let max = self.store.max_event_seq(session_id).await?;
-                let mut counters = self.seq_counters.write().await;
-                // Another task may have seeded this while we queried; keep
-                // whichever counter landed first so numbering stays monotonic.
-                counters
-                    .entry(session_id.to_string())
-                    .or_insert_with(|| Arc::new(AtomicI32::new(max + 1)))
-                    .clone()
-            }
-        };
-
-        Ok(counter.fetch_add(1, Ordering::SeqCst))
-    }
-
     /// Assign a sequence number, journal the event if stable, and publish it.
     async fn emit(&self, session_id: &str, turn_id: &str, mut event: StreamEvent) -> crate::error::Result<()> {
-        event.seq = self.next_seq(session_id).await?;
+        event.seq = self.seq.next(session_id).await?;
 
         if event.is_stable() {
             // Journal before publishing so a client that reconnects

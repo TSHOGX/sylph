@@ -23,6 +23,10 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::models::Event;
 
+pub mod seq;
+
+pub use seq::SeqAllocator;
+
 /// How many ephemeral events to retain per turn for reconnect replay.
 ///
 /// Deltas arrive at token rate, so this is a tail window rather than a full
@@ -95,6 +99,58 @@ impl StreamEvent {
             created_at_ms: self.created_at_ms,
             reconciled_at_ms: None,
         }
+    }
+
+    /// Build from a `sylph.agent.v2` event message.
+    ///
+    /// `seq` is left at zero for the caller to assign, because ordering is the
+    /// server's to decide: an adapter numbering its own events could not
+    /// interleave correctly with the server's own (the user's message, status),
+    /// which share one stream.
+    ///
+    /// Returns `None` only when `kind` is missing. Every other field is optional
+    /// by protocol, so a sparse event is valid rather than malformed.
+    pub fn from_adapter(body: &serde_json::Value) -> Option<Self> {
+        let kind = body.get("kind")?.as_str()?.to_string();
+        let phase = body
+            .get("phase")
+            .and_then(|p| p.as_str())
+            .map(|s| s.to_string());
+
+        // Stability follows the phase, unchanged from v1: a `completed` event
+        // carries its block's whole stable value, and an event with no phase is
+        // server-authored and always stable.
+        let stability = match phase.as_deref() {
+            Some("completed") | None => "stable",
+            _ => "ephemeral",
+        };
+
+        Some(Self {
+            seq: 0,
+            kind,
+            phase,
+            stream_id: body
+                .get("streamId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            name: body
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            text: body
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            data: body.get("data").cloned().filter(|d| !d.is_null()),
+            is_error: body
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            stability: stability.to_string(),
+            source: "agent".to_string(),
+            created_at_ms: chrono::Utc::now().timestamp_millis(),
+        })
     }
 
     /// Rebuild the wire form from a journal row.
@@ -171,10 +227,18 @@ struct TurnChannel {
     finished: bool,
 }
 
-/// Registry of live event channels, keyed by turn id.
+/// Registry of live event channels, keyed by turn id, plus session-scoped ones.
 #[derive(Clone, Default)]
 pub struct EventHub {
     channels: Arc<RwLock<HashMap<String, TurnChannel>>>,
+    /// Session-scoped channels, for facts that are not about a turn.
+    ///
+    /// A link attaching or dying, a capability list changing, and a request being
+    /// raised all belong to the session: they can happen with no turn running, and
+    /// a client watching only turns would miss an approval raised while it was
+    /// idle. Kept separate from turn channels rather than folded in, because
+    /// their lifetimes differ — a session channel outlives every turn on it.
+    sessions: Arc<RwLock<HashMap<String, broadcast::Sender<StreamEvent>>>>,
 }
 
 /// What an SSE handler needs to serve one client: the backlog to replay first,
@@ -232,6 +296,33 @@ impl EventHub {
     /// Drop a finished turn's channel entirely.
     pub async fn remove(&self, turn_id: &str) {
         self.channels.write().await.remove(turn_id);
+    }
+
+    /// Publish a session-scoped fact.
+    ///
+    /// Created on demand: unlike a turn, a session has no explicit open, and
+    /// requiring one would mean a request raised before any client subscribed had
+    /// nowhere to go.
+    pub async fn publish_session(&self, session_id: &str, event: StreamEvent) {
+        let sender = {
+            let mut sessions = self.sessions.write().await;
+            sessions
+                .entry(session_id.to_string())
+                .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0)
+                .clone()
+        };
+        // No listener is normal and not an error: these facts are journaled or
+        // available as resources, and the stream is only the fast path.
+        let _ = sender.send(event);
+    }
+
+    /// Subscribe to a session's facts.
+    pub async fn attach_session(&self, session_id: &str) -> broadcast::Receiver<StreamEvent> {
+        let mut sessions = self.sessions.write().await;
+        sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0)
+            .subscribe()
     }
 
     /// Attach a client, replaying ephemeral events newer than `after_seq`.

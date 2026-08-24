@@ -3,7 +3,7 @@ use sqlx::sqlite::{
 };
 use std::path::Path;
 use crate::error::{Error, Result};
-use crate::models::{Event, Incarnation, Session, Turn};
+use crate::models::{Event, Incarnation, PendingRequest, Session, Turn};
 use crate::tracedb::summarize_line;
 
 #[derive(Clone)]
@@ -734,6 +734,161 @@ impl LiveStore {
         .fetch_all(&self.pool)
         .await
         .map_err(Error::Database)
+    }
+
+    /// Record a request an agent raised, so it survives every client leaving.
+    pub async fn create_pending_request(&self, request: &PendingRequest) -> Result<PendingRequest> {
+        sqlx::query_as::<_, PendingRequest>(
+            r#"
+            INSERT INTO pending_requests (
+                id, session_id, turn_id, adapter_request_id, kind, tool,
+                tool_use_id, title, detail_json, options_json, default_option,
+                risk, status, created_at_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            RETURNING *
+            "#,
+        )
+        .bind(&request.id)
+        .bind(&request.session_id)
+        .bind(&request.turn_id)
+        .bind(&request.adapter_request_id)
+        .bind(&request.kind)
+        .bind(&request.tool)
+        .bind(&request.tool_use_id)
+        .bind(&request.title)
+        .bind(&request.detail_json)
+        .bind(&request.options_json)
+        .bind(&request.default_option)
+        .bind(&request.risk)
+        .bind(request.created_at_ms)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Error::Database)
+    }
+
+    /// What a session is currently waiting on, oldest first.
+    pub async fn open_requests(&self, session_id: &str) -> Result<Vec<PendingRequest>> {
+        sqlx::query_as::<_, PendingRequest>(
+            "SELECT * FROM pending_requests
+             WHERE session_id = ? AND status = 'pending'
+             ORDER BY created_at_ms",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::Database)
+    }
+
+    pub async fn get_request(&self, id: &str) -> Result<Option<PendingRequest>> {
+        sqlx::query_as::<_, PendingRequest>("SELECT * FROM pending_requests WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Error::Database)
+    }
+
+    /// Claim a request for resolution. `None` when it was already answered.
+    ///
+    /// The `status = 'pending'` predicate is the whole concurrency control: two
+    /// clients answering at once both run this UPDATE, and SQLite serializes
+    /// them, so exactly one sees a row. Reading the status first and then writing
+    /// would leave a window where both observe `pending` and both forward an
+    /// answer to the adapter — which for an approval means the second overwrites
+    /// the first's decision.
+    pub async fn resolve_request(
+        &self,
+        id: &str,
+        option: &str,
+        input_json: Option<&str>,
+        resolved_by: Option<&str>,
+    ) -> Result<Option<PendingRequest>> {
+        sqlx::query_as::<_, PendingRequest>(
+            r#"
+            UPDATE pending_requests
+               SET status = 'resolved',
+                   chosen_option = ?,
+                   resolved_input_json = ?,
+                   resolved_by = ?,
+                   resolved_at_ms = ?
+             WHERE id = ? AND status = 'pending'
+            RETURNING *
+            "#,
+        )
+        .bind(option)
+        .bind(input_json)
+        .bind(resolved_by)
+        .bind(now_ms())
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::Database)
+    }
+
+    /// Mark every open request on a session abandoned, returning how many.
+    ///
+    /// Called when a link dies with requests outstanding. They can never be
+    /// answered — the adapter waiting on them is gone — so leaving them `pending`
+    /// would show a session forever waiting on a question nobody can act on. The
+    /// timeline needs to say the turn stopped because its agent died, rather than
+    /// leaving an unexplained gap.
+    pub async fn abandon_open_requests(&self, session_id: &str) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE pending_requests
+                SET status = 'abandoned', resolved_at_ms = ?
+              WHERE session_id = ? AND status = 'pending'",
+        )
+        .bind(now_ms())
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(Error::Database)?;
+        Ok(result.rows_affected())
+    }
+
+    /// A session's status, without loading the whole row.
+    pub async fn session_status(&self, session_id: &str) -> Option<String> {
+        sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// The turn currently executing on a session, if any.
+    ///
+    /// A link's events have to be attributed to a turn, and the link does not
+    /// know turn ids — they are the server's concept. Ordered descending so a
+    /// journal that somehow holds two running turns attributes to the newer,
+    /// which is the one an event just arrived for.
+    pub async fn running_turn_id(&self, session_id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM turns
+              WHERE session_id = ? AND status IN ('running', 'stopping')
+              ORDER BY created_at_ms DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::Database)
+    }
+
+    /// Abandon every open request across all sessions, for startup recovery.
+    ///
+    /// No link survives a restart, so anything still `pending` in the journal is
+    /// waiting on a process that no longer exists.
+    pub async fn abandon_all_open_requests(&self) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE pending_requests
+                SET status = 'abandoned', resolved_at_ms = ?
+              WHERE status = 'pending'",
+        )
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await
+        .map_err(Error::Database)?;
+        Ok(result.rows_affected())
     }
 }
 
