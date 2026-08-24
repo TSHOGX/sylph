@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claude adapter entry point for `sylph.agent.v2`.
+# Claude adapter entry point for `sylph.agent.v3`.
 #
 # A shell shim over `adapter.py` for the same reason the v1 claude runner had
 # one: the protocol work needs real JSON handling and a concurrent read loop,

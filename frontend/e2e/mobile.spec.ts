@@ -97,15 +97,15 @@ test("the composer fits the viewport, with a flag selected and with a long messa
   // already too large.
   expect(await overflowingElements(page)).toEqual([]);
 
-  // Selecting a flag is what widened the row, so the invariant is re-checked after.
-  await page.getByRole("button", { name: "Model" }).click();
+  // Selecting a value is what widened the row, so the invariant is re-checked after.
+  await page.getByRole("button", { name: /^Model:/ }).click();
   // On a phone the menu is a bottom sheet rather than a popover: a 200px panel
   // pinned to a 32px button is both hard to hit and prone to landing under the
   // on-screen keyboard.
   const sheet = page.getByRole("dialog", { name: "Model" });
   await expect(sheet).toBeVisible();
-  await sheet.getByRole("menuitemradio", { name: "thorough" }).click();
-  await expect(page.getByRole("button", { name: /thorough/ })).toBeVisible();
+  await sheet.getByRole("menuitemradio", { name: "Thorough" }).click();
+  await expect(page.getByRole("button", { name: /^Model:/ })).toHaveText(/Thorough/);
   expect(await overflowingElements(page)).toEqual([]);
 
   // And with content in it, since the textarea grows.

@@ -168,6 +168,11 @@ pub async fn interrupt(
 }
 
 /// Add text to a turn already in flight.
+///
+/// `turnId` is a precondition rather than a routing hint. A steer that races a turn
+/// boundary would otherwise be delivered into the *next* turn — the request
+/// succeeds, nothing errors, and the text lands in the wrong conversation. Naming
+/// the turn the client believed was running turns that into a refusal.
 pub async fn steer(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -179,9 +184,21 @@ pub async fn steer(
         return Err(Error::InvalidRequest("Steering text cannot be empty".into()));
     }
 
+    // Checked here as well as by the adapter: the server knows which turn is
+    // running, so a stale client can be told so without waking the agent.
+    let running = state.store.running_turn_id(&session_id).await?;
+    if let Some(expected) = body.turn_id.as_deref() {
+        if running.as_deref() != Some(expected) {
+            return Err(Error::TurnMoved {
+                expected: expected.to_string(),
+                running: running.clone(),
+            });
+        }
+    }
+
     let link = state.links.get(&session_id).await.ok_or(Error::LinkGone)?;
 
-    link.steer(body.text)
+    link.steer(body.text, running)
         .await
         .map_err(|error| Error::Unsupported(format!("{:#}", error)))?;
 
@@ -189,8 +206,63 @@ pub async fn steer(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SteerRequest {
     pub text: String,
+    /// The turn the client believes is running. Optional, because a client with no
+    /// turn in view is steering "whatever is running", which is a coherent ask.
+    #[serde(default)]
+    pub turn_id: Option<String>,
+}
+
+/// Set one typed config option on a live session.
+///
+/// The response is the refreshed capability surface rather than an acknowledgement,
+/// because setting one option can change another's choices — `pi`'s thinking levels
+/// depend on the selected model, and `claude` carries per-model effort levels. A
+/// client that assumed its own optimistic value would drift from the agent.
+pub async fn set_config(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<SetConfigRequest>,
+) -> Result<Json<LinkState>> {
+    require_session(&state, &session_id).await?;
+
+    if body.config_id.trim().is_empty() {
+        return Err(Error::InvalidRequest("A config id is required".into()));
+    }
+
+    let link = state.links.ensure(&session_id).await.map_err(|error| {
+        Error::LinkFailed(format!("{:#}", error))
+    })?;
+
+    // The option has to be one the agent offered, for the same reason a request
+    // option is validated: an id the adapter does not recognize reaches the vendor
+    // CLI as an unknown setting, and what that does is undefined.
+    let surface = link.capabilities().await;
+    if !surface.config.iter().any(|option| option.id() == body.config_id) {
+        return Err(Error::InvalidRequest(format!(
+            "'{}' is not a config option this session offers",
+            body.config_id
+        )));
+    }
+
+    link.set_config(&body.config_id, body.value)
+        .await
+        .map_err(|error| Error::Unsupported(format!("{:#}", error)))?;
+
+    // Published so every other attached client sees the change rather than only the
+    // one that made it — the same reason a capability update is pushed at all.
+    state.links.announce_capabilities(&session_id).await;
+
+    Ok(Json(state.links.state(&session_id).await))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetConfigRequest {
+    pub config_id: String,
+    pub value: serde_json::Value,
 }
 
 /// Session-scoped facts, as SSE.

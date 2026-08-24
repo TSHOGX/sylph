@@ -120,6 +120,27 @@ if commands:
 check("returns subagent definitions", len(opened.get("subagents") or []) > 0,
       "{} subagents".format(len(opened.get("subagents") or [])))
 
+# v3: the command list distinguishes what to ask the agent from what the session is.
+control = [c for c in commands if c.get("kind") == "control"]
+check("classifies control commands", len(control) > 0,
+      ", ".join("/" + c["name"] for c in control))
+check("a control command names its config option",
+      all(c.get("configId") or c["name"] in ("context", "compact") for c in control))
+check("carries the aliases the terminal honours",
+      any(c.get("aliases") for c in commands),
+      next((", ".join(c["aliases"]) for c in commands if c.get("aliases")), ""))
+
+# The model catalogue, which v2 reported as empty on every session: it read `id`
+# where the CLI answers `value`, and a wrong key fails silently.
+config = opened.get("config") or []
+models = next((o for o in config if o["id"] == "model"), None)
+check("reports a non-empty model catalogue",
+      bool(models and models.get("options")),
+      "{} models".format(len(models.get("options") or []) if models else 0))
+check("reports the current model rather than guessing",
+      bool(models and models.get("currentValue")),
+      str(models.get("currentValue") if models else None))
+
 print("3. a turn streams and completes")
 send({"t": "send", "id": "c1", "text": "Reply with exactly: SYLPH-OK"})
 await_reply("c1")
@@ -152,6 +173,27 @@ else:
           "input": request.get("detail")})
     check("the turn continues past the approval",
           state["turn_done"].wait(timeout=120))
+
+print("6. capability facets survive a turn")
+# The regression v3 exists for. `claude` emits `system/init` once per *turn*, and in
+# v2 the adapter turned each into a whole-surface update carrying only the permission
+# mode — erasing all 46 commands on the first exchange.
+partials = [e for e in state["events"]
+            if e.get("kind") == "capabilities"]
+check("a per-turn capability update names only the facet it changes",
+      all(set((e.get("facets") or {}).keys()) <= {"permissionMode"} for e in partials),
+      "{} update(s)".format(len(partials)))
+check("no update carries a whole surface",
+      all("capabilities" not in e for e in partials))
+
+print("7. a typed config change answers with the refreshed facet")
+send({"t": "set_config", "id": "s1", "configId": "model", "value": "sonnet"})
+set_reply = await_reply("s1", timeout=30)
+new_config = (set_reply.get("facets") or {}).get("config") or []
+new_model = next((o for o in new_config if o["id"] == "model"), None)
+check("the model is now what was asked for",
+      bool(new_model and new_model.get("currentValue") == "sonnet"),
+      str(new_model.get("currentValue") if new_model else None))
 
 send({"t": "close", "id": "z1"})
 try:

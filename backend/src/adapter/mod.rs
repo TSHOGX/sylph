@@ -1,4 +1,4 @@
-//! The duplex agent-session protocol: `sylph.agent.v2`.
+//! The duplex agent-session protocol: `sylph.agent.v3`.
 //!
 //! `docs/session-protocol.md` is the governing spec. The short version of why
 //! this module exists: the v1 runner contract writes a prompt to stdin and

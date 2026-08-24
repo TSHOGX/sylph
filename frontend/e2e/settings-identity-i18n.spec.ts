@@ -18,6 +18,16 @@ import { gotoReady } from "./fixtures/session";
  */
 
 async function openSettings(page: import("@playwright/test").Page) {
+  // Wait for the shell before pressing the shortcut. The binding is registered by a
+  // client component, so a keypress sent between navigation and hydration reaches a
+  // document with no handler for it — the key is swallowed and the dialog never
+  // opens. That made this helper fail only under load, which reads as flakiness
+  // rather than as a race, and only after a `reload()`.
+  //
+  // Matched by role rather than by name: this helper is also used with the UI in
+  // Chinese, where every accessible name is translated. A label here would pin the
+  // readiness check to one locale and fail in the other.
+  await expect(page.getByRole("banner").getByRole("button").first()).toBeVisible();
   await page.keyboard.press("ControlOrMeta+Comma");
   const settings = page.getByRole("dialog");
   await expect(settings).toBeVisible();

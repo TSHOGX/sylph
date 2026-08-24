@@ -444,36 +444,40 @@ test("binding a workspace from the empty sidebar area needs no session first", a
 
 // -------------------------------------------------------- Phase 7: composer
 //
-// The composer now exposes the runner configuration a turn will use. Both
-// controls are generated from `--describe`, so these assert against whatever the
-// E2E fixture declares rather than hardcoding a model list.
+// The composer exposes the configuration a turn will use, generated from what the
+// agent reports rather than hardcoded — so these assert against whatever the E2E
+// fixture declares.
+//
+// The source changed with the v3 protocol: the control is driven by the session's
+// live `config`, not by the agent descriptor's static `flags`. That is what makes it
+// correct at all for a real agent — `claude` declares an empty `model.choices` in its
+// descriptor because its catalogue depends on the account and is only knowable from a
+// running session, so a descriptor-driven control was permanently empty.
 
-test("a declared flag is a truncating chip that opens a menu, not a <select>", async ({
+test("a declared config option is a truncating button that opens a menu, not a <select>", async ({
   page,
 }) => {
   await createSession(page);
 
-  // The fixture declares `model` with two choices and no `effort`, so exactly one
-  // chip is expected — the row is generated from `--describe`, never hardcoded.
-  const model = page.getByRole("button", { name: "Model" });
+  // The fixture reports one `model` option in the `model` category, so exactly one
+  // control is expected on the row.
+  const model = page.getByRole("button", { name: /^Model:/ });
   await expect(model).toBeVisible();
-  // Unset shows the flag's name, not a blank control: "Model" reads as "choose one",
-  // where an empty chip reads as broken.
-  await expect(model).toHaveText(/Model/);
+  // It renders the agent's *current value*, which a descriptor-driven chip could not
+  // know. Showing the option's own name instead would hide real state.
+  await expect(model).toHaveText(/Fast/);
 
   await model.click();
   const menu = page.getByRole("menu", { name: "Model" });
   await expect(menu).toBeVisible();
-  // "Runner default" is a real option, distinct from any choice: omitting the flag
-  // is not the same as sending one of the runner's values.
-  await expect(menu.getByRole("menuitemradio", { name: "Runner default" })).toBeChecked();
-  await menu.getByRole("menuitemradio", { name: "thorough" }).click();
+  // The current value is checked, read from the agent rather than from local state.
+  await expect(menu.getByRole("menuitemradio", { name: "Fast" })).toBeChecked();
+  await menu.getByRole("menuitemradio", { name: "Thorough" }).click();
 
-  // The chip now renders the *current value*. This is the whole reason it is a
-  // button and not a `<select>`: a select is sized by its longest option, so one
-  // long model name widened the control past the viewport on a phone regardless of
-  // what was selected.
-  await expect(page.getByRole("button", { name: /thorough/ })).toBeVisible();
+  // The button re-renders from the response, which *is* the refreshed surface:
+  // setting one option can change another's choices, so an optimistic local value
+  // would be wrong exactly when it matters.
+  await expect(page.getByRole("button", { name: /^Model:/ })).toHaveText(/Thorough/);
 });
 
 test("no configuration can push Send outside the composer", async ({ page }) => {
@@ -492,9 +496,9 @@ test("no configuration can push Send outside the composer", async ({ page }) => 
   expect(sendBox).not.toBeNull();
   expect(sendBox!.x + sendBox!.width).toBeLessThanOrEqual(formBox!.x + formBox!.width + 1);
 
-  // And again with a flag selected, since selecting one is what used to widen the row.
-  await page.getByRole("button", { name: "Model" }).click();
-  await page.getByRole("menu", { name: "Model" }).getByRole("menuitemradio", { name: "thorough" }).click();
+  // And again with a value selected, since selecting one is what used to widen the row.
+  await page.getByRole("button", { name: /^Model:/ }).click();
+  await page.getByRole("menu", { name: "Model" }).getByRole("menuitemradio", { name: "Thorough" }).click();
 
   const after = await send.boundingBox();
   expect(after!.x + after!.width).toBeLessThanOrEqual(formBox!.x + formBox!.width + 1);

@@ -157,7 +157,7 @@ impl AppState {
             store.clone(),
             hub.clone(),
             environment,
-            config.agents_dir.clone(),
+            registry.clone(),
             soul_path,
             seq.clone(),
         );
@@ -301,6 +301,9 @@ pub fn router(state: AppState) -> Router {
             post(api::links::interrupt),
         )
         .route("/api/v1/sessions/{id}/steer", post(api::links::steer))
+        // Typed session config: what `/model` and `/permissions` resolve to, so a
+        // control command is a typed set rather than prose sent as a prompt.
+        .route("/api/v1/sessions/{id}/config", post(api::links::set_config))
         // Replay is session-scoped and server-paced: reconstruction is subtle
         // enough that doing it per frontend would let frontends disagree.
         .route("/api/v1/sessions/{id}/replay", get(api::replay::replay))

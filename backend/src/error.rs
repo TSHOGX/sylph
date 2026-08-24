@@ -90,6 +90,18 @@ pub enum Error {
     #[error("The agent that raised this request has exited")]
     LinkGone,
 
+    /// A steer named a turn that is no longer the running one.
+    ///
+    /// A 409 rather than a 404: the request was well-formed and would have been
+    /// valid moments earlier. Refusing it is the point — delivering the text into
+    /// whatever turn happens to be running now would succeed silently and land it
+    /// in the wrong conversation, which is far harder to notice than an error.
+    #[error("Turn {expected} is no longer running")]
+    TurnMoved {
+        expected: String,
+        running: Option<String>,
+    },
+
     /// A link could not be established, or the agent refused to open a session.
     #[error("Could not start the agent: {0}")]
     LinkFailed(String),
@@ -184,6 +196,17 @@ impl Error {
                 StatusCode::CONFLICT,
                 "LINK_GONE",
                 "The agent that raised this request has exited".to_string(),
+            ),
+            Error::TurnMoved { expected, running } => (
+                StatusCode::CONFLICT,
+                "TURN_MOVED",
+                match running {
+                    Some(running) => format!(
+                        "Turn {} is no longer running; {} is",
+                        expected, running
+                    ),
+                    None => format!("Turn {} is no longer running", expected),
+                },
             ),
             // 502-ish in spirit but reported as 503: the agent is a dependency
             // this server starts, and the useful signal is "try again once it

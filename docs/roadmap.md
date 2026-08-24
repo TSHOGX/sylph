@@ -1107,7 +1107,7 @@ against the 1–2 a runner hand-declares in `--describe`.
 
 Governing specs, written before the code:
 
-- `docs/session-protocol.md` — `sylph.agent.v2`, the duplex adapter contract
+- `docs/session-protocol.md` — `sylph.agent.v3`, the duplex adapter contract
 - `docs/environments.md` — the `Environment` seam, local / khora / ssh
 - `docs/control-plane.md` — one server, many frontends; Discord as a frontend
 - `docs/storage.md` — lossless replayable history, tiered, watermark-pruned
@@ -1156,6 +1156,90 @@ Governing specs, written before the code:
 - **Discord becomes a thin frontend**, keeping only channel→session bindings.
   Ends the two-control-plane split, and Discord inherits approvals, live command
   lists, and real interrupt.
+
+### `sylph.agent.v3`: what a second agent forced
+
+The protocol needed a version bump, and both reasons came from real use rather than
+review.
+
+**A capability surface was one value, replaced wholesale.** `claude` emits its
+`system/init` **once per turn** — measured, two user messages produce two of them.
+The adapter turned each into a capability event carrying only the permission mode,
+and the server assigned it over the cached surface, so the first turn of every
+session erased the project's 46 slash commands. The symptom appeared two layers
+away: the composer's menu stopped opening after the first exchange. Reproduced end
+to end before changing anything — `commands=46` before a turn, `commands=0` after.
+
+Merging partials would have fixed that same bug at the same cost and left the
+hazard: a message about one part of the surface would still be *able* to speak for
+all of it. So a capability update is now **facet-scoped**, and an unmentioned facet
+cannot be cleared. The regression test drives a real link and fails (`left: 0, right:
+2`) when the merge is reverted — verified by reintroducing the bug rather than
+assuming the test would catch it.
+
+**Every slash command was modelled as a kind of turn.** Right for `/verify`, wrong
+for `/model`: sent as prompt text, it returns a paragraph listing the models, which
+is the CLI behaving correctly because a headless client has no picker to open. Three
+protocols were surveyed and all three make the same split — ACP hoists model and mode
+into `SessionModelState` / `SessionConfigOption`, codex has no command concept at all
+and exposes `model/list` plus `config/value/write`, and `pi` deliberately *excludes*
+its built-in TUI commands from `get_commands`. `claude` is the outlier in returning
+`/model` in the same list as `/verify`.
+
+So a command now carries `kind: prompt | control`, and control commands resolve
+against typed session config (`select` | `boolean`, with a `category`), modelled on
+ACP's `SessionConfigOption` because it already covers all four agents' knobs. **The
+adapter classifies**, because no vendor supplies the discriminator and which commands
+are control surfaces is a vendor fact — a list in the server or the UI would be wrong
+for the next agent.
+
+### A second adapter, and what it proved
+
+`adapters/pi/` speaks `pi --mode rpc`. It exists to stop "claude does X" from being
+mistaken for "agents do X", and it earned its place immediately:
+
+- It declares **no `approval` capability**. pi ships no sandbox and has no
+  tool-permission callback, so an approval prompt could never arrive. This is the
+  degradation case capability negotiation exists for, and it is why `supports` gates
+  UI affordances rather than being decorative.
+- Its surface is *queried*, not pushed — `get_commands`, `get_available_models` and
+  `get_state` are three round trips, which facet-scoped updates make cheap.
+- Its thinking levels are **per-model**: the selected model offers two of the seven
+  pi documents. `claude` likewise carries `supportedEffortLevels` per model. A
+  session-global effort enumeration — which is what the old flat `flags.choices` was
+  — is wrong for both, so config options are re-derived after a model change.
+- Four agents spell a model list four different ways (`value`/`displayName`,
+  `modelId`/`name`, `id`/`displayName`, `id`/`name`), which is what makes the
+  normalized seam belong in the adapter.
+
+### Bugs found while building, each with its own cause
+
+- **The model list was empty on every session ever opened.** `capabilities_from` read
+  `entry.get("id")`, but the CLI answers `{"value","displayName",...}`. A wrong key
+  fails silently, so the composer's model control had nothing to show and looked like
+  a UI bug.
+- **`LinkManager` could not find adapters it had discovered.** Discovery searches two
+  roots; the manager knew only `agents_dir` and re-derived the path, so an agent found
+  in the other root listed as usable while every link failed with `No adapter for
+  agent 'claude' at <the other root>`. `Registry::adapter_path` already existed and
+  was unused. Discovery and linking now share one answer.
+- **The approval dialog offered an option the agent forbade.** The CLI marks asks
+  where granting "always" would write a rule *broader than the ask itself*, and its
+  schema says a host should omit the affordance. We always showed it. Filtering lives
+  in `requestOptions` so every consumer inherits it — and never empties the dialog,
+  because a panel with no buttons leaves the agent blocked with no way to answer.
+- **A steer could land on the wrong turn.** codex requires an `expectedTurnId`
+  precondition; ours had none, so a steer racing a turn boundary was delivered into
+  the next turn — succeeding silently with the text in the wrong conversation. Now a
+  `409 TURN_MOVED`.
+- **`ConfigOption` needed `rename_all_fields`.** With only the container
+  `rename_all`, serde renames variant *names* but not the fields inside them, so
+  `currentValue` parsed as `None` while everything compiled and every other field
+  worked. A test caught it; review would not have.
+- **The turn event rendered the reply twice.** `turn` had no case in the timeline and
+  fell through to the status line, printing the final text under the assistant block
+  it duplicated. Invisible under v1, where the outcome arrived as a process envelope
+  that never reached the timeline.
 
 ### Open items
 

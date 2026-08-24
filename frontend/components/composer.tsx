@@ -58,12 +58,19 @@ import {
   ApiError,
   sessionFlags,
   type Agent,
+  type ConfigOption,
   type Session,
   type SessionCommand,
 } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
 import { useT, type Translate } from "@/lib/i18n";
 import { SlashMenu, useSlashMatches } from "@/components/slash-menu";
+import { commandRoute } from "@/lib/slash";
+import {
+  ConfigControl,
+  configItems,
+  configMenuItems,
+} from "@/components/config-picker";
 import { useIsMobile } from "@/lib/viewport";
 import {
   MAX_ATTACHMENTS,
@@ -73,7 +80,9 @@ import {
 } from "@/components/attachment-picker";
 import { Button, IconButton } from "@/components/ui/button";
 import { MenuButton, type MenuItem } from "@/components/ui/menu";
+import { Overlay } from "@/components/overlay";
 import {
+  CheckIcon,
   ChevronDownIcon,
   ChipIcon,
   CommandIcon,
@@ -101,6 +110,24 @@ const DirectoryPicker = dynamic(
  * runner adding a third enumerated flag silently made the row wider.
  */
 const ROW_FLAGS = ["model", "effort"] as const;
+
+/**
+ * Config categories promoted to the control row, in order.
+ *
+ * Same rule as `ROW_FLAGS` and the same reason: a fixed-shape row. Everything else
+ * an agent declares still gets a control, in the `+` menu, so an agent that reports
+ * six knobs cannot widen the composer.
+ */
+const ROW_CATEGORIES = ["model", "effort"] as const;
+
+/**
+ * Sentinel for "the user asked for config but named no option".
+ *
+ * A distinct value rather than `undefined`, because "no dialog open" and "open the
+ * whole config menu" are different states and conflating them makes the dialog
+ * impossible to close.
+ */
+const ALL_CONFIG = "*";
 
 /**
  * Human label for a flag key. `effort` is the reasoning budget.
@@ -132,13 +159,19 @@ export function Composer({
   onAttachmentsChange,
   onSend,
   commands = [],
+  config = [],
   onRunCommand,
+  onSetConfig,
   sending,
   sendError,
   onStop,
   stopping,
   hasCommands,
   onOpenCommands,
+  canInterrupt = false,
+  onInterrupt,
+  canSteer = false,
+  onSteer,
 }: {
   session: Session;
   agents: Agent[];
@@ -158,14 +191,31 @@ export function Composer({
    * exist.
    */
   commands?: SessionCommand[];
-  /** Invoke a command instead of sending the text as a message. */
+  /**
+   * Typed session config, from the live agent.
+   *
+   * This drives the model and effort controls, replacing the agent descriptor's
+   * static `flags`: those are spawn-time choices, and `claude` declares an empty
+   * `model.choices` there because its catalogue is only knowable from a live
+   * session. Reading the descriptor left the model control permanently empty.
+   */
+  config?: ConfigOption[];
+  /** Invoke a prompt command instead of sending the text as a message. */
   onRunCommand?: (name: string, rest: string) => void;
+  /** Set one config option. A control command resolves to this, never to a turn. */
+  onSetConfig?: (configId: string, value: string | boolean) => void;
   sending: boolean;
   sendError: unknown;
   onStop: () => void;
   stopping: boolean;
   hasCommands: boolean;
   onOpenCommands: () => void;
+  /** Whether the agent declared it can end a turn without ending the session. */
+  canInterrupt?: boolean;
+  onInterrupt?: () => void;
+  /** Whether the agent declared it accepts text mid-turn. */
+  canSteer?: boolean;
+  onSteer?: (text: string) => void;
 }) {
   const queryClient = useQueryClient();
   const router = useRouter();
@@ -177,6 +227,8 @@ export function Composer({
   // The query the highlight belongs to, so a narrowing query can reset it during
   // render rather than in an effect.
   const [slashIndexFor, setSlashIndexFor] = useState<string | undefined>(undefined);
+  // Which config option a control command opened, or `ALL_CONFIG` for all of them.
+  const [openConfigId, setOpenConfigId] = useState<string | null>(null);
 
   // The menu is open when the text *is* a command being typed: a leading slash,
   // no whitespace yet. Derived rather than a state flag, so there is no way to
@@ -200,26 +252,47 @@ export function Composer({
   }
 
   /**
-   * Send, routing a leading slash to the command API.
+   * Send, routing a leading slash by what kind of command it is.
    *
-   * Both Enter and the Send button call this, so there is no way for one to
-   * treat `/verify the auth change` as a command and the other as a message.
-   * An unknown command is deliberately *not* intercepted: it goes through as
-   * text, and the agent says it does not recognize it - which is what a
-   * terminal does, and is more honest than this UI guessing.
+   * Both Enter and the Send button call this, so there is no way for one to treat
+   * `/verify the auth change` as a command and the other as a message. The rule
+   * itself lives in `lib/slash.ts`, where it is unit-tested without a DOM.
    */
   function submit() {
-    const match = /^\/([^\s]+)\s*([\s\S]*)$/.exec(text.trim());
-    const known =
-      match && commands.some((command) => command.name === match[1]);
-    if (known && onRunCommand) {
-      onRunCommand(match[1], match[2].trim());
+    // Mid-turn, text is steering. Routing it as a command would try to start a
+    // second turn, which the backend refuses one-per-session — so the message would
+    // simply be lost with an error the user did not cause.
+    if (steering && onSteer) {
+      onSteer(text);
+      onTextChange("");
+      return;
+    }
+
+    const route = commandRoute(commands, text);
+
+    if (route.kind === "control") {
+      // Nothing is sent. The text is cleared and the picker opened, so the composer
+      // does not sit holding a command that has already done its job.
+      onTextChange("");
+      setOpenConfigId(route.configId ?? ALL_CONFIG);
+      return;
+    }
+
+    if (route.kind === "prompt" && onRunCommand) {
+      onRunCommand(route.name, route.rest);
       return;
     }
     onSend();
   }
 
   function pickCommand(command: SessionCommand) {
+    if (command.kind === "control") {
+      // Opened immediately rather than completed into the input: a control command
+      // takes no argument, so there is nothing for the user to finish typing.
+      onTextChange("");
+      setOpenConfigId(command.configId ?? ALL_CONFIG);
+      return;
+    }
     // Completed into the input rather than sent, because most commands take an
     // argument and sending on selection would deny the user the chance to type
     // one. A trailing space is what makes the next keystroke an argument.
@@ -237,7 +310,12 @@ export function Composer({
 
   const descriptor = agents.find((agent) => agent.name === session.agent);
   const flags = sessionFlags(session);
-  const disabled = isLive || sending;
+  // While a turn runs, text is steering rather than a new message — that is what the
+  // agent can actually accept mid-turn, and it is why the textarea is no longer
+  // disabled for an agent that supports it. Queuing a second turn instead would be
+  // refused by the backend, which allows one turn per session.
+  const steering = isLive && canSteer;
+  const disabled = (isLive && !steering) || sending;
   const canSend = text.trim().length > 0 && !disabled;
 
   // The agent is fixed once the conversation has content. Switching it would
@@ -350,11 +428,39 @@ export function Composer({
       ),
     [descriptor?.flags],
   );
-  const rowFlags = enumerated.filter(([key]) =>
-    (ROW_FLAGS as readonly string[]).includes(key),
+  // Split the agent's live config into what sits on the row and what goes in the
+  // `+` menu, by its own `category`. An option with no category falls to the menu:
+  // the row is a fixed shape, and promoting an unrecognized knob would let a new
+  // agent widen the composer.
+  const rowConfig = useMemo(
+    () =>
+      config.filter((option) =>
+        (ROW_CATEGORIES as readonly string[]).includes(option.category ?? ""),
+      ),
+    [config],
+  );
+  const menuConfig = useMemo(
+    () =>
+      config.filter(
+        (option) => !(ROW_CATEGORIES as readonly string[]).includes(option.category ?? ""),
+      ),
+    [config],
+  );
+
+  // A descriptor flag the live config already covers is dropped rather than shown
+  // twice. Two controls for one setting is worse than either alone: they disagree the
+  // moment one is used, and nothing on screen says which won.
+  const coveredByConfig = useMemo(
+    () => new Set(config.flatMap((option) => [option.id, option.category ?? option.id])),
+    [config],
+  );
+  const rowFlags = enumerated.filter(
+    ([key]) =>
+      (ROW_FLAGS as readonly string[]).includes(key) && !coveredByConfig.has(key),
   );
   const menuFlags = enumerated.filter(
-    ([key]) => !(ROW_FLAGS as readonly string[]).includes(key),
+    ([key]) =>
+      !(ROW_FLAGS as readonly string[]).includes(key) && !coveredByConfig.has(key),
   );
 
   /** Choices for one flag, as menu items. */
@@ -414,6 +520,17 @@ export function Composer({
             onSelect: onOpenCommands,
           },
         ]
+      : []),
+
+    // Whatever the agent reports beyond the row's two categories. Present because
+    // the agent declared it, so it is real configuration a user must be able to
+    // reach — `claude` reports permissions and fast mode here.
+    ...(menuConfig.length > 0
+      ? configMenuItems(
+          menuConfig,
+          (configId, value) => onSetConfig?.(configId, value),
+          t,
+        )
       : []),
 
     // Agent, which is session-scoped rather than per-turn and so sits below a
@@ -626,7 +743,11 @@ export function Composer({
               }
             }}
             placeholder={
-              isLive ? t("composer.placeholderBusy") : t("composer.placeholder")
+              steering
+                ? t("composer.placeholderSteer")
+                : isLive
+                  ? t("composer.placeholderBusy")
+                  : t("composer.placeholder")
             }
             disabled={disabled}
             aria-describedby={problem ? problemId : undefined}
@@ -690,6 +811,27 @@ export function Composer({
               artefact, and the chips are self-evidently swipeable on a touch screen.
             */}
             <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {/*
+                Live config first, and the descriptor's flags only for what it does
+                not cover. The two answer different questions — what can be chosen
+                before a session exists, against what this running session reports —
+                and the live answer is the true one. Reading only the descriptor is
+                why the model control was permanently empty: `claude` declares
+                `model.choices: []` there, because its catalogue depends on the
+                account and is not knowable until the CLI has loaded.
+              */}
+              {rowConfig.map((option) => (
+                <ConfigControl
+                  key={option.id}
+                  option={option}
+                  // Mid-turn the agent is already running with the old value, so a
+                  // change now would silently apply to the *next* turn while
+                  // appearing to affect this one.
+                  disabled={isLive}
+                  icon={flagIcon(option.category ?? option.id)}
+                  onSet={(value) => onSetConfig?.(option.id, value)}
+                />
+              ))}
               {rowFlags.map(([key, spec]) => (
                 <MenuButton
                   key={key}
@@ -699,9 +841,6 @@ export function Composer({
                   {(trigger) => (
                     <Button
                       variant="chip"
-                      // Mid-turn the runner is already running with the old value,
-                      // so a change now would silently apply to the *next* turn
-                      // while appearing to affect this one.
                       disabled={isLive || patchFlags.isPending}
                       icon={flagIcon(key)}
                       className="max-w-40 shrink-0"
@@ -716,6 +855,24 @@ export function Composer({
                 </MenuButton>
               ))}
             </div>
+
+            {/*
+              Interrupt sits beside Stop rather than replacing it, because they are
+              different intentions: interrupt ends the turn and leaves the agent
+              loaded, stop kills the process. Offering only one makes the other
+              unreachable. Shown only when the agent declared it — an interrupt
+              button on an agent that cannot interrupt is a lie.
+            */}
+            {isLive && canInterrupt && (
+              <Button
+                variant="secondary"
+                onClick={onInterrupt}
+                icon={<StopIcon size={14} />}
+                className="shrink-0"
+              >
+                {t("action.interrupt")}
+              </Button>
+            )}
 
             {isLive ? (
               <Button
@@ -802,6 +959,23 @@ export function Composer({
         </div>
       </div>
 
+      {/*
+        The picker a control command opens.
+        `/model` in a terminal opens a list; through a headless protocol the same
+        request as prompt text can only come back as prose, so the list lives here
+        and is built from the agent's own typed options.
+      */}
+      {openConfigId && (
+        <ConfigDialog
+          config={openConfigId === ALL_CONFIG ? config : configFor(config, openConfigId)}
+          onClose={() => setOpenConfigId(null)}
+          onSet={(configId, value) => {
+            onSetConfig?.(configId, value);
+            setOpenConfigId(null);
+          }}
+        />
+      )}
+
       {uploadTarget && (
         <DirectoryPicker
           title="Save attachments into the workspace"
@@ -814,6 +988,84 @@ export function Composer({
         />
       )}
     </div>
+  );
+}
+
+/** The one option a control command named, or nothing when it names none. */
+function configFor(config: ConfigOption[], configId: string): ConfigOption[] {
+  const option = config.find((candidate) => candidate.id === configId);
+  return option ? [option] : [];
+}
+
+/**
+ * A control command's choices, as a modal.
+ *
+ * A dialog rather than the inline menu the row uses, because this is opened from the
+ * *composer text* rather than from a button: there is no trigger element to anchor a
+ * popover to, and anchoring it to the textarea would put it over what the user typed.
+ *
+ * An option that reports no choices still gets a row saying so. A command the agent
+ * offered must not open an empty box — that reads as broken rather than as "this
+ * agent has nothing to configure here".
+ */
+function ConfigDialog({
+  config,
+  onSet,
+  onClose,
+}: {
+  config: ConfigOption[];
+  onSet: (configId: string, value: string | boolean) => void;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const items = useMemo(
+    () =>
+      config.length === 1
+        ? configItems(config[0], (value) => onSet(config[0].id, value), t)
+        : configMenuItems(config, onSet, t),
+    [config, onSet, t],
+  );
+
+  return (
+    <Overlay title={config.length === 1 ? (config[0].name ?? config[0].id) : t("composer.configureEllipsis")} onClose={onClose}>
+      {items.length === 0 ? (
+        <p className="px-4 py-3 text-xs text-ink-muted">
+          {t("composer.noConfigOptions")}
+        </p>
+      ) : (
+        <ul role="menu" className="max-h-96 overflow-y-auto overscroll-contain py-1">
+          {items.map((item, index) => (
+            <li key={`${item.label}-${index}`} role="none">
+              <button
+                type="button"
+                role={item.checked === undefined ? "menuitem" : "menuitemradio"}
+                aria-checked={item.checked}
+                disabled={item.disabled}
+                onClick={() => {
+                  if (item.disabled) return;
+                  item.onSelect();
+                }}
+                className={`flex w-full items-center gap-2 px-4 py-2 text-left text-xs ${
+                  item.disabled
+                    ? "cursor-default font-medium text-ink-faint"
+                    : "text-ink hover:bg-active"
+                }`}
+              >
+                {item.checked ? (
+                  <CheckIcon size={14} />
+                ) : (
+                  <span aria-hidden className="w-3.5" />
+                )}
+                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                {item.hint ? (
+                  <span className="shrink-0 text-3xs text-ink-faint">{item.hint}</span>
+                ) : null}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Overlay>
   );
 }
 

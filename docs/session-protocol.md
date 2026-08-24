@@ -1,8 +1,44 @@
-# Agent Session Protocol (`sylph.agent.v2`)
+# Agent Session Protocol (`sylph.agent.v3`)
 
-The contract between the Sylph server and a pluggable agent. It replaces the
-one-shot turn contract in the Sylph skill's `references/runner-protocol.md`,
-which remains supported as a degraded path (see **Compatibility**).
+The contract between the Sylph server and a pluggable agent.
+
+## What v3 changed, and why it needed a version
+
+v2 held for one agent and broke on the second. Two of its choices were wrong in a
+way no amount of adapter code could hide.
+
+**A capability surface was one value, replaced wholesale.** `claude` emits its
+`system/init` message *once per turn*, not once per process — measured, two user
+messages produce two `init`s. The adapter turned each into a `capabilities` event
+carrying only the permission mode, and the server assigned it over the cached
+surface. So the first turn of every session erased the project's 46 slash
+commands, and the composer's menu stopped opening. Merging partials would have
+patched the symptom; the defect was that a message speaking about one part of the
+surface could silently erase another. v3 makes a capability update **facet-scoped**
+(§ Capability facets), so an unmentioned facet cannot be cleared.
+
+**Every slash command was modelled as a kind of turn.** That is right for
+`/verify` and wrong for `/model`. Sent as prompt text, `/model` returns a
+paragraph listing the models — which is the CLI behaving correctly, because a
+headless client has no picker to open. The fix is not in the translation. It is
+that a control command needs typed state a client can render as a picker, so
+choosing an option sends a typed set rather than prose.
+
+Three protocols reached the same split independently, which is what makes it a
+generalization rather than a guess:
+
+| | commands | model and mode |
+| --- | --- | --- |
+| **ACP** (`gemini --acp`, `opencode acp`) | `AvailableCommand {name, description, input?}` | `SessionModelState`, `SessionModeState`, `SessionConfigOption` |
+| **codex app-server** | no command concept at all | `model/list`, `config/value/write`, `thread/settings/updated` |
+| **pi** (`--mode rpc`) | `get_commands`, which *excludes* built-in TUI commands by design | `set_model`, `set_thinking_level`, `get_available_models` |
+
+`claude` is the outlier: `/model`, `/context`, `/compact` and `/clear` sit in the
+same list as `/verify` with no field telling them apart. Since no vendor supplies
+that discriminator, **the adapter classifies** — it owns vendor translation, and
+which of an agent's commands are control surfaces is a vendor fact. A hardcoded
+list in the server or the UI would be wrong for the next agent, which is the
+mistake v3 exists to stop repeating.
 
 ## Why the old contract cannot be extended
 
@@ -43,7 +79,7 @@ anything the agent learned about *being in a conversation* — pending approvals
 loaded skills, permission decisions, subagent state — is discarded between
 turns and rebuilt from a resume id.
 
-v2 keeps a live process for the session and runs turns inside it. The process is
+v3 keeps a live process for the session and runs turns inside it. The process is
 called a **link**, and a session is `attached` (a link is live) or `detached`.
 
 A link is **not** required for a session to work. Links are expensive and do not
@@ -67,7 +103,7 @@ The server never speaks a vendor protocol. An **adapter** does, one per agent,
 living where v1's runner lived:
 
 ```
-server ──sylph.agent.v2 over stdio──► adapter ──vendor protocol──► agent CLI
+server ──sylph.agent.v3 over stdio──► adapter ──vendor protocol──► agent CLI
          (normalized, this document)             (stream-json, JSON-RPC, rpc)
 ```
 
@@ -114,8 +150,8 @@ a peer that does not know one behaves as though the sender had not sent it.
 The server opens the link, then negotiates before anything can go wrong:
 
 ```json
-{"t":"hello","id":"h1","protocol":"sylph.agent.v2","server":"sylph-web/0.2.0",
- "accepts":["approval","dialog","subagent","plan","diff","context"]}
+{"t":"hello","id":"h1","protocol":"sylph.agent.v3","server":"sylph-web/0.2.0",
+ "accepts":["approval","dialog","elicitation","choice"]}
 ```
 
 `accepts` is what the *server* can handle. An adapter must not send a request
@@ -128,7 +164,7 @@ The adapter replies with what it and its CLI can actually do:
 
 ```json
 {"t":"ok","id":"h1","adapter":"claude/2.0.0","agent":{"name":"claude","version":"2.1.238"},
- "supports":["interrupt","steer","approval","subagent","slash","set_model","context","fork"],
+ "supports":["interrupt","steer","approval","subagent","slash","set_config","context","fork"],
  "flags":{"model":{"choices":["opus-5","sonnet-5"],"description":"..."},
           "effort":{"choices":["low","medium","high","xhigh","max"]}}}
 ```
@@ -138,8 +174,17 @@ directly, which is why nothing in the frontend hardcodes an agent's abilities �
 a composer that offers interrupt to an adapter that cannot interrupt is a lie the
 handshake prevents.
 
-`flags` carries v1's `--describe` schema unchanged, so an adapter has one place
-to declare its options rather than two.
+`flags` carries the coarse, spawn-time option schema: what can be chosen *before*
+a session exists, which is all the create-a-session screen can know. Anything
+adjustable on a live session belongs in `config` instead (§ Session config), and
+an adapter that can adjust a knob at runtime should declare it in both — `flags`
+so it can be chosen at creation, `config` so it can be changed afterwards.
+
+An adapter that declares `approval` in `supports` must be able to raise one. `pi`
+is the worked example of the other case: it has no sandbox and no tool-permission
+callback, so its adapter declares no `approval`, and the UI must not offer an
+approval affordance for a `pi` session. That is what makes `supports` load-bearing
+rather than decorative.
 
 ## Opening a session
 
@@ -160,29 +205,120 @@ the CLI has loaded the project:
 ```json
 {"t":"ok","id":"o1","sessionId":"abc-123",
  "commands":[{"name":"verify","description":"Verify that a change does what it should",
-              "argHint":"[target]","source":"skill"}],
+              "argHint":"[target]","source":"skill","kind":"prompt"},
+             {"name":"model","description":"Set the AI model","aliases":[],
+              "source":"builtin","kind":"control","configId":"model"}],
  "subagents":[{"name":"Explore","description":"..."}],
- "models":[{"id":"opus-5","label":"Opus 5"}],
+ "config":[{"id":"model","name":"Model","category":"model","type":"select",
+            "currentValue":"opus[1m]",
+            "options":[{"value":"opus[1m]","name":"Opus (1M context)"},
+                       {"value":"sonnet","name":"Sonnet 5"}]}],
  "permissionMode":"ask","contextWindow":1000000}
 ```
 
-`commands` is the point of the redesign in one field. On a real project this
-returns dozens of entries — skills, project commands, plugins — where v1's
-`--describe` returned one or two hand-written ones. The server does not curate
-it; it is the agent's own answer to "what can I be asked to do".
+`commands` is the agent's own answer to "what can I be asked to do". On a real
+project it returns dozens of entries — skills, project commands, plugins — and the
+server does not curate it.
 
-Because commands change while a session runs (a skill is edited, a plugin
-loads), the adapter re-sends the list as a `capabilities` event rather than the
-server polling.
+## Two kinds of command
+
+```
+A prompt command is what the agent thinks about.   →  a turn
+A control command is what the session *is*.        →  typed state
+```
+
+`kind` is `prompt` or `control`, and **absent means `prompt`** — so an adapter that
+says nothing behaves exactly as it did in v2.
+
+A `prompt` command is delivered as a turn (§ Slash commands are turns). Its output
+is durable history, it can be interrupted and steered, and it can raise approvals.
+
+A `control` command is **never** a turn. It names a `configId`, and a client
+renders the matching config option as a picker; choosing an option sends
+`set_config`. This is the difference between `/model` opening a list of models and
+`/model` returning a paragraph about them.
+
+`aliases` is carried because agents ship them and a terminal honours them: `claude`
+gives `/usage` the aliases `cost` and `stats`, and `/clear` the aliases `reset` and
+`new`. A menu that ignores them is a menu that behaves unlike the terminal it is
+modelled on.
+
+Which commands are control commands is the **adapter's** judgement. No vendor
+supplies the discriminator, and the answer differs per agent: `pi` already excludes
+its built-in TUI commands from `get_commands`, so almost everything it reports is a
+prompt; `claude` reports its builtins inline, so its adapter must classify them.
+Putting that list in the server or the UI would encode one vendor's taxonomy as
+though it were universal.
+
+## Session config
+
+Everything adjustable on a live session, in one shape:
+
+```json
+{"id":"effort","name":"Reasoning effort","category":"effort","type":"select",
+ "currentValue":"medium",
+ "options":[{"value":"low","name":"Low"},{"value":"max","name":"Max"}]}
+
+{"id":"autoCompaction","name":"Auto-compaction","category":"compaction",
+ "type":"boolean","currentValue":true}
+```
+
+`type` is `select` or `boolean`. `category` is advisory grouping — `model`,
+`effort`, `permission_mode`, or anything an agent invents — and a client groups by
+it without needing to know the vocabulary. The shape is ACP's
+`SessionConfigOption`, adopted rather than invented because it already covers
+`claude`'s model / effort / permission mode / output style, `pi`'s model / thinking
+level / queue modes, `codex`'s approval policy, and `gemini`'s approval mode.
+
+```json
+{"t":"set_config","id":"c9","configId":"model","value":"sonnet"}
+```
+
+The `ok` reply carries the **refreshed** `config` array, not an acknowledgement,
+because setting one option can change another's choices. This is not defensive:
+`pi`'s thinking levels depend on the selected model — the current one offers only
+`off` and `high` — and `claude` carries `supportedEffortLevels` per model. A design
+where effort is one session-global enumeration is wrong for both, which is what
+v2's flat `flags.choices` was.
+
+`select` and `boolean` are enough for every knob the four surveyed agents expose. A
+numeric or free-text type is a later addition, not a placeholder now.
+
+## Capability facets
+
+A capability update names the facets it speaks about. **A facet that is not
+mentioned is not changed.**
+
+```json
+{"t":"event","kind":"capabilities","facets":{"commands":[…]}}
+{"t":"event","kind":"capabilities","facets":{"config":[…],"permissionMode":"plan"}}
+```
+
+Facets: `commands`, `subagents`, `config`, `permissionMode`, `contextWindow`.
+
+This is the one shape v2 got wrong badly enough to need a version. There, a
+capability event carried the whole surface and the server assigned it, so an
+adapter reporting a permission-mode change also declared that the session had no
+commands. Nothing in the wire format said that was happening, and the symptom
+appeared two layers away as a menu that would not open.
+
+Merging partials would have fixed the same bug at the same cost, and would have
+left the hazard: a message about one part of the surface would still be *able* to
+speak for the whole of it, and the next adapter would rediscover that. Naming the
+facet makes silence mean silence.
+
+Capability changes are pushed, not polled — a skill edited on disk or a plugin
+loading changes what the composer should offer, and a list a client refreshes on
+its own schedule is wrong for however long that schedule is.
 
 ## Commands the server sends
 
 | `t` | Meaning |
 | --- | --- |
-| `send` | A user turn: `text`, optional `attachments[]`, optional `command`+`args` |
+| `send` | A user turn: `text`, optional `attachments[]`, optional `command`+`args`, optional `config` overrides |
 | `interrupt` | Stop the current turn, keep the session |
-| `steer` | Inject text mid-turn without ending it |
-| `set` | Change `model`, `effort`, `permissionMode`, or `cwd` |
+| `steer` | Inject text mid-turn without ending it; carries `expectedTurnId` |
+| `set_config` | Set one config option by id; `ok` carries the refreshed `config` |
 | `resolve` | Answer an adapter request, echoing its `id` |
 | `query` | Ask for `context`, `cost`, `diff`, or `plan` |
 | `close` | End the session cleanly; adapter flushes and exits |
@@ -190,6 +326,19 @@ server polling.
 `send` returns `ok` as soon as the turn is accepted, not when it finishes. Turn
 completion is an event, because a turn outlives any request that started it —
 the same reason `POST /turns` returns `202`.
+
+**Per-turn config travels with the turn.** `send` carries the overrides that turn
+needs rather than the server issuing `set_config` calls before it. Those were three
+round trips with a window in between where a turn could run under a mix of old and
+new settings, and a failure partway left no single answer to "what did this turn
+run as". codex models the same thing the same way, documenting a turn-scoped
+override as applying "for this turn and subsequent turns".
+
+**`steer` names the turn it means.** Without that precondition a steer racing a
+turn boundary is delivered into the *next* turn — the message arrives, nothing
+errors, and it lands in the wrong conversation. codex requires the same field and
+fails the request "when it does not match the currently active turn". A mismatch is
+an `err`, not a silent redirect.
 
 ## Requests the adapter sends
 
@@ -200,9 +349,10 @@ The inversion that v1 could not express: the agent asks, and a human answers.
  "tool":"Bash","title":"Run a shell command",
  "detail":{"command":"rm -rf build","description":"Clean the build directory"},
  "options":[{"id":"allow","label":"Allow once"},
-            {"id":"allow_always","label":"Allow Bash for this session"},
+            {"id":"allow_always","label":"Allow Bash for this session","persistent":true},
             {"id":"deny","label":"Deny"}],
- "default":"deny","risk":"destructive"}
+ "default":"deny","risk":"destructive",
+ "allowPersistent":true,"expiresAtMs":null}
 ```
 
 The server journals it, publishes it to every attached client, and blocks
@@ -220,6 +370,19 @@ Request kinds: `approval`, `dialog` (free-form question, e.g. Claude's
 `request_user_dialog`), `elicitation` (MCP-originated structured input),
 `choice`. Each is gated by `accepts` in the handshake.
 
+`allowPersistent` is `false` when a lasting grant must not be offered, and a client
+must then omit the "always allow" affordance entirely rather than merely
+discouraging it. This is not a style preference: `claude` sets it on asks where
+accepting always would write a permission rule *broader than the ask itself*, so
+offering it converts a narrow yes into a wide one the user did not read. Absent
+means it is allowed, which keeps a minimal adapter correct.
+
+`expiresAtMs` is advisory, and present when the agent will stop waiting. `pi`
+auto-resolves a dialog when its own timeout lapses, so a client with no deadline to
+show is racing a clock it cannot see — and the user experiences a dialog that
+answers itself. The server never auto-applies a default when it lapses; that would
+remove the user from the decision this channel exists to give them.
+
 **A pending request is durable state, not UI state.** It is journaled, survives a
 client disconnect, and is re-delivered on reconnect — otherwise closing a laptop
 lid strands an agent forever. If the link dies with requests outstanding, they
@@ -228,9 +391,8 @@ instead of showing an unexplained gap.
 
 ## Events the adapter sends
 
-v1's event kinds survive unchanged — `thinking`, `assistant`, `tool_call`,
-`tool_result`, `usage`, `status` with phases `started` / `delta` / `completed`,
-where only `completed` is durable. v2 adds:
+The event kinds are `thinking`, `assistant`, `tool_call`, `tool_result`, `usage`,
+`status`, with phases `started` / `delta` / `completed`. Beyond those:
 
 | `kind` | Carries |
 | --- | --- |
@@ -239,7 +401,7 @@ where only `completed` is durable. v2 adds:
 | `diff` | A structured patch, so a file change renders as a diff not a tool log |
 | `compact` | A compaction boundary, so the timeline shows where context was condensed |
 | `turn` | `started` / `completed` with usage, cost, duration, stop reason |
-| `capabilities` | Replaces the previous `commands`/`models`/`subagents` |
+| `capabilities` | `facets`, applied per facet (§ Capability facets) |
 | `notice` | Agent-originated notification worth surfacing |
 
 `subagent` is the one that changes what the UI can be. A subagent's trajectory
@@ -247,9 +409,9 @@ arrives tagged with its parent tool call, so the timeline can nest it — which 
 what the terminal does, and what TraceDB already records as lineage. v1 saw only
 an opaque `Task` tool call with a wall of text.
 
-## Slash commands are text, not a side channel
+## Slash commands are turns
 
-A command is delivered as `send` with `command` set:
+A **prompt** command is delivered as `send` with `command` set:
 
 ```json
 {"t":"send","id":"c9","command":"verify","args":{"target":"the auth change"},"text":""}
@@ -267,6 +429,12 @@ Two consequences worth stating, because both were wrong in v1:
 * A command's output is durable history, not a toast.
 * A command can be interrupted, steered, and can raise approvals, because it is
   a turn like any other.
+
+A **control** command is not sent at all. It resolves to a config option, the
+client renders a picker, and the chosen value goes back as `set_config`. v2
+applied the paragraph above to every command uniformly, and that is precisely what
+made `/model` answer with prose: the CLI was asked a question in a channel that has
+no picker, and it did the only sensible thing.
 
 ## v1 is not supported
 

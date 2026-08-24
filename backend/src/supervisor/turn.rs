@@ -207,20 +207,19 @@ impl LinkedSupervisor {
             info!("Turn {} invokes /{}", turn_id, name);
         }
 
-        // Flags are applied to the live session rather than passed with the turn:
-        // a link outlives one turn, so a per-turn flag would silently persist
-        // into the next. Applying it explicitly makes the change visible in the
-        // capability stream.
-        for (key, value) in &flags {
-            if let Err(error) = link.set(key, serde_json::Value::String(value.clone())).await {
-                // Not fatal: an agent may refuse a flag it no longer supports,
-                // and losing the turn over that is worse than running it with
-                // the previous value.
-                warn!("Agent refused to set {}={}: {:#}", key, value, error);
-            }
-        }
+        // Config travels with the turn rather than as calls before it.
+        //
+        // The previous shape was one `set` per flag and then `send` — extra round
+        // trips with a window in between where a turn could begin under a mix of
+        // old and new settings, and a failure partway left no single answer to
+        // "what did this turn run as". Sending them together makes the turn and its
+        // settings one atom, which is also how codex models a turn-scoped override.
+        let config: HashMap<String, serde_json::Value> = flags
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .collect();
 
-        link.send(prompt, attachments, command, command_args)
+        link.send(prompt, attachments, command, command_args, config)
             .await
             .map_err(|error| {
                 anyhow::anyhow!("The agent would not accept this turn: {:#}", error)

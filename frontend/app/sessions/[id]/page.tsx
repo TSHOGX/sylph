@@ -501,11 +501,25 @@ export default function SessionPage() {
         // session reports none, which is why the menu simply does not open
         // rather than offering a command that may no longer exist.
         commands={agent.link?.capabilities?.commands ?? []}
+        // Typed config from the live agent, which is what a control command like
+        // `/model` resolves against instead of being sent as prompt text.
+        config={agent.link?.capabilities?.config ?? []}
         onRunCommand={(name, rest) =>
           runCommand.mutate({ command: name, args: rest ? { args: rest } : {} })
         }
+        onSetConfig={(configId, value) => agent.setConfig(configId, value)}
         hasCommands={hasCommands}
         onOpenCommands={() => setCommandOpen(true)}
+        // Gated on what the agent declared rather than offered unconditionally: an
+        // interrupt button on an agent with no interrupt is a promise the handshake
+        // already told us we cannot keep. `pi` supports both; a minimal adapter
+        // may support neither.
+        canInterrupt={agent.can("interrupt")}
+        onInterrupt={() => agent.interrupt()}
+        canSteer={agent.can("steer")}
+        // The running turn is named as a precondition, so a steer that races the
+        // turn boundary is refused rather than delivered into the next conversation.
+        onSteer={(value) => agent.steer(value, liveTurnId ?? undefined)}
       />
 
       {commandOpen && (

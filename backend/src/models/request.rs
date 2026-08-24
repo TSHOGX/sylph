@@ -33,6 +33,16 @@ pub struct PendingRequest {
     pub default_option: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk: Option<String>,
+    /// Whether a lasting grant may be offered for this ask.
+    ///
+    /// `false` means the client must omit "always allow" entirely: the agent has
+    /// said that granting always would write a rule broader than what is being
+    /// asked here. Persisted rather than held on the link, because the dialog may
+    /// be rendered by a client that attached long after the request was raised.
+    pub allow_persistent: bool,
+    /// When the agent stops waiting, if it will. Advisory; nothing here acts on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<i64>,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chosen_option: Option<String>,

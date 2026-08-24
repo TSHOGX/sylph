@@ -28,6 +28,7 @@ use crate::db::LiveStore;
 use crate::env::Environment;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::models::PendingRequest;
+use crate::runners::Registry;
 
 /// How long a link may sit unused before it is torn down.
 ///
@@ -77,7 +78,14 @@ pub struct LinkManager {
     store: LiveStore,
     hub: EventHub,
     environment: Arc<dyn Environment>,
-    agents_dir: PathBuf,
+    /// Where an adapter actually is, according to the thing that found it.
+    ///
+    /// Deliberately the registry rather than a directory to join a name onto.
+    /// Discovery searches several roots, so re-deriving the path here meant an
+    /// agent found in one root was listed as usable while every link to it failed
+    /// with "No adapter for agent 'claude' at <the other root>". One component
+    /// knows where adapters are, and this is not it.
+    registry: Arc<Mutex<Registry>>,
     soul_path: Option<PathBuf>,
     seq: SeqAllocator,
     /// Turns waiting to be told how they ended.
@@ -101,7 +109,7 @@ impl LinkManager {
         store: LiveStore,
         hub: EventHub,
         environment: Arc<dyn Environment>,
-        agents_dir: PathBuf,
+        registry: Arc<Mutex<Registry>>,
         soul_path: Option<PathBuf>,
         seq: SeqAllocator,
     ) -> Self {
@@ -109,7 +117,7 @@ impl LinkManager {
             store,
             hub,
             environment,
-            agents_dir,
+            registry,
             soul_path,
             seq,
             waiters: Arc::new(RwLock::new(None)),
@@ -251,14 +259,21 @@ impl LinkManager {
             .await?
             .ok_or_else(|| anyhow!("Unknown session {}", session_id))?;
 
-        let adapter_path = self.agents_dir.join(&session.agent).join("adapter.sh");
-        if !adapter_path.exists() {
-            return Err(anyhow!(
-                "No adapter for agent '{}' at {:?}",
-                session.agent,
-                adapter_path
-            ));
-        }
+        // Asked of the registry, which is what discovered it. An agent that is not
+        // there is genuinely unavailable, rather than merely absent from one of the
+        // roots discovery happens to search.
+        let adapter_path = {
+            let registry = self.registry.lock().await;
+            registry
+                .adapter_path(&session.agent)
+                .map(|path| path.to_path_buf())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "No adapter registered for agent '{}'; it was not discovered",
+                        session.agent
+                    )
+                })?
+        };
 
         // Identity is the server's decision, and the empty string is how the
         // protocol spells "inject nothing". A preserved session must send it
@@ -507,6 +522,8 @@ impl LinkManager {
             options_json: serde_json::to_string(&request.options).unwrap_or_else(|_| "[]".into()),
             default_option: request.default.clone(),
             risk: request.risk.clone(),
+            allow_persistent: request.allow_persistent,
+            expires_at_ms: request.expires_at_ms,
             status: "pending".to_string(),
             chosen_option: None,
             resolved_input_json: None,
@@ -582,6 +599,24 @@ impl LinkManager {
             session_id,
             "link",
             serde_json::json!({"reason": reason, "attached": false}),
+        )
+        .await;
+    }
+
+    /// Re-publish the current capability surface to attached clients.
+    ///
+    /// Used after a config change made through the API: the client that made it
+    /// learns the outcome from its own response, but every other attached client
+    /// would otherwise keep showing the previous value.
+    pub async fn announce_capabilities(&self, session_id: &str) {
+        let Some(link) = self.get(session_id).await else {
+            return;
+        };
+        let surface = link.capabilities().await;
+        self.publish_session_event(
+            session_id,
+            "capabilities",
+            serde_json::to_value(&surface).unwrap_or_default(),
         )
         .await;
     }

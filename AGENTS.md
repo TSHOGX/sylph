@@ -193,6 +193,35 @@ directory is gitignored and the backend recreates `live.db` on start. Do that
 before trusting a timing result or diagnosing an intermittent E2E failure.
 Raising the timeout does not help, because the cost grows without bound.
 
+**An E2E fixture that cannot be discovered fails the suite while looking like a
+product bug.** Discovery requires `adapter.sh`; after the v1 runner path was deleted,
+`frontend/e2e/fixtures/runners/e2e/` still held only `runner.sh`, so the backend
+reported `Agent discovery: 0 usable, 0 broken` and every spec that created a session
+or ran a turn failed against an agent that did not exist. The failures read as broken
+features, not as a missing fixture. When a protocol version changes, the fixture is
+part of the protocol surface — check `Agent discovery: N usable` in the backend log
+before believing an E2E failure is about the UI.
+
+**A partial capability update must never be able to speak for the whole surface.**
+`claude` emits `system/init` once per *turn*, not once per process. An adapter that
+answered it with a whole-surface `capabilities` payload carrying only the permission
+mode erased the project's 46 slash commands on the first exchange of every session,
+and the symptom surfaced two layers away as a composer menu that would not open.
+Capability updates are facet-scoped for exactly this reason (`docs/session-protocol.md`
+§ Capability facets): an unmentioned facet cannot be cleared. Merging partials would
+have fixed the instance and left the hazard.
+
+**Reading the wrong key off a vendor payload fails silently.** `capabilities_from`
+read `entry.get("id")` from `claude`'s model catalogue, which answers
+`{"value","displayName",…}`. The result was an empty model list on every session ever
+opened, presenting as a UI bug in the composer's model control. When adapting a vendor
+shape, print one real payload rather than inferring field names — two of three guesses
+about this CLI's shapes were wrong, and each one compiled.
+
+**serde's `rename_all` does not rename fields inside enum variants.** An internally
+tagged enum needs `rename_all_fields` as well, or camelCase wire fields inside a
+variant parse as `None` while the code compiles and every non-variant field works.
+
 **A clean `git merge` can still lose code.** Both sides adding methods to the same
 object literal merges without a conflict marker and silently keeps only one set —
 this happened to `api.files` during the Phase 7 merge, dropping two client methods.

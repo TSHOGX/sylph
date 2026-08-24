@@ -1,7 +1,7 @@
 //! Discovering the agents this server can run.
 //!
 //! An agent is a directory containing an executable `adapter.sh` that speaks
-//! `sylph.agent.v2`. Discovery learns what an agent *is* by handshaking with it,
+//! `sylph.agent.v3`. Discovery learns what an agent *is* by handshaking with it,
 //! because that is the only source: an adapter's capabilities and flags come from
 //! the CLI behind it, not from a descriptor a human maintains beside it.
 //!

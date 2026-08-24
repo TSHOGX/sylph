@@ -268,7 +268,7 @@ async fn a_turn_can_raise_an_approval_be_answered_and_then_continue() {
     );
 
     let (link, mut events) = establish(adapter, |_| {}).await;
-    link.send("clean the build".into(), vec![], None, HashMap::new())
+    link.send("clean the build".into(), vec![], None, HashMap::new(), HashMap::new())
         .await
         .unwrap();
 
@@ -315,7 +315,7 @@ async fn a_capability_change_updates_the_cached_surface_and_is_published() {
     let (link, mut events) = establish(adapter, |_| {}).await;
     assert_eq!(link.capabilities().await.commands.len(), 2);
 
-    link.send("go".into(), vec![], None, HashMap::new()).await.unwrap();
+    link.send("go".into(), vec![], None, HashMap::new(), HashMap::new()).await.unwrap();
 
     let LinkEvent::Capabilities(surface) = next_event(&mut events).await else {
         panic!("a capability change must surface as its own variant");
@@ -366,7 +366,7 @@ async fn an_adapter_that_exits_mid_turn_reports_a_close_with_its_stderr_tail() {
     );
 
     let (link, mut events) = establish(adapter, |_| {}).await;
-    link.send("go".into(), vec![], None, HashMap::new()).await.unwrap();
+    link.send("go".into(), vec![], None, HashMap::new(), HashMap::new()).await.unwrap();
 
     let LinkEvent::Closed { exit_code, stderr_tail } = next_event(&mut events).await else {
         panic!("the link must report its own death");
@@ -398,7 +398,7 @@ async fn a_command_outstanding_when_the_adapter_dies_fails_rather_than_hanging()
     let (link, _events) = establish(adapter, |_| {}).await;
 
     let error = link
-        .send("go".into(), vec![], None, HashMap::new())
+        .send("go".into(), vec![], None, HashMap::new(), HashMap::new())
         .await
         .expect_err("a dead adapter cannot accept a turn");
     let message = format!("{error:#}");

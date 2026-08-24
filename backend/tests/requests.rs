@@ -31,6 +31,8 @@ async fn raise_request(server: &TestBackend, session_id: &str, tool: &str) -> Pe
         .to_string(),
         default_option: Some("deny".to_string()),
         risk: Some("destructive".to_string()),
+        allow_persistent: true,
+        expires_at_ms: None,
         status: "pending".to_string(),
         chosen_option: None,
         resolved_input_json: None,
@@ -322,4 +324,154 @@ async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
     // Capability is a property of a live link. Reporting a remembered list would
     // promise interrupt on a session with no process to interrupt.
     assert!(body["capabilities"].is_null());
+}
+
+/// Typed session config: what a control command resolves against.
+///
+/// `/model` sent as prompt text comes back as a paragraph, because a headless CLI
+/// has no picker to open. So the option is state a client can render, and choosing
+/// one is a typed set rather than prose.
+#[tokio::test]
+async fn setting_a_config_option_answers_with_the_refreshed_surface() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    let response = server
+        .post_authed(
+            &format!("/api/v1/sessions/{}/config", session_id),
+            json!({"configId": "model", "value": "slow"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await;
+    let config = body["capabilities"]["config"].as_array().unwrap();
+    let model = config.iter().find(|o| o["id"] == "model").unwrap();
+    // The response is the new surface, not an acknowledgement: setting one option can
+    // change another's choices, so a client that trusted its own optimistic value
+    // would drift from the agent exactly when it matters.
+    assert_eq!(model["currentValue"], "slow");
+    // And the rest of the surface is intact, which is the property the whole facet
+    // design exists to guarantee.
+    assert_eq!(body["capabilities"]["commands"].as_array().unwrap().len(), 2);
+}
+
+/// An option the agent never offered is refused before it reaches the adapter.
+///
+/// The same reasoning as a request option: an unrecognized id reaches the vendor CLI
+/// as an unknown setting, and what that does there is undefined.
+#[tokio::test]
+async fn a_config_option_the_agent_never_offered_is_refused() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    let response = server
+        .post_authed(
+            &format!("/api/v1/sessions/{}/config", session_id),
+            json!({"configId": "nonesuch", "value": "x"}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "INVALID_REQUEST");
+}
+
+/// A control command is answered from typed state and must never create a turn.
+///
+/// Asserted through the turn list rather than the response, because "did not run a
+/// turn" is the actual promise: a control command that quietly started one would put
+/// a paragraph about models into the transcript.
+#[tokio::test]
+async fn setting_config_does_not_create_a_turn() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    server
+        .post_authed(
+            &format!("/api/v1/sessions/{}/config", session_id),
+            json!({"configId": "model", "value": "slow"}),
+        )
+        .await;
+
+    let body = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}/turns", session_id))
+            .await,
+    )
+    .await;
+    assert_eq!(body["turns"].as_array().unwrap().len(), 0);
+}
+
+/// A steer that names a turn which is no longer running is refused.
+///
+/// Without the precondition the text is delivered into whatever turn is running now:
+/// the request succeeds, nothing errors, and the message lands in the wrong
+/// conversation — a failure far harder to notice than a 409.
+#[tokio::test]
+async fn a_steer_naming_a_finished_turn_is_a_conflict() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    let response = server
+        .post_authed(
+            &format!("/api/v1/sessions/{}/steer", session_id),
+            json!({"text": "actually, stop", "turnId": "a-turn-that-never-ran"}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "TURN_MOVED");
+}
+
+/// The regression this protocol version exists for, end to end.
+///
+/// `claude` emits its `system/init` once per *turn*, and the adapter turns that into
+/// a capability update carrying only the permission mode. In v2 the server assigned
+/// the whole surface from it, so the first turn of every session erased the project's
+/// 46 slash commands and the composer's menu stopped opening — a symptom two layers
+/// away from its cause.
+///
+/// Driven through a real link and a real turn rather than by calling `apply_to`
+/// directly: the unit test pins the merge, and this pins that the path a turn
+/// actually takes goes through it.
+#[tokio::test]
+async fn a_turn_does_not_erase_the_session_command_list() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    let before = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}/capabilities", session_id))
+            .await,
+    )
+    .await;
+    let commands_before = before["capabilities"]["commands"].as_array().unwrap().len();
+    assert!(commands_before > 0, "the fixture must report commands to begin with");
+
+    let turn = json_body(
+        server
+            .post_authed(
+                &format!("/api/v1/sessions/{}/turns", session_id),
+                json!({"text": "hello"}),
+            )
+            .await,
+    )
+    .await;
+    server.await_turn(turn["turn"]["id"].as_str().unwrap()).await;
+
+    let after = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}/capabilities", session_id))
+            .await,
+    )
+    .await;
+    assert_eq!(
+        after["capabilities"]["commands"].as_array().unwrap().len(),
+        commands_before,
+        "a turn must not change what the agent can be asked to do"
+    );
+    assert!(!after["capabilities"]["config"].as_array().unwrap().is_empty());
+    assert!(!after["capabilities"]["subagents"].as_array().unwrap().is_empty());
 }

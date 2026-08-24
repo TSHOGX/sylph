@@ -1,4 +1,4 @@
-//! The `sylph.agent.v2` wire format.
+//! The `sylph.agent.v3` wire format.
 //!
 //! NDJSON in both directions on a held-open duplex stream. See
 //! `docs/session-protocol.md`; this module is that document as types.
@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// The protocol version string exchanged in the handshake.
-pub const PROTOCOL: &str = "sylph.agent.v2";
+pub const PROTOCOL: &str = "sylph.agent.v3";
 
 /// What this server can be asked to do by an adapter.
 ///
@@ -41,8 +41,8 @@ pub enum Capability {
     Subagent,
     /// Reports a live slash-command list.
     Slash,
-    /// Accepts a model change on a live session.
-    SetModel,
+    /// Accepts a typed config change on a live session.
+    SetConfig,
     /// Answers context-usage queries.
     Context,
     /// Can fork a session.
@@ -59,11 +59,31 @@ pub struct FlagSpec {
     pub description: String,
 }
 
+/// Whether a command is something the agent thinks about, or something the
+/// session *is*.
+///
+/// The distinction v2 lacked, and the reason `/model` answered with a paragraph:
+/// sent as prompt text to a headless CLI, a request to pick a model can only come
+/// back as prose, because there is no picker to open. A `Control` command instead
+/// names a [`ConfigOption`] the client renders directly.
+///
+/// Defaults to [`CommandKind::Prompt`], so an adapter that says nothing behaves
+/// exactly as it did before this field existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandKind {
+    /// Delivered as a turn. Its output is durable history.
+    #[default]
+    Prompt,
+    /// Never a turn. Resolves against typed session config.
+    Control,
+}
+
 /// A slash command the agent itself reports.
 ///
-/// The point of the redesign in one struct: on a real project the handshake
-/// returns dozens of these — skills, project commands, plugins — where v1's
-/// `--describe` returned the one or two an adapter author hand-wrote.
+/// On a real project the handshake returns dozens of these — skills, project
+/// commands, plugins — where v1's `--describe` returned the one or two an adapter
+/// author hand-wrote.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandSpec {
@@ -77,15 +97,83 @@ pub struct CommandSpec {
     /// used only for grouping in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Prompt or control. Absent means prompt.
+    #[serde(default)]
+    pub kind: CommandKind,
+    /// For a control command, the [`ConfigOption`] it drives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_id: Option<String>,
+    /// Other names the agent answers to for this command.
+    ///
+    /// Carried because agents ship them and a terminal honours them — `claude`
+    /// gives `/usage` the aliases `cost` and `stats`. A menu that ignores them
+    /// behaves unlike the terminal it is modelled on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
-/// A model the agent offers.
+/// One choice within a [`ConfigOption::Select`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ModelSpec {
-    pub id: String,
+pub struct ConfigChoice {
+    pub value: String,
     #[serde(default)]
-    pub label: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Something adjustable on a live session.
+///
+/// The shape is ACP's `SessionConfigOption`, adopted rather than invented: it
+/// already covers `claude`'s model / effort / permission mode / output style,
+/// `pi`'s model / thinking level / queue modes, `codex`'s approval policy, and
+/// `gemini`'s approval mode. Two variants are enough for every knob those four
+/// actually expose.
+///
+/// `category` is advisory grouping — `model`, `effort`, `permission_mode`, or
+/// anything an agent invents — so a client groups by it without having to know the
+/// vocabulary. That openness is the point: the next agent's knobs render without a
+/// server or UI change.
+/// `rename_all_fields` is load-bearing, not tidiness: with only the container
+/// `rename_all`, the *variant names* are renamed but the fields inside them are
+/// not, so `currentValue` on the wire parses as `None` while everything still
+/// compiles and every other field works. A test caught it; review would not have.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum ConfigOption {
+    Select {
+        id: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_value: Option<String>,
+        #[serde(default)]
+        options: Vec<ConfigChoice>,
+    },
+    Boolean {
+        id: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
+        #[serde(default)]
+        current_value: bool,
+    },
+}
+
+impl ConfigOption {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Select { id, .. } | Self::Boolean { id, .. } => id,
+        }
+    }
 }
 
 /// A subagent definition the agent can delegate to.
@@ -99,10 +187,9 @@ pub struct SubagentSpec {
 
 /// The live capability surface of an open session.
 ///
-/// Re-sent as a `capabilities` event whenever it changes, rather than polled: a
-/// skill edited on disk or a plugin loading changes what the composer should
-/// offer, and a list the client refreshes on its own schedule is a list that is
-/// wrong for however long that schedule is.
+/// Pushed rather than polled: a skill edited on disk or a plugin loading changes
+/// what the composer should offer, and a list the client refreshes on its own
+/// schedule is wrong for however long that schedule is.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionCapabilities {
@@ -110,12 +197,73 @@ pub struct SessionCapabilities {
     pub commands: Vec<CommandSpec>,
     #[serde(default)]
     pub subagents: Vec<SubagentSpec>,
+    /// Everything adjustable on this session, typed.
     #[serde(default)]
-    pub models: Vec<ModelSpec>,
+    pub config: Vec<ConfigOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<i64>,
+}
+
+/// A capability update, addressed by facet.
+///
+/// Every field is an `Option` and **`None` means "not mentioned"**, which is the
+/// whole design. v2 carried the entire surface in one value and assigned it, so an
+/// adapter reporting a permission-mode change also declared that the session had no
+/// commands — and the symptom surfaced two layers away as a slash menu that would
+/// not open, long after the message that caused it.
+///
+/// Merging partial surfaces would have fixed that same bug at the same cost and
+/// left the hazard in place: a message about one part of the surface would still be
+/// *able* to speak for all of it, and the next adapter would rediscover it. Naming
+/// the facet is what makes silence mean silence.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityFacets {
+    #[serde(default)]
+    pub commands: Option<Vec<CommandSpec>>,
+    #[serde(default)]
+    pub subagents: Option<Vec<SubagentSpec>>,
+    #[serde(default)]
+    pub config: Option<Vec<ConfigOption>>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub context_window: Option<i64>,
+}
+
+impl CapabilityFacets {
+    /// Whether this update mentions anything at all.
+    ///
+    /// An update naming no facet is a no-op rather than a clear, so a malformed or
+    /// empty payload cannot erase a surface by accident.
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_none()
+            && self.subagents.is_none()
+            && self.config.is_none()
+            && self.permission_mode.is_none()
+            && self.context_window.is_none()
+    }
+
+    /// Apply the mentioned facets onto `surface`, leaving the rest alone.
+    pub fn apply_to(self, surface: &mut SessionCapabilities) {
+        if let Some(commands) = self.commands {
+            surface.commands = commands;
+        }
+        if let Some(subagents) = self.subagents {
+            surface.subagents = subagents;
+        }
+        if let Some(config) = self.config {
+            surface.config = config;
+        }
+        if let Some(mode) = self.permission_mode {
+            surface.permission_mode = Some(mode);
+        }
+        if let Some(window) = self.context_window {
+            surface.context_window = Some(window);
+        }
+    }
 }
 
 /// An option offered on an adapter request.
@@ -161,6 +309,28 @@ pub struct AdapterRequest {
     /// `safe`, `destructive`, `network`. Advisory, for emphasis in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk: Option<String>,
+    /// Whether a lasting grant may be offered at all.
+    ///
+    /// `false` means a client must omit the "always allow" affordance entirely,
+    /// not merely de-emphasize it: `claude` sets it on asks where accepting always
+    /// would write a permission rule *broader than the ask itself*, so offering it
+    /// turns a narrow yes into a wide one the user never read. Defaults to `true`,
+    /// which keeps a minimal adapter correct.
+    #[serde(default = "default_true")]
+    pub allow_persistent: bool,
+    /// When the agent stops waiting, if it will.
+    ///
+    /// Advisory and never acted on by the server. `pi` auto-resolves a dialog when
+    /// its own timeout lapses, so a client with no deadline to show is racing a
+    /// clock it cannot see. The server does not apply a default when it passes —
+    /// that would remove the user from the decision this channel exists to give
+    /// them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<i64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A line the adapter sent us.
@@ -246,13 +416,23 @@ pub enum Outbound {
         attachments: Vec<String>,
         command: Option<String>,
         args: HashMap<String, String>,
+        /// Config overrides for this turn, sent with it rather than as separate
+        /// preceding calls: those were extra round trips with a window in between
+        /// where a turn could run under a mix of old and new settings.
+        config: HashMap<String, serde_json::Value>,
     },
     Interrupt,
     Steer {
         text: String,
+        /// The turn this steer is meant for.
+        ///
+        /// Without it, a steer racing a turn boundary is delivered into the *next*
+        /// turn: the message arrives, nothing errors, and it lands in the wrong
+        /// conversation. codex requires the same precondition.
+        expected_turn_id: Option<String>,
     },
-    Set {
-        field: String,
+    SetConfig {
+        config_id: String,
         value: serde_json::Value,
     },
     /// Answer an adapter request. `id` echoes the request's id, so this is the
@@ -318,6 +498,7 @@ impl Outbound {
                 attachments,
                 command,
                 args,
+                config,
             } => {
                 object.insert("text".into(), text.clone().into());
                 if !attachments.is_empty() {
@@ -330,16 +511,26 @@ impl Outbound {
                     object.insert("command".into(), command.clone().into());
                     object.insert("args".into(), serde_json::to_value(args).unwrap_or_default());
                 }
+                if !config.is_empty() {
+                    object.insert("config".into(), serde_json::to_value(config).unwrap_or_default());
+                }
                 "send"
             }
             Self::Interrupt => "interrupt",
-            Self::Steer { text } => {
+            Self::Steer {
+                text,
+                expected_turn_id,
+            } => {
                 object.insert("text".into(), text.clone().into());
+                if let Some(turn_id) = expected_turn_id {
+                    object.insert("expectedTurnId".into(), turn_id.clone().into());
+                }
                 "steer"
             }
-            Self::Set { field, value } => {
-                object.insert(field.clone(), value.clone());
-                "set"
+            Self::SetConfig { config_id, value } => {
+                object.insert("configId".into(), config_id.clone().into());
+                object.insert("value".into(), value.clone());
+                "set_config"
             }
             Self::Resolve {
                 request_id,
@@ -436,6 +627,7 @@ mod tests {
             attachments: vec![],
             command: Some("verify".into()),
             args: HashMap::from([("target".to_string(), "the auth change".to_string())]),
+            config: HashMap::new(),
         };
         let value = line_of(&send, "c9");
         assert_eq!(value["t"], "send");
@@ -450,11 +642,29 @@ mod tests {
             attachments: vec![],
             command: None,
             args: HashMap::new(),
+            config: HashMap::new(),
         };
         let value = line_of(&send, "c1");
         assert_eq!(value["text"], "hello");
         assert!(value.get("command").is_none());
         assert!(value.get("attachments").is_none());
+        assert!(value.get("config").is_none());
+    }
+
+    /// Config rides along with the turn rather than arriving as separate calls
+    /// before it. The previous shape left a window where a turn could begin under a
+    /// mix of old and new settings.
+    #[test]
+    fn per_turn_config_travels_with_the_turn_that_needs_it() {
+        let send = Outbound::Send {
+            text: "go".into(),
+            attachments: vec![],
+            command: None,
+            args: HashMap::new(),
+            config: HashMap::from([("model".to_string(), serde_json::json!("sonnet"))]),
+        };
+        let value = line_of(&send, "c2");
+        assert_eq!(value["config"]["model"], "sonnet");
     }
 
     /// A resolve is addressed to the request it answers, so it must carry that
@@ -550,7 +760,7 @@ mod tests {
     fn capabilities_default_to_empty_so_a_minimal_adapter_is_usable() {
         let caps: SessionCapabilities = serde_json::from_str("{}").unwrap();
         assert!(caps.commands.is_empty());
-        assert!(caps.models.is_empty());
+        assert!(caps.config.is_empty());
         assert!(caps.permission_mode.is_none());
     }
 
@@ -570,13 +780,140 @@ mod tests {
     }
 
     #[test]
-    fn a_set_command_puts_the_field_at_the_top_level() {
+    fn a_set_config_command_names_the_option_and_its_value() {
         let value = line_of(
-            &Outbound::Set { field: "model".into(), value: "opus-5".into() },
+            &Outbound::SetConfig { config_id: "model".into(), value: "opus-5".into() },
             "s1",
         );
-        assert_eq!(value["t"], "set");
-        assert_eq!(value["model"], "opus-5");
+        assert_eq!(value["t"], "set_config");
+        assert_eq!(value["configId"], "model");
+        assert_eq!(value["value"], "opus-5");
+    }
+
+    fn prompt_command(name: &str) -> CommandSpec {
+        CommandSpec {
+            name: name.to_string(),
+            description: String::new(),
+            arg_hint: None,
+            source: None,
+            kind: CommandKind::Prompt,
+            config_id: None,
+            aliases: vec![],
+        }
+    }
+
+    /// The regression this protocol version exists for.
+    ///
+    /// A partial update used to be applied by assigning the whole surface, so an
+    /// adapter reporting only a permission-mode change also declared that the
+    /// session had no slash commands. On a real project that erased 46 of them, and
+    /// the symptom surfaced two layers away as a composer menu that would not open.
+    #[test]
+    fn a_facet_update_leaves_the_facets_it_does_not_mention_alone() {
+        let mut surface = SessionCapabilities {
+            commands: vec![prompt_command("verify")],
+            subagents: vec![SubagentSpec { name: "Explore".into(), description: String::new() }],
+            config: vec![],
+            permission_mode: Some("default".into()),
+            context_window: Some(1_000_000),
+        };
+
+        let facets: CapabilityFacets =
+            serde_json::from_str(r#"{"permissionMode":"plan"}"#).unwrap();
+        facets.apply_to(&mut surface);
+
+        assert_eq!(surface.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(surface.commands.len(), 1, "commands must survive a mode-only update");
+        assert_eq!(surface.subagents.len(), 1);
+        assert_eq!(surface.context_window, Some(1_000_000));
+    }
+
+    /// An explicitly empty list is a real value: an agent whose plugins were
+    /// unloaded genuinely has no commands, and that must stay expressible.
+    #[test]
+    fn an_explicitly_empty_facet_does_clear_that_facet() {
+        let mut surface =
+            SessionCapabilities { commands: vec![prompt_command("verify")], ..Default::default() };
+        let facets: CapabilityFacets = serde_json::from_str(r#"{"commands":[]}"#).unwrap();
+        facets.apply_to(&mut surface);
+        assert!(surface.commands.is_empty());
+    }
+
+    /// Distinguishing "said nothing" from "said empty" is the whole mechanism, so it
+    /// is asserted directly rather than only through `apply_to`.
+    #[test]
+    fn a_facet_update_naming_nothing_is_a_no_op() {
+        let facets: CapabilityFacets = serde_json::from_str("{}").unwrap();
+        assert!(facets.is_empty());
+        let named: CapabilityFacets = serde_json::from_str(r#"{"commands":[]}"#).unwrap();
+        assert!(!named.is_empty(), "an empty list is still a statement about commands");
+    }
+
+    /// Absent `kind` means prompt, so an adapter that never heard of the field
+    /// behaves exactly as it did before the field existed.
+    #[test]
+    fn a_command_with_no_kind_is_a_prompt_command() {
+        let command: CommandSpec =
+            serde_json::from_str(r#"{"name":"verify","description":"check it"}"#).unwrap();
+        assert_eq!(command.kind, CommandKind::Prompt);
+        assert!(command.config_id.is_none());
+    }
+
+    #[test]
+    fn a_control_command_names_the_config_option_it_drives() {
+        let command: CommandSpec = serde_json::from_str(
+            r#"{"name":"model","kind":"control","configId":"model","aliases":["m"]}"#,
+        )
+        .unwrap();
+        assert_eq!(command.kind, CommandKind::Control);
+        assert_eq!(command.config_id.as_deref(), Some("model"));
+        assert_eq!(command.aliases, vec!["m"]);
+    }
+
+    #[test]
+    fn a_select_config_option_carries_its_choices_and_current_value() {
+        let option: ConfigOption = serde_json::from_str(
+            r#"{"type":"select","id":"model","name":"Model","category":"model",
+                "currentValue":"sonnet",
+                "options":[{"value":"sonnet","name":"Sonnet 5"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(option.id(), "model");
+        let ConfigOption::Select { current_value, options, .. } = &option else {
+            panic!("must parse as a select");
+        };
+        assert_eq!(current_value.as_deref(), Some("sonnet"));
+        assert_eq!(options[0].name, "Sonnet 5");
+    }
+
+    /// Absent means allowed, so a minimal adapter that never sets it stays correct;
+    /// an explicit `false` is what forbids the affordance.
+    #[test]
+    fn an_approval_may_forbid_offering_a_lasting_grant() {
+        let permissive: AdapterRequest =
+            serde_json::from_str(r#"{"kind":"approval","title":"x"}"#).unwrap();
+        assert!(permissive.allow_persistent);
+
+        let narrow: AdapterRequest =
+            serde_json::from_str(r#"{"kind":"approval","title":"x","allowPersistent":false}"#)
+                .unwrap();
+        assert!(!narrow.allow_persistent);
+    }
+
+    /// A steer names the turn it was written for, so one racing a turn boundary is
+    /// refused rather than delivered into the next conversation.
+    #[test]
+    fn a_steer_carries_the_turn_the_client_believed_was_running() {
+        let value = line_of(
+            &Outbound::Steer { text: "actually, stop".into(), expected_turn_id: Some("t7".into()) },
+            "c4",
+        );
+        assert_eq!(value["t"], "steer");
+        assert_eq!(value["expectedTurnId"], "t7");
+
+        let unscoped =
+            line_of(&Outbound::Steer { text: "hi".into(), expected_turn_id: None }, "c5");
+        assert!(unscoped.get("expectedTurnId").is_none());
     }
 
     #[test]

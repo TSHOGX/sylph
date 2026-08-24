@@ -251,6 +251,13 @@ function TimelineRowView({
       return <UsageLine event={event} />;
     case "status":
       return <StatusLine event={event} />;
+    case "turn":
+      // A turn boundary, not transcript content. Its `text` is the turn's final
+      // result, which the `assistant` block already rendered — so drawing it here
+      // shows the reply twice. Under v1 the outcome arrived as a process envelope
+      // that never reached the timeline; on a live link it is an event like any
+      // other, and the default branch rendered it as a status line.
+      return null;
     default:
       return <StatusLine event={event} />;
   }

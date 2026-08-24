@@ -23,7 +23,8 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, warn};
 
 use super::wire::{
-    parse_inbound, AdapterRequest, Capability, FlagSpec, Inbound, Outbound, SessionCapabilities,
+    parse_inbound, AdapterRequest, Capability, CapabilityFacets, FlagSpec, Inbound, Outbound,
+    SessionCapabilities,
 };
 use crate::env::{Environment, ProcessSignal, ProcessSpec, Signal};
 
@@ -221,18 +222,39 @@ impl Link {
                         }
                         Inbound::Event { body } => {
                             // A capability change is an event on the wire but a
-                            // state change here, so it updates the cached
-                            // surface before being forwarded.
+                            // state change here, so it updates the cached surface
+                            // before being forwarded.
+                            //
+                            // Applied facet by facet. Assigning the whole surface is
+                            // what erased 46 slash commands the first time an
+                            // adapter reported only a permission-mode change, and
+                            // the symptom appeared two layers away as a menu that
+                            // would not open.
                             let is_capabilities =
                                 body.get("kind").and_then(|k| k.as_str()) == Some("capabilities");
                             if is_capabilities {
-                                if let Some(parsed) = body
-                                    .get("capabilities")
+                                let facets = body
+                                    .get("facets")
+                                    // A whole-surface payload is still accepted, so
+                                    // an adapter written against v2 degrades rather
+                                    // than reporting nothing. Its field names are the
+                                    // same, so it parses as facets.
+                                    .or_else(|| body.get("capabilities"))
                                     .cloned()
-                                    .and_then(|c| serde_json::from_value(c).ok())
-                                {
-                                    *capabilities.lock().await = parsed;
-                                    let snapshot = capabilities.lock().await.clone();
+                                    .and_then(|c| {
+                                        serde_json::from_value::<CapabilityFacets>(c).ok()
+                                    });
+                                if let Some(facets) = facets {
+                                    if facets.is_empty() {
+                                        // Naming no facet is a no-op, never a clear.
+                                        debug!("Ignoring a capability update naming no facet");
+                                        continue;
+                                    }
+                                    let snapshot = {
+                                        let mut surface = capabilities.lock().await;
+                                        facets.apply_to(&mut surface);
+                                        surface.clone()
+                                    };
                                     let _ =
                                         events_tx.send(LinkEvent::Capabilities(snapshot)).await;
                                     continue;
@@ -435,8 +457,9 @@ impl Link {
         attachments: Vec<String>,
         command: Option<String>,
         args: HashMap<String, String>,
+        config: HashMap<String, serde_json::Value>,
     ) -> Result<()> {
-        self.call(Outbound::Send { text, attachments, command, args })
+        self.call(Outbound::Send { text, attachments, command, args, config })
             .await
             .map(|_| ())
     }
@@ -453,17 +476,48 @@ impl Link {
         self.call(Outbound::Interrupt).await.map(|_| ())
     }
 
-    pub async fn steer(&self, text: String) -> Result<()> {
+    /// Add text to the turn named by `expected_turn_id`.
+    ///
+    /// Awaited rather than fired and forgotten, because the adapter is the only
+    /// thing that can tell us the turn moved on: a steer that missed its turn has
+    /// to surface as an error, not as a message quietly delivered into the next
+    /// conversation.
+    pub async fn steer(&self, text: String, expected_turn_id: Option<String>) -> Result<()> {
         if !self.identity.can(Capability::Steer) {
             bail!("{} cannot be steered mid-turn", self.identity.agent_name);
         }
-        self.tell(Outbound::Steer { text }).await
-    }
-
-    pub async fn set(&self, field: &str, value: serde_json::Value) -> Result<()> {
-        self.call(Outbound::Set { field: field.to_string(), value })
+        self.call(Outbound::Steer { text, expected_turn_id })
             .await
             .map(|_| ())
+    }
+
+    /// Set one config option, and take the refreshed surface from the reply.
+    ///
+    /// The reply carries the whole `config` facet because setting one option can
+    /// change another's choices — `pi`'s thinking levels depend on the selected
+    /// model, and `claude` carries per-model effort levels. Reading it back here is
+    /// what keeps the cached surface true without a second round trip.
+    pub async fn set_config(
+        &self,
+        config_id: &str,
+        value: serde_json::Value,
+    ) -> Result<SessionCapabilities> {
+        if !self.identity.can(Capability::SetConfig) {
+            bail!("{} cannot change config on a live session", self.identity.agent_name);
+        }
+        let reply = self
+            .call(Outbound::SetConfig { config_id: config_id.to_string(), value })
+            .await?;
+
+        let facets = serde_json::from_value::<CapabilityFacets>(
+            reply.get("facets").cloned().unwrap_or(reply.clone()),
+        )
+        .unwrap_or_default();
+        let mut surface = self.capabilities.lock().await;
+        if !facets.is_empty() {
+            facets.apply_to(&mut surface);
+        }
+        Ok(surface.clone())
     }
 
     /// Answer a request the adapter raised.

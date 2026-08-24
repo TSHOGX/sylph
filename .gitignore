@@ -37,6 +37,10 @@ test-results/
 /frontend/.e2e-data/
 /frontend/test-results/
 
+# Python bytecode, from the adapters
+__pycache__/
+*.pyc
+
 # macOS
 .DS_Store
 

@@ -99,13 +99,24 @@ export interface AgentFlag {
 }
 
 /**
+ * Whether a command is something to ask the agent, or something the session *is*.
+ *
+ * `prompt` runs as a turn; `control` opens the picker for the config option it
+ * names. Absent means `prompt`, so an agent that never says behaves as before.
+ *
+ * This is what stops `/model` coming back as a paragraph: sent as prompt text to a
+ * headless CLI, "which model?" can only be answered in prose, because there is no
+ * picker on that side of the wire.
+ */
+export type CommandKind = "prompt" | "control";
+
+/**
  * A slash command the *session's own agent* reports.
  *
- * Distinct from `AgentCommand` in where it comes from, which is the whole point
- * of the v2 protocol: this list is read from a live agent that has loaded the
- * project, so it holds the real skills, project commands, and plugins — dozens on
- * a real checkout. `AgentCommand` is what an agent declares about itself before
- * any session exists, and is usually empty.
+ * Distinct from `AgentCommand` in where it comes from: this list is read from a
+ * live agent that has loaded the project, so it holds the real skills, project
+ * commands, and plugins — dozens on a real checkout. `AgentCommand` is what an
+ * agent declares about itself before any session exists, and is usually empty.
  */
 export interface SessionCommand {
   name: string;
@@ -114,11 +125,15 @@ export interface SessionCommand {
   argHint?: string;
   /** `skill` | `project` | `plugin` | `builtin`. Advisory, for grouping. */
   source?: string;
-}
-
-export interface SessionModel {
-  id: string;
-  label?: string;
+  /** Absent means `prompt`. */
+  kind?: CommandKind;
+  /** For a control command, the config option it drives. */
+  configId?: string;
+  /**
+   * Other names the agent answers to. `claude` gives `/usage` the aliases `cost`
+   * and `stats`, and a menu that ignores them behaves unlike the terminal.
+   */
+  aliases?: string[];
 }
 
 export interface SessionSubagent {
@@ -126,11 +141,46 @@ export interface SessionSubagent {
   description?: string;
 }
 
+/** One choice within a `select` config option. */
+export interface ConfigChoice {
+  value: string;
+  name?: string;
+  description?: string;
+}
+
+/**
+ * Something adjustable on a live session.
+ *
+ * The shape is ACP's `SessionConfigOption`. `category` is advisory grouping —
+ * `model`, `effort`, `permission_mode`, or anything an agent invents — so the UI
+ * groups by it without needing to know the vocabulary, and the next agent's knobs
+ * render with no frontend change.
+ */
+export type ConfigOption =
+  | {
+      type: "select";
+      id: string;
+      name?: string;
+      description?: string;
+      category?: string;
+      currentValue?: string | null;
+      options: ConfigChoice[];
+    }
+  | {
+      type: "boolean";
+      id: string;
+      name?: string;
+      description?: string;
+      category?: string;
+      currentValue?: boolean;
+    };
+
 /** What a session's agent can do right now, read from its live link. */
 export interface SessionCapabilities {
   commands: SessionCommand[];
   subagents: SessionSubagent[];
-  models: SessionModel[];
+  /** Everything adjustable on this session, typed. */
+  config: ConfigOption[];
   permissionMode?: string;
   contextWindow?: number;
 }
@@ -189,6 +239,17 @@ export interface PendingRequest {
   defaultOption?: string;
   /** `safe` | `destructive` | `network`. Advisory, for emphasis. */
   risk?: string;
+  /**
+   * Whether a lasting grant may be offered at all.
+   *
+   * `false` means the dialog must omit "always allow" entirely, not merely
+   * de-emphasize it: the agent has said that granting always would write a rule
+   * broader than this ask, so showing it turns a narrow yes into a wide one the
+   * user never read. Absent means allowed.
+   */
+  allowPersistent?: boolean;
+  /** When the agent stops waiting, if it will. Advisory. */
+  expiresAtMs?: number;
   status: string;
   chosenOption?: string;
   createdAtMs: number;
@@ -212,18 +273,39 @@ export function requestDetail(request: PendingRequest): Record<string, unknown> 
  * render as a dialog with no buttons, leaving the agent blocked with no way for
  * the user to answer. Allow and deny are the two the backend validates against
  * whatever the agent actually offered, so a wrong guess is refused rather than
- * silently accepted. */
+ * silently accepted.
+ *
+ * A persistent option is dropped when the request forbids one. That filtering lives
+ * here rather than in the dialog so every consumer of this list is correct by
+ * construction: the agent has said that granting always would write a permission
+ * rule *broader than this ask*, and offering it anyway converts a narrow yes into a
+ * wide one the user never read. Absent means allowed, which keeps a minimal adapter
+ * working. */
 export function requestOptions(request: PendingRequest): RequestOption[] {
-  try {
-    const parsed = JSON.parse(request.optionsJson);
-    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-  } catch {
-    // fall through
+  const offered = (() => {
+    try {
+      const parsed = JSON.parse(request.optionsJson);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed as RequestOption[];
+    } catch {
+      // fall through
+    }
+    return [
+      { id: "allow", label: "Allow" },
+      { id: "deny", label: "Deny" },
+    ] satisfies RequestOption[];
+  })();
+
+  if (request.allowPersistent === false) {
+    const narrowed = offered.filter((option) => !option.persistent);
+    // Filtering must never empty the dialog. If every option the agent offered was
+    // persistent, a UI with no buttons leaves the agent blocked with no way for the
+    // user to answer at all — strictly worse than the over-broad grant this filter
+    // exists to avoid. Declining is always safe, and the backend validates the id
+    // against what the agent offered, so a rejected deny fails loudly rather than
+    // silently approving.
+    return narrowed.length > 0 ? narrowed : [{ id: "deny", label: "Deny" }];
   }
-  return [
-    { id: "allow", label: "Allow" },
-    { id: "deny", label: "Deny" },
-  ];
+  return offered;
 }
 
 export interface AgentCommand {
@@ -863,11 +945,30 @@ export const api = {
       fetchAPI<{ interrupted: boolean }>(`/sessions/${id}/interrupt`, {
         method: "POST",
       }),
-    /** Add text to a turn already in flight. */
-    steer: (id: string, text: string) =>
+    /**
+     * Add text to a turn already in flight.
+     *
+     * `turnId` is a precondition, not a routing hint: a steer that races a turn
+     * boundary would otherwise be delivered into the *next* turn, succeeding
+     * silently with the text in the wrong conversation. A mismatch is a 409.
+     */
+    steer: (id: string, text: string, turnId?: string) =>
       fetchAPI<{ steered: boolean }>(`/sessions/${id}/steer`, {
         method: "POST",
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, turnId }),
+      }),
+    /**
+     * Set one typed config option on a live session.
+     *
+     * Answers with the refreshed surface rather than an acknowledgement, because
+     * setting one option can change another's choices — effort levels depend on
+     * the selected model for both installed agents. So the response is applied
+     * rather than an optimistic local value.
+     */
+    setConfig: (id: string, configId: string, value: string | boolean) =>
+      fetchAPI<LinkState>(`/sessions/${id}/config`, {
+        method: "POST",
+        body: JSON.stringify({ configId, value }),
       }),
   },
   requests: {

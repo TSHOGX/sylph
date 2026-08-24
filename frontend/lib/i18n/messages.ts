@@ -55,6 +55,11 @@ export const en = {
   "action.copy": "Copy",
   "action.copied": "Copied",
   "action.dismiss": "Dismiss",
+  // Ends the turn but keeps the agent loaded. Distinct from Stop, which ends the
+  // agent — two different intentions, so two different words.
+  "action.interrupt": "Interrupt",
+  "action.on": "On",
+  "action.off": "Off",
   "action.loading": "Loading...",
   "action.expand": "Expand",
   "action.collapse": "Collapse",
@@ -131,12 +136,19 @@ export const en = {
   "composer.model": "Model",
   "composer.thinking": "Thinking",
   "composer.runnerDefault": "Runner default",
+  // A control command opens a picker instead of sending a message. Short because it
+  // is a badge in a dense list, not a sentence.
+  "composer.setting": "setting",
+  "composer.agentDefault": "Agent default",
+  "composer.configureEllipsis": "Configure...",
+  "composer.noConfigOptions": "This agent reports nothing to configure here.",
   "composer.attachEllipsis": "Attach files...",
   "composer.saveToWorkspace": "Save attachments to workspace...",
   "composer.runCommand": "Run a command...",
   "composer.stagedAttachments": "Staged attachments",
   "composer.placeholder": "Send a message...",
   "composer.placeholderBusy": "Waiting for the current turn to finish...",
+  "composer.placeholderSteer": "Add to what the agent is doing...",
   "composer.message": "Message",
   "composer.addToMessage": "Add to this message",
   "composer.saveFailed": "Could not save those files into the workspace.",

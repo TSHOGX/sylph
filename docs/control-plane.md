@@ -34,7 +34,7 @@ a session is.
                      │              │              │
                 Environments    Adapters       TraceDB
               local / khora /   per agent    (archive, search)
-                    ssh        (v2 duplex)
+                    ssh        (v3 duplex)
 ```
 
 The server owns: session identity and origin, identity and lifecycle policy,
@@ -130,14 +130,26 @@ Additive to `/api/v1`. Existing endpoints keep their contracts.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /sessions/{id}/replay` | The session's stream, reconstructed with original timing |
-| `GET /sessions/{id}/capabilities` | Live slash commands, models, subagents, permission mode |
+| `GET /sessions/{id}/capabilities` | Live slash commands, subagents, typed config, permission mode |
 | `POST /sessions/{id}/link` | Establish a link eagerly |
 | `DELETE /sessions/{id}/link` | Tear one down |
 | `GET /sessions/{id}/requests` | Pending requests |
 | `POST /requests/{id}/resolve` | Answer one |
-| `POST /turns/{id}/steer` | Inject text mid-turn |
-| `POST /turns/{id}/interrupt` | Stop the turn, keep the session |
+| `POST /sessions/{id}/steer` | Inject text mid-turn, naming the turn it is meant for |
+| `POST /sessions/{id}/interrupt` | Stop the turn, keep the session |
+| `POST /sessions/{id}/config` | Set one typed config option; answers with the refreshed surface |
 | `GET /environments` | Configured environments and health |
+
+Both `steer` and `interrupt` are session-scoped rather than turn-scoped: they act on
+the agent, and the session is what holds a link, so a caller need not know a turn id
+to interrupt the only turn running. `steer` still *names* a turn — as a precondition,
+not as routing — because a steer racing a turn boundary would otherwise be delivered
+into the next turn, succeeding silently with the text in the wrong conversation.
+
+`config` is what a control command resolves to. `/model` sent as prompt text comes
+back as a paragraph, because a headless CLI has no picker to open, so the option is
+typed state a client renders and choosing one is a typed set. See
+`docs/session-protocol.md` § Session config.
 
 `interrupt` is deliberately separate from the existing `stop`. `stop` kills the
 process group; `interrupt` asks the agent to stop the turn and stay alive. They

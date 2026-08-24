@@ -762,9 +762,9 @@ impl LiveStore {
             INSERT INTO pending_requests (
                 id, session_id, turn_id, adapter_request_id, kind, tool,
                 tool_use_id, title, detail_json, options_json, default_option,
-                risk, status, created_at_ms
+                risk, allow_persistent, expires_at_ms, status, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
             RETURNING *
             "#,
         )
@@ -780,6 +780,8 @@ impl LiveStore {
         .bind(&request.options_json)
         .bind(&request.default_option)
         .bind(&request.risk)
+        .bind(request.allow_persistent)
+        .bind(request.expires_at_ms)
         .bind(request.created_at_ms)
         .fetch_one(&self.pool)
         .await

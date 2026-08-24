@@ -49,7 +49,10 @@ export interface AgentSession {
   /** Set when the last answer lost a race, so the UI can say the dialog was stale. */
   staleAnswer: boolean;
   interrupt: () => void;
-  steer: (text: string) => void;
+  steer: (text: string, turnId?: string) => void;
+  /** Set one typed config option; the response replaces the cached surface. */
+  setConfig: (configId: string, value: string | boolean) => void;
+  settingConfig: boolean;
 }
 
 export function useAgentSession(sessionId: string | undefined): AgentSession {
@@ -141,7 +144,20 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
   });
 
   const steerMutation = useMutation({
-    mutationFn: (text: string) => api.sessions.steer(sessionId!, text),
+    mutationFn: ({ text, turnId }: { text: string; turnId?: string }) =>
+      api.sessions.steer(sessionId!, text, turnId),
+  });
+
+  // The response *is* the new surface, so it is written into the cache rather than
+  // triggering a refetch. Setting one option can change another's choices — effort
+  // levels depend on the selected model for both installed agents — so an optimistic
+  // local value would be wrong exactly when it matters.
+  const configMutation = useMutation({
+    mutationFn: ({ configId, value }: { configId: string; value: string | boolean }) =>
+      api.sessions.setConfig(sessionId!, configId, value),
+    onSuccess: (link) => {
+      queryClient.setQueryData(["session", sessionId, "capabilities"], link);
+    },
   });
 
   const requests = requestsQuery.data ?? [];
@@ -179,6 +195,9 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
       resolveMutation.isError &&
       /already/i.test(String((resolveMutation.error as Error | null)?.message ?? "")),
     interrupt: () => interruptMutation.mutate(),
-    steer: (text: string) => steerMutation.mutate(text),
+    steer: (text: string, turnId?: string) => steerMutation.mutate({ text, turnId }),
+    setConfig: (configId: string, value: string | boolean) =>
+      configMutation.mutate({ configId, value }),
+    settingConfig: configMutation.isPending,
   };
 }

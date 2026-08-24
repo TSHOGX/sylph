@@ -39,7 +39,7 @@ const PROJECTION_CAPACITY: usize = 512;
 const BROADCAST_CAPACITY: usize = 1024;
 
 /// A normalized event as it appears on the wire, both from adapters
-/// (`sylph.agent.v2` event messages) and to browsers (SSE `data:` payloads).
+/// (`sylph.agent.v3` event messages) and to browsers (SSE `data:` payloads).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
@@ -101,7 +101,7 @@ impl StreamEvent {
         }
     }
 
-    /// Build from a `sylph.agent.v2` event message.
+    /// Build from a `sylph.agent.v3` event message.
     ///
     /// `seq` is left at zero for the caller to assign, because ordering is the
     /// server's to decide: an adapter numbering its own events could not

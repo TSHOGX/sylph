@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude adapter for `sylph.agent.v2`.
+"""Claude adapter for `sylph.agent.v3`.
 
 Translates between Sylph's normalized duplex protocol and Claude Code's own
 bidirectional control protocol. `docs/session-protocol.md` governs the Sylph
@@ -30,8 +30,8 @@ import sys
 import threading
 import uuid
 
-PROTOCOL = "sylph.agent.v2"
-ADAPTER_VERSION = "1.0.0"
+PROTOCOL = "sylph.agent.v3"
+ADAPTER_VERSION = "3.0.0"
 
 # What this adapter can do, from the protocol's closed vocabulary. Declared
 # rather than assumed: the server refuses to send anything absent from here, so
@@ -42,14 +42,21 @@ SUPPORTS = [
     "approval",
     "subagent",
     "slash",
-    "set_model",
+    "set_config",
     "context",
     "fork",
 ]
 
+# Spawn-time options, for the create-a-session screen, which has no live session to
+# ask. Anything adjustable afterwards is a config option instead (`config_from`), and
+# `model` deliberately appears in both: it is choosable up front and changeable later.
+#
+# `model` lists no choices because the real catalogue depends on the account and is
+# only knowable once the CLI has loaded — so an empty list here means "free-form,
+# ask the session", not "no models".
 FLAGS = {
     "model": {
-        "choices": [],  # Filled from the live `models` list at open time.
+        "choices": [],
         "description": "Model for this session.",
     },
     "effort": {
@@ -95,6 +102,15 @@ SUPPORTED_DIALOG_KINDS = [
 # `bypassPermissions` auto-approves before any callback runs, so an approval
 # prompt under it would never fire — worth knowing rather than discovering.
 INTERACTIVE_MODES = {"default", "acceptEdits", "plan", "manual"}
+
+class UnknownConfig(Exception):
+    """A config id this adapter cannot set.
+
+    Its own exception type so the `set_config` handler can answer
+    `UNSUPPORTED_FIELD` — a capability answer a UI can disable a control over —
+    rather than a generic adapter error a client can only retry.
+    """
+
 
 out_lock = threading.Lock()
 
@@ -155,6 +171,12 @@ class Session:
         self.message_id = "claude"
         self.message_seq = 0
         self.turn_open = False
+        # The last `initialize` response, kept so a config facet can be rebuilt
+        # without another round trip to the CLI. Effort levels depend on the selected
+        # model, so recomputing needs the catalogue, not just the chosen value.
+        self.initialize_response = {}
+        self.current_model = None
+        self.current_effort = None
         # vendor request id -> 'can_use_tool' | 'dialog'. A permission and a dialog
         # take different response shapes, and guessing wrong parks the turn.
         self.request_kinds = {}
@@ -243,6 +265,38 @@ class Session:
             self.pending_control.pop(request_id, None)
             raise RuntimeError("claude did not answer {} in time".format(subtype))
         return box["response"] or {}
+
+    def apply_config(self, config_id, value):
+        """Set one config option on the live session.
+
+        The mapping from a Sylph config id to a vendor control lives here because it
+        is a vendor fact: `permissionMode` is `set_permission_mode` for claude and
+        does not exist at all for pi.
+        """
+        if config_id == "model":
+            # `default`, null and an omitted model all reset to the session default,
+            # per the CLI's own schema, so an explicit reset is passed through rather
+            # than filtered out.
+            self.control("set_model", model=value)
+            self.current_model = value
+        elif config_id == "effort":
+            # Measured against the real CLI rather than inferred from the name:
+            # `apply_flag_settings` refuses a bare field with "requires `settings` to
+            # be an object", and `set_max_thinking_tokens` wants an integer budget,
+            # not an effort name. Two wrong guesses, both of which would have failed
+            # silently as a setting that never took.
+            self.control("apply_flag_settings", settings={"effort": value})
+            self.current_effort = value
+        elif config_id == "fastMode":
+            self.control("apply_flag_settings", settings={"fastMode": bool(value)})
+        elif config_id == "permissionMode":
+            self.control("set_permission_mode", mode=value)
+            if self.initialize_response:
+                self.initialize_response["current_permission_mode"] = value
+        elif config_id == "cwd":
+            self.control("set_cwd", cwd=value)
+        else:
+            raise UnknownConfig(config_id)
 
     def answer(self, vendor_id, option, user_input):
         """Reply to a vendor request in the shape its kind expects.
@@ -429,12 +483,23 @@ class Session:
                 self._forward_question(vendor_id, request)
                 return
 
-            options = [
-                {"id": "allow", "label": "Allow once"},
-                {"id": "allow_always", "label": "Always allow {}".format(tool or "this"),
-                 "persistent": True},
-                {"id": "deny", "label": "Deny"},
-            ]
+            # Whether a lasting grant may be offered at all. The CLI marks asks
+            # where accepting "always" would write a rule *broader than this ask*,
+            # and its schema is explicit that a host "should omit any persistent-rule
+            # affordance when set". Offering it anyway turns a narrow yes into a wide
+            # one the user never read, so the option is withheld rather than merely
+            # labelled differently.
+            allow_persistent = not request.get("suppressAlwaysAllowRule")
+
+            options = [{"id": "allow", "label": "Allow once"}]
+            if allow_persistent:
+                options.append({
+                    "id": "allow_always",
+                    "label": "Always allow {}".format(tool or "this"),
+                    "persistent": True,
+                })
+            options.append({"id": "deny", "label": "Deny"})
+
             emit({
                 "t": "request",
                 "id": vendor_id,
@@ -447,6 +512,7 @@ class Session:
                 "options": options,
                 "default": "deny",
                 "risk": self._risk(tool, request.get("input")),
+                "allowPersistent": allow_persistent,
             })
             return
 
@@ -740,20 +806,32 @@ class Session:
         subtype = msg.get("subtype")
 
         if subtype == "init":
-            # `init` carries the permission mode claude actually settled on,
-            # which is not always the one requested.
-            event("capabilities", capabilities={
+            # `init` arrives once per *turn*, not once per process — measured, two
+            # user messages produce two of them. So this must speak about the
+            # permission mode and nothing else.
+            #
+            # This is where the 46-commands-to-0 bug lived: it sent the whole
+            # capability surface with only this one field set, and the server
+            # assigned it. Naming the facet is what makes the rest survive.
+            event("capabilities", facets={
                 "permissionMode": msg.get("permissionMode"),
             })
+            # The model can change without us asking — a fallback under load, or a
+            # `/model` the user typed as text — so the surface is refreshed from what
+            # the CLI now reports rather than from what we last set.
+            if msg.get("model"):
+                self.current_model = msg["model"]
             return
 
         if subtype == "commands_changed":
-            # A skill was edited or a plugin loaded, so the composer's list is
-            # now stale. Re-read it rather than trusting the notification's
-            # payload, which carries only that something changed.
+            # A skill was edited or a plugin loaded, so the composer's list is now
+            # stale. Re-read it rather than trusting the notification's payload,
+            # which carries only that something changed.
             try:
                 fresh = self.control("initialize")
-                event("capabilities", capabilities=capabilities_from(fresh))
+                self.initialize_response = fresh
+                event("capabilities", facets=capabilities_from(
+                    fresh, self.current_model, self.current_effort))
             except Exception as error:
                 log("failed to refresh commands: {}".format(error))
             return
@@ -798,46 +876,211 @@ def flatten(content):
     return "".join(str(part) for part in parts if part)
 
 
-def capabilities_from(initialize_response):
-    """Project claude's `initialize` response onto Sylph's capability shape.
+# Which of Claude's own builtins are session *control* rather than prompts, and the
+# config option each one drives.
+#
+# This table lives in the adapter because classification is a vendor fact: `claude`
+# returns `/model` in the same list as `/verify` with no field telling them apart,
+# while `pi` already excludes its TUI commands and ACP has no notion of the split at
+# all. A list like this in the server or the UI would encode one vendor's taxonomy as
+# though it were universal, which is the mistake v3 exists to stop repeating.
+#
+# A command mapping to `None` is still control — it is a session operation rather
+# than something to think about — but has no picker behind it, so a client runs it
+# without offering choices.
+# Only the ones that genuinely resolve to a picker. `/context`, `/compact`,
+# `/usage` and `/clear` are deliberately *not* here: each one produces output worth
+# keeping — a context table, a compaction boundary, a cost summary — so they belong
+# in the transcript as turns. Naming them control would have hidden their answers in
+# a dialog that closes.
+#
+# `/doctor`, `/init`, `/mcp` and `/agents` are likewise prompts: they do work and
+# report on it. An earlier draft listed them here on the theory that "builtin"
+# implied "control", and the observable effect was a set of commands that opened an
+# empty picker instead of doing anything.
+CONTROL_COMMANDS = {
+    "model": "model",
+    "fast": "fastMode",
+}
 
-    This is the redesign's payoff in one function: `commands` here is the
-    project's real list — skills, project commands, plugins — where a v1
-    descriptor carried whatever its author typed by hand.
+# Builtins, for `source`. Everything the CLI reports arrives in one flat list, and
+# v2 labelled all 46 as `skill` — untrue for `/model`, and the label is what a UI
+# groups by, so the menu grouped builtins under Skills.
+BUILTIN_SOURCES = set(CONTROL_COMMANDS) | {
+    "review", "resume", "rewind", "todos", "help", "status", "cost", "memory",
+    "export", "hooks", "plugin", "skill-doctor", "loop", "design-sync",
+    "design-login", "artifacts", "tasks", "workflows",
+}
+
+
+def commands_from(initialize_response):
+    """Project claude's command list onto Sylph's, classifying as it goes.
+
+    On this checkout the CLI returns 46 entries — skills, project commands, plugins,
+    and its own builtins — where a v1 descriptor carried whatever its author typed by
+    hand.
     """
     commands = []
     for entry in initialize_response.get("commands") or []:
-        if isinstance(entry, dict):
-            name = entry.get("name")
-            if not name:
-                continue
-            commands.append({
-                "name": name,
-                "description": entry.get("description") or "",
-                "argHint": entry.get("argNames") or entry.get("argumentHint"),
-                "source": entry.get("source") or "skill",
-            })
-        elif isinstance(entry, str):
-            commands.append({"name": entry, "description": ""})
+        if isinstance(entry, str):
+            commands.append({"name": entry, "description": "", "kind": "prompt"})
+            continue
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not name:
+            continue
 
+        spec = {
+            "name": name,
+            "description": entry.get("description") or "",
+            # `argumentHint` is the CLI's spelling. v2 also tried `argNames`, which
+            # this version does not send; keeping both costs nothing and a wrong
+            # guess here silently drops every hint.
+            "argHint": entry.get("argumentHint") or entry.get("argNames") or None,
+            "source": "builtin" if name in BUILTIN_SOURCES else "skill",
+            # Carried because the terminal honours them: `/usage` answers to `cost`
+            # and `stats`, `/clear` to `reset` and `new`.
+            "aliases": entry.get("aliases") or [],
+        }
+
+        if name in CONTROL_COMMANDS:
+            spec["kind"] = "control"
+            config_id = CONTROL_COMMANDS[name]
+            if config_id:
+                spec["configId"] = config_id
+        else:
+            spec["kind"] = "prompt"
+
+        commands.append({k: v for k, v in spec.items() if v is not None})
+    return commands
+
+
+def models_from(initialize_response):
+    """The model catalogue, in the CLI's own spelling.
+
+    Measured against `claude` 2.1.238: an entry is
+    `{"value","resolvedModel","displayName","description","supportsEffort",
+    "supportedEffortLevels",...}`. v2 read `id`/`label`, which exist on none of
+    them, so the model list was empty on every session ever opened — and the
+    composer's model control had nothing to show. Reading the wrong key failed
+    silently, which is why this is spelled out here.
+    """
     models = []
     for entry in initialize_response.get("models") or []:
-        if isinstance(entry, dict) and entry.get("id"):
-            models.append({"id": entry["id"], "label": entry.get("displayName") or entry["id"]})
-        elif isinstance(entry, str):
-            models.append({"id": entry, "label": entry})
+        if isinstance(entry, str):
+            models.append({"value": entry, "name": entry})
+        elif isinstance(entry, dict) and entry.get("value"):
+            models.append({
+                "value": entry["value"],
+                "name": entry.get("displayName") or entry["value"],
+                "description": entry.get("description"),
+                "effortLevels": entry.get("supportedEffortLevels") or [],
+            })
+    return models
 
+
+def config_from(initialize_response, current_model=None, current_effort=None):
+    """Everything adjustable on this live session, typed.
+
+    Options are re-derived rather than cached because they are not independent: the
+    effort levels a session can offer come from the *selected* model, so a model
+    change can shrink or grow them. A flat session-global list of efforts — which is
+    what v2's `flags.choices` was — is wrong for any agent whose models differ.
+    """
+    models = models_from(initialize_response)
+    options = []
+
+    selected = current_model or next(
+        (m["value"] for m in models if m["value"] == "default"),
+        models[0]["value"] if models else None,
+    )
+
+    if models:
+        options.append({
+            "type": "select",
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "currentValue": selected,
+            "options": [
+                {k: v for k, v in {
+                    "value": m["value"],
+                    "name": m["name"],
+                    "description": m.get("description"),
+                }.items() if v is not None}
+                for m in models
+            ],
+        })
+
+    # Effort, scoped to the selected model. Omitted rather than shown empty when the
+    # model does not support it: an empty picker invites a choice that cannot exist.
+    levels = next(
+        (m.get("effortLevels") or [] for m in models if m["value"] == selected),
+        [],
+    )
+    if levels:
+        options.append({
+            "type": "select",
+            "id": "effort",
+            "name": "Reasoning effort",
+            "category": "effort",
+            "currentValue": current_effort,
+            "options": [{"value": level, "name": level.capitalize()} for level in levels],
+        })
+
+    mode = initialize_response.get("current_permission_mode")
+    options.append({
+        "type": "select",
+        "id": "permissionMode",
+        "name": "Permissions",
+        "category": "permission_mode",
+        "currentValue": mode,
+        "options": [
+            {"value": choice, "name": choice}
+            for choice in FLAGS["mode"]["choices"]
+        ],
+    })
+
+    # Output style is deliberately *not* offered. The CLI reports
+    # `available_output_styles`, but probing every plausible control subtype found
+    # none that sets it, and an option a client can render but not apply is worse
+    # than an absent one: the picker would accept a choice that silently does
+    # nothing. It becomes a config option the day a setter is confirmed.
+
+    if initialize_response.get("fast_mode_state") is not None:
+        options.append({
+            "type": "boolean",
+            "id": "fastMode",
+            "name": "Fast mode",
+            "category": "speed",
+            "currentValue": initialize_response.get("fast_mode_state") == "on",
+        })
+
+    return options
+
+
+def capabilities_from(initialize_response, current_model=None, current_effort=None):
+    """The full capability surface, as facets.
+
+    Every caller sends facets, including this one. That is the point: there is no
+    path left that can express "the whole surface" and therefore no path that can
+    accidentally erase a facet it was not talking about.
+    """
     subagents = []
     for entry in initialize_response.get("agents") or []:
         if isinstance(entry, dict) and entry.get("name"):
-            subagents.append({"name": entry["name"], "description": entry.get("description") or ""})
+            subagents.append({
+                "name": entry["name"],
+                "description": entry.get("description") or "",
+            })
         elif isinstance(entry, str):
             subagents.append({"name": entry, "description": ""})
 
     return {
-        "commands": commands,
-        "models": models,
+        "commands": commands_from(initialize_response),
         "subagents": subagents,
+        "config": config_from(initialize_response, current_model, current_effort),
         "permissionMode": initialize_response.get("current_permission_mode"),
     }
 
@@ -946,23 +1189,46 @@ def serve():
                     flags=msg.get("flags") or {},
                     permission_mode=msg.get("permissionMode"),
                 )
-                # The handshake that turns a process into a session: this is
-                # where the project's real command list comes from, and where we
-                # declare which dialogs we can render.
-                surface = capabilities_from(
-                    session.control(
-                        "initialize",
-                        supportedDialogKinds=SUPPORTED_DIALOG_KINDS,
-                    )
+                # The handshake that turns a process into a session: this is where
+                # the project's real command list comes from, and where we declare
+                # which dialogs we can render.
+                #
+                # `supportedDialogKinds` is first-attached-client-wins per the CLI's
+                # own schema — "later initializes do not change it" — so this call is
+                # the only one whose declaration counts. A per-turn re-initialize
+                # cannot widen it later.
+                initialized = session.control(
+                    "initialize",
+                    supportedDialogKinds=SUPPORTED_DIALOG_KINDS,
                 )
+                session.initialize_response = initialized
+                flags = msg.get("flags") or {}
+                session.current_model = flags.get("model")
+                session.current_effort = flags.get("effort")
+                surface = capabilities_from(
+                    initialized, session.current_model, session.current_effort)
                 ok(mid, sessionId=session.native_session_id, **surface)
 
             elif t == "send":
+                # Config first, so the turn runs under the settings it was sent with.
+                # Applied here rather than by the server as separate calls: one
+                # message means there is no window in which a turn could begin under
+                # a mix of old and new values.
+                for config_id, value in (msg.get("config") or {}).items():
+                    try:
+                        session.apply_config(config_id, value)
+                    except Exception as error:
+                        # Not fatal. An agent refusing a setting it no longer offers
+                        # is worth reporting, but losing the turn over it is worse
+                        # than running under the previous value.
+                        log("could not apply {}={}: {}".format(config_id, value, error))
+
                 command = msg.get("command")
                 text = msg.get("text") or ""
                 if command:
-                    # A slash command is a kind of turn, not a side channel, so
-                    # its output lands in the transcript like anything else.
+                    # A prompt command is a kind of turn, not a side channel, so its
+                    # output lands in the transcript like anything else. A control
+                    # command never reaches here — it resolves against config.
                     args = " ".join(str(v) for v in (msg.get("args") or {}).values())
                     text = "/{} {}".format(command, args).strip()
                 content = build_content(text, msg.get("attachments"))
@@ -975,22 +1241,31 @@ def serve():
                 ok(mid)
 
             elif t == "steer":
+                # The server has already checked the turn id against its own record;
+                # rechecking here would need state this adapter does not keep, and
+                # claude has no steer-with-precondition of its own. Carried in the
+                # protocol so an agent that *can* enforce it does.
                 session.to_claude({"type": "user",
                                    "message": {"role": "user",
                                                "content": msg.get("text") or ""}})
                 ok(mid)
 
-            elif t == "set":
-                if "model" in msg:
-                    session.control("set_model", model=msg["model"])
-                elif "permissionMode" in msg:
-                    session.control("set_permission_mode", mode=msg["permissionMode"])
-                elif "cwd" in msg:
-                    session.control("set_cwd", cwd=msg["cwd"])
-                else:
-                    err(mid, "UNSUPPORTED_FIELD", "nothing settable in that message")
+            elif t == "set_config":
+                config_id = msg.get("configId")
+                try:
+                    session.apply_config(config_id, msg.get("value"))
+                except UnknownConfig:
+                    err(mid, "UNSUPPORTED_FIELD",
+                        "'{}' is not settable on a claude session".format(config_id))
                     continue
-                ok(mid)
+                # The refreshed facet, not an acknowledgement: setting the model can
+                # change which effort levels exist, so the caller needs the new
+                # options rather than an assurance that the old ones still apply.
+                ok(mid, facets={"config": config_from(
+                    session.initialize_response,
+                    session.current_model,
+                    session.current_effort,
+                )})
 
             elif t == "resolve":
                 # `id` addresses the vendor request this answers, so it is passed

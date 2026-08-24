@@ -389,7 +389,7 @@ pub async fn json_body(response: Response<Body>) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("body was not JSON ({}): {}", e, text))
 }
 
-/// A generated adapter conforming to `sylph.agent.v2`.
+/// A generated adapter conforming to `sylph.agent.v3`.
 ///
 /// Python rather than bash: an adapter holds a duplex read loop and parses JSON,
 /// which bash does badly enough that a fixture written in it would be testing the
@@ -460,6 +460,12 @@ impl MockRunner {
             Behavior::Success | Behavior::BrokenDescribe => {
                 r#"
         ok(mid)
+        # A per-turn capability update that speaks about ONE facet, which is what
+        # `claude` actually does: its `system/init` arrives once per turn and carries
+        # only the permission mode. This line is the fixture's whole reason for
+        # existing — without it the suite cannot observe a partial update erasing the
+        # facets it never mentioned, and that bug shipped once already.
+        ev("capabilities", facets={"permissionMode": "default"})
         ev("thinking", "started", streamId="t1")
         ev("thinking", "delta", streamId="t1", text="think")
         ev("thinking", "completed", streamId="t1", text="thinking done")
@@ -513,7 +519,7 @@ impl MockRunner {
             r#"
         ok(mid, adapter="mock/1.0.0",
            agent={"name": NAME, "version": "0.0.0"},
-           supports=["interrupt", "steer", "approval", "slash"],
+           supports=["interrupt", "steer", "approval", "slash", "set_config"],
            flags={"model": {"choices": ["fast", "slow"], "description": "Mock model"},
                   "effort": {"choices": ["low", "high"], "description": "Mock effort"}})
 "#
@@ -555,9 +561,25 @@ for raw in sys.stdin:
     if t == "hello":{hello}
     elif t == "open":
         ok(mid, sessionId="mock-session-1",
-           commands=[{{"name": "noop", "description": "Does nothing"}}],
-           models=[{{"id": "fast", "label": "Fast"}}],
+           commands=[{{"name": "noop", "description": "Does nothing"}},
+                     {{"name": "model", "description": "Pick a model",
+                       "kind": "control", "configId": "model"}}],
+           config=[{{"type": "select", "id": "model", "name": "Model",
+                     "category": "model", "currentValue": "fast",
+                     "options": [{{"value": "fast", "name": "Fast"}},
+                                 {{"value": "slow", "name": "Slow"}}]}}],
+           subagents=[{{"name": "Explore", "description": "Search"}}],
            permissionMode="default")
+    elif t == "set_config":
+        if msg.get("configId") != "model":
+            emit({{"t": "err", "id": mid, "code": "UNSUPPORTED_FIELD",
+                   "message": "no such option"}})
+            continue
+        ok(mid, facets={{"config": [
+            {{"type": "select", "id": "model", "name": "Model", "category": "model",
+              "currentValue": msg.get("value"),
+              "options": [{{"value": "fast", "name": "Fast"}},
+                          {{"value": "slow", "name": "Slow"}}]}}]}})
     elif t == "send":{on_send}
     elif t == "interrupt":
         ok(mid)

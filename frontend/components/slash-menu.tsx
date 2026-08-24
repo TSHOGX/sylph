@@ -21,6 +21,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { SessionCommand } from "@/lib/api";
 import { fuzzyRank } from "@/lib/fuzzy";
+import { useT } from "@/lib/i18n";
 
 interface Props {
   /** Every command the agent reported. */
@@ -42,23 +43,40 @@ interface Props {
  * almost always in the first few. */
 const VISIBLE = 8;
 
+/**
+ * Rank commands against what has been typed.
+ *
+ * A plain function, not a hook, so the ranking rule can be tested without a DOM —
+ * the hook below is only the memo around it.
+ */
+export function slashMatches(
+  commands: SessionCommand[],
+  query: string,
+): SessionCommand[] {
+  if (commands.length === 0) return [];
+  // `fuzzyRank` returns scored wrappers; only the items matter here. Field order is
+  // the ranking: the name first, so typing `ver` prefers a command *called* verify
+  // over one that merely mentions verifying, then the agent's own aliases, then the
+  // description.
+  //
+  // Aliases are matched because the terminal matches them — `/usage` answers to
+  // `cost` and `stats` — and a menu that finds nothing for a name the agent accepts
+  // reads as a missing command.
+  const ranked = query
+    ? fuzzyRank(commands, query, (command) => [
+        command.name,
+        ...(command.aliases ?? []),
+        command.description ?? "",
+      ]).map((result) => result.item)
+    : commands;
+  return ranked.slice(0, VISIBLE);
+}
+
 export function useSlashMatches(
   commands: SessionCommand[],
   query: string,
 ): SessionCommand[] {
-  return useMemo(() => {
-    if (commands.length === 0) return [];
-    // `fuzzyRank` returns scored wrappers; only the items matter here. The name is
-    // ranked ahead of the description by field order, so typing `ver` prefers a
-    // command *called* verify over one that merely mentions verifying.
-    const ranked = query
-      ? fuzzyRank(commands, query, (command) => [
-          command.name,
-          command.description ?? "",
-        ]).map((result) => result.item)
-      : commands;
-    return ranked.slice(0, VISIBLE);
-  }, [commands, query]);
+  return useMemo(() => slashMatches(commands, query), [commands, query]);
 }
 
 export function SlashMenu({
@@ -71,6 +89,7 @@ export function SlashMenu({
 }: Props) {
   const matches = useSlashMatches(commands, query);
   const activeRef = useRef<HTMLLIElement>(null);
+  const t = useT();
 
   // Keep the highlighted row visible as the arrow keys move past the fold.
   useEffect(() => {
@@ -109,6 +128,14 @@ export function SlashMenu({
             <span className="font-mono font-medium text-ink">/{command.name}</span>
             {command.argHint ? (
               <span className="font-mono text-ink-faint">{command.argHint}</span>
+            ) : null}
+            {/* A control command opens a picker rather than sending a message, and
+                that is worth saying before it is chosen: the two look identical in a
+                list and behave nothing alike. */}
+            {command.kind === "control" ? (
+              <span className="shrink-0 rounded border border-line px-1 text-3xs text-ink-faint">
+                {t("composer.setting")}
+              </span>
             ) : null}
             {command.description ? (
               <span className="min-w-0 flex-1 truncate">{command.description}</span>
