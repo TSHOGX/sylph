@@ -40,17 +40,30 @@ export function Overlay({
    */
   size = "picker",
   describedBy,
+  autoFocus = false,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   size?: "picker" | "panel" | "viewer" | "viewer-full";
   describedBy?: string;
+  /**
+   * Move focus into the dialog on open.
+   *
+   * Off by default because most overlays here carry their own `autoFocus` input — a
+   * search field, a filter — and taking focus to the container first would move the
+   * caret out of it.
+   *
+   * A dialog whose content is *only* buttons has no such input, and then the default
+   * is wrong rather than merely unnecessary: focus stays on the page behind, so the
+   * dialog cannot be reached or dismissed by keyboard at all (WCAG 2.4.3, 2.1.2).
+   * Opt in for those. This was a real defect in the config picker, caught by the
+   * accessibility spec that used to cover the dialog it replaced.
+   */
+  autoFocus?: boolean;
 }) {
   const titleId = useId();
-  // `autoFocus: false` — the pickers all carry an `autoFocus` input, and taking
-  // focus to the container first would move the caret out of it.
-  const { ref, onKeyDown } = useDialog<HTMLDivElement>({ onClose, autoFocus: false });
+  const { ref, onKeyDown } = useDialog<HTMLDivElement>({ onClose, autoFocus });
 
   // No body-scroll lock. This used to set `body.style.overflow = "hidden"`, which
   // was both ineffective against iOS rubber-banding and is now redundant: the

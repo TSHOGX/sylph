@@ -109,7 +109,6 @@ export const zh: Dictionary = {
   "composer.noConfigOptions": "该 agent 在这里没有可配置项。",
   "composer.attachEllipsis": "附加文件……",
   "composer.saveToWorkspace": "把附件保存到工作区……",
-  "composer.runCommand": "执行命令……",
   "composer.stagedAttachments": "已暂存的附件",
   "composer.placeholder": "输入消息……",
   "composer.placeholderBusy": "等待当前回合结束……",

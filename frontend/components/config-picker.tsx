@@ -34,7 +34,7 @@ function optionLabel(option: ConfigOption): string {
  * model ids are things like `claude-opus-5[1m]`, and a control row is not where a
  * user should have to decode one.
  */
-export function currentLabel(option: ConfigOption, t: Translate): string {
+function currentLabel(option: ConfigOption, t: Translate): string {
   if (option.type === "boolean") {
     return option.currentValue ? t("action.on") : t("action.off");
   }

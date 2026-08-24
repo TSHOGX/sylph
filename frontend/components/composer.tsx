@@ -85,7 +85,6 @@ import {
   CheckIcon,
   ChevronDownIcon,
   ChipIcon,
-  CommandIcon,
   FileImageIcon,
   FileTextIcon,
   PaperclipIcon,
@@ -166,8 +165,6 @@ export function Composer({
   sendError,
   onStop,
   stopping,
-  hasCommands,
-  onOpenCommands,
   canInterrupt = false,
   onInterrupt,
   canSteer = false,
@@ -208,8 +205,6 @@ export function Composer({
   sendError: unknown;
   onStop: () => void;
   stopping: boolean;
-  hasCommands: boolean;
-  onOpenCommands: () => void;
   /** Whether the agent declared it can end a turn without ending the session. */
   canInterrupt?: boolean;
   onInterrupt?: () => void;
@@ -510,18 +505,6 @@ export function Composer({
           },
         ]
       : []),
-    ...(hasCommands
-      ? [
-          {
-            label: t("composer.runCommand"),
-            icon: <CommandIcon size={14} />,
-            separated: true,
-            disabled,
-            onSelect: onOpenCommands,
-          },
-        ]
-      : []),
-
     // Whatever the agent reports beyond the row's two categories. Present because
     // the agent declared it, so it is real configuration a user must be able to
     // reach — `claude` reports permissions and fast mode here.
@@ -796,7 +779,7 @@ export function Composer({
                 <IconButton
                   label={t("action.add")}
                   variant="ghost"
-                  disabled={disabled && !hasCommands}
+                  disabled={disabled}
                   size={isMobile ? 20 : 16}
                   {...trigger}
                 >
@@ -1027,7 +1010,13 @@ function ConfigDialog({
   );
 
   return (
-    <Overlay title={config.length === 1 ? (config[0].name ?? config[0].id) : t("composer.configureEllipsis")} onClose={onClose}>
+    <Overlay
+      title={config.length === 1 ? (config[0].name ?? config[0].id) : t("composer.configureEllipsis")}
+      onClose={onClose}
+      // Nothing inside is a text field, so without this focus stays on the page
+      // behind the dialog and it cannot be answered or dismissed by keyboard.
+      autoFocus
+    >
       {items.length === 0 ? (
         <p className="px-4 py-3 text-xs text-ink-muted">
           {t("composer.noConfigOptions")}

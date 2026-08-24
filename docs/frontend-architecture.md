@@ -227,9 +227,11 @@ frontend/
 │   ├── settings-panel.tsx      # Cmd+,
 │   ├── history-overlay.tsx     # Cmd+Shift+K, plus the workspace switcher
 │   ├── directory-picker.tsx    # Server-enumerated folder chooser
-│   ├── composer.tsx            # Message entry, + menu, flag chips, attachments
+│   ├── composer.tsx            # Message entry, + menu, config controls, attachments
 │   ├── attachment-picker.tsx
-│   ├── command-dialog.tsx      # Agent-declared commands
+│   ├── slash-menu.tsx          # The agent's own commands, as the user types
+│   ├── config-picker.tsx       # Typed session config; what a control command opens
+│   ├── approval-dialog.tsx     # Answering what an agent is blocked on
 │   ├── badges.tsx              # Origin and status badges
 │   ├── icons.tsx               # ~40 hand-authored SVG paths, no dependency
 │   └── ui/
@@ -1113,10 +1115,50 @@ a phone user arrives with from every messaging app.
 The control row is `flex-nowrap` with a **horizontally scrolling middle
 section**, not `flex-wrap`. Wrapping would make the composer's height depend on
 how many flags a runner declares, so the transcript would reflow when a model
-name changed. Scrolling keeps the height fixed and Send pinned. Only `model` and
-`effort` are promoted to the row; anything else a runner declares still gets a
-control, in the menu — so the row is a fixed shape no matter what `--describe`
-returns.
+name changed. Scrolling keeps the height fixed and Send pinned. Only the `model`
+and `effort` categories are promoted to the row; anything else the agent declares
+still gets a control, in the menu — so the row is a fixed shape no matter what an
+agent reports.
+
+The row is driven by the session's **live typed config**, not by the agent
+descriptor's `flags`. The two answer different questions — what can be chosen
+before a session exists, against what this running session reports — and only the
+live answer is knowable: `claude` declares an empty `model.choices` in its
+descriptor, because its catalogue depends on the account and is not known until the
+CLI has loaded. A descriptor-driven model control was therefore permanently empty.
+A descriptor flag the live config already covers is dropped rather than rendered
+twice; two controls for one setting disagree the moment either is used, and nothing
+on screen says which won.
+
+### Two kinds of command
+
+The command surface is one inline menu, not a dialog. A slash command is a *way of
+writing a message*, so the menu is a listbox the textarea owns and announces
+through `aria-activedescendant` — focus never leaves the input, and Tab completes
+the way it does in the terminal this is modelled on.
+
+What a command does depends on its `kind`, which the agent reports
+(`docs/session-protocol.md` § Two kinds of command):
+
+- A **prompt** command runs as a turn. Its output is durable history.
+- A **control** command opens `config-picker.tsx` and never becomes a turn.
+
+That split is the whole reason `/model` works. Sent as prompt text to a headless
+CLI it can only answer in prose, because there is no picker on that side of the
+wire — so the picker has to be the client's, driven by the typed option the command
+names. Nothing in the frontend names a model, an effort level, or a permission
+mode; it renders whatever options the session declared, grouped by their own
+`category`.
+
+An unknown command is deliberately **not** intercepted: it goes through as text and
+the agent says it does not recognize it. Intercepting would mean this UI deciding a
+command does not exist, when the agent is the only thing that knows and the list
+can be stale by a keystroke. Aliases are matched, because the agent honours them —
+`/cost` and `/stats` are `/usage`.
+
+A previous `command-dialog.tsx` ran commands from the *static* descriptor. It was
+removed rather than fixed: that list carries no `kind`, so it would have sent
+`/model` as a turn, which is exactly the defect the split exists to prevent.
 
 Two mobile-specific behaviours:
 

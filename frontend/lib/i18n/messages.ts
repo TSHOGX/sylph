@@ -144,7 +144,6 @@ export const en = {
   "composer.noConfigOptions": "This agent reports nothing to configure here.",
   "composer.attachEllipsis": "Attach files...",
   "composer.saveToWorkspace": "Save attachments to workspace...",
-  "composer.runCommand": "Run a command...",
   "composer.stagedAttachments": "Staged attachments",
   "composer.placeholder": "Send a message...",
   "composer.placeholderBusy": "Waiting for the current turn to finish...",

@@ -114,7 +114,9 @@ implemented either way yet.
 
 **Deliverables:**
 - ✅ Attachment upload (drag/drop, image previews) — `components/attachment-picker.tsx`
-- ✅ Agent command dialogs (model/effort selection, status checks) — `components/command-dialog.tsx`
+- ✅ Agent command dialogs (model/effort selection, status checks) — since replaced by
+  the slash menu and `components/config-picker.tsx`, which read the *live* command and
+  config surface rather than the static agent descriptor
 - ✅ TraceDB search integration — `GET /api/v1/search`, `app/search/page.tsx`
 - ✅ Native session import flow — `POST /api/v1/sessions/import`
 - ✅ Session filters (agent, workspace, time) — server-side, `LIMIT`-cap safe

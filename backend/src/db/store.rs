@@ -356,14 +356,16 @@ impl LiveStore {
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
-        sqlx::query(
-            "UPDATE sessions SET backend_session_id = ?, updated_at_ms = ? WHERE id = ?",
-        )
-        .bind(backend_session_id)
-        .bind(now_ms())
-        .bind(session_id)
-        .execute(&mut *tx)
-        .await?;
+        // `updated_at_ms` is deliberately not touched. It orders sessions by *user
+        // activity* — it is what "pick up where you left off" and the sidebar sort
+        // mean — and learning where an agent keeps its own session is bookkeeping, not
+        // activity. Bumping it made merely *opening* an old session reorder it above a
+        // newer one, because establishing a link persists this id.
+        sqlx::query("UPDATE sessions SET backend_session_id = ? WHERE id = ?")
+            .bind(backend_session_id)
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
 
         if let Some(incarnation_id) = incarnation_id {
             sqlx::query("UPDATE backend_incarnations SET backend_session_id = ? WHERE id = ?")

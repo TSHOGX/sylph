@@ -523,3 +523,41 @@ async fn a_session_relinks_after_its_link_is_torn_down() {
         "a resumed link reports the same surface"
     );
 }
+
+/// Opening a session must not make it look like the most recently worked-in one.
+///
+/// `updated_at_ms` orders sessions by *user activity* — it is what the start screen's
+/// "pick up where you left off" and the sidebar's sort both mean. Establishing a link
+/// persists the agent's native session id, and that write used to bump the timestamp,
+/// so merely *reading* an older session reordered it above a newer one. It surfaced as
+/// a start-screen spec opening the wrong session, which reads as a UI bug.
+#[tokio::test]
+async fn establishing_a_link_does_not_reorder_a_session_as_recent() {
+    let server = TestBackend::start().await;
+    let older = server.create_session("mock").await;
+    let newer = server.create_session("mock").await;
+
+    let before = json_body(server.get_authed(&format!("/api/v1/sessions/{}", older)).await)
+        .await["session"]["updatedAtMs"]
+        .as_i64()
+        .unwrap();
+
+    // Establishing a link is what persists the native session id.
+    server
+        .get_authed(&format!("/api/v1/sessions/{}/capabilities", older))
+        .await;
+
+    let after = json_body(server.get_authed(&format!("/api/v1/sessions/{}", older)).await)
+        .await["session"]["updatedAtMs"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(before, after, "opening a session is not activity in it");
+
+    // And the ordering the start screen depends on still holds.
+    let newer_updated =
+        json_body(server.get_authed(&format!("/api/v1/sessions/{}", newer)).await).await
+            ["session"]["updatedAtMs"]
+            .as_i64()
+            .unwrap();
+    assert!(newer_updated >= after, "the newer session is still the newer one");
+}

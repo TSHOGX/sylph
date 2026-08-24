@@ -26,20 +26,23 @@ test("the skip link moves focus to main content", async ({ page }) => {
   expect(await page.evaluate(() => window.location.hash)).toBe("#main");
 });
 
-test("the command dialog traps focus and returns it on close", async ({ page }) => {
+test("a control command's picker traps focus and returns it on close", async ({ page }) => {
   await createSession(page);
 
-  // The mock runner declares one command, so the item is present. Running a command
-  // moved from a standalone button into the composer's `+` menu: it is occasional,
-  // where the control row is reserved for what changes on every turn.
-  const opener = page.getByRole("button", { name: "Add", exact: true });
-  await opener.click();
-  await page
-    .getByRole("menu", { name: "Add" })
-    .getByRole("menuitem", { name: /Run a command/ })
-    .click();
+  // Retargeted from the old `CommandDialog`, which was removed: it ran commands from
+  // the static agent descriptor, a list with no `kind`, so it would have sent
+  // `/model` as a turn. The config picker is the surface that replaced it, and focus
+  // handling is what this spec has always actually been about.
+  // Opened from the slash menu rather than the Send button, so the opener is the
+  // textarea itself — which is where a keyboard user was, and where focus has to
+  // return. Driving it by keyboard is also the only way this asserts the real path.
+  const composer = page.getByLabel("Message");
+  await composer.click();
+  await composer.fill("/model");
+  await expect(page.getByRole("listbox", { name: "Agent commands" })).toBeVisible();
+  await composer.press("Enter");
 
-  const dialog = page.getByRole("dialog");
+  const dialog = page.getByRole("dialog", { name: "Model" });
   await expect(dialog).toBeVisible();
   // Focus moved into the dialog rather than staying on the page behind it.
   await expect(dialog.locator(":focus")).toBeVisible();
@@ -47,9 +50,10 @@ test("the command dialog traps focus and returns it on close", async ({ page }) 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
 
-  // The regression this guards: without focus restoration a keyboard user is
-  // dropped at the top of the document and must tab back to where they were.
-  await expect(opener).toBeFocused();
+  // The regression this guards: without focus restoration a keyboard user is dropped
+  // at the top of the document and must tab back to where they were. The composer is
+  // where they were, because that is what opened the picker.
+  await expect(composer).toBeFocused();
 });
 
 /**

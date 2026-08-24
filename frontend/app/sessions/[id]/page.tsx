@@ -28,7 +28,6 @@ import { useAgentSession } from "@/lib/use-agent-session";
 import { ApprovalDialog } from "@/components/approval-dialog";
 import { type StagedAttachment } from "@/components/attachment-picker";
 import { Composer } from "@/components/composer";
-import { CommandDialog, type CommandInvocation } from "@/components/command-dialog";
 import { Timeline } from "@/components/timeline";
 import { OriginBadge, SessionStatusBadge, TurnStatusBadge } from "@/components/badges";
 import { Button, IconButton } from "@/components/ui/button";
@@ -57,7 +56,6 @@ export default function SessionPage() {
   const [attachments, setAttachments] = useState<StagedAttachment[]>([]);
   /** Turn started by this tab. Null means "whatever history says is running". */
   const [sentTurnId, setSentTurnId] = useState<string | null>(null);
-  const [commandOpen, setCommandOpen] = useState(false);
   /** Global expand override from `Shift+E` / `Shift+C`. Null restores per-row
    *  defaults, so the timeline is not stuck open after one use. */
   const [expandAll, setExpandAll] = useState<boolean | null>(null);
@@ -180,18 +178,22 @@ export default function SessionPage() {
     },
   });
 
-  /** A command runs as a turn, so its output streams into the same transcript. */
+  /**
+   * A prompt command runs as a turn, so its output streams into the same transcript.
+   *
+   * Only a `prompt` command reaches here. A `control` command resolves against typed
+   * session config and never becomes a turn — the composer routes on `kind`.
+   */
   const runCommand = useMutation({
-    mutationFn: (invocation: CommandInvocation) =>
+    mutationFn: ({ command, args }: { command: string; args: Record<string, string> }) =>
       api.turns.create(sessionId, {
-        command: invocation.command,
-        args: invocation.args,
+        command,
+        args,
         idempotencyKey: crypto.randomUUID(),
       }),
     onSuccess: (result) => {
       hasCommittedWork.current = true;
       setSentTurnId(result.turn.id);
-      setCommandOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "history"] });
     },
@@ -210,11 +212,6 @@ export default function SessionPage() {
   const [dismissedRequest, setDismissedRequest] = useState<string | null>(null);
   const pendingRequest =
     agent.current && agent.current.id !== dismissedRequest ? agent.current : undefined;
-  const commands = useMemo(() => {
-    const descriptor = agentsQuery.data?.agents.find((a) => a.name === session?.agent);
-    return descriptor?.commands ?? {};
-  }, [agentsQuery.data, session?.agent]);
-  const hasCommands = Object.keys(commands).length > 0;
 
   const openFile = useCallback(
     (path: string, line?: number) => {
@@ -508,8 +505,6 @@ export default function SessionPage() {
           runCommand.mutate({ command: name, args: rest ? { args: rest } : {} })
         }
         onSetConfig={(configId, value) => agent.setConfig(configId, value)}
-        hasCommands={hasCommands}
-        onOpenCommands={() => setCommandOpen(true)}
         // Gated on what the agent declared rather than offered unconditionally: an
         // interrupt button on an agent with no interrupt is a promise the handshake
         // already told us we cannot keep. `pi` supports both; a minimal adapter
@@ -522,14 +517,6 @@ export default function SessionPage() {
         onSteer={(value) => agent.steer(value, liveTurnId ?? undefined)}
       />
 
-      {commandOpen && (
-        <CommandDialog
-          commands={commands}
-          busy={runCommand.isPending}
-          onClose={() => setCommandOpen(false)}
-          onSubmit={(invocation) => runCommand.mutate(invocation)}
-        />
-      )}
     </>
   );
 }
