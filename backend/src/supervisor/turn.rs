@@ -149,9 +149,18 @@ impl LinkedSupervisor {
 
         self.hub.open(&turn_id).await;
 
+        // Registered before the turn is marked running, so there is no window in
+        // which the journal says `running` but no waiter exists. A `stop` landing
+        // in that window would find a running turn it could not settle and report
+        // STOP_ALREADY_COMPLETED — which showed up as a flaky test under parallel
+        // load rather than as an obvious bug.
+        let (tx, rx) = oneshot::channel();
+        self.waiters.lock().await.insert(turn_id.clone(), tx);
+
         if !self.store.mark_turn_running(&turn_id, &incarnation_id).await? {
             // Already claimed, stopped, or interrupted before it began.
             debug!("Turn {} was no longer queued; skipping", turn_id);
+            self.waiters.lock().await.remove(&turn_id);
             self.hub.close(&turn_id).await;
             return Ok(());
         }
@@ -163,11 +172,6 @@ impl LinkedSupervisor {
             self.emit(&session_id, &turn_id, server_event("user", prompt.clone(), None))
                 .await?;
         }
-
-        // Registered before the send, so a turn that completes immediately still
-        // finds a waiter rather than resolving into nothing.
-        let (tx, rx) = oneshot::channel();
-        self.waiters.lock().await.insert(turn_id.clone(), tx);
 
         // Establishing may take seconds — an agent CLI loads a project — so the
         // status event goes out first and the UI can say what it is waiting for.

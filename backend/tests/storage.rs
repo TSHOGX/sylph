@@ -1,0 +1,311 @@
+//! Consolidation and replay, end to end.
+//!
+//! The properties here are the ones `docs/storage.md` exists to guarantee: a turn
+//! moves out of the journal losslessly, a client can replay exactly what it saw,
+//! and history is durable before the journal forgets.
+
+mod common;
+
+use common::TestBackend;
+use sylph_web_backend::models::Event;
+use sylph_web_backend::storage::cas::BlobStore;
+use sylph_web_backend::storage::history::{self, HistoryStore};
+use tempfile::TempDir;
+
+async fn history_store() -> (HistoryStore, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let blobs = BlobStore::new(dir.path().join("cas"));
+    let store = HistoryStore::open(dir.path().join("history.db").to_str().unwrap(), blobs)
+        .await
+        .unwrap();
+    (store, dir)
+}
+
+fn event(seq: i32, kind: &str, phase: Option<&str>, stream: Option<&str>, text: &str, at_ms: i64) -> Event {
+    Event {
+        id: None,
+        session_id: "s1".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        seq,
+        kind: kind.to_string(),
+        phase: phase.map(str::to_string),
+        stream_id: stream.map(str::to_string),
+        name: None,
+        text: text.to_string(),
+        data_json: "{}".to_string(),
+        is_error: false,
+        stability: if phase == Some("completed") || phase.is_none() {
+            "stable".to_string()
+        } else {
+            "ephemeral".to_string()
+        },
+        source: "agent".to_string(),
+        created_at_ms: at_ms,
+        reconciled_at_ms: None,
+    }
+}
+
+/// One assistant block that streamed in four deltas, consolidated and replayed.
+/// This is the whole point of the design in one test.
+#[tokio::test]
+async fn a_streamed_block_replays_exactly_what_the_client_saw() {
+    let (history, _dir) = history_store().await;
+
+    let events = vec![
+        event(0, "user", None, None, "the question", 1000),
+        event(1, "assistant", Some("started"), Some("a1"), "", 1100),
+        event(2, "assistant", Some("delta"), Some("a1"), "I'll ", 1100),
+        event(3, "assistant", Some("delta"), Some("a1"), "read ", 1134),
+        event(4, "assistant", Some("delta"), Some("a1"), "the ", 1185),
+        event(5, "assistant", Some("delta"), Some("a1"), "config.", 1197),
+        event(6, "assistant", Some("completed"), Some("a1"), "I'll read the config.", 1200),
+    ];
+
+    let blocks = history::consolidate(&events);
+    history.put_blocks(&blocks).await.unwrap();
+
+    let stored = history.blocks("s1", -1).await.unwrap();
+    // The user's message and one assistant block: the deltas folded into it.
+    assert_eq!(stored.len(), 2);
+
+    let assistant = stored.iter().find(|b| b.kind == "assistant").unwrap();
+    assert_eq!(assistant.text, "I'll read the config.");
+
+    let replayed = HistoryStore::replay_block(assistant);
+    let texts: Vec<&str> = replayed.iter().map(|d| d.text.as_str()).collect();
+    assert_eq!(texts, vec!["I'll ", "read ", "the ", "config."]);
+    // Timing is reconstructed too, which is what makes a paced replay possible.
+    let arrivals: Vec<i64> = replayed.iter().map(|d| d.at_ms).collect();
+    assert_eq!(arrivals, vec![1100, 1134, 1185, 1197]);
+}
+
+/// Deltas must not survive as rows. Storing them individually is the ~20× cost
+/// the fold exists to avoid.
+#[tokio::test]
+async fn deltas_become_one_block_rather_than_a_row_each() {
+    let (history, _dir) = history_store().await;
+
+    let mut events = vec![event(0, "assistant", Some("started"), Some("a1"), "", 1000)];
+    for i in 0..200 {
+        events.push(event(
+            i + 1,
+            "assistant",
+            Some("delta"),
+            Some("a1"),
+            "token ",
+            1000 + i as i64 * 5,
+        ));
+    }
+    let full = "token ".repeat(200);
+    events.push(event(201, "assistant", Some("completed"), Some("a1"), &full, 2000));
+
+    history
+        .put_blocks(&history::consolidate(&events))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        history.block_count("s1").await.unwrap(),
+        1,
+        "200 deltas and their completion are one block"
+    );
+    let block = &history.blocks("s1", -1).await.unwrap()[0];
+    assert_eq!(HistoryStore::replay_block(block).len(), 200);
+}
+
+#[tokio::test]
+async fn an_unstreamed_block_replays_as_a_single_arrival() {
+    let (history, _dir) = history_store().await;
+    // A tool result arrives complete, with no deltas at all.
+    let events = vec![event(
+        0,
+        "tool_result",
+        Some("completed"),
+        Some("c1"),
+        "file contents",
+        1000,
+    )];
+
+    history
+        .put_blocks(&history::consolidate(&events))
+        .await
+        .unwrap();
+
+    let block = &history.blocks("s1", -1).await.unwrap()[0];
+    assert!(block.folded.is_none());
+    let replayed = HistoryStore::replay_block(block);
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].text, "file contents");
+}
+
+/// A large payload is externalized, and reads back through the blob store
+/// transparently.
+#[tokio::test]
+async fn a_large_block_is_externalized_and_still_reads_back_whole() {
+    let (history, _dir) = history_store().await;
+    let big = "x".repeat(20_000);
+    let events = vec![event(0, "tool_result", Some("completed"), Some("c1"), &big, 1000)];
+
+    history
+        .put_blocks(&history::consolidate(&events))
+        .await
+        .unwrap();
+
+    let block = &history.blocks("s1", -1).await.unwrap()[0];
+    assert_eq!(block.text.len(), 20_000);
+    assert_eq!(block.text, big);
+}
+
+/// The same file read in two turns is one object on disk.
+#[tokio::test]
+async fn a_payload_repeated_across_turns_is_stored_once() {
+    let (history, _dir) = history_store().await;
+    let shared = "the same file contents ".repeat(400);
+
+    for seq in [0, 1] {
+        let events = vec![event(
+            seq,
+            "tool_result",
+            Some("completed"),
+            Some(&format!("c{seq}")),
+            &shared,
+            1000 + seq as i64,
+        )];
+        history
+            .put_blocks(&history::consolidate(&events))
+            .await
+            .unwrap();
+    }
+
+    let objects = count_files(&_dir.path().join("cas"));
+    assert_eq!(objects, 1, "content addressing stores it once");
+    // And both blocks still read it.
+    for block in history.blocks("s1", -1).await.unwrap() {
+        assert_eq!(block.text, shared);
+    }
+}
+
+/// Consolidation is idempotent, which is what makes a crash between the history
+/// insert and the journal delete harmless.
+#[tokio::test]
+async fn consolidating_the_same_turn_twice_is_harmless() {
+    let (history, _dir) = history_store().await;
+    let events = vec![
+        event(0, "user", None, None, "q", 1000),
+        event(1, "assistant", Some("completed"), Some("a1"), "a", 1100),
+    ];
+
+    let blocks = history::consolidate(&events);
+    history.put_blocks(&blocks).await.unwrap();
+    history.put_blocks(&blocks).await.unwrap();
+
+    assert_eq!(history.block_count("s1").await.unwrap(), 2);
+}
+
+/// The ordering rule: history holds the turn before the journal drops it. A turn
+/// consolidated through the real store must be readable from history and gone
+/// from the journal, with nothing lost in between.
+#[tokio::test]
+async fn a_consolidated_turn_leaves_the_journal_and_survives_in_history() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            serde_json::json!({"text": "consolidate me"}),
+        )
+        .await;
+    let turn_id = common::json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&turn_id).await;
+
+    let journalled = backend
+        .state
+        .store
+        .turn_events_after(&turn_id, -1)
+        .await
+        .unwrap();
+    assert!(!journalled.is_empty(), "the turn must be journalled first");
+
+    let (history, _dir) = history_store().await;
+    let moved = history::consolidate_turn(&backend.state.store, &history, &turn_id)
+        .await
+        .unwrap();
+
+    assert!(moved > 0);
+    // Gone from the journal…
+    assert!(backend
+        .state
+        .store
+        .turn_events_after(&turn_id, -1)
+        .await
+        .unwrap()
+        .is_empty());
+    // …and readable from history, with the assistant text intact.
+    let blocks = history.turn_blocks(&turn_id).await.unwrap();
+    assert!(blocks.iter().any(|b| b.text.contains("mock reply")));
+}
+
+/// A block whose completion never arrived — the link died mid-answer — is kept as
+/// what did arrive. Losing a half-streamed answer is exactly the case a user most
+/// wants to see.
+#[tokio::test]
+async fn a_block_cut_off_mid_stream_keeps_what_arrived() {
+    let (history, _dir) = history_store().await;
+    let events = vec![
+        event(0, "assistant", Some("started"), Some("a1"), "", 1000),
+        event(1, "assistant", Some("delta"), Some("a1"), "I was ", 1010),
+        event(2, "assistant", Some("delta"), Some("a1"), "saying", 1020),
+        // No completed event: the agent died here.
+    ];
+
+    history
+        .put_blocks(&history::consolidate(&events))
+        .await
+        .unwrap();
+
+    let blocks = history.blocks("s1", -1).await.unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].text, "I was saying");
+    assert_eq!(blocks[0].phase.as_deref(), Some("incomplete"));
+}
+
+#[tokio::test]
+async fn multibyte_deltas_survive_the_round_trip() {
+    let (history, _dir) = history_store().await;
+    let events = vec![
+        event(0, "assistant", Some("delta"), Some("a1"), "我会先", 1000),
+        event(1, "assistant", Some("delta"), Some("a1"), "读取配置。", 1050),
+        event(2, "assistant", Some("completed"), Some("a1"), "我会先读取配置。", 1100),
+    ];
+
+    history
+        .put_blocks(&history::consolidate(&events))
+        .await
+        .unwrap();
+
+    let block = &history.blocks("s1", -1).await.unwrap()[0];
+    let replayed = HistoryStore::replay_block(block);
+    let rebuilt: String = replayed.iter().map(|d| d.text.as_str()).collect();
+    assert_eq!(rebuilt, "我会先读取配置。");
+}
+
+fn count_files(root: &std::path::Path) -> usize {
+    let mut count = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                count += 1;
+            }
+        }
+    }
+    count
+}

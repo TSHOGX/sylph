@@ -39,6 +39,9 @@ pub mod middleware;
 pub mod models;
 pub mod paths;
 pub mod runners;
+/// Durable, replayable history: folded deltas, content-addressed blobs, and
+/// watermark-driven retention.
+pub mod storage;
 pub mod supervisor;
 pub mod tracedb;
 

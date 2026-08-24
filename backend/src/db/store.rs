@@ -874,6 +874,38 @@ impl LiveStore {
         .map_err(Error::Database)
     }
 
+    /// Drop a turn's journal rows once history holds them.
+    ///
+    /// Called only by consolidation, and only after the history insert has
+    /// committed. `docs/storage.md` states the rule: history is durable before the
+    /// journal forgets, never the reverse.
+    pub async fn delete_turn_events(&self, turn_id: &str) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM events WHERE turn_id = ?")
+            .bind(turn_id)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::Database)?;
+        Ok(result.rows_affected())
+    }
+
+    /// Turns whose events are still in the journal, oldest first.
+    ///
+    /// The consolidation work list. Only terminal turns qualify: a running turn's
+    /// stream is still being appended to.
+    pub async fn consolidatable_turns(&self, limit: i64) -> Result<Vec<String>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT t.id FROM turns t
+               JOIN events e ON e.turn_id = t.id
+              WHERE t.status IN ('completed', 'failed', 'cancelled', 'interrupted')
+              ORDER BY t.completed_at_ms
+              LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::Database)
+    }
+
     /// Abandon every open request across all sessions, for startup recovery.
     ///
     /// No link survives a restart, so anything still `pending` in the journal is
