@@ -475,3 +475,51 @@ async fn a_turn_does_not_erase_the_session_command_list() {
     assert!(!after["capabilities"]["config"].as_array().unwrap().is_empty());
     assert!(!after["capabilities"]["subagents"].as_array().unwrap().is_empty());
 }
+
+/// A session survives losing its link, which is the ordinary path rather than an
+/// error path: links idle out after thirty minutes, die with the server, and can be
+/// detached deliberately.
+///
+/// The turn after any of those has to establish a fresh link by resuming the agent's
+/// native session id — and `open` must answer with that id, because the server treats
+/// a null as an unresumable session and refuses the link. The claude adapter reported
+/// null on exactly this branch, so a session became permanently unlinkable the moment
+/// its first link went away. Nothing caught it, because every test created a session
+/// and used it immediately.
+#[tokio::test]
+async fn a_session_relinks_after_its_link_is_torn_down() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    let first = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}/capabilities", session_id))
+            .await,
+    )
+    .await;
+    assert_eq!(first["attached"], true);
+    let commands = first["capabilities"]["commands"].as_array().unwrap().len();
+
+    let detached = json_body(
+        server
+            .delete_authed(&format!("/api/v1/sessions/{}/link", session_id))
+            .await,
+    )
+    .await;
+    assert_eq!(detached["attached"], false);
+
+    // The assertion the bug would fail: asking again must establish a new link by
+    // resuming, not report a session that can never be spoken to again.
+    let relinked = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}/capabilities", session_id))
+            .await,
+    )
+    .await;
+    assert_eq!(relinked["attached"], true, "a detached session must be relinkable");
+    assert_eq!(
+        relinked["capabilities"]["commands"].as_array().unwrap().len(),
+        commands,
+        "a resumed link reports the same surface"
+    );
+}

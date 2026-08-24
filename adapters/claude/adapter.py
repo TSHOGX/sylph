@@ -225,6 +225,15 @@ class Session:
 
         if session_id:
             argv += ["-r", session_id]
+            # Recorded now, not discovered later. `open` must answer with the id, and
+            # on this path the only other source is claude's first message — which has
+            # not arrived when the reply is due. Leaving it unset made a resumed link
+            # answer `sessionId: null`, which the server rejects as an unresumable
+            # session ("Adapter opened a session without reporting its id"). The
+            # effect was that every session became permanently unlinkable once its
+            # first link died — after the 30-minute idle reaper, a server restart, or
+            # an explicit detach — which is the ordinary path, not an error path.
+            self.native_session_id = session_id
         else:
             # Assigning the id up front rather than discovering it means the
             # server can correlate with TraceDB before the first event lands.

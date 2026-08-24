@@ -276,6 +276,16 @@ pub struct RequestOption {
     /// UI can mark "allow always" differently from "allow once".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub persistent: bool,
+    /// What this option means, when the agent explained it.
+    ///
+    /// Load-bearing on a `choice`, where the agent authored the options and the
+    /// description is most of what makes them readable — "Tabs" and "Spaces" say far
+    /// less than the sentences beside them. Omitting the field here did not merely
+    /// fail to use it: the options are re-serialized from this struct on their way to
+    /// the journal, so a description the adapter sent was silently discarded before
+    /// any client could render it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A question the agent needs a human to answer.
@@ -888,6 +898,28 @@ mod tests {
 
     /// Absent means allowed, so a minimal adapter that never sets it stays correct;
     /// an explicit `false` is what forbids the affordance.
+    /// A `choice`'s options carry the agent's own explanations, and they must survive
+    /// the trip through this struct: the options are re-serialized from here into the
+    /// journal, so a field missing from the type is a field the client never sees.
+    /// That is how the descriptions on an AskUserQuestion were being dropped —
+    /// silently, with the adapter sending them correctly.
+    #[test]
+    fn an_option_keeps_the_explanation_the_agent_wrote_for_it() {
+        let line = r#"{"t":"request","id":"r7","kind":"choice","title":"Indentation?",
+            "options":[{"id":"option:0","label":"Tabs","description":"Use tab characters"},
+                       {"id":"option:1","label":"Spaces"}]}"#;
+        let Some(Inbound::Request { request, .. }) = parse_inbound(line) else {
+            panic!("must parse as a request");
+        };
+        assert_eq!(request.options[0].description.as_deref(), Some("Use tab characters"));
+        assert!(request.options[1].description.is_none());
+
+        // The round trip is the actual promise: this is what reaches the journal.
+        let json = serde_json::to_value(&request.options).unwrap();
+        assert_eq!(json[0]["description"], "Use tab characters");
+        assert!(json[1].get("description").is_none(), "an absent one stays absent");
+    }
+
     #[test]
     fn an_approval_may_forbid_offering_a_lasting_grant() {
         let permissive: AdapterRequest =

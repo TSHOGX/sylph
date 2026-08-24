@@ -274,11 +274,18 @@ class Session:
         self.current_model = model.get("id") if isinstance(model, dict) else model
         self.current_thinking = state.get("thinkingLevel")
 
-        return {
+        surface = {
             "commands": self.commands(),
             "subagents": [],
             "config": self.config(),
         }
+        # pi reports a per-model context window, so this facet is real here. The
+        # claude adapter deliberately omits it: its `initialize` reports no window at
+        # all, and inventing a number would put a fabricated denominator under a usage
+        # meter — worse than showing none.
+        if isinstance(model, dict) and model.get("contextWindow"):
+            surface["contextWindow"] = model["contextWindow"]
+        return surface
 
     def apply_config(self, config_id, value):
         if config_id == "model":

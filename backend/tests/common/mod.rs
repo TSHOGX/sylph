@@ -560,7 +560,11 @@ for raw in sys.stdin:
 
     if t == "hello":{hello}
     elif t == "open":
-        ok(mid, sessionId="mock-session-1",
+        # Echo the id we were asked to resume, exactly as a real adapter must: `open`
+        # has to answer with one, and the server rejects a null as an unresumable
+        # session. The claude adapter got this wrong on the resume branch, which made
+        # every session unlinkable once its first link died.
+        ok(mid, sessionId=msg.get("sessionId") or "mock-session-1",
            commands=[{{"name": "noop", "description": "Does nothing"}},
                      {{"name": "model", "description": "Pick a model",
                        "kind": "control", "configId": "model"}}],

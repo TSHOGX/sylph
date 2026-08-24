@@ -1,3 +1,5 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { expect, test } from "@playwright/test";
 import { createSession, gotoReady } from "./fixtures/session";
 
@@ -82,17 +84,24 @@ test("the first-run guide gives way to recents once a session exists", async ({ 
 test("a directory with several sessions is one row that opens the newest", async ({
   page,
 }) => {
-  await createSession(page, { workdir: "/tmp" });
-  await createSession(page, { workdir: "/tmp" });
-  const newest = await createSession(page, { workdir: "/tmp", title: "Newest here" });
+  // A directory of this spec's own, not the shared `/tmp`. The journal is never
+  // cleared between runs, so every other spec's `/tmp` session lands in the same
+  // group — and "the newest here" then means the newest of *those*, not of the three
+  // created below. That made this assert pass on a clean data directory and fail on
+  // an accumulated one, which reads as flakiness rather than as shared state.
+  const workdir = mkdtempSync(`${tmpdir()}/sylph-recents-`);
+
+  await createSession(page, { workdir });
+  await createSession(page, { workdir });
+  const newest = await createSession(page, { workdir, title: "Newest here" });
 
   await page.goto("/");
   const recents = page.getByRole("region", { name: "Pick up where you left off" });
 
-  // One row for `/tmp`, whatever the session count, and it states the count.
-  const tmpRow = recents.getByRole("listitem").filter({ hasText: "/tmp" });
+  // One row for the directory, whatever the session count, and it states the count.
+  const tmpRow = recents.getByRole("listitem").filter({ hasText: workdir });
   await expect(tmpRow).toHaveCount(1);
-  await expect(tmpRow).toContainText(/\d+ sessions/);
+  await expect(tmpRow).toContainText("3 sessions");
 
   // And it opens the newest session, which is what "resume" means.
   await tmpRow.getByRole("link").click();
