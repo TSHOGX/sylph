@@ -50,8 +50,8 @@ A link is **not** required for a session to work. Links are expensive and do not
 survive a server restart, so:
 
 * A turn on a detached session **establishes a link first**, resuming the
-  agent's native session by id. This is exactly v1's behaviour, and it is the
-  floor the design degrades to rather than an error path.
+  agent's native session by id. This is the ordinary path after any restart, not
+  an error path.
 * A link idles out (default 30 minutes) and is torn down. History is unaffected;
   the next turn re-establishes.
 * Interactive capability is a property of the link, so the UI reports it as
@@ -77,9 +77,10 @@ dropping in a directory, with no server build. It also contains a vendor's
 protocol churn in a script the user can read and patch, and it keeps a crashing
 adapter from taking the server down.
 
-Adapters are discovered at `<runners_dir>/<name>/`. An adapter declaring v2
-provides `adapter.sh`; a directory with only `runner.sh` is a v1 runner and is
-driven on the degraded path.
+An agent is a directory containing an executable `adapter.sh`. Bundled adapters
+ship in the repo, because an adapter is versioned with the protocol it implements
+and a protocol change breaks it; third-party ones live in the configured agents
+directory, which is what keeps "add an agent by adding a directory" true.
 
 ## Framing
 
@@ -267,26 +268,29 @@ Two consequences worth stating, because both were wrong in v1:
 * A command can be interrupted, steered, and can raise approvals, because it is
   a turn like any other.
 
-## Compatibility
+## v1 is not supported
 
-The v1 contract stays supported, unchanged, for two reasons: the Discord daemon
-runs on it today, and a v1 runner is the correct floor when a CLI genuinely has
-no duplex mode.
+There is no degraded path. `runner.sh` is not discovered, `SYLPH_STREAM_FORMAT`
+has no meaning, and an agent directory without `adapter.sh` is simply not an
+agent.
 
-The server picks a path per agent directory:
+This project has no external consumers, so a compatibility shim would buy
+nothing and cost the thing that matters most: a single shape for what an agent
+is. Keeping v1 would have meant every layer above the seam carrying two notions
+of a session — one where a turn is a process and one where it is a message — and
+that duality does not stay contained. It shows up in the supervisor, in the API's
+capability reporting, in the UI's decision about whether to offer interrupt, and
+in every test that has to cover both.
 
-| Present | Path | Capability |
-| --- | --- | --- |
-| `adapter.sh` | v2 duplex | Full |
-| `runner.sh` only | v1 one-shot | Turns, flags, declared commands; no approvals, interrupt, or live capability |
+The Discord daemon does run on v1 today. It is migrated to this server rather
+than kept on the old contract — see `docs/control-plane.md`. That is more work
+than a shim and it is the work that leaves one control plane instead of two.
 
-A v1 runner is presented as an adapter whose `supports` is the v1 subset, so
-nothing above the seam branches on protocol version. The degradation surfaces as
-capability, which the UI already reads — one code path, honest about what it can
-do.
-
-`SYLPH_STREAM_FORMAT=ndjson-v1` keeps its meaning for v1 runners. v2 adapters are
-invoked as `adapter.sh --serve` and ignore it.
+An agent whose CLI genuinely has no duplex mode is still supportable: its adapter
+holds the session and spawns a one-shot CLI invocation per turn internally. The
+one-shot-ness becomes a vendor detail inside one adapter, which is exactly where
+vendor details belong, and the adapter declares a smaller `supports` list. The
+protocol does not need to know.
 
 ## What the adapter owns, and what it must not
 

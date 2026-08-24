@@ -59,6 +59,12 @@ channel↔thread model — and gives up what is not.
 | `ProcessSupervisor` for `/stop` | `POST /api/v1/turns/{id}/stop` |
 | Runner discovery + hot reload | `GET /api/v1/agents` |
 
+This migration is not optional, because v1 is being removed rather than kept
+beside v2 (`docs/session-protocol.md`). The daemon's runners stop being
+discoverable, so it moves to the server or it stops working. Choosing the
+migration over a shim is what leaves one control plane; the shim would have
+preserved two.
+
 What the daemon keeps is a binding table: Discord channel → Sylph session id.
 That is genuinely Discord's own state, and it is the only state it needs.
 
@@ -123,6 +129,7 @@ Additive to `/api/v1`. Existing endpoints keep their contracts.
 
 | Endpoint | Purpose |
 | --- | --- |
+| `GET /sessions/{id}/replay` | The session's stream, reconstructed with original timing |
 | `GET /sessions/{id}/capabilities` | Live slash commands, models, subagents, permission mode |
 | `POST /sessions/{id}/link` | Establish a link eagerly |
 | `DELETE /sessions/{id}/link` | Tear one down |

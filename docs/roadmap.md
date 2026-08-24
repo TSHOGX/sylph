@@ -1077,6 +1077,20 @@ approval prompts, interrupt that keeps the session, subagents rendered as
 subagents. Plus the seam that lets the same session run in a Khora sandbox
 instead of on the host, without the record changing.
 
+### Verified rather than assumed
+
+Three facts this phase rests on, each measured on this machine:
+
+- **A held-open stdin is what makes approvals possible.** With an `ask` rule,
+  `claude` sends `can_use_tool` back over stdin and waits; v1's close aborts it
+  with `Tool permission request failed: AbortError: Stream closed`.
+- **The adapter returns 46 real slash commands and 5 subagents** on this checkout,
+  against the one or two a v1 descriptor carries by hand. `adapters/claude/verify.py`
+  is the check, run against the real CLI.
+- **TraceDB ingestion is whole-session and lossless**, so a watermark is derivable
+  from `endedAtMs`. `IngestMode::retain_full` can no longer create a partial
+  record, and `Facade::scan` re-parses rather than appending.
+
 ### What forced a redesign rather than features
 
 Measured, not assumed. `claude -p --input-format stream-json
@@ -1096,6 +1110,7 @@ Governing specs, written before the code:
 - `docs/session-protocol.md` — `sylph.agent.v2`, the duplex adapter contract
 - `docs/environments.md` — the `Environment` seam, local / khora / ssh
 - `docs/control-plane.md` — one server, many frontends; Discord as a frontend
+- `docs/storage.md` — lossless replayable history, tiered, watermark-pruned
 
 ### Decisions taken
 
@@ -1103,15 +1118,36 @@ Governing specs, written before the code:
   sessions are `attached` or `detached`. Links are disposable — they idle out, die
   with a restart, and a turn on a detached session establishes one first. That
   path is v1's behaviour, which makes it the floor rather than an error case.
-- **v1 stays supported.** A directory with only `runner.sh` is driven one-shot and
-  presented as an adapter whose `supports` is the v1 subset, so nothing above the
-  seam branches on protocol version.
-- **The server records.** The normalized event stream is journaled as durable
-  history and feeds TraceDB, because the server is the only component present for
-  work in every environment. This makes `live.db` real history rather than a
-  bounded projection — a deliberate reversal of the earlier decision, taken
-  because a sandbox's native store dies with the sandbox and the archive would
-  otherwise have a hole exactly where isolated work happened.
+- **v1 is removed, not kept beside v2.** There are no external consumers, so a
+  compatibility shim would buy nothing and cost a single shape for what an agent
+  is. Keeping it would have put two notions of a session — a turn as a process,
+  and a turn as a message — into the supervisor, the capability API, the UI's
+  interrupt decision, and every test. An agent whose CLI has no duplex mode is
+  still supportable: its adapter holds the session and invokes the CLI per turn
+  internally, which is where a vendor detail belongs.
+- **The server records, losslessly and replayably.** `docs/storage.md` governs it.
+  The normalized stream becomes durable history rather than a bounded projection,
+  because the server is the only component present for work in every environment
+  and a sandbox's native store dies with the sandbox.
+- **Deltas are folded, not dropped.** A block stores its final text once plus
+  packed offset and timing arrays, so every delta is reconstructible byte-for-byte
+  with its arrival time at ~8 bytes each instead of ~60. Lossless replay stops
+  being a thing to trade away: a 2 KB message costs 3.2 KB rather than 24 KB.
+- **Three tiers, because there are three workloads.** A small hot `journal.db`, a
+  read-mostly `history.db`, and a content-addressed blob store. The split is
+  forced by SQLite, not taste: a long read transaction blocks WAL checkpointing,
+  so a browser scrolling an archive would otherwise degrade the streaming latency
+  of an unrelated live turn — a bug that reads as a network problem.
+- **Retention is watermark-driven and never time-driven.** A lagging consumer
+  causes growth, never loss, which is the discipline behind a Postgres replication
+  slot and a Kafka offset. Sessions split into *delegated* (a native store exists,
+  prune below the confirmed seq) and *terminal* (a sandbox, no ingestion path,
+  compact forever). Collapsing the two would destroy the only copy of exactly the
+  isolated work this was meant to protect.
+- **Replay is a server operation.** Reconstruction is subtle — UTF-8 boundaries,
+  interleaving across two stores, timing accumulation — and a rule implemented once
+  per frontend is one that will differ per frontend, leaving Discord, a terminal,
+  and the browser disagreeing about what happened.
 - **Pending requests are resources, not stream messages.** An approval survives a
   client disconnect and is answerable from any frontend. A stream-only design
   strands the request and blocks the agent indefinitely.
@@ -1129,5 +1165,11 @@ Governing specs, written before the code:
   remain unbuilt, and non-loopback binding stays a separate explicit change.
 - **Khora needs a Template carrying the agent CLIs and adapters**, since the
   adapter runs inside the environment. None exists yet.
-- **Journal retention needs a real policy** once it is authoritative history.
-  Unbounded growth was acceptable for a projection and is not for a record.
+- **An explicit TraceDB ingestion ack** would beat the derived watermark and stays
+  worth doing: it would remove the `endedAtMs` reasoning entirely and let Sylph
+  prune on confirmation rather than inference. A TraceDB change, so a separate
+  decision — the derivation is sound enough to run on meanwhile, which was not
+  obviously going to be true.
+- **The `journal.db` / `history.db` split is designed but not built.** The
+  supervisor still writes one `live.db`, so the WAL-checkpoint hazard the split
+  exists to prevent is currently live.
