@@ -91,16 +91,25 @@ pub struct LinkedSupervisor {
     links: LinkManager,
     seq: SeqAllocator,
     waiters: TurnWaiters,
+    /// Moves a settled turn's events into history.
+    consolidator: crate::storage::Consolidator,
 }
 
 impl LinkedSupervisor {
-    pub fn new(store: LiveStore, hub: EventHub, links: LinkManager, seq: SeqAllocator) -> Self {
+    pub fn new(
+        store: LiveStore,
+        hub: EventHub,
+        links: LinkManager,
+        seq: SeqAllocator,
+        consolidator: crate::storage::Consolidator,
+    ) -> Self {
         Self {
             store,
             hub,
             links,
             seq,
             waiters: Default::default(),
+            consolidator,
         }
     }
 
@@ -281,7 +290,16 @@ impl LinkedSupervisor {
                         "Turn {} could not be interrupted; tearing the link down",
                         turn_id
                     );
+                    // Settled *before* detaching, and this ordering is the whole
+                    // point. Tearing the link down makes its drain task observe a
+                    // close and settle the turn as LINK_LOST — which is true of
+                    // the transport and false about what happened: the user asked
+                    // for this. Claiming the outcome first means the drain task's
+                    // later attempt finds the turn already settled and does
+                    // nothing, so the record says cancelled.
+                    self.settle(&session_id, turn_id, Outcome::Interrupted).await;
                     self.links.detach(&session_id, "stopped").await;
+                    return Ok(true);
                 }
             }
             None => {
@@ -292,17 +310,46 @@ impl LinkedSupervisor {
         }
 
         // Settled here rather than waiting for a `turn` event, because an
-        // interrupted agent may not emit one, and a detached link certainly will
-        // not. The waiter is removed by `settle`, so a later event is a no-op.
+        // interrupted agent may not emit one. If it does, `finish_turn`'s guard
+        // makes this the outcome that stands.
         self.settle(&session_id, turn_id, Outcome::Interrupted).await;
         Ok(true)
     }
 
     /// Record a turn's terminal state and close its stream.
     async fn settle(&self, session_id: &str, turn_id: &str, outcome: Outcome) {
+        let (status, error_code, message) = outcome.as_status();
+
+        // Claimed before the waiter is dropped, and that order is load-bearing.
+        //
+        // Removing the waiter drops the oneshot sender, which wakes whoever is
+        // parked in `run()` with a `RecvError` — and that path reads as "the link
+        // died", so it settles the turn as LINK_LOST. Claiming first means that
+        // second settlement finds the turn already terminal and does nothing.
+        // Reversed, a user's stop is reported as the agent having exited: true of
+        // the transport, false about what happened.
+        let settled = match self
+            .store
+            .finish_turn(turn_id, status, None, error_code, Some(&message))
+            .await
+        {
+            Ok(settled) => settled,
+            Err(error) => {
+                error!("Failed to record turn {} as {}: {}", turn_id, status, error);
+                self.waiters.lock().await.remove(turn_id);
+                return;
+            }
+        };
+
         self.waiters.lock().await.remove(turn_id);
 
-        let (status, error_code, message) = outcome.as_status();
+        if !settled {
+            debug!(
+                "Turn {} was already settled; not recording it as {}",
+                turn_id, status
+            );
+            return;
+        }
 
         if !message.is_empty() {
             let _ = self
@@ -333,16 +380,14 @@ impl LinkedSupervisor {
             )
             .await;
 
-        if let Err(error) = self
-            .store
-            .finish_turn(turn_id, status, None, error_code, Some(&message))
-            .await
-        {
-            error!("Failed to record turn {} as {}: {}", turn_id, status, error);
-        }
         let _ = self.store.update_session_status(session_id, "idle").await;
 
         self.hub.close(turn_id).await;
+
+        // The turn's rows have stopped changing, so this is the moment to move
+        // them. Detached: the client already has its events, and making anything
+        // wait on disk work here would be pure latency.
+        self.consolidator.schedule(turn_id.to_string());
     }
 
     async fn emit(

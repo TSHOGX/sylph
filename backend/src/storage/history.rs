@@ -569,7 +569,7 @@ pub async fn consolidate_turn(
     history: &HistoryStore,
     turn_id: &str,
 ) -> Result<usize> {
-    let events = journal.turn_events_after(turn_id, -1).await?;
+    let events = journal.turn_events_for_consolidation(turn_id).await?;
     if events.is_empty() {
         return Ok(0);
     }

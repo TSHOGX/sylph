@@ -41,6 +41,12 @@ pub struct Config {
     /// rather than offering a toggle over a file that does not exist.
     pub soul_path: Option<PathBuf>,
     pub cookie_secret: String,
+    /// Where consolidated history lives. Derived from the data directory rather
+    /// than configured separately: the two tiers are one store split for SQLite's
+    /// sake, not two things a user chooses between.
+    pub history_path: String,
+    /// Root of the content-addressed blob store.
+    pub blobs_dir: PathBuf,
 }
 
 /// Resolve `SOUL.md` the way a runner resolves it.
@@ -99,6 +105,9 @@ impl Config {
 
         let database_path = format!("{}/live.db",
             PathBuf::from(&data_dir).display());
+        let history_path = format!("{}/history.db",
+            PathBuf::from(&data_dir).display());
+        let blobs_dir = PathBuf::from(&data_dir).join("cas");
 
         // `$HOME` first so it is the default landing root in the picker, then any
         // configured extras. Existence is not checked here: a root that vanishes
@@ -131,6 +140,8 @@ impl Config {
             browse_roots,
             soul_path,
             cookie_secret,
+            history_path,
+            blobs_dir,
         })
     }
 }

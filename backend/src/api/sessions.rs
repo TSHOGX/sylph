@@ -148,17 +148,47 @@ pub async fn history(
 
     let mut out = Vec::with_capacity(turns.len());
     for turn in turns {
-        let events = state
-            .store
-            .turn_events_after(&turn.id, -1)
-            .await?
-            .iter()
-            .map(StreamEvent::from_row)
-            .collect();
+        // Both tiers, because a turn's events live in exactly one of them and
+        // which one depends on whether consolidation has run. Reading only the
+        // journal would make history vanish from the UI moments after a turn
+        // finished, which is the bug this exists to prevent.
+        let journalled = state.store.turn_events_after(&turn.id, -1).await?;
+        let events = if journalled.is_empty() {
+            state
+                .history
+                .turn_blocks(&turn.id)
+                .await
+                .map(|blocks| blocks.iter().map(block_to_event).collect())
+                .unwrap_or_default()
+        } else {
+            journalled.iter().map(StreamEvent::from_row).collect()
+        };
         out.push(TurnWithEvents { turn, events });
     }
 
     Ok(Json(HistoryResponse { turns: out }))
+}
+
+/// Render a consolidated block as the event a client expects.
+///
+/// A timeline renders stable events, and a block *is* a stable event plus how it
+/// streamed — so the folded deltas are deliberately not expanded here. Replay is a
+/// separate operation for a client that wants the arrival sequence; a transcript
+/// read wants the settled value.
+pub fn block_to_event(block: &crate::storage::Block) -> StreamEvent {
+    StreamEvent {
+        seq: block.seq,
+        kind: block.kind.clone(),
+        phase: block.phase.clone(),
+        stream_id: block.stream_id.clone(),
+        name: block.name.clone(),
+        text: block.text.clone(),
+        data: block.data.clone(),
+        is_error: block.is_error,
+        stability: "stable".to_string(),
+        source: block.source.clone(),
+        created_at_ms: block.created_at_ms,
+    }
 }
 
 pub async fn create(

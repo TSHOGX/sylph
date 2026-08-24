@@ -585,6 +585,17 @@ impl LiveStore {
 
     /// Record a terminal turn state. `status` is one of `completed`, `failed`,
     /// `cancelled`, or `interrupted`.
+    /// Record a turn's terminal state. First writer wins.
+    ///
+    /// The `status NOT IN (...)` guard is what makes a terminal state final. Two
+    /// settlements race by design: `stop` interrupts the agent and records
+    /// `cancelled`, and the agent then emits its own `turn` event, which arrives a
+    /// moment later and would otherwise overwrite that with `completed`. The user
+    /// asked for a stop and got one, so reporting the turn as having completed
+    /// normally is a lie about what happened.
+    ///
+    /// Returns whether this call was the one that settled it, so a caller can tell
+    /// "I settled this" from "someone already had".
     pub async fn finish_turn(
         &self,
         turn_id: &str,
@@ -592,13 +603,14 @@ impl LiveStore {
         exit_code: Option<i32>,
         error_code: Option<&str>,
         error_message: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query(
+    ) -> Result<bool> {
+        let result = sqlx::query(
             r#"
             UPDATE turns
             SET status = ?, completed_at_ms = ?, runner_exit_code = ?,
                 error_code = ?, error_message = ?
             WHERE id = ?
+              AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
             "#,
         )
         .bind(status)
@@ -609,7 +621,7 @@ impl LiveStore {
         .bind(turn_id)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     /// Fail every turn left mid-flight by a previous process.
@@ -725,9 +737,16 @@ impl LiveStore {
     }
 
     /// Journaled events for one turn after `after_seq`, in sequence order.
+    /// A turn's *stable* journal rows: what a transcript renders.
+    ///
+    /// Deltas are journaled too — consolidation needs them to fold — but they are
+    /// excluded here, because a `completed` event already carries its block's whole
+    /// text. Including both would render every token twice.
     pub async fn turn_events_after(&self, turn_id: &str, after_seq: i32) -> Result<Vec<Event>> {
         sqlx::query_as::<_, Event>(
-            "SELECT * FROM events WHERE turn_id = ? AND seq > ? ORDER BY seq",
+            "SELECT * FROM events
+              WHERE turn_id = ? AND seq > ? AND stability = 'stable'
+              ORDER BY seq",
         )
         .bind(turn_id)
         .bind(after_seq)
@@ -874,6 +893,23 @@ impl LiveStore {
         .map_err(Error::Database)
     }
 
+    /// A session's journal rows after `after_seq`, across every turn.
+    ///
+    /// Distinct from `turn_events_after`: a replay is session-scoped, and the
+    /// journal holds only the tail that consolidation has not moved yet.
+    pub async fn session_events_after(&self, session_id: &str, after_seq: i32) -> Result<Vec<Event>> {
+        sqlx::query_as::<_, Event>(
+            "SELECT * FROM events
+              WHERE session_id = ? AND seq > ? AND stability = 'stable'
+              ORDER BY seq",
+        )
+        .bind(session_id)
+        .bind(after_seq)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::Database)
+    }
+
     /// Drop a turn's journal rows once history holds them.
     ///
     /// Called only by consolidation, and only after the history insert has
@@ -886,6 +922,20 @@ impl LiveStore {
             .await
             .map_err(Error::Database)?;
         Ok(result.rows_affected())
+    }
+
+    /// Every journal row for a turn, deltas included.
+    ///
+    /// Only consolidation wants this: the deltas are what it folds. A reader that
+    /// used it for a transcript would show each token twice.
+    pub async fn turn_events_for_consolidation(&self, turn_id: &str) -> Result<Vec<Event>> {
+        sqlx::query_as::<_, Event>(
+            "SELECT * FROM events WHERE turn_id = ? ORDER BY seq",
+        )
+        .bind(turn_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::Database)
     }
 
     /// Turns whose events are still in the journal, oldest first.

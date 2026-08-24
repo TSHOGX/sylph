@@ -4,6 +4,7 @@ pub mod files;
 pub mod fs;
 pub mod health;
 pub mod links;
+pub mod replay;
 pub mod search;
 pub mod sessions;
 pub mod soul;

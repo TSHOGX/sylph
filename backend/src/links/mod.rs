@@ -414,26 +414,32 @@ impl LinkManager {
             }
         }
 
-        if event.is_stable() {
-            // Journaled before publishing, so a client that reconnects the
-            // instant after seeing an event always finds it in replay.
-            //
-            // A failure here is loud on purpose. This was a real bug: a CHECK
-            // constraint rejected every adapter event, and because the error was
-            // only logged at debug level the turn streamed perfectly and came
-            // back empty on reload. An event published but not journaled is worse
-            // than one that never arrived, because the client has already been
-            // told it happened.
-            if let Err(error) = self
-                .store
-                .append_event(&event.to_row(session_id, &turn_id))
-                .await
-            {
-                error!(
-                    "DATA LOSS: event seq {} kind '{}' on session {} was published but not journaled: {}",
-                    event.seq, event.kind, session_id, error
-                );
-            }
+        // Everything is journaled, including deltas.
+        //
+        // This reverses v1, where a delta was ephemeral and dropped. Lossless
+        // replay needs them: consolidation folds a block's deltas into ~8 bytes
+        // each, and it can only fold what the journal actually kept. Dropping them
+        // here would make `docs/storage.md`'s whole guarantee unreachable — the
+        // fold would have nothing to fold.
+        //
+        // The cost is bounded and short-lived. Deltas sit in the hot journal only
+        // until the turn settles, which is when consolidation replaces them with
+        // the folded form and deletes the rows.
+        //
+        // A failure here is loud on purpose. This was a real bug: a CHECK
+        // constraint rejected every adapter event, and because the error was only
+        // logged at debug level the turn streamed perfectly and came back empty on
+        // reload. An event published but not journaled is worse than one that never
+        // arrived, because the client has already been told it happened.
+        if let Err(error) = self
+            .store
+            .append_event(&event.to_row(session_id, &turn_id))
+            .await
+        {
+            error!(
+                "DATA LOSS: event seq {} kind '{}' on session {} was published but not journaled: {}",
+                event.seq, event.kind, session_id, error
+            );
         }
 
         let settles = event.kind == "turn" && event.phase.as_deref() == Some("completed");

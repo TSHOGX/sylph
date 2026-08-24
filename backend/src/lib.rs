@@ -61,10 +61,20 @@ pub struct AppState {
     /// Runs turns on live links.
     pub turns: crate::supervisor::turn::LinkedSupervisor,
     pub links: crate::links::LinkManager,
+    /// The warm tier. Reads come here once a turn has been consolidated.
+    pub history: crate::storage::HistoryStore,
+    /// Moves settled turns into history. Exposed so a test can trigger the same
+    /// work the background sweeper does, rather than waiting on it.
+    pub consolidator: crate::storage::Consolidator,
     pub tracedb: TraceDbClient,
 }
 
 impl AppState {
+    /// Consolidate every settled turn now, returning how many moved.
+    pub async fn consolidate_now(&self) -> usize {
+        self.consolidator.sweep().await
+    }
+
     /// Assemble application state from configuration.
     ///
     /// Runner discovery and the TraceDB probe are both non-fatal: a missing
@@ -121,6 +131,17 @@ impl AppState {
         // drift into disagreeing about whether identity is active.
         let soul_path = config.soul_path.clone();
 
+        // The warm tier, opened before anything can settle a turn into it.
+        let history = crate::storage::HistoryStore::open(
+            &config.history_path,
+            crate::storage::cas::BlobStore::new(config.blobs_dir.clone()),
+        )
+        .await?;
+        let consolidator = crate::storage::Consolidator::new(store.clone(), history.clone());
+        // Catches whatever a crash or a restart left unconsolidated, then keeps
+        // watching. A turn that settles normally is handled the moment it does.
+        consolidator.spawn_sweeper();
+
         let hub = EventHub::new();
         // The host is the only environment today. It is constructed here rather
         // than inside the supervisor so a session-chosen environment later
@@ -149,6 +170,7 @@ impl AppState {
             hub.clone(),
             links.clone(),
             seq,
+            consolidator.clone(),
         );
         links.set_waiters(turns.waiters()).await;
         let tracedb = TraceDbClient::new(config.tracedb_bin.clone());
@@ -160,6 +182,8 @@ impl AppState {
             hub,
             turns,
             links,
+            history,
+            consolidator,
             tracedb,
         })
     }
@@ -277,6 +301,9 @@ pub fn router(state: AppState) -> Router {
             post(api::links::interrupt),
         )
         .route("/api/v1/sessions/{id}/steer", post(api::links::steer))
+        // Replay is session-scoped and server-paced: reconstruction is subtle
+        // enough that doing it per frontend would let frontends disagree.
+        .route("/api/v1/sessions/{id}/replay", get(api::replay::replay))
         .route("/api/v1/turns/{id}", get(api::turns::get))
         .route("/api/v1/turns/{id}/events", get(api::turns::events))
         .route("/api/v1/turns/{id}/stop", post(api::turns::stop))

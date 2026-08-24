@@ -97,6 +97,10 @@ impl TestBackend {
             host: "127.0.0.1".to_string(),
             port: 0,
             database_path: data_dir.join("live.db").display().to_string(),
+            // Both tiers inside the throwaway tree, so a test never touches the
+            // developer's real history or blob store.
+            history_path: data_dir.join("history.db").display().to_string(),
+            blobs_dir: data_dir.join("cas"),
             data_dir,
             // v2 adapters live beside the v1 runners in the harness tree, so a
             // test that installs one gets it discovered without a second root to
@@ -137,6 +141,39 @@ impl TestBackend {
             config,
             state,
         }
+    }
+
+    /// Wait until a settled turn's events have moved into history.
+    ///
+    /// Consolidation is scheduled on settle and runs detached, so a test cannot
+    /// simply read afterwards. This polls the observable end state — journal empty,
+    /// history populated — and sweeps once as a fallback, which covers the case
+    /// where the scheduled attempt deferred.
+    pub async fn await_consolidation(&self, turn_id: &str) {
+        for attempt in 0..50 {
+            let journalled = self
+                .state
+                .store
+                .turn_events_after(turn_id, -1)
+                .await
+                .unwrap_or_default();
+            let blocks = self
+                .state
+                .history
+                .turn_blocks(turn_id)
+                .await
+                .unwrap_or_default();
+            if journalled.is_empty() && !blocks.is_empty() {
+                return;
+            }
+            // Halfway through, do the work ourselves rather than waiting out the
+            // whole budget on an attempt that already failed.
+            if attempt == 25 {
+                self.state.consolidate_now().await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("turn {} was never consolidated", turn_id);
     }
 
     /// Rebuild the backend against the same journal, as a restart would.
@@ -428,7 +465,12 @@ impl MockRunner {
         ev("thinking", "completed", streamId="t1", text="thinking done")
         ev("tool_call", "completed", streamId="c1", name="Read",
            data={"path": "/tmp/x"})
+        # Deltas must concatenate to the completed text, exactly as a real agent's
+        # do — it builds the completed event by accumulating them. A fixture whose
+        # deltas disagree makes `fold` refuse, which is correct behaviour on bad
+        # input and useless as a test of the good path.
         ev("assistant", "delta", streamId="a1", text="mock ")
+        ev("assistant", "delta", streamId="a1", text="reply")
         ev("assistant", "completed", streamId="a1", text="mock reply")
         ev("usage", "completed", data={"inputTokens": 10, "outputTokens": 3})
         ev("turn", "completed", text="mock reply")

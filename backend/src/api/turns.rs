@@ -189,14 +189,29 @@ pub async fn events(
 
     let after_seq = query.after_seq;
 
-    // Replay stable events from the journal first.
-    let journal_events: Vec<StreamEvent> = state
-        .store
-        .turn_events_after(&turn_id, after_seq)
-        .await?
-        .into_iter()
-        .map(|row| StreamEvent::from_row(&row))
-        .collect();
+    // Replay stable events, from whichever tier holds them. A finished turn that
+    // has already been consolidated is gone from the journal, so a client
+    // reconnecting to it would otherwise get an empty stream.
+    let journalled = state.store.turn_events_after(&turn_id, after_seq).await?;
+    let journal_events: Vec<StreamEvent> = if journalled.is_empty() {
+        state
+            .history
+            .turn_blocks(&turn_id)
+            .await
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|block| block.seq > after_seq)
+                    .map(crate::api::sessions::block_to_event)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        journalled
+            .into_iter()
+            .map(|row| StreamEvent::from_row(&row))
+            .collect()
+    };
 
     // One attach() call: it snapshots the ephemeral projection and subscribes
     // under a single lock. Calling it twice (once for `live`, once for `replay`)

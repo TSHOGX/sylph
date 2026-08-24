@@ -563,7 +563,11 @@ async fn stopping_a_running_turn_cancels_it() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
     let finished = backend.await_turn(&turn_id).await;
-    assert_eq!(finished["turn"]["status"], "cancelled");
+    assert_eq!(
+        finished["turn"]["status"], "cancelled",
+        "turn was {:?} / {:?}",
+        finished["turn"]["errorCode"], finished["turn"]["errorMessage"]
+    );
 }
 
 #[tokio::test]

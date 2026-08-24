@@ -222,31 +222,27 @@ async fn a_consolidated_turn_leaves_the_journal_and_survives_in_history() {
         .to_string();
     backend.await_turn(&turn_id).await;
 
-    let journalled = backend
-        .state
-        .store
-        .turn_events_after(&turn_id, -1)
-        .await
-        .unwrap();
-    assert!(!journalled.is_empty(), "the turn must be journalled first");
+    backend.await_consolidation(&turn_id).await;
 
-    let (history, _dir) = history_store().await;
-    let moved = history::consolidate_turn(&backend.state.store, &history, &turn_id)
-        .await
-        .unwrap();
-
-    assert!(moved > 0);
     // Gone from the journal…
-    assert!(backend
-        .state
-        .store
-        .turn_events_after(&turn_id, -1)
-        .await
-        .unwrap()
-        .is_empty());
-    // …and readable from history, with the assistant text intact.
-    let blocks = history.turn_blocks(&turn_id).await.unwrap();
-    assert!(blocks.iter().any(|b| b.text.contains("mock reply")));
+    assert!(
+        backend
+            .state
+            .store
+            .turn_events_after(&turn_id, -1)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the journal must not keep what history now holds"
+    );
+    // …and readable from history, with the assistant text intact. The order
+    // matters more than either half: history is durable *before* the journal
+    // forgets, so there is no instant at which the turn exists in neither.
+    let blocks = backend.state.history.turn_blocks(&turn_id).await.unwrap();
+    assert!(
+        blocks.iter().any(|b| b.text.contains("mock reply")),
+        "the assistant reply must survive the move"
+    );
 }
 
 /// A block whose completion never arrived — the link died mid-answer — is kept as
@@ -308,4 +304,117 @@ fn count_files(root: &std::path::Path) -> usize {
         }
     }
     count
+}
+
+/// Consolidation must be invisible to a reader. A turn's transcript reads the
+/// same before and after its events move tiers — otherwise history vanishes from
+/// the UI moments after a turn finishes, which is the failure the two-tier read
+/// path exists to prevent.
+#[tokio::test]
+async fn a_transcript_reads_the_same_before_and_after_consolidation() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            serde_json::json!({"text": "remember this"}),
+        )
+        .await;
+    let turn_id = common::json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&turn_id).await;
+
+    let before = common::json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+            .await,
+    )
+    .await;
+
+    // Consolidation is scheduled the moment a turn settles, so by now it has
+    // usually already run. Await the observable outcome rather than the trigger:
+    // asserting on a sweep's return value would be asserting that the automatic
+    // path had *not* worked.
+    backend.await_consolidation(&turn_id).await;
+
+    let after = common::json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+            .await,
+    )
+    .await;
+
+    assert_eq!(
+        before["turns"][0]["events"], after["turns"][0]["events"],
+        "the transcript changed when its events moved tiers"
+    );
+}
+
+/// A client reconnecting to a turn whose events have been consolidated still gets
+/// its stream, rather than an empty one.
+#[tokio::test]
+async fn an_sse_reconnect_after_consolidation_still_replays_the_turn() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            serde_json::json!({"text": "stream me"}),
+        )
+        .await;
+    let turn_id = common::json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&turn_id).await;
+    backend.await_consolidation(&turn_id).await;
+
+    let stream = common::body_string(
+        backend
+            .get_authed(&format!("/api/v1/turns/{turn_id}/events?after_seq=-1"))
+            .await,
+    )
+    .await;
+
+    assert!(
+        stream.contains("mock reply"),
+        "a consolidated turn must still replay: {stream}"
+    );
+}
+
+/// Replay emits the deltas a live client saw, not just the settled block.
+#[tokio::test]
+async fn replay_reproduces_the_deltas_and_not_only_the_final_text() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            serde_json::json!({"text": "replay me"}),
+        )
+        .await;
+    let turn_id = common::json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&turn_id).await;
+    backend.await_consolidation(&turn_id).await;
+
+    // speed=0 emits everything immediately, which is what a test wants.
+    let stream = common::body_string(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/replay?speed=0"))
+            .await,
+    )
+    .await;
+
+    // The mock streams "mock " then "mock reply", so a faithful replay carries the
+    // partial arrival as well as the settled value.
+    assert!(stream.contains("\"phase\":\"delta\""), "no deltas replayed: {stream}");
+    assert!(stream.contains("mock reply"));
 }

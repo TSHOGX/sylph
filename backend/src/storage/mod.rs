@@ -11,10 +11,12 @@
 //! * [`retention`] — watermark-driven pruning, never time-driven.
 
 pub mod cas;
+pub mod consolidator;
 pub mod fold;
 pub mod history;
 pub mod retention;
 
 pub use fold::{Delta, Folded};
+pub use consolidator::Consolidator;
 pub use history::{Block, HistoryStore};
 pub use retention::{RetentionAuthority, TerminalAuthority, TraceDbAuthority};
