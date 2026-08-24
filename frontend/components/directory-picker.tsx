@@ -25,6 +25,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, type BrowseRoot } from "@/lib/api";
+import { useT } from "@/lib/i18n";
 import { Overlay } from "@/components/overlay";
 import { ExternalLinkIcon, FolderIcon, FolderUpIcon } from "@/components/icons";
 
@@ -79,6 +80,7 @@ export function DirectoryPicker({
   confirmLabel?: string;
   initialPath?: string;
 }) {
+  const t = useT();
   const rootsQuery = useQuery({
     queryKey: ["fs", "roots"],
     queryFn: () => api.fs.roots(),
@@ -164,7 +166,7 @@ export function DirectoryPicker({
                 onClick={() => void treeQuery.refetch()}
                 className="mt-1.5 rounded border border-danger-line bg-raised px-2 py-1 font-medium text-danger hover:bg-danger-bg focus-ring"
               >
-                Retry
+                {t("app.retry")}
               </button>
             </div>
           ) : treeQuery.isPending ? (

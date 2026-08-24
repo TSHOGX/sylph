@@ -19,6 +19,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, type Session, type Turn, type TurnWithEvents } from "@/lib/api";
+import { useT } from "@/lib/i18n";
 import { ErrorBoundary } from "@/lib/error-boundary";
 import { formatTimestamp, sessionLabel } from "@/lib/format";
 import { densityClasses, useSettings } from "@/lib/settings";
@@ -46,6 +47,7 @@ const TERMINAL: ReadonlySet<Turn["status"]> = new Set([
 ]);
 
 export default function SessionPage() {
+  const t = useT();
   const params = useParams();
   const sessionId = String(params.id);
   const queryClient = useQueryClient();
@@ -464,6 +466,25 @@ export default function SessionPage() {
         </div>
       </div>
 
+      {/* A lost race means the panel on screen was already answered — by another
+          frontend, or another tab. Worth saying: the user pressed a button and
+          nothing happened, and the reason is not their mistake. `staleAnswer` was
+          computed for this and had no surface. */}
+      {agent.staleAnswer && (
+        <p role="status" className="border-t border-line bg-canvas px-3 pt-2 text-2xs text-ink-muted">
+          {t("approval.stale")}
+        </p>
+      )}
+
+      {/* More than one request can be open at once — a dismissed approval stays
+          pending and the agent stays blocked — so the count is stated rather than
+          leaving the others invisible behind the first. */}
+      {agent.requests.length > 1 && (
+        <p className="border-t border-line bg-canvas px-3 pt-2 text-2xs text-ink-muted">
+          {t("approval.pendingCount", { count: agent.requests.length })}
+        </p>
+      )}
+
       {pendingRequest && (
         <div className="border-t border-line bg-canvas px-3 pt-3">
           <ApprovalDialog
@@ -711,6 +732,7 @@ function TurnSection({
 
   // Resending a turn that already succeeded would duplicate work the agent has
   // done, so it is offered only where the turn produced no usable result.
+  const t = useT();
   const resendable =
     entry.turn.status === "failed" ||
     entry.turn.status === "cancelled" ||
@@ -750,7 +772,7 @@ function TurnSection({
           onClick={() => void copy()}
           className="rounded px-1 hover:bg-hover hover:text-ink-soft focus-ring"
         >
-          {copied ? "Copied" : "Copy"}
+          {copied ? t("action.copied") : t("action.copy")}
         </button>
         {resendable && entry.turn.requestText && (
           <button

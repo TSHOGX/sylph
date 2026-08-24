@@ -202,7 +202,7 @@ export function WorkspaceSidebar() {
               onClick={() => void sessionsQuery.refetch()}
               className="mt-1.5 rounded border border-danger-line bg-raised px-2 py-1 font-medium text-danger hover:bg-danger-bg focus-ring"
             >
-              Retry
+              {t("app.retry")}
             </button>
           </div>
         ) : (

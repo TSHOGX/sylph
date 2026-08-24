@@ -637,8 +637,12 @@ export function Composer({
             </ul>
           )}
 
+          {/* The textarea's accessible name, and therefore what a screen reader
+              announces — so it is translated like any other user-facing string. The
+              English value is unchanged, which is what keeps the E2E specs that
+              query `getByLabel("Message")` valid. */}
           <label htmlFor={messageId} className="sr-only">
-            Message
+            {t("composer.message")}
           </label>
           {slashActive && (
             <div className="absolute inset-x-0 bottom-full z-30 mb-2">
@@ -961,8 +965,8 @@ export function Composer({
 
       {uploadTarget && (
         <DirectoryPicker
-          title="Save attachments into the workspace"
-          confirmLabel="Save here"
+          title={t("composer.saveIntoWorkspace")}
+          confirmLabel={t("composer.saveHere")}
           initialPath={session.workdir}
           onClose={() => setUploadTarget(null)}
           onChoose={(path) =>

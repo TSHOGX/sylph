@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Providers } from "@/lib/providers";
 import { AppShell } from "@/components/app-shell";
+import { SkipLink } from "@/components/skip-link";
 import { RegisterServiceWorker } from "@/lib/register-sw";
 import { THEME_BOOTSTRAP } from "@/lib/theme";
 
@@ -92,16 +93,16 @@ export default function RootLayout({
       </head>
       <body className="antialiased">
         {/*
-          Visible only while focused, so a keyboard user can jump past the
-          header on every page instead of tabbing through it each time. Each
-          page gives its <main> the matching id.
+          Visible only while focused, so a keyboard user can jump past the header on
+          every page instead of tabbing through it each time. Each page gives its
+          <main> the matching id.
+
+          Its own client component because the locale lives in `localStorage` and this
+          layout is a server component — and a skip link is the one control whose
+          entire purpose is to be read aloud, so an untranslatable one is the worst
+          place to leave a hardcoded string.
         */}
-        <a
-          href="#main"
-          className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-50 focus:rounded-lg focus:bg-accent focus:px-3 focus:py-2 focus:text-sm focus:text-accent-ink"
-        >
-          Skip to main content
-        </a>
+        <SkipLink />
         {/*
           The shell lives in the layout, not in each page: sidebars must keep
           their state and scroll position across navigation, which a shell

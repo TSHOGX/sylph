@@ -10,7 +10,7 @@ import { ApiError } from "@/lib/api";
 import { ErrorBoundary } from "@/lib/error-boundary";
 import { useSettings } from "@/lib/settings";
 import { applyTheme, watchSystemTheme } from "@/lib/theme";
-import { applyLocale } from "@/lib/i18n";
+import { applyLocale, useT } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -72,6 +72,11 @@ function LocaleSync() {
  * every page load, not once per browser.
  */
 function AuthGate({ children }: { children: ReactNode }) {
+  // `useT` reads the locale from the settings store rather than from a provider, so
+  // it works here — outside the auth gate and before any session exists. The two
+  // screens below are the first thing a user ever sees, and they were the only ones
+  // still hardcoded to English.
+  const t = useT();
   const { isPending, error } = useQuery({
     queryKey: ["auth", "token"],
     queryFn: async () => {
@@ -98,7 +103,7 @@ function AuthGate({ children }: { children: ReactNode }) {
         aria-live="polite"
         className="flex h-dvh items-center justify-center text-sm text-ink-muted"
       >
-        Connecting to backend...
+        {t("app.connecting")}
       </output>
     );
   }
@@ -107,9 +112,11 @@ function AuthGate({ children }: { children: ReactNode }) {
     return (
       <div role="alert" className="flex h-dvh items-center justify-center px-4">
         <div className="max-w-md text-center">
-          <h1 className="text-lg font-semibold text-danger">Cannot reach the backend</h1>
+          <h1 className="text-lg font-semibold text-danger">
+            {t("app.backendUnreachableTitle")}
+          </h1>
           <p className="mt-2 text-sm text-ink-muted">
-            Sylph Web needs the Rust backend running on{" "}
+            {t("app.backendUnreachableBody")}{" "}
             <code className="rounded bg-hover px-1">localhost:4317</code>.
           </p>
           <pre className="mt-3 overflow-x-auto rounded-lg bg-sunken p-3 text-left text-xs text-ink-soft">
@@ -121,7 +128,7 @@ function AuthGate({ children }: { children: ReactNode }) {
             onClick={() => window.location.reload()}
             className="mt-4"
           >
-            Retry
+            {t("app.retry")}
           </Button>
         </div>
       </div>

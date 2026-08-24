@@ -41,20 +41,23 @@
 
 export const en = {
   // Shell chrome and navigation.
+  // The only key here with no rendering surface, deliberately: it mirrors the
+  // `metadata.title` in `app/layout.tsx`, which Next resolves per *build* rather than
+  // per user, so a browser tab cannot follow the locale. Kept so the app's own name
+  // has one spelling, and so a future title that *can* be dynamic has somewhere to
+  // read it from.
   "app.name": "Sylph Web",
   "app.skipToMain": "Skip to main content",
   "app.connecting": "Connecting to backend...",
   "app.backendUnreachableTitle": "Cannot reach the backend",
+  "app.backendUnreachableBody": "Sylph Web needs the Rust backend running on",
   "app.retry": "Retry",
 
   "action.close": "Close",
   "action.cancel": "Cancel",
-  "action.save": "Save",
-  "action.reset": "Reset",
   "action.refresh": "Refresh",
   "action.copy": "Copy",
   "action.copied": "Copied",
-  "action.dismiss": "Dismiss",
   // Ends the turn but keeps the agent loaded. Distinct from Stop, which ends the
   // agent — two different intentions, so two different words.
   "action.interrupt": "Interrupt",
@@ -100,12 +103,10 @@ export const en = {
   "sidebar.quickSessions": "Quick Sessions",
   "sidebar.quickSessionsHint": "Quick Start puts scratch sessions here.",
   "sidebar.noSessions": "No sessions yet",
-  "sidebar.workspaceActions": "Workspace actions",
   "sidebar.listActions": "Workspace list actions",
   "sidebar.newWorkspaceEllipsis": "New Workspace...",
   "sidebar.newWorkspace": "New Workspace",
   "sidebar.bindWorkspace": "Bind workspace",
-  "sidebar.newSessionHereEllipsis": "New session here...",
   "sidebar.newSessionHere": "New session here",
   "sidebar.browseHistory": "Browse history...",
   "sidebar.pin": "Pin to sidebar",
@@ -128,9 +129,7 @@ export const en = {
   "approval.agentWantsTool": "Wants to use {tool}.",
   "approval.proposed": "Proposed",
   "approval.edited": "Edited - the agent will run this instead.",
-  "approval.waiting": "Agent is waiting for permission",
   "approval.pendingCount": "{count} waiting",
-  "approval.review": "Review",
   "approval.stale": "Someone already answered this.",
   "composer.agent": "Agent",
   "composer.model": "Model",
@@ -144,6 +143,8 @@ export const en = {
   "composer.noConfigOptions": "This agent reports nothing to configure here.",
   "composer.attachEllipsis": "Attach files...",
   "composer.saveToWorkspace": "Save attachments to workspace...",
+  "composer.saveIntoWorkspace": "Save attachments into the workspace",
+  "composer.saveHere": "Save here",
   "composer.stagedAttachments": "Staged attachments",
   "composer.placeholder": "Send a message...",
   "composer.placeholderBusy": "Waiting for the current turn to finish...",

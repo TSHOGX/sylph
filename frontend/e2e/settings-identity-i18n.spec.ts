@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { gotoReady } from "./fixtures/session";
+import { createSession, gotoReady } from "./fixtures/session";
 
 /**
  * Settings behaviour that only exists end to end.
@@ -90,6 +90,30 @@ test("switching language repaints the UI and retags the document", async ({ page
   await settings.getByRole("button", { name: "English", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
   await expect(settings.getByRole("heading", { level: 3, name: "Settings" })).toBeVisible();
+});
+
+test("the composer and the skip link translate too", async ({ page }) => {
+  // Two strings that were hardcoded English until the i18n sweep, and both are
+  // *accessible names* rather than visible text — which is why they were easy to
+  // miss and worst to leave: they are what a screen reader announces, so a Chinese
+  // user heard the interface's two most load-bearing labels in English.
+  // The session is created *before* switching language, because `createSession`
+  // navigates by waiting for the composer's English label — the very string this
+  // spec is about to translate.
+  await createSession(page);
+
+  const settings = await openSettings(page);
+  await settings.getByRole("button", { name: "中文", exact: true }).click();
+  await page.keyboard.press("Escape");
+
+  // The composer's textarea label. 25 specs query this by its English name, which is
+  // exactly why translating it had to keep the English value unchanged.
+  await expect(page.getByLabel("消息")).toBeVisible();
+
+  // The skip link is the first thing in the document and the first thing a keyboard
+  // user reaches. It lives in a server-rendered layout, so it needed its own client
+  // component to read the locale at all.
+  await expect(page.getByRole("link", { name: "跳到主要内容" })).toBeAttached();
 });
 
 /**

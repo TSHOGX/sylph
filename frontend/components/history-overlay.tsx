@@ -25,6 +25,7 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api, type ArchiveSession, type Workspace } from "@/lib/api";
+import { useT } from "@/lib/i18n";
 import { formatRelative, shortenHome } from "@/lib/format";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
@@ -47,6 +48,7 @@ const DirectoryPicker = dynamic(
 const PAGE_SIZE = 25;
 
 export function HistoryOverlay() {
+  const t = useT();
   const router = useRouter();
   const { closeOverlay, activeWorkdir, setActiveWorkdir } = useWorkspaceUI();
 
@@ -266,7 +268,7 @@ export function HistoryOverlay() {
               onClick={() => void history.refetch()}
               className="mt-1.5 rounded border border-danger-line px-2 py-1 font-medium text-danger hover:bg-danger-bg focus-ring"
             >
-              Retry
+              {t("app.retry")}
             </button>
           </div>
         ) : rows.length === 0 ? (

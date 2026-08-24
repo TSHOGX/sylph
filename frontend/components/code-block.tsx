@@ -20,6 +20,7 @@
  */
 
 import { memo, useState } from "react";
+import { useT } from "@/lib/i18n";
 
 /**
  * Lines rendered before truncating.
@@ -45,6 +46,7 @@ export const CodeBlock = memo(function CodeBlock({
   maxLines?: number;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const t = useT();
   const [copied, setCopied] = useState(false);
 
   const lines = code.replace(/\n$/, "").split("\n");
@@ -77,7 +79,7 @@ export const CodeBlock = memo(function CodeBlock({
           onClick={() => void copy()}
           className="rounded px-1.5 py-0.5 text-3xs text-ink-muted hover:bg-raised hover:text-ink focus-ring"
         >
-          {copied ? "Copied" : "Copy"}
+          {copied ? t("action.copied") : t("action.copy")}
         </button>
       </div>
 
