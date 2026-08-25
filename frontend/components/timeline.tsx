@@ -50,6 +50,7 @@ import {
   buildRows,
   buildTree,
   pathTo,
+  trajectoryName,
   trajectoryReport,
   type TimelineNode,
   type TimelineRow,
@@ -615,10 +616,11 @@ function RollupSummary({ node }: { node: TimelineNode }) {
   return <>{parts.join(" · ")}</>;
 }
 
-/** A trajectory's display name, never the vendor's tool name. */
-function trajectoryName(node: TimelineNode): string {
-  return node.row.event.name?.trim() || "Subagent";
-}
+// `trajectoryName` moved to `lib/timeline-tree.ts` and is imported above. It was
+// duplicated here and in the overview, which is one fact with two derivations: the
+// same node could be labelled differently in the card and in the strip, and the
+// overview's `aria-label` would then stop matching the card's region name — a
+// divergence no type checks and no test would report.
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;

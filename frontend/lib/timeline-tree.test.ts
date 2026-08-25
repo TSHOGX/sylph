@@ -4,6 +4,7 @@ import {
   buildTree,
   flattenTrajectories,
   pathTo,
+  trajectoryName,
   trajectoryReport,
   type TimelineNode,
 } from "@/lib/timeline-tree";
@@ -485,6 +486,35 @@ describe("promotion", () => {
  * which fail silently: a promoted host's `text` is its tool arguments, and a progress
  * snapshot describes work a close has already superseded.
  */
+describe("trajectoryName", () => {
+  it("prefers the name the agent gave", () => {
+    const nodes = tree([opens("s1", "code-reviewer"), closes("s1")]);
+    expect(trajectoryName(nodes[0])).toBe("code-reviewer");
+  });
+
+  it("falls back for a trajectory with no name, and treats blank as none", () => {
+    // Two producers can leave this empty: an adapter that declares a trajectory before
+    // its brief parses, and the server's own close, which carries no name at all.
+    expect(trajectoryName(tree([opens("s1"), closes("s1")])[0])).toBe("Subagent");
+    expect(trajectoryName(tree([opens("s2", "   "), closes("s2")])[0])).toBe("Subagent");
+  });
+
+  it("is the single definition both naming surfaces use", () => {
+    // The card's region label and the overview row's accessible name are the two places
+    // one node is named, and each used to compute the fallback itself. Two derivations of
+    // one fact diverge the moment either grows a case — and the failure is silent: the
+    // strip would name a node one way while the card named it another, so a locator that
+    // finds one stops finding the other. Asserted as an invariant over the shape both
+    // consume, since a `node` test environment cannot render either surface.
+    const named = tree([opens("s1", "Explore"), closes("s1")])[0];
+    const bare = tree([opens("s2"), closes("s2")])[0];
+    for (const node of [named, bare]) {
+      expect(trajectoryName(node)).toBe(node.row.event.name?.trim() || "Subagent");
+      expect(trajectoryName(node).trim()).not.toBe("");
+    }
+  });
+});
+
 describe("trajectoryReport", () => {
   it("reports a declared delegation's closing summary", () => {
     const nodes = tree([

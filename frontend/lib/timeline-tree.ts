@@ -677,6 +677,25 @@ export function pathTo(
 }
 
 /**
+ * A trajectory's display name, never the vendor's tool name.
+ *
+ * One definition, because two is what this had and the copies could disagree. The card
+ * and the sibling-comparison strip each computed it, so a change to either would label
+ * one node two ways — and the strip's `aria-label` would stop matching the card's region
+ * name, which nothing type-checks and no test asserts.
+ *
+ * Note what the fallback is *not*: it is not the only source of the string "Subagent".
+ * `claude`'s adapter sends that literal as the `name` on the wire whenever a
+ * delegation's brief has not finished streaming (`_task_label`), which at `started` is
+ * the usual case. So renaming this fallback would not remove "Subagent" from the screen
+ * — it would only change which of the two producers put it there. Anything that needs
+ * the string gone has to change the adapter and this together.
+ */
+export function trajectoryName(node: TimelineNode): string {
+  return node.row.event.name?.trim() || "Subagent";
+}
+
+/**
  * What a delegation says about itself: its closing summary, else its latest progress.
  *
  * The protocol records both — `task_notification` carries the delegate's own summary,
