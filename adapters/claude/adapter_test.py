@@ -457,6 +457,78 @@ class PermissionModeIsValidated(unittest.TestCase):
             self.assertIn(mode, adapter.PERMISSION_MODES, mode)
 
 
+class NestedTrajectoriesCarrySpanOnEveryPhase(Emitted):
+    """A nested `subagent` must name its parent on *every* phase, not only on open.
+
+    `history::consolidate` folds a declared trajectory's phases into one row keyed by
+    its close, and it carries `name` forward but **not** `span`. So an adapter that
+    states the parent only on `started` nests correctly while the turn is live and
+    re-roots itself beside its parent the moment the turn settles — the delegated
+    subtree flattens on reload, which is the pre-`span` bug arriving via the storage
+    tier. Both of this adapter's two paths to a `subagent` event are pinned here
+    because neither was covered: the existing specs assert a close lands in the tree,
+    which passes even if an intermediate phase drops the pointer.
+    """
+
+    def test_a_nested_declared_task_names_its_parent_throughout(self):
+        # The outer Task, at the root: `span` is absent rather than null, which is how
+        # the protocol spells "the root turn".
+        self.session._stream_event(
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "toolu_outer",
+                               "name": "Task"}}, None)
+        # The inner one, declared inside it — the envelope tags it with the outer id.
+        for nested in (
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "toolu_inner",
+                               "name": "Task"}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"partial_json": '{"subagent_type":"Explore"}'}},
+            {"type": "content_block_stop", "index": 0},
+        ):
+            self.session._stream_event(nested, "toolu_outer")
+        # Its `tool_result` is the delegated work's outcome, so it closes it.
+        self.session._tool_results({
+            "parent_tool_use_id": "toolu_outer",
+            "message": {"content": [{"type": "tool_result",
+                                     "tool_use_id": "toolu_inner",
+                                     "content": "done"}]},
+        })
+
+        inner = [e for e in self.trajectories() if e["streamId"] == "toolu_inner"]
+        self.assertEqual([e["phase"] for e in inner],
+                         ["started", "delta", "completed"])
+        for phase in inner:
+            self.assertEqual(phase.get("span"), "toolu_outer", phase["phase"])
+
+        outer = [e for e in self.trajectories() if e["streamId"] == "toolu_outer"]
+        self.assertNotIn("span", outer[0])
+
+    def test_a_notified_delegation_names_its_host_throughout(self):
+        opened = {
+            "type": "system", "subtype": "task_started",
+            "task_id": "t1", "tool_use_id": "toolu_wf",
+            "description": "worker", "task_type": "local_agent",
+        }
+        self.session._task_notification("task_started", opened)
+        self.session._task_notification("task_progress", {
+            "type": "system", "subtype": "task_progress", "task_id": "t1",
+            "tool_use_id": "toolu_wf", "description": "still going",
+        })
+        # The close carries no `tool_use_id` at all, so the host has to be remembered
+        # — and it has to reach this phase, not merely be known internally.
+        self.session._task_notification("task_updated", {
+            "type": "system", "subtype": "task_updated", "task_id": "t1",
+            "patch": {"status": "completed"},
+        })
+
+        phases = [e for e in self.trajectories() if e["streamId"] == "t1"]
+        self.assertEqual([e["phase"] for e in phases],
+                         ["started", "delta", "completed"])
+        for phase in phases:
+            self.assertEqual(phase.get("span"), "toolu_wf", phase["phase"])
+
+
 class UnaddressableNotification(Emitted):
     """A notification with no id at all still happened."""
 
