@@ -717,6 +717,29 @@ journaled, because the method disagreed with the field beside it. The reload the
 flattened every delegated subtree onto the root, which is the exact bug the field
 was added to prevent, reappearing one layer down. Read the field.
 
+**A placeholder written into durable data cannot be withdrawn by fixing the
+producer.** `claude`'s adapter sent the literal `"Subagent"` as a delegation's `name`
+whenever its brief had not finished streaming — the usual case at `started`.
+`history::consolidate` keeps the best name any phase gave a block, so a later `delta`
+with the real brief normally wins; but when the brief never finishes, because the
+delegation fails early or the link dies mid-input, the guess becomes the trajectory's
+durable name in `history.db`.
+
+The bound on the fix is worth stating exactly, because it sounds better than it is:
+**rows already journaled with the literal are permanently indistinguishable from a
+genuine name.** There was nothing to migrate not because the data is fine but because
+nothing can tell the two apart. So a historical `"Subagent"` row is not evidence that
+an agent chose it, and any analysis over archived names has to treat those as
+unknowable rather than as data. The general rule: a field meaning "what this is
+called" must be absent when unknown, because a journal makes every guess permanent —
+and `Option`/`null` is the only value that stays honest after the fact.
+
+Landing such a fix has an order. Renaming a *client* fallback while the adapter still
+sends the literal gives one condition two labels, which is worse than one imprecise
+label; and the subtraction is safe alone precisely because the client already falls
+back to the same string, so the rendered output does not change. Producer first,
+presentation second.
+
 **Consolidation keeps the closing event's fields, so a name given at open is
 lost.** `history::consolidate` folds a block's phases into one row keyed by the
 `completed` event. That is right for text and wrong for identity: a delegated
