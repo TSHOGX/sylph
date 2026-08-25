@@ -555,6 +555,12 @@ fn normalize_events(events: &[TraceEvent]) -> Vec<StreamEvent> {
             // Archived events are settled history, never mid-stream.
             phase: Some("completed".to_string()),
             stream_id,
+            // TraceDB records a delegation as a *separate session* with its own
+            // lineage (§ `Lineage::Subagent`), not as a trajectory inside one
+            // session's stream — and its `parent_id` pairs a result to its call,
+            // which is a different relationship. So an archived stream is always
+            // root-level, and a delegated one is reached by opening that session.
+            span: None,
             name: event.name.clone(),
             text: event.text.clone().unwrap_or_default(),
             data,

@@ -59,16 +59,15 @@ Detailed system state (sessions, turns, runners).
 The identity text Sylph appends to an agent's prompt, read from disk per request.
 
 This endpoint exists because the toggle that governs injection is meaningless
-without it. `SOUL.md` lives under `~/.agents/skills/sylph/` — outside this repo and
-outside any other surface the app exposes — so asking a user to decide whether to
-append it to every session, with no way to read what it says, is asking for consent
-to something invisible.
+without it. `SOUL.md` lives in the Sylph home directory — outside any other surface
+the app exposes — so asking a user to decide whether to append it to every session,
+with no way to read what it says, is asking for consent to something invisible.
 
 **Response 200 — a file resolved and was readable:**
 ```json
 {
   "available": true,
-  "path": "/Users/hsw/.agents/skills/sylph/SOUL.md",
+  "path": "/Users/you/.sylph/SOUL.md",
   "content": "# Sylph\n\nYou are ...",
   "bytes": 3184,
   "modifiedMs": 1724058000000
@@ -112,11 +111,73 @@ Four decisions this shape encodes:
 Authenticated, like every route but `/health`: it returns an absolute filesystem
 path and the full text of a personal file.
 
-Resolution lives in `Config` (`backend/src/config.rs`), mirroring what the runners
-do — `<runners_dir>/../SOUL.md`, overridden by `SYLPH_SOUL`. An explicit empty
-`SYLPH_SOUL` yields no identity, matching the runner protocol's spelling. The two
-resolving it independently is exactly how the settings panel and the spawned runner
-would come to disagree about whether injection is active.
+Resolution lives in `Config` (`backend/src/config/`), which resolves `paths.soul`
+once — `~/.sylph/SOUL.md` by default, overridden by `SYLPH_SOUL`. An explicit empty
+`SYLPH_SOUL` yields no identity, matching the adapter protocol's spelling, and a
+configured path that does not exist resolves to none for the same reason. Resolving
+it in two places is exactly how the settings panel and the spawned adapter would
+come to disagree about whether injection is active.
+
+#### `GET /api/v1/config`
+
+What configuration resolved to, and which source supplied each value. The same
+report `sylph-web-backend doctor` renders, so the terminal and the settings panel
+cannot disagree.
+
+**Response 200:**
+```json
+{
+  "home": "/Users/you/.sylph",
+  "configPath": "/Users/you/.sylph/config.toml",
+  "configPresent": true,
+  "entries": [
+    {
+      "key": "paths.data_dir",
+      "value": "/Users/you/.sylph/data",
+      "source": "default",
+      "envVar": "SYLPH_DATA_DIR",
+      "exists": true
+    },
+    {
+      "key": "server.port",
+      "value": "4400",
+      "source": "env",
+      "envVar": "SYLPH_PORT"
+    }
+  ],
+  "bundledAgentCandidates": [
+    { "path": "/opt/sylph/adapters", "exists": true, "chosen": true }
+  ]
+}
+```
+
+Four decisions:
+
+- **`source` and `envVar` on every entry.** A resolved value alone cannot
+  distinguish "this path is wrong" from "the path I set is not being read", and
+  those need opposite fixes. Naming the variable in the row means acting on it does
+  not require consulting a table elsewhere.
+- **`exists` is absent, not `false`, for anything that is not a path.** A log level
+  rendered as missing reports a working setting as broken. `tracedb.bin` is checked
+  against `PATH` when it is a bare command name, since that is the default and a
+  filesystem check would call a working install absent.
+- **Read-only, with no `PUT`.** `paths.browse_roots` bounds what any client of this
+  backend may enumerate and `paths.agents_dir` names directories the server executes
+  programs from. A loopback HTTP surface that could rewrite either is a materially
+  larger threat-model question than one that displays them, and the file is the
+  durable, reviewable record. The panel shows the values and the path to open.
+- **Authenticated.** Every value is an absolute local filesystem path. `/health`
+  stays unauthenticated for supervisor probes and reports booleans only.
+
+Built per request rather than cached: every `exists` field is a filesystem fact, and
+a cached report would keep telling a user a directory is missing after they created
+it. It is a handful of `stat` calls against the page cache.
+
+`bundledAgentCandidates` lists every directory bundled-adapter resolution tried, in
+order, with the one it took marked. Without it "no agents" is unactionable — a
+missing install and a mistyped path produce the same empty list.
+
+See `docs/configuration.md` for the settings themselves.
 
 ### Agents
 
@@ -470,6 +531,34 @@ event: usage
 data: {"seq":7,"data":{"inputTokens":1234,"outputTokens":567}}
 ```
 
+Delegated work carries `span`, naming the trajectory an event happened in; absent
+means the root turn. A `subagent` event's `streamId` *is* a trajectory id, so a
+nested delegation is one whose `span` names another — which is how a subagent, a
+subagent's subagent, and a dynamic workflow's parallel phases all travel in one
+flat stream. See `docs/session-protocol.md` § Delegated trajectories.
+
+```
+event: subagent
+data: {"seq":8,"phase":"started","streamId":"s1","name":"Explore"}
+
+event: tool_call
+data: {"seq":9,"phase":"completed","streamId":"t7","span":"s1","name":"Grep"}
+
+event: subagent
+data: {"seq":10,"phase":"started","streamId":"s2","span":"s1","name":"Worker"}
+
+event: subagent
+data: {"seq":11,"phase":"completed","streamId":"s1"}
+```
+
+Unlike other kinds, a `subagent` event is `stable` at every phase: its `started`
+phase is where a trajectory's identity, name, and parent live, so dropping it as an
+ephemeral projection would leave the journal holding children that point at a parent
+it never recorded. A trajectory an adapter never closes is closed by the server when
+the turn terminates, carrying `data.closedBy = "server"` — which a client reports as
+*abandoned* rather than *failed*, because nobody said it failed, only that nobody
+said.
+
 SSE reconnection:
 - Client sends `Last-Event-ID: {seq}`
 - Server replays from `seq+1`
@@ -589,8 +678,8 @@ listing returns.
 **Response 200:**
 ```json
 {
-  "quickStartDir": "/Users/you/.agents",
-  "dataDir": "/Users/you/.agents/data/sylph/web",
+  "quickStartDir": "/Users/you/.sylph/scratch",
+  "dataDir": "/Users/you/.sylph/data",
   "home": "/Users/you",
   "workspaces": [
     {
@@ -1164,7 +1253,8 @@ It is deliberately narrower than the session file API in three ways: only
 directories are listed, so it cannot be used to discover file names; there is no
 content endpoint, so reading bytes stays session-scoped; and a symlink leaving the
 root is omitted from listings rather than merely refused on access. Dotfiles *are*
-listed, because `~/.agents` is a legitimate workspace the product points at.
+listed, because `~/.sylph` is a legitimate workspace the product points at, and
+because a directory a user chose to name should not be hidden from them.
 
 #### `GET /api/v1/fs/roots`
 

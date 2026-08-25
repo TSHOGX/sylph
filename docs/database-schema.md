@@ -2,7 +2,7 @@
 
 Sylph Web uses SQLite for the live session journal and TraceDB for stable cross-agent history.
 
-## Live Journal (live.db)
+## Journal (journal.db)
 
 The live journal stores active sessions, turns, and recent events. It uses WAL mode for concurrent access and numbered migrations for schema evolution.
 
@@ -265,7 +265,9 @@ startup:
 002_pending_requests.sql       -- what an agent is blocked on
 003_agent_event_vocabulary.sql
 004_request_affordances.sql    -- allow_persistent, expires_at_ms
-005_request_form.sql           -- form_json
+005_event_span.sql             -- span, for a delegated trajectory's parent
+006_turn_origin.sql            -- origin, for an agent-initiated turn
+007_request_form.sql           -- form_json
 ```
 
 Attachments and commands need no migration of their own: attachments are staged on

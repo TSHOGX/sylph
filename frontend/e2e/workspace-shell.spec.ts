@@ -366,7 +366,10 @@ test("the history browser switches workspace through a filterable picker", async
   // The filesystem fallback exists for a directory the archive has never seen.
   await dialog.getByRole("button", { name: /^Workspace:/ }).click();
   await dialog.getByRole("button", { name: "Browse folders..." }).click();
-  await expect(dialog.getByRole("list", { name: "Folders" })).toBeVisible();
+  // A `listbox`, not a `list`: the folder browser is filterable now, and a
+  // filterable list has to be the combobox pattern — a `role="menu"` or a bare
+  // `<ul>` cannot legally contain the text field.
+  await expect(dialog.getByRole("listbox", { name: "Folders" })).toBeVisible();
 
   // One trap throughout: Escape closes the whole thing, not just a nested layer.
   await page.keyboard.press("Escape");
@@ -427,11 +430,16 @@ test("binding a workspace from the empty sidebar area needs no session first", a
   // only path to binding a fresh directory undiscoverable.
   await sidebar.getByRole("button", { name: "New Workspace..." }).click();
 
-  // The picker enumerates the *backend's* filesystem, which a browser cannot do
-  // for itself.
+  // Known workspaces first: binding a directory that already holds archived
+  // history is the common case, and that directory is absent from the sidebar
+  // precisely because nothing has bound it yet.
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole("list", { name: "Folders" })).toBeVisible();
+  await expect(dialog.getByRole("combobox", { name: /filter workspaces/i })).toBeVisible();
+
+  // The filesystem stays one click away, for a folder with no history at all.
+  await dialog.getByRole("button", { name: "Browse folders..." }).click();
+  await expect(dialog.getByRole("listbox", { name: "Folders" })).toBeVisible();
 
   await dialog.getByRole("button", { name: "Bind workspace" }).click();
 

@@ -13,11 +13,10 @@
  * # Why the text is shown at all
  *
  * A toggle governing whether `SOUL.md` is appended to every prompt is a request
- * for consent to something the user cannot otherwise see: the file lives under
- * `~/.agents/skills/sylph/`, outside this repo and outside any surface the app
- * offers. Asking someone to choose between "Sylph's identity" and "the agent as it
- * comes" without showing what the first one says is asking them to pick between
- * two unknowns.
+ * for consent to something the user cannot otherwise see: the file lives in the
+ * Sylph home directory, outside any surface the app otherwise offers. Asking
+ * someone to choose between "Sylph's identity" and "the agent as it comes" without
+ * showing what the first one says is asking them to pick between two unknowns.
  *
  * Collapsed by default, because the answer to "is identity on" is the toggle, and
  * the file is 3 KB of prose that would otherwise push every other control in this

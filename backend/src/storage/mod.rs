@@ -9,14 +9,21 @@
 //!   is stored once.
 //! * [`history`] — the read-mostly store the journal consolidates into.
 //! * [`retention`] — watermark-driven pruning, never time-driven.
+//! * [`scheduler`] — when retention runs. Separate from the policy it invokes,
+//!   because "what is safe to drop" and "when to ask" are independent decisions,
+//!   and the second one being absent is what left the first unreachable.
 
 pub mod cas;
 pub mod consolidator;
 pub mod fold;
 pub mod history;
 pub mod retention;
+pub mod scheduler;
 
 pub use fold::{Delta, Folded};
 pub use consolidator::Consolidator;
 pub use history::{Block, HistoryStore};
-pub use retention::{RetentionAuthority, TerminalAuthority, TraceDbAuthority};
+pub use retention::{
+    Confirmation, RetentionAuthority, Resolved, TerminalAuthority, TraceDbAuthority,
+};
+pub use scheduler::{PassReport, RetentionScheduler};

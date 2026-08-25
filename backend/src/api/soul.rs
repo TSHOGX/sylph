@@ -3,9 +3,8 @@
 //! This exists because the toggle that governs injection is meaningless without
 //! it. Asking a user to decide whether to append `SOUL.md` to every session,
 //! while giving them no way to read what it says, is asking them to consent to
-//! something invisible — and the file lives outside the repo, under
-//! `~/.agents/skills/sylph/`, so there is nowhere in the UI they could otherwise
-//! look.
+//! something invisible — and the file lives in the Sylph home directory, so there
+//! is nowhere else in the UI they could look.
 //!
 //! Read on request rather than cached at startup. `SOUL.md` is hand-edited
 //! between sessions, and a cached copy would show a stale identity next to a

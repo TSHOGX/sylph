@@ -4,8 +4,8 @@
  * Left pane: sessions grouped by the directory they run in.
  *
  * The grouping key is `workdir`, because that is what a session actually is —
- * an agent bound to a directory. Sessions in `~/.agents` are split into a
- * separate "Quick Sessions" group: they exist so a user can ask something
+ * an agent bound to a directory. Sessions in the Quick Start directory are split
+ * into a separate "Quick Sessions" group: they exist so a user can ask something
  * without picking a project, and mixing them into the project list would bury
  * the projects under scratch work.
  *
@@ -37,8 +37,8 @@ import dynamic from "next/dynamic";
 // Code-split: the picker pulls in its own queries and markup, and the sidebar
 // renders on first paint. Loading it eagerly would put a modal nobody has opened
 // into the first-load bundle, which is within 4 KB of its budget.
-const DirectoryPicker = dynamic(
-  () => import("@/components/directory-picker").then((m) => m.DirectoryPicker),
+const WorkspacePicker = dynamic(
+  () => import("@/components/workspace-picker").then((m) => m.WorkspacePicker),
   { ssr: false },
 );
 import { ContextMenu, MenuButton, type MenuItem } from "@/components/ui/menu";
@@ -212,7 +212,12 @@ export function WorkspaceSidebar() {
               group={
                 quick ?? {
                   path: quickStartDir ?? "",
-                  name: ".agents",
+                  // Derived from the resolved path rather than written out: the
+                  // directory is configurable, so a literal name here would be
+                  // wrong for anyone who set `paths.quick_start_dir`. This is only
+                  // the pre-load fallback — the real row carries the server's own
+                  // leaf name.
+                  name: leafName(quickStartDir ?? ""),
                   sessions: [],
                   isQuickStart: true,
                   lastUsedMs: 0,
@@ -295,8 +300,13 @@ export function WorkspaceSidebar() {
       )}
     </nav>
 
+    {/* The workspace list, not a raw browse: binding a directory that already holds
+        archived history is the common case — a project worked on before this UI
+        existed — and that directory is absent from the sidebar precisely because
+        nothing has bound it yet. The filesystem stays one click away for a folder
+        with no history at all. */}
     {picking && (
-      <DirectoryPicker
+      <WorkspacePicker
         title={t("sidebar.newWorkspace")}
         confirmLabel={t("sidebar.bindWorkspace")}
         onChoose={bindWorkspace}

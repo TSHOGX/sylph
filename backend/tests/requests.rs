@@ -310,8 +310,12 @@ async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
     let session_id = server.create_session("mock").await;
 
     // Remove the adapter behind an already-created session, which is what an
-    // uninstalled agent looks like to a session that predates its removal.
-    std::fs::remove_dir_all(server.browse_root().join("runners").join("mock")).unwrap();
+    // uninstalled agent looks like to a session that predates its removal. Asked
+    // of the harness rather than spelled out: a literal directory name here is a
+    // second place the layout is written down, and it silently stops removing
+    // anything the moment that layout changes — leaving a test that asserts the
+    // detached path while never producing it.
+    std::fs::remove_dir_all(server.agents_dir().join("mock")).unwrap();
 
     let body = json_body(
         server

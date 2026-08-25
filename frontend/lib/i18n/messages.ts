@@ -52,6 +52,7 @@ export const en = {
   "app.backendUnreachableTitle": "Cannot reach the backend",
   "app.backendUnreachableBody": "Sylph Web needs the Rust backend running on",
   "app.retry": "Retry",
+  "app.back": "Back",
 
   "action.close": "Close",
   "action.cancel": "Cancel",
@@ -70,6 +71,10 @@ export const en = {
   "select.filter.label": "Filter {name}",
   "select.filter.placeholder": "Type to filter",
   "select.filter.none": "No matches",
+  // The keyboard contract, shown in a picker's footer. One string rather than one
+  // per surface: every list here answers the same three keys, and three copies is
+  // how two of them come to disagree.
+  "select.keys": "↑↓ navigate · ↵ choose · Esc close",
   "action.loading": "Loading...",
   "action.expand": "Expand",
   "action.collapse": "Collapse",
@@ -129,6 +134,44 @@ export const en = {
   "sidebar.loadingHistory": "Loading history...",
   "sidebar.archiveUnavailable": "Archive unavailable — showing live sessions only",
   "sidebar.turnRunning": "A turn is running",
+
+  // Choosing a workspace: the directories this machine has worked in, ranked by
+  // recency. Reached from `Mod+N`, the sidebar, and the history browser, which is
+  // why these are their own namespace rather than any one caller's.
+  "workspacePicker.title": "Choose a workspace",
+  "workspacePicker.filterName": "workspaces",
+  // Names the *path* explicitly: the visible column is a leaf name, so nothing
+  // else tells the user that a middle segment will match.
+  "workspacePicker.filterPlaceholder": "Filter by any part of the path...",
+  "workspacePicker.loading": "Loading workspaces...",
+  "workspacePicker.loadFailed": "Could not load workspaces",
+  "workspacePicker.empty": "No workspaces yet. Browse for a folder to start one.",
+  "workspacePicker.browse": "Browse folders...",
+  "workspacePicker.browseTitle": "Browse for a folder",
+  "workspacePicker.archived": "{count} archived",
+  "workspacePicker.live": "{count} live",
+  // The history browser's own verb for the filesystem fallback, which is where a
+  // chosen folder lands when it was reached by browsing rather than by picking.
+  "history.showHistory": "Show its history",
+
+  // The filesystem fallback: one directory level per request.
+  "directoryPicker.title": "Choose a folder",
+  "directoryPicker.confirm": "Use this folder",
+  "directoryPicker.filterName": "folders",
+  "directoryPicker.filterPlaceholder": "Filter folders, or type a path...",
+  "directoryPicker.folders": "Folders",
+  "directoryPicker.path": "Path",
+  "directoryPicker.roots": "Starting points",
+  "directoryPicker.parent": "Parent folder",
+  "directoryPicker.loading": "Loading folders...",
+  "directoryPicker.empty": "No subfolders here. Choose this folder, or go up.",
+  "directoryPicker.noMatch": "No subfolder matches.",
+  "directoryPicker.truncated": "Only the first folders are listed. Narrow down by opening one.",
+  "directoryPicker.listFailed": "Could not list that folder.",
+  "directoryPicker.goTo": "Go to {path}",
+  // Enter opens a folder; the modifier chooses it outright. Stated in the footer
+  // because a modifier no affordance mentions is a feature nobody finds.
+  "directoryPicker.keys": "↑↓ navigate · ↵ open · ⌘↵ choose · Esc close",
 
   // Composer.
   "approval.fallbackTitle": "The agent needs permission",
@@ -360,8 +403,27 @@ export const en = {
     "Errors always expand regardless of these, since a failure's output is the answer.",
   "settings.expansion.thinking": "Expand thinking blocks",
   "settings.expansion.toolOutput": "Expand tool output on success",
-  "settings.dataDir.label": "Data directory",
-  "settings.dataDir.hint": "Set with SYLPH_WEB_DATA_DIR; read-only here.",
+  "settings.section.config": "Configuration",
+  "settings.config.failed": "Could not read the resolved configuration.",
+  "settings.config.file.label": "Configuration file",
+  "settings.config.file.hint":
+    "Everything below is set here. Edit the file and restart; an environment variable overrides it.",
+  "settings.config.file.absent":
+    "No file yet — every value below is a default. It is created on first start.",
+  "settings.config.resolved.label": "Resolved settings",
+  "settings.config.resolved.hint":
+    "What this server is actually using, and where each value came from.",
+  "settings.config.column.setting": "Setting",
+  "settings.config.column.value": "Value",
+  "settings.config.column.source": "From",
+  "settings.config.source.file": "config.toml",
+  "settings.config.source.default": "default",
+  "settings.config.missing": "missing",
+  "settings.config.adapters.label": "Bundled adapters",
+  "settings.config.adapters.hint":
+    "Adapters shipped with Sylph, searched in this order. Your own live in the agents directory above and shadow these by name.",
+  "settings.config.adapters.inUse": "in use",
+  "settings.config.adapters.absent": "not found",
   "settings.reset.label": "Reset",
   "settings.reset.hint": "Clears stored preferences. Sessions and history are untouched.",
   "settings.reset.button": "Reset preferences",
@@ -391,7 +453,8 @@ export const en = {
   "settings.agents.default.first": "First discovered runner",
   "settings.agents.models.label": "Default model per agent",
   "settings.agents.models.hint": "Applied as the `model` flag on new sessions.",
-  "settings.agents.models.none": "No runners discovered. Check SYLPH_RUNNERS_DIR, then refresh.",
+  "settings.agents.models.none":
+    "No agents discovered. Check the paths in Configuration, then refresh.",
   "settings.agents.models.noFlag": "declares no model flag",
   "settings.agents.models.runnerDefault": "Runner default",
   // Names one agent's model control. Distinct from the section label, which names

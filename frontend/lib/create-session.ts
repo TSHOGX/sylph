@@ -4,10 +4,10 @@
  * Creating a session with no dialog.
  *
  * The directory is the only thing a session genuinely needs beyond an agent,
- * and every caller here already knows it: Quick Start knows `~/.agents`, and a
- * sidebar group *is* a directory. So the interaction is a mutation, not a route
- * — asking for a working directory that the invocation already named is a form
- * the user has to dismiss to get what they clicked.
+ * and every caller here already knows it: Quick Start has the server-resolved
+ * Quick Start directory, and a sidebar group *is* a directory. So the interaction
+ * is a mutation, not a route — asking for a working directory that the invocation
+ * already named is a form the user has to dismiss to get what they clicked.
  *
  * `/sessions/new` still exists, for the two cases this cannot serve: no
  * directory chosen yet (`Mod+N`), and overriding the agent, model, or title.

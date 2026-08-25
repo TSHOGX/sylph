@@ -36,8 +36,31 @@ export interface SelectOption {
   label: string;
   /** Leading icon. Decorative; the label is the accessible name. */
   icon?: ReactNode;
+  /**
+   * Second line under the label, and matched by the filter.
+   *
+   * This is the field that let every richer picker join this engine rather than
+   * fork it. A workspace is identified by its *path*, not its leaf name — the
+   * user's mental index of a project is often a middle segment (`huawei`,
+   * `sylph`) that no leaf carries — and an archived session by the directory it
+   * ran in. Both need a line the eye can read and the filter can reach, which
+   * `hint` could not be: it is trailing, mono, and width-capped for a shortcut.
+   *
+   * Being part of the searchable contract is why it lives here rather than in a
+   * render callback. A row that renders text the filter cannot see is a row the
+   * user can read and not find.
+   */
+  detail?: string;
   /** Trailing hint — a shortcut, or the agent's own description of a choice. */
   hint?: string;
+  /**
+   * Trailing metadata: counts, a badge, a timestamp.
+   *
+   * Deliberately *not* matched. It is derived from the candidate rather than
+   * naming it — "3 sessions" is true of hundreds of rows, so admitting it to the
+   * filter would rank by a word that identifies nothing.
+   */
+  meta?: ReactNode;
   /** Renders as a dimmed, unfocusable row: the action exists but does not apply. */
   disabled?: boolean;
   /**
@@ -164,9 +187,12 @@ function withOneChecked<T extends SelectOption>(items: readonly T[]): readonly T
  * a heading introduces choices that are no longer beneath it, so keeping one in a
  * filtered result labels the wrong thing.
  *
- * Both the label and the hint are matched, because for a model catalogue the hint
- * is the agent's own description and carries the words a user actually remembers —
- * a provider name, a price. Field order is the ranking, so a label match wins.
+ * Label, detail, and hint are all matched, because each carries words a user
+ * actually remembers: a model catalogue's hint is the agent's own description (a
+ * provider name, a price), and a workspace's detail is the path whose middle
+ * segment is how the project is known. Field order is the ranking, so a label
+ * match wins, then the detail line, then the trailing hint — which is the right
+ * order because it runs from what names the row to what merely annotates it.
  */
 export function buildRows<T extends SelectOption>(
   items: readonly T[],
@@ -190,7 +216,7 @@ export function buildRows<T extends SelectOption>(
   return fuzzyRank(
     source.filter((item) => !item.disabled),
     trimmed,
-    (item) => [item.label, item.hint ?? ""],
+    (item) => [item.label, item.detail ?? "", item.hint ?? ""],
   ).map((result, index) => ({ item: result.item, index }));
 }
 

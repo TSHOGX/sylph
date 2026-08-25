@@ -71,8 +71,14 @@ test("every control in the create picker has an accessible name", async ({ page 
   await gotoReady(page);
   await page.keyboard.press("ControlOrMeta+Shift+o");
   await expect(page.getByRole("dialog")).toBeVisible();
+  // Both surfaces of the create path, not just the first: the workspace list and
+  // the folder browser are separate component trees, and the browser is the one
+  // that navigates entirely by button — the crumb trail, the roots, the up
+  // control. Auditing only the list would leave those uncovered.
+  await expect(page.getByRole("combobox", { name: /filter workspaces/i })).toBeVisible();
+  await page.getByRole("button", { name: "Browse folders..." }).click();
   // Wait for the listing, so the audit sees folder rows rather than the spinner.
-  await expect(page.getByRole("list", { name: "Folders" })).toBeVisible();
+  await expect(page.getByRole("listbox", { name: "Folders" })).toBeVisible();
 
   const unnamed = await page.evaluate(() => {
     // Buttons are included, not just fields: this surface navigates by button,
@@ -166,8 +172,17 @@ test("the create picker has no automated accessibility violations", async ({ pag
   await gotoReady(page);
   await page.keyboard.press("ControlOrMeta+Shift+o");
   await expect(page.getByRole("dialog")).toBeVisible();
-  await expect(page.getByRole("list", { name: "Folders" })).toBeVisible();
-  await audit(page, "create session picker");
+
+  // Audited with a list actually open, in both states. A filterable list is the
+  // combobox pattern, and the invalid-ARIA failure that pattern exists to avoid —
+  // an `<input>` inside a `role="menu"` — is only reachable while the surface is
+  // rendered. A static read does not catch it.
+  await expect(page.getByRole("combobox", { name: /filter workspaces/i })).toBeVisible();
+  await audit(page, "workspace picker");
+
+  await page.getByRole("button", { name: "Browse folders..." }).click();
+  await expect(page.getByRole("listbox", { name: "Folders" })).toBeVisible();
+  await audit(page, "folder browser");
 });
 
 test("the conversation canvas has no automated accessibility violations", async ({
@@ -186,6 +201,45 @@ test("the conversation canvas has no automated accessibility violations", async 
   await expect(page.getByRole("complementary", { name: "Artifacts" })).toBeVisible();
 
   await audit(page, "conversation canvas with tool calls");
+});
+
+/**
+ * A delegation tree, audited with real nesting rather than one card.
+ *
+ * Nested landmarks are the risk here: each delegation is a `region`, so a depth-3
+ * tree nests three of them, and a `region` with no accessible name is a landmark a
+ * screen reader announces as nothing. The failed branch also auto-expands, which
+ * puts the danger colours inside a `bg-raised` card — a contrast pairing that does
+ * not occur anywhere else in the timeline.
+ */
+test("a nested delegation tree has no automated accessibility violations", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  await page.getByLabel("Message").fill("delegate this please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Verify delegation" })).toBeVisible({
+    timeout: 15000,
+  });
+
+  // Open a clean branch too, so both tones are in scope: the failed branch opened
+  // itself, and a card's own colours differ by status.
+  await page
+    .getByRole("region", { name: "Explore delegation" })
+    .getByRole("button", { name: "Explore", exact: true })
+    .click();
+
+  await audit(page, "delegation tree");
+
+  // Focus mode is a different tree: a breadcrumb `nav` plus re-rooted cards.
+  await page
+    .getByRole("region", { name: "Verify delegation" })
+    .getByRole("button", { name: "Focus Verify" })
+    .click();
+  await expect(page.getByRole("navigation", { name: "Delegation path" })).toBeVisible();
+
+  await audit(page, "delegation tree in focus mode");
 });
 
 /**

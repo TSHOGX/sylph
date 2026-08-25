@@ -101,6 +101,62 @@ describe("buildRows, filtered", () => {
   });
 });
 
+/**
+ * The second line is searchable, which is the whole reason it is part of the row
+ * model rather than a render callback.
+ *
+ * A workspace is identified by its path, and the segment a user remembers is
+ * usually in the middle of it — `huawei`, `sylph` — where no leaf name carries it.
+ * A `detail` the filter could not reach would render text the user can read and
+ * cannot find, which is the failure mode a render escape hatch would have allowed
+ * back in.
+ */
+describe("buildRows, the detail line", () => {
+  const workspaces = [
+    choice("sylph-web", { detail: "~/Workspace/sylph-web" }),
+    choice("api", { detail: "~/Workspace/huawei/api" }),
+    choice("notes", { detail: "~/Documents/notes" }),
+  ];
+
+  it("matches a middle path segment that no label carries", () => {
+    expect(buildRows(workspaces, "huawei").map((row) => row.item.label)).toEqual(["api"]);
+  });
+
+  it("still ranks a label match above a detail match", () => {
+    const rows = buildRows(
+      [choice("archive", { detail: "~/Workspace/x" }), choice("x", { detail: "~/archive/y" })],
+      "archive",
+    );
+
+    expect(rows[0].item.label).toBe("archive");
+  });
+
+  /**
+   * Field order is a tie-break, not a dominance rule: each later field costs a
+   * fixed 60, which a tighter match in a shorter string can still outweigh. So the
+   * two candidates carry the *same* text, leaving position as the only variable.
+   * Asserting more than this would pin a scoring accident rather than the contract.
+   */
+  it("ranks a detail match above an equal hint match", () => {
+    const rows = buildRows(
+      [choice("first", { hint: "sylph" }), choice("second", { detail: "sylph" })],
+      "sylph",
+    );
+
+    expect(rows[0].item.label).toBe("second");
+  });
+
+  /**
+   * `meta` is derived from the candidate rather than naming it: "3 archived" is
+   * true of hundreds of rows, so admitting it would rank by a word that identifies
+   * nothing. It is also a `ReactNode`, which has no text to match in the first
+   * place.
+   */
+  it("does not match the trailing metadata", () => {
+    expect(buildRows([choice("api", { meta: "12 archived" })], "archived")).toEqual([]);
+  });
+});
+
 describe("shouldSearch", () => {
   const choices = (count: number) =>
     Array.from({ length: count }, (_, i) => choice(`Model ${i}`));

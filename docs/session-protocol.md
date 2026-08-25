@@ -459,7 +459,7 @@ The event kinds are `thinking`, `assistant`, `tool_call`, `tool_result`, `usage`
 
 | `kind` | Carries |
 | --- | --- |
-| `subagent` | `parentToolUseId`, the child's own events nested |
+| `subagent` | Declares a delegated trajectory; its `streamId` is that trajectory's id. Any event's `span` may also promote its referent to one (§ Delegated trajectories) |
 | `plan` | A proposed plan, so plan mode is reviewable rather than prose |
 | `diff` | A structured patch, so a file change renders as a diff not a tool log |
 | `compact` | A compaction boundary, so the timeline shows where context was condensed |
@@ -467,10 +467,188 @@ The event kinds are `thinking`, `assistant`, `tool_call`, `tool_result`, `usage`
 | `capabilities` | `facets`, applied per facet (§ Capability facets) |
 | `notice` | Agent-originated notification worth surfacing |
 
-`subagent` is the one that changes what the UI can be. A subagent's trajectory
-arrives tagged with its parent tool call, so the timeline can nest it — which is
-what the terminal does, and what TraceDB already records as lineage. v1 saw only
-an opaque `Task` tool call with a wall of text.
+`subagent` is the one that changes what the UI can be, and it needs its own
+section because it is the only event kind that describes *structure* rather than
+content.
+
+## Delegated trajectories
+
+A turn is not a sequence. An agent delegates, its delegates delegate, and a
+dynamic workflow fans out to a dozen agents at once and then synthesizes. The
+event stream has to carry that shape, because a client cannot recover it.
+
+**One field carries all of it.** Every event may name the trajectory it belongs
+to:
+
+```
+span   the trajectory this event happened in. Absent means the root turn.
+```
+
+A `subagent` event *is* the trajectory's own record: its `streamId` is the
+trajectory id, and its `span` names the trajectory it was delegated *from*.
+A `subagent` event *declares* a trajectory, but § Promotion below is what
+*defines* one — declaration is the richer path, not the required one.
+Everything else follows:
+
+```json
+{"t":"event","kind":"subagent","phase":"started","streamId":"s1","name":"Explore"}
+{"t":"event","kind":"thinking","phase":"delta","streamId":"b3","span":"s1","text":"…"}
+{"t":"event","kind":"subagent","phase":"started","streamId":"s2","span":"s1","name":"Verify"}
+{"t":"event","kind":"tool_call","phase":"completed","streamId":"t9","span":"s2","name":"Bash"}
+{"t":"event","kind":"subagent","phase":"completed","streamId":"s2","span":"s1"}
+{"t":"event","kind":"subagent","phase":"completed","streamId":"s1"}
+```
+
+`s2` is a child of `s1` because it carries `span:"s1"`, by exactly the same rule
+that puts the `thinking` block there. Depth is unbounded, siblings may run
+concurrently, and a workflow phase is simply a trajectory whose children are
+trajectories. No case in the protocol distinguishes any of these, which is what
+makes it a generalization rather than three features.
+
+**Why a pointer and not nesting.** The table above once said the child's events
+arrived *nested inside* the parent event. That cannot be implemented: an envelope
+has to be closed before it is sent, and a trajectory streams for minutes. It also
+contradicts the journal, where an event is a row — a nested payload would make one
+row hold a subtree, so a delta inside it could not be addressed, deduplicated, or
+pruned. A flat stream of events carrying a parent pointer is what distributed
+tracing settled on for the same reason, and it is already how the vendor speaks:
+`claude` tags a subagent's output with `parent_tool_use_id` on the envelope.
+
+**`span` is not `streamId`.** `streamId` identifies one block across its phases;
+`span` identifies the trajectory a block ran in. A `subagent` event is the one
+place they meet, because opening a trajectory is itself a block with a lifecycle.
+
+### Promotion: a trajectory is defined by use, not by declaration
+
+**Any `streamId` that another event names as its `span` is a trajectory**,
+whatever kind of event opened it. A `tool_call` so named is *promoted*: it stays
+a tool call, and it also becomes the container its children already claim it is.
+
+This is a definition and not a fallback, because delegation is only knowable
+*retroactively*. An adapter learns that a tool call delegated when a child event
+arrives carrying its id — and by then the `tool_call` event has been sent and
+cannot be recalled. Anything that decides at open time is therefore a guess
+standing in for a fact that has not arrived. `claude`'s adapter guessed by tool
+name (`Task`), which was correct until the vendor shipped `Agent` and `Workflow`;
+an MCP server can add another at any time, so the whitelist could not have been
+completed, only extended after each report. Promotion needs no list: an agent
+nobody has written yet nests correctly by tagging its children, which is the same
+`span` it must already set for its output to be attributed at all.
+
+Declaration keeps a purpose it does not share with promotion. A `subagent` event
+carries a *name* before any child exists, and states an *outcome* independent of
+its host's — so an adapter that knows it is delegating should still declare, and
+one that only discovers it in hindsight is no longer silently wrong. Both produce
+the same tree.
+
+**A promoted trajectory closes with its host.** A `tool_call`'s `completed` phase
+means its input finished streaming, not that the delegated work finished — the
+`tool_result` sharing its `streamId` is the close, and its `isError` is the
+outcome. A client must not read a promoted node's lifecycle off its phase, or
+every delegation reads as finished the moment its arguments are parsed.
+
+**One host may run many delegates, so a trajectory id must be the delegate's.**
+`claude`'s `Workflow` fans out to N agents under a single `tool_use_id`; keying a
+trajectory by the host collapses all N into one row, where the last name to arrive
+wins and every earlier delegate's identity is lost. Measured: a two-agent workflow
+rendered as one card reading `Demo: agent-2`. An id must come from whatever the
+vendor gives *per delegate* — `task_id` for `claude` — with the host named as its
+`span`. This is the same rule as *What the adapter must keep separate* below, one
+level up: never key a trajectory by something the vendor multiplexes.
+
+**Progress is a snapshot, so it is not delta text.** A vendor's progress
+notification re-sends its whole current summary rather than a suffix, so appending
+each one repeats it — measured at six copies of one sentence. A `subagent` event
+carries such a summary as `data.progress`, which replaces, leaving `text`
+append-only as everywhere else in the protocol.
+
+**A trajectory with no interior says so.** A vendor may report that delegated work
+exists without forwarding any of it — `claude` forwards interior events for its
+built-in delegation and only lifecycle notifications for the rest. A *closed*
+trajectory with no children is therefore a real state and not a loading one, and a
+client must distinguish it from a running trajectory that has not reported yet.
+Rendering both as an empty expandable card invites the user to keep opening a
+branch that will never fill.
+
+**A `subagent` event is always stable, at every phase.** Ordinarily `started` and
+`delta` are ephemeral projections that never reach the journal (§ `docs/storage.md`).
+That rule is right for content and wrong for structure: the `started` phase is
+where a trajectory's identity, name, and parent live, so dropping it would leave
+every child event in the journal pointing at a parent that was never recorded.
+After a reload the whole delegated subtree would flatten into the parent's own work
+— which is precisely the pre-`span` bug, reintroduced by the storage tier instead
+of by the protocol.
+
+**An unknown `span` is not an error.** A client that receives an event naming a
+trajectory it has not seen renders it at the root rather than dropping it. The
+alternative loses work in exactly the case where structure is least reliable: a
+link that died mid-delegation, or an adapter emitting out of order.
+
+**A trajectory has its own outcome.** `phase:"completed"` with `isError` closes it,
+so a delegation that failed three levels down is reportable at every level above
+it without a client inferring failure from the absence of a result. An adapter that
+loses a trajectory — its link died, its vendor stopped reporting — leaves it open,
+and the server closes open trajectories when the turn terminates, for the same
+reason a pending request becomes `abandoned`: an unexplained gap is worse than a
+recorded failure.
+
+**What the adapter must keep separate.** Vendor block state has to be keyed by
+trajectory, not by the vendor's own block index. `claude` numbers content blocks
+per message, and two concurrent subagents both start at index 0 — an adapter with
+one index-keyed map merges their deltas into one another's text. That is data
+corruption, not a display fault, and it is invisible until two delegates run at
+once.
+
+## An agent may start a turn
+
+A turn is not always a reply. An adapter may emit events with no turn in flight, and
+the server opens a turn for them rather than dropping them — an **agent-initiated**
+turn, recorded with `origin: "agent"` and an empty request text.
+
+This is not hypothetical and not rare. Measured on `claude` 2.x, a session holding
+backgrounded work emits, *after* the dispatching turn's `result`:
+
+```
+background_tasks_changed        the set of live background tasks changed
+task_updated                    patch{status: completed}
+task_notification               status, and the delegate's own summary
+init                            …and then an entire exchange of its own
+assistant                       "the background worker finished"
+result
+```
+
+Its stdout stays open and the process does not exit. So the agent reports late work,
+and reports it twice over: the delegate's outcome, then its own account of it.
+
+**Why the events cannot simply be dropped.** They were, and the reasoning was sound
+as far as it went: an event carries no turn id, the server files it under whichever
+turn is running, and a *guessed* id misplaces it in the transcript permanently. The
+error was concluding that no turn means nowhere to belong. The answer is to open the
+turn that does exist rather than to guess at one that does not — otherwise the only
+observable effect is that a delegation promised to report back never does, with
+nothing anywhere saying why.
+
+**Why a turn and not a lesser thing.** A turn is the unit that orders, consolidates,
+and prunes (`docs/storage.md`): `turn_id` is what consolidation iterates and what
+`events` is indexed by. Attaching these to no turn would leave rows the journal never
+folds and never releases — a leak whose size is set by how much unprompted work an
+agent does. Making them a turn costs one row and inherits every guarantee.
+
+**When the turn opens.** On the *first* out-of-turn event of any kind, not on a
+`turn`/`started`. The vendor's own bracket arrives partway through the sequence above
+— `task_notification`, the payload this exists to deliver, precedes it — so waiting
+for the bracket keeps the announcement and drops what it announces. A later
+`turn`/`started` then lands inside the already-open turn instead of opening a second.
+
+**How it settles.** By its own `turn`/`completed`, like any turn. Nothing is parked on
+its outcome, since nobody asked for it, so the server records terminal state directly
+rather than waking a waiter. It must settle: a session with a live turn refuses new
+messages, so one unprompted turn left running would wedge the session.
+
+**A client has to say who started it.** `requestText` is empty by construction, which
+is indistinguishable from a user who sent nothing — so an unlabelled agent turn reads
+as an answer to a message the user never wrote. `origin` is the only thing that
+carries this.
 
 ## Slash commands are turns
 

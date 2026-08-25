@@ -59,6 +59,18 @@ export interface Turn {
   sessionId: string;
   incarnationId: string | null;
   status: TurnStatus;
+  /**
+   * Who started this turn.
+   *
+   * `agent` means nobody did: the agent spoke after its previous turn had settled,
+   * which is how backgrounded work reports finishing. Such a turn has an empty
+   * `requestText` by construction, so this is the only thing that distinguishes it
+   * from a user who sent nothing — and without the distinction it reads as a reply to
+   * a message the user never wrote.
+   *
+   * Optional so a response from an older backend still parses.
+   */
+  origin?: "user" | "agent";
   requestText: string;
   commandInvocationId: string | null;
   idempotencyKey: string | null;
@@ -77,6 +89,15 @@ export interface StreamEvent {
   kind: string;
   phase?: string;
   streamId?: string;
+  /**
+   * The delegated trajectory this event happened in; absent is the root turn.
+   *
+   * `docs/session-protocol.md` § Delegated trajectories. A `subagent` event's
+   * `streamId` *is* a trajectory id, so a nested delegation is one whose `span`
+   * names another — which is how arbitrary depth and a dynamic workflow's
+   * parallel phases are carried by a single field.
+   */
+  span?: string;
   name?: string;
   text?: string;
   data?: unknown;
@@ -501,11 +522,60 @@ export interface Workspace {
 }
 
 export interface WorkspacesResponse {
-  /** Absolute `~/.agents`, resolved server-side: the browser cannot expand `~`. */
+  /**
+   * Where Quick Start sessions run, resolved server-side.
+   *
+   * Server-side because the browser can neither expand `~` nor know what
+   * `paths.quick_start_dir` was set to, so a client that derived it would be
+   * wrong for anyone who configured one.
+   */
   quickStartDir: string;
   dataDir: string;
   home: string;
   workspaces: Workspace[];
+}
+
+/** Which source supplied a resolved setting. */
+export type ConfigSource = "env" | "file" | "default";
+
+/** One resolved setting, as `GET /config` reports it. */
+export interface ConfigEntry {
+  /** Dotted key as it appears in `config.toml`, e.g. `paths.data_dir`. */
+  key: string;
+  value: string;
+  source: ConfigSource;
+  /** The environment variable that overrides it. */
+  envVar: string;
+  /**
+   * Whether the path exists. Absent for settings that are not paths — which must
+   * render differently from `false`, or a log level looks like a broken directory.
+   */
+  exists?: boolean;
+}
+
+/** One directory bundled-adapter resolution considered. */
+export interface ConfigCandidate {
+  path: string;
+  exists: boolean;
+  /** True for the one discovery actually reads. */
+  chosen: boolean;
+}
+
+/**
+ * What configuration resolved to, and who said so.
+ *
+ * Read-only by design: see the backend's `api::config` for why a loopback HTTP
+ * surface must not be able to rewrite `browse_roots` or `agents_dir`. The panel
+ * shows these values and the path of the file to edit.
+ */
+export interface ConfigReport {
+  /** The one root everything else defaults under. */
+  home: string;
+  configPath: string;
+  /** False before a first run has seeded it, or after a user deletes it. */
+  configPresent: boolean;
+  entries: ConfigEntry[];
+  bundledAgentCandidates: ConfigCandidate[];
 }
 
 /** Which viewer a file wants. Absent means "read it as text". */
@@ -1102,6 +1172,16 @@ export const api = {
    */
   soul: {
     get: () => fetchAPI<SoulResponse>("/soul"),
+  },
+  /**
+   * What configuration resolved to, and which source supplied each value.
+   *
+   * Read-only, like `soul` above and for the same class of reason: `browseRoots`
+   * bounds what any client of this backend may enumerate, and `agentsDir` names
+   * directories the server executes programs from.
+   */
+  config: {
+    get: () => fetchAPI<ConfigReport>("/config"),
   },
   workspaces: {
     /**

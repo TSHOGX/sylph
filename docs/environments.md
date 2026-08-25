@@ -148,8 +148,8 @@ one component present for all work regardless of environment. It journals the
 normalized stream as the durable record and feeds TraceDB from there.
 
 This makes the journal real history rather than a bounded projection — a change
-this repo has to make deliberately, since `live.db` was explicitly not a second
-transcript archive. The trade is accepted because the alternative is
+this repo has to make deliberately, since the journal (then named `live.db`) was
+explicitly not a second transcript archive. The trade is accepted because the alternative is
 per-environment sync paths that each lose the tail on a crash, and because it is
 the only option that gives local, sandbox, and SSH identical fidelity.
 

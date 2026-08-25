@@ -85,8 +85,8 @@ const HistoryOverlay = dynamic(
   () => import("@/components/history-overlay").then((m) => m.HistoryOverlay),
   { ssr: false },
 );
-const DirectoryPicker = dynamic(
-  () => import("@/components/directory-picker").then((m) => m.DirectoryPicker),
+const WorkspacePicker = dynamic(
+  () => import("@/components/workspace-picker").then((m) => m.WorkspacePicker),
   { ssr: false },
 );
 
@@ -376,7 +376,7 @@ function TopBar() {
 }
 
 /**
- * `Mod+N`: choose a directory, then create there.
+ * `Mod+N`: choose a workspace, then create there.
  *
  * This replaced a four-field form, and the fields are worth naming because their
  * absence is the design. `workdir` is the only one a session cannot start
@@ -390,13 +390,22 @@ function TopBar() {
  * So the form's only irreplaceable field is the directory, and a picker is a
  * better control for it than a text box. Creation errors surface in the shell's
  * shared banner, which is why this renders no error state of its own.
+ *
+ * # Why this opens on known workspaces rather than on the filesystem
+ *
+ * It used to open `DirectoryPicker` — a raw browse rooted at `$HOME`, navigated by
+ * mouse one level at a time. But a new session almost always belongs in a directory
+ * this machine has already worked in, and the backend answers exactly that question
+ * ranked by recency. Starting from the filesystem made the common case the slow one
+ * and the rare case no faster. `WorkspacePicker` keeps the filesystem one click
+ * away for a directory that has genuinely never been used.
  */
 function NewSessionPicker() {
   const { closeOverlay, createSessionIn } = useWorkspaceUI();
   const t = useT();
 
   return (
-    <DirectoryPicker
+    <WorkspacePicker
       title={t("shell.newSession.title")}
       confirmLabel={t("shell.newSession.confirm")}
       onClose={closeOverlay}

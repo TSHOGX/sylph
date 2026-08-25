@@ -12,7 +12,7 @@
 # cleared otherwise, and each spec's `mkdtemp` workdir becomes a permanent sidebar
 # group — so run 4 would render hundreds of dead groups that run 1 did not, and the
 # runs would not be comparable. Wiping is free: the directory is gitignored and the
-# backend recreates `live.db` on start.
+# backend recreates `journal.db` on start.
 #
 # Results go to /tmp/e2e-repeat/, one JSON per run plus a summary.
 

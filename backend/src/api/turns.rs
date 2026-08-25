@@ -113,6 +113,9 @@ pub async fn create(
         session_id: session_id.clone(),
         incarnation_id: Some(incarnation.id.clone()),
         status: "queued".to_string(),
+        // This endpoint is the definition of a user turn: it exists because someone
+        // posted. An agent's own turn is opened by the link manager instead.
+        origin: "user".to_string(),
         request_text: text.clone(),
         command_invocation_id: req.command.clone(),
         idempotency_key: idempotency_key.clone(),

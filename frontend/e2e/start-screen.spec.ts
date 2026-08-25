@@ -118,7 +118,7 @@ test("the start screen's create button runs the same path as its shortcut", asyn
   await page.getByRole("button", { name: /New session/ }).click();
   const picker = page.getByRole("dialog");
   await expect(picker).toBeVisible();
-  await expect(picker.getByRole("list", { name: "Folders" })).toBeVisible();
+  await expect(picker.getByRole("combobox", { name: /filter workspaces/i })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(picker).toBeHidden();
 

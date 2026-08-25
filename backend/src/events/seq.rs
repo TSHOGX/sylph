@@ -17,18 +17,18 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::db::LiveStore;
+use crate::db::JournalStore;
 use crate::error::Result;
 
 /// Hands out monotonic sequence numbers, seeded from the journal.
 #[derive(Clone)]
 pub struct SeqAllocator {
-    store: LiveStore,
+    store: JournalStore,
     counters: Arc<RwLock<HashMap<String, Arc<AtomicI32>>>>,
 }
 
 impl SeqAllocator {
-    pub fn new(store: LiveStore) -> Self {
+    pub fn new(store: JournalStore) -> Self {
         Self {
             store,
             counters: Arc::new(RwLock::new(HashMap::new())),
@@ -72,9 +72,9 @@ mod tests {
     /// would leave the allocator querying a table that does not exist. The
     /// tempdir is returned so it outlives the store — dropping it deletes the
     /// database out from under the pool.
-    async fn store() -> (LiveStore, tempfile::TempDir) {
+    async fn store() -> (JournalStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = LiveStore::new(dir.path().join("live.db").to_str().unwrap())
+        let store = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
             .await
             .expect("store");
         (store, dir)
