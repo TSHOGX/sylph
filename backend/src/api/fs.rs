@@ -253,27 +253,13 @@ fn canonical_roots(state: &AppState) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Require `candidate` to resolve inside at least one root.
+/// Require `candidate` to resolve inside at least one browse root.
 ///
-/// Multiple roots mean containment is a disjunction, but each disjunct is the
-/// same shared check — no root gets a weaker rule than another.
+/// A thin naming of [`paths::contain_in_any`], which is shared with the session
+/// workdir bound: browsing and naming a workdir are checked against the same root
+/// set by the same primitive, so one cannot drift into being laxer than the other.
 fn contain_in_any(roots: &[PathBuf], candidate: &std::path::Path) -> Result<PathBuf> {
-    let mut last = None;
-    for root in roots {
-        match paths::contain(root, candidate) {
-            Ok(target) => return Ok(target),
-            Err(error) => last = Some(error),
-        }
-    }
-    // A path that exists but sits outside every root reports Forbidden; one that
-    // does not exist reports the IO error, so a typo is distinguishable from a
-    // refusal.
-    Err(match last {
-        Some(Error::FileNotFound) => Error::FileNotFound,
-        Some(Error::Forbidden(_)) | Some(_) | None => Error::Forbidden(
-            "That directory is outside the browsable roots.".to_string(),
-        ),
-    })
+    paths::contain_in_any(roots, candidate, "the browsable roots")
 }
 
 /// Last path component, for display.

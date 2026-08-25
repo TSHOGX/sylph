@@ -46,6 +46,44 @@ pub struct Block {
     pub created_at_ms: i64,
 }
 
+/// How much record one session holds, and how that changed.
+///
+/// `grewBy` is a signed delta, and negative is a real and useful reading: it means
+/// pruning worked. A field reporting only increases would make a successful
+/// retention pass indistinguishable from a stalled one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionBytes {
+    pub session_id: String,
+    pub bytes: i64,
+    pub blocks: i64,
+    pub measured_at_ms: i64,
+    /// Change since the previous *differing* measurement, or `None` when there has
+    /// only ever been one. `None` is not zero: a session measured once has an
+    /// unknown trend, and reporting that as "stable" would be a claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grew_by: Option<i64>,
+    /// How long that change took, so a delta can be read as a rate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grew_over_ms: Option<i64>,
+}
+
+fn session_bytes_from_row(row: sqlx::sqlite::SqliteRow) -> SessionBytes {
+    let bytes: i64 = row.get("bytes");
+    let measured_at_ms: i64 = row.get("measured_at_ms");
+    let previous_bytes: Option<i64> = row.get("previous_bytes");
+    let previous_measured_at_ms: Option<i64> = row.get("previous_measured_at_ms");
+
+    SessionBytes {
+        session_id: row.get("session_id"),
+        bytes,
+        blocks: row.get("blocks"),
+        measured_at_ms,
+        grew_by: previous_bytes.map(|previous| bytes - previous),
+        grew_over_ms: previous_measured_at_ms.map(|before| measured_at_ms - before),
+    }
+}
+
 /// The read-mostly history store.
 #[derive(Clone)]
 pub struct HistoryStore {
@@ -465,6 +503,142 @@ impl HistoryStore {
             .fetch_one(&self.pool)
             .await
             .context("Could not count blocks")
+    }
+
+    /// Bytes of record a session currently holds, and how many blocks hold them.
+    ///
+    /// `text_len` is the *uncompressed* length, always — including for an
+    /// externalized payload, which is exactly why the column exists (a timeline
+    /// lays out without touching the blob store). So this is the logical size of
+    /// the record, not its footprint on disk, and that is the deliberate choice:
+    ///
+    /// * **It is comparable across rows.** Compression ratio varies 1–5× with
+    ///   content, so ranking sessions by stored bytes ranks them partly by how
+    ///   compressible their tool output happened to be. A session holding twice
+    ///   the record should report twice the bytes.
+    /// * **It needs no second bookkeeping.** Stored size for an external payload
+    ///   is a file on disk, so measuring it means either a `stat` per blob per
+    ///   pass or a size column written at consolidation — a new fact to keep
+    ///   correct through pruning and sweeping, for a number that answers the same
+    ///   question worse.
+    /// * **Attribution stays sound.** A blob shared by two sessions is one file,
+    ///   so *stored* bytes summed per session over-counts it, and each session's
+    ///   share is not well-defined. Logical bytes are honestly per session: this
+    ///   session's record does contain that text.
+    ///
+    /// `data_json` is measured as stored, because it has no `_len` companion and
+    /// is small by construction — anything over 4 KB was externalized.
+    ///
+    /// The consequence to hold onto: the sum over sessions is the size of the
+    /// *record*, and the store on disk is smaller. This measure answers "which
+    /// session is growing", not "what is my disk doing" — `du` answers that, and
+    /// answers it exactly.
+    pub async fn measure_session_bytes(&self, session_id: &str) -> Result<(i64, i64)> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(text_len), 0) + COALESCE(SUM(LENGTH(data_json)), 0) AS bytes,
+                    COUNT(*) AS blocks
+               FROM blocks WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("Could not measure a session's held bytes")?;
+
+        Ok((row.get::<i64, _>("bytes"), row.get::<i64, _>("blocks")))
+    }
+
+    /// Measure a session and record it, carrying the prior reading forward.
+    ///
+    /// The previous value moves only when this measurement is a *different*
+    /// observation, so two passes in quick succession cannot flatten the baseline
+    /// and hide growth: re-recording the same reading would set
+    /// `previous_bytes = bytes` and report a growing session as stable. Held at
+    /// the last differing observation instead, which is what makes the delta
+    /// meaningful however often passes run.
+    pub async fn record_session_bytes(&self, session_id: &str) -> Result<SessionBytes> {
+        let (bytes, blocks) = self.measure_session_bytes(session_id).await?;
+        let now = chrono::Utc::now().timestamp_millis();
+
+        sqlx::query(
+            "INSERT INTO session_bytes (
+               session_id, bytes, blocks, measured_at_ms,
+               previous_bytes, previous_measured_at_ms
+             )
+             VALUES (?, ?, ?, ?, NULL, NULL)
+             ON CONFLICT(session_id) DO UPDATE SET
+               previous_bytes = CASE
+                 WHEN excluded.bytes = session_bytes.bytes THEN session_bytes.previous_bytes
+                 ELSE session_bytes.bytes END,
+               previous_measured_at_ms = CASE
+                 WHEN excluded.bytes = session_bytes.bytes
+                   THEN session_bytes.previous_measured_at_ms
+                 ELSE session_bytes.measured_at_ms END,
+               bytes = excluded.bytes,
+               blocks = excluded.blocks,
+               measured_at_ms = excluded.measured_at_ms",
+        )
+        .bind(session_id)
+        .bind(bytes)
+        .bind(blocks)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("Could not record a session's held bytes")?;
+
+        self.session_bytes(session_id)
+            .await?
+            .context("a row just written must be readable")
+    }
+
+    /// One session's byte accounting, if it has ever been measured.
+    pub async fn session_bytes(&self, session_id: &str) -> Result<Option<SessionBytes>> {
+        let row = sqlx::query(
+            "SELECT session_id, bytes, blocks, measured_at_ms,
+                    previous_bytes, previous_measured_at_ms
+               FROM session_bytes WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Could not read a session's byte accounting")?;
+
+        Ok(row.map(session_bytes_from_row))
+    }
+
+    /// The sessions holding the most record, largest first.
+    ///
+    /// Bounded, because the point is to name the few sessions worth acting on. A
+    /// full listing would put the whole session table in a diagnostics response
+    /// to answer a question about its head.
+    pub async fn largest_sessions(&self, limit: i64) -> Result<Vec<SessionBytes>> {
+        let rows = sqlx::query(
+            "SELECT session_id, bytes, blocks, measured_at_ms,
+                    previous_bytes, previous_measured_at_ms
+               FROM session_bytes ORDER BY bytes DESC, session_id LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("Could not list the largest sessions")?;
+
+        Ok(rows.into_iter().map(session_bytes_from_row).collect())
+    }
+
+    /// Bytes of record held across every measured session, and how many that is.
+    ///
+    /// Read from the recorded measurements rather than summed live over `blocks`,
+    /// so the total and the per-session rows beside it are the same observation. A
+    /// live `SUM` would disagree with them by whatever changed since the last pass,
+    /// which reads as an accounting bug.
+    pub async fn total_bytes(&self) -> Result<(i64, i64)> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(bytes), 0) AS bytes, COUNT(*) AS sessions FROM session_bytes",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Could not total the held bytes")?;
+
+        Ok((row.get::<i64, _>("bytes"), row.get::<i64, _>("sessions")))
     }
 
     /// Sessions holding blocks, least-recently-checked first.

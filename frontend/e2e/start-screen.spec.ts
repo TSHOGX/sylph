@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { expect, test } from "@playwright/test";
 import { createSession, gotoReady } from "./fixtures/session";
@@ -99,7 +99,12 @@ test("a directory with several sessions is one row that opens the newest", async
   const recents = page.getByRole("region", { name: "Pick up where you left off" });
 
   // One row for the directory, whatever the session count, and it states the count.
-  const tmpRow = recents.getByRole("listitem").filter({ hasText: workdir });
+  //
+  // Matched on the *canonical* path, because that is what the backend journals and
+  // therefore what the row renders: `os.tmpdir()` is `/var/folders/…` on macOS and
+  // resolves to `/private/var/folders/…`. Asserting the unresolved spelling would be
+  // asserting a string the server never produces.
+  const tmpRow = recents.getByRole("listitem").filter({ hasText: realpathSync(workdir) });
   await expect(tmpRow).toHaveCount(1);
   await expect(tmpRow).toContainText("3 sessions");
 

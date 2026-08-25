@@ -5,6 +5,7 @@ mod common;
 use axum::http::{header, StatusCode};
 use common::{body_string, json_body, MockRunner, MockTraceDb, TestBackend};
 use serde_json::{json, Value};
+use tempfile::TempDir;
 
 // ---------------------------------------------------------------- auth
 
@@ -143,6 +144,211 @@ async fn create_session_rejects_unknown_agent_and_missing_workdir() {
         )
         .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ------------------------------------------------------- workdir containment
+//
+// A session's workdir is the `current_dir` of a spawned agent process, and a
+// coding agent reads and writes the tree it is pointed at. So this field decides
+// where arbitrary code runs, and existence — the only thing it used to be checked
+// for — says nothing about whether it should. These assert the bound in both
+// directions, because a containment rule that refuses everything passes every
+// refusal test.
+
+/// The bound is the configured one, asserted by reading it back from the harness.
+/// A hardcoded path would only prove that the test and the code agree.
+#[tokio::test]
+async fn a_workdir_inside_the_configured_roots_is_accepted() {
+    let backend = TestBackend::start().await;
+    let inside = backend.workdir().join("nested/deeper");
+    std::fs::create_dir_all(&inside).unwrap();
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({"agent": "mock", "workdir": inside.display().to_string()}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    // Journalled canonical, so two spellings of one directory cannot become two
+    // workspaces — and so the recorded path has no symlinked component that could
+    // be re-pointed after the check.
+    assert_eq!(
+        json_body(response).await["session"]["workdir"],
+        std::fs::canonicalize(&inside).unwrap().display().to_string()
+    );
+}
+
+/// Before this, any client of this backend could start an agent anywhere on the
+/// filesystem. `browse_roots` bounded what `/fs/*` may *enumerate* and said
+/// nothing about what a request may *name*, so the narrower capability was
+/// bounded and the wider one was not.
+#[tokio::test]
+async fn a_workdir_outside_the_configured_roots_is_refused() {
+    let backend = TestBackend::start().await;
+    let outside = backend.outside_the_roots();
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({"agent": "mock", "workdir": outside.path().display().to_string()}),
+        )
+        .await;
+
+    // 403 with POLICY_VIOLATION, not 400: the request is well-formed and the
+    // directory exists. Reporting it as a malformed request would send the reader
+    // to their input instead of to `config.toml`.
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "POLICY_VIOLATION");
+    // Names the bound that refused it and what is permitted, so the fix is
+    // discoverable from the error alone.
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("sessions may run in"),
+        "the error names the bound: {message}"
+    );
+    assert!(
+        message.contains(&backend.browse_root().display().to_string())
+            || message.contains(
+                &std::fs::canonicalize(backend.browse_root())
+                    .unwrap()
+                    .display()
+                    .to_string()
+            ),
+        "the error lists what is permitted: {message}"
+    );
+}
+
+/// Traversal is defeated by resolution, not by inspecting the request string.
+#[tokio::test]
+async fn a_workdir_reaching_out_of_a_root_with_dotdot_is_refused() {
+    let backend = TestBackend::start().await;
+    let escaping = backend.workdir().join("../../..");
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({"agent": "mock", "workdir": escaping.display().to_string()}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+/// A symlink pointing out of the roots is the escape no string filter can see:
+/// it lives on disk, not in the request.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_workdir_reached_through_an_escaping_symlink_is_refused() {
+    let backend = TestBackend::start().await;
+    let outside = backend.outside_the_roots();
+    let link = backend.workdir().join("escape");
+    std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({"agent": "mock", "workdir": link.display().to_string()}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+/// A file is not a working directory, and reports as the client mistake it is
+/// rather than as a policy refusal.
+#[tokio::test]
+async fn a_workdir_naming_a_file_is_a_bad_request() {
+    let backend = TestBackend::start().await;
+    let file = backend.workdir().join("not-a-directory.txt");
+    std::fs::write(&file, "x").unwrap();
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({"agent": "mock", "workdir": file.display().to_string()}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "INVALID_REQUEST"
+    );
+}
+
+/// Quick Start runs in a directory the product owns, which both `SYLPH_HOME` and
+/// `paths.quick_start_dir` can move outside `$HOME`. It is permitted explicitly
+/// rather than by coincidence of being browsable, or an install that moved it
+/// would find the product's own no-workspace flow refused.
+#[tokio::test]
+async fn the_quick_start_directory_is_always_a_permitted_workdir() {
+    let backend = TestBackend::start().await;
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({
+                "agent": "mock",
+                "workdir": backend.quick_start_dir().display().to_string(),
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+/// A journalled workdir is never re-checked, so narrowing configuration cannot
+/// orphan history.
+///
+/// This is the half of the rule that is easy to get wrong in the other direction:
+/// a bound applied on *read* would make every session created under wider
+/// configuration — or before the bound existed at all — unreadable, which is a
+/// worse bug than the hole it closes. The bound applies where a path enters as a
+/// new decision, and nowhere else.
+#[tokio::test]
+async fn a_session_recorded_outside_the_roots_stays_readable_after_narrowing() {
+    let mut backend = TestBackend::start().await;
+    let recorded = backend.workdir().to_path_buf();
+    let session_id = backend.create_session("mock").await;
+
+    // Configuration now permits only a sibling directory, so the recorded workdir
+    // is out of bounds — exactly the state a user reaches by editing
+    // `paths.browse_roots` after working for a month.
+    let narrowed = backend.browse_root().join("narrowed");
+    std::fs::create_dir_all(&narrowed).unwrap();
+    backend.restart_with_session_roots(&[&narrowed]).await;
+
+    // Creating there now is refused, which is what proves the bound really moved.
+    let refused = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({"agent": "mock", "workdir": recorded.display().to_string()}),
+        )
+        .await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+
+    // And the existing session is untouched: readable, listed, workdir intact.
+    let response = backend
+        .get_authed(&format!("/api/v1/sessions/{session_id}"))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(response).await["session"]["workdir"],
+        recorded.display().to_string()
+    );
+
+    let listed = json_body(backend.get_authed("/api/v1/sessions").await).await;
+    assert!(
+        listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == session_id.as_str()),
+        "a session outside the current roots is still listed: {listed}"
+    );
 }
 
 #[tokio::test]
@@ -1803,18 +2009,27 @@ fn archived_session(cwd: Option<&str>, title: Option<&str>, ask: &str) -> MockTr
 }
 
 /// Build a backend whose stubbed archive describes a session rooted in a
-/// directory that really exists.
+/// directory that really exists *and* that this install permits.
 ///
-/// Import validates that the recorded working directory is present, and each
-/// harness owns a fresh temp directory that is deleted when it drops. So a
-/// throwaway harness is created first to borrow a live path, and returned
-/// alongside the one under test to keep that path alive for the test's
-/// duration.
+/// Import validates two things about the recorded working directory: that it is
+/// present, and that it is inside the directories this install permits sessions to
+/// run in. Each harness owns a fresh temp directory deleted when it drops, so a
+/// throwaway harness is created first to borrow a live path — and that path is
+/// then named as a browse root, which is the configuration that permits importing
+/// a session which ran there. Naming it is deliberate rather than incidental: an
+/// import whose archived directory is *not* permitted must be refused, which
+/// `importing_a_session_that_ran_outside_the_permitted_roots_is_refused` asserts.
+///
+/// The throwaway harness is returned alongside the one under test to keep that
+/// directory alive for the test's duration.
 async fn backend_with_archived_session(ask: &str) -> (TestBackend, TestBackend, String) {
     let host = TestBackend::start().await;
     let workdir = host.workdir().display().to_string();
-    let backend = TestBackend::start_with_tracedb(archived_session(Some(&workdir), None, ask))
-        .await;
+    let backend = TestBackend::start_with_tracedb_permitting(
+        archived_session(Some(&workdir), None, ask),
+        &[host.workdir()],
+    )
+    .await;
     (backend, host, workdir)
 }
 
@@ -1864,11 +2079,10 @@ async fn importing_reads_the_workdir_from_session_metadata() {
     // merely constructed.
     let host = TestBackend::start().await;
     let workdir = host.workdir().display().to_string();
-    let backend = TestBackend::start_with_tracedb(archived_session(
-        Some(&workdir),
-        Some("Recorded title"),
-        "the ask",
-    ))
+    let backend = TestBackend::start_with_tracedb_permitting(
+        archived_session(Some(&workdir), Some("Recorded title"), "the ask"),
+        &[host.workdir()],
+    )
     .await;
 
     let response = backend
@@ -1901,6 +2115,75 @@ async fn importing_an_archived_session_without_a_workdir_is_unprocessable() {
     assert!(
         body["error"]["message"].as_str().unwrap().contains("mock:archived"),
         "id missing from message: {body}"
+    );
+}
+
+/// Import is bounded exactly like creation, and this is not belt-and-braces.
+///
+/// The archive holds every session any agent ever ran on this machine, so an
+/// unbounded import is a *general* way to start an agent anywhere: find a row that
+/// ran in the target directory, adopt it, send a turn. That the path came from the
+/// archive rather than from the request body changes who chose it, not what
+/// happens next.
+#[tokio::test]
+async fn importing_a_session_that_ran_outside_the_permitted_roots_is_refused() {
+    // A real, existing directory that this install does not permit — so the
+    // refusal is about the bound rather than about a missing directory, which is
+    // the distinction the error has to carry.
+    let elsewhere = TempDir::new().unwrap();
+    let backend = TestBackend::start_with_tracedb(archived_session(
+        Some(&elsewhere.path().display().to_string()),
+        None,
+        "work done elsewhere",
+    ))
+    .await;
+
+    let response = backend
+        .post_authed("/api/v1/sessions/import", json!({"traceSessionId": "mock:archived"}))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "POLICY_VIOLATION");
+    // Says what importing would enable, so the refusal reads as a policy decision
+    // rather than as a broken archive.
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("let an agent run there"),
+        "the error explains the consequence: {message}"
+    );
+
+    // And nothing was recorded, so a refused import leaves no half-adopted row.
+    let listed = json_body(backend.get_authed("/api/v1/sessions?origin=native").await).await;
+    assert!(listed["sessions"].as_array().unwrap().is_empty(), "{listed}");
+}
+
+/// An archived directory that is simply gone is a different problem with a
+/// different fix, so it must not report as a policy refusal.
+#[tokio::test]
+async fn importing_a_session_whose_directory_is_gone_reports_that_instead() {
+    let vanished = TempDir::new().unwrap();
+    let path = vanished.path().to_path_buf();
+    let backend = TestBackend::start_with_tracedb_permitting(
+        archived_session(Some(&path.display().to_string()), None, "gone"),
+        &[&path],
+    )
+    .await;
+    drop(vanished);
+
+    let response = backend
+        .post_authed("/api/v1/sessions/import", json!({"traceSessionId": "mock:archived"}))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "INVALID_REQUEST");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no longer exists"),
+        "{body}"
     );
 }
 

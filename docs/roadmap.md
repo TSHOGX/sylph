@@ -577,9 +577,14 @@ the UI never showed.
   wider write range than the process it drives. Revisit only with a real need and
   a threat-model decision, not for convenience.
 - **`browse_roots` widening** is a configuration decision with real consequence:
-  it is what any client of this backend can enumerate. The default is `$HOME`
-  alone, and `docs/architecture.md` records why enumeration is the part that
-  matters.
+  it is what any client of this backend can enumerate — and, since the workdir
+  bound was added, where a client may ask for an agent process to be started. The
+  default is `$HOME` alone. This note used to say enumeration "is the part that
+  matters", which was true of the endpoints that existed when it was written and
+  became the reason the larger hole stayed invisible: `POST /sessions` checked only
+  that a `workdir` existed, so the *narrower* capability was bounded and the wider
+  one was not. Both are now checked against the same root set by the same
+  primitive; see `docs/configuration.md` § `browse_roots` bounds where agents run.
 - **Rename from the sidebar** now has an endpoint but no menu item.
 - **Dark theme** remains deliberately absent; the composer and picker were built
   with the same light-only palette as the rest, so they inherit that debt.
@@ -1630,10 +1635,22 @@ spends real tokens and only observes whatever shapes one live turn produces, so 
   policy resolves any non-`local` environment to `terminal`, which is the safe
   answer and the right one, but no sandbox exists yet to confirm the environment
   reports the kind this depends on.
-- **Retention has no upper bound on a terminal session's growth.** Compacting
-  forever is correct — the record is the only copy — but a long-lived sandbox
-  session accumulates without limit by design, and nothing yet surfaces *which*
-  sessions are responsible. `/diagnostics` reports the terminal count, not the bytes.
+- **A terminal session's growth is now reported, and deliberately still unbounded.**
+  `/diagnostics` carries `bytesHeld`, `bytesGrewBy`, and a bounded
+  `largestSessions` list naming which sessions hold what and how fast each is
+  growing, from a `session_bytes` table each pass writes. A configurable size bound
+  was *refused* rather than deferred: a terminal session's record is the only copy,
+  so a size-triggered prune is a size-triggered deletion of data nothing else holds
+  — the same trade a time rule makes, and rejected for the same reason
+  (`docs/storage.md` § Why no configurable upper bound is offered). The remedy for a
+  session that is too large has an owner: delete it, or move its environment to one
+  TraceDB can ingest so it stops being terminal.
+- **The byte measure ranks sessions; it does not gauge the disk.** It counts the
+  logical record (`text_len`, uncompressed) rather than the footprint, so the sum
+  over sessions deliberately exceeds what `du` reports on `data/` — a shared blob is
+  counted for every session holding it, which is the right attribution for "who is
+  responsible" and the wrong number for "how full is my disk". Anything wanting the
+  second has to measure the filesystem.
 - **`e2e/delegation.spec.ts` is timing-sensitive under full-suite load.** Measured
   over nine runs of the file after the four-worktree merge: three runs had one or two
   failures and six were clean, and the failing spec was a *different* one each time

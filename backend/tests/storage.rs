@@ -575,6 +575,124 @@ async fn a_terminal_session_records_its_watermark_even_with_no_archive() {
     );
 }
 
+/// Bytes are measured on the install where nothing can be pruned.
+///
+/// This is the load-bearing property, and the one an obvious implementation gets
+/// wrong: measuring alongside the watermark write would leave the report empty
+/// here, because a delegated session with no reachable archive is deliberately
+/// left untouched — no watermark, since "cannot ask" must not be stored as "asked,
+/// and nothing is safe". A no-TraceDB install is exactly the one whose history
+/// grows without bound, so it is the one that most needs the number.
+#[tokio::test]
+async fn a_pass_reports_bytes_held_even_with_no_archive_to_confirm_anything() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            serde_json::json!({"text": "measure me"}),
+        )
+        .await;
+    let turn_id = common::json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&turn_id).await;
+    backend.await_consolidation(&turn_id).await;
+
+    let report = backend.state.retention.pass().await;
+
+    assert!(
+        !report.archive_available,
+        "the premise of this test is a degraded archive: {report:?}"
+    );
+    assert!(
+        report.bytes_held > 0,
+        "held bytes must be reported without an authority to confirm them: {report:?}"
+    );
+    assert_eq!(report.sessions_measured, 1);
+
+    // And it names *which* session, which is the whole point: a count of withheld
+    // sessions cannot distinguish forty small ones from one enormous one.
+    let named = report
+        .largest_sessions
+        .iter()
+        .find(|s| s.session_id == session_id)
+        .unwrap_or_else(|| panic!("the session is not named: {report:?}"));
+    assert!(named.bytes > 0);
+    assert!(named.blocks > 0);
+    // One observation is not a trend, so growth is unknown rather than zero.
+    assert_eq!(
+        named.grew_by, None,
+        "a first measurement must not claim the session is stable: {named:?}"
+    );
+
+    // `/diagnostics` carries the same numbers, from the same pass, so a reader
+    // does not have to reach into the log.
+    let body = common::json_body(backend.get_authed("/api/v1/diagnostics").await).await;
+    let retention = &body["retention"];
+    assert_eq!(retention["bytesHeld"], report.bytes_held);
+    assert_eq!(retention["sessionsMeasured"], 1);
+    assert_eq!(
+        retention["largestSessions"][0]["sessionId"], session_id,
+        "the endpoint names the session too: {body}"
+    );
+    assert!(
+        retention["largestSessions"][0].get("grewBy").is_none(),
+        "unknown growth is absent rather than zero on the wire: {body}"
+    );
+}
+
+/// A second turn has to show up as growth, or the report cannot distinguish a
+/// session that reached its size and stopped from one still accumulating — which
+/// is the distinction that decides whether to go and look at it.
+#[tokio::test]
+async fn a_growing_session_reports_how_much_it_grew() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let mut sizes = Vec::new();
+    for text in ["first turn", "second turn"] {
+        let response = backend
+            .post_authed(
+                &format!("/api/v1/sessions/{session_id}/turns"),
+                serde_json::json!({"text": text}),
+            )
+            .await;
+        let turn_id = common::json_body(response).await["turn"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        backend.await_turn(&turn_id).await;
+        backend.await_consolidation(&turn_id).await;
+        sizes.push(backend.state.retention.pass().await);
+    }
+
+    let grown = sizes
+        .last()
+        .unwrap()
+        .largest_sessions
+        .iter()
+        .find(|s| s.session_id == session_id)
+        .expect("the session must be named")
+        .clone();
+
+    assert!(
+        grown.grew_by.unwrap_or(0) > 0,
+        "the second turn must read as growth: {grown:?}"
+    );
+    assert!(
+        grown.grew_over_ms.is_some(),
+        "a delta without its interval cannot be read as a rate: {grown:?}"
+    );
+    assert!(
+        sizes.last().unwrap().bytes_grew_by > 0,
+        "the pass total must move too: {:?}",
+        sizes.last().unwrap()
+    );
+}
+
 /// Idempotent: passes run every five minutes forever, so a second one over
 /// unchanged state must neither drop history nor accumulate rows.
 #[tokio::test]

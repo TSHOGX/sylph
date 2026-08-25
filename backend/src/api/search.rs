@@ -72,7 +72,12 @@ pub async fn search(
     let hits = match state.tracedb.search(query, limit).await {
         Ok(hits) => hits,
         Err(detail) => {
-            tracing::warn!("TraceDB search failed: {}", detail);
+            // `debug` for the same reason as `api::archive`: an unreachable archive
+            // is one fact about the install, and `tracedb::Client` already reports
+            // it once at `error`. A `warn` per keystroke-driven search would be an
+            // unbounded stream describing a supported configuration. The response
+            // carries `available: false` and `detail`, which is what the UI renders.
+            tracing::debug!("TraceDB search failed: {}", detail);
             return Ok(Json(SearchResponse {
                 results: Vec::new(),
                 available: false,

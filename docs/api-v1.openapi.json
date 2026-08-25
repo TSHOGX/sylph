@@ -28,6 +28,7 @@
     },
     "/api/v1/diagnostics": {
       "get": {
+        "description": "Runtime state: session and turn counts, discovered and broken agents, every agent root considered, archive totals, live child processes, and the last retention pass. Authenticated, unlike /health, because it carries counts and local filesystem paths. The retention block's withheld/terminal pair separates correct behaviour from a broken pass — a terminal session is supposed to keep everything, while a delegated session that keeps withholding means the archive is not confirming it, and an all-unchanged pass means ingestion has stopped advancing. Its byte fields answer which session is growing, which the counts cannot: forty small withheld sessions and one enormous one report identically. bytesHeld is the logical record across every measured session rather than the footprint on disk, so it exceeds what du reports — a ranking measure, not a disk gauge. grewBy is signed, since negative means pruning worked, and is absent when a session has been measured only once, because one observation is not a trend and reporting zero would claim stability. There is deliberately no configurable size bound: a terminal session's record is the only copy, so a size-triggered prune is a size-triggered deletion of data nothing else holds.",
         "responses": {
           "200": {
             "description": "Diagnostics snapshot"
@@ -122,6 +123,7 @@
         }
       },
       "post": {
+        "description": "Create a Sylph-managed session. `workdir` is bounded by configuration: it must resolve inside paths.browse_roots or the Quick Start directory, checked on the canonical path so `..` and symlinks are resolved rather than pattern-matched. The bound exists because this field is the current_dir of a spawned agent process and a coding agent reads and writes the tree it is pointed at, so it decides where arbitrary code runs — existence, the only property it was previously checked for, says nothing about whether it should. The same root set /api/v1/fs/* browses, deliberately: that endpoint exists to name a workdir, so a second bound would be a second thing to keep equal. 403 POLICY_VIOLATION is a workdir that exists outside the permitted roots, distinct from 400 because the request is well-formed and the fix is in config.toml; the message lists what is permitted. The canonical path is journalled, so two spellings of one directory do not become two workspaces. A session already recorded outside the roots stays fully readable — nothing re-checks a journalled workdir, since narrowing configuration must not orphan history.",
         "requestBody": {
           "$ref": "#/components/requestBodies/CreateSession"
         },
@@ -131,13 +133,16 @@
           },
           "400": {
             "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
           }
         }
       }
     },
     "/api/v1/sessions/import": {
       "post": {
-        "description": "Adopt an archived native session. Policy-relevant fields are derived from the archive rather than the request: the agent from the id prefix, since it selects identity and lifecycle policy, and the working directory from the archive's session metadata, falling back to an early event carrying it as JSON for archives that report no metadata. The session is restored as recorded, with identityMode and lifecycleMode set to preserve. 422 means the archive has the session but recorded no working directory, so there is nothing to resume into; the request itself was valid.",
+        "description": "Adopt an archived native session. Policy-relevant fields are derived from the archive rather than the request: the agent from the id prefix, since it selects identity and lifecycle policy, and the working directory from the archive's session metadata, falling back to an early event carrying it as JSON for archives that report no metadata. The session is restored as recorded, with identityMode and lifecycleMode set to preserve. 422 means the archive has the session but recorded no working directory, so there is nothing to resume into; the request itself was valid. The archived working directory is bounded exactly like a created one, and not as belt-and-braces: the archive holds every session any agent ever ran on this machine, so an unbounded import is a general way to start an agent anywhere — find a row that ran in the target directory, adopt it, send a turn. That the path came from the archive rather than the request changes who chose it, not what happens next. 403 POLICY_VIOLATION therefore means the archived directory exists but sits outside the directories this install permits sessions to run in, and the message says what importing would enable so the refusal reads as policy rather than as a broken archive.",
         "requestBody": {
           "$ref": "#/components/requestBodies/ImportSession"
         },
@@ -146,6 +151,9 @@
             "$ref": "#/components/responses/SessionCreated"
           },
           "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
             "$ref": "#/components/responses/Error"
           },
           "404": {

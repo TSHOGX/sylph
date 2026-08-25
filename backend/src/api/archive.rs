@@ -203,7 +203,20 @@ pub async fn list(
         {
             Ok(page) => page,
             Err(detail) => {
-                tracing::warn!("TraceDB list failed: {}", detail);
+                // `debug`, not `warn`, and this is the same rule as
+                // `tracedb::Client`'s one layer down: an absent archive is a
+                // supported configuration, so it is one fact about the install
+                // rather than one fault per request. The client already reports a
+                // spawn failure once at `error` and at `debug` after — a `warn`
+                // here re-created exactly the unbounded stream that bound was added
+                // to stop, and worse, per *request* rather than per pass. Measured
+                // in the E2E log: ~30 identical lines per page load, because the
+                // sidebar and the history overlay each list several directories.
+                //
+                // Nothing is lost by demoting it. The response carries `available:
+                // false` and the `detail` string, so the client renders the actual
+                // reason; the log line was the redundant copy.
+                tracing::debug!("TraceDB list failed: {}", detail);
                 return Ok(Json(ArchiveListResponse {
                     sessions: Vec::new(),
                     next_cursor: None,
