@@ -140,11 +140,19 @@ test("assistant prose renders Markdown without chat bubbles", async ({ page }) =
 /**
  * Assert the turn is still live, so a closed window fails as itself.
  *
- * Exactness is only available while a turn is live, and the badge that depends on it is
- * *deliberately* withheld once durations degrade to bounds. So a window that closed
- * mid-spec presents as a missing badge — a broken overview — rather than as a timing
- * problem, which is the most expensive way for this to fail. Called immediately before
- * the assertions that need exactness, not only at the top.
+ * This guard was written when exactness was available *only* while a turn was live,
+ * because a settled row's start had to be reconstructed. Publishing `startedAtMs`
+ * removed that asymmetry — a settled delegate is exact too — so the guard is no longer
+ * about exactness. It is still needed, and for the more general reason: these specs
+ * assert on live-only states (a running trajectory, an open extent with no end), and
+ * every one of them is *absent* once the turn settles.
+ *
+ * That is the expensive shape. When the correct behaviour is the absence of a signal, a
+ * window that closed mid-spec is indistinguishable from the feature working — so the
+ * failure presents as a broken overview rather than as a timing problem. Called
+ * immediately before each assertion that depends on the window, not only at the top:
+ * the window is consumed from both ends, and the whole sequence has to fit inside it
+ * rather than merely start there.
  */
 async function stillLive(page: Page, what: string) {
   await expect(
@@ -194,12 +202,19 @@ test("a fan-out reports which delegation was the slow one", async ({ page }) => 
 /**
  * What the same fan-out says once its turn settles.
  *
- * This is the state a user scrolls back to, and it is *not* the live one: consolidation
- * folds a declared trajectory's phases into one row keyed by its close, so every exact
- * duration is gone. The view must then degrade to lower bounds and say so — and must
- * not name a slowest row, because a rank over lower bounds is not a rank. A delegate
- * that ran 9s and forwarded one event at 8.9s bounds at 0.1s, so ranking bounds would
- * answer this view's one question confidently and wrongly.
+ * This is the state a user scrolls back to, and it is the state that used to lose its
+ * figures. Consolidation folds a declared trajectory's phases into one row keyed by its
+ * close, so `createdAtMs` becomes the *end* — and while the block's own
+ * `startedAtMs` went unpublished, every settled duration had to be reconstructed from
+ * whatever the interior happened to forward. That made them lower bounds, and a rank
+ * over lower bounds is not a rank: a delegate that ran 9s and forwarded one event at
+ * 8.9s bounds at 0.1s, so ranking bounds would answer this view's one question
+ * confidently and wrongly.
+ *
+ * The field is now on the wire, so a settled delegate is exact and rankable. What
+ * remains withheld is narrower and still worth pinning: a trajectory that never
+ * finished has an end timestamp without an outcome, so its arithmetic is exact while
+ * its span is not, and one such row withholds the badge from the whole set.
  */
 test("a settled fan-out reports exact durations and withholds the rank for the one row that never finished", async ({
   page,
