@@ -257,6 +257,51 @@ test("a delegation can be reached from the overview by keyboard", async ({ page 
 });
 
 /**
+ * A collapsed delegation reports its conclusion, not only that it happened.
+ *
+ * The backend records a delegate's summary — `task_notification` carries it — and the
+ * card rendered neither it nor the progress snapshot, so the account was stored and
+ * never shown. That is the one line of *content* a collapsed row can carry: without it
+ * the row is a status and a set of counts, which say work happened and nothing about
+ * what came of it. It matters most where a late outcome arrives on a turn of the
+ * agent's own, because then the summary is the whole of what a user learns about work
+ * that finished after the turn that dispatched it.
+ */
+test("a collapsed delegation shows what it concluded, without being opened", async ({
+  page,
+}) => {
+  test.slow();
+  await runFanoutSettled(page);
+
+  // Collapsed — nothing has been clicked — and the summary is on the card.
+  const survey = page.getByRole("region", { name: "Survey delegation" });
+  await expect(survey).toContainText("surveyed 412 files");
+  // Still collapsed, so this is the summary and not the opened interior.
+  await expect(survey).not.toContainText("Survey is starting.");
+
+  // A sibling's summary must not appear on it: the report is per-delegation, and a
+  // rollup-style leak would caption every row with the last one to arrive.
+  await expect(survey).not.toContainText("formatted");
+  await expect(page.getByRole("region", { name: "Lint delegation" })).toContainText("clean");
+});
+
+test("a promoted host reports its outcome, not its own arguments", async ({ page }) => {
+  await createSession(page);
+  await page.getByLabel("Message").fill("promote this please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByText("Running a workflow.")).toBeVisible({ timeout: 15_000 });
+
+  // A promoted host's `text` is its tool call's serialized input, so reading `text`
+  // uniformly would caption the card with a JSON blob. Its outcome arrives as the
+  // `subagent` close held beside the row — the field that exists so promotion does not
+  // overwrite the call. `Agent` is the host that forwards no interior, which is exactly
+  // where this summary is the only thing anyone can learn.
+  const agent = page.getByRole("region", { name: "Agent delegation" });
+  await expect(agent).toContainText("reported nothing");
+  await expect(agent).not.toContainText("summarize");
+});
+
+/**
  * The overview, audited by axe.
  *
  * Written here rather than in `accessibility.spec.ts` because the surface needs the

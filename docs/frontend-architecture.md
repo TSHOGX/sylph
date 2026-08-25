@@ -1733,6 +1733,35 @@ session where a `Workflow` dispatched a backgrounded delegate and returned clean
   from the turn-settle sweep entirely, so `abandoned` no longer appears on a delegate
   that was *expected* to outlive its turn — see the roadmap's "Backgrounded work is
   not abandoned work".
+- **A badge's explanation has to survive the behaviour it explains.** The
+  "outlived its turn" tooltip said an agent *cannot* report back after its turn
+  "because its process exits with the turn", and measured on `claude` 2.x that is
+  false: stdout stays open, the delegate's completion arrives after its turn's
+  `result`, and the agent opens an exchange of its own to report it — which is why
+  `origin: "agent"` turns exist. So the badge explained its own state with the
+  mechanism that resolves it, teaching a model of the product the product
+  contradicts. What is true is narrower: nobody has reported an outcome *yet*.
+  `abandoned` is not final, because a late outcome is written against the turn that
+  owns the trajectory. The one terminal case is a restart — startup recovery
+  deliberately ignores `is_backgrounded`, since a process that no longer exists cannot
+  report — and that has to stay distinguishable from work still running in the
+  background. The same wrong tense was in the overview's row description and in
+  `ExtentBound`, and is corrected in both.
+- **A delegate's summary was recorded and never rendered.** `task_notification`
+  carries the delegate's own account of its work, and the card showed neither it nor
+  `data.progress` — so a collapsed row was a status and a set of counts, which say
+  work happened and nothing about what came of it. It is now the card's first line,
+  clamped to two, and appended last to each overview row's accessible name so a reader
+  scanning twenty rows hears the comparison before the prose. This matters most where
+  a late outcome lands on a turn of the agent's own, because the summary is then the
+  whole of what a user learns about work that finished after its dispatching turn.
+  `trajectoryReport` in `lib/timeline-tree.ts` owns the two rules, both of which fail
+  silently: a **promoted host's `text` is its tool arguments**, so its summary can only
+  come from the `subagent` close held beside the row (`trajectoryClose`) — reading
+  `text` uniformly captions a `Workflow` with a JSON blob, and reading only `text` left
+  the `Agent` host, whose interior is never forwarded, with nothing at all. And a
+  **close outranks progress**, because a snapshot describes a state the outcome has
+  superseded.
 - **A promoted host renders its own call.** The row keeps `kind: "tool_call"`
   precisely so the tool's name, arguments, and result survive promotion, so a card
   that drew only trajectory chrome answered opening a `Workflow` with an empty
@@ -1757,7 +1786,11 @@ settled on for the same problem and the same `span`. A concurrent fan-out reads 
 bars stacked in one band, a sequential chain as a staircase; the slow one is the long
 bar. `components/delegation-overview.tsx` renders it as `left`/`width` percentages —
 no chart library, no measuring pass — and it is `next/dynamic`, so a route that never
-opens it pays nothing (**+0.2 KB** first-load).
+opens it pays nothing: `/sessions/[id]` measured 242.8 → 243.2 KB gzipped across the
+strip and the summary line together, **+0.4 KB**. Note that
+`scripts/measure-bundle.sh` reports the *root* route (221.1 KB), which is the figure
+the roadmap tracks; a dynamic route renders no HTML at build time, so the session
+route is measured by serving it and summing the scripts it references.
 
 It is scoped to what is on screen, so under focus the comparison is between the
 branch's own children rather than the whole turn, and it renders nothing below two

@@ -35,7 +35,11 @@
  */
 
 import { useMemo, useState } from "react";
-import type { TimelineNode, TrajectoryStatus } from "@/lib/timeline-tree";
+import {
+  trajectoryReport,
+  type TimelineNode,
+  type TrajectoryStatus,
+} from "@/lib/timeline-tree";
 import {
   buildWaterfall,
   type WaterfallOrder,
@@ -369,8 +373,20 @@ function describe(row: WaterfallRow, name: string): string {
 
   if (row.depth > 0) parts.push(`nested ${row.depth} deep`);
   if (row.note === "no-interior") parts.push("forwarded none of its own events");
-  if (row.note === "unreported") parts.push("outlived its turn, so nothing is known about it");
+  // "Nothing is known" was the wrong tense: nobody has reported an outcome *yet*, and
+  // a late one is written against the turn that owns the trajectory — so this row can
+  // still acquire one. Only a restart makes it terminal.
+  if (row.note === "unreported") parts.push("outlived its turn, no outcome reported yet");
   if (row.navigable) parts.push("activate to focus");
+
+  // The delegate's own account, last. It is the longest part and the least useful for
+  // *comparing*, which is what this list is for — a reader scanning twenty rows needs
+  // to be able to stop listening before reaching a sentence. It is here at all because
+  // a row that reports only a status and a duration says work happened and nothing
+  // about what came of it, and this is not visible on the row: adding it there would
+  // squeeze out the duration at 412px, where the name already truncates.
+  const report = trajectoryReport(row.node);
+  if (report) parts.push(report);
 
   return parts.join(", ");
 }

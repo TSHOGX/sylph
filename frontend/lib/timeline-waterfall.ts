@@ -83,7 +83,10 @@ export type ExtentBound =
   | "exact"
   /**
    * The end is when the turn terminated and we stopped listening, not when the work
-   * stopped. A server-closed trajectory.
+   * stopped. A server-closed trajectory — and one that may yet report a real outcome
+   * on a later turn, at which point the bound is replaced by an exact span rather than
+   * refined. The layout is a pure function of the tree for that reason: nothing here
+   * may hold a bound past the arrival of the fact that supersedes it.
    */
   | "stopped-listening"
   /**
@@ -106,7 +109,14 @@ export type ExtentBound =
 export type WaterfallNote =
   /** Finished and forwarded none of its interior. Real terminal state, not pending. */
   | "no-interior"
-  /** Still running when the turn ended, so nothing is known about its interior. */
+  /**
+   * Still running when its turn ended, so no outcome has been reported yet.
+   *
+   * Not "nothing can be known": a late outcome is written against the turn that owns
+   * the trajectory, so `abandoned` is not final and this row can be superseded. A
+   * layout that treated it as terminal — caching it, or refusing to recompute — would
+   * pin the unresolved state past the point where it stopped being true.
+   */
   | "unreported";
 
 /** One trajectory, placed on the shared axis. */
