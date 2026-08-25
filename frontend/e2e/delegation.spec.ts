@@ -322,7 +322,15 @@ test("a host that forwarded no interior says so instead of offering an empty car
   // A closed trajectory with no children is a terminal state, not a loading one.
   // Presented as expandable it invites opening a branch that can never fill, and
   // saying so only after the click is the lossy collapse the tree exists to avoid.
-  const agent = page.getByRole("region", { name: "Agent delegation" });
+  //
+  // `exact` because `getByRole` matches an accessible name by case-insensitive
+  // *substring*, and "Subagent delegation" — the label a trajectory with no name of
+  // its own renders — contains "agent delegation". So this locator is ambiguous by
+  // construction with the fallback name, and a build that produces one resolves to two
+  // elements and fails strict mode, which reads as the card being wrong rather than as
+  // the locator being loose. The disclosure below already guards the same hazard
+  // against "Focus Agent"; the region needed it for the same reason.
+  const agent = page.getByRole("region", { name: "Agent delegation", exact: true });
   await expect(agent).toContainText("no interior");
   // Collapsed, the card says what came back from inside it — nothing — without the
   // user having to open it to find that out. Whether it *can* be opened is a separate
@@ -399,7 +407,10 @@ test("a host with no forwarded interior is still worth opening", async ({ page }
   // `no interior` says nothing came back from inside. That is not the same as nothing
   // to show: the call itself is still there, so this one keeps its disclosure while a
   // *declared* trajectory with no interior does not have one to keep.
-  const agent = page.getByRole("region", { name: "Agent delegation" });
+  //
+  // `exact` for the reason given above: a bare "Agent delegation" also matches
+  // "Subagent delegation".
+  const agent = page.getByRole("region", { name: "Agent delegation", exact: true });
   await expect(agent).toContainText("no interior");
   const disclosure = agent.getByRole("button", { name: "Agent", exact: true });
   await expect(disclosure).toHaveCount(1);
@@ -522,7 +533,7 @@ test("focusing a promoted host shows its own call, not an empty pane", async ({
   // delegates are: focusing the `Agent` host, whose interior claude never forwards,
   // showed a breadcrumb over nothing at all. A delegation that genuinely reported
   // nothing then looks identical to a broken one.
-  const agent = page.getByRole("region", { name: "Agent delegation" });
+  const agent = page.getByRole("region", { name: "Agent delegation", exact: true });
   await agent.getByRole("button", { name: "Focus Agent" }).click();
 
   // The breadcrumb confirms we re-rooted, and the call is on screen with it.
@@ -537,7 +548,7 @@ test("focusing a host with no interior says so rather than showing blank", async
 }) => {
   await runPromotion(page);
 
-  const agent = page.getByRole("region", { name: "Agent delegation" });
+  const agent = page.getByRole("region", { name: "Agent delegation", exact: true });
   await agent.getByRole("button", { name: "Focus Agent" }).click();
 
   // An empty pane is indistinguishable from a still-loading one, and this delegation
