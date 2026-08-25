@@ -1497,7 +1497,19 @@ a total `Record` over the key set, so adding an English string without its
 translation fails `npm run build`. What the compiler *cannot* catch is a translation
 that drops a `{placeholder}` — that compiles and renders a sentence with a hole in
 it — so a unit test asserts placeholder agreement across catalogues. Both catalogues
-currently sit at 263 keys, verified equal.
+currently sit at 396 keys, verified equal.
+
+The three overlays — search (`Mod+K`), the command palette (`Mod+P`), and the
+workspace history browser — were the last surfaces holding literal English, and they
+are now in the catalogue like everything else. Two rules came out of translating
+them. A *rendered* group heading has to be a key, not a literal used only for
+sorting; and a label built from a stored enum reads that enum's own translation
+(`settings.density.*`) rather than interpolating the raw value, or a translated
+sentence carries an English word in the slot the user is reading. Note also that a
+component whose labels are translated must list `t` among its `useMemo`
+dependencies: without it a language change leaves the labels the surface was opened
+with while the filter keeps matching them, so typing hits a row whose visible text
+no longer contains what was typed.
 
 **No framework.** `next-intl` and `next-i18next` are built around locale-in-the-URL:
 a `[locale]` segment, negotiating middleware, per-request catalogue loads on the
