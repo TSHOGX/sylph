@@ -228,6 +228,26 @@ export const en = {
   // The history browser's own verb for the filesystem fallback, which is where a
   // chosen folder lands when it was reached by browsing rather than by picking.
   "history.showHistory": "Show its history",
+  // Browsing one workspace's archived sessions.
+  "history.title": "Workspace history",
+  "history.field": "Filter this workspace's history",
+  "history.placeholder": "Filter loaded sessions...",
+  "history.list": "Archived sessions",
+  "history.chooseWorkspace": "Choose a workspace...",
+  // The switcher's accessible name states the current directory *and* the verb,
+  // because a button showing a truncated path is announced as that path alone.
+  "history.workspaceButton": "Workspace: {path}. Change",
+  "history.noWorkspace": "none chosen",
+  // Paging is by request, so the count is what has been *fetched*, not what exists
+  // — `+` marks that more remain rather than being part of the number.
+  "history.loaded": "{count} loaded",
+  "history.loadedMore": "{count}+ loaded",
+  "history.loadOlder": "Load older sessions",
+  "history.loadFailed": "Could not load history",
+  "history.none": "No loaded session matches.",
+  "history.empty": "No archived sessions here yet.",
+  "history.archiveUnavailable":
+    "The TraceDB archive is unavailable, so past sessions cannot be listed.",
 
   // The filesystem fallback: one directory level per request.
   "directoryPicker.title": "Choose a folder",

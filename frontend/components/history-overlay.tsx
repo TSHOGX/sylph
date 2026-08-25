@@ -192,7 +192,7 @@ export function HistoryOverlay() {
   }
 
   return (
-    <Overlay title="Workspace history" onClose={closeOverlay} describedBy="history-hint">
+    <Overlay title={t("history.title")} onClose={closeOverlay} describedBy="history-hint">
       {/* The filter input comes first in DOM order deliberately. `Overlay` focuses
           the first focusable descendant on mount, so a control placed above this
           would take focus and the user's first keystroke would change the
@@ -209,12 +209,12 @@ export function HistoryOverlay() {
             aria-expanded
             aria-controls="history-results"
             aria-activedescendant={rows.length > 0 ? `history-row-${activeIndex}` : undefined}
-            aria-label="Filter this workspace's history"
+            aria-label={t("history.field")}
             autoFocus
             value={query}
             onChange={(event) => setPicker({ query: event.target.value, active: 0 })}
             onKeyDown={(event) => onKeyDown(event, activeIndex, setActive)}
-            placeholder="Filter loaded sessions..."
+            placeholder={t("history.placeholder")}
             className="flex-1 bg-transparent text-sm outline-none placeholder:text-ink-muted"
           />
         </div>
@@ -228,11 +228,13 @@ export function HistoryOverlay() {
           <button
             type="button"
             onClick={() => setMode("switch")}
-            aria-label={`Workspace: ${workdir ? shortenHome(workdir, home) : "none chosen"}. Change`}
+            aria-label={t("history.workspaceButton", {
+              path: workdir ? shortenHome(workdir, home) : t("history.noWorkspace"),
+            })}
             className="flex min-w-0 flex-1 items-center gap-1 rounded border border-line bg-raised px-1.5 py-1 text-left text-xs hover:bg-sunken focus-ring"
           >
             <span className="min-w-0 flex-1 truncate" title={workdir ?? undefined}>
-              {workdir ? shortenHome(workdir, home) : "Choose a workspace..."}
+              {workdir ? shortenHome(workdir, home) : t("history.chooseWorkspace")}
             </span>
             <span className="shrink-0 text-ink-muted">
               <ChevronDownIcon size={12} />
@@ -240,8 +242,10 @@ export function HistoryOverlay() {
           </button>
           <span className="shrink-0 text-3xs text-ink-muted">
             {history.isFetching && sessions.length === 0
-              ? "loading..."
-              : `${sessions.length}${history.hasNextPage ? "+" : ""} loaded`}
+              ? t("action.loading")
+              : t(history.hasNextPage ? "history.loadedMore" : "history.loaded", {
+                  count: sessions.length,
+                })}
           </span>
         </div>
       </div>
@@ -250,12 +254,12 @@ export function HistoryOverlay() {
         ref={listRef}
         id="history-results"
         role="listbox"
-        aria-label="Archived sessions"
+        aria-label={t("history.list")}
         className="min-h-0 flex-1 pane py-1"
       >
         {!available ? (
           <p className="px-3 py-6 text-center text-xs text-ink-muted">
-            The TraceDB archive is unavailable, so past sessions cannot be listed.
+            {t("history.archiveUnavailable")}
           </p>
         ) : history.isPending ? (
           <output aria-live="polite" className="block px-3 py-6 text-center text-xs text-ink-muted">
@@ -263,7 +267,7 @@ export function HistoryOverlay() {
           </output>
         ) : history.error ? (
           <div role="alert" className="px-3 py-6 text-center text-xs">
-            <p className="font-medium text-danger">Could not load history</p>
+            <p className="font-medium text-danger">{t("history.loadFailed")}</p>
             <button
               type="button"
               onClick={() => void history.refetch()}
@@ -274,7 +278,7 @@ export function HistoryOverlay() {
           </div>
         ) : rows.length === 0 ? (
           <p className="px-3 py-6 text-center text-xs text-ink-muted">
-            {query.trim() ? "No loaded session matches." : "No archived sessions here yet."}
+            {query.trim() ? t("history.none") : t("history.empty")}
           </p>
         ) : (
           rows.map((session, index) => (
@@ -297,7 +301,7 @@ export function HistoryOverlay() {
               disabled={history.isFetchingNextPage}
               className="w-full rounded border border-line px-2 py-1 text-xs font-medium text-ink-soft hover:bg-sunken disabled:opacity-60 focus-ring"
             >
-              {history.isFetchingNextPage ? "Loading..." : "Load older sessions"}
+              {history.isFetchingNextPage ? t("action.loading") : t("history.loadOlder")}
             </button>
           </div>
         )}
