@@ -1833,6 +1833,17 @@ session where a `Workflow` dispatched a backgrounded delegate and returned clean
   the `Agent` host, whose interior is never forwarded, with nothing at all. And a
   **close outranks progress**, because a snapshot describes a state the outcome has
   superseded.
+
+  **Nor may it read a promoted host's `tool_result`**, which is the obvious next step
+  precisely because a promoted host's *lifecycle* is its result (§ Promotion). A result
+  is the tool's output, not the delegation's account of itself — and now that cards
+  carry summaries, this is coupled to the suite: several
+  `not.toContainText("running" | "failed")` assertions in `e2e/delegation.spec.ts` match
+  a card's whole subtree, so a status word appearing inside a *summary* fails them as
+  though the status were wrong. The fixture already holds the ammunition —
+  `pr-host-d`'s result reads "dispatched; running in background". Pinned by a unit test
+  rather than a comment, because a comment cannot fail: it was confirmed by adding the
+  `row.result` fallback and watching the test reject that exact string.
 - **A promoted host renders its own call.** The row keeps `kind: "tool_call"`
   precisely so the tool's name, arguments, and result survive promotion, so a card
   that drew only trajectory chrome answered opening a `Workflow` with an empty
