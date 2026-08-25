@@ -314,6 +314,22 @@ class Fixture:
                   text=json.dumps({"script": "phase('Stage A')"}))
             event("subagent", "started", streamId="pr-task-3",
                   span="pr-host-c", name="Stage A: A:item-1")
+
+            # Host 4: the shape a real backgrounded workflow has, and the one that
+            # produced two wrong readings at once. Its own call *succeeded* — the tool
+            # dispatched and returned — while its delegate was still running when the
+            # turn ended, so only the server closes that. The host must therefore read
+            # `done`, not `failed`: the server marks its closing event `isError` so the
+            # row reads as unresolved, and counting that as a descendant failure badged
+            # a workflow red for finishing exactly as designed. And the delegate must
+            # not claim "no interior", because nobody looked — that is a different fact
+            # from a host that finished and forwarded nothing.
+            event("tool_call", "completed", streamId="pr-host-d", name="Workflow",
+                  text=json.dumps({"script": "parallel([sleep20, sleep15])"}))
+            event("subagent", "started", streamId="pr-task-4",
+                  span="pr-host-d", name="Barrier: worker-1")
+            event("tool_result", "completed", streamId="pr-host-d",
+                  name="Workflow", text="dispatched; running in background")
             self._reply()
 
         elif "paced" in text:

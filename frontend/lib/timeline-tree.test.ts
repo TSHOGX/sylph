@@ -395,6 +395,33 @@ describe("promotion", () => {
     expect(nodes).toHaveLength(1);
   });
 
+  it("does not fail a host whose only unresolved delegate was abandoned", () => {
+    // Measured on a real session: a `Workflow` whose own `tool_result` succeeded was
+    // badged `failed` because one delegate was still running when the turn ended.
+    // The server marks its own closing event `isError` so the row reads as
+    // unresolved rather than clean, and the rollup counted that as a descendant
+    // failure — escalating every ancestor. `abandoned` means nobody reported an
+    // outcome, which is a different fact from work that reported an error, and
+    // conflating them reports an interrupted turn as a broken one.
+    const nodes = tree([
+      call("h1", "Workflow"),
+      opens("t1", "Demo: agent-1", "h1"),
+      result("h1"),
+      ev({
+        kind: "subagent",
+        phase: "completed",
+        streamId: "t1",
+        span: "h1",
+        isError: true,
+        data: { closedBy: "server", reason: "abandoned" },
+      }),
+    ]);
+
+    expect(nodes[0].status).toBe("done");
+    expect(nodes[0].rollup.failures).toBe(0);
+    expect(nodes[0].children[0].status).toBe("abandoned");
+  });
+
   it("replaces a progress snapshot instead of appending it", () => {
     // These notifications re-send the whole summary rather than a suffix. Appended
     // as delta text, one sentence was stored six times.
