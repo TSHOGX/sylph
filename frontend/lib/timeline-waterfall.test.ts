@@ -184,6 +184,70 @@ describe("buildWaterfall", () => {
     expect(untimed).toBe(0);
   });
 
+  it("prefers a consolidated block's own start over a bound from its children", () => {
+    // `startedAtMs` is the block's record of when its first phase arrived, published
+    // only on a consolidated block. With it, a settled trajectory is exact rather than
+    // bounded — which is the difference between being rankable and not, since a rank
+    // over lower bounds is not a rank.
+    //
+    // The same shape as the test above, plus the one field. Note the descendant at
+    // 4000 would have produced a `from-children` bound of 1000ms; the block's own
+    // start is earlier and truer, because the delegate existed before it forwarded
+    // anything.
+    const { rows, timed, bounded, untimed } = waterfall([
+      closes("s1", 5000, { name: "Reloaded", startedAtMs: 3000 }),
+      ev({
+        kind: "assistant",
+        phase: "completed",
+        streamId: "b1",
+        span: "s1",
+        text: "work",
+        createdAtMs: 4000,
+      }),
+    ]);
+
+    expect(rows[0].extent).toEqual({
+      kind: "measured",
+      startMs: 3000,
+      endMs: 5000,
+      bound: "exact",
+    });
+    expect(rows[0].durationMs).toBe(2000);
+    expect(timed).toBe(true);
+    expect(bounded).toBe(0);
+    expect(untimed).toBe(0);
+  });
+
+  it("never crowns a row that did not finish, even when its arithmetic is exact", () => {
+    // A trajectory still open when its turn ended can acquire an end timestamp — the
+    // close the server wrote, or the turn's own end — so the subtraction is exact over
+    // a span whose real end nobody reported. Its true duration can only be longer, so
+    // it cannot lose a comparison and must not win one. It was eligible for "the
+    // longest here" while carrying the label "never finished".
+    //
+    // Only observable once settled rows became exact: while every one was a bound, no
+    // rank was offered at all, so nothing could be wrongly crowned.
+    const { rows } = waterfall([
+      closes("fast", 2000, { name: "Fast", startedAtMs: 1000 }),
+      closes("slow", 4000, { name: "Slow", startedAtMs: 1000 }),
+      // Open at 1000, force-closed at 9000 by the turn ending. Reads as the longest.
+      ev({
+        kind: "subagent",
+        phase: "started",
+        streamId: "cut",
+        name: "Cutoff",
+        createdAtMs: 1000,
+      }),
+      serverCloses("cut", 9000),
+    ]);
+
+    const byName = (n: string) => rows.find((r) => r.node.row.event.name === n)!;
+    expect(byName("Cutoff").status).toBe("abandoned");
+    expect(byName("Cutoff").slowest).toBe(false);
+    // And because one row is unrankable, no row claims the top at all.
+    expect(rows.filter((r) => r.slowest)).toHaveLength(0);
+  });
+
   it("refuses to name a slowest row when any duration is only a bound", () => {
     // A rank over lower bounds is not a rank. A delegate that ran 9s and forwarded its
     // one event at 8.9s bounds at 0.1s, so ranking it against an exact 0.5s names the

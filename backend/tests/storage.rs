@@ -7,6 +7,8 @@
 mod common;
 
 use common::TestBackend;
+use sylph_web_backend::api::sessions::block_to_event;
+use sylph_web_backend::events::StreamEvent;
 use sylph_web_backend::models::Event;
 use sylph_web_backend::storage::cas::BlobStore;
 use sylph_web_backend::storage::history::{self, HistoryStore};
@@ -313,6 +315,70 @@ async fn deltas_become_one_block_rather_than_a_row_each() {
     );
     let block = &history.blocks("s1", -1).await.unwrap()[0];
     assert_eq!(HistoryStore::replay_block(block).len(), 200);
+}
+
+#[tokio::test]
+async fn a_consolidated_block_publishes_when_it_began_and_not_only_when_it_closed() {
+    let (history, _dir) = history_store().await;
+
+    // One block spanning a full second: opened at 1000, closed at 2000.
+    let events = vec![
+        event(0, "assistant", Some("started"), Some("a1"), "", 1000),
+        event(1, "assistant", Some("delta"), Some("a1"), "half ", 1500),
+        event(2, "assistant", Some("completed"), Some("a1"), "half done", 2000),
+    ];
+    history
+        .put_blocks(&history::consolidate(&events))
+        .await
+        .unwrap();
+
+    let block = &history.blocks("s1", -1).await.unwrap()[0];
+    let wire = block_to_event(block);
+
+    // Consolidation keys the folded row on the *closing* event, so `createdAtMs`
+    // alone says only when the block finished. A client computing a duration from
+    // durable history then has an end and no beginning — which is why the
+    // delegation overview was built believing durations were unreconstructible
+    // after a turn settles. The value was computed and stored all along; only the
+    // wire dropped it, and an unpublished measurement is indistinguishable from an
+    // impossible one.
+    assert_eq!(
+        wire.started_at_ms,
+        Some(1000),
+        "a consolidated block reports the arrival of its first phase"
+    );
+    assert_eq!(
+        wire.created_at_ms, 2000,
+        "and still reports its close, so the two together bound the work"
+    );
+}
+
+#[tokio::test]
+async fn a_journal_row_reports_no_start_because_it_is_one_arrival() {
+    // The inverse of the above, and the reason the field is optional rather than
+    // defaulted: a live event happened once, so a start would either duplicate
+    // `createdAtMs` or invent a span the event never had. Absent is the honest
+    // answer, and it is what lets a client tell streaming from settled.
+    let row = Event {
+        id: None,
+        session_id: "s1".to_string(),
+        turn_id: Some("t1".to_string()),
+        seq: 0,
+        kind: "assistant".to_string(),
+        phase: Some("delta".to_string()),
+        stream_id: Some("a1".to_string()),
+        span: None,
+        name: None,
+        text: "partial".to_string(),
+        data_json: "{}".to_string(),
+        is_error: false,
+        stability: "ephemeral".to_string(),
+        source: "runner".to_string(),
+        created_at_ms: 1000,
+        reconciled_at_ms: None,
+    };
+
+    assert_eq!(StreamEvent::from_row(&row).started_at_ms, None);
 }
 
 #[tokio::test]

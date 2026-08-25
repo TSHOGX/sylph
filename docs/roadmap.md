@@ -70,21 +70,32 @@ counted only their own suite. Re-measure by running the suites, not by adding th
 sections — `cargo test`, `npm test`, and `npx playwright test --list` report all
 four numbers directly.
 
-**Current first-load JS: 221.1 KB gzipped** across 13 chunks, measured on `main`
-after the Phase 12 merges. The recipe each phase ran by hand is now
-`scripts/measure-bundle.sh`, which prints the per-chunk breakdown as well as the
-total:
+**Current first-load JS, measured by `scripts/measure-bundle.sh`:**
+
+| Route | Figure | Chunks |
+| --- | --- | --- |
+| `/` | **221.3 KB** gzipped | 13 |
+| `/sessions/[id]` | **244.3 KB** gzipped | 15 |
 
 ```sh
 cd frontend && SYLPH_WEB_BACKEND=http://localhost:4317 npm run build
-./scripts/measure-bundle.sh
+./scripts/measure-bundle.sh                        # the root route
+./scripts/measure-bundle.sh --route='/sessions/[id]'
 ```
 
-It reads `.next/server/app/index.html`, which is the only place that lists the
-scripts `/` actually references — summing the chunk directory instead counts
-chunks belonging to other routes. Note that Next 16's Turbopack build no longer
-prints a first-load column of its own, so there is no build output to read this
-off; the script is the measurement.
+**The two are not comparable, and confusing them has already happened.** Two
+measurements of "the bundle" came back 221 and 243, both correct about a different
+route — the session route legitimately carries the timeline, the delegation tree, and
+the overview. The 200 KB budget was set against `/`. Quote a route with every figure.
+
+They are also obtained differently, which is why the script takes the route rather
+than leaving it to whoever is measuring. A prerendered route has served HTML in
+`.next/server/app/index.html`, and that HTML is the only authority on which scripts it
+references — summing the chunk directory counts every route's chunks together. A
+dynamic route emits no build-time HTML at all, and Next 16's Turbopack build publishes
+no per-route chunk manifest for the App Router (`build-manifest.json` carries only
+`/_app`), so it has to be served and read. The script does both; neither is derivable
+from build output, since Turbopack also stopped printing a first-load column.
 
 This is **past the 200 KB budget Phase 4 set**, and knowingly so: Phase 9 already
 recorded the crossing at 203.9 KB and Phase 12 added the delegation tree, the choice-list

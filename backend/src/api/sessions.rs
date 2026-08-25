@@ -189,6 +189,12 @@ pub fn block_to_event(block: &crate::storage::Block) -> StreamEvent {
         stability: "stable".to_string(),
         source: block.source.clone(),
         created_at_ms: block.created_at_ms,
+        // The block already carries this; it was simply never published. Without it
+        // a settled block reports only when it closed, so every duration computed
+        // from durable history was a reconstruction from whatever the interior
+        // happened to forward — exact for a chatty delegate, a lower bound for a
+        // quiet one, and absent entirely for one that forwarded nothing.
+        started_at_ms: Some(block.started_at_ms),
     }
 }
 

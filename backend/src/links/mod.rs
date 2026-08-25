@@ -928,6 +928,8 @@ impl LinkManager {
             stability: "stable".to_string(),
             source: "server".to_string(),
             created_at_ms: now_ms(),
+            // A live session fact is one arrival.
+            started_at_ms: None,
         };
         self.hub.publish_session(session_id, event).await;
     }

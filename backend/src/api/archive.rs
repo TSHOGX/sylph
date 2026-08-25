@@ -865,6 +865,8 @@ fn normalize_events(events: &[TraceEvent]) -> Vec<StreamEvent> {
             stability: "stable".to_string(),
             source: "archive".to_string(),
             created_at_ms: event.created_at_ms.unwrap_or(0),
+            // The archive stores only a creation time per event.
+            started_at_ms: None,
         });
     }
 

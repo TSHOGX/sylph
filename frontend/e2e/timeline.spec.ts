@@ -184,7 +184,7 @@ test("a fan-out reports which delegation was the slow one", async ({ page }) => 
  * that ran 9s and forwarded one event at 8.9s bounds at 0.1s, so ranking bounds would
  * answer this view's one question confidently and wrongly.
  */
-test("a settled fan-out degrades to bounds instead of claiming a winner", async ({
+test("a settled fan-out reports exact durations and withholds the rank for the one row that never finished", async ({
   page,
 }) => {
   test.slow();
@@ -192,17 +192,39 @@ test("a settled fan-out degrades to bounds instead of claiming a winner", async 
 
   const overview = await openOverview(page);
 
-  // The caveat is on screen, not in a tooltip: a reader who cannot see which bars are
-  // faded has no way to ask for it.
-  await expect(overview).toContainText(/lower bound/);
-  // No row claims the top, because none can be shown to hold it. `exact`, or the
-  // "slowest first" control beside it matches and this can never observe anything.
-  await expect(overview.getByText("slowest", { exact: true })).toHaveCount(0);
-  // The figures are still there, carrying the sign that says what they are.
-  await expect(overview.getByRole("button", { name: /^Survey,/ })).toContainText("≥");
+  // This spec used to assert the opposite — that a settled fan-out degrades to lower
+  // bounds — and that was true only because `startedAtMs` was computed, stored, and
+  // never published. A consolidated block is keyed on its close, so without that field
+  // a settled trajectory reported when it ended and not when it began, and the start
+  // had to be reconstructed from whatever the interior happened to forward. Now the
+  // block's own start is on the wire, so a settled delegate is exact.
+  await expect(overview).not.toContainText(/lower bound/);
   await expect(
     overview.getByRole("button", { name: /^Survey, .*measured from the work it forwarded/ }),
+  ).toHaveCount(0);
+
+  // Exact figures, and the case that matters most: a delegate that forwarded nothing is
+  // now timed anyway, because the block records its own start rather than depending on
+  // it having spoken. Previously this row could only ever be a caret.
+  //
+  // Matched as text, not as a button — such a row is deliberately not a control, since
+  // focusing it would re-root onto a pane with nothing in it.
+  await expect(
+    overview.getByText(/^Audit, finished, took \d/),
   ).toBeVisible();
+
+  // But the rank is still withheld, for a different and narrower reason. `Cutoff` was
+  // still open when the turn ended, so it has an end timestamp without anyone having
+  // reported an outcome: the subtraction is exact and the span is not. Its real
+  // duration can only be longer, so it cannot lose this comparison and must not win
+  // it — and a row labelled "never finished" was previously eligible to be called "the
+  // longest here". One unrankable row withholds the badge from every row, because a
+  // partial rank is still a claim about the whole set.
+  await expect(overview).toContainText(/never finished/);
+  await expect(overview.getByText("slowest", { exact: true })).toHaveCount(0);
+  await expect(
+    overview.getByRole("button", { name: /the longest here/ }),
+  ).toHaveCount(0);
 });
 
 test("the overview is legible without seeing the bars", async ({ page }) => {

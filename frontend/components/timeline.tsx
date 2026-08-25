@@ -354,7 +354,24 @@ function TrajectoryCard({
 }) {
   // Opens on failure, like a failed shell command: that is the case where the
   // contents are the answer rather than detail.
-  const [open, setOpen] = useState(node.status === "failed");
+  //
+  // Derived, not initial. `useState(node.status === "failed")` reads the status once
+  // at mount and never again, and a delegation's failure almost always arrives
+  // *after* its row exists: a descendant fails, the status escalates, and by then the
+  // initializer has long since run. So a failed branch stayed collapsed over the tool
+  // that failed — the "collapsing must not be lossy" rule breaking silently, and
+  // invisible to a mock fast enough to deliver both events in one render.
+  //
+  // An effect that force-opens on the transition is the wrong repair: it would
+  // re-open a branch the user had deliberately collapsed every time another
+  // descendant failed. What is wanted is a default that tracks the data until the
+  // user overrides it, so the override is remembered rather than the value.
+  //
+  // Three inputs, one boolean, so the precedence is stated once here: an explicit
+  // expand-all/collapse-all wins, then the user's own toggle on this row, then the
+  // failure-derived default.
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? node.status === "failed";
   const isOpen = expandAll ?? open;
   const name = trajectoryName(node);
   const tone = STATUS_TONE[node.status ?? "running"];
@@ -413,7 +430,7 @@ function TrajectoryCard({
         ) : (
           <button
             type="button"
-            onClick={() => setOpen(!isOpen)}
+            onClick={() => setUserOpen(!isOpen)}
             aria-expanded={isOpen}
             className="min-w-0 shrink truncate rounded px-0.5 font-medium text-ink hover:bg-hover focus-ring"
           >
@@ -941,8 +958,14 @@ function OrphanResult({
   expandAll?: boolean | null;
 }) {
   const status = resultStatus(event);
-  const [open, setOpen] = useState(status.failed);
-  const isOpen = expandAll ?? open;
+  // Derived from the event, not captured at mount — see the same reasoning on the
+  // trajectory row above. A result's text streams in, so a failure can be known
+  // after this row first rendered, and an initializer would never see it: a failed
+  // command then stayed collapsed with its output — the answer to "what went wrong"
+  // — behind a "more" button. `null` means the user has not decided, so the derived
+  // default still applies; once they toggle, their choice is what is remembered.
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const isOpen = expandAll ?? userOpen ?? status.failed;
 
   if (!event.text) return null;
 
@@ -962,7 +985,7 @@ function OrphanResult({
           <StatusMark running={false} failed={status.failed} exitCode={status.exitCode} />
           <button
             type="button"
-            onClick={() => setOpen(!isOpen)}
+            onClick={() => setUserOpen(!isOpen)}
             aria-expanded={isOpen}
             className="rounded px-1 text-3xs text-ink-muted hover:bg-hover hover:text-ink-soft focus-ring"
           >

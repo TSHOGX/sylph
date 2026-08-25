@@ -70,6 +70,22 @@ pub struct StreamEvent {
     pub stability: String,
     pub source: String,
     pub created_at_ms: i64,
+    /// When this block's *first* phase arrived, on a consolidated block only.
+    ///
+    /// A live event is one arrival, so `created_at_ms` is the whole story. A
+    /// consolidated block is many arrivals folded into one row keyed by its close,
+    /// and `created_at_ms` then means "when it finished" — so a client computing a
+    /// duration from a settled turn has an end and no beginning.
+    ///
+    /// `history::consolidate` has always computed and stored this; only the wire
+    /// omitted it. That absence is why the delegation overview was designed around
+    /// durations being unreconstructible after a turn settles: the measurement
+    /// existed and was not published, which looks identical to not existing.
+    ///
+    /// Absent on a live event, so a reader can tell "streaming, one arrival" from
+    /// "settled, and here is the span it covered".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
 }
 
 impl StreamEvent {
@@ -177,10 +193,16 @@ impl StreamEvent {
             stability: stability.to_string(),
             source: "agent".to_string(),
             created_at_ms: chrono::Utc::now().timestamp_millis(),
+            // Straight from an adapter envelope: one arrival.
+            started_at_ms: None,
         })
     }
 
     /// Rebuild the wire form from a journal row.
+    ///
+    /// No `started_at_ms`: a journal row is one arrival, so its `created_at_ms` is
+    /// already the moment it happened. The field exists only for a consolidated
+    /// block, which is many arrivals folded into one row.
     pub fn from_row(row: &Event) -> Self {
         Self {
             seq: row.seq,
@@ -198,6 +220,7 @@ impl StreamEvent {
             stability: row.stability.clone(),
             source: row.source.clone(),
             created_at_ms: row.created_at_ms,
+            started_at_ms: None,
         }
     }
 }
@@ -419,6 +442,7 @@ mod tests {
             },
             source: "runner".to_string(),
             created_at_ms: 1_700_000_000_000,
+            started_at_ms: None,
         }
     }
 
