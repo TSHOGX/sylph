@@ -213,16 +213,20 @@ design — do not "fix" it by persisting the token.
 tree, a compiler or linter can capture a half-written file and report an error
 whose line numbers do not match the source. Re-run before believing it.
 
-**The E2E data directory is never wiped, so specs must not count shared state.**
-`frontend/.e2e-home/` accumulates every session across every run — it passed 240
-during Phase 7 and 357 during Phase 9 — and the sidebar caps its listing at 200. A
-spec that creates a session in `/tmp` and asserts "the group grew by one" therefore
-passes for months and then fails permanently once the shared group reaches that
-cap, with a diff-by-one that looks like a UI bug and is not. Past the cap a new
-session *displaces* an older row instead of adding one, so the count stays flat.
-Assert on identity — "the session I just created is listed here", matched by its id
-— or create a `mkdtemp` directory per spec and count against that. This has now
-bitten twice, in exactly the same place.
+**Specs must not count shared state, even though the E2E home is now wiped per
+run.** `frontend/.e2e-home/` used to accumulate every session across every run — it
+passed 240 during Phase 7 and 357 during Phase 9 — and the sidebar caps its listing
+at 200. A spec that creates a session in `/tmp` and asserts "the group grew by one"
+therefore passed for months and then failed permanently once the shared group
+reached that cap, with a diff-by-one that looks like a UI bug and is not. Past the
+cap a new session *displaces* an older row instead of adding one, so the count stays
+flat. This bit twice, in exactly the same place, which is why `npm run e2e` now
+wipes the directory first (`frontend/e2e/reset-home.mjs`).
+
+The wipe removes the trigger, not the hazard: a run creates over a hundred sessions
+of its own, so a spec late in the order can still meet the cap. Assert on identity —
+"the session I just created is listed here", matched by its id — or create a
+`mkdtemp` directory per spec and count against that.
 
 **That same accumulation also makes the suite progressively slower, and it looks
 like flakiness.** The `mkdtemp` directory each spec creates becomes a *permanent
@@ -232,10 +236,22 @@ single-session directory each, and every page load pays for all of them.
 Measured during Phase 9: the suite went from 1.5 minutes to 35 minutes, and two
 or three specs failed per run on the 30s default timeout — a *different* two or
 three each time, which is what makes it read as flakiness rather than as a
-fixture problem. `rm -rf frontend/.e2e-home` is the fix, and it is free: the
-directory is gitignored and the backend recreates `journal.db` on start. Do that
-before trusting a timing result or diagnosing an intermittent E2E failure.
-Raising the timeout does not help, because the cost grows without bound.
+fixture problem. Raising the timeout does not help, because the cost grows without
+bound. `npm run e2e` now wipes the directory before the run, so this should not
+recur; `SYLPH_E2E_KEEP_HOME=1` opts out to inspect a journal after a failure, and
+leaving it on brings both symptoms back.
+
+**Neither Playwright hook can wipe that directory, and both fail the same way.**
+Measured on 1.60.0. A `globalSetup` runs *after* `webServer`, because `webServer` is
+a plugin and `createGlobalSetupTasks` (`playwright/lib/runner/index.js`) orders
+plugin setup first; module scope in `playwright.config.ts` runs *again in every
+worker process*. Both therefore delete `journal.db` out from under a backend that has
+already opened it, and the suite answers `unable to open database file` and 500s —
+the module-scope variant eight seconds into the run, which reads as a mid-run
+database failure rather than as a fixture wiping itself. The npm script is the only
+place with the ordering this needs: one process, once, before Playwright is asked to
+start anything. A genuinely fresh home starts clean, so a first-run database error is
+this bug and not a product one.
 
 **An E2E fixture that cannot be discovered fails the suite while looking like a
 product bug.** Discovery requires `adapter.sh`; after the v1 runner path was deleted,
