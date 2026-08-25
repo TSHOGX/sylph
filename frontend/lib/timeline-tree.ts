@@ -700,8 +700,13 @@ export function pathTo(
  * streaming (the delegation fails early, or the link dies mid-input) the placeholder
  * becomes the trajectory's durable name in `history.db`.
  *
- * `_task_label` now returns `None`, so this is the sole producer and the rename above is
- * safe. **The bound on what that fixed is worth stating exactly, because it sounds
+ * `_task_label` returns `None` as of `c8783b3`, which is what makes this the sole
+ * producer and the rename above safe. **That is a dependency of this code, not a
+ * historical note**: move the rename to a tree without that commit — a cherry-pick, an
+ * older branch — and the two-label state returns, silently, until a card renders. The
+ * commit is named here so the check is a `git log` rather than a memory.
+ *
+ * **The bound on what that fixed is worth stating exactly, because it sounds
  * better than it is: rows already journaled with the literal are permanently
  * indistinguishable from a genuine name.** There was nothing to migrate not because the
  * data is fine but because nothing can tell the two apart — the fix stops new guesses and
