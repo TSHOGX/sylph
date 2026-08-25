@@ -420,8 +420,10 @@ directory" must re-filter for exact equality after normalizing trailing slashes 
 `api::archive` and `api::workspaces` share `normalize` for exactly this.
 
 **`list` does not collapse fork lineage, but `search` does.** Delegated sessions
-are rows of their own and are 51% of a real local archive (2238 of 4416
-non-empty), so a listing that does not fold them into their parent is half noise.
+are rows of their own and are half of a real local archive (2316 of 4606
+non-empty, re-censused after the archive grew to 4922 sessions; it was 2238 of
+4416, so the ratio is stable and worth trusting over either absolute), so a
+listing that does not fold them into their parent is half noise.
 `list` carries no parent column, so lineage costs one `show` per candidate —
 `Client::session_metadata` is the cheapest shape, but see the measurement above:
 11.5 ms and ~2.5 KB, not the ~0.5 ms once recorded here.

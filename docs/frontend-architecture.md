@@ -2169,7 +2169,14 @@ verification against a 4922-session archive.
 
 ### Bundle size management
 
-**Measured: 203.9 KB gzipped first-load JS.** The project maintains a compact bundle
+**Current figure lives in `docs/roadmap.md`, and is measured by
+`scripts/measure-bundle.sh`.** Do not quote a number here as current: this section
+carried 203.9 KB as "measured" while the roadmap recorded 221.1 KB, which is the
+same staleness the roadmap warns about, in a second place. What follows is the
+attribution history — each figure is what a specific change cost when it landed, and
+is correct as a past measurement.
+
+The project maintains a compact bundle
 through deliberate architecture and dependency choices. Phase 4 measured 187.8 KB;
 Phase 6 added the shell, three overlays, the file browser, the Markdown renderer,
 the diff view, and the fuzzy ranker for **+8.4 KB**, reaching 196.2 KB. Archive

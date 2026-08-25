@@ -775,7 +775,7 @@ Three filters are applied here rather than upstream, each for a measured reason:
   `/w/app-old` and every subdirectory. Rows are re-filtered for exact equality
   after normalizing trailing slashes.
 - **Lineage rollup.** TraceDB's `list` does not collapse fork lineage, though
-  `search` does, and delegated sessions are 51% of a real archive (2238 of 4416
+  `search` does, and delegated sessions are half of a real archive (2316 of 4606
   non-empty). They fold into the session that spawned them as `subagentCount`,
   since listing them as peers buries the sessions a user actually started. See
   **Lineage** below, which is the subtlest part of this endpoint.
