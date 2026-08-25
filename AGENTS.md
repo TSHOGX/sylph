@@ -1050,6 +1050,26 @@ already correct and its doc comment stated the exact invariant `upload` violated
 hundred lines away: when one function documents an invariant about a shared idiom,
 every other user of that idiom needs checking against it.
 
+**Killing a subshell does not kill what it exec'd, and the survivor answers on the
+port.** `scripts/measure-bundle.sh` served a route to measure it, backgrounded
+`npx next start` in a subshell, and killed the subshell — leaving `next`'s exec'd
+child holding port 3199. The *next* run then measured that server, which serves its
+own older build, so the served HTML named chunk hashes the current build never
+produced.
+
+It surfaced as `referenced chunk is missing from the build`, which points at the
+build. Three theories died before the right one: a stale `.next`, a rebuild
+mid-serve, and a `next/dynamic` boundary. The chunk existed nowhere in `.next`
+because it belonged to a build that no longer existed. `lsof -ti tcp:PORT` is the
+one-command answer, and worth reaching for early whenever output describes a tree
+that does not match what is on disk — it is the network-facing sibling of the
+mid-write phantom-error pitfall below.
+
+Three things together fix it, and any one alone still fails silently: run the job in
+its own process group (`set -m`) and kill the group; refuse a busy port instead of
+measuring whatever is on it; and make a missing artifact explain the likely cause
+rather than only naming the file.
+
 **A default that is one machine's absolute path is wrong everywhere else.**
 `TRACEDB_BIN` defaulted to `$HOME/Workspace/trace-db/target/release/trace-db` — a
 sibling checkout that exists on exactly one machine, so every other install got a
