@@ -1748,6 +1748,55 @@ session where a `Workflow` dispatched a backgrounded delegate and returned clean
   renders the focused row itself when it is not a `subagent`, and says why the pane
   is empty rather than leaving it blank.
 
+**A rollup cannot compare siblings.** It describes one node against itself, so it
+answers "should I open this branch" and not "which of these twenty was slow" — and a
+user with a wide fan-out had to open every branch to find the expensive one, which is
+the work collapsing was supposed to save. `lib/timeline-waterfall.ts` puts every
+trajectory in view on **one shared time axis**, which is what distributed tracing
+settled on for the same problem and the same `span`. A concurrent fan-out reads as
+bars stacked in one band, a sequential chain as a staircase; the slow one is the long
+bar. `components/delegation-overview.tsx` renders it as `left`/`width` percentages —
+no chart library, no measuring pass — and it is `next/dynamic`, so a route that never
+opens it pays nothing (**+0.2 KB** first-load).
+
+It is scoped to what is on screen, so under focus the comparison is between the
+branch's own children rather than the whole turn, and it renders nothing below two
+trajectories: one delegation compares to nothing, and its card already states its
+duration. Rows are buttons whose accessible name carries what the bar shows — name,
+status, elapsed, offset into the turn, depth — because a purely visual overview
+excludes the reader who most needs a summary. Native tab order, not a roving cursor:
+these are navigation targets like the breadcrumb's, and `lib/select-list.ts` exists so
+a *choice list* does not grow a fourth cursor, not so a delegation is announced as an
+option nobody picked.
+
+**What it may not claim is the whole design.** Only `createdAtMs` exists, so three
+states are not measurable and each is rendered as itself rather than as a bar:
+
+- **Running** has no end. Deriving one from `Date.now()` would re-lay out every bar at
+  clock rate inside a live stream, so the axis comes from the data and an open bar
+  fades instead.
+- **Abandoned** ends when the turn terminated and we stopped listening — a lower bound,
+  labelled `≥`.
+- **Consolidated** has no start at all. `history::consolidate` folds a declared
+  trajectory's phases into one row keyed by its close and `block_to_event` publishes
+  only that timestamp, so an *exact* duration exists only while a turn is live — which
+  is a few seconds of the life of every turn a user scrolls back to. The interior
+  survives, each descendant being its own timestamped block, so the row is bounded from
+  below by the work it forwarded and says so. A trajectory that forwarded nothing has no
+  bound either and is drawn as a caret, because a width there would be invented. The
+  real fix is one field on the wire: `consolidate` already computes `started_at_ms` and
+  stores it on the block, and publishing it would make these exact.
+
+**"Slowest" therefore requires that every row is exact.** A rank over lower bounds is
+not a rank: a delegate that ran 9s and forwarded its one event at 8.9s bounds at 0.1s,
+so ranking it against an exact 0.5s names the wrong row — confidently, in answer to the
+only question the view exists for. When any row is a bound the figures are still shown
+with their `≥` and no row is badged. `e2e/timeline.spec.ts` asserts the live window and
+the settled degradation separately, against a `fanout` fixture sized at six delegates
+with genuinely different durations: at two the answer is visible without an overview,
+and a fixture that emits its whole tree within one millisecond gives every bar the same
+length, so neither could observe the comparison at all.
+
 ## Data Flow Patterns
 
 ### Creating a Session

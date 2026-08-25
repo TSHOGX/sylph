@@ -17,6 +17,60 @@ async function runPrompt(page: Page, prompt: string) {
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
 }
 
+/**
+ * The wide fan-out, and the wait that actually means it finished.
+ *
+ * The `fanout` scenario spends ~2.6s making one delegate measurably slower than its
+ * siblings, so the reply arrives long after the first card does. Waiting on the
+ * slowest delegation's *close* is what makes an assertion about durations meaningful:
+ * waiting on the reply alone would sometimes read the tree mid-fan-out, where the
+ * slowest row is still running and has no duration at all.
+ */
+async function sendFanout(page: Page) {
+  await createSession(page);
+  await page.getByLabel("Message").fill("fanout across agents please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByText("Fanning out to six agents.")).toBeVisible({
+    timeout: 15_000,
+  });
+}
+
+/**
+ * The fan-out, stopped inside its live window.
+ *
+ * Exact durations exist only *while a turn is live*. Once it settles the transcript is
+ * re-read from consolidated history, where a declared trajectory's phases are folded
+ * into one row keyed by its close — so the start, and with it every exact duration, is
+ * gone. Anything asserting on a real comparison therefore has to assert before that,
+ * and the fixture holds the turn open for 1.2s after its reply so the window is real
+ * rather than a microsecond race.
+ *
+ * Waiting on the reply is what pins that Survey has closed; waiting on **Stop** is what
+ * pins that the turn has not settled yet. `Send` is useless for the second: it is also
+ * disabled whenever the composer is empty, which is exactly the state a spec is in
+ * right after sending.
+ */
+async function runFanoutLive(page: Page) {
+  await sendFanout(page);
+  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(
+    page.getByRole("button", { name: "Stop", exact: true }),
+    "the fixture's post-reply hold should still be running",
+  ).toBeVisible();
+}
+
+/** The fan-out after its turn settles, which is the state a user scrolls back to. */
+async function runFanoutSettled(page: Page) {
+  await sendFanout(page);
+  // The Send/Stop swap back is the settle signal, for the reason above.
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toHaveCount(0);
+}
+
 test("tool calls render as work, with target, status, and no bubbles", async ({ page }) => {
   await runPrompt(page, "exercise tools please");
 
@@ -72,6 +126,212 @@ test("assistant prose renders Markdown without chat bubbles", async ({ page }) =
   // `**real**` in the runner's reply must render as emphasis, not literal
   // asterisks — the Markdown path is what makes agent prose readable.
   await expect(page.locator("strong", { hasText: "real" })).toBeVisible();
+});
+
+/**
+ * Sibling comparison across a fan-out.
+ *
+ * The rollup on a card answers "should I open this branch" and cannot answer "which of
+ * these six was slow", because it never compares a node to the node beside it. These
+ * specs are written against the *wide* fixture for that reason: at two delegates the
+ * answer is visible without an overview, so a two-delegate scenario cannot observe
+ * whether the comparison works.
+ */
+/** Open the strip and hand back its region. */
+async function openOverview(page: Page) {
+  const overview = page.getByRole("region", { name: "Delegation overview" });
+  await expect(overview).toBeVisible();
+  // Closed by default, and the toggle states the count so opening it is informed
+  // rather than a surprise.
+  const toggle = overview.getByRole("button", { name: /Compare \d+ delegations/ });
+  await expect(toggle).toBeVisible();
+  await toggle.click();
+  return overview;
+}
+
+test("a fan-out reports which delegation was the slow one", async ({ page }) => {
+  test.slow(); // The fixture spends ~2.9s making one delegate genuinely slower.
+  await runFanoutLive(page);
+
+  const overview = await openOverview(page);
+
+  // The answer, on the row it belongs to. `Survey` is the outlier the fixture builds;
+  // asserting the label rather than a bar width is what keeps this about the claim
+  // rather than about pixels.
+  const slowest = overview.getByRole("button", { name: /^Survey,/ });
+  await expect(slowest).toContainText("slowest");
+  // And exactly one row claims it: two rows both marked slowest is a tie reported as
+  // a winner. `exact` matters here — Playwright's text matching is a substring match,
+  // so a bare "slowest" also matches the "slowest first" ordering control beside it,
+  // which made this count one whether any row was badged or not.
+  await expect(overview.getByText("slowest", { exact: true })).toHaveCount(1);
+
+  // Failure and slowness are different facts, and the fixture puts them on different
+  // rows on purpose — a view that conflated them would look correct whenever they
+  // coincide.
+  const failed = overview.getByRole("button", { name: /^Typecheck, failed/ });
+  await expect(failed).toBeVisible();
+  await expect(failed).not.toContainText("slowest");
+});
+
+/**
+ * What the same fan-out says once its turn settles.
+ *
+ * This is the state a user scrolls back to, and it is *not* the live one: consolidation
+ * folds a declared trajectory's phases into one row keyed by its close, so every exact
+ * duration is gone. The view must then degrade to lower bounds and say so — and must
+ * not name a slowest row, because a rank over lower bounds is not a rank. A delegate
+ * that ran 9s and forwarded one event at 8.9s bounds at 0.1s, so ranking bounds would
+ * answer this view's one question confidently and wrongly.
+ */
+test("a settled fan-out degrades to bounds instead of claiming a winner", async ({
+  page,
+}) => {
+  test.slow();
+  await runFanoutSettled(page);
+
+  const overview = await openOverview(page);
+
+  // The caveat is on screen, not in a tooltip: a reader who cannot see which bars are
+  // faded has no way to ask for it.
+  await expect(overview).toContainText(/lower bound/);
+  // No row claims the top, because none can be shown to hold it. `exact`, or the
+  // "slowest first" control beside it matches and this can never observe anything.
+  await expect(overview.getByText("slowest", { exact: true })).toHaveCount(0);
+  // The figures are still there, carrying the sign that says what they are.
+  await expect(overview.getByRole("button", { name: /^Survey,/ })).toContainText("≥");
+  await expect(
+    overview.getByRole("button", { name: /^Survey, .*measured from the work it forwarded/ }),
+  ).toBeVisible();
+});
+
+test("the overview is legible without seeing the bars", async ({ page }) => {
+  test.slow();
+  await runFanoutLive(page);
+
+  const overview = await openOverview(page);
+
+  // Each row's accessible name carries what its bar shows. A purely visual overview
+  // excludes the reader who most needs a summary, so the durations, the ordering
+  // evidence, and the caveats all have to survive with the bars removed.
+  const slowest = overview.getByRole("button", { name: /^Survey,/ });
+  await expect(slowest).toHaveAttribute("aria-label", /finished/);
+  await expect(slowest).toHaveAttribute("aria-label", /took \d/);
+  await expect(slowest).toHaveAttribute("aria-label", /the longest here/);
+
+  // A delegate that forwarded nothing says so, and is not a control: focusing it would
+  // re-root onto an empty pane.
+  await expect(overview.getByText(/^Audit, .*forwarded none of its own events/)).toBeVisible();
+  await expect(overview.getByRole("button", { name: /^Audit,/ })).toHaveCount(0);
+
+  // Nesting is reported, so a deep row is not read as a sibling of the turn.
+  await expect(
+    overview.getByText(/^Deep probe, .*nested 1 deep/),
+  ).toBeVisible();
+});
+
+test("a delegation can be reached from the overview by keyboard", async ({ page }) => {
+  test.slow();
+  await runFanoutLive(page);
+
+  const overview = await openOverview(page);
+
+  // Ordering is a control, not a static label: which order is in effect changes what
+  // the list means, so it is announced rather than shown by colour alone.
+  const slowestFirst = overview.getByRole("button", { name: "slowest first" });
+  await expect(slowestFirst).toHaveAttribute("aria-pressed", "false");
+  await slowestFirst.press("Enter");
+  await expect(slowestFirst).toHaveAttribute("aria-pressed", "true");
+
+  // Longest first, so the slow one is the first row in the list rather than something
+  // to be found among twenty overlapping bars.
+  const rows = overview.getByRole("listitem");
+  await expect(rows.first()).toContainText("Survey");
+
+  // And the row re-roots the timeline, which is the whole point of finding it.
+  await overview.getByRole("button", { name: /^Survey,/ }).press("Enter");
+  await expect(page.getByRole("navigation", { name: "Delegation path" })).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Delegation path" }),
+  ).toContainText("Survey");
+});
+
+/**
+ * The overview, audited by axe.
+ *
+ * Written here rather than in `accessibility.spec.ts` because the surface needs the
+ * `fanout` fixture and its live window, which that file's delegation audit does not
+ * set up. Two states are audited because they are different trees: a `region` with an
+ * `aria-pressed` group and an `ol` of controls, and the same list with a
+ * non-navigable row that carries its name as text instead of as a label — naming is
+ * prohibited on a paragraph, so `aria-label` there is a violation axe reports and a
+ * screen reader may ignore.
+ */
+test("the overview has no automated accessibility violations", async ({ page }) => {
+  test.slow();
+  await runFanoutLive(page);
+  const overview = await openOverview(page);
+  await expect(overview.getByRole("button", { name: /^Survey,/ })).toBeVisible();
+
+  const { default: AxeBuilder } = await import("@axe-core/playwright");
+  const results = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+
+  const violations = results.violations.map((violation) => ({
+    id: violation.id,
+    impact: violation.impact,
+    nodes: violation.nodes.slice(0, 3).map((node) => ({
+      target: node.target.join(" "),
+      summary: node.failureSummary?.replace(/\s+/g, " ").slice(0, 240),
+    })),
+  }));
+
+  expect(
+    violations,
+    `axe violations on the delegation overview: ${JSON.stringify(violations, null, 2)}`,
+  ).toEqual([]);
+});
+
+/**
+ * The same overview at 412px.
+ *
+ * This project runs at 1280px, where a bar chart is merely roomy. The failure this
+ * guards is the one a desktop viewport cannot see: a row whose label, badges, and
+ * duration overflow the viewport, which is how a `<select>` and an un-truncated name
+ * broke the composer on a phone. The viewport is set here rather than in
+ * `mobile.spec.ts` because that file is the mobile *project*, and these assertions
+ * belong beside the rest of the overview's.
+ */
+test("the overview fits a phone without overflowing it", async ({ page }) => {
+  test.slow();
+  await page.setViewportSize({ width: 412, height: 915 });
+  // Settled rather than live: geometry is what this asserts, and a row that is still
+  // streaming can change width between the measurement and the comparison.
+  await runFanoutSettled(page);
+
+  const overview = await openOverview(page);
+  await expect(overview.getByRole("button", { name: /^Survey,/ })).toBeVisible();
+
+  // Nothing extends past the right edge. Asserted as an invariant rather than as a
+  // pixel width, so it keeps holding as the design moves.
+  const overflow = await overview.evaluate((node: HTMLElement) => {
+    const limit = document.documentElement.clientWidth;
+    return Array.from(node.querySelectorAll("*"))
+      .filter((child) => child.getBoundingClientRect().right > limit + 1)
+      .map((child) => child.className)
+      .slice(0, 3);
+  });
+  expect(overflow, "overview children wider than the viewport").toEqual([]);
+
+  // The bars still share one origin at this width: an indented track would offset a
+  // nested bar by its depth and destroy the only comparison the view makes.
+  const origins = await overview.evaluate((node: HTMLElement) =>
+    Array.from(node.querySelectorAll("li > span[aria-hidden]")).map((track) =>
+      Math.round(track.getBoundingClientRect().left),
+    ),
+  );
+  expect(new Set(origins).size, `track origins: ${origins.join(",")}`).toBe(1);
 });
 
 /**

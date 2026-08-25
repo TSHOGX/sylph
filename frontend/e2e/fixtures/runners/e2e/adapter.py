@@ -448,6 +448,121 @@ class Fixture:
             time.sleep(1)
             self._reply(stream=True)
 
+        elif "fanout" in text:
+            # A *wide* delegation with genuinely different durations, which is the one
+            # shape none of the scenarios above can produce.
+            #
+            # Two things make it its own scenario rather than an edit to `delegate`.
+            #
+            # Width: the question the overview answers is "which of these twenty was
+            # slow", and with two delegates the answer is visible without any overview
+            # at all — the same reason `promote` runs two delegates per host instead of
+            # one. Six is the smallest number where scanning is real work and where a
+            # concurrent band is distinguishable from a staircase.
+            #
+            # Duration: every other scenario emits its whole tree inside one
+            # millisecond, so every bar has the same length and the slowest is
+            # undefined. A client that computed durations from the wrong field, or laid
+            # every bar out from the axis origin, passed the entire suite. The server
+            # stamps `createdAtMs` on arrival, so the *only* way to make one delegate
+            # measurably slower than another is to actually take longer.
+            #
+            # Budget: ~2.6s of sleep, comparable to `paced`. Deliberately spent on one
+            # clear outlier and a short tail rather than spread evenly, because "one of
+            # these is much worse than the rest" is the real shape of a slow fan-out.
+            event("assistant", "completed", streamId="fo-intro",
+                  text="Fanning out to six agents.")
+
+            # All six open before any closes: their bars must then overlap in one band.
+            # Laid out sequentially — each starting where the last ended — this reads as
+            # a chain, which is a different run and the mistake a single-column
+            # rendering cannot show.
+            for name in ("Survey", "Compile", "Lint", "Typecheck", "Format", "Audit"):
+                sid = "fo-{}".format(name.lower())
+                event("subagent", "started", streamId=sid, name=name)
+                # Each delegate says something early, and that is not decoration.
+                #
+                # A settled turn's transcript comes from consolidated history, where a
+                # trajectory's `started` phase is folded away — so its own start is gone
+                # and the only remaining lower bound on when it ran is the first event
+                # it *forwarded*. A delegate that forwards nothing therefore cannot be
+                # timed at all once the turn settles. Five of six forwarding nothing made
+                # the settled comparison almost entirely untimed, which is not what a
+                # real fan-out looks like: a delegate that ran did work, and work is
+                # events. `Audit` below is the deliberate exception.
+                if name != "Audit":
+                    event("thinking", "completed", streamId="fo-{}-think".format(name.lower()),
+                          span=sid, text="{} is starting.".format(name))
+
+            # A nested delegate inside the slowest one, so the overview has to carry
+            # depth as well as duration — and so a deep row's bar stays on the shared
+            # axis instead of being indented off it.
+            event("subagent", "started", streamId="fo-probe", span="fo-survey",
+                  name="Deep probe")
+
+            time.sleep(0.1)
+            event("subagent", "completed", streamId="fo-format", text="formatted")
+            time.sleep(0.15)
+            event("subagent", "completed", streamId="fo-lint", text="clean")
+            time.sleep(0.15)
+            # A failure in a fast delegate, so "slowest" and "failed" are on different
+            # rows: a view that conflated them would look right whenever they coincide.
+            self._tool("fo-tc-bash", "Bash", {"command": "tsc --noEmit"},
+                       "error TS2345: argument of the wrong type", is_error=True,
+                       data={"exitCode": 2}, span="fo-typecheck")
+            event("subagent", "completed", streamId="fo-typecheck",
+                  text="type errors", isError=True)
+            # Closed having forwarded nothing: the overview must say so rather than
+            # drawing an empty bar, which is the same lie as offering an empty card.
+            # Closed *before* the outlier below on purpose — closing it last made its
+            # duration tie with the outlier's, and a tie has no unique slowest row, so
+            # any spec asserting one would be asserting a coin flip.
+            time.sleep(0.15)
+            event("subagent", "completed", streamId="fo-audit", text="reported nothing")
+            time.sleep(0.2)
+            event("subagent", "completed", streamId="fo-compile", text="built")
+
+            # The outlier, and the row every assertion about "slowest" is about. Closed
+            # well after every sibling, with its nested delegate closing just before it.
+            time.sleep(1.4)
+            # `span` on the *close* as well, and it is load-bearing rather than tidy:
+            # `history::consolidate` folds a block's phases into one row keyed by the
+            # closing event, and it carries `name` forward from an earlier phase but not
+            # `span`. So a nested delegate that declares its parent only on `started` is
+            # correctly nested while the turn is live and re-roots itself beside its
+            # parent the moment the turn settles. Every other scenario here happens to
+            # set it on both phases, which is why nothing caught it.
+            event("subagent", "completed", streamId="fo-probe", span="fo-survey",
+                  text="probed")
+            event("subagent", "completed", streamId="fo-survey",
+                  text="surveyed 412 files")
+
+            # Left open, so the turn-settle sweep closes it. Its end is when we stopped
+            # listening, not when the work stopped, and the row has to say so.
+            event("subagent", "started", streamId="fo-cutoff", name="Cutoff")
+            self._reply()
+
+            # Held open after the reply, which is not padding.
+            #
+            # A settled turn's transcript comes from *consolidated* history, and
+            # consolidation folds a declared trajectory's phases into one row keyed by
+            # its close — so its `started` phase, and with it every exact duration, is
+            # gone by the time the turn stops being live. Any assertion about comparing
+            # real durations therefore has a window, and without a hold that window is
+            # the microseconds between this reply and `settle()` below. A spec racing
+            # that is a spec that fails on a slow machine and reads as flakiness.
+            #
+            # The composer swaps Send for Stop while a turn is live, so this hold is
+            # observable rather than guessed at.
+            #
+            # Three seconds and not one, because the window is consumed from both ends:
+            # it starts when this sleep begins, and a spec cannot assert until the
+            # browser has painted the reply. Page loads in this suite get slower as
+            # `.e2e-home` accumulates sessions, so a window sized to a fast run is a
+            # window that closes before the assertion on a loaded one — and the failure
+            # would read as a broken overview rather than as a missed window.
+            time.sleep(3)
+
         else:
             self._reply(stream=True)
 
