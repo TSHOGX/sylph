@@ -7,7 +7,7 @@ use crate::models::{Event, Incarnation, PendingRequest, Session, Turn};
 use crate::tracedb::summarize_line;
 
 #[derive(Clone)]
-pub struct LiveStore {
+pub struct JournalStore {
     pool: SqlitePool,
 }
 
@@ -38,7 +38,7 @@ impl Default for SessionFilter {
     }
 }
 
-impl LiveStore {
+impl JournalStore {
     pub async fn new(path: &str) -> Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = Path::new(path).parent() {
@@ -695,10 +695,17 @@ impl LiveStore {
         Ok(seq.unwrap_or(-1))
     }
 
-    /// Append a stable event to the journal.
+    /// Append one event to the journal, in its own transaction.
     ///
-    /// Ephemeral events are deliberately not written here — they live only in
-    /// the hub's bounded projection.
+    /// Both stable and ephemeral events belong here. Ephemeral ones are what
+    /// consolidation folds into a block's offset and timing arrays, so dropping
+    /// them would leave the fold nothing to fold and make `docs/storage.md`'s
+    /// lossless-replay guarantee unreachable. They are short-lived: consolidation
+    /// replaces them with the folded form and deletes the rows.
+    ///
+    /// Prefer [`Self::append_events`] for a run of ephemeral events. One
+    /// transaction per delta is thousands of fsyncs per turn, and fsync count is
+    /// what actually costs on the hot path.
     pub async fn append_event(&self, event: &Event) -> Result<()> {
         sqlx::query(
             r#"
@@ -725,6 +732,54 @@ impl LiveStore {
         .bind(event.created_at_ms)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Append many events in one transaction.
+    ///
+    /// This is the single largest lever on the hot path (`docs/storage.md`): a 2 KB
+    /// assistant message arrives as ~400 deltas, and committing each one separately
+    /// makes ~400 fsyncs out of what can be one. Batching converts thousands of tiny
+    /// transactions per turn into tens.
+    ///
+    /// All-or-nothing per batch, which is the honest granularity: a partially
+    /// applied window would leave gaps in the middle of a block's delta run, and a
+    /// fold over those would reconstruct a stream that never happened. Losing a
+    /// whole trailing window instead reconstructs a turn that was visibly cut off,
+    /// which is a state the replayer already handles.
+    pub async fn append_events(&self, events: &[Event]) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await?;
+        for event in events {
+            sqlx::query(
+                r#"
+                INSERT INTO events (
+                    session_id, turn_id, seq, kind, phase, stream_id, name,
+                    text, data_json, is_error, stability, source, created_at_ms
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&event.session_id)
+            .bind(&event.turn_id)
+            .bind(event.seq)
+            .bind(&event.kind)
+            .bind(&event.phase)
+            .bind(&event.stream_id)
+            .bind(&event.name)
+            .bind(&event.text)
+            .bind(&event.data_json)
+            .bind(event.is_error)
+            .bind(&event.stability)
+            .bind(&event.source)
+            .bind(event.created_at_ms)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1177,7 +1232,7 @@ mod tests {
     #[tokio::test]
     async fn archive_identity_matches_native_root_but_not_subagent_prefix() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = LiveStore::new(dir.path().join("live.db").to_str().unwrap())
+        let store = JournalStore::new(dir.path().join("live.db").to_str().unwrap())
             .await
             .expect("store");
         store

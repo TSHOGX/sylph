@@ -95,6 +95,27 @@ thousands of tiny transactions into tens, and fsync count is what actually costs
 The window is a latency/loss tradeoff, not a throughput knob — 50 ms is below
 human perception for stream smoothness and bounds loss to one window.
 
+**Only ephemeral events are batched, and that is forced rather than cautious.** The
+two kinds of event already have different replay paths: a stable event is journaled
+*before* it is published, so that a client reconnecting immediately after seeing it
+always finds it in replay, while `EventHub` keeps a bounded in-memory ring of only
+ephemeral events, which is what a mid-stream reconnect replays from.
+
+| | Replayed from | Batching it would |
+| --- | --- | --- |
+| stable | the journal | open a window where a reconnect sees a hole |
+| ephemeral | the hub's ring | cost nothing observable |
+
+Batching only ephemeral events captures nearly all the win — deltas are thousands
+per turn against tens of stable events — while leaving the reconnect invariant
+untouched and needing no flush-on-read machinery to preserve it.
+
+The window also has one ordering rule, and it is load-bearing: **a turn's buffer
+must be flushed before consolidation folds it.** The fold reads journal rows and
+then deletes them, so a window still in memory would be silently omitted from the
+block and the rows that would have fixed it destroyed. The flush is awaited on the
+settle path for exactly this reason.
+
 ## Consolidation
 
 When a turn reaches a terminal state, its rows move from `journal.db` to
@@ -334,8 +355,95 @@ Two safeguards remain, because a derived watermark should be conservative:
 * A session TraceDB has never seen has no row, which yields no watermark and
   therefore no pruning. The absent case is safe by construction.
 
-An explicit ingestion ack would still be better than a derivation, and it stays
-worth doing: it would remove the `endedAtMs` reasoning entirely and let Sylph
-prune on confirmation rather than inference. That is a TraceDB change, so it is a
-separate decision — but the derivation above is sound enough to run on, which it
-was not obvious it would be.
+### What the explicit ack turned out to be
+
+TraceDB now emits one, and it is not the thing this section hoped for. The
+expectation was that an ack would "remove the `endedAtMs` reasoning entirely". It
+does not, and the reason is worth recording because the mistake is easy to repeat:
+
+**The ack is archive-global, not per-session.** `store::record_ingest_status` bumps
+a single monotonic `ingest.next_ack_sequence` once per *ingest run*, and returns it
+with `committedAtMs`. It is committed *after* the data transaction, so it can never
+be a false positive — but it describes a run, not a session, and carries no
+statement about which events of which session are covered.
+
+So coverage and commitment are two facts with two sources, and neither substitutes
+for the other:
+
+| Question | Source |
+| --- | --- |
+| How far does the copy of *this session* extend? | `endedAtMs` — a statement about data |
+| Did the archive durably commit, and is ingestion healthy? | the ack — a statement about a run |
+
+The derivation above therefore stands unchanged. What the ack adds is that the
+second row stops being an assumption.
+
+**The per-session equivalent is `ingestedAtMs`, and it is better here.**
+`store::upsert_many` writes a session's row *and* its events in one transaction, so
+the `ingestedAtMs` on a `list` row is a durable per-session commit marker — exactly
+the confirmation retention wants, at session granularity the global ack cannot
+offer.
+
+**What Sylph actually reads is the fingerprint.** `show` carries
+`file-v2:<sha256>:<bytes>:<mtime_ns>` over the agent-native source, which is the
+value TraceDB itself compares to decide whether to re-ingest. Recorded beside each
+watermark, it says *which version* of the source a confirmation was derived from,
+and makes re-ingestion observable — a pass where every fingerprint is unchanged
+means the archive is not advancing, which is what a stopped ingestion daemon looks
+like and is otherwise indistinguishable from a healthy steady state. It is chosen
+over `ingestedAtMs` because it is content-addressed rather than a clock reading, and
+because it arrives on the `show` call retention already makes; `ingestedAtMs`
+appears only on `list`, which cannot filter by id.
+
+It is deliberately *not* an optimization, and should not be described as one: the
+current fingerprint arrives in the same response that carries the coverage bound,
+so it cannot gate the call that fetches it.
+
+**The ack is not cheaply readable, which is why nothing here depends on it.** Its
+only surfaces are a gRPC ingest response and `trace-db doctor --json` — measured at
+**2m34s**, because doctor walks every agent's native store and verifies the archive.
+`trace-db api` exposes `stats`, `search`, `list`, `show`, `reconstruct`, and none of
+them carry it. A retention pass polling a global epoch would therefore cost far more
+than the per-session reads it was meant to gate. An `ingest_status` op on
+`trace-db api` would fix that — it is a single `schema_meta` read that
+`store::ingest_status` already implements — and is worth asking upstream for.
+
+### Retention runs on a schedule, and reports what it did
+
+A pass runs at startup and every five minutes over a bounded batch of sessions that
+hold blocks, ordered least-recently-checked first so successive passes rotate
+through all of them rather than re-examining one prefix.
+
+Three things make it safe to run often and safe to run at all:
+
+* **A watermark row is written even when nothing is confirmed.** Otherwise "checked,
+  and nothing is safe yet" is indistinguishable from "never checked", and those call
+  for opposite responses. An empty `watermarks` table looks exactly like a correctly
+  conservative one — which is how a retention path that confirmed nothing stayed
+  invisible.
+* **An unreachable archive is one fact about the pass, not N session failures.** The
+  archive is probed once per pass. Without it, delegated sessions are left entirely
+  alone: not pruned, and *not* recorded as checked, because "cannot ask" must not be
+  stored as "asked, and nothing is safe". An install without TraceDB is a supported
+  degraded state, and reporting it per session per pass forever would bury it.
+* **Blob sweeping is per pass, not per session.** Reachability spans sessions — the
+  same file read in two sessions is one blob — so the sweep is a global scan over
+  `cas_refs`. Calling it per session would run that scan once per session for one
+  pass's worth of work.
+
+`/api/v1/diagnostics` reports the last pass: examined, confirmed, withheld,
+terminal, unchanged, blocks pruned, blobs swept, and whether the archive was
+reachable. A subsystem whose correct behaviour is usually "nothing happened" is
+otherwise indistinguishable from one that is broken.
+
+### The two id spaces
+
+Sylph keys a session by UUID; the archive keys one as `<agent>:<native-id>`. The two
+are disjoint, and comparing them directly is **silently always false** — the archive
+answers "no such session", retention correctly keeps everything, and every layer
+behaves impeccably while the subsystem does nothing. That is not a hypothetical: it
+is how the first TraceDB authority shipped, written and tested, confirming nothing.
+
+The authority therefore cannot be constructed without an archive id, so the
+unanswerable question cannot be asked. A session with no native id has no archive
+identity at all, which makes it terminal rather than merely unconfirmed.

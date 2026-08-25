@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub host: String,
     pub port: u16,
-    pub database_path: String,
+    /// The hot tier: unconsolidated turns. Named for what it holds rather than
+    /// when it is read — see [`crate::db`].
+    pub journal_path: String,
     pub data_dir: PathBuf,
     pub runners_dir: PathBuf,
     /// Where `<agent>/adapter.sh` lives.
@@ -174,10 +176,8 @@ impl Config {
             .unwrap_or_else(|_| format!("{}/Workspace/trace-db/target/release/trace-db", home))
             .into();
 
-        let database_path = format!("{}/live.db",
-            PathBuf::from(&data_dir).display());
-        let history_path = format!("{}/history.db",
-            PathBuf::from(&data_dir).display());
+        let journal_path = format!("{}/journal.db", PathBuf::from(&data_dir).display());
+        let history_path = format!("{}/history.db", PathBuf::from(&data_dir).display());
         let blobs_dir = PathBuf::from(&data_dir).join("cas");
 
         // `$HOME` first so it is the default landing root in the picker, then any
@@ -203,7 +203,7 @@ impl Config {
         Ok(Self {
             host,
             port,
-            database_path,
+            journal_path,
             data_dir,
             runners_dir,
             agents_dir,

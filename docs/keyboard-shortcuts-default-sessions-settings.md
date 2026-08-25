@@ -424,7 +424,7 @@ Permanently removes all sessions in ~/.agents
 Restores all settings to defaults
 
 [Clear All Data]
-Deletes live.db, all sessions, all attachments
+Deletes journal.db, all sessions, all attachments
 (TraceDB archive is unaffected)
 ```
 

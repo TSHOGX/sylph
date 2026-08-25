@@ -370,28 +370,60 @@ impl HistoryStore {
         Ok(removed)
     }
 
-    /// Record how far an authority has confirmed a session.
+    /// Record how far an authority has confirmed a session, and against what.
+    ///
+    /// Written on every pass, including one that confirmed nothing: the row is what
+    /// distinguishes "checked, and nothing is safe to drop yet" from "never
+    /// checked", and those need opposite responses. An empty `watermarks` table
+    /// looks exactly like a correctly conservative one, which is how a retention
+    /// path that confirmed nothing stayed invisible.
     pub async fn set_watermark(
         &self,
         session_id: &str,
         authority: &str,
-        confirmed_seq: Option<i32>,
+        confirmation: &crate::storage::retention::Confirmation,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO watermarks (session_id, authority, confirmed_seq, checked_at_ms)
-             VALUES (?, ?, ?, ?)
+            "INSERT INTO watermarks (
+               session_id, authority, confirmed_seq, checked_at_ms,
+               archive_id, source_fingerprint
+             )
+             VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(session_id) DO UPDATE SET
                authority = excluded.authority,
                confirmed_seq = excluded.confirmed_seq,
-               checked_at_ms = excluded.checked_at_ms",
+               checked_at_ms = excluded.checked_at_ms,
+               archive_id = excluded.archive_id,
+               source_fingerprint = excluded.source_fingerprint",
         )
         .bind(session_id)
         .bind(authority)
-        .bind(confirmed_seq)
+        .bind(confirmation.safe_to_drop)
         .bind(chrono::Utc::now().timestamp_millis())
+        .bind(confirmation.archive_id.as_deref())
+        .bind(confirmation.source_fingerprint.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// The fingerprint recorded for a session at its last pass, if any.
+    ///
+    /// A pass compares this against what the archive reports now. It cannot gate
+    /// the `show` call — the current fingerprint arrives in that same response —
+    /// so this is not an optimization: it is how "the archive re-ingested this
+    /// session" becomes observable. A pass where every session is unchanged means
+    /// the copy is not advancing, which is what a stopped ingestion daemon looks
+    /// like, and which is otherwise indistinguishable from a healthy steady state.
+    pub async fn watermark_fingerprint(&self, session_id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT source_fingerprint FROM watermarks WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map(Option::flatten)
+        .map_err(Into::into)
     }
 
     pub async fn watermark(&self, session_id: &str) -> Result<Option<(String, Option<i32>)>> {
@@ -433,6 +465,34 @@ impl HistoryStore {
             .fetch_one(&self.pool)
             .await
             .context("Could not count blocks")
+    }
+
+    /// Sessions holding blocks, least-recently-checked first.
+    ///
+    /// Ordered by the last pass rather than by id, so a bounded batch rotates
+    /// through every session instead of re-examining the same alphabetical prefix
+    /// forever. A session never checked has no watermark row and sorts first, which
+    /// is what makes a fresh install converge on the whole set rather than starving
+    /// whatever happens to sort late.
+    ///
+    /// Only sessions with blocks appear: a session whose history is already empty
+    /// has nothing to prune, so spending a `show` round trip on it would be pure
+    /// cost. This is also why the batch is drawn from `blocks` rather than from the
+    /// journal's session list — the work is proportional to what history holds, not
+    /// to how many sessions exist.
+    pub async fn sessions_awaiting_retention(&self, limit: i64) -> Result<Vec<String>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT b.session_id FROM (
+               SELECT DISTINCT session_id FROM blocks
+             ) b
+             LEFT JOIN watermarks w ON w.session_id = b.session_id
+             ORDER BY w.checked_at_ms IS NOT NULL, w.checked_at_ms, b.session_id
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("Could not list sessions awaiting retention")
     }
 }
 
@@ -602,7 +662,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
 ///
 /// The ordering rule this module exists to enforce: insert, commit, *then* delete.
 pub async fn consolidate_turn(
-    journal: &crate::db::LiveStore,
+    journal: &crate::db::JournalStore,
     history: &HistoryStore,
     turn_id: &str,
 ) -> Result<usize> {

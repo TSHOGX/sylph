@@ -138,6 +138,23 @@ pub struct TraceSession {
     pub started_at_ms: Option<i64>,
 }
 
+/// How far the archive's copy of one session extends, and under what mode.
+///
+/// The pair is what retention needs and neither half suffices: `mode` says whether
+/// the copy claims to be lossless, `ended_at_ms` says how much of the timeline it
+/// covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestState {
+    pub ended_at_ms: Option<i64>,
+    pub mode: Option<String>,
+    /// TraceDB's `file-v2:<sha256>:<bytes>:<mtime_ns>` over the agent-native file.
+    ///
+    /// The value TraceDB compares to decide whether a session needs re-ingesting,
+    /// so it identifies *which version* of the source the archive holds. An
+    /// unchanged fingerprint is proof the copy has not advanced.
+    pub source_fingerprint: Option<String>,
+}
+
 /// One normalized event from an archived session.
 ///
 /// snake_case, because this comes from `show`. The fields beyond `kind`/`text`
@@ -405,6 +422,47 @@ fn envelope_summary(text: &str) -> Option<String> {
 /// form every other operation takes as an `id`. Returns `None` for a bare id.
 pub fn split_lineage(id: &str) -> Option<(&str, &str)> {
     id.split_once('/')
+}
+
+/// The id this session would be archived under, if it is archived at all.
+///
+/// The two id spaces are disjoint and it is not obvious from either side: a Sylph
+/// session is a bare UUID, while the archive keys everything as
+/// `<agent>:<native-id>`. Comparing the two directly is silently always-false,
+/// which is precisely how retention's TraceDB authority came to confirm nothing
+/// while looking correct — it asked the archive about a UUID no archive row can
+/// carry.
+///
+/// [`crate::db::JournalStore::find_session_by_archive_id`] is the inverse and pins
+/// the same convention; this is the forward direction it had no counterpart for.
+///
+/// `None` is meaningful rather than an error: a session that has never linked to
+/// an agent has no native id, so nothing downstream holds a copy of it. Retention
+/// reads that as *terminal* and keeps every block.
+pub fn archive_id(
+    agent: &str,
+    backend_session_id: Option<&str>,
+    trace_session_id: Option<&str>,
+) -> Option<String> {
+    // An imported session already carries the archive's own id, which is
+    // authoritative: it may name a subagent, and it survives the native id being
+    // reassigned by a later incarnation.
+    if let Some(imported) = trace_session_id.filter(|id| !id.trim().is_empty()) {
+        return Some(imported.to_string());
+    }
+
+    let native = backend_session_id?.trim();
+    if native.is_empty() {
+        return None;
+    }
+    // A slash makes the composite a *subagent* identity (`claude:uuid/agent-x`)
+    // rather than this session's own record. A native id should never contain one,
+    // and if one ever does, claiming a delegated row as ours would let retention
+    // prune against a confirmation about different work.
+    if native.contains('/') || native.contains(':') {
+        return None;
+    }
+    Some(format!("{agent}:{native}"))
 }
 
 /// The snippet TraceDB judged most relevant within a session.
@@ -704,6 +762,52 @@ impl Client {
         let header: Option<Header> = serde_json::from_value(raw)
             .map_err(|e| format!("Unexpected show payload: {}", e))?;
         Ok(header.map(|header| header.session))
+    }
+
+    /// What the archive holds for one session, as retention needs to see it.
+    ///
+    /// Asked by id through `show` with a one-event slice, which is the targeted
+    /// O(1) lookup — `list` cannot filter by id, so answering this from `list`
+    /// means paging the whole archive and giving up early. That is what the
+    /// previous implementation did, with a 200-row bound against 4400+ rows.
+    ///
+    /// `mode` sits at the payload's top level rather than inside `session`, beside
+    /// the event slice, which is why this cannot reuse [`Self::session_metadata`].
+    pub async fn ingest_state(&self, id: &str) -> Result<Option<IngestState>, String> {
+        let raw = self
+            .call(Request {
+                op: "show",
+                id: Some(id),
+                from: Some(0),
+                to: Some(0),
+                ..Default::default()
+            })
+            .await?;
+
+        #[derive(Deserialize)]
+        struct Payload {
+            session: PayloadSession,
+            #[serde(default)]
+            mode: Option<String>,
+        }
+
+        // `fingerprint` is not on `TraceSession`, which is the shape the archive
+        // browser renders; it is provenance rather than something a reader shows.
+        #[derive(Deserialize)]
+        struct PayloadSession {
+            #[serde(default)]
+            ended_at_ms: Option<i64>,
+            #[serde(default)]
+            fingerprint: Option<String>,
+        }
+
+        let payload: Option<Payload> = serde_json::from_value(raw)
+            .map_err(|e| format!("Unexpected show payload: {}", e))?;
+        Ok(payload.map(|payload| IngestState {
+            ended_at_ms: payload.session.ended_at_ms,
+            mode: payload.mode,
+            source_fingerprint: payload.session.fingerprint,
+        }))
     }
 
 

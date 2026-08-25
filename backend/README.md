@@ -7,7 +7,7 @@ Rust backend for Sylph Web, providing REST API and SSE streaming for coding agen
 - **Framework**: Axum 0.8 + Tokio 1.44
 - **Database**: SQLite with SQLx (compile-time query checking)
 - **Port**: 4317 (127.0.0.1 only)
-- **Data**: `~/.agents/data/sylph/web/live.db`
+- **Data**: `~/.agents/data/sylph/web/journal.db`
 
 ## Build
 

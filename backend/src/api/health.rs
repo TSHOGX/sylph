@@ -94,6 +94,15 @@ pub struct DiagnosticsResponse {
     /// Turns with a live child process right now. May be lower than the journal's
     /// running count if a process died without the reaper having recorded it yet.
     active_processes: usize,
+    /// The last retention pass, or `null` before the first one completes.
+    ///
+    /// Reported because retention's correct behaviour is usually "nothing was
+    /// dropped", which is indistinguishable from a broken pass without the counts.
+    /// `withheld` beside `terminal` is what separates the two: a terminal session
+    /// is *supposed* to keep everything forever, while a delegated session that
+    /// keeps withholding means the archive is not confirming it — and an
+    /// all-`unchanged` pass means the ingestion daemon has stopped advancing.
+    retention: Option<crate::storage::PassReport>,
 }
 
 /// GET /api/v1/diagnostics
@@ -145,5 +154,6 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
             .collect(),
         tracedb: state.tracedb.archive_counts().await,
         active_processes: state.turns.active_turn_count().await,
+        retention: state.retention.last_pass().await,
     }))
 }

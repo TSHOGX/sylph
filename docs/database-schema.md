@@ -2,7 +2,7 @@
 
 Sylph Web uses SQLite for the live session journal and TraceDB for stable cross-agent history.
 
-## Live Journal (live.db)
+## Journal (journal.db)
 
 The live journal stores active sessions, turns, and recent events. It uses WAL mode for concurrent access and numbered migrations for schema evolution.
 

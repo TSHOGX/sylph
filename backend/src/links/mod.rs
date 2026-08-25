@@ -24,7 +24,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::adapter::link::{Link, LinkConfig, LinkEvent};
 use crate::adapter::wire::SessionCapabilities;
-use crate::db::LiveStore;
+use crate::db::JournalStore;
 use crate::env::Environment;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::models::PendingRequest;
@@ -132,7 +132,14 @@ impl LinkState {
 
 #[derive(Clone)]
 pub struct LinkManager {
-    store: LiveStore,
+    store: JournalStore,
+    /// The batching front for the journal, used by the drain path.
+    ///
+    /// Deltas arrive here thousands per turn, so this is the one write path where
+    /// batching matters. Held beside `store` rather than replacing it: the manager
+    /// also does ordinary single-row work (persisting a native id, a pending
+    /// request) that has nothing to batch.
+    writer: crate::db::JournalWriter,
     hub: EventHub,
     environment: Arc<dyn Environment>,
     /// Where an adapter actually is, according to the thing that found it.
@@ -163,7 +170,8 @@ pub struct LinkManager {
 
 impl LinkManager {
     pub fn new(
-        store: LiveStore,
+        store: JournalStore,
+        writer: crate::db::JournalWriter,
         hub: EventHub,
         environment: Arc<dyn Environment>,
         registry: Arc<Mutex<Registry>>,
@@ -172,6 +180,7 @@ impl LinkManager {
     ) -> Self {
         let manager = Self {
             store,
+            writer,
             hub,
             environment,
             registry,
@@ -524,9 +533,13 @@ impl LinkManager {
         // logged at debug level the turn streamed perfectly and came back empty on
         // reload. An event published but not journaled is worse than one that never
         // arrived, because the client has already been told it happened.
+        // Stable events commit immediately; ephemeral ones join a ~50 ms window.
+        // The writer holds that distinction rather than this call site, because
+        // which events may be batched is a property of where a reconnect replays
+        // them from — see [`crate::db::writer`].
         if let Err(error) = self
-            .store
-            .append_event(&event.to_row(session_id, &turn_id))
+            .writer
+            .append(&event.to_row(session_id, &turn_id), event.is_stable())
             .await
         {
             error!(

@@ -48,7 +48,7 @@ not come up, so a broken install does not look like a successful one.
 | --- | --- | --- |
 | `SYLPH_WEB_PREFIX` | `~/.local/share/sylph-web` | Where the install lives |
 | `SYLPH_WEB_BIN_DIR` | `~/.local/bin` | Where launchers are linked |
-| `SYLPH_WEB_DATA_DIR` | `~/.agents/data/sylph/web` | The journal (`live.db`) |
+| `SYLPH_WEB_DATA_DIR` | `~/.agents/data/sylph/web` | The journal (`journal.db`) |
 | `SYLPH_WEB_PORT` | `4317` | Backend port |
 | `SYLPH_WEB_FRONTEND_PORT` | `3000` | Frontend port |
 | `SYLPH_RUNNERS_DIR` | `~/.agents/skills/sylph/runners` | Runner discovery |
@@ -73,7 +73,7 @@ processes with a bare environment and would not otherwise see them.
 
 ## Your data
 
-The journal at `$SYLPH_WEB_DATA_DIR/live.db` holds sessions and turns created
+The journal at `$SYLPH_WEB_DATA_DIR/journal.db` holds sessions and turns created
 through the web app. It is the only state the installer touches, and it survives
 upgrades and uninstalls.
 

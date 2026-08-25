@@ -1214,6 +1214,59 @@ mistaken for "agents do X", and it earned its place immediately:
   `modelId`/`name`, `id`/`displayName`, `id`/`name`), which is what makes the
   normalized seam belong in the adapter.
 
+### Retention became reachable, and what that took
+
+Three things were believed about storage that measurement contradicted.
+
+**The tiering was already built.** The open item claiming the `journal.db` /
+`history.db` split was "designed but not built" was stale: `HistoryStore` (own pool,
+`synchronous=FULL`, own migrations) and `Consolidator` (spawned at startup) had
+landed. Measured on a real install: the journal's `events` table held **0 rows**
+while `history.db` held **131 blocks across 4 sessions**, 11 of them carrying folded
+delta arrays. The split works and the journal is bounded. What was missing was the
+file *name* and delta batching.
+
+**Retention had no scheduler — and would have pruned nothing if it had.** Two
+independent defects in `TraceDbAuthority`, either alone fatal:
+
+- It compared Sylph's session UUID against the archive's `<agent>:<native-id>` key.
+  The three linked sessions on this machine *are* in TraceDB, as
+  `claude:9bdacb6e-…` and two `pi:…` rows. The UUID matches nothing, ever.
+- It scanned `list(None, 200, None)` — one page of a 4416-row archive.
+
+Both fail silently: the archive answers "no such session", retention correctly keeps
+everything, and every layer behaves impeccably. `watermarks` held **0 rows**,
+confirming it had never run. The authority is now constructed *from* an archive id,
+so the unanswerable question cannot be asked, and asks `show` by id rather than
+paging. Both defects were re-introduced deliberately to confirm the new tests fail.
+
+**The upstream ack is not what the design hoped for.** It is archive-global — one
+monotonic sequence per ingest *run*, committed after the data transaction so never a
+false positive — not a per-session coverage cursor, so it cannot replace the
+`endedAtMs` reasoning. It is also not cheaply readable: its only surfaces are a gRPC
+ingest response and `doctor --json`, measured at **2m34s**. What retention reads
+instead is `show`'s source fingerprint, which says which version of the native store
+a confirmation came from; `docs/storage.md` records the full reasoning.
+
+Also decided: the ingestion daemon already runs (`trace-db watch --interval 1800`,
+same archive, same version), so Sylph observes rather than becoming a second writer.
+
+Two design corrections fell out of building it. An unreachable archive is reported
+once per pass rather than as N session failures — an install without TraceDB is a
+supported degraded state, and it must not be recorded as a *checked* watermark,
+because "cannot ask" is not "asked and nothing is safe". And blob sweeping moved out
+of the per-session path: reachability spans sessions, so it was running a global scan
+once per session for one pass's worth of work.
+
+**Delta batching is ephemeral-only, and that is forced.** Stable events are journaled
+before publishing so a reconnect can always find them; the hub's ring holds only
+ephemeral events, which is what a mid-stream reconnect replays. So batching stable
+events would open a hole a reconnect could observe, while batching deltas — thousands
+per turn against tens of stable events — costs nothing observable and captures nearly
+all the win. Its one ordering rule is that a turn's buffer must flush before the fold
+reads it; removing that flush fails
+`replay_reproduces_the_deltas_and_not_only_the_final_text`, verified by removing it.
+
 ### Bugs found while building, each with its own cause
 
 - **The model list was empty on every session ever opened.** `capabilities_from` read
@@ -1330,11 +1383,18 @@ Each was found by a test, and each presented somewhere other than where it lived
   remain unbuilt, and non-loopback binding stays a separate explicit change.
 - **Khora needs a Template carrying the agent CLIs and adapters**, since the
   adapter runs inside the environment. None exists yet.
-- **An explicit TraceDB ingestion ack** would beat the derived watermark and stays
-  worth doing: it would remove the `endedAtMs` reasoning entirely and let Sylph
-  prune on confirmation rather than inference. A TraceDB change, so a separate
-  decision — the derivation is sound enough to run on meanwhile, which was not
-  obviously going to be true.
-- **The `journal.db` / `history.db` split is designed but not built.** The
-  supervisor still writes one `live.db`, so the WAL-checkpoint hazard the split
-  exists to prevent is currently live.
+- **An `ingest_status` op on `trace-db api`** is worth asking upstream for. TraceDB
+  now emits a durable ingestion ack, but its only surfaces are a gRPC ingest
+  response and `doctor --json`, measured at **2m34s** because doctor walks every
+  agent's native store and verifies the archive. The op would be a single
+  `schema_meta` read that `store::ingest_status` already implements. Nothing depends
+  on it: retention reads per-session confirmation instead, which is finer-grained
+  than the archive-global ack anyway (`docs/storage.md`).
+- **A Khora session's retention class is untested against a real sandbox.** The
+  policy resolves any non-`local` environment to `terminal`, which is the safe
+  answer and the right one, but no sandbox exists yet to confirm the environment
+  reports the kind this depends on.
+- **Retention has no upper bound on a terminal session's growth.** Compacting
+  forever is correct — the record is the only copy — but a long-lived sandbox
+  session accumulates without limit by design, and nothing yet surfaces *which*
+  sessions are responsible. `/diagnostics` reports the terminal count, not the bytes.

@@ -465,3 +465,144 @@ async fn replay_reproduces_the_deltas_and_not_only_the_final_text() {
     assert!(stream.contains("\"phase\":\"delta\""), "no deltas replayed: {stream}");
     assert!(stream.contains("mock reply"));
 }
+
+/// Retention has to actually run, and a real session has to survive it.
+///
+/// This is the test whose absence let the whole subsystem sit unreachable: the
+/// authorities were written and unit-tested, and nothing called them. A pass that
+/// examines a real consolidated session and leaves its blocks intact is the
+/// end-to-end shape — the mock agent has no agent-native store for TraceDB to have
+/// ingested, so withholding is the *correct* outcome here, and the assertion is
+/// that the pass happened and kept everything rather than that it pruned.
+#[tokio::test]
+async fn a_retention_pass_examines_a_consolidated_session_and_keeps_unconfirmed_history() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            serde_json::json!({"text": "retain me"}),
+        )
+        .await;
+    let turn_id = common::json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&turn_id).await;
+    backend.await_consolidation(&turn_id).await;
+
+    let before = backend.state.history.block_count(&session_id).await.unwrap();
+    assert!(before > 0, "the session must hold history to retain");
+
+    let report = backend.state.retention.pass().await;
+
+    // The pass reached this session — which is the thing that was missing entirely,
+    // and the reason the authorities sat unreachable while fully tested.
+    assert_eq!(
+        report.examined, 1,
+        "the consolidated session must be examined: {report:?}"
+    );
+    assert_eq!(
+        report.blocks_pruned, 0,
+        "nothing confirmed it, so nothing may be dropped: {report:?}"
+    );
+    assert_eq!(
+        backend.state.history.block_count(&session_id).await.unwrap(),
+        before,
+        "every block stays"
+    );
+
+    // The harness has no TraceDB, which is a supported degraded state. What matters
+    // is that it is reported as one fact about the pass rather than as a per-session
+    // fault, and that no watermark claims a check that never happened.
+    assert!(
+        !report.archive_available,
+        "the harness has no archive, and the pass must say so: {report:?}"
+    );
+    assert_eq!(
+        report.failed, 0,
+        "an absent archive is a configuration fact, not N session failures: {report:?}"
+    );
+    assert!(
+        backend
+            .state
+            .history
+            .watermark(&session_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "'cannot ask' must not be recorded as 'asked, and nothing is safe yet'"
+    );
+}
+
+/// With no downstream copy to consult, a pass must still record that it looked.
+///
+/// This is the counterpart to the unreachable-archive case: a terminal session
+/// never asks the archive, so its answer does not depend on one existing, and the
+/// watermark row is what distinguishes "correctly keeping everything forever" from
+/// "never scheduled". Those two look identical without it, which is how the missing
+/// scheduler stayed invisible.
+#[tokio::test]
+async fn a_terminal_session_records_its_watermark_even_with_no_archive() {
+    let (history, _dir) = history_store().await;
+    let events = vec![event(
+        0,
+        "assistant",
+        Some("completed"),
+        Some("a1"),
+        "only copy",
+        1000,
+    )];
+    history
+        .put_blocks(&history::consolidate(&events))
+        .await
+        .unwrap();
+
+    let report = sylph_web_backend::storage::retention::run_retention(
+        &history,
+        &sylph_web_backend::storage::TerminalAuthority,
+        "s1",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.pruned, 0);
+    assert_eq!(
+        history.watermark("s1").await.unwrap(),
+        Some(("terminal".to_string(), None)),
+        "the row names the authority, so a reader knows why nothing was dropped"
+    );
+}
+
+/// Idempotent: passes run every five minutes forever, so a second one over
+/// unchanged state must neither drop history nor accumulate rows.
+#[tokio::test]
+async fn a_second_retention_pass_over_unchanged_history_changes_nothing() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            serde_json::json!({"text": "retain me twice"}),
+        )
+        .await;
+    let turn_id = common::json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&turn_id).await;
+    backend.await_consolidation(&turn_id).await;
+
+    backend.state.retention.pass().await;
+    let after_first = backend.state.history.block_count(&session_id).await.unwrap();
+
+    backend.state.retention.pass().await;
+
+    assert_eq!(
+        backend.state.history.block_count(&session_id).await.unwrap(),
+        after_first,
+        "a repeated pass must be a no-op, not a slow erosion of history"
+    );
+}

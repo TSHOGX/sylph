@@ -16,7 +16,7 @@ use anyhow::Result;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
-use crate::db::LiveStore;
+use crate::db::JournalStore;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::links::LinkManager;
 
@@ -86,18 +86,21 @@ pub type TurnWaiters = std::sync::Arc<tokio::sync::Mutex<HashMap<String, oneshot
 /// Runs turns against links.
 #[derive(Clone)]
 pub struct LinkedSupervisor {
-    store: LiveStore,
+    store: JournalStore,
     hub: EventHub,
     links: LinkManager,
     seq: SeqAllocator,
     waiters: TurnWaiters,
     /// Moves a settled turn's events into history.
     consolidator: crate::storage::Consolidator,
+    /// Held only to flush a turn's buffered deltas before the fold reads them.
+    writer: crate::db::JournalWriter,
 }
 
 impl LinkedSupervisor {
     pub fn new(
-        store: LiveStore,
+        store: JournalStore,
+        writer: crate::db::JournalWriter,
         hub: EventHub,
         links: LinkManager,
         seq: SeqAllocator,
@@ -105,6 +108,7 @@ impl LinkedSupervisor {
     ) -> Self {
         Self {
             store,
+            writer,
             hub,
             links,
             seq,
@@ -431,6 +435,18 @@ impl LinkedSupervisor {
         let _ = self.store.update_session_status(session_id, "idle").await;
 
         self.hub.close(turn_id).await;
+
+        // Awaited, and it must stay awaited. Consolidation folds this turn by
+        // reading its journal rows, so any window still buffered in the writer has
+        // to land first — the fold would otherwise write a block missing its final
+        // deltas and then delete the rows, making the omission permanent. This is
+        // the one ordering rule `crate::db::writer` imposes, and the only place the
+        // batching layer is visible outside itself.
+        //
+        // Guarded by `replay_reproduces_the_deltas_and_not_only_the_final_text` in
+        // `tests/storage.rs`, which fails when this line is removed because the
+        // replay then carries only the settled text. Verified by removing it.
+        self.writer.flush_turn(turn_id).await;
 
         // The turn's rows have stopped changing, so this is the moment to move
         // them. Detached: the client already has its events, and making anything

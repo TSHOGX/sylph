@@ -78,7 +78,7 @@ Look for these lines in the backend tab output:
 ```
 ✓ Good:
   INFO sylph_web_backend: Starting Sylph Web backend on 127.0.0.1:4317
-  INFO sylph_web_backend: Database initialized at /Users/hsw/.agents/data/sylph/web/live.db
+  INFO sylph_web_backend: Database initialized at /Users/hsw/.agents/data/sylph/web/journal.db
   INFO sylph_web_backend::runners: Discovered runner: claude at "..."
   INFO sylph_web_backend: Runner discovery: 4 agents found, 0 broken
   INFO sylph_web_backend: TraceDB available: 4705 archived sessions, 529688 events
@@ -178,7 +178,7 @@ read/write access rather than the read-only direct frontend.
 ### The start screen lists few sessions, and the archive seems missing
 
 **This is expected.** The start screen's recents come from the live journal
-(`live.db`), which holds only what this app created or imported. It lists
+(`journal.db`), which holds only what this app created or imported. It lists
 directories rather than sessions, so a directory worked in all week is one row.
 
 Archived coding-agent history lives in TraceDB and is reached three ways:
@@ -189,7 +189,7 @@ Archived coding-agent history lives in TraceDB and is reached three ways:
 3. **`Cmd+K`** — searches live sessions and the archive together by content
 
 The architecture separates:
-- **Active sessions** (live.db) — ongoing work, resumable, editable
+- **Active sessions** (journal.db) — ongoing work, resumable, editable
 - **Archived sessions** (TraceDB) — historical read-only records, searchable
 
 An archived session opens read-only and offers explicit continuation. Importing is
@@ -359,7 +359,7 @@ For remote access:
 
 ### Data locations
 
-- `~/.agents/data/sylph/web/live.db` — Active sessions (SQLite)
+- `~/.agents/data/sylph/web/journal.db` — Active sessions (SQLite)
 - `~/Library/Application Support/trace-db/trace.db` — Archived sessions (TraceDB, macOS)
 - `~/.agents/skills/sylph/runners/` — Runner discovery
 
@@ -375,6 +375,6 @@ To stop services:
 
 Data is never deleted by stopping services. To reset:
 ```sh
-rm ~/.agents/data/sylph/web/live.db  # Deletes active sessions
+rm ~/.agents/data/sylph/web/journal.db  # Deletes active sessions
 # TraceDB archive is never touched
 ```

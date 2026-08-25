@@ -96,7 +96,7 @@ impl TestBackend {
         let config = Config {
             host: "127.0.0.1".to_string(),
             port: 0,
-            database_path: data_dir.join("live.db").display().to_string(),
+            journal_path: data_dir.join("journal.db").display().to_string(),
             // Both tiers inside the throwaway tree, so a test never touches the
             // developer's real history or blob store.
             history_path: data_dir.join("history.db").display().to_string(),

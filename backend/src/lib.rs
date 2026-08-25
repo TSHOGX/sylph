@@ -47,14 +47,14 @@ pub mod tracedb;
 
 use crate::config::Config;
 use crate::error::Error;
-use crate::db::LiveStore;
+use crate::db::JournalStore;
 use crate::events::EventHub;
 use crate::runners::Registry;
 use crate::tracedb::Client as TraceDbClient;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store: LiveStore,
+    pub store: JournalStore,
     pub config: Config,
     pub registry: Arc<Mutex<Registry>>,
     pub hub: EventHub,
@@ -66,6 +66,10 @@ pub struct AppState {
     /// Moves settled turns into history. Exposed so a test can trigger the same
     /// work the background sweeper does, rather than waiting on it.
     pub consolidator: crate::storage::Consolidator,
+    /// Prunes history down to what a downstream authority confirms. Exposed for the
+    /// same reason as the consolidator: a test drives one pass instead of waiting
+    /// five minutes for the interval.
+    pub retention: crate::storage::RetentionScheduler,
     pub tracedb: TraceDbClient,
 }
 
@@ -81,8 +85,11 @@ impl AppState {
     /// runners directory or a misconfigured TraceDB binary leaves the backend
     /// serving what it can, with the failure visible in `/diagnostics`.
     pub async fn build(config: Config) -> anyhow::Result<Self> {
-        let store = LiveStore::new(&config.database_path).await?;
-        tracing::info!("Database initialized at {}", config.database_path);
+        // Before the store opens the path, so an install predating the rename
+        // carries its history forward instead of starting empty beside it.
+        crate::db::migrate::rename_legacy_journal(&config.journal_path).await;
+        let store = JournalStore::new(&config.journal_path).await?;
+        tracing::info!("Journal initialized at {}", config.journal_path);
 
         // Bundled adapters first, so a user-installed one of the same name
         // shadows rather than duplicates. Discovery handshakes with each, which
@@ -168,8 +175,14 @@ impl AppState {
         // the same sequence number.
         let seq = crate::events::SeqAllocator::new(store.clone());
 
+        // Batches the journal's hot path. One instance, shared: the drain task
+        // buffers a turn's deltas and the supervisor flushes them before the fold,
+        // so separate writers would leave the fold reading a buffer nobody flushed.
+        let writer = crate::db::JournalWriter::new(store.clone());
+
         let links = crate::links::LinkManager::new(
             store.clone(),
+            writer.clone(),
             hub.clone(),
             environment,
             registry.clone(),
@@ -182,6 +195,7 @@ impl AppState {
         // waiter registry is handed over after both exist.
         let turns = crate::supervisor::turn::LinkedSupervisor::new(
             store.clone(),
+            writer.clone(),
             hub.clone(),
             links.clone(),
             seq,
@@ -189,6 +203,18 @@ impl AppState {
         );
         links.set_waiters(turns.waiters()).await;
         let tracedb = TraceDbClient::new(config.tracedb_bin.clone());
+
+        // Retention needs the archive client, so it is built after it. The
+        // environment kind is `local` because that is the only environment today;
+        // it is passed rather than assumed inside so a per-session environment
+        // later replaces an argument instead of reaching into the scheduler.
+        let retention = crate::storage::RetentionScheduler::new(
+            store.clone(),
+            history.clone(),
+            tracedb.clone(),
+            crate::env::Environment::descriptor(&crate::env::LocalEnvironment::new()).kind,
+        );
+        retention.spawn();
 
         Ok(Self {
             store,
@@ -199,6 +225,7 @@ impl AppState {
             links,
             history,
             consolidator,
+            retention,
             tracedb,
         })
     }

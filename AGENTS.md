@@ -113,10 +113,17 @@ resolves to none, matching the runner's `[[ -f "$SOUL_PATH" ]] || SOUL_PATH=""`.
 Reporting a configured-but-absent file as present would let the UI promise an
 injection that never happens. `GET /api/v1/soul` reports what resolved.
 
-The journal is always `live.db` inside the data dir; it is derived, not
-separately configurable. `TRACEDB_BIN` defaults to a release build in a sibling
-checkout rather than a `PATH` lookup, so TraceDB-dependent features degrade
-until that binary exists — check `/api/v1/health` for `tracedb.available`.
+All three storage tiers are derived from the data dir, not separately configurable:
+`journal.db` (hot), `history.db` (warm), `cas/` (cold). A pre-existing `live.db` is
+renamed to `journal.db` on startup, after a truncating WAL checkpoint — never by
+moving the three WAL files, since a crash between renaming `-wal` and `.db` strands
+committed data in an orphaned WAL.
+
+`TRACEDB_BIN` defaults to a release build in a sibling checkout rather than a `PATH`
+lookup, so TraceDB-dependent features degrade until that binary exists — check
+`/api/v1/health` for `tracedb.available`. Retention is one of them, and degrades
+safely: with no archive it keeps everything and says so in `/diagnostics` rather than
+reporting a failure per session.
 
 ## Pitfalls Worth Remembering
 
@@ -198,7 +205,7 @@ Measured during Phase 9: the suite went from 1.5 minutes to 35 minutes, and two
 or three specs failed per run on the 30s default timeout — a *different* two or
 three each time, which is what makes it read as flakiness rather than as a
 fixture problem. `rm -rf frontend/.e2e-data` is the fix, and it is free: the
-directory is gitignored and the backend recreates `live.db` on start. Do that
+directory is gitignored and the backend recreates `journal.db` on start. Do that
 before trusting a timing result or diagnosing an intermittent E2E failure.
 Raising the timeout does not help, because the cost grows without bound.
 
@@ -259,6 +266,51 @@ object literal merges without a conflict marker and silently keeps only one set 
 this happened to `api.files` during the Phase 7 merge, dropping two client methods.
 Nothing in git reports it; only `npm run build` did. Run both sides' full checks on
 a merge that reports itself clean, especially the type check.
+
+**Sylph's session id and TraceDB's are disjoint id spaces, and confusing them is
+silently always-false.** Sylph keys a session by UUID; the archive keys the same
+conversation as `<agent>:<native-id>` (`claude:9bdacb6e-…`). Comparing the two
+produces no error at any layer — the archive answers "no such session", the caller
+concludes nothing is confirmed, and every component behaves impeccably while the
+feature does nothing. This is how the first `TraceDbAuthority` shipped fully written
+and tested, pruning nothing, with an empty `watermarks` table that looked exactly
+like correct conservatism. `tracedb::archive_id` is the forward direction and
+`JournalStore::find_session_by_archive_id` the inverse; a type that needs the archive
+id to be constructed cannot be asked the unanswerable question, which is the actual
+fix. Anything comparing an id against the archive needs a test with a *real* archive
+id, because a wrong one passes.
+
+**A subsystem whose correct behaviour is "nothing happened" needs a report, or it
+cannot be distinguished from a broken one.** Retention keeping every block is right
+for a terminal session and a symptom for a delegated one, and the observable state —
+no blocks pruned — is identical. It is also identical to never having run at all,
+which is what it was doing. The watermark row is written even when nothing is
+confirmed, and `/diagnostics` reports confirmed/withheld/terminal/unchanged
+separately, because a single "pruned: 0" answers none of the questions that matter.
+
+**A degraded dependency is one fact about the run, not one fault per item.** With no
+TraceDB — a supported configuration — probing per session turned one missing binary
+into a warning per session per pass, forever. Probe once per pass and report it once.
+The related rule: "cannot ask" must never be recorded as "asked, and nothing is
+safe", or a watermark claims a check that never happened.
+
+**TraceDB's ingestion ack is archive-global and expensive to read.** It is one
+monotonic sequence per ingest *run*, committed after the data transaction so it is
+never a false positive — but it says nothing about which events of which session are
+covered, so it cannot replace a per-session coverage bound. Its only surfaces are a
+gRPC ingest response and `doctor --json`, measured at **2m34s** because doctor walks
+every agent's native store and verifies the archive; `trace-db api` does not expose
+it. Per-session facts are both cheaper and more precise: `ingestedAtMs` on a `list`
+row is a durable per-session commit marker (`upsert_many` writes the session row and
+its events in one transaction), and `show`'s `fingerprint` says which version of the
+native source was ingested.
+
+**Renaming a WAL-mode SQLite file means checkpoint-then-rename, not moving three
+files.** A crash between renaming `-wal` and renaming `.db` leaves committed data in
+an orphaned WAL beside a database that no longer references it — silent loss of
+exactly the turns that were in flight. `PRAGMA wal_checkpoint(TRUNCATE)` first, close
+every connection, then move the main file alone. The emptied sidecars must also be
+deleted, or a later `live.db` adopts them.
 
 **TraceDB's API spellings are inconsistent per-operation.** `show` emits
 snake_case (`created_at_ms`, `started_at_ms`), while `stats`, `search`, and
