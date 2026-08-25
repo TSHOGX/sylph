@@ -556,6 +556,39 @@ vendor gives *per delegate* — `task_id` for `claude` — with the host named a
 `span`. This is the same rule as *What the adapter must keep separate* below, one
 level up: never key a trajectory by something the vendor multiplexes.
 
+**A vendor tag coarser than a trajectory is not refinable by guessing, and needs no
+new protocol field.** The question a multiplexing host raises is where its *forwarded
+interior* belongs, and it is tempting to answer it with a new envelope field. It does
+not need one: `span` is already per-event and can name any trajectory at any depth.
+The missing correlation is entirely vendor-side — `claude` tags forwarded output with
+`parent_tool_use_id`, the *host*, which is precisely the id it multiplexes. So when a
+host has N delegates the vendor's own tag cannot say which one produced a given event,
+and an adapter must attribute that output to the **host** — the container, which is
+true — rather than pick a delegate, which is corruption indistinguishable from correct
+output. Only N = 1 is safe, because there the sole delegate is the only thing the
+interior can be.
+
+Two obligations follow, and both were real defects rather than hypotheses:
+
+* **A re-label must be latched.** The table an adapter consults grows while the turn
+  runs, so the same host answers "the host" before its `task_started` and "the sole
+  delegate" after it, while the forwarded stream does not pause in between. Answered
+  freshly per event, one delegate's output is split across the container and the
+  delegate at whatever instant the notification landed — and both halves render,
+  nested one inside the other, so nothing reports the split.
+* **Vendor block state must be keyed by the vendor's own tag, never by the
+  trajectory it resolves to.** The tag is the only part guaranteed identical across a
+  block's `start`, `delta` and `stop`. Keyed by the resolution, a notification landing
+  mid-block moves the key out from under an open block: the delta and the stop both
+  miss, so the block's text is dropped and no `completed` is ever emitted.
+
+Measured on `claude` 2.1.245: no host both forwards interior events and multiplexes.
+`--forward-subagent-text` forwards only for the built-in `Task`, whose notifications
+reuse the spawning id and so never make it multiplexing; `Agent` and `Workflow`
+multiplex and forward nothing. The N = 1 re-label is therefore a guard against a
+vendor change, not a path in use — which is exactly the shape the promotion rule above
+exists to make safe.
+
 **Progress is a snapshot, so it is not delta text.** A vendor's progress
 notification re-sends its whole current summary rather than a suffix, so appending
 each one repeats it — measured at six copies of one sentence. A `subagent` event

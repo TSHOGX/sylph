@@ -327,6 +327,208 @@ class ForwardedOutputFindsItsDelegate(Emitted):
         self.assertEqual(self.session._delegate_of("toolu_wf"), "toolu_wf")
 
 
+class AttributionIsLatchedPerHost(Emitted):
+    """`_delegate_of` reads a table that grows while the turn runs.
+
+    So the same host has one answer before `task_started` and another after it, and the
+    forwarded stream does not pause in between. Asked freshly each time, one delegate's
+    output is split across the container and the delegate at whatever instant the
+    notification happened to land — and *both halves render*, nested one inside the
+    other, so no layer reports the split. That is the failure mode this whole family
+    takes: a plausible timeline that misdescribes what the agent did.
+    """
+
+    def _announce(self, task="t1", host="toolu_wf"):
+        self.session._task_notification("task_started", {
+            "type": "system", "subtype": "task_started",
+            "task_id": task, "tool_use_id": host,
+            "description": "worker", "task_type": "local_agent",
+        })
+
+    def test_an_answer_given_before_the_delegate_arrived_stands(self):
+        # Forwarded output reaching the adapter first can only be attributed to the
+        # host. Once that is published, the delegate arriving later must not move the
+        # rest of the same stream.
+        self.assertEqual(self.session._delegate_of("toolu_wf"), "toolu_wf")
+        self._announce()
+        self.assertEqual(self.session._delegate_of("toolu_wf"), "toolu_wf")
+
+    def test_a_delegate_known_first_is_used_for_the_whole_stream(self):
+        self._announce()
+        self.assertEqual(self.session._delegate_of("toolu_wf"), "t1")
+        # A second delegate would make the host multiplexing, but the stream already
+        # committed: re-deciding now would reparent output already published.
+        self._announce(task="t2")
+        self.assertEqual(self.session._delegate_of("toolu_wf"), "t1")
+
+    def test_a_host_whose_sole_delegate_is_itself_resolves_to_itself(self):
+        # A `Task` reports its notifications under the *spawning* id, so host and
+        # trajectory are one. The identity case must not be recorded as a re-label.
+        self.session.subagent_tools.add("toolu_task")
+        self.session.subagent_parent["toolu_task"] = None
+        self._announce(task="inner", host="toolu_task")
+        self.assertEqual(self.session._delegate_of("toolu_task"), "toolu_task")
+
+    def test_the_root_is_never_latched(self):
+        self.assertIsNone(self.session._delegate_of(None))
+        self.assertEqual(self.session.host_attribution, {})
+
+
+class AForwardedBlockSurvivesANotification(Emitted):
+    """A block's three phases must key on the envelope tag, not on the resolution.
+
+    `parent_tool_use_id` is the only part claude guarantees is identical across
+    `content_block_start`, `_delta` and `_stop`. Keyed by the trajectory that tag
+    resolves to, a `task_started` landing mid-block moves the key out from under an open
+    block: the delta looks up a tuple that no longer exists and returns, the stop misses
+    too, and no `completed` is ever emitted. The block's whole text is dropped and its
+    node stays open, with nothing at any layer reporting it.
+    """
+
+    def _forward(self, nested):
+        self.session._stream_event(nested, "toolu_wf")
+
+    def test_a_delta_arriving_after_a_task_started_still_lands(self):
+        self._forward({"type": "content_block_start", "index": 0,
+                       "content_block": {"type": "text", "text": ""}})
+        # The notification that used to move the key.
+        self.session._task_notification("task_started", {
+            "type": "system", "subtype": "task_started",
+            "task_id": "t1", "tool_use_id": "toolu_wf",
+            "description": "worker", "task_type": "local_agent",
+        })
+        self._forward({"type": "content_block_delta", "index": 0,
+                       "delta": {"text": "half a sentence"}})
+        self._forward({"type": "content_block_stop", "index": 0})
+
+        assistant = self.of_kind("assistant")
+        self.assertEqual([e["phase"] for e in assistant],
+                         ["started", "delta", "completed"])
+        self.assertEqual(assistant[-1]["text"], "half a sentence")
+        # And it stays in the trajectory its `started` claimed, rather than moving to
+        # the delegate partway through one block.
+        self.assertEqual({e.get("span") for e in assistant}, {"toolu_wf"})
+
+    def test_concurrent_delegates_keep_their_own_index_zero(self):
+        # The original keying bug, still pinned: two hosts both stream index 0.
+        for host, text in (("toolu_a", "from A"), ("toolu_b", "from B")):
+            self.session._stream_event(
+                {"type": "content_block_start", "index": 0,
+                 "content_block": {"type": "text", "text": ""}}, host)
+        for host, text in (("toolu_a", "from A"), ("toolu_b", "from B")):
+            self.session._stream_event(
+                {"type": "content_block_delta", "index": 0,
+                 "delta": {"text": text}}, host)
+        for host in ("toolu_a", "toolu_b"):
+            self.session._stream_event(
+                {"type": "content_block_stop", "index": 0}, host)
+
+        done = [e for e in self.of_kind("assistant") if e["phase"] == "completed"]
+        self.assertEqual({(e["span"], e["text"]) for e in done},
+                         {("toolu_a", "from A"), ("toolu_b", "from B")})
+
+
+class PermissionModeIsValidated(unittest.TestCase):
+    """A mode the CLI rejects must not reach it.
+
+    Measured against claude 2.1.245 by trying each candidate: `--permission-mode`
+    accepts `default`, `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`
+    and `plan`, and **rejects `ask`** — the value this protocol's own spec examples use
+    for the field. commander rejects it at parse time, so the CLI exits 1 before
+    answering `initialize` and the adapter reported "claude did not answer initialize in
+    time": a timeout message for an argument error, which sends the investigation to the
+    link layer while the cause is one argv entry.
+
+    Note the vendor's own error text is not the authority either — it lists six values
+    and omits `default`, which it nevertheless accepts.
+    """
+
+    def test_the_spec_s_own_example_value_is_not_accepted_by_the_cli(self):
+        self.assertNotIn("ask", adapter.PERMISSION_MODES)
+
+    def test_every_offered_spawn_choice_is_one_the_cli_accepts(self):
+        # The flag schema and the CLI must not disagree: a mode offered at creation
+        # that the CLI refuses is a session that cannot start, chosen from a picker.
+        for choice in adapter.FLAGS["mode"]["choices"]:
+            self.assertIn(choice, adapter.PERMISSION_MODES, choice)
+
+    def test_every_interactive_mode_is_also_a_real_mode(self):
+        for mode in adapter.INTERACTIVE_MODES:
+            self.assertIn(mode, adapter.PERMISSION_MODES, mode)
+
+
+class NestedTrajectoriesCarrySpanOnEveryPhase(Emitted):
+    """A nested `subagent` must name its parent on *every* phase, not only on open.
+
+    `history::consolidate` folds a declared trajectory's phases into one row keyed by
+    its close, and it carries `name` forward but **not** `span`. So an adapter that
+    states the parent only on `started` nests correctly while the turn is live and
+    re-roots itself beside its parent the moment the turn settles — the delegated
+    subtree flattens on reload, which is the pre-`span` bug arriving via the storage
+    tier. Both of this adapter's two paths to a `subagent` event are pinned here
+    because neither was covered: the existing specs assert a close lands in the tree,
+    which passes even if an intermediate phase drops the pointer.
+    """
+
+    def test_a_nested_declared_task_names_its_parent_throughout(self):
+        # The outer Task, at the root: `span` is absent rather than null, which is how
+        # the protocol spells "the root turn".
+        self.session._stream_event(
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "toolu_outer",
+                               "name": "Task"}}, None)
+        # The inner one, declared inside it — the envelope tags it with the outer id.
+        for nested in (
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "toolu_inner",
+                               "name": "Task"}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"partial_json": '{"subagent_type":"Explore"}'}},
+            {"type": "content_block_stop", "index": 0},
+        ):
+            self.session._stream_event(nested, "toolu_outer")
+        # Its `tool_result` is the delegated work's outcome, so it closes it.
+        self.session._tool_results({
+            "parent_tool_use_id": "toolu_outer",
+            "message": {"content": [{"type": "tool_result",
+                                     "tool_use_id": "toolu_inner",
+                                     "content": "done"}]},
+        })
+
+        inner = [e for e in self.trajectories() if e["streamId"] == "toolu_inner"]
+        self.assertEqual([e["phase"] for e in inner],
+                         ["started", "delta", "completed"])
+        for phase in inner:
+            self.assertEqual(phase.get("span"), "toolu_outer", phase["phase"])
+
+        outer = [e for e in self.trajectories() if e["streamId"] == "toolu_outer"]
+        self.assertNotIn("span", outer[0])
+
+    def test_a_notified_delegation_names_its_host_throughout(self):
+        opened = {
+            "type": "system", "subtype": "task_started",
+            "task_id": "t1", "tool_use_id": "toolu_wf",
+            "description": "worker", "task_type": "local_agent",
+        }
+        self.session._task_notification("task_started", opened)
+        self.session._task_notification("task_progress", {
+            "type": "system", "subtype": "task_progress", "task_id": "t1",
+            "tool_use_id": "toolu_wf", "description": "still going",
+        })
+        # The close carries no `tool_use_id` at all, so the host has to be remembered
+        # — and it has to reach this phase, not merely be known internally.
+        self.session._task_notification("task_updated", {
+            "type": "system", "subtype": "task_updated", "task_id": "t1",
+            "patch": {"status": "completed"},
+        })
+
+        phases = [e for e in self.trajectories() if e["streamId"] == "t1"]
+        self.assertEqual([e["phase"] for e in phases],
+                         ["started", "delta", "completed"])
+        for phase in phases:
+            self.assertEqual(phase.get("span"), "toolu_wf", phase["phase"])
+
+
 class UnaddressableNotification(Emitted):
     """A notification with no id at all still happened."""
 
