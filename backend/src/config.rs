@@ -62,6 +62,33 @@ pub struct Config {
 /// The env read is a parameter so this is a pure function: `std::env::set_var`
 /// is process-global and unsafe in a threaded test binary, so a test that had to
 /// set it could not run beside the others.
+/// Where bundled `adapter.sh` trees live.
+///
+/// Installed builds expect `$HOME/.local/share/sylph-web/adapters`. A dev
+/// checkout keeps them at `<repo>/adapters`, which is one level above
+/// `backend/` — the compile-time manifest dir — so `cargo run` works without
+/// setting `SYLPH_AGENTS_DIR` when the install tree is absent.
+fn resolve_agents_dir(home: &str, configured: Option<&str>) -> PathBuf {
+    if let Some(path) = configured.filter(|p| !p.is_empty()) {
+        return PathBuf::from(path);
+    }
+
+    let install = PathBuf::from(format!("{home}/.local/share/sylph-web/adapters"));
+    if install.is_dir() {
+        return install;
+    }
+
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("backend crate has a parent")
+        .join("adapters");
+    if repo.is_dir() {
+        return repo;
+    }
+
+    install
+}
+
 fn resolve_soul_path(runners_dir: &Path, configured: Option<&str>) -> Option<PathBuf> {
     let candidate = match configured {
         Some("") => return None,
@@ -91,13 +118,7 @@ impl Config {
                 .unwrap_or_else(|_| format!("{}/.agents/skills/sylph/runners", home)),
         );
 
-        // Bundled adapters sit beside the binary in an install and at the repo
-        // root in development, so the env var is what makes both work without a
-        // build-time path baked in.
-        let agents_dir = PathBuf::from(
-            env::var("SYLPH_AGENTS_DIR")
-                .unwrap_or_else(|_| format!("{}/.local/share/sylph-web/adapters", home)),
-        );
+        let agents_dir = resolve_agents_dir(&home, env::var("SYLPH_AGENTS_DIR").ok().as_deref());
 
         let tracedb_bin = env::var("TRACEDB_BIN")
             .unwrap_or_else(|_| format!("{}/Workspace/trace-db/target/release/trace-db", home))
@@ -199,6 +220,29 @@ mod tests {
         std::fs::write(tmp.path().join("SOUL.md"), "# SOUL.md").unwrap();
 
         assert_eq!(resolve_soul_path(&runners, Some("")), None);
+    }
+
+    #[test]
+    fn agents_dir_prefers_an_explicit_override() {
+        let tmp = TempDir::new().unwrap();
+        let explicit = tmp.path().join("mine");
+        std::fs::create_dir_all(&explicit).unwrap();
+
+        assert_eq!(
+            resolve_agents_dir("/unused", Some(explicit.to_str().unwrap())),
+            explicit
+        );
+    }
+
+    #[test]
+    fn agents_dir_falls_back_to_the_repo_adapters_tree_in_a_dev_checkout() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("adapters");
+        assert!(repo.is_dir(), "repo adapters/ should exist in this checkout");
+
+        assert_eq!(resolve_agents_dir("/no/such/home", None), repo);
     }
 
     /// A configured path that points at a directory is not a readable soul.
