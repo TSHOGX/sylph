@@ -312,7 +312,20 @@ CREATE TABLE watermarks (
   session_id    TEXT PRIMARY KEY,
   authority     TEXT NOT NULL,        -- 'tracedb' | 'terminal'
   confirmed_seq INTEGER,              -- NULL: nothing confirmed yet
-  checked_at_ms INTEGER NOT NULL
+  checked_at_ms INTEGER NOT NULL,
+  archive_id        TEXT,             -- which archived session confirmed it
+  source_fingerprint TEXT             -- which version of the native source
+) WITHOUT ROWID;
+
+-- What each session holds, and what it held before. Separate from `watermarks`
+-- because bytes held need no authority: see "Growth is accounted in bytes".
+CREATE TABLE session_bytes (
+  session_id     TEXT PRIMARY KEY,
+  bytes          INTEGER NOT NULL,
+  blocks         INTEGER NOT NULL,
+  measured_at_ms INTEGER NOT NULL,
+  previous_bytes          INTEGER,
+  previous_measured_at_ms INTEGER
 ) WITHOUT ROWID;
 ```
 
@@ -460,6 +473,99 @@ Three things make it safe to run often and safe to run at all:
 terminal, unchanged, blocks pruned, blobs swept, and whether the archive was
 reachable. A subsystem whose correct behaviour is usually "nothing happened" is
 otherwise indistinguishable from one that is broken.
+
+### Growth is accounted in bytes, per session
+
+The counts above answer *was anything dropped*. They cannot answer the question an
+operator has when a disk fills: **which session is responsible**. A terminal
+session keeping every block is correct behaviour, so `withheld: 41` is both the
+right report and completely silent about the one sandbox session that has reached a
+gigabyte while forty others sit at kilobytes. Counting blocks cannot separate them
+either — one 200 KB tool result and one 20-byte status are both one block.
+
+So each pass measures the sessions it examined and records the result in
+`session_bytes`:
+
+```sql
+CREATE TABLE session_bytes (
+  session_id     TEXT PRIMARY KEY,
+  bytes          INTEGER NOT NULL,
+  blocks         INTEGER NOT NULL,
+  measured_at_ms INTEGER NOT NULL,
+  previous_bytes          INTEGER,   -- the last *differing* observation
+  previous_measured_at_ms INTEGER
+) WITHOUT ROWID;
+```
+
+`/diagnostics` then reports `bytesHeld`, `sessionsMeasured`, `bytesGrewBy`, and a
+bounded `largestSessions` list, each row carrying its own `grewBy` and
+`grewOverMs`.
+
+Five decisions in that shape are load-bearing.
+
+**A byte is the logical record, not the footprint on disk.** `text_len` is the
+uncompressed length even for an externalized payload — that is why the column
+exists — so this measures what the record contains. Stored size was rejected on
+three counts: compression ratio varies 1–5× with content, so ranking by it ranks
+partly by how compressible a session's tool output happened to be; measuring it
+means a `stat` per blob per pass or a size column to keep correct through pruning
+and sweeping; and a blob shared by two sessions is one file, so stored bytes summed
+per session over-counts it with no well-defined share. The consequence to hold
+onto: **the sum over sessions exceeds the store on disk**, and this measure answers
+"which session is growing", not "what is my disk doing". `du` answers that, exactly.
+
+**Growth needs a stored earlier observation.** Current size is a `SUM` and needs no
+table. A difference does, and without one the only available answer is "large" —
+which does not distinguish a session that reached its size months ago and stopped
+from one adding a hundred megabytes an hour. Those need opposite responses, and the
+second is why this exists.
+
+**The baseline moves only on a differing measurement.** Re-recording an unchanged
+reading would set `previous_bytes = bytes` and report a growing session as stable
+the moment two passes happen to agree. Held at the last differing observation
+instead, so the delta stays meaningful however often passes run.
+
+**`grewBy` is absent, not zero, on a first measurement, and signed thereafter.**
+One observation is not a trend, and reporting it as zero would claim a session is
+stable on the strength of never having been looked at twice. Negative is a real and
+useful reading: pruning worked. A field that only reported increases would make a
+working archive indistinguishable from a stalled one.
+
+**Measurement is independent of the watermark, and this is the property an obvious
+implementation gets wrong.** Bytes are recorded on every path a pass takes,
+including the one where a delegated session is left entirely untouched because the
+archive is unreachable. Measuring alongside the watermark write would have left the
+byte report **empty on exactly the install whose growth is unbounded** — one with
+no TraceDB, where nothing can ever be pruned. A watermark records what an authority
+confirmed; bytes held are a local fact needing no authority. Hence a separate table
+rather than more columns on `watermarks`.
+
+### Why no configurable upper bound is offered
+
+The obvious next step is a setting — "prune a terminal session above N GB" — and it
+is refused rather than unbuilt.
+
+A terminal session's record exists **only** here. There is no downstream copy, and
+none is coming: that is what makes it terminal. A size-triggered prune is therefore
+a size-triggered *deletion of the only copy*, which is the same trade a time-based
+rule makes and is refused for the same reason — it destroys data precisely where
+nothing else holds it. "Growth is visible and fixable; loss is neither" is not a
+slogan here, it is the whole basis of the watermark design, and a byte threshold is
+a clock with a different face.
+
+A **reporting** threshold — warn above N — was considered and also left out. It
+changes a log line's severity and nothing about what is kept, so it would be a
+setting whose only effect is how loudly the server describes correct behaviour;
+`/diagnostics` already carries the numbers a decision would be made from, and
+`AGENTS.md` records why a setting the code does not honour is worse than one not
+offered. The pass logs one line naming the single largest holder when anything
+grew — one line, not one per session, because growth every pass is a terminal
+session's *expected* state and a line per session would be an unbounded stream
+reporting nothing wrong.
+
+What an operator does about a session that is too large is delete the session, or
+move its environment to one TraceDB can ingest so it stops being terminal. Both are
+decisions with an owner. Neither belongs to a background timer.
 
 ### The two id spaces
 

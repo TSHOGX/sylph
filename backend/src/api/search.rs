@@ -72,7 +72,19 @@ pub async fn search(
     let hits = match state.tracedb.search(query, limit).await {
         Ok(hits) => hits,
         Err(detail) => {
-            tracing::warn!("TraceDB search failed: {}", detail);
+            // One report per run, not one per keystroke — the shared helper, so this
+            // endpoint cannot drift from `api::archive` and `api::workspaces`. An
+            // unreachable archive is one fact about the install, and a `warn` per
+            // keystroke-driven search would be an unbounded stream describing a
+            // supported configuration. Unconditional `debug` was the alternative and
+            // hides the first failure too, which is the one worth seeing. The
+            // response carries `available: false` and `detail` regardless, which is
+            // what the UI renders.
+            crate::api::archive::report_tracedb_failure(
+                &state,
+                "TraceDB search failed",
+                &detail,
+            );
             return Ok(Json(SearchResponse {
                 results: Vec::new(),
                 available: false,

@@ -288,7 +288,7 @@ impl Registry {
     }
 
     /// Agents that are installed but unusable, with why.
-    pub fn broken_runners(&self) -> &HashMap<String, String> {
+    pub fn broken_adapters(&self) -> &HashMap<String, String> {
         &self.broken
     }
 
@@ -371,7 +371,7 @@ for raw in sys.stdin:
             .await
             .unwrap();
         assert!(registry.list_agents().is_empty());
-        assert!(registry.broken_runners().is_empty());
+        assert!(registry.broken_adapters().is_empty());
     }
 
     /// Discovery reads what the adapter says, not a descriptor beside it. The CLI
@@ -417,7 +417,7 @@ for raw in sys.stdin:
 
         assert_eq!(registry.list_agents().len(), 1);
         assert!(registry.has_agent("good"));
-        let broken = registry.broken_runners();
+        let broken = registry.broken_adapters();
         assert_eq!(broken.len(), 2);
         assert!(broken.contains_key("exits"));
         assert!(broken.contains_key("silent"));
@@ -437,7 +437,7 @@ for raw in sys.stdin:
             .unwrap();
 
         assert!(!registry.has_agent("codex"));
-        assert!(registry.broken_runners()["codex"].contains("identifies itself"));
+        assert!(registry.broken_adapters()["codex"].contains("identifies itself"));
     }
 
     #[tokio::test]
@@ -454,7 +454,7 @@ for raw in sys.stdin:
             .unwrap();
 
         assert_eq!(registry.list_agents().len(), 1);
-        assert!(registry.broken_runners().is_empty());
+        assert!(registry.broken_adapters().is_empty());
     }
 
     /// A v1 runner tree is an agent that cannot be spoken to, not an absent one.
@@ -477,9 +477,9 @@ for raw in sys.stdin:
 
         assert!(!registry.has_agent("codex"));
         assert!(
-            registry.broken_runners()["codex"].contains("adapter.sh"),
+            registry.broken_adapters()["codex"].contains("adapter.sh"),
             "the reason names what is missing: {:?}",
-            registry.broken_runners()
+            registry.broken_adapters()
         );
     }
 
@@ -510,7 +510,7 @@ for raw in sys.stdin:
         .unwrap();
 
         assert!(registry.has_agent("claude"));
-        assert!(registry.broken_runners().is_empty());
+        assert!(registry.broken_adapters().is_empty());
     }
 
     /// The first root wins, which is what lets a user shadow a bundled adapter
@@ -560,12 +560,12 @@ for raw in sys.stdin:
         let mut registry = Registry::new(vec![tmp.path().to_path_buf()], environment())
             .await
             .unwrap();
-        assert_eq!(registry.broken_runners().len(), 1);
+        assert_eq!(registry.broken_adapters().len(), 1);
 
         write_adapter(tmp.path(), "claude", &cooperative("claude", "1.0"));
         registry.refresh().await.unwrap();
 
-        assert!(registry.broken_runners().is_empty());
+        assert!(registry.broken_adapters().is_empty());
         assert!(registry.has_agent("claude"));
     }
 

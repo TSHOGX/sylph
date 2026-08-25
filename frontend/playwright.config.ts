@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import os from "node:os";
 import path from "node:path";
 
 /**
@@ -106,15 +107,25 @@ export default defineConfig({
         // agent CLIs — spawning real processes, and making specs pass or fail on
         // which agents happen to be installed. Naming it keeps the fixture the
         // only agent that exists.
-        SYLPH_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "runners"),
-        SYLPH_BUNDLED_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "runners"),
+        SYLPH_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "adapters"),
+        SYLPH_BUNDLED_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "adapters"),
         // Point at a path that does not exist so archive-dependent screens
         // exercise their unavailable state instead of the developer's archive.
         SYLPH_TRACEDB_BIN: path.join(sylphHome, "absent-trace-db"),
-        // Browse roots always include `$HOME`, but the specs create sessions in
-        // `/tmp`. Naming it keeps the directory picker assertable without
+        // Browse roots always include `$HOME`, but the specs create sessions
+        // outside it. Naming these keeps the directory picker assertable without
         // depending on what happens to live in the developer's home directory.
-        SYLPH_BROWSE_ROOTS: "/tmp",
+        //
+        // Both entries, and this is not redundancy. `browse_roots` bounds two
+        // things (`docs/configuration.md`): what `/fs/*` may enumerate, and what a
+        // request may name as a session's `workdir`. The specs use two different
+        // directories for those — a literal `/tmp` as the default workdir, and
+        // `os.tmpdir()` per spec via `mkdtemp`, which on macOS is
+        // `/var/folders/…/T` and is *not* under `/tmp`. Naming only one leaves
+        // every `mkdtemp` spec creating sessions in a directory the backend
+        // refuses, which surfaces as ~a dozen unrelated-looking spec failures
+        // rather than as a fixture problem.
+        SYLPH_BROWSE_ROOTS: ["/tmp", os.tmpdir()].join(":"),
         // No identity, so the fixture adapter is not handed a `SOUL.md` the specs
         // never assert on. The protocol reserves the empty string for this.
         SYLPH_SOUL: "",

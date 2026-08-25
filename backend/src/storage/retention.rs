@@ -590,6 +590,146 @@ mod tests {
         assert_eq!(history.watermark_fingerprint("s1").await.unwrap(), None);
     }
 
+    // ---- Byte accounting --------------------------------------------------
+    //
+    // These pin the one question the counts cannot answer. A terminal session
+    // keeping every block is correct behaviour and identical, in every count, to a
+    // session growing without bound — which is the actual state a full disk is in.
+
+    /// A block-count report cannot rank sessions: one large tool result and one
+    /// short status are both one block. Bytes are what separate them.
+    #[tokio::test]
+    async fn bytes_held_distinguish_a_large_session_from_a_long_one() {
+        let (history, _dir) = history().await;
+
+        let mut heavy = block("heavy", 0, 1000);
+        heavy.text = "x".repeat(40_000);
+        let mut chatty = Vec::new();
+        for seq in 0..20 {
+            chatty.push(block("chatty", seq, 1000 + seq as i64));
+        }
+
+        history.put_blocks(&[heavy]).await.unwrap();
+        history.put_blocks(&chatty).await.unwrap();
+
+        let (heavy_bytes, heavy_blocks) = history.measure_session_bytes("heavy").await.unwrap();
+        let (chatty_bytes, chatty_blocks) =
+            history.measure_session_bytes("chatty").await.unwrap();
+
+        assert_eq!(heavy_blocks, 1);
+        assert_eq!(chatty_blocks, 20);
+        assert!(
+            heavy_bytes > chatty_bytes * 10,
+            "one 40 KB block outweighs twenty short ones: {heavy_bytes} vs {chatty_bytes}"
+        );
+        // Measured as the *logical* record, so an externalized payload still
+        // reports its uncompressed size rather than the ~40 bytes that highly
+        // repetitive text compresses to. Ranking by stored bytes would rank
+        // partly by compressibility.
+        assert!(
+            heavy_bytes >= 40_000,
+            "the uncompressed length is what is reported: {heavy_bytes}"
+        );
+    }
+
+    /// The largest sessions are named, because "which session" is the question a
+    /// full disk actually poses.
+    #[tokio::test]
+    async fn the_report_names_which_sessions_hold_the_most() {
+        let (history, _dir) = history().await;
+        for (session, size) in [("small", 100), ("largest", 50_000), ("middle", 5_000)] {
+            let mut only = block(session, 0, 1000);
+            only.text = "y".repeat(size);
+            history.put_blocks(&[only]).await.unwrap();
+            history.record_session_bytes(session).await.unwrap();
+        }
+
+        let largest = history.largest_sessions(2).await.unwrap();
+
+        assert_eq!(
+            largest.iter().map(|s| s.session_id.as_str()).collect::<Vec<_>>(),
+            vec!["largest", "middle"],
+            "largest first, and bounded to what was asked for"
+        );
+
+        let (total, measured) = history.total_bytes().await.unwrap();
+        assert_eq!(measured, 3);
+        assert!(total >= 55_100, "every measured session is counted: {total}");
+    }
+
+    /// Growth is a difference between two observations, so a session measured once
+    /// must report *unknown* rather than zero. Reporting zero would claim a
+    /// session is stable on the strength of never having been looked at twice.
+    #[tokio::test]
+    async fn a_first_measurement_reports_no_growth_rather_than_zero_growth() {
+        let (history, _dir) = history().await;
+        history.put_blocks(&[block("s1", 0, 1000)]).await.unwrap();
+
+        let first = history.record_session_bytes("s1").await.unwrap();
+
+        assert!(first.bytes > 0);
+        assert_eq!(first.grew_by, None, "one observation is not a trend");
+        assert_eq!(first.grew_over_ms, None);
+    }
+
+    #[tokio::test]
+    async fn growth_is_reported_once_a_session_has_grown() {
+        let (history, _dir) = history().await;
+        history.put_blocks(&[block("s1", 0, 1000)]).await.unwrap();
+        let before = history.record_session_bytes("s1").await.unwrap();
+
+        let mut added = block("s1", 1, 2000);
+        added.text = "z".repeat(10_000);
+        history.put_blocks(&[added]).await.unwrap();
+        let after = history.record_session_bytes("s1").await.unwrap();
+
+        assert_eq!(after.grew_by, Some(after.bytes - before.bytes));
+        assert!(after.grew_by.unwrap() >= 10_000, "{:?}", after.grew_by);
+    }
+
+    /// A pass that changes nothing must not flatten the baseline, or a genuinely
+    /// growing session reads as stable the moment two passes happen to agree.
+    #[tokio::test]
+    async fn an_unchanged_measurement_keeps_the_earlier_baseline() {
+        let (history, _dir) = history().await;
+        history.put_blocks(&[block("s1", 0, 1000)]).await.unwrap();
+        history.record_session_bytes("s1").await.unwrap();
+
+        let mut added = block("s1", 1, 2000);
+        added.text = "z".repeat(10_000);
+        history.put_blocks(&[added]).await.unwrap();
+        let grown = history.record_session_bytes("s1").await.unwrap();
+
+        // Nothing changed between these two.
+        let again = history.record_session_bytes("s1").await.unwrap();
+
+        assert_eq!(
+            again.grew_by, grown.grew_by,
+            "re-measuring an unchanged session must not report it as stable"
+        );
+    }
+
+    /// Pruning has to be visible as a *negative* delta. A field that only ever
+    /// reported increases would make a working archive indistinguishable from a
+    /// stalled one.
+    #[tokio::test]
+    async fn pruning_shows_up_as_a_negative_delta() {
+        let (history, _dir) = history().await;
+        let mut early = block("s1", 0, 1000);
+        early.text = "a".repeat(20_000);
+        history.put_blocks(&[early, block("s1", 1, 2000)]).await.unwrap();
+        history.record_session_bytes("s1").await.unwrap();
+
+        history.prune_below("s1", 0).await.unwrap();
+        let after = history.record_session_bytes("s1").await.unwrap();
+
+        assert!(
+            after.grew_by.unwrap() < -19_000,
+            "pruning reads as shrinkage: {:?}",
+            after.grew_by
+        );
+    }
+
     // ---- Batch selection --------------------------------------------------
 
     /// Ordered by last check so a bounded batch rotates through every session.

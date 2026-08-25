@@ -412,5 +412,7 @@ pub(crate) fn server_event(kind: &str, text: String, data: Option<serde_json::Va
         stability: "stable".to_string(),
         source: "server".to_string(),
         created_at_ms: chrono::Utc::now().timestamp_millis(),
+        // Server-authored, so it happens once, now.
+        started_at_ms: None,
     }
 }

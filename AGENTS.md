@@ -34,7 +34,8 @@ those, and duplicating them here only creates a second copy to forget.
 | System design, data flow | `docs/architecture.md` |
 | Endpoint contracts | `docs/api-design.md`, `docs/api-v1.openapi.json` |
 | Tables, indexes, migrations | `docs/database-schema.md` |
-| UI structure and conventions | `docs/frontend-architecture.md` |
+| How the frontend is built | `docs/frontend-architecture.md` |
+| Panes, surfaces, components, tokens | `docs/ui-layout.md` |
 | Where files live, what a setting does | `docs/configuration.md` |
 | What an adapter may send, and when | `docs/session-protocol.md` |
 | How history is kept, replayed, pruned | `docs/storage.md` |
@@ -116,8 +117,15 @@ changes faster than the shipped adapter catches up. Copying bundled adapters int
 it would freeze them at install time and break the next upgrade.
 
 `SYLPH_BROWSE_ROOTS` is colon-separated and *adds* to `$HOME`, which is always
-browsable. It bounds `/api/v1/fs/*`, the only endpoint that lists directories the
-client names — so widening it widens what any client of this backend can enumerate.
+browsable. It bounds **two** things, and the second is the larger one: what
+`/api/v1/fs/*` may *enumerate*, and what a client may *name* as a session's
+`workdir` on `POST /sessions` and `POST /sessions/import`. A workdir is the
+`current_dir` of a spawned agent, so widening this setting widens where arbitrary
+code may run — not merely what names are visible. The Quick Start directory is
+permitted in addition, always, since both `SYLPH_HOME` and `paths.quick_start_dir`
+can move it outside `$HOME`. One key rather than two because `/fs/*` exists solely
+to name a workdir, so a second key would have to be kept equal to this one; see
+`docs/configuration.md` § `browse_roots` bounds where agents run.
 
 `SYLPH_SOUL` points at the identity preamble. An explicit *empty* value is
 meaningful rather than missing — the protocol reserves it for "no identity" — and a
@@ -181,7 +189,7 @@ untested.
 **Testing "it streams" needs a runner slower than one render.** Every E2E spec
 asserted final state against a mock runner that finished in well under a second,
 so a client that dropped every mid-turn event passed the entire suite. The `paced`
-scenario in `frontend/e2e/fixtures/runners/e2e/adapter.py` spaces its stages a
+scenario in `frontend/e2e/fixtures/adapters/e2e/adapter.py` spaces its stages a
 second apart, and `e2e/streaming.spec.ts` asserts an earlier stage is on screen
 while a later one has not been emitted yet. Asserting only the end state cannot
 distinguish streaming from batching.
@@ -255,7 +263,7 @@ this bug and not a product one.
 
 **An E2E fixture that cannot be discovered fails the suite while looking like a
 product bug.** Discovery requires `adapter.sh`; after the v1 runner path was deleted,
-`frontend/e2e/fixtures/runners/e2e/` still held only `runner.sh`, so the backend
+`frontend/e2e/fixtures/adapters/e2e/` still held only `runner.sh`, so the backend
 reported `Agent discovery: 0 usable, 0 broken` and every spec that created a session
 or ran a turn failed against an agent that did not exist. The failures read as broken
 features, not as a missing fixture. When a protocol version changes, the fixture is
@@ -300,6 +308,30 @@ read `entry.get("id")` from `claude`'s model catalogue, which answers
 opened, presenting as a UI bug in the composer's model control. When adapting a vendor
 shape, print one real payload rather than inferring field names — two of three guesses
 about this CLI's shapes were wrong, and each one compiled.
+
+This is the most-repeated defect in this file: **six instances so far**, each one
+compiling, each surfacing one or two layers from the cause. They are catalogued
+individually below (`pi`'s `set_model`, the invented `task_*` subtypes,
+`AskUserQuestion`'s `selectedOptions`, `requestedSchema` versus `requested_schema`,
+and `pi`'s never-emitted `agent_start`) because the *specific* keys are what a reader
+needs. The general rule is the one above, plus three shapes worth knowing before
+writing any adapter:
+
+- **A type in a vendor's event union is not a promise that anything emits it.** `pi`
+  0.84.4 declares `agent_start` and `agent_end`, documents them, and has **zero emit
+  sites** in its shipped bundle — its `Task` tool builds a nested agent whose events
+  reach an internal callback that never touches the transport. An adapter written
+  from the type definitions ships a tree that never populates. Grep the
+  implementation for emit sites, not the types for declarations.
+- **An SDK object's attribute names and its JSON wire names are different
+  namespaces.** The MCP spec says `requestedSchema`; the Python SDK's dataclass field
+  is `requested_schema` with the camelCase form as a Pydantic *alias*, and `claude`
+  passes `__dict__` without `by_alias=True`. So the spec-correct key reads `None`
+  against a spec-compliant SDK. When the payload came from an SDK rather than off a
+  socket, read the Python side.
+- **Ask the binary.** Grepping the 321 MB `claude` binary for a key is cheap and
+  decisive: `selectedOptions` occurs nowhere in it, which would have caught that
+  instance before it shipped.
 
 **serde's `rename_all` does not rename fields inside enum variants.** An internally
 tagged enum needs `rename_all_fields` as well, or camelCase wire fields inside a
@@ -420,8 +452,10 @@ directory" must re-filter for exact equality after normalizing trailing slashes 
 `api::archive` and `api::workspaces` share `normalize` for exactly this.
 
 **`list` does not collapse fork lineage, but `search` does.** Delegated sessions
-are rows of their own and are 51% of a real local archive (2238 of 4416
-non-empty), so a listing that does not fold them into their parent is half noise.
+are rows of their own and are half of a real local archive (2316 of 4606
+non-empty, re-censused after the archive grew to 4922 sessions; it was 2238 of
+4416, so the ratio is stable and worth trusting over either absolute), so a
+listing that does not fold them into their parent is half noise.
 `list` carries no parent column, so lineage costs one `show` per candidate —
 `Client::session_metadata` is the cheapest shape, but see the measurement above:
 11.5 ms and ~2.5 KB, not the ~0.5 ms once recorded here.
@@ -563,6 +597,31 @@ a different row. The symptom is a click that appears to do nothing, three layers
 the cause. `lib/select-list.ts` returns each row with its own index, or `null` when it
 cannot be chosen, so no renderer computes one and the two spaces cannot exist.
 
+The corollary for a surface holding *two* lists: **one cursor per list, plus an
+explicit owner for the focused pane.** The history overlay ran a single cursor across
+a workspace pane and a session pane, so `Tab` and `ArrowDown` disagreed about which
+was active — the same dual-cursor defect one level up. Two `useSelectList` instances
+with a named owner cannot disagree, because there is no shared index to disagree
+about.
+
+**A navigation list must omit `aria-selected` entirely, not report `false`.** Reporting
+`false` on every row claims a selection state the list does not have, and a screen
+reader repeats it per row. The combobox-over-listbox pattern does not require the
+attribute on rows that are navigation targets rather than choices — so leave it off,
+and keep it only where a row genuinely is or is not the current value.
+
+**`aria-activedescendant` belongs on the focused control, not on the list it names.**
+This is the one an automated checker cannot catch, and it cost a VoiceOver pass to
+find. Where the input and the listbox are the *same* node, putting it on the listbox
+is accidentally correct — which is why the command palette worked. Where they are two
+nodes, as in the history overlay, focus sits on the input while the attribute sits on
+the popup, and arrowing through sessions announces **nothing at all**: the cursor moves
+without focus moving, and the announcement follows focus. axe passes either way,
+because it verifies the id resolves and cannot verify that a screen reader will walk
+the relationship. Third instance this session of well-formed ARIA that a real reader
+still fails — **axe checks that the graph is valid; a screen reader walks it.** Both
+are needed, and neither substitutes.
+
 **A `role="menu"` may not contain a text field.** Adding a filter to a menu is not a
 styling change: a menu may only contain menu items, so an `<input>` inside one is
 invalid ARIA that axe reports and that leaves a screen reader with a control its
@@ -675,10 +734,31 @@ until two delegates run simultaneously. Key such state by `(trajectory, index)`.
 
 **Visible text beats `title` for a control's accessible name.** A per-card "focus"
 button with `title="Focus Explore"` is announced as "focus" — so twenty delegations
-present twenty controls a screen reader cannot tell apart. Use `aria-label`. And
-note the converse when testing: Playwright's `getByRole` name matching is a
-substring match, so `{ name: "Explore" }` also matches "Focus Explore"; distinct
-names still need `exact: true`.
+present twenty controls a screen reader cannot tell apart. Use `aria-label`.
+
+**Playwright's name and text matching is a case-insensitive substring, and this has
+bitten three times in one file.** `getByRole({ name: "Explore" })` also matches
+"Focus Explore"; `getByText("slowest")` also matches the "slowest first" button
+beside it, so a count assertion read 1 whether or not any row was badged. Distinct
+names need `exact: true`.
+
+Two harder forms, both of which pass indefinitely first:
+
+- **A name that is a substring of a *fallback* name.** `trajectoryName` answers
+  "Subagent" for a nameless node, and `{ name: "Agent delegation" }` matches
+  "Subagent delegation". The collision exists only in the states that render a
+  nameless node, so it passes until it fails in a state that is never the one under
+  test — presenting as the card being wrong rather than the locator being loose.
+  This appeared in four places in `delegation.spec.ts` while the *button* two lines
+  below one of them was already guarded with `exact`: the rule was known, applied to
+  the control, and missed on the region it labels.
+- **A negative assertion on a container.** `toContainText` walks the subtree, so any
+  `not.toContainText(X)` on a trajectory card is coupled to copy *anywhere beneath
+  it* — including fixture summary text a later change adds. Such a locator can also
+  be satisfied for the wrong reason: one asserting a delegate's outcome was matching
+  the agent's prose the whole time, so the spec named the thing and never observed
+  it. A locator that passes for the wrong reason is worse than one that fails,
+  because it retires the question.
 
 **A collapsed subtree must report what it hides, or collapsing is lossy.** Hiding
 a delegation's work by default is only defensible if a failure three levels down is
@@ -767,7 +847,46 @@ then exist, on different turns, and the earlier card still says the work never
 finished when it demonstrably did. The flag is reported only by `task_started`, so the
 adapter re-attaches it to every later phase — the server reads whichever row it finds.
 Keep the exclusion narrow: an ordinary delegation left open is the permanent spinner
-the sweep exists to prevent.
+the sweep exists to prevent. Startup recovery deliberately *ignores* the flag, in both
+tiers, because a dead process cannot report — so "abandoned after a restart" stays a
+truthful terminal state and must remain distinguishable from "still running in the
+background".
+
+**Skipping a step that writes a wrong record can delete the right one.** That
+exclusion removed the contradiction and, unnoticed, the delegation: a trajectory with
+no close carries no text, so it folded into no block and its children reattached to the
+root — the flattening `span` exists to prevent, reappearing one layer down. The
+roadmap recorded the item as closed. When a fix is "stop writing X", check what still
+writes the *record*: an exception to a producer can make its consumer's default the new
+bug, and the observable difference between "wrongly described" and "absent" is one card
+nobody looks for. It also only ever helped `claude`; every other adapter reports no
+flag and kept getting the contradicting close.
+
+**A cross-turn `span` fabricates a trajectory on the turn it lands on.** A late outcome
+names its host from an earlier turn, and promotion-by-reference then made the sweep
+close a host that had already succeeded — a failure record for work that never ran
+there. The obvious repair, "skip an id another turn declared", is *not available*:
+consolidation moves the earlier turn's rows to `history.db`, so the evidence of which
+turn owned the host is gone by the time the late outcome arrives. The decidable rule is
+that some row *on this turn* must carry the id as its `stream_id`. Anything inferring
+structure from a pointer has to ask whether the pointer's target is even in scope.
+
+**When correct behaviour is the *withholding* of a signal, a timing failure is
+indistinguishable from the feature working.** A fan-out spec's live window closed
+mid-run under load, so a badge that is deliberately withheld after settling was simply
+absent — reading as a broken overview rather than as a hold that was too short. The
+window is consumed from both ends: it opens before the browser paints, and the whole
+assertion sequence has to fit inside it rather than merely start there. Assert the
+window is still open immediately before each dependent assertion, so a closed one fails
+saying so.
+
+**A fixture's *timing* is part of the contract, not only its size.** The server stamps
+`createdAtMs` on arrival, so a scenario emitting its whole tree inside one millisecond
+gives every bar equal length — and a client computing durations from the wrong field
+then passes the entire suite. Related: a delegate that forwards nothing cannot be timed
+from its interior at all, so "each delegate forwards at least one event" is a fixture
+*requirement* rather than a nod to realism. This is the sibling of the size rule
+recorded above; both say the fixture's shape is the test.
 
 **Focus mode re-roots to `children`, which discards a promoted host's own row.** Right
 for a declared `subagent`, whose row carries no content of its own; wrong for a
@@ -808,6 +927,46 @@ whose event is re-folded from its phases every build: those are the rows most wo
 skipping and were the only ones that could never be skipped. Before trusting a memo,
 check which object the producer actually preserves — `lib/timeline-rows.test.ts` pins
 it.
+
+**`useState(derived)` captures a snapshot, and with streamed data the snapshot is
+usually stale.** React uses a `useState` initializer once. Both
+`useState(status.failed)` and `useState(node.status === "failed")` in `timeline.tsx`
+read a flag that arrives *after* mount: a tool call mounts when its `tool_call`
+arrives and its failure is known when the `tool_result` does, and a delegation's
+status escalates when a descendant fails, which is always later. So
+auto-expand-on-failure fired only when both landed in one render — meaning only
+against a mock fast enough to batch them, which is the whole suite. The trajectory
+instance was the worse one: a failed branch stayed collapsed over the tool that
+failed, which is the collapsing-must-not-be-lossy rule breaking silently.
+
+The repair is derived state with a *remembered override*, not an effect. An effect
+that force-opens on the transition re-opens a branch the user deliberately collapsed
+every time another descendant fails. And note the second bug hiding in the same
+expression: `expandAll ?? open` silently outranked the per-row toggle. **Three inputs
+to one boolean need a stated precedence, or two of them are latent bugs** — here
+expand-all, then the user's toggle, then the derived default.
+
+**A publishing gap is indistinguishable from a missing measurement.**
+`history::consolidate` computed and stored `started_at_ms`; `block_to_event` did not
+put it on the wire. A consolidated block is keyed on its close, so every settled
+trajectory reported an end and no beginning — and a turn switches to consolidated
+history moments after settling, so that is every delegation a user scrolls back to.
+The delegation overview was therefore *designed* around durations being
+unreconstructible after settle, with a documented lower-bound fallback, because the
+value looked impossible to obtain while it sat in the table the whole time. Before
+building around a limit, check whether the producer already records what you need and
+only the wire drops it.
+
+**Making the honest rows exact is what lets a dishonest one be crowned.** Publishing
+that field turned every settled duration exact, which for the first time let the
+overview offer a rank — and the badge landed on a row labelled "never finished". A
+trajectory still open when its turn ended acquires an end timestamp from the server's
+close or the turn's own end, so the subtraction is exact over a span whose real end
+nobody reported; its true duration can only be longer, so it cannot lose a comparison
+and must not win one. **An "is it sound" check on the arithmetic is not an "is it
+finished" check on the subject**, and the rank needs both. While every row was a
+bound no rank was offered at all, so the gap was unobservable: removing one
+degradation can expose a second that the first was masking.
 
 **Two nodes naming each other silently delete both.** A cycle in `span` pointers is
 not merely a recursion hazard. Attachment holds the first as an orphan waiting for
@@ -868,6 +1027,65 @@ error: all answered is *"Your questions have been answered … you can now conti
 these answers in mind"*, while one of two is the weaker *"The user answered …"*. Both
 look like success from the outside.
 
+**A setting that carefully bounds one endpoint makes the unbounded one invisible.**
+`SYLPH_BROWSE_ROOTS` was documented in three places with 16 tests behind it, so
+containment read as solved — while `POST /sessions` called `Path::exists` and spawned
+an agent in any directory a client named. The *narrower* capability being visibly
+bounded is what kept the wider one from being looked at, and the roadmap's own note
+that enumeration "is the part that matters" was load-bearing in the wrong direction.
+When a bound exists, ask which operations it does *not* cover.
+
+**A write cannot canonicalize its own target, and a check on a resolved path does not
+govern an operation on an unresolved one.** Two holes of the same shape, found a day
+apart. An `overwrite: true` upload wrote *through* a pre-existing symlink out of the
+workdir, because the target does not exist yet — so containment sits on the parent and
+the final component is appended verbatim. And a read canonicalized for the check and
+then opened the original path, so a symlink *inside* the workdir pointing out of it
+passed and was followed.
+
+The rule that fixes both: **derive the path you operate on from the check itself** —
+canonicalize once, into one variable, and use that variable. A `contain_in_any` check
+paired with a path it did not produce is not a bound. Note also that `remove` was
+already correct and its doc comment stated the exact invariant `upload` violated, two
+hundred lines away: when one function documents an invariant about a shared idiom,
+every other user of that idiom needs checking against it.
+
+**Killing a subshell does not kill what it exec'd, and the survivor answers on the
+port.** `scripts/measure-bundle.sh` served a route to measure it, backgrounded
+`npx next start` in a subshell, and killed the subshell — leaving `next`'s exec'd
+child holding port 3199. The *next* run then measured that server, which serves its
+own older build, so the served HTML named chunk hashes the current build never
+produced.
+
+It surfaced as `referenced chunk is missing from the build`, which points at the
+build. Three theories died before the right one: a stale `.next`, a rebuild
+mid-serve, and a `next/dynamic` boundary. The chunk existed nowhere in `.next`
+because it belonged to a build that no longer existed. `lsof -ti tcp:PORT` is the
+one-command answer, and worth reaching for early whenever output describes a tree
+that does not match what is on disk — it is the network-facing sibling of the
+mid-write phantom-error pitfall below.
+
+**This bit twice in one session, the second time as an unrunnable E2E suite.** A
+backend surviving on 4318 from an interrupted run makes `npm run e2e` fail before any
+spec, because `reuseExistingServer: false` — correctly — refuses to trust it. Playwright
+names the cause plainly (`is already used`), so the cost there is only that a run
+looks like a product failure until the message is read; the expensive version is the
+one that *succeeds* against the wrong server. Before diagnosing either, clear the
+suite's ports:
+
+```sh
+for p in 4318 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done
+```
+
+Any script in this repo that starts a server to measure or test something needs the
+process-group kill, the busy-port refusal, and an error that names the survivor. Two
+of the three are only discoverable after the fact.
+
+Three things together fix it, and any one alone still fails silently: run the job in
+its own process group (`set -m`) and kill the group; refuse a busy port instead of
+measuring whatever is on it; and make a missing artifact explain the likely cause
+rather than only naming the file.
+
 **A default that is one machine's absolute path is wrong everywhere else.**
 `TRACEDB_BIN` defaulted to `$HOME/Workspace/trace-db/target/release/trace-db` — a
 sibling checkout that exists on exactly one machine, so every other install got a
@@ -900,6 +1118,57 @@ and merely improbable until closing delegated trajectories put a query and a
 per-trajectory emit inside it. Three integration tests then failed *by timing*, a
 different subset each run, which reads as flakiness rather than as ordering. Write
 the row that makes the next action legal first.
+
+**A setting that bounds one endpoint makes the unbounded one invisible.**
+`SYLPH_BROWSE_ROOTS` bounded what `/api/v1/fs/*` may *enumerate*, was documented as
+such in three places, and had 16 containment tests behind it — so path containment
+read as solved. Meanwhile `POST /sessions` called `Path::exists` on `workdir` and
+nothing else, and that string is the `current_dir` of a spawned agent: any client of
+this backend could start an agent anywhere on the filesystem. The *narrower*
+capability being carefully bounded is what kept the wider one from being looked at,
+and the roadmap note saying enumeration "is the part that matters" was true when
+written and then load-bearing in the wrong direction. When a setting bounds one
+endpoint, enumerate every other endpoint consuming the same kind of value, and rank
+them by what the value lets a caller *do* rather than by how the setting is named.
+Both paths now share `paths::contain_in_any`, because a containment rule written
+twice is one that will diverge.
+
+**A write cannot canonicalize its own target, so containment on the parent leaves
+one component unchecked.** `canonicalize` needs an existing path and the file
+usually does not exist yet, so every write endpoint here contains the *parent* and
+appends the final name verbatim. That is correct and incomplete: a pre-existing
+symlink at that last component is inside the root by name, points wherever it
+likes, and `fs::write` follows it — so `overwrite` was a write outside the workdir,
+arriving through the one component the check could not see. `remove` was already
+safe by construction (unlinking never touches a target) and its doc comment even
+asserted that a final escaping symlink is "only ever unlinked, never opened or
+written to" — an invariant that was true of `remove` and false of `upload` two
+hundred lines away. Inspect an existing entry with `symlink_metadata`, then resolve
+and re-check; and when one function documents an invariant about a shared
+containment idiom, check every other function that uses the idiom against it.
+Verify such a fix by reverting it and watching the test fail — otherwise the test
+only proves it agrees with the code.
+
+**Canonicalizing a stored path changes every comparison against it.** Journalling
+the canonical `workdir` — right, since it defeats a symlink re-pointed after the
+check and stops two spellings becoming two sidebar groups — silently split the Quick
+Start group, because `/workspaces` compared that canonical value against the
+*configured* `quick_start_dir` and reported `isQuickStart: false` for every Quick
+Start session. Nothing errored: the row and the sessions it counts simply stopped
+being the same directory. Anything that groups, compares, or displays a path has to
+be re-checked when the recorded spelling changes, and on macOS this is not an edge
+case — `/tmp`, `os.tmpdir()`, and everything under `/var` all differ from their
+canonical form, so the bug is invisible on Linux CI and certain on a developer's
+machine.
+
+**A fixture's comment is not evidence about the fixture.** The E2E config set
+`SYLPH_BROWSE_ROOTS: "/tmp"` under a comment saying "the specs create sessions in
+`/tmp`". They have not since `mkdtemp(os.tmpdir())` was introduced — that is
+`/var/folders/…/T` on macOS, not under `/tmp` — and nothing could observe the
+disagreement while the value was unenforced. Enforcing it would have failed a dozen
+specs at once, reading as a product regression. Read what a fixture's values
+actually resolve to rather than what its comment claims, especially before making
+something depend on them.
 
 **Seeding a file keyed on its own absence overrides a deliberate deletion.**
 `SOUL.md` is seeded on first run, and deleting it means "no identity" — which the

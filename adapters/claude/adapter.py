@@ -98,9 +98,33 @@ SUPPORTED_DIALOG_KINDS = [
     "mcp_url_elicitation",
 ]
 
+# What `--permission-mode` actually accepts, enumerated by trying every candidate
+# against claude 2.1.245 rather than read off the CLI's own error text — which lists
+# six values and omits `default`, a value it nevertheless accepts. So the vendor's
+# message is not the authority here either; the set below is what the parser took.
+#
+# `ask` is **rejected**, and it is the value `docs/session-protocol.md`'s own examples
+# use for this field. Passed through unvalidated it is a total session failure with a
+# misdirected diagnosis: commander rejects it at parse time, so claude exits 1 before
+# answering `initialize`, and the adapter reported "claude did not answer initialize in
+# time" — a *timeout* message for an argument error, which sends the investigation to
+# the link layer while the real cause sits in one argv entry. The vendor's complaint
+# goes to stderr, where it is captured but not part of the error the server reports.
+#
+# So an unrecognized mode is substituted rather than forwarded: a session that runs
+# under the default policy and says so beats a session that cannot start.
+PERMISSION_MODES = {
+    "default", "acceptEdits", "auto", "bypassPermissions", "manual",
+    "dontAsk", "plan",
+}
+
 # Claude permission modes that route decisions to us rather than deciding alone.
 # `bypassPermissions` auto-approves before any callback runs, so an approval
 # prompt under it would never fire — worth knowing rather than discovering.
+#
+# `auto` and `dontAsk` are absent because both decide without consulting a callback;
+# asking for the channel under them would promise a prompt that never arrives, which
+# is the same mistake as declaring a capability the vendor lacks.
 INTERACTIVE_MODES = {"default", "acceptEdits", "plan", "manual"}
 
 class UnknownConfig(Exception):
@@ -185,14 +209,20 @@ class Session:
         self.native_session_id = None
         self.pending_control = {}       # our control id -> threading.Event box
         self.tool_names = {}            # tool_use_id -> tool name, for results
-        # (trajectory, content block index) -> in-flight block.
+        # (envelope `parent_tool_use_id`, content block index) -> in-flight block.
         #
-        # Keyed by trajectory and not by index alone, which was a correctness bug
+        # Keyed by the delegation and not by index alone, which was a correctness bug
         # rather than a tidiness one: claude numbers content blocks per message, so
         # two concurrent subagents both open index 0, and one index-keyed map made
         # each one's deltas append to the other's text. Invisible until two
         # delegates run at once, and then it is corrupted output, not a layout
         # glitch.
+        #
+        # The key is the *raw* envelope tag, deliberately, not the trajectory
+        # `_delegate_of` resolves it to. The tag is the only part the vendor promises
+        # is identical across a block's three phases; a resolution is derived from
+        # tables that grow mid-turn, so keying by it lets a notification arriving
+        # between a block's start and its delta orphan the block entirely.
         self.blocks = {}
         self.subagent_tools = set()     # tool_use_ids that are subagent spawns
         # tool_use_id -> the trajectory the spawning Task call itself ran in, so a
@@ -215,6 +245,18 @@ class Session:
         # delegate that actually produced it; with several, claude forwards no
         # interior at all, so there is nothing to attribute.
         self.host_tasks = {}
+        # host tool_use_id -> the trajectory its forwarded output was *first*
+        # attributed to, latched for the life of the link.
+        #
+        # `_delegate_of` reads a table that grows while a turn runs, so asking it
+        # twice about one host can answer differently: before `task_started` the only
+        # answer is the host, after it the sole delegate. Unlatched, one delegate's
+        # output is split across two nodes at whatever instant the notification
+        # happened to arrive — the earlier half under the container, the later half
+        # under the delegate — and neither node is wrong, so nothing reports it.
+        # Latching makes the attribution a property of the stream rather than of
+        # arrival order.
+        self.host_attribution = {}
         # task id -> its host, the inverse of the above. `task_updated` carries no
         # `tool_use_id`, so a close would otherwise land at the root while the
         # trajectory it closes sits inside a container — leaving the container open
@@ -268,6 +310,14 @@ class Session:
         ]
 
         mode = permission_mode or flags.get("mode") or "default"
+        if mode not in PERMISSION_MODES:
+            # Loudly, because substituting a permission policy silently is exactly the
+            # kind of help an adapter must not give: the user asked for one policy and
+            # gets another, and only this line says so. Forwarding it instead kills the
+            # session with a message that names the wrong layer.
+            log("claude does not accept --permission-mode {!r}; using 'default'."
+                " Accepted: {}".format(mode, ", ".join(sorted(PERMISSION_MODES))))
+            mode = "default"
         argv += ["--permission-mode", mode]
         # Routing permission decisions to us over stdio is the whole point; under
         # a bypassing mode Claude decides before any callback, so asking for the
@@ -830,15 +880,26 @@ class Session:
                 return "destructive"
         return "safe"
 
-    def _stream_event(self, nested, parent=None):
+    def _stream_event(self, nested, host=None):
         """Claude's partial-message stream, projected onto Sylph event kinds.
 
-        `parent` is the envelope's `parent_tool_use_id`: the delegating call this
-        output came from, or None for the root agent's own work. It becomes the
-        event's `span`, which is what lets the timeline nest a delegation to any
-        depth (`docs/session-protocol.md` § Delegated trajectories).
+        `host` is the envelope's `parent_tool_use_id`: the delegating call this output
+        came from, or None for the root agent's own work. Resolved through
+        `_delegate_of`, it becomes the event's `span`, which is what lets the timeline
+        nest a delegation to any depth (`docs/session-protocol.md` § Delegated
+        trajectories).
+
+        **The block map is keyed by the envelope's own tag, never by the resolved
+        trajectory.** A resolution is derived from tables that grow while the turn
+        runs; the tag is what the vendor guarantees is identical across a block's
+        `start`, `delta` and `stop`. Keyed by the resolution, a `task_started` landing
+        between a block's start and its first delta moves the key out from under an
+        open block: the delta looks up a tuple that does not exist and returns, the
+        `stop` misses too, and the block is never completed. That is silent loss of a
+        whole content block — the text is dropped, no `completed` is ever emitted, and
+        the node stays open — with nothing at any layer reporting it.
         """
-        parent = self._delegate_of(parent)
+        parent = self._delegate_of(host)
         ntype = nested.get("type")
 
         if ntype == "message_start":
@@ -890,7 +951,10 @@ class Session:
                     self.subagent_parent[stream_id] = parent
                     kind = "subagent"
 
-            self.blocks[(parent, index)] = {
+            # Keyed by the envelope tag; `span` carries the resolution, so every later
+            # phase of this block reports the trajectory its `started` claimed rather
+            # than re-deriving one that may have changed underneath it.
+            self.blocks[(host, index)] = {
                 "kind": kind, "id": stream_id, "name": name, "text": text,
                 "span": parent,
             }
@@ -902,7 +966,7 @@ class Session:
 
         if ntype == "content_block_delta":
             index = nested.get("index", 0)
-            block = self.blocks.get((parent, index))
+            block = self.blocks.get((host, index))
             if not block:
                 return
             delta = nested.get("delta") or {}
@@ -923,7 +987,7 @@ class Session:
 
         if ntype == "content_block_stop":
             index = nested.get("index", 0)
-            block = self.blocks.pop((parent, index), None)
+            block = self.blocks.pop((host, index), None)
             if not block:
                 return
             data = None
@@ -1068,13 +1132,39 @@ class Session:
         forwards no interior at all, so there is nothing to attribute and a guess
         would put one delegate's work under another — the corruption this whole
         change exists to prevent.
+
+        **The answer is latched.** `host_tasks` grows while the turn runs, so this
+        question has a different answer before and after `task_started`, and the
+        forwarded stream does not pause for it. Answering freshly each time splits one
+        delegate's output across the container and the delegate at whatever instant the
+        notification landed; both halves render, so no layer reports the split. The
+        first answer therefore stands for the rest of the link.
+
+        A host whose only delegate is *itself* — a `Task`, which claude reports under
+        the spawning id — resolves to itself either way, and is excluded explicitly so
+        the latch cannot record an identity mapping as though it were a re-label.
+
+        Measured caveat, and the reason this is a guard rather than a feature: on claude
+        2.1.245 no host both forwards interior events and multiplexes.
+        `--forward-subagent-text` forwards only for the built-in `Task`, whose
+        notifications reuse the host id and so never populate `host_tasks`; `Agent` and
+        `Workflow` populate it and forward nothing. So the re-label cannot fire today.
+        It is kept because the vendor adding forwarding for `Agent` would activate it
+        silently, and that is the shape a whitelist-shaped bug takes here.
         """
         if not host:
             return host
+        latched = self.host_attribution.get(host)
+        if latched:
+            return latched
         tasks = self.host_tasks.get(host)
+        resolved = host
         if tasks and len(tasks) == 1:
-            return next(iter(tasks))
-        return host
+            sole = next(iter(tasks))
+            if sole != host:
+                resolved = sole
+        self.host_attribution[host] = resolved
+        return resolved
 
     def _task_notification(self, subtype, msg):
         """A delegate's lifecycle, reported by the host tool rather than streamed.
@@ -1221,9 +1311,12 @@ class Session:
         # delegate — which is why progress is a `delta` however it was announced.
         if trajectory not in self.task_trajectories:
             self.task_trajectories[trajectory] = host
+            # `name or None`, not a placeholder: same reasoning as `_task_label`. An
+            # unnamed delegation is journaled, and a guess written into `name` is
+            # indistinguishable later from a name the agent chose.
             event("subagent", "started",
                   streamId=trajectory, span=span,
-                  name=name or "Subagent", data=data)
+                  name=name or None, data=data)
             return
 
         event("subagent", "delta",
@@ -1236,16 +1329,28 @@ def _task_label(content):
     "Task" is the tool's name, not the work's: a timeline of six identical rows
     reading "Task" is unreadable. The input carries better, but it only arrives as
     streamed partial JSON, so at `started` there is usually nothing yet — the
-    trajectory is renamed by the `delta` that carries its parsed brief. Falling
-    back to "Subagent" rather than "Task" keeps the vendor's tool name out of the
-    UI, since the server's vocabulary is trajectories.
+    trajectory is renamed by the `delta` that carries its parsed brief.
+
+    Returns `None` rather than a placeholder when nothing is known yet, and that
+    distinction is the point. `name` means "what this delegation is called", so
+    `None` says nobody knows while a literal asserts a name the adapter cannot
+    support — and the guess does not stay in the UI, it is *journaled*.
+    `history::consolidate` keeps the best name any phase gave a block, so a later
+    `delta` carrying the real brief normally wins; but when the brief never finishes
+    streaming — the delegation fails early, or the link dies mid-input — the
+    placeholder becomes the trajectory's durable name in `history.db`,
+    indistinguishable from one an agent actually chose.
+
+    Display is unaffected: the client's `trajectoryName` already falls back to the
+    same word, so omitting the field renders the identical string. Keeping the
+    vendor's tool name out of the UI is the client's job, and it is doing it.
     """
     payload = content.get("input")
     if isinstance(payload, dict):
         label = payload.get("subagent_type") or payload.get("description")
         if label:
             return str(label)
-    return "Subagent"
+    return None
 
 
 def flatten(content):
@@ -1293,6 +1398,27 @@ CONTROL_COMMANDS = {
 # Builtins, for `source`. Everything the CLI reports arrives in one flat list, and
 # v2 labelled all 46 as `skill` — untrue for `/model`, and the label is what a UI
 # groups by, so the menu grouped builtins under Skills.
+#
+# **This list is known-incomplete, and measurement is the only reason that is known.**
+# Against claude 2.1.245 the CLI reports 46 commands whose entries carry exactly
+# `name`, `description`, `argumentHint`, `aliases` — printed, not inferred — so the
+# vendor supplies **no** builtin/skill discriminator at all, which is why
+# `docs/session-protocol.md` § Two kinds of command assigns this judgement to the
+# adapter. Measured coverage: 4 of 46 are classified correctly, 42 fall through to
+# `skill` (including `clear`, `compact`, `context`, `config`, `doctor`, `mcp` and
+# `usage`, all plainly the CLI's own), and 16 of the 20 names below are not reported by
+# this version at all. Only two user skills exist on this machine's disk, so the
+# fall-through is wrong far more often than it is right.
+#
+# It is deliberately **not** "fixed" by hand-listing the other 42. That would swap one
+# unverifiable list for a longer one, and it cannot even be right in principle: a
+# plugin's command is neither a builtin nor a skill, and nothing in this payload
+# separates the three. So the wrong entries are left rather than pruned — they cost
+# nothing, since only reported names are ever looked up, and removing them would imply
+# the remainder had been verified. `kind`/`configId` classification below is the part
+# that was verified against the CLI and the part that matters: mislabelling `source`
+# mis-groups a menu, while mislabelling `kind` sends `/model` through as prose.
+# Correcting `source` needs a discriminator this vendor does not expose.
 BUILTIN_SOURCES = set(CONTROL_COMMANDS) | {
     "review", "resume", "rewind", "todos", "help", "status", "cost", "memory",
     "export", "hooks", "plugin", "skill-doctor", "loop", "design-sync",

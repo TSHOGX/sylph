@@ -28,6 +28,7 @@ pub struct TestBackend {
     /// every staged attachment.
     temp: TempDir,
     workdir: PathBuf,
+    quick_start_dir: PathBuf,
     cookie: String,
     /// Kept so a test can rebuild the backend against the same journal, which
     /// is how a restart is simulated.
@@ -50,7 +51,7 @@ impl TestBackend {
 
     /// Start a backend whose runners directory contains exactly `runners`.
     pub async fn start_with_runners(runners: &[MockRunner]) -> Self {
-        Self::start_with(runners, None, None).await
+        Self::start_with(runners, None, None, &[]).await
     }
 
     /// Start a backend wired to a stub `trace-db api` process.
@@ -58,7 +59,28 @@ impl TestBackend {
     /// The stub speaks the real line protocol so the client stays on its
     /// production path: one JSON request per line in, one response line out.
     pub async fn start_with_tracedb(tracedb: MockTraceDb) -> Self {
-        Self::start_with(&[MockRunner::success("mock")], Some(tracedb), None).await
+        Self::start_with(&[MockRunner::success("mock")], Some(tracedb), None, &[]).await
+    }
+
+    /// Start a backend that also permits sessions in `extra_roots`.
+    ///
+    /// Needed by the import tests, and the reason is the feature under test rather
+    /// than a harness quirk: an archived session's recorded working directory is
+    /// outside this install's tree, and importing it is refused unless the install
+    /// permits sessions there. Adding the directory as a browse root is exactly the
+    /// configuration that permits it — which is what makes these tests assert the
+    /// real bound rather than route around it.
+    pub async fn start_with_tracedb_permitting(
+        tracedb: MockTraceDb,
+        extra_roots: &[&Path],
+    ) -> Self {
+        Self::start_with(
+            &[MockRunner::success("mock")],
+            Some(tracedb),
+            None,
+            extra_roots,
+        )
+        .await
     }
 
     /// Start a backend whose resolved `SOUL.md` holds `text`.
@@ -67,13 +89,14 @@ impl TestBackend {
     /// requires a readable file — the same order production runs in, where
     /// `SOUL.md` predates the process.
     pub async fn start_with_soul(text: &str) -> Self {
-        Self::start_with(&[MockRunner::success("mock")], None, Some(text)).await
+        Self::start_with(&[MockRunner::success("mock")], None, Some(text), &[]).await
     }
 
     async fn start_with(
         runners: &[MockRunner],
         tracedb: Option<MockTraceDb>,
         soul: Option<&str>,
+        extra_roots: &[&Path],
     ) -> Self {
         let temp = TempDir::new().expect("failed to create temp dir");
         let root = temp.path();
@@ -103,8 +126,15 @@ impl TestBackend {
             ("SYLPH_HOME", root.display().to_string()),
             // The harness root, not `$HOME`: browsing tests must resolve inside the
             // throwaway tree so they assert the real containment rule without
-            // depending on the developer's home directory.
-            ("SYLPH_BROWSE_ROOTS", root.display().to_string()),
+            // depending on the developer's home directory. Colon-separated, as in
+            // production, when a test permits a directory outside its own tree.
+            (
+                "SYLPH_BROWSE_ROOTS",
+                std::iter::once(root.display().to_string())
+                    .chain(extra_roots.iter().map(|path| path.display().to_string()))
+                    .collect::<Vec<_>>()
+                    .join(":"),
+            ),
             (
                 // Absent unless a test opts in, so TraceDB-dependent paths degrade
                 // rather than making every test need an external binary.
@@ -149,10 +179,19 @@ impl TestBackend {
             .expect("failed to build state");
         let cookie = format!("sylph_session={}", state.config.cookie_secret);
 
+        // Resolved once, in the spelling the server records and reports. Every
+        // assertion comparing against these is then comparing against the
+        // configured value as the server resolved it, rather than against a
+        // spelling only the harness ever uses.
+        let quick_start_dir = std::fs::canonicalize(&config.quick_start_dir)
+            .unwrap_or_else(|_| config.quick_start_dir.clone());
+        let workdir = std::fs::canonicalize(&workdir).unwrap_or(workdir);
+
         Self {
             router: router(state.clone()),
             temp,
             workdir,
+            quick_start_dir,
             cookie,
             config,
             state,
@@ -207,6 +246,30 @@ impl TestBackend {
         self.state = state;
     }
 
+    /// Restart against the same journal with the session roots narrowed to
+    /// `roots`.
+    ///
+    /// Exists for one property that cannot be observed any other way: a session
+    /// recorded while its directory was permitted must stay readable after
+    /// configuration stops permitting it. Reading the journal with a *different*
+    /// bound in force is the whole test, and a harness that could only restart
+    /// with identical configuration could not express it.
+    pub async fn restart_with_session_roots(&mut self, roots: &[&Path]) {
+        self.config.browse_roots = roots.iter().map(|path| path.to_path_buf()).collect();
+        // Moved out of the way too. It is permitted unconditionally, so leaving it
+        // pointing inside the tree would keep a root the test meant to remove.
+        self.config.quick_start_dir = self.temp.path().join("no-quick-start");
+        self.restart().await;
+    }
+
+    /// The session workdir, in the spelling the server records.
+    ///
+    /// Canonical, because session creation resolves a client-named workdir before
+    /// journalling it — so this is what a created session's `workdir` reads back
+    /// as, and what `/workspaces` groups by. `TempDir` hands out a path under
+    /// `/var/folders` on macOS, which resolves to `/private/var/folders`; a test
+    /// comparing against the unresolved spelling would be asserting against a
+    /// value the server never produces.
     pub fn workdir(&self) -> &Path {
         &self.workdir
     }
@@ -216,9 +279,20 @@ impl TestBackend {
     /// Exposed so a test asserts against the *configured* directory rather than a
     /// literal path. A test that hardcoded one could only ever confirm that the
     /// endpoint agreed with the test, which is how the endpoint kept reporting a
-    /// directory belonging to another project.
+    /// directory belonging to another project. Canonical for the same reason
+    /// [`Self::workdir`] is.
     pub fn quick_start_dir(&self) -> &Path {
-        &self.config.quick_start_dir
+        &self.quick_start_dir
+    }
+
+    /// A directory outside every configured session root.
+    ///
+    /// Exists because "outside the roots" cannot be asserted with a literal: the
+    /// harness root moves per test, so a hardcoded path would either be
+    /// accidentally inside it or prove nothing about the configured bound. Created
+    /// on demand and cleaned up with the returned guard.
+    pub fn outside_the_roots(&self) -> TempDir {
+        TempDir::new().expect("failed to create a directory outside the roots")
     }
 
     /// Where this backend's adapters live.

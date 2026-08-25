@@ -2,7 +2,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use serde::Serialize;
 use std::collections::HashMap;
 
-use crate::{error::Result, runners::AgentDescriptor, AppState};
+use crate::{error::Result, agents::AgentDescriptor, AppState};
 
 #[derive(Serialize)]
 pub struct AgentsResponse {
@@ -15,7 +15,7 @@ pub struct AgentsResponse {
 pub async fn list(State(state): State<AppState>) -> Result<Json<AgentsResponse>> {
     let registry = state.registry.lock().await;
     let agents = registry.list_agents();
-    let broken = registry.broken_runners().clone();
+    let broken = registry.broken_adapters().clone();
 
     Ok(Json(AgentsResponse { agents, broken }))
 }
@@ -29,7 +29,7 @@ pub async fn refresh(State(state): State<AppState>) -> Result<(StatusCode, Json<
         .map_err(|e| crate::error::Error::Internal(format!("Runner refresh failed: {}", e)))?;
 
     let agents = registry.list_agents();
-    let broken = registry.broken_runners().clone();
+    let broken = registry.broken_adapters().clone();
 
     Ok((StatusCode::OK, Json(AgentsResponse { agents, broken })))
 }

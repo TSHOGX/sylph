@@ -28,7 +28,7 @@ use crate::db::JournalStore;
 use crate::env::Environment;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::models::PendingRequest;
-use crate::runners::Registry;
+use crate::agents::Registry;
 
 /// How long a link may sit unused before it is torn down.
 ///
@@ -928,6 +928,8 @@ impl LinkManager {
             stability: "stable".to_string(),
             source: "server".to_string(),
             created_at_ms: now_ms(),
+            // A live session fact is one arrival.
+            started_at_ms: None,
         };
         self.hub.publish_session(session_id, event).await;
     }

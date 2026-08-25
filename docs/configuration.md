@@ -91,6 +91,60 @@ else, and no legacy location is consulted.
 `SYLPH_BROWSE_ROOTS` is colon-separated, matching `PATH`. In the file it is a
 list of strings.
 
+### `browse_roots` bounds where agents run, not only what is listed
+
+This is the highest-consequence setting in the file, and its name understates it.
+`paths.browse_roots` bounds two things:
+
+| Endpoint | Capability |
+| --- | --- |
+| `GET /api/v1/fs/*` | which directories a client may **enumerate** |
+| `POST /api/v1/sessions`, `POST /api/v1/sessions/import` | which directories a client may name as a session's **working directory** |
+
+The second is where an agent process is spawned, and a coding agent reads and
+writes the tree it is pointed at. So widening this setting widens where arbitrary
+code may run, not merely what names are visible.
+
+Until this bound existed, `POST /sessions` checked only that the path existed —
+so any client of this backend could start an agent anywhere on the filesystem
+while the *narrower* capability, listing directory names, was bounded. The
+narrower one being bounded is what made this easy to miss.
+
+**One key rather than two.** A separate `paths.session_roots` was rejected, and
+not for brevity. `/api/v1/fs/*` exists for exactly one purpose — naming a workdir
+— so a second key would have to be kept equal to this one for the picker to stay
+honest, and two keys that must agree are two keys that will not. Widening one
+alone yields either a picker offering directories creation refuses, or, far worse,
+creation accepting directories the operator only meant to be listable. One key
+means one blast radius, stated once.
+
+The Quick Start directory is permitted in addition, always, because it is where
+the product's own no-workspace sessions run and it is only *coincidentally*
+browsable: both `SYLPH_HOME` and `paths.quick_start_dir` can move it outside
+`$HOME`, and an install that did so would otherwise find Quick Start refused by a
+bound nobody aimed at it.
+
+**What the check is.** Canonicalize, then require containment — the same
+`backend/src/paths.rs` primitive both file APIs use. Canonicalizing is what
+defeats `..` and symlinks, including a symlink that lives on disk rather than in
+the request, which no amount of inspecting the request string can see. The
+canonical path is what gets journalled, so two spellings of one directory
+(`/tmp/x` and `/private/tmp/x` on macOS) cannot become two workspaces, and the
+recorded path has no symlinked component that could be re-pointed after the check.
+
+**Refusals name the bound, not the path.** A directory that does not exist is
+`400 INVALID_REQUEST`; one that exists outside every root is `403
+POLICY_VIOLATION` listing what is permitted. The two send a reader to different
+places — the filesystem, or this file — and reporting the second as "does not
+exist" would send them to the wrong one.
+
+**Narrowing this setting does not orphan existing sessions.** Nothing re-checks a
+journalled workdir when a session is read, listed, or resumed. The bound applies
+where a path enters as a new decision; a rule that applied on read would make
+every session created under wider configuration unreadable, which is a worse
+failure than the hole it closes. Reading a session's *files* stays bounded either
+way, by that session's own workdir (`backend/src/api/files.rs`).
+
 `paths.soul` has a third state the others do not. An **empty** value — `soul = ""`
 or `SYLPH_SOUL=""` — means *never inject identity*, which the adapter protocol
 reserves and which is different from leaving it unset: unset resolves the default

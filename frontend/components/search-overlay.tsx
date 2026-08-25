@@ -15,7 +15,7 @@
  */
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type SearchResult, type Session } from "@/lib/api";
 import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
@@ -23,13 +23,19 @@ import { liveSessionsQuery } from "@/lib/sessions-query";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useDebounced } from "@/lib/use-debounced";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
-import { useT, type Translate } from "@/lib/i18n";
-import { Overlay, scrollActiveIntoView, useListNavigation } from "@/components/overlay";
+import { useT } from "@/lib/i18n";
+import { Overlay } from "@/components/overlay";
+import {
+  SelectFilter,
+  SelectRows,
+  SelectScroll,
+  useSelectList,
+} from "@/components/ui/select-list";
+import type { SelectChoice } from "@/lib/select-list";
 import {
   ArchiveIcon,
   OriginNativeIcon,
   OriginSylphIcon,
-  SearchIcon,
 } from "@/components/icons";
 
 type Row =
@@ -42,10 +48,16 @@ export function SearchOverlay() {
   const queryClient = useQueryClient();
   const { closeOverlay } = useWorkspaceUI();
 
-  // One state object so a query change resets the cursor in the same update; two
-  // separate states would need an effect to keep them consistent.
-  const [{ query, active }, setPicker] = useState({ query: "", active: 0 });
-  const listRef = useRef<HTMLDivElement>(null);
+  /**
+   * The query lives here, not in the list.
+   *
+   * It has to: it drives a debounced request to the backend, so this component reads
+   * it, and the ranking below is the caller's own for the reason spelled out at
+   * `useSelectList`'s `external` option — archive hits are ordered by a full-text
+   * index over transcripts the browser never loaded. The cursor still belongs to the
+   * list, which is the half that had two owners before.
+   */
+  const [query, setQuery] = useState("");
   const debounced = useDebounced(query);
 
   // The same declaration the sidebar and the start screen use, so opening search
@@ -92,18 +104,6 @@ export function SearchOverlay() {
     return [...live.slice(0, 12), ...archive.slice(0, 12)];
   }, [sessionsQuery.data, archiveQuery.data, query]);
 
-  // Clamped rather than reset in an effect: archive results arrive after the
-  // query settles and can shrink the list under the cursor, and clamping during
-  // render means Enter can never commit a row that no longer exists.
-  const activeIndex = Math.min(active, Math.max(0, rows.length - 1));
-
-  useEffect(() => scrollActiveIntoView(listRef.current, activeIndex), [activeIndex]);
-
-  const setActive = useCallback(
-    (index: number) => setPicker((current) => ({ ...current, active: index })),
-    [],
-  );
-
   const importSession = useMutation({
     mutationFn: (hit: SearchResult) =>
       api.sessions.import({ traceSessionId: hit.id, title: hit.title }),
@@ -115,75 +115,113 @@ export function SearchOverlay() {
     },
   });
 
-  function commit(index: number) {
-    const row = rows[index];
-    if (!row) return;
-    if (row.type === "live") {
-      closeOverlay();
-      router.push(`/sessions/${row.session.id}`);
-    } else {
-      // Importing preserves the originating agent's identity and lifecycle; the
-      // backend derives every policy field from the archive, so nothing here
-      // needs to (or may) choose them.
-      importSession.mutate(row.hit);
-    }
-  }
-
-  const { onKeyDown } = useListNavigation(rows.length, commit);
   const home = workspacesQuery.data?.home;
+  // Which hit is being imported, read from the mutation's own variables rather than
+  // from the cursor. The cursor was the wrong source twice over: hovering another row
+  // moved the badge off the row that was actually importing, and deriving it from
+  // `activeIndex` would now make the rows depend on the list that is built from them.
+  const importingId = importSession.isPending ? importSession.variables?.id : undefined;
+  // Destructured, because the mutation object is a fresh one every render and the memo
+  // below would then rebuild every row on every keystroke. `mutate` is stable.
+  const importHit = importSession.mutate;
+
+  const items = useMemo<SelectChoice[]>(
+    () =>
+      rows.map((row) => {
+        if (row.type === "live") {
+          const session = row.session;
+          return {
+            label: sessionLabel(session),
+            icon: (
+              <span
+                className={session.origin === "native" ? "text-native" : "text-success"}
+              >
+                {session.origin === "native" ? (
+                  <OriginNativeIcon size={9} />
+                ) : (
+                  <OriginSylphIcon size={9} />
+                )}
+              </span>
+            ),
+            detail: `${session.agent}${
+              session.workdir ? ` · ${shortenHome(session.workdir, home)}` : ""
+            }`,
+            meta: formatRelative(session.updatedAtMs),
+            onSelect: () => {
+              closeOverlay();
+              router.push(`/sessions/${session.id}`);
+            },
+          };
+        }
+
+        const hit = row.hit;
+        return {
+          label: hit.title ?? hit.ask ?? hit.id,
+          icon: (
+            <span className="text-ink-muted">
+              <ArchiveIcon size={12} />
+            </span>
+          ),
+          detail: `${hit.agent}${hit.cwd ? ` · ${shortenHome(hit.cwd, home)}` : ""}`,
+          // The snippet is why this row is here at all: TraceDB matched words in the
+          // transcript, and without showing them an archive hit is a title that does
+          // not contain the query.
+          excerpt: (hit.bestMatch?.snippet ?? hit.ask)?.replace(/\s+/g, " "),
+          meta: (
+            <span className="flex items-center gap-1.5">
+              <span className="rounded bg-hover px-1 font-medium text-ink-muted">
+                {importingId === hit.id ? t("search.importing") : t("search.archiveBadge")}
+              </span>
+              {formatRelative(hit.endedAtMs ?? hit.startedAtMs)}
+            </span>
+          ),
+          // Importing preserves the originating agent's identity and lifecycle; the
+          // backend derives every policy field from the archive, so nothing here
+          // needs to (or may) choose them.
+          onSelect: () => importHit(hit),
+        };
+      }),
+    [rows, home, importingId, closeOverlay, router, importHit, t],
+  );
+
+  // `searchable: true` and `external`: the field is the surface's whole point, and the
+  // ranking is this component's. No `onClose` — a live row navigates and an archive
+  // row starts a mutation that closes on success, so tearing the surface down here
+  // would hide an import that can still fail. Escape belongs to `Overlay`.
+  const list = useSelectList(items, {
+    searchable: true,
+    external: { query, setQuery },
+  });
 
   return (
     <Overlay title={t("search.title")} onClose={closeOverlay} describedBy="search-hint">
-      <div className="flex items-center gap-2 border-b border-line px-3 py-2.5">
-        <span className="text-ink-muted">
-          <SearchIcon size={15} />
-        </span>
-        <input
-          type="text"
-          role="combobox"
-          aria-expanded
-          aria-controls="search-results"
-          aria-activedescendant={rows.length > 0 ? `search-row-${activeIndex}` : undefined}
-          aria-label={t("search.field")}
-          autoFocus
-          value={query}
-          onChange={(event) => setPicker({ query: event.target.value, active: 0 })}
-          onKeyDown={(event) => onKeyDown(event, activeIndex, setActive)}
-          placeholder={t("search.placeholder")}
-          className="flex-1 bg-transparent text-sm outline-none placeholder:text-ink-muted"
-        />
-        {archiveQuery.isFetching && (
-          <span className="text-3xs text-ink-muted">{t("search.searchingArchive")}</span>
-        )}
-      </div>
+      <SelectFilter
+        list={list}
+        name={t("search.results")}
+        // Not "Filter search results": this query reaches TraceDB's index over
+        // transcripts that were never sent to the browser, so it searches rather than
+        // narrows, and the name a screen reader reads has to say which.
+        label={t("search.field")}
+        placeholder={t("search.placeholder")}
+        size="roomy"
+        trailing={
+          archiveQuery.isFetching ? (
+            <span className="shrink-0 text-3xs text-ink-muted">
+              {t("search.searchingArchive")}
+            </span>
+          ) : undefined
+        }
+      />
 
-      <div
-        ref={listRef}
-        id="search-results"
-        role="listbox"
-        aria-label={t("search.results")}
-        className="min-h-0 flex-1 pane py-1"
-      >
-        {rows.length === 0 ? (
+      <SelectScroll list={list} label={t("search.results")} fill>
+        {list.rows.length === 0 ? (
           <p className="px-3 py-6 text-center text-xs text-ink-muted">
             {query.trim() ? t("search.none") : t("search.empty")}
           </p>
         ) : (
-          rows.map((row, index) => (
-            <SearchRow
-              key={row.type === "live" ? row.session.id : `archive-${row.hit.id}`}
-              row={row}
-              index={index}
-              active={index === activeIndex}
-              home={home}
-              onHover={() => setActive(index)}
-              onSelect={() => commit(index)}
-              importing={importSession.isPending && activeIndex === index}
-              t={t}
-            />
-          ))
+          <SelectRows list={list} />
         )}
-      </div>
+      </SelectScroll>
 
       <footer
         id="search-hint"
@@ -202,88 +240,5 @@ export function SearchOverlay() {
         )}
       </footer>
     </Overlay>
-  );
-}
-
-function SearchRow({
-  row,
-  index,
-  active,
-  home,
-  onHover,
-  onSelect,
-  importing,
-  t,
-}: {
-  row: Row;
-  index: number;
-  active: boolean;
-  home?: string;
-  onHover: () => void;
-  onSelect: () => void;
-  importing: boolean;
-  /**
-   * Passed down rather than read from `useT` here.
-   *
-   * A row is rendered once per result and the hook subscribes to the settings
-   * store, so calling it per row would add one subscription per visible session
-   * for a value that cannot differ between them.
-   */
-  t: Translate;
-}) {
-  const isLive = row.type === "live";
-  const title = isLive ? sessionLabel(row.session) : (row.hit.title ?? row.hit.ask ?? row.hit.id);
-  const path = isLive ? row.session.workdir : row.hit.cwd;
-  const agent = isLive ? row.session.agent : row.hit.agent;
-  const when = isLive ? row.session.updatedAtMs : row.hit.endedAtMs ?? row.hit.startedAtMs;
-  const snippet = isLive ? undefined : row.hit.bestMatch?.snippet ?? row.hit.ask;
-
-  return (
-    <div
-      id={`search-row-${index}`}
-      data-index={index}
-      role="option"
-      aria-selected={active}
-      onMouseEnter={onHover}
-      onClick={onSelect}
-      className={`cursor-pointer px-3 py-1.5 ${active ? "bg-hover" : ""}`}
-    >
-      <div className="flex items-baseline gap-2">
-        <span
-          aria-hidden="true"
-          className={`shrink-0 text-3xs ${
-            isLive
-              ? row.session.origin === "native"
-                ? "text-native"
-                : "text-success"
-              : "text-ink-muted"
-          }`}
-        >
-          {isLive ? (
-            row.session.origin === "native" ? (
-              <OriginNativeIcon size={9} />
-            ) : (
-              <OriginSylphIcon size={9} />
-            )
-          ) : (
-            <ArchiveIcon size={12} />
-          )}
-        </span>
-        <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink">{title}</span>
-        {!isLive && (
-          <span className="shrink-0 rounded bg-hover px-1 text-3xs font-medium text-ink-muted">
-            {importing ? t("search.importing") : t("search.archiveBadge")}
-          </span>
-        )}
-        <span className="shrink-0 text-3xs text-ink-muted">{formatRelative(when)}</span>
-      </div>
-      <p className="truncate pl-4 text-3xs text-ink-muted">
-        {agent}
-        {path && ` · ${shortenHome(path, home)}`}
-      </p>
-      {snippet && (
-        <p className="truncate pl-4 text-3xs text-ink-muted">{snippet.replace(/\s+/g, " ")}</p>
-      )}
-    </div>
   );
 }

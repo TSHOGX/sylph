@@ -33,6 +33,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import { useT } from "@/lib/i18n";
 import { useIsMobile } from "@/lib/viewport";
@@ -67,6 +68,19 @@ export interface SelectList<T extends SelectChoice> {
 }
 
 /**
+ * Where the query lives when the caller does the ranking.
+ *
+ * Handed in as one object rather than as a `filter: "caller"` flag plus a query,
+ * because those two are not independent: a query with hook-owned filtering would be
+ * filtered twice, and caller-owned filtering with no query has nothing to read. One
+ * parameter makes the invalid pair unrepresentable.
+ */
+export interface ExternalQuery {
+  query: string;
+  setQuery: (query: string) => void;
+}
+
+/**
  * Wire up one choice list.
  *
  * `onClose` is optional because not every list owns its surface: a menu closes on
@@ -80,9 +94,35 @@ export function useSelectList<T extends SelectChoice>(
   {
     searchable = "auto",
     onClose,
+    external,
   }: {
     searchable?: boolean | "auto";
     onClose?: () => void;
+    /**
+     * Take the rows as already ranked, and let the caller own the query.
+     *
+     * # Why this exists, when the whole point was one filtering rule
+     *
+     * The search overlay cannot be filtered here, and not for a stylistic reason.
+     * Its rows come from two sources ranked by different engines — live sessions by
+     * `fuzzyRank` in the browser, archive hits by TraceDB's full-text search over
+     * event bodies that were never sent to the client — and it fixes live above
+     * archive because a session you can open beats one you must import first. Ranking
+     * that merged list by `buildRows` would re-score archive hits against the only
+     * text the browser has, their titles, which is precisely the text that did *not*
+     * match. A hit found by its transcript would then rank last or vanish.
+     *
+     * The query also has to leave this hook either way: it drives a debounced
+     * server request, so the caller needs to read it. Owning it there and passing it
+     * back in is what keeps one cursor over one row list — which is the invariant
+     * this module actually protects. `buildRows` still numbers the rows, headings
+     * still elide, the cursor still cannot be counted in a second space.
+     *
+     * Absent for every other list, and it should stay rare: a caller that ranks its
+     * own rows also owns keeping `detail` searchable, which is the guarantee the row
+     * model exists to make.
+     */
+    external?: ExternalQuery;
   } = {},
 ): SelectList<T> {
   const baseId = useId();
@@ -103,18 +143,30 @@ export function useSelectList<T extends SelectChoice>(
    */
   const [state, setState] = useState(() => ({ query: "", active: initialIndex(items) }));
 
-  const rows = useMemo(() => buildRows(items, state.query), [items, state.query]);
+  const query = external ? external.query : state.query;
+  // An externally ranked list is filtered already, so it is built with no query: a
+  // second pass would drop rows the caller's own ranking kept. Everything else
+  // `buildRows` does — numbering, heading elision, one checked row per group — still
+  // applies, which is why this is the same call rather than a bypass.
+  const rows = useMemo(
+    () => buildRows(items, external ? "" : state.query),
+    [items, external, state.query],
+  );
   const count = useMemo(() => rows.reduce((n, row) => (row.index === null ? n : n + 1), 0), [rows]);
 
   const activeIndex = count === 0 ? -1 : Math.min(state.active, count - 1);
 
+  const externalSetQuery = external?.setQuery;
   const setQuery = useCallback(
-    (query: string) => {
+    (next: string) => {
       // Clearing the filter returns the cursor to the current choice, the same place
-      // the list opened on; a query moves it to the top match.
-      setState({ query, active: query.trim() ? 0 : initialIndex(items) });
+      // the list opened on; a query moves it to the top match. Both halves happen in
+      // one update, so no frame renders the new rows under the old cursor — the frame
+      // a fast typist presses Enter on.
+      setState({ query: next, active: next.trim() ? 0 : initialIndex(items) });
+      externalSetQuery?.(next);
     },
-    [items],
+    [items, externalSetQuery],
   );
 
   const setActiveIndex = useCallback((active: number) => {
@@ -190,11 +242,11 @@ export function useSelectList<T extends SelectChoice>(
   useEffect(() => {
     if (activeIndex < 0) return;
     scrollActiveIntoView(document.getElementById(listId), activeIndex);
-  }, [activeIndex, state.query, listId]);
+  }, [activeIndex, query, listId]);
 
   return {
     search,
-    query: state.query,
+    query,
     setQuery,
     rows,
     activeIndex,
@@ -240,7 +292,11 @@ export function useSelectList<T extends SelectChoice>(
 export function SelectFilter<T extends SelectChoice>({
   list,
   name,
+  label,
   placeholder,
+  icon,
+  size = "compact",
+  trailing,
   ready = true,
 }: {
   // Generic, like `SelectRows` and `SelectScroll`. Pinned to the base type it
@@ -250,6 +306,15 @@ export function SelectFilter<T extends SelectChoice>({
   /** What is being filtered, for the field's own accessible name. */
   name: string;
   /**
+   * Replaces the composed "Filter {name}" name outright.
+   *
+   * For the field that is not a filter. The search overlay's query reaches TraceDB's
+   * full-text index over transcripts the browser never loaded, and the palette's runs
+   * a command rather than narrowing a set — calling either "Filter …" would name the
+   * wrong operation for a screen reader, which is the only place this string is read.
+   */
+  label?: string;
+  /**
    * Overrides the generic "Type to filter".
    *
    * Worth a prop because the useful hint is list-specific: a workspace list is
@@ -257,6 +322,21 @@ export function SelectFilter<T extends SelectChoice>({
    * list whose visible column is a leaf name.
    */
   placeholder?: string;
+  /** Leading glyph. Decorative; defaults to the magnifier. */
+  icon?: ReactNode;
+  /**
+   * `roomy` for a full-surface overlay, whose field is the first thing on screen
+   * rather than a strip above a popover's rows.
+   */
+  size?: "compact" | "roomy";
+  /**
+   * Status beside the field: "searching archive…", a spinner.
+   *
+   * Here rather than in the caller's own bar because it belongs to the query, and a
+   * separate row above the list would move the rows down the moment a request
+   * started.
+   */
+  trailing?: ReactNode;
   ready?: boolean;
 }) {
   const t = useT();
@@ -275,9 +355,13 @@ export function SelectFilter<T extends SelectChoice>({
   }, [ready, isMobile]);
 
   return (
-    <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
-      <span aria-hidden className="text-ink-muted">
-        <SearchIcon size={14} />
+    <div
+      className={`flex shrink-0 items-center gap-2 border-b border-line px-3 ${
+        size === "roomy" ? "py-2.5" : "py-2"
+      }`}
+    >
+      <span aria-hidden className="shrink-0 text-ink-muted">
+        {icon ?? <SearchIcon size={size === "roomy" ? 15 : 14} />}
       </span>
       <input
         ref={inputRef}
@@ -285,13 +369,18 @@ export function SelectFilter<T extends SelectChoice>({
         // with no accessible name, drawn by the browser inside a combobox.
         type="text"
         role="combobox"
-        aria-expanded
+        // Not a constant: `aria-expanded` claims a popup is showing, and with no
+        // choosable row there is no `listbox` for `aria-controls` to point at — the
+        // rows are replaced by a "no matches" line, which is not an option list.
+        // Hard-coding it true made a screen reader announce a list that was not
+        // rendered.
+        aria-expanded={list.rows.length > 0}
         aria-controls={list.listId}
         aria-activedescendant={list.activeDescendant}
         // Named for what it filters, and deliberately not the same string as the
         // list itself — two controls a screen reader cannot tell apart is the
         // collision that once failed 40 specs at once.
-        aria-label={t("select.filter.label", { name })}
+        aria-label={label ?? t("select.filter.label", { name })}
         autoComplete="off"
         spellCheck={false}
         value={list.query}
@@ -300,8 +389,11 @@ export function SelectFilter<T extends SelectChoice>({
         placeholder={placeholder ?? t("select.filter.placeholder")}
         // `text-base` under a coarse pointer: mobile Safari zooms the page when a
         // focused field's text is under 16px and does not zoom back out.
-        className="min-w-0 flex-1 bg-transparent text-base outline-none placeholder:text-ink-muted md:text-xs"
+        className={`min-w-0 flex-1 bg-transparent text-base outline-none placeholder:text-ink-muted ${
+          size === "roomy" ? "md:text-sm" : "md:text-xs"
+        }`}
       />
+      {trailing}
     </div>
   );
 }
@@ -339,7 +431,9 @@ export function SelectRows<T extends SelectChoice>({
   const checkable = list.rows.some((row) => row.item.checked !== undefined);
   // Derived per list, not per row, so a filtered result whose matches happen to
   // carry no detail line does not shrink its rows mid-list as the user types.
-  const twoLine = list.rows.some((row) => row.item.detail !== undefined);
+  const twoLine = list.rows.some(
+    (row) => row.item.detail !== undefined || row.item.excerpt !== undefined,
+  );
   const padding = density === "comfortable" ? "px-4 py-2" : "px-3 py-1.5";
 
   if (list.rows.length === 0) {
@@ -359,7 +453,18 @@ export function SelectRows<T extends SelectChoice>({
             : "menuitemradio";
         return (
           <div key={`${item.label}-${position}`}>
-            {item.separated && <div role="separator" className="my-1 border-t border-line" />}
+            {/* A `separator` is a legal child of a `menu` and *not* of a `listbox`,
+                which admits only options and groups — axe reports
+                `aria-required-children` on the whole list, one of the two patterns at
+                a time. So in the combobox pattern the same rule is drawn and not
+                announced: the line is decoration either way, and a screen reader in a
+                listbox already hears each option's position out of the total. */}
+            {item.separated &&
+              (list.search ? (
+                <div aria-hidden className="my-1 border-t border-line" />
+              ) : (
+                <div role="separator" className="my-1 border-t border-line" />
+              ))}
             <button
               type="button"
               id={index === null ? undefined : list.rowId(index)}
@@ -409,7 +514,9 @@ export function SelectRows<T extends SelectChoice>({
               {/* One line collapses to the label itself, so a menu row keeps the
                   exact box it had before `detail` existed — no wrapper, no extra
                   baseline to disagree about. */}
-              {item.detail === undefined && item.meta === undefined ? (
+              {item.detail === undefined &&
+              item.meta === undefined &&
+              item.excerpt === undefined ? (
                 <span className="min-w-0 flex-1 truncate">{item.label}</span>
               ) : (
                 <span className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -429,6 +536,11 @@ export function SelectRows<T extends SelectChoice>({
                     >
                       {item.detail}
                     </span>
+                  )}
+                  {/* Not mono: an excerpt is prose from a transcript, and the path
+                      above it is the line that needs the fixed width. */}
+                  {item.excerpt !== undefined && (
+                    <span className="truncate text-3xs text-ink-muted">{item.excerpt}</span>
                   )}
                 </span>
               )}
@@ -471,13 +583,20 @@ export function SelectScroll<T extends SelectChoice>({
   fill?: boolean;
   children: React.ReactNode;
 }) {
+  // A `listbox` may only contain options and groups, and this container also holds
+  // the states that are *not* rows: a spinner, a retry button, "no matches". Claiming
+  // the role while one of those is showing is the same invalid-ARIA class as an
+  // `<input>` inside a `role="menu"` — axe reports `aria-required-children`, and a
+  // screen reader is handed a list box with no options in it. So the role is claimed
+  // only when there is something for it to contain.
+  const listbox = list.search && list.rows.length > 0;
   return (
     <div
       id={list.listId}
       // A menu's role belongs to the surface, which owns focus and the label; only
       // the combobox pattern needs a role on the scrolling list itself.
-      role={list.search ? "listbox" : undefined}
-      aria-label={list.search ? label : undefined}
+      role={listbox ? "listbox" : undefined}
+      aria-label={listbox ? label : undefined}
       className={
         fill
           ? "pane min-h-0 flex-1 py-1"

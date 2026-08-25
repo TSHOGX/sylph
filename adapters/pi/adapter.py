@@ -23,6 +23,23 @@ had to be answered in the protocol rather than papered over here:
     `high`, not the seven pi documents. A session-global effort enumeration would
     therefore be wrong, which is why config options are re-derived after a model
     change rather than cached.
+  * **pi reports no delegated work over RPC at all, and that is measured rather
+    than assumed.** Searched pi 0.84.3's entire 18 MB `dist/` tree: `subagent` and
+    `parentToolUseId` occur **zero** times, and all 40 hits for `delegate` are
+    comments about pluggable SSH backends for `read`/`write`/`bash`. Its event table
+    is 21 kinds with no parent, span, or child field — `toolCallId` is the only
+    correlation any event carries — and its tool catalogue (`read`, `write`, `edit`,
+    `bash`, `find`, `grep`, `ls`, `tree`) holds no delegating tool. Sub-agents exist
+    only for *SDK embedders*, who build a second in-process `AgentSession` inside a
+    custom tool (`docs/sdk.md`); that inner session's events go to its own
+    `subscribe` callback and never reach this process. The one trace such work
+    leaves on the wire is `ToolResultMessage.usage`, documented as the tool's
+    "combined `Usage`" for nested LLM calls (`docs/extensions.md`) — an aggregate
+    token count with no identity, no lifecycle, and no count of delegates, so it
+    cannot name a trajectory even in principle. So this adapter declares no
+    `subagent` and emits none, and the flatness of a pi transcript is a true report
+    rather than a gap. Synthesizing a trajectory out of a token total would put a
+    shape in the timeline that nothing in the session corresponds to.
 
 pi also has a second queue discipline Sylph has no word for yet: a message can be
 `steer` (delivered after the current tool calls, before the next model call) or
@@ -43,8 +60,11 @@ ADAPTER_VERSION = "1.0.0"
 #
 # `approval` is absent deliberately and is not an omission to fix later: pi has no
 # tool-permission callback, so declaring it would promise a prompt that can never
-# arrive. `subagent` is absent for the same reason — pi reports no child
-# trajectories.
+# arrive. `subagent` is absent on the same footing and with the same evidence behind
+# it — pi 0.84.3 exposes no delegation on the RPC wire in any form, measured as
+# recorded in the module docstring above. Declaring the capability would promise a
+# tree the vendor never reports, and a client reading `supports` would then offer an
+# affordance for structure that cannot arrive.
 SUPPORTS = [
     "interrupt",
     "steer",

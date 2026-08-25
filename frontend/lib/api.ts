@@ -105,6 +105,15 @@ export interface StreamEvent {
   stability: string;
   source: string;
   createdAtMs: number;
+  /**
+   * When a consolidated block's *first* phase arrived. Absent on a live event.
+   *
+   * A live event is one arrival, so `createdAtMs` is the whole story. A consolidated
+   * block is many arrivals folded into one row keyed by its close, which makes
+   * `createdAtMs` its *end* — so this is the only field that says when it began.
+   * Presence therefore also distinguishes settled history from a live stream.
+   */
+  startedAtMs?: number;
 }
 
 /** One turn plus its durable events, as returned by the history endpoint. */

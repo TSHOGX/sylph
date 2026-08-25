@@ -243,10 +243,25 @@ export function buildWaterfall(
   // derived from data that cannot support it. So the badge requires that every row in
   // the comparison is exact; when any is not, the durations are still shown, with
   // their `≥`, and no row claims the top.
-  const exact = rows.filter(
-    (row) => row.extent.kind === "measured" && row.extent.bound === "exact",
+  // Two conditions, because the extent and the status can disagree and each one alone
+  // lets a bad rank through.
+  //
+  // `bound === "exact"` says the *arithmetic* is sound. It does not say the work
+  // finished: a trajectory still open when its turn ended can acquire an end
+  // timestamp — the close the server wrote, or the turn's own end — and that produces
+  // an exact-looking subtraction over a span whose real end nobody reported. Such a
+  // row is labelled "never finished" and was still eligible to be called "the longest
+  // here", which is the one sentence this view must never get wrong. Its true duration
+  // can only be longer, so it cannot lose a comparison and must not win one.
+  //
+  // Publishing `startedAtMs` is what surfaced this: while every settled row was a
+  // bound, no rank was ever offered, so the gap could not be observed. Making the
+  // honest rows exact is what let a dishonest one be crowned.
+  const finished = (row: WaterfallRow) => row.status === "done" || row.status === "failed";
+  const rankableRows = rows.filter(
+    (row) => row.extent.kind === "measured" && row.extent.bound === "exact" && finished(row),
   );
-  const rankable = exact.length === comparable.length && comparable.length > 1;
+  const rankable = rankableRows.length === comparable.length && comparable.length > 1;
   if (rankable) {
     let longest = -1;
     for (const row of comparable) {
@@ -255,7 +270,9 @@ export function buildWaterfall(
     // Only when something is actually longer than something else. Marking the single
     // row of a one-delegate turn "slowest" states a comparison that was never made.
     if (longest > 0) {
-      for (const row of rows) if (row.durationMs === longest) row.slowest = true;
+      // Over `rankableRows`, not every row: a row excluded from the comparison must
+      // not be able to collect the badge by matching the winning figure.
+      for (const row of rankableRows) if (row.durationMs === longest) row.slowest = true;
     }
   }
 
@@ -347,19 +364,28 @@ function extentOf(node: TimelineNode): Extent {
   if (status === "running") return { kind: "open", startMs };
 
   // Closed with no close timestamp: a *declared* trajectory whose phases were
-  // consolidated into one row, so `createdAtMs` is its close and its start is gone.
+  // consolidated into one row, so `createdAtMs` is its close.
   //
-  // Its interior is not gone, though — every descendant is its own block with its own
-  // timestamp — so the work it forwarded bounds it from below. That matters far more
-  // than it sounds: a turn switches to consolidated history moments after it settles,
-  // so *every* delegation a user scrolls back to is in this state, and without the
-  // bound the comparison this view exists for would work only while a turn is live.
+  // `startedAtMs` is the block's own record of when its first phase arrived, and it
+  // makes this exact rather than reconstructed. It is present only on a consolidated
+  // block — a live event is one arrival and says nothing about a span — so its
+  // presence is precisely the case being handled here.
   //
-  // It is a lower bound and labelled as one. The proper fix is one field on the wire
-  // — `history::consolidate` already computes `started_at_ms` and stores it on the
-  // block; `api::sessions::block_to_event` simply does not publish it — and this
-  // stops being a reconstruction the moment it does.
+  // This matters more than one field sounds like: a turn switches to consolidated
+  // history moments after it settles, so *every* delegation a user scrolls back to is
+  // in this state. While the field went unpublished, every such duration was a lower
+  // bound, and a lower bound cannot be ranked — so the "slowest" answer this view
+  // exists to give was withheld on all but a live turn.
   if (!promoted) {
+    const declaredStart = row.event.startedAtMs;
+    if (declaredStart !== undefined && declaredStart < startMs) {
+      return { kind: "measured", startMs: declaredStart, endMs: startMs, bound: "exact" };
+    }
+
+    // No `startedAtMs`: history written before the field was published, or a block
+    // whose phases all arrived in one millisecond. The interior still bounds it from
+    // below, since every descendant is its own timestamped block. Labelled as the
+    // bound it is.
     const first = earliestDescendant(node);
     if (first !== undefined && first < startMs) {
       return { kind: "measured", startMs: first, endMs: startMs, bound: "from-children" };

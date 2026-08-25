@@ -163,6 +163,49 @@ impl Config {
     pub fn agent_roots(&self) -> Vec<PathBuf> {
         vec![self.bundled_agents_dir.clone(), self.agents_dir.clone()]
     }
+
+    /// Where a client may name a session's working directory.
+    ///
+    /// # Why this is `browse_roots` and not a key of its own
+    ///
+    /// A workdir is where an agent process is *started*, which is a strictly
+    /// larger capability than listing directory names — so the first instinct is
+    /// that it deserves its own, narrower bound. It does not, and the reason is
+    /// that `/api/v1/fs/*` has exactly one purpose: naming a workdir. Nothing
+    /// else consumes it, and its response documents as much ("the client hands
+    /// this straight back as a session `workdir`"). A second key would therefore
+    /// have to be kept equal to this one to keep the picker honest, and two keys
+    /// that must agree are two keys that will not: widening one alone yields
+    /// either a picker offering directories creation refuses, or — far worse —
+    /// creation accepting directories the operator only meant to be listable.
+    /// One key, one blast radius, stated once in `docs/configuration.md`.
+    ///
+    /// The Quick Start directory is added because it is where the product's own
+    /// no-workspace sessions run, and it is only *coincidentally* browsable: it
+    /// defaults under `<home>/scratch`, and both `SYLPH_HOME` and
+    /// `paths.quick_start_dir` can move it outside `$HOME`. An install that did
+    /// so would find Quick Start refused by a bound the user never aimed at it.
+    ///
+    /// Canonicalized here, and roots that no longer exist are dropped, so a
+    /// stale entry cannot make the bound accidentally wider *or* refuse
+    /// everything: a non-canonical root rejects every path beneath it on macOS,
+    /// where `/tmp` is a symlink to `/private/tmp`.
+    pub fn session_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = Vec::with_capacity(self.browse_roots.len() + 1);
+        for candidate in self
+            .browse_roots
+            .iter()
+            .chain(std::iter::once(&self.quick_start_dir))
+        {
+            let Ok(canonical) = std::fs::canonicalize(candidate) else {
+                continue;
+            };
+            if canonical.is_dir() && !roots.contains(&canonical) {
+                roots.push(canonical);
+            }
+        }
+        roots
+    }
 }
 
 /// A configured `SOUL.md` that can actually be read.

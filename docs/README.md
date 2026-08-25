@@ -14,7 +14,8 @@ development practices.
 
 ### Architecture & Design
 - **[System Architecture](architecture.md)** — High-level system design, data flow, core concepts
-- **[Frontend Architecture](frontend-architecture.md)** — UI design, component structure, performance
+- **[Frontend Architecture](frontend-architecture.md)** — how the frontend is built: state, streaming, performance
+- **[UI Layout and Design](ui-layout.md)** — what the interface is: panes, surfaces, components, tokens
 - **[API Design](api-design.md)** — REST API contracts and endpoint specifications
 - **[Database Schema](database-schema.md)** — SQLite schema, migrations, data model
 
@@ -38,13 +39,14 @@ development practices.
 | System design, data flow | [architecture.md](architecture.md) |
 | Endpoint contracts | [api-design.md](api-design.md) |
 | Tables, indexes, migrations | [database-schema.md](database-schema.md) |
-| UI structure and conventions | [frontend-architecture.md](frontend-architecture.md) |
+| How the frontend is built | [frontend-architecture.md](frontend-architecture.md) |
+| What the interface looks like | [ui-layout.md](ui-layout.md) |
 | How to install/deploy | [installation.md](installation.md) |
 | Where files live, what a setting does | [configuration.md](configuration.md) |
 | How to develop locally | [development.md](development.md) |
 | Identity, origin, and `SOUL.md` | [architecture.md](architecture.md#session-model) |
 | Translations and locale | [frontend-architecture.md](frontend-architecture.md#internationalization) |
-| Which shortcuts a browser reserves | [frontend-architecture.md](frontend-architecture.md#keyboard-model) |
+| Which shortcuts a browser reserves | [ui-layout.md](ui-layout.md#keyboard-model) |
 | What an adapter may send, and when | [session-protocol.md](session-protocol.md) |
 | How history is kept, replayed, pruned | [storage.md](storage.md) |
 | Why the server owns session policy | [control-plane.md](control-plane.md) |

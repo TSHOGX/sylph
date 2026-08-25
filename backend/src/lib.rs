@@ -38,7 +38,7 @@ pub mod events;
 pub mod middleware;
 pub mod models;
 pub mod paths;
-pub mod runners;
+pub mod agents;
 /// Durable, replayable history: folded deltas, content-addressed blobs, and
 /// watermark-driven retention.
 pub mod storage;
@@ -49,7 +49,7 @@ use crate::config::Config;
 use crate::error::Error;
 use crate::db::JournalStore;
 use crate::events::EventHub;
-use crate::runners::Registry;
+use crate::agents::Registry;
 use crate::tracedb::Client as TraceDbClient;
 
 #[derive(Clone)]
@@ -82,7 +82,7 @@ impl AppState {
     /// Assemble application state from configuration.
     ///
     /// Runner discovery and the TraceDB probe are both non-fatal: a missing
-    /// runners directory or a misconfigured TraceDB binary leaves the backend
+    /// adapters directory or a misconfigured TraceDB binary leaves the backend
     /// serving what it can, with the failure visible in `/diagnostics`.
     pub async fn build(config: Config) -> anyhow::Result<Self> {
         // Before the store opens the path, so an install predating the rename
@@ -105,7 +105,7 @@ impl AppState {
             tracing::info!(
                 "Agent discovery: {} usable, {} broken",
                 usable,
-                registry.broken_runners().len()
+                registry.broken_adapters().len()
             );
             // Zero usable agents is not a quiet degradation: no session can be
             // created and no existing one can offer a command, so every feature

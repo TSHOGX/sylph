@@ -87,7 +87,21 @@ pub async fn list(
     // Both from configuration rather than the environment: `quick_start_dir` is a
     // setting, and `home` is the base the picker abbreviates paths against, which
     // must be the same one `browse_roots` was resolved with.
-    let quick_start_dir = normalize(&state.config.quick_start_dir.display().to_string());
+    //
+    // Canonicalized, because a session's journalled `workdir` is: creation resolves
+    // the client's path before recording it, so it can never contain a symlinked
+    // component. Comparing a canonical journal value against a configured spelling
+    // would report `isQuickStart: false` for every Quick Start session on macOS,
+    // where `<home>` under `/var/folders` resolves to `/private/var/folders` —
+    // splitting the Quick Start row from the very sessions it counts. Reported in
+    // the same spelling for the same reason: the client hands this back as a
+    // `workdir`, and a second spelling would be a second sidebar group.
+    let quick_start_dir = normalize(
+        &std::fs::canonicalize(&state.config.quick_start_dir)
+            .unwrap_or_else(|_| state.config.quick_start_dir.clone())
+            .display()
+            .to_string(),
+    );
     let home = state
         .config
         .browse_roots

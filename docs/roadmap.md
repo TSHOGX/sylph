@@ -59,10 +59,10 @@ landed changes enough of the system that the summary above would mislead without
 Its own section at the end of this file carries the reasoning, the measurements, and
 the open items — that section is authoritative for Phase 12, not this list.
 
-**Current test totals, measured on `main` after the four Phase 12 worktrees merged:**
-300 backend unit, 183 backend integration across three binaries (143 `integration`,
-24 `requests`, 16 `storage`, plus 3 ignored by default that parse files from real
-Office tooling), 333 frontend unit in 20 files, 134 E2E specs in 16 files.
+**Current test totals, measured on `main` after the six delegation/security worktrees
+merged:** 322 backend unit, 205 backend integration across three binaries (158
+`integration`, 24 `requests`, 23 `storage`, plus 3 ignored by default that parse files
+from real Office tooling), 366 frontend unit in 21 files, 147 E2E specs in 16 files.
 
 The per-phase counts below are what each phase measured on its own branch and are
 left as its record; they do not add up to these, because parallel tracks each
@@ -70,21 +70,32 @@ counted only their own suite. Re-measure by running the suites, not by adding th
 sections — `cargo test`, `npm test`, and `npx playwright test --list` report all
 four numbers directly.
 
-**Current first-load JS: 221.1 KB gzipped** across 13 chunks, measured on `main`
-after the Phase 12 merges. The recipe each phase ran by hand is now
-`scripts/measure-bundle.sh`, which prints the per-chunk breakdown as well as the
-total:
+**Current first-load JS, measured by `scripts/measure-bundle.sh`:**
+
+| Route | Figure | Chunks |
+| --- | --- | --- |
+| `/` | **221.3 KB** gzipped | 13 |
+| `/sessions/[id]` | **244.3 KB** gzipped | 15 |
 
 ```sh
 cd frontend && SYLPH_WEB_BACKEND=http://localhost:4317 npm run build
-./scripts/measure-bundle.sh
+./scripts/measure-bundle.sh                        # the root route
+./scripts/measure-bundle.sh --route='/sessions/[id]'
 ```
 
-It reads `.next/server/app/index.html`, which is the only place that lists the
-scripts `/` actually references — summing the chunk directory instead counts
-chunks belonging to other routes. Note that Next 16's Turbopack build no longer
-prints a first-load column of its own, so there is no build output to read this
-off; the script is the measurement.
+**The two are not comparable, and confusing them has already happened.** Two
+measurements of "the bundle" came back 221 and 243, both correct about a different
+route — the session route legitimately carries the timeline, the delegation tree, and
+the overview. The 200 KB budget was set against `/`. Quote a route with every figure.
+
+They are also obtained differently, which is why the script takes the route rather
+than leaving it to whoever is measuring. A prerendered route has served HTML in
+`.next/server/app/index.html`, and that HTML is the only authority on which scripts it
+references — summing the chunk directory counts every route's chunks together. A
+dynamic route emits no build-time HTML at all, and Next 16's Turbopack build publishes
+no per-route chunk manifest for the App Router (`build-manifest.json` carries only
+`/_app`), so it has to be served and read. The script does both; neither is derivable
+from build output, since Turbopack also stopped printing a first-load column.
 
 This is **past the 200 KB budget Phase 4 set**, and knowingly so: Phase 9 already
 recorded the crossing at 203.9 KB and Phase 12 added the delegation tree, the choice-list
@@ -97,7 +108,24 @@ forward.
 
 ### Open Decisions
 
-One decision remaining:
+Two decisions remaining:
+
+**Whether reading archived metadata should be path-bounded.** Creating a session is
+now bounded — a client-named `workdir` must canonicalize inside `browse_roots` plus
+the Quick Start directory, on create and on import. Reading is not:
+`GET /api/v1/archive/sessions?workdir=` accepts any absolute path behind only
+`starts_with('/')`, so a client can learn which archived sessions ran in any
+directory on the machine. This was deliberately left alone rather than half-fixed,
+because `/api/v1/search` and `GET /api/v1/archive/sessions/{trace_id}` reach the same
+content with no path bound at all — bounding one of three would read as a boundary
+without being one.
+
+The line that is now true and coherent: **reading archived metadata is
+authentication-bounded, acting on it is browse-root-bounded.** Under the loopback
+bind and the bootstrap cookie that is defensible, and it is the whole answer only for
+as long as both hold. The decision is whether reading should be bounded too, which is
+a threat-model call rather than an implementation gap — and it has to be answered for
+all three surfaces at once or not at all. Any move off loopback forces it.
 
 **Native→Sylph conversion endpoint shape:** `PATCH /api/v1/sessions/{id}`
 with `identityMode`/`lifecycleMode` fields vs. `POST
@@ -507,7 +535,15 @@ Two remain, as arguments for *intent* rather than descriptions of the code:
 settings). Each now marks where the shipped implementation diverged from it.
 `docs/frontend-architecture.md` is authoritative for what the code does.
 
-## Phase 7: Interaction and Composer Redesign — Complete
+## Phase 7a: Interaction and Composer Redesign — Complete
+
+> **Why 7a and 7b rather than 7 and 8.** Two tracks ran in parallel and both were
+> written up as "Phase 7", so the number addressed two different bodies of work and a
+> per-phase count summed nothing. Renumbering the later one to 8 would have been the
+> tidier fix and the wrong one: ten references across `docs/` and `AGENTS.md`, plus
+> commit subjects, already name Phases 8 through 12 as they stand, so shifting them
+> would invalidate every one. A suffix disambiguates the heading and leaves all of
+> that valid. Do not renumber.
 
 **Goal:** remove the forms and stacked form-fields that Phase 6 left in the two
 surfaces a user touches most — creating a session, and writing a message.
@@ -583,9 +619,14 @@ the UI never showed.
   wider write range than the process it drives. Revisit only with a real need and
   a threat-model decision, not for convenience.
 - **`browse_roots` widening** is a configuration decision with real consequence:
-  it is what any client of this backend can enumerate. The default is `$HOME`
-  alone, and `docs/architecture.md` records why enumeration is the part that
-  matters.
+  it is what any client of this backend can enumerate — and, since the workdir
+  bound was added, where a client may ask for an agent process to be started. The
+  default is `$HOME` alone. This note used to say enumeration "is the part that
+  matters", which was true of the endpoints that existed when it was written and
+  became the reason the larger hole stayed invisible: `POST /sessions` checked only
+  that a `workdir` existed, so the *narrower* capability was bounded and the wider
+  one was not. Both are now checked against the same root set by the same
+  primitive; see `docs/configuration.md` § `browse_roots` bounds where agents run.
 - **Rename from the sidebar** now has an endpoint but no menu item.
 - **Dark theme** remains deliberately absent; the composer and picker were built
   with the same light-only palette as the rest, so they inherit that debt.
@@ -594,7 +635,7 @@ the UI never showed.
   is nothing to preserve, so this is correct rather than a workaround — but it
   means the switcher is unavailable exactly where conversion would be interesting.
 
-## Phase 7: Artifacts file viewer — Complete
+## Phase 7b: Artifacts file viewer — Complete
 
 **Goal:** make the Artifacts pane answer "what did the agent do to my files?" for
 the formats an agent actually produces, not only for source code.
@@ -1363,8 +1404,9 @@ second line had to fork the engine. Three things followed from that fork.
   surface the user reached.
 - **`useListNavigation` is a second engine.** Four call sites re-derive
   `fuzzyRank` + `scrollActiveIntoView` + row ids + `autoFocus` around it, each with
-  its own cursor clamping — the same shape the model picker was fixed for. Two are
-  now converted; the palette and the search overlay are not, and are listed below.
+  its own cursor clamping — the same shape the model picker was fixed for. Two were
+  converted in this pass; the palette, the search overlay, and the history browser's
+  session list followed later, and the hook is now deleted.
 - **`shortenHome` was the buggy copy of a function the picker had got right.**
   `shortenHome("/Users/hsw-backup/x", "/Users/hsw")` returned `~-backup/x`, naming a
   directory that does not exist. Five call sites used the buggy one and the tested
@@ -1610,38 +1652,81 @@ spends real tokens and only observes whatever shapes one live turn produces, so 
 
 ### Open items
 
-- **`pi` reports no child trajectories yet,** so its sessions render as before.
-  Promotion is what makes adding them an adapter change alone: emitting a `subagent`
-  per delegate, or merely tagging child events with a `span`, is enough for its own
-  subagents and dynamic workflows to render as a tree with no server or UI work.
-- **A multiplexed host with several delegates cannot attribute forwarded interior.**
-  `_delegate_of` re-tags forwarded output to the delegate only when a host has
-  exactly one; with several, `claude` forwards nothing, so there is nothing to
-  attribute. If a future vendor forwards interior *and* multiplexes, it will need a
-  correlation the envelope does not currently carry.
-- **TraceDB's archived sessions stay flat.** It records a delegation as a separate
-  session with its own lineage, not as a trajectory inside one stream, so an
-  archived transcript has no `span` and the sidebar's rolled-up count is still how
-  delegation appears there. Unifying the two views is a real design question and
-  not a translation.
-- **A structure overview is not built.** `flattenTrajectories` exists and the
-  breadcrumb uses the path, but there is no waterfall or graph answering "which of
-  these twenty agents was slow" at a glance. The rollups cover *whether* to drill
-  in; they do not compare siblings.
+- ✅ **`pi` cannot report child trajectories, and the reason is in `pi`.** Measured on
+  0.84.4: it *declares* `agent_start` and `agent_end` in its event union and documents
+  them, and has **zero emit sites** in its shipped bundle — the `Task` tool builds a
+  nested agent whose events reach an internal callback that never touches the
+  transport. So this was never an adapter change waiting to be made: the data does not
+  leave the process. The adapter now marks `Task` with `delegates: true` so the call is
+  legible as delegation without implying a tree that can never fill, and says so in its
+  module docstring. Revisit if a release adds emit sites, not if one adds types.
+- ✅ **A multiplexed host cannot attribute forwarded interior, and `_delegate_of` was
+  also wrong for the ordinary case.** The count was taken across *all* hosts, so two
+  concurrent delegations each labelled the other's delegate. Fixed to count per host.
+  The multiplexed case is a genuine impossibility rather than a gap: once a second
+  delegate opens, interior already published under the first cannot be regrouped, so
+  the adapter stops attributing rather than moving a delegate's work out from under it.
+  No protocol field was added — `parent_tool_use_id` already covers `claude`, and
+  `Workflow` forwards nothing, so a field would encode a hazard no vendor exhibits.
+- ✅ **Archived sessions are a session-level tree, and cannot be an event-level one.**
+  Measured before designing: `data_json` is null on **all 36,308 events sampled across
+  five agents**, so no vendor payload survives ingestion, and `parent_id` means a
+  different relationship per agent — `claude`'s is the `parentUuid` conversation chain,
+  `opencode`'s groups parts under a message, `codex` and `gemini` never set it. Reading
+  it as a `span` would nest a whole transcript into one chain thousands deep. Anchoring
+  a delegation to its host tool call was measured and rejected: 1,918 of 2,104 id
+  suffixes are hash-only, so it recovers 8.8% and misattributes on collisions —
+  structure right for one delegation in eleven, indistinguishable on screen from the
+  rest. Listing rows now carry `subagents` by identity and transcripts carry
+  `parentId`/`forkedFrom` with `flat: true`, so each surface states its own limit.
+- ✅ **The sibling comparison is built** (`lib/timeline-waterfall.ts`,
+  `components/delegation-overview.tsx`): every trajectory in view on one shared time
+  axis, as left/width percentages — no chart library, no measuring pass, dynamically
+  imported for +0.2 KB. Most of the design is what it may not claim, and one field
+  changed that: publishing `started_at_ms`, which `consolidate` had always computed and
+  only the wire dropped, turned every settled duration from a lower bound into an exact
+  figure. That is what made a rank possible at all — and immediately exposed that a row
+  labelled "never finished" could win it, since such a row acquires an end timestamp
+  without anyone reporting an outcome. The rank now requires an exact extent *and* a
+  terminal status.
 
+- ✅ **A client-named `workdir` is bounded**, on create *and* on import. It previously
+  needed only to exist, so any client could start an agent anywhere on the filesystem;
+  `browse_roots` bounded what `/fs/*` may *enumerate* and said nothing about what a
+  request may *name*. The narrower capability being carefully bounded — three documents,
+  16 tests — is what kept the wider one from being looked at. Import is included
+  deliberately: the archive records every directory any agent ever ran in, so an
+  unbounded import is a general way to start an agent anywhere.
+- ✅ **Two symlink holes of one shape, found in the same audit.** An `overwrite: true`
+  upload wrote *through* a pre-existing symlink out of the workdir, and a read
+  canonicalized for the check then opened the original path. The rule that fixes both:
+  derive the path you operate on *from the check itself*. A `contain_in_any` check
+  paired with a path it did not produce is not a bound.
+- ✅ **Retention reports bytes, and names which sessions hold them.** Measured
+  independently of the watermark, because measuring where the watermark is written
+  leaves the report empty on exactly the install whose growth is unbounded — no
+  TraceDB, nothing prunable. A configurable size bound is **refused rather than
+  deferred**: a terminal session's record is the only copy, so a size-triggered prune
+  is a size-triggered deletion of data nothing else holds.
 - **Multi-user is not solved by this work**, only un-foreclosed: authorization has
   one place to live, and request resolution records a resolver. Authentication
   beyond the bootstrap cookie, per-user visibility, and credential isolation
   remain unbuilt, and non-loopback binding stays a separate explicit change.
 - **Khora needs a Template carrying the agent CLIs and adapters**, since the
   adapter runs inside the environment. None exists yet.
-- **The command palette and the search overlay still run on `useListNavigation`.**
-  Both are combobox-over-a-ranked-list, which is what `useSelectList` now is, so the
-  conversion is mechanical — and until it happens `useListNavigation` cannot be
-  deleted and the next picker can still copy the wrong pattern. Left out of this pass
-  because both own paged or async sources and the workspace surfaces did not, so
-  converting them is a separate change with its own failure modes rather than a
-  rename. The history overlay's *session* list is the same case.
+- ✅ **The palette, the search overlay, and the history browser are migrated, and
+  `useListNavigation` is deleted.** It was not the mechanical rename the item
+  predicted. The palette needed hidden match words (`keywords`) for the aliases its
+  rows do not show, the archive hit needed a third line (`excerpt`) for the snippet
+  that is the only text on it containing the query, and the search overlay could not
+  be filtered by `buildRows` at all: its two sources are ranked by different engines
+  and the archive's ranking is over transcripts the browser never loaded, so
+  re-scoring would have demoted every hit found by its body. That one keeps its own
+  ranking through `external` and hands back only the query. Auditing the migrated
+  surfaces with a list open found two ARIA faults the old hand-rolled markup carried
+  as well — a `separator` and a paging button inside `role="listbox"` — and one focus
+  bug in all three: React's `autoFocus` fires before `useDialog` records the opener,
+  so each field was captured *as* the opener and closing dropped focus on `<body>`.
 - **An `ingest_status` op on `trace-db api`** is worth asking upstream for. TraceDB
   now emits a durable ingestion ack, but its only surfaces are a gRPC ingest
   response and `doctor --json`, measured at **2m34s** because doctor walks every
@@ -1653,10 +1738,22 @@ spends real tokens and only observes whatever shapes one live turn produces, so 
   policy resolves any non-`local` environment to `terminal`, which is the safe
   answer and the right one, but no sandbox exists yet to confirm the environment
   reports the kind this depends on.
-- **Retention has no upper bound on a terminal session's growth.** Compacting
-  forever is correct — the record is the only copy — but a long-lived sandbox
-  session accumulates without limit by design, and nothing yet surfaces *which*
-  sessions are responsible. `/diagnostics` reports the terminal count, not the bytes.
+- **A terminal session's growth is now reported, and deliberately still unbounded.**
+  `/diagnostics` carries `bytesHeld`, `bytesGrewBy`, and a bounded
+  `largestSessions` list naming which sessions hold what and how fast each is
+  growing, from a `session_bytes` table each pass writes. A configurable size bound
+  was *refused* rather than deferred: a terminal session's record is the only copy,
+  so a size-triggered prune is a size-triggered deletion of data nothing else holds
+  — the same trade a time rule makes, and rejected for the same reason
+  (`docs/storage.md` § Why no configurable upper bound is offered). The remedy for a
+  session that is too large has an owner: delete it, or move its environment to one
+  TraceDB can ingest so it stops being terminal.
+- **The byte measure ranks sessions; it does not gauge the disk.** It counts the
+  logical record (`text_len`, uncompressed) rather than the footprint, so the sum
+  over sessions deliberately exceeds what `du` reports on `data/` — a shared blob is
+  counted for every session holding it, which is the right attribution for "who is
+  responsible" and the wrong number for "how full is my disk". Anything wanting the
+  second has to measure the filesystem.
 - **`e2e/delegation.spec.ts` is timing-sensitive under full-suite load.** Measured
   over nine runs of the file after the four-worktree merge: three runs had one or two
   failures and six were clean, and the failing spec was a *different* one each time

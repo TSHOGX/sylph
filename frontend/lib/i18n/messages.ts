@@ -248,6 +248,12 @@ export const en = {
   "history.empty": "No archived sessions here yet.",
   "history.archiveUnavailable":
     "The TraceDB archive is unavailable, so past sessions cannot be listed.",
+  // Its own string rather than `select.keys`, because Enter here opens a read-only
+  // view: a shared "choose" would promise a session that can be continued.
+  "history.keys": "↑↓ navigate · ↵ open read-only · Esc close",
+  // Only shown while more pages remain, which is when the filter's reach is a fact a
+  // user needs: it searches what has loaded, and the rest is behind the paging button.
+  "history.filterScope": "filter searches loaded sessions only",
 
   // The filesystem fallback: one directory level per request.
   "directoryPicker.title": "Choose a folder",

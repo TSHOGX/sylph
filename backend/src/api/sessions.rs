@@ -189,7 +189,92 @@ pub fn block_to_event(block: &crate::storage::Block) -> StreamEvent {
         stability: "stable".to_string(),
         source: block.source.clone(),
         created_at_ms: block.created_at_ms,
+        // The block already carries this; it was simply never published. Without it
+        // a settled block reports only when it closed, so every duration computed
+        // from durable history was a reconstruction from whatever the interior
+        // happened to forward — exact for a chatty delegate, a lower bound for a
+        // quiet one, and absent entirely for one that forwarded nothing.
+        started_at_ms: Some(block.started_at_ms),
     }
+}
+
+/// Resolve a client-named working directory, or refuse it.
+///
+/// # Why naming a workdir is bounded at all
+///
+/// A session's workdir is the `current_dir` of a spawned agent process, and a
+/// coding agent's whole job is reading and writing the tree it is pointed at. So
+/// this string decides where arbitrary code runs and what it may touch —
+/// existence is the one property that says nothing about whether it *should*.
+/// Before this check, any client of this backend could start an agent anywhere on
+/// the filesystem: `/`, another user's home, a mounted volume. `browse_roots`
+/// bounded what `/api/v1/fs/*` may *enumerate* and said nothing about what a
+/// request may *name*, which meant the narrower capability was bounded and the
+/// wider one was not.
+///
+/// # The rule
+///
+/// Canonicalize, then require containment in one of
+/// [`Config::session_roots`](crate::config::Config::session_roots). Canonicalizing
+/// is what defeats `..` and symlinks — including a link that lives on disk, which
+/// no amount of inspecting the request string can see — and it is the same
+/// [`paths`] primitive the two file APIs use, deliberately shared rather than
+/// reimplemented.
+///
+/// The canonical path is what gets journalled, not the string as sent. Two
+/// spellings of one directory (`/tmp/x` and `/private/tmp/x` on macOS) would
+/// otherwise be two sidebar groups for one workspace, and a later containment
+/// check on the journalled value would have to re-resolve it anyway.
+///
+/// # What this deliberately does *not* do
+///
+/// It is not applied to sessions already recorded. Nothing re-checks a journalled
+/// workdir when a session is read, listed, or resumed: a rule that retroactively
+/// orphaned real sessions — making them unreadable because configuration changed
+/// after they were created — would be a worse bug than the hole it closes, and
+/// the containment that matters for *reading* a session's files is
+/// [`crate::api::files`]'s own root, which is that session's workdir and is
+/// checked on every request. The bound applies where a path enters the system as
+/// a new decision, which is this endpoint and [`import`].
+fn contain_workdir(state: &AppState, requested: &str) -> Result<String> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err(Error::InvalidRequest(
+            "A session needs a working directory.".to_string(),
+        ));
+    }
+
+    let roots = state.config.session_roots();
+    if roots.is_empty() {
+        // Every root is missing or unreadable. Refusing is the only honest
+        // answer — an empty root set that fell through to "allow" would silently
+        // remove the bound exactly when configuration is broken.
+        return Err(Error::Forbidden(
+            "No directory is configured for sessions to run in. Set `paths.browse_roots` \
+             in config.toml."
+                .to_string(),
+        ));
+    }
+
+    let path = std::path::Path::new(requested);
+    let target = crate::paths::contain_in_any(&roots, path, "the directories sessions may run in")
+        .map_err(|error| match error {
+            // `FileNotFound` is a 404, which is wrong for a request *body* field:
+            // the session is not what is missing. Restated as the 400 it is, in
+            // the words the picker can show against the field that caused it.
+            Error::FileNotFound => Error::InvalidRequest(format!(
+                "That working directory does not exist: {requested}"
+            )),
+            other => other,
+        })?;
+
+    if !target.is_dir() {
+        return Err(Error::InvalidRequest(format!(
+            "A session's working directory must be a directory: {requested}"
+        )));
+    }
+
+    Ok(target.display().to_string())
 }
 
 pub async fn create(
@@ -211,12 +296,9 @@ pub async fn create(
     }
     drop(registry);
 
-    // Validate workdir exists
-    if !std::path::Path::new(&req.workdir).exists() {
-        return Err(Error::InvalidRequest(
-            "Workdir does not exist".to_string(),
-        ));
-    }
+    // Existence is necessary and nowhere near sufficient: this path is where a
+    // process gets spawned.
+    let workdir = contain_workdir(&state, &req.workdir)?;
 
     // Origin stays `sylph`: this session was created by the WebApp, and origin
     // records who created it. Identity is a separate axis, and opting out of
@@ -235,7 +317,7 @@ pub async fn create(
         agent: req.agent.clone(),
         backend_session_id: None,
         trace_session_id: None,
-        workdir: req.workdir.clone(),
+        workdir,
         title: req.title.clone(),
         flags_json: req
             .flags
@@ -416,14 +498,31 @@ pub async fn import(
         .ok_or_else(|| Error::TraceSessionNotFound(trace_id.to_string()))?;
 
     // Without a recorded working directory there is nothing to resume into.
-    let workdir = facts
+    let archived_workdir = facts
         .cwd
         .ok_or_else(|| Error::TraceSessionNotResumable(trace_id.to_string()))?;
-    if !std::path::Path::new(&workdir).exists() {
-        return Err(Error::InvalidRequest(format!(
-            "The working directory this session ran in no longer exists: {workdir}"
-        )));
-    }
+
+    // Bounded exactly like a created session, and this is not belt-and-braces.
+    // The archive holds every session any agent ever ran on this machine, so an
+    // unbounded import is a *general* way to start an agent anywhere: pick a row
+    // that ran in the target directory, adopt it, send a turn. That the path came
+    // from the archive rather than from the request body changes who chose it, not
+    // what happens next — resuming spawns a process there either way.
+    //
+    // The error therefore has to distinguish three things a user fixes
+    // differently: the directory is gone (nothing to do), the directory is out of
+    // bounds (widen `paths.browse_roots`), or the archive never recorded one
+    // (`TraceSessionNotResumable`, above).
+    let workdir = contain_workdir(&state, &archived_workdir).map_err(|error| match error {
+        Error::InvalidRequest(_) => Error::InvalidRequest(format!(
+            "The working directory this session ran in no longer exists: {archived_workdir}"
+        )),
+        Error::Forbidden(message) => Error::Forbidden(format!(
+            "This archived session ran outside the directories this install permits, \
+             so importing it would let an agent run there: {message}"
+        )),
+        other => other,
+    })?;
 
     let title = req
         .title
