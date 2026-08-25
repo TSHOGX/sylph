@@ -82,8 +82,8 @@ pub struct DiagnosticsResponse {
     agents: Vec<String>,
     broken_runners: HashMap<String, String>,
     /// Every directory bundled-adapter resolution considered, in order, plus the
-    /// user agents directory. Present because "no agents" is otherwise
-    /// unactionable: a missing install and a mistyped `SYLPH_AGENTS_DIR` give the
+    /// user's own agents directory. Present because "no agents" is otherwise
+    /// unactionable: a missing install and a mistyped `paths.agents_dir` give the
     /// same empty list and need opposite fixes. Authenticated, since these are
     /// local filesystem paths.
     agent_roots: Vec<String>,
@@ -94,6 +94,15 @@ pub struct DiagnosticsResponse {
     /// Turns with a live child process right now. May be lower than the journal's
     /// running count if a process died without the reaper having recorded it yet.
     active_processes: usize,
+    /// The last retention pass, or `null` before the first one completes.
+    ///
+    /// Reported because retention's correct behaviour is usually "nothing was
+    /// dropped", which is indistinguishable from a broken pass without the counts.
+    /// `withheld` beside `terminal` is what separates the two: a terminal session
+    /// is *supposed* to keep everything forever, while a delegated session that
+    /// keeps withholding means the archive is not confirming it — and an
+    /// all-`unchanged` pass means the ingestion daemon has stopped advancing.
+    retention: Option<crate::storage::PassReport>,
 }
 
 /// GET /api/v1/diagnostics
@@ -138,12 +147,13 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         broken_runners,
         agent_roots: state
             .config
-            .agents_dir_candidates
+            .bundled_agents_candidates
             .iter()
-            .chain(std::iter::once(&state.config.runners_dir))
+            .chain(std::iter::once(&state.config.agents_dir))
             .map(|path| path.display().to_string())
             .collect(),
         tracedb: state.tracedb.archive_counts().await,
         active_processes: state.turns.active_turn_count().await,
+        retention: state.retention.last_pass().await,
     }))
 }

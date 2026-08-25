@@ -8,6 +8,16 @@ pub struct Turn {
     pub session_id: String,
     pub incarnation_id: Option<String>,
     pub status: String,
+    /// `user` or `agent`. See `migrations/006_turn_origin.sql`.
+    ///
+    /// An `agent` turn is one nobody asked for: the agent spoke after its previous
+    /// turn had settled, which `claude` does to report a backgrounded delegate
+    /// finishing. It is a real turn in every mechanical sense — it consolidates, it
+    /// orders by sequence, its events journal normally — and this only records that
+    /// its prompt did not come from the user, which a reader needs and an empty
+    /// `request_text` cannot say on its own.
+    #[serde(default = "default_origin")]
+    pub origin: String,
     pub request_text: String,
     pub command_invocation_id: Option<String>,
     pub idempotency_key: Option<String>,
@@ -20,7 +30,16 @@ pub struct Turn {
     pub stopped_at_ms: Option<i64>,
 }
 
+fn default_origin() -> String {
+    "user".to_string()
+}
+
 impl Turn {
+    /// Whether this turn was started by the agent rather than by the user.
+    pub fn is_agent_initiated(&self) -> bool {
+        self.origin == "agent"
+    }
+
     /// Whether the turn has reached a state from which it cannot progress.
     pub fn is_terminal(&self) -> bool {
         matches!(

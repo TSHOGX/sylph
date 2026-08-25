@@ -35,10 +35,28 @@
         }
       }
     },
+    "/api/v1/config": {
+      "get": {
+        "summary": "Read what configuration resolved to",
+        "description": "Returns every resolved setting with the source that supplied it, plus every bundled-adapter directory considered. The same report `sylph-web-backend doctor` renders, served so the terminal and the settings panel cannot disagree. It exists because every failure in this area has one shape: a path resolves somewhere nothing lives, the server starts, /health reports fine, and the symptom appears layers away as an empty agent list or a dead slash key. A resolved value alone cannot distinguish a wrong path from a path that is not being read, so each entry names its source and the variable that overrides it. Read-only, deliberately: paths.browse_roots bounds what any client of this backend may enumerate and paths.agents_dir names directories the server executes programs from, so a loopback HTTP surface able to rewrite either is a materially larger threat model than one that displays them — the config file stays the durable, reviewable record. Authenticated, since every value is an absolute local filesystem path.",
+        "responses": {
+          "200": {
+            "description": "The resolved configuration and its provenance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/soul": {
       "get": {
         "summary": "Read the Sylph identity preamble",
-        "description": "Returns the resolved SOUL.md with its path, size, and mtime. Exists because the toggle governing injection is meaningless without it: SOUL.md lives under ~/.agents/skills/sylph/, outside the repo and outside any other surface the app offers, so a user asked to consent to appending it has nowhere else to read it. A missing SOUL.md is a 200 carrying available:false rather than a 404 — an install without one is ordinary and runs every session natively, which the client has to be able to say. A file that resolved but cannot be read is a separate error field rather than a 5xx, because the settings panel must render the toggle either way. Resolution mirrors the runners' own rule (<runners_dir>/../SOUL.md, overridden by SYLPH_SOUL, where an explicit empty value means no identity).",
+        "description": "Returns the resolved SOUL.md with its path, size, and mtime. Exists because the toggle governing injection is meaningless without it: SOUL.md lives under the Sylph home directory, outside any other surface the app offers, so a user asked to consent to appending it has nowhere else to read it. A missing SOUL.md is a 200 carrying available:false rather than a 404 — an install without one is ordinary and runs every session natively, which the client has to be able to say. A file that resolved but cannot be read is a separate error field rather than a 5xx, because the settings panel must render the toggle either way. Resolved once in Config as paths.soul (~/.sylph/SOUL.md by default, overridden by SYLPH_SOUL, where an explicit empty value means no identity and a configured-but-absent path resolves to none).",
         "responses": {
           "200": {
             "description": "Resolved identity text, or available:false when no SOUL.md exists",
@@ -1342,7 +1360,6 @@
             "type": "string",
             "enum": [
               "status",
-              "system",
               "user",
               "thinking",
               "assistant",
@@ -1350,7 +1367,13 @@
               "tool_result",
               "usage",
               "error",
-              "approval"
+              "turn",
+              "subagent",
+              "plan",
+              "diff",
+              "compact",
+              "capabilities",
+              "notice"
             ]
           },
           "phase": {
@@ -1359,11 +1382,36 @@
               "null"
             ]
           },
+          "streamId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stable id for one logical block across its phases. A tool_result repeats its tool_call's id so the two group."
+          },
+          "span": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The delegated trajectory this event happened in; absent is the root turn. A subagent event's streamId is itself a trajectory id, so a nested delegation names another here. See docs/session-protocol.md, Delegated trajectories."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tool name for a tool_call, or the agent's own name for a subagent trajectory."
+          },
           "text": {
             "type": "string"
           },
           "data": {
             "type": "object"
+          },
+          "isError": {
+            "type": "boolean",
+            "description": "Set on a failed tool result, a failed trajectory, or an error event."
           },
           "stability": {
             "type": "string",
@@ -1375,12 +1423,14 @@
           "source": {
             "type": "string",
             "enum": [
-              "runner",
+              "agent",
               "server",
-              "tracedb"
+              "tracedb",
+              "archive"
             ]
           }
-        }
+        },
+        "description": "A normalized stream or journal event. Kinds are additive by protocol, so a client must tolerate one it does not know rather than rejecting the stream."
       },
       "Workspace": {
         "type": "object",
@@ -1415,7 +1465,7 @@
           },
           "isQuickStart": {
             "type": "boolean",
-            "description": "True for ~/.agents, which the sidebar lists separately."
+            "description": "True for the configured Quick Start directory, which the sidebar lists separately."
           },
           "archivedCount": {
             "type": "integer",
@@ -1434,7 +1484,7 @@
         "properties": {
           "quickStartDir": {
             "type": "string",
-            "description": "Absolute $HOME/.agents."
+            "description": "Absolute path of the Quick Start directory, resolved server-side: the browser can neither expand ~ nor know what paths.quick_start_dir was set to."
           },
           "dataDir": {
             "type": "string",
@@ -2225,6 +2275,103 @@
           "error": {
             "type": "string",
             "description": "Why no content is present, when a path resolved but could not be read. Distinguishes \"there is no SOUL.md\" from \"there is one and it is unreadable\" — different problems with different fixes."
+          }
+        }
+      },
+      "ConfigReport": {
+        "type": "object",
+        "required": [
+          "home",
+          "configPath",
+          "configPresent",
+          "entries",
+          "bundledAgentCandidates"
+        ],
+        "properties": {
+          "home": {
+            "type": "string",
+            "description": "The one root every path defaults under.",
+            "example": "/Users/you/.sylph"
+          },
+          "configPath": {
+            "type": "string",
+            "description": "The file to edit. Shown so a user knows what to open.",
+            "example": "/Users/you/.sylph/config.toml"
+          },
+          "configPresent": {
+            "type": "boolean",
+            "description": "False before a first run seeds it, and after a user deletes it. Stated rather than implied, because a table of values needs to say when none of them came from a file."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConfigEntry"
+            }
+          },
+          "bundledAgentCandidates": {
+            "type": "array",
+            "description": "Every directory bundled-adapter resolution tried, in order, with the one it took marked. Without it 'no agents' is unactionable: a missing install and a mistyped path give the same empty list and need opposite fixes.",
+            "items": {
+              "$ref": "#/components/schemas/ConfigCandidate"
+            }
+          }
+        }
+      },
+      "ConfigEntry": {
+        "type": "object",
+        "required": [
+          "key",
+          "value",
+          "source",
+          "envVar"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Dotted key as it appears in config.toml.",
+            "example": "paths.data_dir"
+          },
+          "value": {
+            "type": "string",
+            "example": "/Users/you/.sylph/data"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "env",
+              "file",
+              "default"
+            ],
+            "description": "Which source won. Precedence is environment, then file, then a default derived from the root."
+          },
+          "envVar": {
+            "type": "string",
+            "description": "The variable that overrides this setting, named here so acting on the row needs no table elsewhere.",
+            "example": "SYLPH_DATA_DIR"
+          },
+          "exists": {
+            "type": "boolean",
+            "description": "Whether the path is there. ABSENT rather than false for settings that are not paths — a log level rendered as missing reports a working setting as broken. A bare command name (the tracedb.bin default) is checked against PATH, since a filesystem check would call a working install absent."
+          }
+        }
+      },
+      "ConfigCandidate": {
+        "type": "object",
+        "required": [
+          "path",
+          "exists",
+          "chosen"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "chosen": {
+            "type": "boolean",
+            "description": "True for the one directory discovery actually reads."
           }
         }
       }

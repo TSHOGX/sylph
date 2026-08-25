@@ -11,6 +11,13 @@ pub struct Event {
     pub kind: String,
     pub phase: Option<String>,
     pub stream_id: Option<String>,
+    /// The delegated trajectory this event happened in; `None` is the root turn.
+    ///
+    /// See `docs/session-protocol.md` § Delegated trajectories. A `subagent`
+    /// event's `stream_id` *is* a trajectory id, so a nested delegation is one
+    /// whose `span` names another — which is the whole of how arbitrary depth
+    /// and parallel workflow phases are represented.
+    pub span: Option<String>,
     pub name: Option<String>,
     pub text: String,
     pub data_json: String,

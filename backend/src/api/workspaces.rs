@@ -2,11 +2,11 @@
 //!
 //! The frontend groups sessions by working directory to form "spaces". It could
 //! do that arithmetic itself from `GET /sessions`, but two things are only
-//! knowable here: the absolute path of the Quick Start directory (`~/.agents`),
-//! and counts that span more sessions than a `LIMIT`-capped listing returns.
-//! Deriving the home directory in the browser is impossible, and hardcoding
-//! `~/.agents` client-side would break the moment `HOME` differs from the
-//! user Next.js runs as.
+//! knowable here: the absolute path of the Quick Start directory, and counts that
+//! span more sessions than a `LIMIT`-capped listing returns. The browser cannot
+//! expand `~`, and the directory is configurable — so a client that derived it
+//! would be wrong for anyone who set `paths.quick_start_dir`, and for every
+//! deployment where `HOME` differs from the user Next.js runs as.
 
 use axum::{
     extract::{Query, State},
@@ -42,7 +42,7 @@ pub struct Workspace {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspacesResponse {
-    /// Absolute path of the Quick Start directory (`$HOME/.agents`).
+    /// Absolute path of the Quick Start directory, resolved server-side.
     pub quick_start_dir: String,
     /// Where the journal and attachments live. Shown read-only in settings.
     pub data_dir: String,
@@ -84,8 +84,16 @@ pub async fn list(
     State(state): State<AppState>,
     Query(params): Query<ListQuery>,
 ) -> Result<Json<WorkspacesResponse>> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let quick_start_dir = format!("{home}/.agents");
+    // Both from configuration rather than the environment: `quick_start_dir` is a
+    // setting, and `home` is the base the picker abbreviates paths against, which
+    // must be the same one `browse_roots` was resolved with.
+    let quick_start_dir = normalize(&state.config.quick_start_dir.display().to_string());
+    let home = state
+        .config
+        .browse_roots
+        .first()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
 
     let filter = SessionFilter {
         limit: AGGREGATE_LIMIT,
@@ -238,7 +246,7 @@ mod tests {
     #[test]
     fn leaf_names_the_directory() {
         assert_eq!(leaf("/Users/x/Workspace/sylph-web"), "sylph-web");
-        assert_eq!(leaf("/Users/x/.agents"), ".agents");
+        assert_eq!(leaf("/Users/x/.sylph/scratch"), "scratch");
         // Root has no leaf; falling back to the path keeps the label non-empty.
         assert_eq!(leaf("/"), "/");
     }

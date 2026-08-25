@@ -22,6 +22,12 @@ CREATE TABLE IF NOT EXISTS blocks (
   kind         TEXT NOT NULL,
   phase        TEXT,
   stream_id    TEXT,
+  -- The delegated trajectory this block ran in; NULL is the root turn. See
+  -- `docs/session-protocol.md` § Delegated trajectories. Carried here and not
+  -- only in the journal because this tier is the durable record: without it,
+  -- consolidating a session would discard the shape of every delegation and
+  -- replay would reconstruct a workflow's parallel phases as one flat sequence.
+  span         TEXT,
   name         TEXT,
 
   -- Exactly one of these carries the text: `text_inline` when it is small enough

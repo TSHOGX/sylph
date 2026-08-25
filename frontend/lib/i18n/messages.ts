@@ -390,8 +390,27 @@ export const en = {
     "Errors always expand regardless of these, since a failure's output is the answer.",
   "settings.expansion.thinking": "Expand thinking blocks",
   "settings.expansion.toolOutput": "Expand tool output on success",
-  "settings.dataDir.label": "Data directory",
-  "settings.dataDir.hint": "Set with SYLPH_WEB_DATA_DIR; read-only here.",
+  "settings.section.config": "Configuration",
+  "settings.config.failed": "Could not read the resolved configuration.",
+  "settings.config.file.label": "Configuration file",
+  "settings.config.file.hint":
+    "Everything below is set here. Edit the file and restart; an environment variable overrides it.",
+  "settings.config.file.absent":
+    "No file yet — every value below is a default. It is created on first start.",
+  "settings.config.resolved.label": "Resolved settings",
+  "settings.config.resolved.hint":
+    "What this server is actually using, and where each value came from.",
+  "settings.config.column.setting": "Setting",
+  "settings.config.column.value": "Value",
+  "settings.config.column.source": "From",
+  "settings.config.source.file": "config.toml",
+  "settings.config.source.default": "default",
+  "settings.config.missing": "missing",
+  "settings.config.adapters.label": "Bundled adapters",
+  "settings.config.adapters.hint":
+    "Adapters shipped with Sylph, searched in this order. Your own live in the agents directory above and shadow these by name.",
+  "settings.config.adapters.inUse": "in use",
+  "settings.config.adapters.absent": "not found",
   "settings.reset.label": "Reset",
   "settings.reset.hint": "Clears stored preferences. Sessions and history are untouched.",
   "settings.reset.button": "Reset preferences",
@@ -421,7 +440,8 @@ export const en = {
   "settings.agents.default.first": "First discovered runner",
   "settings.agents.models.label": "Default model per agent",
   "settings.agents.models.hint": "Applied as the `model` flag on new sessions.",
-  "settings.agents.models.none": "No runners discovered. Check SYLPH_RUNNERS_DIR, then refresh.",
+  "settings.agents.models.none":
+    "No agents discovered. Check the paths in Configuration, then refresh.",
   "settings.agents.models.noFlag": "declares no model flag",
   "settings.agents.models.runnerDefault": "Runner default",
   // Names one agent's model control. Distinct from the section label, which names

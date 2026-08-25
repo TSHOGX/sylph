@@ -47,14 +47,14 @@ pub mod tracedb;
 
 use crate::config::Config;
 use crate::error::Error;
-use crate::db::LiveStore;
+use crate::db::JournalStore;
 use crate::events::EventHub;
 use crate::runners::Registry;
 use crate::tracedb::Client as TraceDbClient;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store: LiveStore,
+    pub store: JournalStore,
     pub config: Config,
     pub registry: Arc<Mutex<Registry>>,
     pub hub: EventHub,
@@ -66,6 +66,10 @@ pub struct AppState {
     /// Moves settled turns into history. Exposed so a test can trigger the same
     /// work the background sweeper does, rather than waiting on it.
     pub consolidator: crate::storage::Consolidator,
+    /// Prunes history down to what a downstream authority confirms. Exposed for the
+    /// same reason as the consolidator: a test drives one pass instead of waiting
+    /// five minutes for the interval.
+    pub retention: crate::storage::RetentionScheduler,
     pub tracedb: TraceDbClient,
 }
 
@@ -81,8 +85,11 @@ impl AppState {
     /// runners directory or a misconfigured TraceDB binary leaves the backend
     /// serving what it can, with the failure visible in `/diagnostics`.
     pub async fn build(config: Config) -> anyhow::Result<Self> {
-        let store = LiveStore::new(&config.database_path).await?;
-        tracing::info!("Database initialized at {}", config.database_path);
+        // Before the store opens the path, so an install predating the rename
+        // carries its history forward instead of starting empty beside it.
+        crate::db::migrate::rename_legacy_journal(&config.journal_path).await;
+        let store = JournalStore::new(&config.journal_path).await?;
+        tracing::info!("Journal initialized at {}", config.journal_path);
 
         // Bundled adapters first, so a user-installed one of the same name
         // shadows rather than duplicates. Discovery handshakes with each, which
@@ -90,11 +97,7 @@ impl AppState {
         let discovery_env: Arc<dyn crate::env::Environment> =
             Arc::new(crate::env::LocalEnvironment::new());
         let registry = Arc::new(Mutex::new(
-            Registry::new(
-                vec![config.agents_dir.clone(), config.runners_dir.clone()],
-                discovery_env,
-            )
-            .await?,
+            Registry::new(config.agent_roots(), discovery_env).await?,
         ));
         {
             let registry = registry.lock().await;
@@ -112,10 +115,10 @@ impl AppState {
             if usable == 0 {
                 tracing::error!(
                     "No usable agents. Sessions cannot run and no slash commands will be \
-                     offered. Bundled adapters were looked for in {:?}; user agents in {:?}. \
-                     Set SYLPH_AGENTS_DIR to override.",
-                    config.agents_dir_candidates,
-                    config.runners_dir,
+                     offered. Bundled adapters were looked for in {:?}; your own agents in \
+                     {:?}. Run `sylph-web doctor` to see what resolved.",
+                    config.bundled_agents_candidates,
+                    config.agents_dir,
                 );
             }
         }
@@ -127,6 +130,18 @@ impl AppState {
             tracing::warn!(
                 "Interrupted {} stale turns from a previous backend session",
                 interrupted
+            );
+        }
+
+        // Before the consolidator can move those turns. A crash skips `settle`, so
+        // a delegation open at crash time has no closing event — and consolidation
+        // folds a trajectory with no close into no block at all, which loses the
+        // delegation while keeping its children, reattaching them to the root.
+        let closed = store.close_stale_trajectories().await?;
+        if closed > 0 {
+            tracing::warn!(
+                "Closed {} delegated trajectory(ies) left open by a previous backend session",
+                closed
             );
         }
 
@@ -168,8 +183,14 @@ impl AppState {
         // the same sequence number.
         let seq = crate::events::SeqAllocator::new(store.clone());
 
+        // Batches the journal's hot path. One instance, shared: the drain task
+        // buffers a turn's deltas and the supervisor flushes them before the fold,
+        // so separate writers would leave the fold reading a buffer nobody flushed.
+        let writer = crate::db::JournalWriter::new(store.clone());
+
         let links = crate::links::LinkManager::new(
             store.clone(),
+            writer.clone(),
             hub.clone(),
             environment,
             registry.clone(),
@@ -182,13 +203,31 @@ impl AppState {
         // waiter registry is handed over after both exist.
         let turns = crate::supervisor::turn::LinkedSupervisor::new(
             store.clone(),
+            writer.clone(),
             hub.clone(),
             links.clone(),
             seq,
             consolidator.clone(),
         );
         links.set_waiters(turns.waiters()).await;
+        // The other half of settling: a turn the *agent* started has no waiter, so
+        // resolving a channel cannot end it. Without this the first unprompted turn
+        // would sit `running` forever and wedge its session, because the composer
+        // refuses a message while a turn is live.
+        links.set_closer(turns.closer()).await;
         let tracedb = TraceDbClient::new(config.tracedb_bin.clone());
+
+        // Retention needs the archive client, so it is built after it. The
+        // environment kind is `local` because that is the only environment today;
+        // it is passed rather than assumed inside so a per-session environment
+        // later replaces an argument instead of reaching into the scheduler.
+        let retention = crate::storage::RetentionScheduler::new(
+            store.clone(),
+            history.clone(),
+            tracedb.clone(),
+            crate::env::Environment::descriptor(&crate::env::LocalEnvironment::new()).kind,
+        );
+        retention.spawn();
 
         Ok(Self {
             store,
@@ -199,6 +238,7 @@ impl AppState {
             links,
             history,
             consolidator,
+            retention,
             tracedb,
         })
     }
@@ -227,6 +267,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/health", get(api::health::health))
         .route("/api/v1/auth/token", get(middleware::auth::bootstrap_token))
         .route("/api/v1/diagnostics", get(api::health::diagnostics))
+        // What configuration resolved to, and which source supplied each value.
+        // Read-only: see `api::config` for why a loopback HTTP surface must not be
+        // able to rewrite `browse_roots` or `agents_dir`.
+        .route("/api/v1/config", get(api::config::get))
         .route(
             "/api/v1/agents",
             get(api::agents::list).post(api::agents::refresh),

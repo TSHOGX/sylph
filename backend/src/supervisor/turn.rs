@@ -16,7 +16,7 @@ use anyhow::Result;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
-use crate::db::LiveStore;
+use crate::db::JournalStore;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::links::LinkManager;
 
@@ -86,30 +86,39 @@ pub type TurnWaiters = std::sync::Arc<tokio::sync::Mutex<HashMap<String, oneshot
 /// Runs turns against links.
 #[derive(Clone)]
 pub struct LinkedSupervisor {
-    store: LiveStore,
+    store: JournalStore,
     hub: EventHub,
     links: LinkManager,
     seq: SeqAllocator,
     waiters: TurnWaiters,
-    /// Moves a settled turn's events into history.
-    consolidator: crate::storage::Consolidator,
+    /// Records a turn as terminal, and moves its events into history. Shared with the link manager, which settles the
+    /// turns no waiter exists for — see `supervisor::closer`.
+    closer: crate::supervisor::closer::TurnCloser,
 }
 
 impl LinkedSupervisor {
     pub fn new(
-        store: LiveStore,
+        store: JournalStore,
+        writer: crate::db::JournalWriter,
         hub: EventHub,
         links: LinkManager,
         seq: SeqAllocator,
         consolidator: crate::storage::Consolidator,
     ) -> Self {
+        let closer = crate::supervisor::closer::TurnCloser::new(
+            store.clone(),
+            hub.clone(),
+            seq.clone(),
+            consolidator.clone(),
+            writer,
+        );
         Self {
             store,
             hub,
             links,
             seq,
             waiters: Default::default(),
-            consolidator,
+            closer,
         }
     }
 
@@ -117,6 +126,15 @@ impl LinkedSupervisor {
     /// settle turns it sees complete.
     pub fn waiters(&self) -> TurnWaiters {
         self.waiters.clone()
+    }
+
+    /// The settling path, handed to the link manager for turns with no waiter.
+    ///
+    /// An agent-initiated turn is the case: nobody is parked on its outcome, so the
+    /// manager has to record terminal state itself rather than resolve a channel.
+    /// Sharing this object is what keeps one implementation of what settling means.
+    pub fn closer(&self) -> crate::supervisor::closer::TurnCloser {
+        self.closer.clone()
     }
 
     /// Start a turn and return immediately.
@@ -317,76 +335,21 @@ impl LinkedSupervisor {
 
     /// Record a turn's terminal state and close its stream.
     async fn settle(&self, session_id: &str, turn_id: &str, outcome: Outcome) {
-        let (status, error_code, message) = outcome.as_status();
-
-        // Claimed before the waiter is dropped, and that order is load-bearing.
+        // Claimed before the turn is recorded, and that order is load-bearing.
         //
-        // Removing the waiter drops the oneshot sender, which wakes whoever is
-        // parked in `run()` with a `RecvError` — and that path reads as "the link
-        // died", so it settles the turn as LINK_LOST. Claiming first means that
-        // second settlement finds the turn already terminal and does nothing.
-        // Reversed, a user's stop is reported as the agent having exited: true of
-        // the transport, false about what happened.
-        let settled = match self
-            .store
-            .finish_turn(turn_id, status, None, error_code, Some(&message))
-            .await
-        {
-            Ok(settled) => settled,
-            Err(error) => {
-                error!("Failed to record turn {} as {}: {}", turn_id, status, error);
-                self.waiters.lock().await.remove(turn_id);
-                return;
-            }
-        };
-
+        // Removing the waiter drops the oneshot sender, which wakes whoever is parked
+        // in `run()` with a `RecvError` — and that path reads as "the link died", so
+        // it settles the turn as LINK_LOST. Claiming first means that second
+        // settlement finds the turn already terminal and does nothing. Reversed, a
+        // user's stop is reported as the agent having exited: true of the transport,
+        // false about what happened.
+        //
+        // This is the only part of settling that is the supervisor's own. Everything
+        // below it is shared with the link manager, which has to settle turns nobody
+        // is waiting on — see `supervisor::closer`.
         self.waiters.lock().await.remove(turn_id);
 
-        if !settled {
-            debug!(
-                "Turn {} was already settled; not recording it as {}",
-                turn_id, status
-            );
-            return;
-        }
-
-        if !message.is_empty() {
-            let _ = self
-                .emit(
-                    session_id,
-                    turn_id,
-                    StreamEvent {
-                        is_error: true,
-                        ..server_event(
-                            "error",
-                            message.clone(),
-                            Some(serde_json::json!({"code": error_code})),
-                        )
-                    },
-                )
-                .await;
-        }
-
-        let _ = self
-            .emit(
-                session_id,
-                turn_id,
-                server_event(
-                    "status",
-                    String::new(),
-                    Some(serde_json::json!({"state": status})),
-                ),
-            )
-            .await;
-
-        let _ = self.store.update_session_status(session_id, "idle").await;
-
-        self.hub.close(turn_id).await;
-
-        // The turn's rows have stopped changing, so this is the moment to move
-        // them. Detached: the client already has its events, and making anything
-        // wait on disk work here would be pure latency.
-        self.consolidator.schedule(turn_id.to_string());
+        self.closer.close(session_id, turn_id, outcome).await;
     }
 
     async fn emit(
@@ -415,12 +378,14 @@ impl LinkedSupervisor {
 }
 
 /// A server-authored event. These have no phase and are always stable.
-fn server_event(kind: &str, text: String, data: Option<serde_json::Value>) -> StreamEvent {
+pub(crate) fn server_event(kind: &str, text: String, data: Option<serde_json::Value>) -> StreamEvent {
     StreamEvent {
         seq: 0,
         kind: kind.to_string(),
         phase: None,
         stream_id: None,
+        // The server speaks about the turn, not from inside a delegation.
+        span: None,
         name: None,
         text,
         data,

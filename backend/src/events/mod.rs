@@ -52,6 +52,13 @@ pub struct StreamEvent {
     /// with a database row id.
     #[serde(rename = "streamId", skip_serializing_if = "Option::is_none")]
     pub stream_id: Option<String>,
+    /// The delegated trajectory this event happened in; absent is the root turn.
+    ///
+    /// `docs/session-protocol.md` § Delegated trajectories. One pointer carries
+    /// subagents, nested subagents, and a workflow's parallel phases, because a
+    /// `subagent` event's `stream_id` is itself a trajectory id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "str::is_empty")]
@@ -68,12 +75,14 @@ pub struct StreamEvent {
 impl StreamEvent {
     /// True when this event belongs in the durable journal.
     ///
-    /// `completed` events carry the whole stable value for their block, so they
-    /// are the journal's unit of record. Events with no phase at all are
-    /// server-authored (status, error, the user's own request) and are always
-    /// stable.
+    /// Reads the `stability` field rather than re-deriving it from the phase. It
+    /// used to do the latter, and the two answers were the same until `subagent`
+    /// became stable at every phase — at which point a trajectory's `started` was
+    /// classified `stable`, published as stable, and then not journaled, because
+    /// this method disagreed with the field beside it. One fact with two
+    /// derivations diverges the moment either grows a case.
     pub fn is_stable(&self) -> bool {
-        matches!(self.phase.as_deref(), Some("completed") | None)
+        self.stability == "stable"
     }
 
     /// Convert into a persistable row.
@@ -86,6 +95,7 @@ impl StreamEvent {
             kind: self.kind.clone(),
             phase: self.phase.clone(),
             stream_id: self.stream_id.clone(),
+            span: self.span.clone(),
             name: self.name.clone(),
             text: self.text.clone(),
             data_json: self
@@ -120,8 +130,17 @@ impl StreamEvent {
         // Stability follows the phase, unchanged from v1: a `completed` event
         // carries its block's whole stable value, and an event with no phase is
         // server-authored and always stable.
+        //
+        // `subagent` is the documented exception, at every phase. It records
+        // *structure*, not content: its `started` phase is where a trajectory's
+        // id, name, and parent live. Dropped as an ephemeral projection, the
+        // journal would keep every child event pointing at a parent it never
+        // recorded, and a reload would flatten the whole delegated subtree into
+        // its parent's own work — the exact bug `span` exists to fix, reappearing
+        // via the storage tier instead of the protocol.
         let stability = match phase.as_deref() {
             Some("completed") | None => "stable",
+            _ if kind == "subagent" => "stable",
             _ => "ephemeral",
         };
 
@@ -132,6 +151,14 @@ impl StreamEvent {
             stream_id: body
                 .get("streamId")
                 .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            // Empty is normalized to absent: an adapter emitting `"span":""` for a
+            // root event means the root, and a client comparing against a
+            // trajectory id would otherwise look for one named "".
+            span: body
+                .get("span")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
                 .map(|s| s.to_string()),
             name: body
                 .get("name")
@@ -160,6 +187,7 @@ impl StreamEvent {
             kind: row.kind.clone(),
             phase: row.phase.clone(),
             stream_id: row.stream_id.clone(),
+            span: row.span.clone(),
             name: row.name.clone(),
             text: row.text.clone(),
             data: match row.data_json.as_str() {
@@ -326,12 +354,60 @@ impl EventHub {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_trajectory_pointer_survives_the_wire_in_both_directions() {
+        // Both halves matter and they fail differently: a parse miss silently
+        // flattens the tree, and a serialize miss lets the server hold structure it
+        // never sends — which looks like a frontend bug because the journal is
+        // right and the client is empty.
+        let parsed = StreamEvent::from_adapter(&serde_json::json!({
+            "kind": "assistant", "phase": "completed",
+            "streamId": "b1", "span": "s1", "text": "hi"
+        }))
+        .expect("parses");
+        assert_eq!(parsed.span.as_deref(), Some("s1"));
+
+        let wire = serde_json::to_value(&parsed).expect("serializes");
+        assert_eq!(wire.get("span").and_then(|v| v.as_str()), Some("s1"));
+
+        // A root event says nothing rather than saying "".
+        let root = StreamEvent::from_adapter(&serde_json::json!({
+            "kind": "assistant", "span": ""
+        }))
+        .expect("parses");
+        assert_eq!(root.span, None);
+        assert!(serde_json::to_value(&root).unwrap().get("span").is_none());
+    }
+
+    #[test]
+    fn a_trajectory_is_journaled_at_every_phase() {
+        // `started` is where a trajectory's id, name, and parent live. Dropped as an
+        // ephemeral projection, the journal keeps children pointing at a parent it
+        // never recorded, and a reload flattens the subtree onto the root.
+        for phase in ["started", "delta", "completed"] {
+            let event = StreamEvent::from_adapter(&serde_json::json!({
+                "kind": "subagent", "phase": phase, "streamId": "s1"
+            }))
+            .expect("parses");
+            assert_eq!(event.stability, "stable", "subagent/{phase}");
+            assert!(event.is_stable(), "subagent/{phase} must reach the journal");
+        }
+
+        // The exception is scoped to structure: content still projects.
+        let delta = StreamEvent::from_adapter(&serde_json::json!({
+            "kind": "assistant", "phase": "delta", "streamId": "b1"
+        }))
+        .expect("parses");
+        assert_eq!(delta.stability, "ephemeral");
+    }
+
     fn event(seq: i32, kind: &str, phase: Option<&str>) -> StreamEvent {
         StreamEvent {
             seq,
             kind: kind.to_string(),
             phase: phase.map(str::to_string),
             stream_id: None,
+            span: None,
             name: None,
             text: String::new(),
             data: None,

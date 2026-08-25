@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
-use crate::db::LiveStore;
+use crate::db::JournalStore;
 use crate::storage::history::{self, HistoryStore};
 
 /// How many turns the startup sweep consolidates per pass.
@@ -37,7 +37,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 /// Consolidates settled turns into history.
 #[derive(Clone)]
 pub struct Consolidator {
-    journal: LiveStore,
+    journal: JournalStore,
     history: HistoryStore,
     /// One consolidation at a time.
     ///
@@ -49,7 +49,7 @@ pub struct Consolidator {
 }
 
 impl Consolidator {
-    pub fn new(journal: LiveStore, history: HistoryStore) -> Self {
+    pub fn new(journal: JournalStore, history: HistoryStore) -> Self {
         Self {
             journal,
             history,

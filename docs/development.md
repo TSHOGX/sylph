@@ -62,12 +62,15 @@ npm run dev
   - Multiple LAN IPs: `"100.125.12.35,192.168.1.100"`
 
 **Backend tab (optional overrides):**
-- `SYLPH_WEB_PORT` — Backend port (default: `4317`)
-- `SYLPH_WEB_DATA_DIR` — Database location (default: `~/.agents/data/sylph/web`)
-- `TRACEDB_BIN` — TraceDB binary path (default: `~/Workspace/trace-db/target/release/trace-db`)
-- `SYLPH_WEB_BROWSE_ROOTS` — Extra colon-separated directories the workspace
-  picker may browse (default: none; `$HOME` is always included)
-- `RUST_LOG` — Log level (default: `info`, try `debug` for troubleshooting)
+- `SYLPH_HOME` — the root holding config, identity, data, and scratch
+  (default: `~/.sylph`). One variable relocates the whole install, which is what
+  makes a second instance a one-line change.
+- `SYLPH_PORT` — Backend port (default: `4317`)
+- `SYLPH_LOG` — Log level (default: `info`, try `debug` for troubleshooting)
+
+Everything else — the data directory, browse roots, the TraceDB binary — belongs in
+`~/.sylph/config.toml` rather than in a shell export, so it survives a new terminal
+and a supervisor restart. See [**configuration.md**](configuration.md).
 
 ## Quick Health Check
 
@@ -77,18 +80,22 @@ Look for these lines in the backend tab output:
 
 ```
 ✓ Good:
-  INFO sylph_web_backend: Starting Sylph Web backend on 127.0.0.1:4317
-  INFO sylph_web_backend: Database initialized at /Users/hsw/.agents/data/sylph/web/live.db
-  INFO sylph_web_backend::runners: Discovered runner: claude at "..."
-  INFO sylph_web_backend: Runner discovery: 4 agents found, 0 broken
+  INFO sylph_web_backend: Sylph home /Users/you/.sylph (config /Users/you/.sylph/config.toml)
+  INFO sylph_web_backend: Database initialized at /Users/you/.sylph/data/journal.db
+  INFO sylph_web_backend::runners: Discovered agent claude at "..."
+  INFO sylph_web_backend: Agent discovery: 2 usable, 0 broken
   INFO sylph_web_backend: TraceDB available: 4705 archived sessions, 529688 events
   INFO sylph_web_backend: Listening on http://127.0.0.1:4317
 
 ✗ Issues:
-  - "TraceDB available: 0 archived sessions" → TraceDB is empty or pointing to wrong database
-  - "address already in use" → Port 4317 is taken (change SYLPH_WEB_PORT)
-  - "0 agents found" → No runners in ~/.agents/skills/sylph/runners
+  - "TraceDB unavailable" → not on PATH; set tracedb.bin in config.toml
+  - "address already in use" → Port 4317 is taken (change SYLPH_PORT)
+  - "No usable agents" → logged at ERROR, and it names every directory searched
 ```
+
+Zero usable agents is logged at `error`, not `info`: no session can be created and
+no slash command offered, so the server reports healthy while unable to do its job.
+`cargo run -- doctor` prints every resolved path and whether it exists.
 
 Or check via curl:
 ```sh
@@ -178,7 +185,7 @@ read/write access rather than the read-only direct frontend.
 ### The start screen lists few sessions, and the archive seems missing
 
 **This is expected.** The start screen's recents come from the live journal
-(`live.db`), which holds only what this app created or imported. It lists
+(`journal.db`), which holds only what this app created or imported. It lists
 directories rather than sessions, so a directory worked in all week is one row.
 
 Archived coding-agent history lives in TraceDB and is reached three ways:
@@ -189,7 +196,7 @@ Archived coding-agent history lives in TraceDB and is reached three ways:
 3. **`Cmd+K`** — searches live sessions and the archive together by content
 
 The architecture separates:
-- **Active sessions** (live.db) — ongoing work, resumable, editable
+- **Active sessions** (journal.db) — ongoing work, resumable, editable
 - **Archived sessions** (TraceDB) — historical read-only records, searchable
 
 An archived session opens read-only and offers explicit continuation. Importing is
@@ -221,34 +228,40 @@ npm run dev
 
 **Symptom:** Startup shows:
 ```
-INFO sylph_web_backend: TraceDB available: 0 archived sessions, 0 events
+WARN sylph_web_backend: TraceDB unavailable, so archive search and native session
+                        import will return no results.
 ```
 
-**Fix:** Set the correct path:
+**Fix:** TraceDB is a separate project. Put it on your `PATH`, or pin a checkout
+build in `~/.sylph/config.toml`:
+```toml
+[tracedb]
+bin = "~/Workspace/trace-db/target/release/trace-db"
+```
+
+Then confirm what resolved:
 ```sh
-export TRACEDB_BIN="/Users/hsw/Workspace/trace-db/target/release/trace-db"
-cargo run
+cargo run -- doctor        # the tracedb.bin row says found or MISSING
 ```
 
-Or verify the default path exists:
+### "No agents discovered" / Agent dropdown empty
+
+**Symptom:** Frontend agent selector is empty, or backend logs at `error`:
+```
+ERROR sylph_web_backend: No usable agents. Sessions cannot run and no slash
+                         commands will be offered.
+```
+
+**Fix:** The log line names every directory searched, and so does `doctor`:
 ```sh
-ls -lh ~/Workspace/trace-db/target/release/trace-db
+cargo run -- doctor
+# "Bundled adapters" lists each candidate, with -> on the one in use.
+# "Your agents" counts adapter.sh trees in ~/.sylph/agents.
 ```
 
-### "No runners discovered" / Agent dropdown empty
-
-**Symptom:** Frontend agent selector is empty, or backend logs:
-```
-INFO sylph_web_backend: Runner discovery: 0 agents found, 0 broken
-```
-
-**Fix:** Ensure runners exist and are executable:
-```sh
-ls -l ~/.agents/skills/sylph/runners/*/runner.sh
-# Should show executable scripts for claude, codex, pi, opencode, etc.
-```
-
-If missing, set up your Sylph runners first.
+Adapters ship with the repo in `adapters/`, so a checkout should find them with
+nothing configured. An adapter that was found but failed its handshake appears in
+`/api/v1/diagnostics` with its error rather than being hidden.
 
 ## Logs and Debugging
 
@@ -359,9 +372,10 @@ For remote access:
 
 ### Data locations
 
-- `~/.agents/data/sylph/web/live.db` — Active sessions (SQLite)
-- `~/Library/Application Support/trace-db/trace.db` — Archived sessions (TraceDB, macOS)
-- `~/.agents/skills/sylph/runners/` — Runner discovery
+- `~/.sylph/` — everything Sylph owns: `config.toml`, `SOUL.md`, `agents/`,
+  `data/`, `scratch/`
+- `~/.sylph/data/journal.db` — active sessions (SQLite)
+- `~/Library/Application Support/trace-db/trace.db` — archived sessions (TraceDB, macOS)
 
 ## Cleanup
 
@@ -375,6 +389,6 @@ To stop services:
 
 Data is never deleted by stopping services. To reset:
 ```sh
-rm ~/.agents/data/sylph/web/live.db  # Deletes active sessions
+rm ~/.sylph/data/journal.db   # Deletes active sessions; history.db is separate
 # TraceDB archive is never touched
 ```

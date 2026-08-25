@@ -34,6 +34,8 @@ pub struct Block {
     pub kind: String,
     pub phase: Option<String>,
     pub stream_id: Option<String>,
+    /// The delegated trajectory this block ran in; `None` is the root turn.
+    pub span: Option<String>,
     pub name: Option<String>,
     pub text: String,
     pub folded: Option<Folded>,
@@ -124,13 +126,13 @@ impl HistoryStore {
             sqlx::query(
                 r#"
                 INSERT OR REPLACE INTO blocks (
-                    session_id, seq, turn_id, kind, phase, stream_id, name,
+                    session_id, seq, turn_id, kind, phase, stream_id, span, name,
                     text_inline, text_hash, text_len, text_encoding,
                     delta_offsets, delta_timings,
                     data_json, data_hash, is_error, source,
                     started_at_ms, created_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&block.session_id)
@@ -139,6 +141,7 @@ impl HistoryStore {
             .bind(&block.kind)
             .bind(&block.phase)
             .bind(&block.stream_id)
+            .bind(&block.span)
             .bind(&block.name)
             .bind(text_inline)
             .bind(&text_hash)
@@ -267,6 +270,7 @@ impl HistoryStore {
             kind: row.try_get("kind")?,
             phase: row.try_get("phase")?,
             stream_id: row.try_get("stream_id")?,
+            span: row.try_get("span")?,
             name: row.try_get("name")?,
             text,
             folded,
@@ -366,28 +370,60 @@ impl HistoryStore {
         Ok(removed)
     }
 
-    /// Record how far an authority has confirmed a session.
+    /// Record how far an authority has confirmed a session, and against what.
+    ///
+    /// Written on every pass, including one that confirmed nothing: the row is what
+    /// distinguishes "checked, and nothing is safe to drop yet" from "never
+    /// checked", and those need opposite responses. An empty `watermarks` table
+    /// looks exactly like a correctly conservative one, which is how a retention
+    /// path that confirmed nothing stayed invisible.
     pub async fn set_watermark(
         &self,
         session_id: &str,
         authority: &str,
-        confirmed_seq: Option<i32>,
+        confirmation: &crate::storage::retention::Confirmation,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO watermarks (session_id, authority, confirmed_seq, checked_at_ms)
-             VALUES (?, ?, ?, ?)
+            "INSERT INTO watermarks (
+               session_id, authority, confirmed_seq, checked_at_ms,
+               archive_id, source_fingerprint
+             )
+             VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(session_id) DO UPDATE SET
                authority = excluded.authority,
                confirmed_seq = excluded.confirmed_seq,
-               checked_at_ms = excluded.checked_at_ms",
+               checked_at_ms = excluded.checked_at_ms,
+               archive_id = excluded.archive_id,
+               source_fingerprint = excluded.source_fingerprint",
         )
         .bind(session_id)
         .bind(authority)
-        .bind(confirmed_seq)
+        .bind(confirmation.safe_to_drop)
         .bind(chrono::Utc::now().timestamp_millis())
+        .bind(confirmation.archive_id.as_deref())
+        .bind(confirmation.source_fingerprint.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// The fingerprint recorded for a session at its last pass, if any.
+    ///
+    /// A pass compares this against what the archive reports now. It cannot gate
+    /// the `show` call — the current fingerprint arrives in that same response —
+    /// so this is not an optimization: it is how "the archive re-ingested this
+    /// session" becomes observable. A pass where every session is unchanged means
+    /// the copy is not advancing, which is what a stopped ingestion daemon looks
+    /// like, and which is otherwise indistinguishable from a healthy steady state.
+    pub async fn watermark_fingerprint(&self, session_id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT source_fingerprint FROM watermarks WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map(Option::flatten)
+        .map_err(Into::into)
     }
 
     pub async fn watermark(&self, session_id: &str) -> Result<Option<(String, Option<i32>)>> {
@@ -430,6 +466,34 @@ impl HistoryStore {
             .await
             .context("Could not count blocks")
     }
+
+    /// Sessions holding blocks, least-recently-checked first.
+    ///
+    /// Ordered by the last pass rather than by id, so a bounded batch rotates
+    /// through every session instead of re-examining the same alphabetical prefix
+    /// forever. A session never checked has no watermark row and sorts first, which
+    /// is what makes a fresh install converge on the whole set rather than starving
+    /// whatever happens to sort late.
+    ///
+    /// Only sessions with blocks appear: a session whose history is already empty
+    /// has nothing to prune, so spending a `show` round trip on it would be pure
+    /// cost. This is also why the batch is drawn from `blocks` rather than from the
+    /// journal's session list — the work is proportional to what history holds, not
+    /// to how many sessions exist.
+    pub async fn sessions_awaiting_retention(&self, limit: i64) -> Result<Vec<String>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT b.session_id FROM (
+               SELECT DISTINCT session_id FROM blocks
+             ) b
+             LEFT JOIN watermarks w ON w.session_id = b.session_id
+             ORDER BY w.checked_at_ms IS NOT NULL, w.checked_at_ms, b.session_id
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("Could not list sessions awaiting retention")
+    }
 }
 
 /// Fold a turn's journal rows into blocks.
@@ -442,6 +506,8 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
     // matched as each `completed` event is reached.
     let mut pending: HashMap<String, Vec<Delta>> = HashMap::new();
     let mut first_arrival: HashMap<String, i64> = HashMap::new();
+    // The best name any phase gave a block, since not every phase carries one.
+    let mut names: HashMap<String, String> = HashMap::new();
     let mut blocks = Vec::new();
 
     for event in events {
@@ -451,6 +517,18 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
             Some("started") | Some("delta") => {
                 let Some(id) = stream_id else { continue };
                 first_arrival.entry(id.clone()).or_insert(event.created_at_ms);
+                // A name given by an earlier phase is kept, because for some blocks
+                // that is the *only* phase that has it. A delegated trajectory is
+                // named on `started` — or renamed by the `delta` that carries its
+                // parsed brief — and its `completed` phase reports an outcome, not
+                // an identity. Folding only the completed event's fields therefore
+                // erased every subagent's name, and every card in the timeline read
+                // "Subagent" after the turn consolidated. The symptom looked like a
+                // frontend fallback firing; the name had been dropped two layers
+                // below it.
+                if let Some(name) = event.name.clone() {
+                    names.insert(id.clone(), name);
+                }
                 if !event.text.is_empty() {
                     pending.entry(id).or_default().push(Delta {
                         text: event.text.clone(),
@@ -469,6 +547,11 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     .as_ref()
                     .and_then(|id| first_arrival.remove(id))
                     .unwrap_or(event.created_at_ms);
+
+                // Resolved before the id is moved into the block below.
+                let name = event.name.clone().or_else(|| {
+                    stream_id.as_ref().and_then(|id| names.remove(id))
+                });
 
                 let folded = fold::fold(&deltas, &event.text, started_at_ms);
                 if folded.is_none() && !deltas.is_empty() {
@@ -489,7 +572,10 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     kind: event.kind.clone(),
                     phase: event.phase.clone(),
                     stream_id,
-                    name: event.name.clone(),
+                    span: event.span.clone(),
+                    // The completed event's own name wins when it has one; a name
+                    // from an earlier phase fills in when it does not.
+                    name,
                     text: event.text.clone(),
                     folded,
                     data: match event.data_json.as_str() {
@@ -545,8 +631,19 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 .map(|e| e.kind.clone())
                 .unwrap_or_else(|| "assistant".to_string()),
             phase: Some("incomplete".to_string()),
+            // Read from the event that opened it, like `kind` above: an interrupted
+            // block still belongs to the trajectory it ran in, and dropping that
+            // would reparent the tail of an abandoned delegation onto the root.
+            span: events
+                .iter()
+                .find(|e| e.stream_id.as_deref() == Some(stream_id.as_str()))
+                .and_then(|e| e.span.clone()),
+            // Same reason as the folded path: for a block whose only phases were
+            // `started` and `delta`, that is the only place a name ever appeared.
+            // A trajectory the agent abandoned is exactly this case, so leaving it
+            // None would make the one delegation that needs explaining anonymous.
+            name: names.remove(&stream_id),
             stream_id: Some(stream_id),
-            name: None,
             text,
             folded,
             data: None,
@@ -565,7 +662,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
 ///
 /// The ordering rule this module exists to enforce: insert, commit, *then* delete.
 pub async fn consolidate_turn(
-    journal: &crate::db::LiveStore,
+    journal: &crate::db::JournalStore,
     history: &HistoryStore,
     turn_id: &str,
 ) -> Result<usize> {

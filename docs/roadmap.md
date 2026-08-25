@@ -1214,6 +1214,59 @@ mistaken for "agents do X", and it earned its place immediately:
   `modelId`/`name`, `id`/`displayName`, `id`/`name`), which is what makes the
   normalized seam belong in the adapter.
 
+### Retention became reachable, and what that took
+
+Three things were believed about storage that measurement contradicted.
+
+**The tiering was already built.** The open item claiming the `journal.db` /
+`history.db` split was "designed but not built" was stale: `HistoryStore` (own pool,
+`synchronous=FULL`, own migrations) and `Consolidator` (spawned at startup) had
+landed. Measured on a real install: the journal's `events` table held **0 rows**
+while `history.db` held **131 blocks across 4 sessions**, 11 of them carrying folded
+delta arrays. The split works and the journal is bounded. What was missing was the
+file *name* and delta batching.
+
+**Retention had no scheduler — and would have pruned nothing if it had.** Two
+independent defects in `TraceDbAuthority`, either alone fatal:
+
+- It compared Sylph's session UUID against the archive's `<agent>:<native-id>` key.
+  The three linked sessions on this machine *are* in TraceDB, as
+  `claude:9bdacb6e-…` and two `pi:…` rows. The UUID matches nothing, ever.
+- It scanned `list(None, 200, None)` — one page of a 4416-row archive.
+
+Both fail silently: the archive answers "no such session", retention correctly keeps
+everything, and every layer behaves impeccably. `watermarks` held **0 rows**,
+confirming it had never run. The authority is now constructed *from* an archive id,
+so the unanswerable question cannot be asked, and asks `show` by id rather than
+paging. Both defects were re-introduced deliberately to confirm the new tests fail.
+
+**The upstream ack is not what the design hoped for.** It is archive-global — one
+monotonic sequence per ingest *run*, committed after the data transaction so never a
+false positive — not a per-session coverage cursor, so it cannot replace the
+`endedAtMs` reasoning. It is also not cheaply readable: its only surfaces are a gRPC
+ingest response and `doctor --json`, measured at **2m34s**. What retention reads
+instead is `show`'s source fingerprint, which says which version of the native store
+a confirmation came from; `docs/storage.md` records the full reasoning.
+
+Also decided: the ingestion daemon already runs (`trace-db watch --interval 1800`,
+same archive, same version), so Sylph observes rather than becoming a second writer.
+
+Two design corrections fell out of building it. An unreachable archive is reported
+once per pass rather than as N session failures — an install without TraceDB is a
+supported degraded state, and it must not be recorded as a *checked* watermark,
+because "cannot ask" is not "asked and nothing is safe". And blob sweeping moved out
+of the per-session path: reachability spans sessions, so it was running a global scan
+once per session for one pass's worth of work.
+
+**Delta batching is ephemeral-only, and that is forced.** Stable events are journaled
+before publishing so a reconnect can always find them; the hub's ring holds only
+ephemeral events, which is what a mid-stream reconnect replays. So batching stable
+events would open a hole a reconnect could observe, while batching deltas — thousands
+per turn against tens of stable events — costs nothing observable and captures nearly
+all the win. Its one ordering rule is that a turn's buffer must flush before the fold
+reads it; removing that flush fails
+`replay_reproduces_the_deltas_and_not_only_the_final_text`, verified by removing it.
+
 ### Bugs found while building, each with its own cause
 
 - **The model list was empty on every session ever opened.** `capabilities_from` read
@@ -1288,7 +1341,197 @@ Two bugs worth recording from the conversion:
   the first Enter in a fresh directory navigated *away* from it. It moved to the
   breadcrumb bar, where the trail it belongs to already lives.
 
+### Delegated trajectories: the protocol promised a tree it could not carry
+
+`subagent` was in the v3 event table from the start, described as carrying "the
+child's own events nested". Nothing implemented it, and the description could not
+be implemented: an envelope must be closed before it is sent, and a trajectory
+streams for minutes. Meanwhile the field it would have needed did not exist —
+`StreamEvent` had no parent pointer, the `events` table had no column, and the
+timeline had no `subagent` case, so a delegation fell through to a bare status
+line.
+
+The measured consequence was worse than a missing feature. `adapters/claude/`
+called `_stream_event(msg["event"])`, dropping the envelope's
+`parent_tool_use_id` — the only thing distinguishing a delegate's output from the
+parent's. Every subagent's thinking, prose, and tool calls were published *as the
+root agent's own*. And `self.blocks` was keyed by claude's content-block index
+alone, which numbers per message: two concurrent delegates both open index 0, so
+one's deltas appended to the other's text. That is corrupted output, not a layout
+fault, and it was invisible until two delegates ran at once.
+
+**One field carries subagents, nested subagents, and dynamic workflows.** An
+event's `span` names the trajectory it ran in; a `subagent` event's `streamId` *is*
+a trajectory id. A nested delegation is one whose `span` names another, and a
+workflow phase is a trajectory whose children are trajectories — no case in the
+protocol distinguishes them, which is what makes it a generalization rather than
+three features. Distributed tracing settled on a flat stream with a parent pointer
+for the same reason, and it is already how the vendor speaks.
+
+**The tree is navigated, not displayed.** One indent per depth runs out of viewport
+before it runs out of tree, so a trajectory is one collapsed card, indentation caps
+at two levels, and focus mode re-roots with a breadcrumb. Collapsing is also the
+performance design: a closed card mounts no descendants, so DOM cost tracks what
+the user opened rather than what the agent did — which is a stronger property than
+the memoization the timeline already had, and why virtualization is still not
+needed.
+
+**Every card reports its whole subtree,** because a collapsed row is otherwise
+where a failure goes to die. A descendant failure escalates its ancestors, and a
+failed branch expands itself down to the tool that failed. `abandoned` stays
+distinct from `failed`: the server closes trajectories an adapter left open when a
+turn terminates, and reporting that as a failure would call an interrupted turn a
+broken one.
+
+### Bugs this surfaced below the UI
+
+Each was found by a test, and each presented somewhere other than where it lived:
+
+- **`is_stable()` disagreed with the `stability` field beside it.** It re-derived
+  the answer from the phase, which was equivalent until `subagent` became stable at
+  every phase — after which a trajectory's `started` was classified stable,
+  published as stable, and then not journaled. One fact with two derivations
+  diverges the moment either grows a case.
+- **Consolidation dropped a trajectory's name.** Folding kept only the `completed`
+  event's fields, but a trajectory is named on `started` and renamed by the `delta`
+  carrying its parsed brief; its close reports an outcome, not an identity. So every
+  card read "Subagent" once a turn consolidated, which looked like a frontend
+  fallback firing two layers up.
+- **A focus control named "focus" collides with every sibling.** Visible text wins
+  over `title` for the accessible name, so twenty delegations presented twenty
+  indistinguishable controls. The same accessible-name collision that once failed 40
+  specs at once.
+- **A two-card fixture cannot observe a tree bug.** The E2E fixture now emits two
+  concurrent trajectories with interleaved events, one nested three deep, a failure
+  at the bottom, and one left open — because grouping by arrival order, flattening at
+  depth 2, and a permanently spinning card each pass a shallower fixture.
+
+### Promotion: a trajectory is defined by use, not by declaration
+
+The tree above worked for `Task` and for nothing else. `claude` has since shipped
+`Agent` and `Workflow`, and an MCP server can add a delegating tool whenever it
+likes — so an adapter deciding at open time whether a call delegates is guessing at
+a fact that arrives later, since delegation is only knowable when a child turns up
+carrying the call's id. Measured on a real session: two `Workflow` cards read
+*running* permanently with no interior, and four `Agent` calls had their children
+rooted beside the call rather than inside it.
+
+**Any `streamId` another event names as its `span` is a trajectory**, whatever kind
+of event opened it, and a `tool_call` so named is *promoted* in place — it stays a
+tool card and becomes the container its children already claim it is. `subagent`
+remains the richer declaration path (it names a delegation before any child exists
+and states an outcome independent of its host), but is no longer required. An agent
+nobody has written yet nests correctly by tagging its children, which is the same
+`span` it must already set for its output to be attributed at all. That is what
+makes `pi`'s future delegation need no adapter-specific path.
+
+Five things follow, each fixing a defect this surfaced:
+
+- **A trajectory's id is the delegate's, never the host's.** `Workflow` fans out to
+  N agents under one `tool_use_id`; keyed by the host, a two-agent workflow rendered
+  as *one* card reading `Demo: agent-2` and `agent-1` was absent from the timeline.
+  Keyed by `task_id` with the host as `span`, the tree is
+  `Workflow → agent-1, agent-2 → each one's work`.
+- **A promoted host's lifecycle is its `tool_result`.** A `tool_call`'s `completed`
+  phase means its *arguments* finished streaming, so reading the phase reports every
+  delegation as finished the instant its input parsed.
+- **Closing is phase-agnostic.** `open_trajectories` matched `phase = 'started'`,
+  which every workflow delegate fails — its first notification is progress, not a
+  start — so the turn-settle sweep never closed them. It now sweeps every id
+  declared or referenced, minus those closed by a `subagent` or a `tool_result`.
+- **Startup closes what a crash left open.** `interrupt_stale_turns` skips `settle`,
+  and consolidation folds a trajectory with no close into *no block at all* — losing
+  the delegation while keeping its children, which then reattach to the root.
+- **A trajectory with no interior says so on the card.** `--forward-subagent-text`
+  forwards only for built-in `Task`: measured, an `Agent` delegation produced zero
+  tagged envelopes. A closed trajectory with no children is a terminal state, so it
+  reports "no interior" and drops its disclosure rather than inviting the user to
+  open a branch that can never fill.
+
+Two hazards found while building it, both silent. A cycle in `span` pointers does
+not merely risk recursion — attachment holds one node as the other's orphan and
+each adopts the other, so neither is reachable and *both vanish*; `buildTree` now
+repairs by reachability and the rollup carries a visited guard. And `NODE_CACHE` was
+keyed on `TimelineRow` while `buildRows` reuses only the *event*, so the memo could
+never hit once; a trajectory row's event is re-folded every build, so the rows most
+worth skipping were the only ones that could not be.
+
+`verify.py` measures all of it against the real CLI, and its own delegated turn now
+answers the approvals the delegate raises — unanswered, the turn never completed and
+every assertion after it read mid-flight state, which is what made a script problem
+present as an adapter fault.
+
+### An agent may start a turn
+
+A `Workflow` that dispatched three backgrounded workers finished its turn in 22
+seconds and said "I'll notify you when it's done". Nothing ever arrived, and the
+delegate's card read *never finished* permanently.
+
+The delegate had in fact succeeded. `claude` reported it — measured, after the turn's
+`result`: `background_tasks_changed`, `task_updated`, `task_notification` carrying the
+delegate's own summary, and then `init`/`assistant`/`result`, an entire exchange the
+agent opened to describe what had happened. stdout stayed open; the process did not
+exit. Every one of those events reached `absorb_event`, found no turn running, and was
+dropped.
+
+The drop was defensible and the conclusion was wrong. An event carries no turn id, so
+the server files it under whichever turn is running, and a guessed id misplaces it in
+the transcript forever — all true, and none of it implies that no turn means nowhere to
+belong. **The server now opens the turn that exists** rather than guessing at one that
+does not: an agent-initiated turn, `origin: "agent"`, a real turn that consolidates and
+orders and prunes like any other. `turn_id` is what consolidation iterates, so anything
+less than a turn would leave rows the journal never folds and never releases.
+
+Four things this settled:
+
+- **It opens on the first out-of-turn event of any kind.** The vendor's own
+  `turn`/`started` arrives *after* `task_notification`, so waiting for the bracket
+  keeps the announcement and drops what it announces.
+- **It settles without a waiter.** Nobody is parked on an outcome nobody asked for, so
+  terminal state is recorded directly. `TurnCloser` is that path, factored out of the
+  supervisor so both reach one implementation — `LinkedSupervisor` owns a
+  `LinkManager`, so a call back the other way would be a cycle. Left unsettled, one
+  unprompted turn wedges its session, because a live turn refuses new messages.
+- **A waiter's absence means two different things.** An agent turn never had one; a
+  user's turn whose waiter is gone has an owner already, and settling it here reported
+  a deliberate stop as `LINK_LOST`. `origin` separates them.
+- **The client had to stop holding its claim.** `sentTurnId` outranked adoption and was
+  never released, so the agent's own turn was never streamed — it would have appeared
+  only on the next reload, which is how a delivered notification still reads as a
+  missing one. The claim now expires when history holds the turn as terminal, derived
+  rather than cleared, which also keeps the handover gapless.
+
+`abandoned` is consequently not final: a delegate the turn-settle sweep closed may
+report its real outcome on a later turn, and the later record is the truth.
+
 ### Open items
+
+- **Two records exist for a backgrounded delegate, and nothing reconciles them.** The
+  sweep's `abandoned` close and the delegate's own later completion are both journaled,
+  on different turns. A reader sees the truth because the later one is on screen too,
+  but the earlier card still says the work never finished. Reconciling them means
+  addressing a trajectory across turn boundaries, which the tree does not currently do.
+- **`is_backgrounded` is carried but not used.** `task_started` reports it, so the sweep
+  could leave a backgrounded delegate open instead of closing it as abandoned —
+  removing the contradiction above at its source rather than after the fact.
+- **`pi` reports no child trajectories yet,** so its sessions render as before.
+  Promotion is what makes adding them an adapter change alone: emitting a `subagent`
+  per delegate, or merely tagging child events with a `span`, is enough for its own
+  subagents and dynamic workflows to render as a tree with no server or UI work.
+- **A multiplexed host with several delegates cannot attribute forwarded interior.**
+  `_delegate_of` re-tags forwarded output to the delegate only when a host has
+  exactly one; with several, `claude` forwards nothing, so there is nothing to
+  attribute. If a future vendor forwards interior *and* multiplexes, it will need a
+  correlation the envelope does not currently carry.
+- **TraceDB's archived sessions stay flat.** It records a delegation as a separate
+  session with its own lineage, not as a trajectory inside one stream, so an
+  archived transcript has no `span` and the sidebar's rolled-up count is still how
+  delegation appears there. Unifying the two views is a real design question and
+  not a translation.
+- **A structure overview is not built.** `flattenTrajectories` exists and the
+  breadcrumb uses the path, but there is no waterfall or graph answering "which of
+  these twenty agents was slow" at a glance. The rollups cover *whether* to drill
+  in; they do not compare siblings.
 
 - **Multi-user is not solved by this work**, only un-foreclosed: authorization has
   one place to live, and request resolution records a resolver. Authentication
@@ -1296,14 +1539,6 @@ Two bugs worth recording from the conversion:
   remain unbuilt, and non-loopback binding stays a separate explicit change.
 - **Khora needs a Template carrying the agent CLIs and adapters**, since the
   adapter runs inside the environment. None exists yet.
-- **An explicit TraceDB ingestion ack** would beat the derived watermark and stays
-  worth doing: it would remove the `endedAtMs` reasoning entirely and let Sylph
-  prune on confirmation rather than inference. A TraceDB change, so a separate
-  decision — the derivation is sound enough to run on meanwhile, which was not
-  obviously going to be true.
-- **The `journal.db` / `history.db` split is designed but not built.** The
-  supervisor still writes one `live.db`, so the WAL-checkpoint hazard the split
-  exists to prevent is currently live.
 - **The command palette and the search overlay still run on `useListNavigation`.**
   Both are combobox-over-a-ranked-list, which is what `useSelectList` now is, so the
   conversion is mechanical — and until it happens `useListNavigation` cannot be
@@ -1311,3 +1546,18 @@ Two bugs worth recording from the conversion:
   because both own paged or async sources and the workspace surfaces did not, so
   converting them is a separate change with its own failure modes rather than a
   rename. The history overlay's *session* list is the same case.
+- **An `ingest_status` op on `trace-db api`** is worth asking upstream for. TraceDB
+  now emits a durable ingestion ack, but its only surfaces are a gRPC ingest
+  response and `doctor --json`, measured at **2m34s** because doctor walks every
+  agent's native store and verifies the archive. The op would be a single
+  `schema_meta` read that `store::ingest_status` already implements. Nothing depends
+  on it: retention reads per-session confirmation instead, which is finer-grained
+  than the archive-global ack anyway (`docs/storage.md`).
+- **A Khora session's retention class is untested against a real sandbox.** The
+  policy resolves any non-`local` environment to `terminal`, which is the safe
+  answer and the right one, but no sandbox exists yet to confirm the environment
+  reports the kind this depends on.
+- **Retention has no upper bound on a terminal session's growth.** Compacting
+  forever is correct — the record is the only copy — but a long-lived sandbox
+  session accumulates without limit by design, and nothing yet surfaces *which*
+  sessions are responsible. `/diagnostics` reports the terminal count, not the bytes.

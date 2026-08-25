@@ -1660,6 +1660,48 @@ function StreamingText({ turnId, kind }: Props) {
 - Resume auto-scroll when user scrolls to bottom
 - Smooth scroll during streaming
 
+### Delegated trajectories
+
+An event's `span` names the trajectory it ran in, and a `subagent` event's
+`streamId` *is* a trajectory id (`docs/session-protocol.md` § Delegated
+trajectories). `lib/timeline-tree.ts` turns that into a tree: `buildRows`
+collapses deltas and pairs results, `buildTree` links each row to the trajectory
+it names. Both are React-free so they unit-test in a `node` environment, which is
+the same reason `lib/sse-parse.ts` is separate from the hook that uses it.
+
+**The tree is navigated, not displayed.** Depth is unbounded — an agent delegates,
+its delegates delegate, a dynamic workflow fans out to a dozen agents and then
+synthesizes — so one indent level per depth runs out of viewport before it runs
+out of tree. Instead:
+
+- A trajectory renders as **one collapsed card**. Opening it shows its immediate
+  children, themselves collapsed.
+- Indentation stops at `MAX_INDENT = 2`. Past that a phone's content column is
+  narrower than a line of code and a tool call's path truncates to nothing, so the
+  indent stops conveying structure and starts destroying content.
+- **Focus re-roots** the timeline at a trajectory with a breadcrumb back. This is
+  the file-manager move, and it works because a user drilling into a delegation has
+  stopped caring about its siblings.
+
+**Collapsing is what makes it fast.** A closed card mounts none of its subtree, so
+DOM cost tracks what the user opened rather than what the agent did: a
+20,000-event workflow costs the same as a small one until someone drills in. An
+indented rendering cannot have that property, because it must lay out every node
+to know where any node goes. This is a stronger result than the memoization note
+in `components/timeline.tsx`, and it is why virtualization is still not needed.
+
+**Every card reports its whole subtree,** because collapsing is otherwise where a
+failure goes to die. `Rollup` carries failures, nested trajectory count, tool
+count, token usage, and duration, computed bottom-up; a descendant failure
+escalates its ancestors' status even when their own result was clean. The rule is
+that no state reachable in the tree is unreported at the root — otherwise
+collapsing is lossy rather than deferred.
+
+**`abandoned` is not `failed`.** A trajectory the server closed on turn
+termination says nobody ever reported an outcome; a failed one says the work
+reported an error. Colouring the first red would report an interrupted turn as a
+broken one.
+
 ## Data Flow Patterns
 
 ### Creating a Session
@@ -2412,13 +2454,13 @@ usable. `overflowingElements()` instead reports every element whose box extends
 past the right edge, which is both the actual defect and actionable when it
 regresses.
 
-**Wipe `.e2e-data/` before trusting a timing result.** The journal is never
+**Wipe `.e2e-home/` before trusting a timing result.** The journal is never
 cleared, and each spec's `mkdtemp` workdir becomes a permanent sidebar group —
 grouping is by workdir, so a directory used once and deleted still renders a
 group forever. At 151 groups (148 of them dead single-session directories) the
 suite ran 35 minutes instead of 1.5, and two or three specs failed per run on
 the 30s timeout: a different two or three each time, which reads as flakiness
-rather than as accumulated fixture state. `rm -rf frontend/.e2e-data` is free —
+rather than as accumulated fixture state. `rm -rf frontend/.e2e-home` is free —
 it is gitignored and the backend recreates it. Raising the timeout does not
 help, because the cost grows without bound.
 

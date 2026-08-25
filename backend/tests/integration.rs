@@ -449,6 +449,52 @@ async fn session_returns_to_idle_after_a_turn() {
     assert_eq!(json_body(response).await["session"]["status"], "idle");
 }
 
+/// A terminal turn must never be observable on a running session.
+///
+/// The two are separate rows and cannot be written in one transaction, so
+/// something is briefly visible between them; this pins *which*. A client that
+/// polls the turn and then reads the session is the ordinary shape — it is what
+/// the composer does to decide whether to accept the next message — and seeing a
+/// finished turn on a "running" session is what makes it refuse.
+///
+/// The window was two statements wide and merely improbable until closing open
+/// trajectories put a query and a per-trajectory emit inside it. Asserting once
+/// would pass on the old ordering by luck, so this drives many turns and checks
+/// the pair every time.
+#[tokio::test]
+async fn a_settled_turn_is_never_visible_on_a_running_session() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    for attempt in 0..12 {
+        let response = backend
+            .post_authed(
+                &format!("/api/v1/sessions/{session_id}/turns"),
+                json!({"text": "hello"}),
+            )
+            .await;
+        let turn_id = json_body(response).await["turn"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        backend.await_turn(&turn_id).await;
+
+        // Read immediately, with nothing between: any sleep here would hide the
+        // very interleaving this exists to catch.
+        let session = json_body(
+            backend
+                .get_authed(&format!("/api/v1/sessions/{session_id}"))
+                .await,
+        )
+        .await;
+        assert_eq!(
+            session["session"]["status"], "idle",
+            "turn {turn_id} was terminal while the session still read as running \
+             (attempt {attempt})"
+        );
+    }
+}
+
 #[tokio::test]
 async fn idempotency_key_returns_the_original_turn() {
     let backend = TestBackend::start().await;
@@ -2617,9 +2663,13 @@ async fn workspaces_group_sessions_and_always_include_quick_start() {
     let body = json_body(backend.get_authed("/api/v1/workspaces").await).await;
 
     let quick = body["quickStartDir"].as_str().unwrap();
-    assert!(
-        quick.ends_with("/.agents"),
-        "Quick Start must be ~/.agents, got {quick}"
+    // The configured directory, not a hardcoded one. Asserting a fixed `~/.agents`
+    // was what let the endpoint keep pointing at another project's tree: the test
+    // and the code agreed with each other and both were wrong about the product.
+    assert_eq!(
+        quick,
+        backend.quick_start_dir().display().to_string(),
+        "Quick Start must be the configured directory"
     );
     assert!(!body["dataDir"].as_str().unwrap().is_empty());
 
@@ -2649,6 +2699,158 @@ async fn workspaces_require_auth() {
         backend.get("/api/v1/workspaces").await.status(),
         StatusCode::UNAUTHORIZED
     );
+}
+
+// ------------------------------------------------------------------ config
+//
+// `GET /config` is what makes a misconfiguration diagnosable from the UI instead
+// of from a log the user never reads. These assert the properties that make it
+// useful — every setting present, each one naming its source and its override
+// variable, and no write path — rather than the exact values, which are the
+// harness's.
+
+/// The settings panel has to be able to show the whole resolution. A key that the
+/// resolver knows and this endpoint omits is invisible to every user.
+#[tokio::test]
+async fn config_reports_every_setting_with_its_source_and_override() {
+    let backend = TestBackend::start().await;
+
+    let body = json_body(backend.get_authed("/api/v1/config").await).await;
+
+    assert!(!body["home"].as_str().unwrap().is_empty());
+    assert!(body["configPath"].as_str().unwrap().ends_with("config.toml"));
+
+    let entries = body["entries"].as_array().unwrap();
+    let keys: Vec<&str> = entries.iter().map(|e| e["key"].as_str().unwrap()).collect();
+    for expected in [
+        "server.host",
+        "server.port",
+        "paths.data_dir",
+        "paths.agents_dir",
+        "paths.soul",
+        "paths.quick_start_dir",
+        "paths.browse_roots",
+        "tracedb.bin",
+        "log.level",
+    ] {
+        assert!(keys.contains(&expected), "{expected} missing from {keys:?}");
+    }
+
+    // Every entry has to answer "who set this" and "what would override it".
+    // A resolved value alone cannot distinguish a wrong path from a path that is
+    // being ignored, and those need opposite fixes.
+    for entry in entries {
+        let key = entry["key"].as_str().unwrap();
+        let source = entry["source"].as_str().unwrap();
+        assert!(
+            ["env", "file", "default"].contains(&source),
+            "{key} has an unknown source: {source}"
+        );
+        assert!(
+            entry["envVar"].as_str().unwrap().starts_with("SYLPH_"),
+            "{key} must name the variable that overrides it"
+        );
+    }
+}
+
+/// The harness sets browse roots and the TraceDB path through the environment, so
+/// those two must report `env` while everything it leaves alone reports `default`.
+/// This is the property that makes the field trustworthy.
+#[tokio::test]
+async fn config_distinguishes_an_overridden_setting_from_a_defaulted_one() {
+    let backend = TestBackend::start().await;
+
+    let body = json_body(backend.get_authed("/api/v1/config").await).await;
+    let entries = body["entries"].as_array().unwrap();
+    let source_of = |key: &str| -> String {
+        entries
+            .iter()
+            .find(|e| e["key"] == key)
+            .unwrap_or_else(|| panic!("{key} missing"))["source"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    assert_eq!(source_of("paths.browse_roots"), "env");
+    assert_eq!(source_of("tracedb.bin"), "env");
+    assert_eq!(source_of("server.host"), "default");
+    assert_eq!(source_of("paths.data_dir"), "default");
+}
+
+/// "Missing" is the fact that turns an empty agent dropdown into a one-line
+/// diagnosis, and it must not be confused with "this setting is not a path".
+#[tokio::test]
+async fn config_reports_whether_each_path_exists_and_omits_it_for_non_paths() {
+    let backend = TestBackend::start().await;
+
+    let body = json_body(backend.get_authed("/api/v1/config").await).await;
+    let entries = body["entries"].as_array().unwrap();
+    let entry = |key: &str| entries.iter().find(|e| e["key"] == key).unwrap();
+
+    // Seeded by the harness through the production path, so it is there.
+    assert_eq!(entry("paths.data_dir")["exists"], true);
+    // Pointed at a file the harness deliberately never creates.
+    assert_eq!(entry("tracedb.bin")["exists"], false);
+
+    // Absent rather than `false`: a log level is not a path, and rendering it as
+    // missing would report a working setting as broken.
+    for key in ["server.host", "server.port", "log.level"] {
+        assert!(
+            entry(key).get("exists").is_none(),
+            "{key} is not a path and must not claim existence"
+        );
+    }
+}
+
+/// Bundled adapter resolution has to name every directory it tried and mark the
+/// one it took. Without that, a missing install and a mistyped path produce the
+/// same empty agent list and need opposite fixes.
+#[tokio::test]
+async fn config_names_every_bundled_adapter_directory_it_considered() {
+    let backend = TestBackend::start().await;
+
+    let body = json_body(backend.get_authed("/api/v1/config").await).await;
+    let candidates = body["bundledAgentCandidates"].as_array().unwrap();
+
+    assert!(!candidates.is_empty());
+    assert_eq!(
+        candidates.iter().filter(|c| c["chosen"] == true).count(),
+        1,
+        "exactly one directory is the one discovery reads"
+    );
+    for candidate in candidates {
+        assert!(candidate["path"].as_str().unwrap().starts_with('/'));
+        assert!(candidate["exists"].is_boolean());
+    }
+}
+
+/// Authenticated, because every value is an absolute local filesystem path.
+/// `/health` is the unauthenticated probe and reports booleans only.
+#[tokio::test]
+async fn config_requires_auth() {
+    let backend = TestBackend::start().await;
+    assert_eq!(
+        backend.get("/api/v1/config").await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+/// There is deliberately no write path: `browse_roots` bounds what any client may
+/// enumerate and `agents_dir` names directories this server executes from, so a
+/// loopback HTTP surface that could rewrite them is a different threat model.
+#[tokio::test]
+async fn config_is_read_only() {
+    let backend = TestBackend::start().await;
+
+    for method in ["PUT", "PATCH", "POST", "DELETE"] {
+        let response = backend.request_authed(method, "/api/v1/config", None).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method} /config must not be accepted"
+        );
+    }
 }
 
 /// Percent-encode a query value. Written inline because the traversal test needs
@@ -2718,13 +2920,13 @@ async fn fs_tree_lists_only_directories() {
     );
 }
 
-/// `~/.agents` is the Quick Start directory and a legitimate workspace, so a
-/// picker that hid dot-directories would hide a directory the product points at.
+/// `~/.sylph` is browsable and holds the Quick Start directory, so a picker that
+/// hid dot-directories would hide a directory the product itself points at.
 #[tokio::test]
 async fn fs_tree_lists_dot_directories() {
     let backend = TestBackend::start().await;
     let root = backend.workdir();
-    std::fs::create_dir_all(root.join(".agents")).unwrap();
+    std::fs::create_dir_all(root.join(".sylph")).unwrap();
 
     let body = json_body(
         backend
@@ -2742,7 +2944,7 @@ async fn fs_tree_lists_dot_directories() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&".agents"), "dotfiles must be pickable: {names:?}");
+    assert!(names.contains(&".sylph"), "dotfiles must be pickable: {names:?}");
 }
 
 #[tokio::test]
@@ -3975,4 +4177,138 @@ mod soul {
             "identity must not be patchable"
         );
     }
+}
+
+/// An agent that speaks after its turn ended gets a turn of its own.
+///
+/// The case this exists for: a delegate dispatched into the background finishes after
+/// the turn that started it has settled. Measured against `claude` 2.x, the CLI
+/// reports that completion and then opens an entire exchange to describe it, with
+/// stdout still open — and every one of those events used to be dropped for arriving
+/// outside a turn, so the notification a user had been promised was discarded by the
+/// transport rather than never sent.
+#[tokio::test]
+async fn an_agent_that_speaks_after_its_turn_gets_a_turn_of_its_own() {
+    let backend =
+        common::TestBackend::start_with_runners(&[common::MockRunner::backgrounded("bg")]).await;
+    let session_id = backend.create_session("bg").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "dispatch a background worker"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let first_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    backend.await_turn(&first_id).await;
+
+    // Polled, because the agent's turn is produced by the drain task *after* the first
+    // turn settled — it cannot be observed from the request that started the exchange.
+    let mut agent_turn = None;
+    for _ in 0..100 {
+        let history = json_body(
+            backend
+                .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+                .await,
+        )
+        .await;
+        let found = history["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| {
+                entry["turn"]["origin"] == "agent" && entry["turn"]["status"] == "completed"
+            })
+            .cloned();
+        if let Some(entry) = found {
+            agent_turn = Some(entry);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let entry = agent_turn.expect("the agent's unprompted turn was recorded");
+    assert_ne!(
+        entry["turn"]["id"].as_str().unwrap(),
+        first_id,
+        "a turn of its own, not more events on the one that ended"
+    );
+    // Empty by construction: nobody asked. `origin` is what distinguishes this from a
+    // user who posted no text.
+    assert_eq!(entry["turn"]["requestText"], "");
+
+    // And the report itself survived, which is the whole point.
+    let text: String = entry["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["text"].as_str())
+        .collect();
+    assert!(
+        text.contains("the background worker finished"),
+        "the agent's late report reached the journal: {text}"
+    );
+}
+
+/// A delegate that finishes after its turn is journaled as finishing.
+///
+/// The turn-settle sweep closes what an adapter left open, which is right when nothing
+/// more is coming. Backgrounded work *is* coming, and its real outcome arrives on the
+/// agent's own turn — so both records exist and the later one is the truth. Before
+/// agent turns, the completion was dropped and `abandoned` was the only thing ever
+/// recorded about work that had in fact succeeded.
+#[tokio::test]
+async fn a_backgrounded_delegates_real_outcome_is_recorded() {
+    let backend =
+        common::TestBackend::start_with_runners(&[common::MockRunner::backgrounded("bg")]).await;
+    let session_id = backend.create_session("bg").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "dispatch"}),
+        )
+        .await;
+    let first_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&first_id).await;
+
+    // Across every turn on the session: the delegate's close lands on whichever turn
+    // was running when it arrived, which is the agent's own rather than the one that
+    // dispatched it.
+    let mut found = false;
+    for _ in 0..100 {
+        let history = json_body(
+            backend
+                .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+                .await,
+        )
+        .await;
+        found = history["turns"].as_array().unwrap().iter().any(|entry| {
+            entry["events"].as_array().unwrap().iter().any(|e| {
+                e["kind"] == "subagent"
+                    && e["streamId"] == "bg-task"
+                    && e["source"] == "agent"
+                    && e["text"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("worker finished"))
+            })
+        });
+        if found {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        found,
+        "the delegate's own completion was journaled, not only the server's close"
+    );
 }

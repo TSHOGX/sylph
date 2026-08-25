@@ -10,15 +10,20 @@
 #   ./scripts/install.sh --rollback         # restore the previous version
 #   ./scripts/install.sh --uninstall        # remove everything it installed
 #
-# Never reads or writes the TraceDB archive. Uninstall leaves your journal
-# alone; it is removed only by an explicit --purge.
+# Never reads or writes the TraceDB archive: that is a separate project with its
+# own install. Uninstall leaves ~/.sylph alone — your config, identity, sessions,
+# and history — and it is removed only by an explicit --purge.
 
 set -euo pipefail
 
 PREFIX="${SYLPH_WEB_PREFIX:-$HOME/.local/share/sylph-web}"
 BIN_DIR="${SYLPH_WEB_BIN_DIR:-$HOME/.local/bin}"
-DATA_DIR="${SYLPH_WEB_DATA_DIR:-$HOME/.agents/data/sylph/web}"
-BACKEND_PORT="${SYLPH_WEB_PORT:-4317}"
+# The one root the app owns: config, identity, data, scratch, logs. Propagating
+# this single variable is what replaced writing six of them into the plist and
+# discovering later that a seventh had been added.
+SYLPH_HOME="${SYLPH_HOME:-$HOME/.sylph}"
+DATA_DIR="$SYLPH_HOME/data"
+BACKEND_PORT="${SYLPH_PORT:-4317}"
 FRONTEND_PORT="${SYLPH_WEB_FRONTEND_PORT:-3000}"
 # Overridable so an install into a throwaway prefix cannot unload or delete the
 # agent belonging to the real install.
@@ -65,7 +70,8 @@ if [ "$DO_ROLLBACK" -eq 1 ]; then
   mv "$PREFIX.old" "$PREFIX"
   [ -d "$PREFIX.rollback-tmp" ] && mv "$PREFIX.rollback-tmp" "$PREFIX.old"
 
-  if [ -d "$PREFIX/journal-backup" ] && [ -f "$PREFIX/journal-backup/live.db" ]; then
+  if [ -d "$PREFIX/journal-backup" ] &&
+     { [ -f "$PREFIX/journal-backup/journal.db" ] || [ -f "$PREFIX/journal-backup/live.db" ]; }; then
     # The version being left may have migrated the schema past what this binary
     # accepts, so restore the journal as it was when this version last ran.
     # Its journal is set aside as the backup for the tree we just moved to
@@ -73,10 +79,15 @@ if [ "$DO_ROLLBACK" -eq 1 ]; then
     say "Restoring the journal from this version's backup"
     rm -rf "$PREFIX.old/journal-backup"
     mkdir -p "$PREFIX.old/journal-backup"
-    for f in "$DATA_DIR"/live.db "$DATA_DIR"/live.db-wal "$DATA_DIR"/live.db-shm; do
+    for f in "$DATA_DIR"/journal.db "$DATA_DIR"/journal.db-wal "$DATA_DIR"/journal.db-shm \
+             "$DATA_DIR"/live.db "$DATA_DIR"/live.db-wal "$DATA_DIR"/live.db-shm; do
       [ -f "$f" ] && mv "$f" "$PREFIX.old/journal-backup/"
     done
-    cp "$PREFIX/journal-backup"/live.db* "$DATA_DIR/"
+    # Whichever name that version used. Only one of the two globs matches, and a
+    # `cp` of a non-match would otherwise abort the restore under `set -e`.
+    for f in "$PREFIX/journal-backup"/journal.db* "$PREFIX/journal-backup"/live.db*; do
+      [ -f "$f" ] && cp "$f" "$DATA_DIR/"
+    done
     say "The other version's journal is kept at $PREFIX.old/journal-backup"
   else
     warn "No journal backup found; keeping the current journal. If the version you are leaving migrated the schema, the restored binary may refuse to start."
@@ -100,10 +111,14 @@ if [ "$DO_UNINSTALL" -eq 1 ]; then
   rm -rf "$PREFIX" "$PREFIX.old" "$PREFIX.new"
   rm -f "$BIN_DIR/sylph-web" "$BIN_DIR/sylph-web-backend"
   if [ "$DO_PURGE" -eq 1 ]; then
-    warn "Purging the journal at $DATA_DIR"
-    rm -rf "$DATA_DIR"
+    # The whole root, not just the journal: with one directory, "delete everything
+    # this app owns" is finally expressible. It is also why --purge is separate
+    # from --uninstall — the config, the identity file, and every session live
+    # here, and no uninstall should take them without being asked.
+    warn "Purging $SYLPH_HOME (config, identity, sessions, and history)"
+    rm -rf "$SYLPH_HOME"
   else
-    say "Left your journal at $DATA_DIR (use --purge to delete it)"
+    say "Left your data at $SYLPH_HOME (use --purge to delete it)"
   fi
   say "Uninstalled."
   exit 0
@@ -122,7 +137,7 @@ node_major="$(node -p 'process.versions.node.split(".")[0]')"
 # stop that first and only then treat a busy port as somebody else's.
 [ -f "$PLIST" ] && unload_agent
 if lsof -ti ":$BACKEND_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  die "Port $BACKEND_PORT is already in use by another process. Stop it, or set SYLPH_WEB_PORT to a free port."
+  die "Port $BACKEND_PORT is already in use by another process. Stop it, or set SYLPH_PORT to a free port."
 fi
 
 say "Installing into $PREFIX (backend port $BACKEND_PORT, frontend $FRONTEND_PORT)"
@@ -175,8 +190,8 @@ cat > "$PREFIX.new/start.sh" <<EOF
 #!/usr/bin/env bash
 # Start backend and frontend together; stop both on exit or Ctrl-C.
 set -euo pipefail
-export SYLPH_WEB_PORT="\${SYLPH_WEB_PORT:-$BACKEND_PORT}"
-export SYLPH_WEB_DATA_DIR="\${SYLPH_WEB_DATA_DIR:-$DATA_DIR}"
+export SYLPH_PORT="\${SYLPH_PORT:-$BACKEND_PORT}"
+export SYLPH_HOME="\${SYLPH_HOME:-$SYLPH_HOME}"
 here="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 
 # launchd appends to its log paths forever, so rotate here. Copy then truncate
@@ -223,11 +238,16 @@ if [ -d "$PREFIX" ]; then
   # whose schema is ahead of the binary. So a rollback needs the journal as it
   # was, not just the old binaries. Safe to copy directly: the agent is stopped
   # and the WAL files come with it.
-  if [ -f "$DATA_DIR/live.db" ]; then
+  # Both names, because the journal was renamed from live.db to journal.db and a
+  # rollback moves *backwards* to a binary that expects the old name. Backing up
+  # whichever name is present means the restore hands each version the file it
+  # knows, without this script having to know which pair of versions it is between.
+  if [ -f "$DATA_DIR/journal.db" ] || [ -f "$DATA_DIR/live.db" ]; then
     say "Backing up the journal for rollback"
     rm -rf "$PREFIX.old/journal-backup"
     mkdir -p "$PREFIX.old/journal-backup"
-    for f in "$DATA_DIR"/live.db "$DATA_DIR"/live.db-wal "$DATA_DIR"/live.db-shm; do
+    for f in "$DATA_DIR"/journal.db "$DATA_DIR"/journal.db-wal "$DATA_DIR"/journal.db-shm \
+             "$DATA_DIR"/live.db "$DATA_DIR"/live.db-wal "$DATA_DIR"/live.db-shm; do
       [ -f "$f" ] && cp "$f" "$PREFIX.old/journal-backup/"
     done
   fi
@@ -255,22 +275,22 @@ if [ "$WANT_LAUNCHAGENT" -eq 1 ]; then
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>SYLPH_WEB_PORT</key><string>$BACKEND_PORT</string>
+    <!--
+      launchd starts from a bare environment, so anything the backend needs has to
+      be written here to survive. That used to mean enumerating a variable per
+      path, and a variable added later was silently absent from every existing
+      install. Now there is one root: everything else the backend resolves from
+      SYLPH_HOME or reads out of its own config.toml, so this list does not grow
+      when a setting is added.
+
+      The frontend port is here because it is the launcher's, not the backend's,
+      and PATH because launchd provides none and the frontend is a node process.
+    -->
+    <key>SYLPH_HOME</key><string>$SYLPH_HOME</string>
+    <key>SYLPH_PORT</key><string>$BACKEND_PORT</string>
     <key>SYLPH_WEB_FRONTEND_PORT</key><string>$FRONTEND_PORT</string>
-    <key>SYLPH_WEB_DATA_DIR</key><string>$DATA_DIR</string>
-    <key>RUST_LOG</key><string>${RUST_LOG:-info}</string>
     <key>PATH</key><string>$(dirname "$(command -v node)"):/usr/bin:/bin:/usr/sbin:/sbin</string>
-$(
-    # launchd starts with a bare environment, so anything overridden in the
-    # installing shell has to be written into the plist to survive. Unset
-    # variables are left out and the backend falls back to its HOME-relative
-    # defaults, which launchd does provide.
-    [ -n "${SYLPH_RUNNERS_DIR:-}" ] &&
-      printf '    <key>SYLPH_RUNNERS_DIR</key><string>%s</string>\n' "$SYLPH_RUNNERS_DIR"
-    [ -n "${TRACEDB_BIN:-}" ] &&
-      printf '    <key>TRACEDB_BIN</key><string>%s</string>\n' "$TRACEDB_BIN"
-    true
-)  </dict>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
   <dict><key>SuccessfulExit</key><false/></dict>

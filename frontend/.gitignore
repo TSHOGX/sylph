@@ -39,6 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+.e2e-home
+# The former name. Kept ignored so a checkout that ran the older suite does not
+# start reporting its leftover tree as untracked.
 .e2e-data
 test-results
 playwright-report

@@ -14,9 +14,10 @@ Next.js Frontend
     ▼
 Rust Backend (127.0.0.1:4317)
     │
-    ├─► live.db (SQLite) ────────┐
-    │   Active sessions & turns  │
-    │                             ├─► Query & Search
+    ├─► journal.db (SQLite) ─────┐
+    │   Unsettled turns          │
+    ├─► history.db + cas/        │
+    │   The durable record       ├─► Query & Search
     ├─► TraceDB ─────────────────┘
     │   Stable cross-agent history
     │
@@ -27,7 +28,8 @@ Rust Backend (127.0.0.1:4317)
 **Components:**
 - **Frontend** — Next.js 16 + React 19, handles UI and real-time updates
 - **Backend** — Rust + Axum, REST API + SSE streaming, process supervision
-- **Live journal** — SQLite (live.db), active sessions and recent events
+- **Journal** — SQLite (journal.db), sessions and turns that have not settled
+- **History** — SQLite (history.db) plus `cas/`, the durable replayable record
 - **TraceDB** — External durable store, cross-agent searchable history
 - **Runners** — Agent binaries discovered via `--describe`, managed as child processes
 
@@ -36,7 +38,8 @@ Rust Backend (127.0.0.1:4317)
 1. **Local-first** — All data stored locally, no cloud dependencies
 2. **Origin as policy** — Session origin (`sylph` or `native`) determines identity and lifecycle
 3. **Runners own storage** — Agents write their native format; TraceDB ingests asynchronously
-4. **Bounded live journal** — Recent events in live.db; stable history in TraceDB
+4. **Bounded journal, durable history** — Unsettled turns in journal.db, consolidated
+   into history.db and pruned only when a downstream authority confirms the data
 5. **Durable turn supervision** — Turn execution independent of HTTP request lifecycle
 
 ## Session Model
@@ -120,15 +123,29 @@ Concurrency: one turn per session at a time; queued turns wait.
 
 ## Storage Architecture
 
-### Live Journal (live.db)
+### Journal (journal.db)
 
-SQLite database with WAL mode, stores:
+The hot tier. SQLite with WAL mode and `synchronous = NORMAL`, holding:
 - Sessions (all sessions created/imported by WebApp)
 - Backend incarnations (lifecycle tracking)
 - Turns (execution records)
-- Events (stable completed events + bounded live projection)
+- Events for turns that have not settled yet, including deltas
 
-Events are **not** a second transcript archive. Stable events are pruned after TraceDB ingestion + retention window.
+Bounded by consolidation rather than by a retention window: when a turn reaches a
+terminal state its events move into `history.db` and its journal rows are deleted.
+The file therefore stays small, which is the point of the split — see
+`docs/storage.md`.
+
+Ephemeral events (deltas) are batched into one transaction per ~50 ms window;
+stable events commit immediately, because a reconnect replays stable events from
+the journal and ephemeral ones from the hub's in-memory ring.
+
+### History (history.db) and CAS
+
+The warm and cold tiers. `synchronous = FULL`, because it is the record. Holds one
+row per block with its deltas folded into packed offset and timing arrays, plus
+content-addressed blobs in `cas/` for payloads over 4 KB. Grows without bound and
+is read-mostly; pruned only by watermark.
 
 ### TraceDB
 
@@ -147,14 +164,25 @@ Sylph Web reads from TraceDB for:
 
 TraceDB writes come from agent native stores (ingestion is external).
 
-### Reconciliation (Future)
+### Retention
 
-Planned reconciliation process:
-1. Map live `backend_session_id` to TraceDB session ID
-2. Track ingestion watermark
-3. Prune duplicated event text from live.db after retention period
+Watermark-driven, never time-driven. A retention pass runs at startup and every
+five minutes, takes a bounded batch of sessions holding blocks (least-recently
+checked first), and asks one question per session: what sequence number has a
+downstream authority confirmed?
 
-Until deployed: live.db grows unbounded (acceptable for development).
+Sessions split into two classes, and collapsing them would destroy the only copy
+of the second:
+
+| Class | When | Rule |
+| --- | --- | --- |
+| Delegated | The environment keeps an agent-native store TraceDB ingests | Prune below the confirmed seq |
+| Terminal | No ingestion path — a sandbox, or a session that never linked | Compact, never prune |
+
+The delegated watermark is derived from TraceDB by archive id
+(`<agent>:<native-id>`, a different id space from Sylph's session id), bounded by
+`endedAtMs` and admitted only for a `full` record. `docs/storage.md` governs the
+whole design; `/api/v1/diagnostics` reports each pass.
 
 ## Event Streaming
 
@@ -271,10 +299,14 @@ enumeration is the part that scales with an attacker's ignorance of the layout.
 
 ## Runner Discovery
 
-Runners live under `~/.agents/skills/sylph/runners/{name}/runner.sh`.
+Adapters are searched in two roots, bundled first: the `adapters/` directory
+shipped beside the binary, then `~/.sylph/agents/`. An agent is a directory holding
+an executable `adapter.sh`. Bundled first means a user-added adapter of the same
+name *shadows* rather than duplicates — the escape hatch when a vendor changes
+faster than the shipped adapter catches up. See `docs/configuration.md`.
 
 Discovery:
-1. Backend scans runners on startup
+1. Backend scans both roots on startup
 2. Calls `runner.sh --describe` for each
 3. Parses JSON capability descriptor
 4. Caches in memory (refresh via API)
@@ -396,9 +428,12 @@ answers "what happened here" when the user has no search term.
 `SYLPH_WEB_BACKEND` is compiled into the route manifest, so it must be set for
 `next build` and not only for `next start`. See `docs/installation.md`.
 
-**Data directory:**
-- `~/.agents/data/sylph/web/live.db` — SQLite journal
-- `~/.agents/data/sylph/web/attachments/{session}/{turn}/` — staged files
+**Sylph home** (`~/.sylph` by default, `SYLPH_HOME` to relocate):
+- `config.toml` — settings; `SOUL.md` — the identity preamble
+- `data/journal.db` — the hot tier: unsettled turns
+- `data/history.db`, `data/blobs/` — consolidated history and its payloads
+- `data/attachments/{session}/{turn}/` — staged files
+- `agents/` — user-added adapters; `scratch/` — Quick Start's working directory
 
 ## Extension Points
 

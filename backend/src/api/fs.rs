@@ -31,9 +31,10 @@
 //! 3. **Escaping symlinks are omitted,** not merely refused on access, so a link
 //!    out of the root is not even advertised as a node to try.
 //!
-//! Dotfiles *are* listed, unlike a conventional file browser. `~/.agents` is the
-//! Quick Start directory and a legitimate workspace, so hiding dot-directories
-//! would hide a directory the product itself points at.
+//! Dotfiles *are* listed, unlike a conventional file browser. `~/.sylph` is
+//! browsable and its `scratch/` is the Quick Start directory, so hiding
+//! dot-directories would hide a directory the product itself points at — and a
+//! directory a user chose to name should not be invisible to them.
 
 use std::path::PathBuf;
 
@@ -290,7 +291,7 @@ mod tests {
     #[test]
     fn leaf_names_the_directory() {
         assert_eq!(leaf("/Users/x/Workspace"), "Workspace");
-        assert_eq!(leaf("/Users/x/.agents"), ".agents");
+        assert_eq!(leaf("/Users/x/.sylph"), ".sylph");
         assert_eq!(leaf("/"), "/");
     }
 
