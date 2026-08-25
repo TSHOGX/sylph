@@ -688,8 +688,27 @@ export function pathTo(
  * `claude`'s adapter sends that literal as the `name` on the wire whenever a
  * delegation's brief has not finished streaming (`_task_label`), which at `started` is
  * the usual case. So renaming this fallback would not remove "Subagent" from the screen
- * — it would only change which of the two producers put it there. Anything that needs
- * the string gone has to change the adapter and this together.
+ * — it would only change which of the two producers put it there.
+ *
+ * The adapter's half is the more serious one, and it is a *data* defect rather than a
+ * display one. `name` means "what this delegation is called", so `null` says nobody
+ * knows yet while `"Subagent"` asserts a name the adapter cannot support. That guess is
+ * journaled: `history::consolidate` keeps the best name any phase gave a block, so a
+ * later `delta` carrying the real brief normally wins — but when the brief never
+ * finishes streaming (the delegation fails early, or the link dies mid-input) the
+ * placeholder becomes the trajectory's durable name in `history.db`, indistinguishable
+ * from one an agent chose.
+ *
+ * **The order of the two fixes matters, and this half must go second.** A fallback here
+ * is a presentation decision and belongs here; the adapter omitting `name` is a
+ * subtraction, and the server already carries it as `Option<String>` throughout. But
+ * renaming *this* while the adapter still sends the literal would give one condition two
+ * labels — "Subagent" for the trajectories the adapter named, whatever this says for the
+ * ones it did not — which is worse than today's single imprecise label. Adapter first,
+ * then this, and only then does the substring-collision class close (see
+ * `e2e/delegation.spec.ts`: "Subagent delegation" contains "agent delegation", so a
+ * `{ name: "<tool> delegation" }` locator is ambiguous with the fallback by
+ * construction).
  */
 export function trajectoryName(node: TimelineNode): string {
   return node.row.event.name?.trim() || "Subagent";
