@@ -758,6 +758,17 @@ it missing. No single-pass attachment can detect this, so `buildTree` repairs it
 reachability afterwards, and the rollup carries a visited guard because unbounded
 recursion in a render path is a frozen tab.
 
+**A control's disabled state usually encodes more than one fact, so it is a bad
+"is it finished" signal.** Waiting for `Send` to re-enable looks like waiting for the
+turn to settle, and is not: `Send` is also disabled whenever the composer has no text,
+which is exactly the state a spec is in right after sending. The wait could therefore
+never succeed, and 33 specs failed on their deadline with nothing wrong in the code
+under test. A single run hid it because an earlier `toBeVisible` had already absorbed
+the wait — only `--repeat-each` exposed it. The composer swaps Send for **Stop** while
+a turn is live, which means one thing and is the signal to use. Before asserting on
+`toBeEnabled`/`toBeDisabled`, check every input to that boolean; prefer a control whose
+*presence* changes.
+
 **A layout bug below a breakpoint is invisible to a suite that runs above it.**
 Three mobile failures survived 41 green specs because every one of them ran at
 1280px, where the same code is merely cramped. A viewport is an instrument, not
