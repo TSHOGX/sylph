@@ -316,3 +316,44 @@ test("dark mode applies before paint and follows an explicit choice", async ({ p
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
+
+/**
+ * A long catalogue on a phone: a sheet, filterable, and not behind the keyboard.
+ *
+ * The desktop popover focuses its filter field on open. This one deliberately does
+ * not, and that difference is the spec: focusing raises the on-screen keyboard, and
+ * iOS Safari does not resize the layout viewport when it appears — so a sheet sized
+ * in `dvh` keeps its full height and its rows end up underneath the keyboard, which
+ * is the exact failure the sheet form exists to avoid. One tap on the field, which
+ * sits at the top of the sheet, is what every native picker asks for.
+ *
+ * Chromium cannot raise a keyboard, so this asserts the decision that avoids it
+ * (focus is not taken) plus the consequences it can observe: the field works when
+ * tapped, and nothing overflows.
+ */
+test("a long catalogue is a filterable sheet that does not grab focus", async ({ page }) => {
+  await createSession(page);
+
+  await page.getByRole("button", { name: /^Provider model:/ }).click();
+  const sheet = page.getByRole("dialog", { name: "Provider model" });
+  await expect(sheet).toBeVisible();
+  await settled(page, sheet);
+
+  const filter = sheet.getByRole("combobox", { name: /filter provider model/i });
+  await expect(filter).toBeVisible();
+  await expect(filter).not.toBeFocused();
+
+  // The sheet is a scroll container of its own, so a fourteen-item catalogue is
+  // reachable rather than clipped — and the sheet itself must not overflow.
+  expect(await overflowingElements(page)).toEqual([]);
+
+  await filter.tap();
+  await filter.fill("qwen");
+  const rows = sheet.getByRole("option");
+  await expect(rows).toHaveCount(1);
+  await rows.first().tap();
+
+  await expect(sheet).toBeHidden();
+  await expect(page.getByRole("button", { name: /^Provider model:/ })).toHaveText(/Qwen 3 Max/);
+  expect(await overflowingElements(page)).toEqual([]);
+});

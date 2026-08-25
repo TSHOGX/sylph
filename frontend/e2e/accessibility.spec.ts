@@ -233,3 +233,37 @@ test("every overlay has no automated accessibility violations", async ({ page })
     await expect(page.getByRole("dialog")).toBeHidden();
   }
 });
+
+/**
+ * The two patterns a choice list presents, audited open.
+ *
+ * A `role="menu"` may only contain menu items, so the filter field added for long
+ * catalogues cannot live in one: axe reports it, and a screen reader is handed a
+ * control its container says cannot exist. The surface therefore switches to the
+ * combobox pattern when it is filterable. That switch is exactly the kind of thing a
+ * static read of the code will not catch and a click-through will not notice, which
+ * is why both states are audited with a list actually open.
+ */
+test("both a menu and a filterable list are valid ARIA while open", async ({ page }) => {
+  await createSession(page);
+
+  await page.getByRole("button", { name: /^Model:/ }).click();
+  await expect(page.getByRole("menu", { name: "Model" })).toBeVisible();
+  await audit(page, "a short choice list (menu pattern)");
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: /^Provider model:/ }).click();
+  await expect(page.getByRole("combobox", { name: /filter provider model/i })).toBeFocused();
+  await audit(page, "a long choice list (combobox pattern)");
+  await page.keyboard.press("Escape");
+
+  // And the dialog form of the same list, which a control command opens. It reaches
+  // the filterable path through a different surface — an `Overlay` that owns its own
+  // dismissal — so its roles are worth auditing separately from the popover's.
+  const composer = page.getByLabel("Message");
+  await composer.click();
+  await composer.fill("/model");
+  await composer.press("Enter");
+  await expect(page.getByRole("dialog", { name: "Model" })).toBeVisible();
+  await audit(page, "a control command's picker");
+});

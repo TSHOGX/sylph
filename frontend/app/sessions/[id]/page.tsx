@@ -532,6 +532,9 @@ export default function SessionPage() {
           runCommand.mutate({ command: name, args: rest ? { args: rest } : {} })
         }
         onSetConfig={(configId, value) => agent.setConfig(configId, value)}
+        // A refused set is reported rather than dropped: without this the chip keeps
+        // its old value and the only symptom is that choosing a model did nothing.
+        configError={agent.configError}
         // Gated on what the agent declared rather than offered unconditionally: an
         // interrupt button on an agent with no interrupt is a promise the handshake
         // already told us we cannot keep. `pi` supports both; a minimal adapter

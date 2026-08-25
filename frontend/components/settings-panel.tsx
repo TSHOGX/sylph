@@ -26,6 +26,8 @@ import { LOCALE_NAMES, LOCALES, useT, type Locale, type MessageKey } from "@/lib
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Overlay } from "@/components/overlay";
 import { IdentitySection } from "@/components/settings-identity";
+import { MenuButton, type MenuItem } from "@/components/ui/menu";
+import { ChevronDownIcon } from "@/components/icons";
 
 type Section = "general" | "identity" | "agents" | "workspaces" | "shortcuts";
 
@@ -208,6 +210,68 @@ function describeDiscovery(agents: Agent[]): string {
     .join("|");
 }
 
+/**
+ * A default-model choice, as a button that opens a filterable list.
+ *
+ * A button rather than a `<select>`, for the reason recorded in `ui/menu.tsx`: a
+ * `<select>` is sized by its longest *option*, so one long model id widens the row
+ * permanently and no `truncate` can recover it — the intrinsic minimum is already
+ * too large. A runner declaring twenty models also gave a `<select>` no way to be
+ * searched, which is the reported bug this shares its fix with.
+ */
+function ModelDefaultPicker({
+  agent,
+  choices,
+  value,
+  onChange,
+}: {
+  agent: string;
+  choices: string[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const t = useT();
+  const items = useMemo<MenuItem[]>(
+    () => [
+      {
+        label: t("settings.agents.models.runnerDefault"),
+        checked: !value,
+        onSelect: () => onChange(""),
+      },
+      ...choices.map((choice) => ({
+        label: choice,
+        checked: value === choice,
+        onSelect: () => onChange(choice),
+      })),
+    ],
+    [choices, value, onChange, t],
+  );
+
+  const current = value || t("settings.agents.models.runnerDefault");
+  // The menu is named for the agent; the trigger is named for the agent *and* its
+  // current value. Deliberately different strings: a screen reader announces
+  // "e2e model, Runner default" on the trigger rather than a bare value with no
+  // idea what it configures, and two controls sharing one name is the collision
+  // that once failed 40 specs at once.
+  const name = t("settings.agents.models.forAgent", { agent });
+
+  return (
+    <MenuButton label={name} items={items}>
+      {(trigger) => (
+        <button
+          {...trigger}
+          type="button"
+          aria-label={`${name}: ${current}`}
+          className="flex min-w-0 flex-1 items-center gap-1 rounded border border-line px-2 py-1 text-xs hover:bg-sunken focus-ring"
+        >
+          <span className="min-w-0 flex-1 truncate">{current}</span>
+          <ChevronDownIcon size={12} className="shrink-0 text-ink-muted" />
+        </button>
+      )}
+    </MenuButton>
+  );
+}
+
 function AgentsSection() {
   const { settings, update } = useSettings();
   const queryClient = useQueryClient();
@@ -274,26 +338,19 @@ function AgentsSection() {
                       {t("settings.agents.models.noFlag")}
                     </span>
                   ) : (
-                    <select
+                    <ModelDefaultPicker
+                      agent={agent.name}
+                      choices={choices}
                       value={settings.defaultModels[agent.name] ?? ""}
-                      onChange={(event) =>
+                      onChange={(choice) =>
                         update({
                           defaultModels: {
                             ...settings.defaultModels,
-                            [agent.name]: event.target.value,
+                            [agent.name]: choice,
                           },
                         })
                       }
-                      aria-label={`${t("settings.agents.models.label")}: ${agent.name}`}
-                      className="min-w-0 flex-1 rounded border border-line px-2 py-1 text-xs focus-ring"
-                    >
-                      <option value="">{t("settings.agents.models.runnerDefault")}</option>
-                      {choices.map((choice) => (
-                        <option key={choice} value={choice}>
-                          {choice}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   )}
                 </li>
               );

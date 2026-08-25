@@ -37,13 +37,65 @@ COMMANDS = [
      "source": "builtin", "aliases": ["cost", "stats"]},
     {"name": "model", "description": "Choose the model", "kind": "control",
      "configId": "model", "source": "builtin"},
+    # A control command onto the long catalogue. The dialog a control command opens
+    # reaches the filterable list through a different surface than the composer's
+    # popover does — an `Overlay` that owns its own dismissal — so without this the
+    # dialog's search path had no coverage at all.
+    {"name": "provider", "description": "Choose the provider model", "kind": "control",
+     "configId": "provider", "source": "builtin"},
+]
+
+# A long catalogue, because the threshold between "a menu" and "a searchable list"
+# is a real behaviour and nothing could observe it while every fixture option had two
+# choices. Fourteen is above `SELECT_SEARCH_THRESHOLD` and in the range real agents
+# report — `pi` declares 21 across providers, `claude` around a dozen — and the ids
+# are deliberately long enough to be the kind that once widened a `<select>` past the
+# right edge of a phone. Descriptions carry the provider, so a spec can assert the
+# filter matches the hint and not only the label.
+CATALOGUE = [
+    ("opus-5-1m", "Opus 5 (1M context)", "Anthropic"),
+    ("opus-5", "Opus 5", "Anthropic"),
+    ("sonnet-5", "Sonnet 5", "Anthropic"),
+    ("haiku-4-5", "Haiku 4.5", "Anthropic"),
+    ("fable-5", "Fable 5", "Anthropic"),
+    ("gpt-5-codex-preview", "GPT-5 Codex Preview", "OpenAI"),
+    ("gpt-5-mini", "GPT-5 Mini", "OpenAI"),
+    ("o5-reasoning", "o5 Reasoning", "OpenAI"),
+    ("gemini-3-pro", "Gemini 3 Pro", "Google"),
+    ("gemini-3-flash", "Gemini 3 Flash", "Google"),
+    ("llama-4-405b-instruct", "Llama 4 405B Instruct", "Meta"),
+    ("mistral-large-3", "Mistral Large 3", "Mistral"),
+    ("qwen-3-max", "Qwen 3 Max", "Alibaba"),
+    ("deepseek-v4", "DeepSeek V4", "DeepSeek"),
+    # Two providers offering the same model under the same display name, which is a
+    # measured shape rather than an invented one: pi 0.84.3 offers two "Claude Opus 5"
+    # (anthropic direct and via openrouter) and two each of "DeepSeek V4 Pro" and
+    # "GLM-5.2". The reported bug was both rows showing a checkmark, because a
+    # producer's `checked: value === currentValue` is a filter and the bare id was not
+    # unique. Values here are provider-qualified for the same reason the pi adapter's
+    # now are; the pair exists so a spec can prove exactly one row reads as current
+    # and that each provider is separately reachable.
+    ("ikun glm-5.2", "GLM-5.2", "ikun-glm"),
+    ("huaweicloud glm-5.2", "GLM-5.2", "huaweicloud"),
+    # Deliberately refused by `set_config` below, so the client's failure path is
+    # observable rather than only reasoned about.
+    ("refused", "Unavailable Model", "Refuses to be set"),
 ]
 
 CONFIG = [
+    # Two choices, so the menu pattern stays covered: below the threshold a config
+    # option is a `menu` of `menuitemradio`s, and that is a different ARIA contract
+    # from the searchable list below, not merely a different width.
     {"type": "select", "id": "model", "name": "Model", "category": "model",
      "currentValue": "fast",
      "options": [{"value": "fast", "name": "Fast"},
                  {"value": "thorough", "name": "Thorough"}]},
+    # Above it, and in the same category so it lands on the composer's control row
+    # beside the short one — which is what lets one screen assert both patterns.
+    {"type": "select", "id": "provider", "name": "Provider model",
+     "category": "model", "currentValue": "sonnet-5",
+     "options": [{"value": value, "name": name, "description": provider}
+                 for value, name, provider in CATALOGUE]},
     {"type": "boolean", "id": "verbose", "name": "Verbose", "category": "output",
      "currentValue": False},
 ]
@@ -232,8 +284,15 @@ def serve():
                   "agent": {"name": "e2e", "version": "3.0.0"},
                   "supports": ["interrupt", "steer", "approval", "slash",
                                "set_config", "context"],
-                  "flags": {"model": {"choices": ["fast", "thorough"],
-                                      "description": "Model tier"}}})
+                  # The descriptor's spawn-time choices, which are a different list
+                  # from the live `config` above and are what the settings panel's
+                  # per-agent default reads. Long here for the same reason: that
+                  # control is a second surface with the same scroll-and-filter
+                  # problem, and a two-item list could not observe it.
+                  "flags": {"model": {
+                      "choices": ["fast", "thorough"]
+                                 + [value for value, _, _ in CATALOGUE],
+                      "description": "Model tier"}}})
 
         elif t == "open":
             # A stable id, so a resumed session in a spec is recognisably the same
@@ -275,6 +334,15 @@ def serve():
             if not option:
                 emit({"t": "err", "id": mid, "code": "UNSUPPORTED_FIELD",
                       "message": "no such config option"})
+                continue
+            # A refusable value, so a spec can observe what a *rejected* set looks
+            # like. This is not hypothetical: a real adapter sending the wrong field
+            # name to its vendor CLI gets a failed RPC back, and with no error path in
+            # the client the rejection was invisible — the value simply did not
+            # change, which is indistinguishable from a broken control.
+            if msg.get("value") == "refused":
+                emit({"t": "err", "id": mid, "code": "UNSUPPORTED_FIELD",
+                      "message": "this agent refuses that value"})
                 continue
             option["currentValue"] = msg.get("value")
             # The whole facet, because setting one option may change another's

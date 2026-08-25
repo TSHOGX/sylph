@@ -1,0 +1,202 @@
+/**
+ * The row model behind every choice list: menus, the config picker, and the
+ * searchable model catalogue.
+ *
+ * # Why this is a module of its own
+ *
+ * A choice list has two rendering modes — unfiltered, where non-selectable rows
+ * (group headings, separators) are part of the list, and filtered, where they are
+ * not — and one cursor that has to mean the same thing in both. The first attempt
+ * at search kept a cursor per mode and reconciled them at the call site, which put
+ * the highlight, `aria-activedescendant`, and Enter on three different rows: the
+ * unfiltered renderer numbered *every* item while the cursor counted only the
+ * enabled ones.
+ *
+ * `buildRows` removes that class of bug by construction. It returns the rows in
+ * render order, each already carrying its own cursor position — or `null` for a row
+ * that cannot be chosen. No renderer computes an index, so there is only ever one
+ * index space, and `activeIndex` cannot be interpreted against the wrong list.
+ *
+ * It is a pure module because that is what makes the rule testable: filtering,
+ * heading elision, and cursor numbering are decided here and asserted in
+ * `select-list.test.ts` without rendering anything.
+ */
+
+import type { ReactNode } from "react";
+import { fuzzyRank } from "./fuzzy";
+
+/**
+ * What every choice list's rows have in common, minus the action.
+ *
+ * Split from `SelectChoice` so the pure rules below — filtering, numbering, which
+ * row opens selected — can be stated and tested over plain data, with no function
+ * to construct. `MenuItem` is `SelectChoice` with a couple of menu-only extras.
+ */
+export interface SelectOption {
+  label: string;
+  /** Leading icon. Decorative; the label is the accessible name. */
+  icon?: ReactNode;
+  /** Trailing hint — a shortcut, or the agent's own description of a choice. */
+  hint?: string;
+  /** Renders as a dimmed, unfocusable row: the action exists but does not apply. */
+  disabled?: boolean;
+  /**
+   * Marks this row as the current choice in a single-select group, which also
+   * switches its role. `undefined` for a plain action, so an action is never
+   * announced as an unchecked option.
+   */
+  checked?: boolean;
+  /** Draws a separator above this row. */
+  separated?: boolean;
+  /** Destructive: stop, discard, delete. */
+  danger?: boolean;
+}
+
+/**
+ * A row that can be chosen.
+ *
+ * The renderer needs the action; the rules above do not, which is why they are typed
+ * on `SelectOption`. A disabled row still carries one so a heading needs no special
+ * case at its construction site — `commit` refuses to run it.
+ */
+export interface SelectChoice extends SelectOption {
+  onSelect: () => void;
+}
+
+/**
+ * Choices past which a list gets a filter field.
+ *
+ * Eight is where a list stops being scannable at a glance and starts being
+ * searched — and it is below every real model catalogue (`claude` reports around a
+ * dozen, `pi` twenty-one) while staying above the two-to-four-value knobs that make
+ * up the rest of an agent's config, which a filter field would only clutter.
+ */
+export const SELECT_SEARCH_THRESHOLD = 8;
+
+export interface SelectRow<T> {
+  item: T;
+  /**
+   * The row's cursor position, or `null` when it cannot be chosen.
+   *
+   * A heading is a row with no position: it is rendered, but arrow keys pass over
+   * it and it has no `data-index` for the cursor to scroll to.
+   */
+  index: number | null;
+}
+
+/**
+ * How many rows form a single-select group.
+ *
+ * This, not the total row count, is what decides whether a filter field appears.
+ * A menu of eight *actions* is a menu and should stay one; eight *choices* is a
+ * catalogue. Disabled rows are excluded because a group heading is not a choice.
+ */
+export function choiceCount(items: readonly SelectOption[]): number {
+  let count = 0;
+  for (const item of items) {
+    if (!item.disabled && item.checked !== undefined) count += 1;
+  }
+  return count;
+}
+
+/** Whether a list of this shape should show a filter field. */
+export function shouldSearch(
+  items: readonly SelectOption[],
+  searchable: boolean | "auto",
+): boolean {
+  if (typeof searchable === "boolean") return searchable;
+  return choiceCount(items) >= SELECT_SEARCH_THRESHOLD;
+}
+
+/**
+ * At most one checked row per single-select group.
+ *
+ * A group is a run of rows between headings, because a flattened config menu
+ * legitimately holds several single-select groups — model, then effort, then
+ * permissions — and each of those has its own current value. Collapsing across the
+ * whole list would uncheck all but the first option's.
+ *
+ * # Why the client enforces this at all
+ *
+ * `checked` arrives already computed, and every producer writes it as
+ * `choice.value === currentValue` — a *filter*, which marks every match. That is
+ * fine until an agent reports two choices with the same value, and one did: `pi`
+ * offered `deepseek-v4-pro` from two different providers, so two rows showed a
+ * checkmark and neither was identifiably the real one. The adapter now issues
+ * provider-qualified values, which fixes the instance.
+ *
+ * This is the second layer, and it is not redundant. "A single choice has one current
+ * row" is a property of single-select itself, not of any one agent's spelling, and
+ * this client renders whatever an agent it has never seen reports — including agents
+ * written by other people. Fixing only the adapter would leave the next one to
+ * rediscover the same symptom.
+ *
+ * The first match wins. Something has to, and the first row is the one a user
+ * scanning from the top would take to be current.
+ */
+function withOneChecked<T extends SelectOption>(items: readonly T[]): readonly T[] {
+  let seenInGroup = false;
+  let changed = false;
+  const out = items.map((item) => {
+    // A heading ends the group, so the next run gets its own current row.
+    if (item.disabled) {
+      seenInGroup = false;
+      return item;
+    }
+    if (item.checked !== true) return item;
+    if (!seenInGroup) {
+      seenInGroup = true;
+      return item;
+    }
+    changed = true;
+    return { ...item, checked: false };
+  });
+  // The same array back when nothing collided, so the common case allocates nothing
+  // and referential equality holds for callers that memoize on it.
+  return changed ? out : items;
+}
+
+/**
+ * The rows to render, in order, each numbered for the cursor.
+ *
+ * An empty query keeps the list as authored, headings included, and numbers only
+ * the rows that can be chosen. A query ranks the choosable rows and drops the rest:
+ * a heading introduces choices that are no longer beneath it, so keeping one in a
+ * filtered result labels the wrong thing.
+ *
+ * Both the label and the hint are matched, because for a model catalogue the hint
+ * is the agent's own description and carries the words a user actually remembers —
+ * a provider name, a price. Field order is the ranking, so a label match wins.
+ */
+export function buildRows<T extends SelectOption>(
+  items: readonly T[],
+  query: string,
+): SelectRow<T>[] {
+  const trimmed = query.trim();
+  // Before filtering, so grouping is decided on the authored list: a query drops the
+  // headings that delimit the groups.
+  const source = withOneChecked(items);
+
+  if (!trimmed) {
+    const rows: SelectRow<T>[] = [];
+    let index = 0;
+    for (const item of source) {
+      rows.push({ item, index: item.disabled ? null : index });
+      if (!item.disabled) index += 1;
+    }
+    return rows;
+  }
+
+  return fuzzyRank(
+    source.filter((item) => !item.disabled),
+    trimmed,
+    (item) => [item.label, item.hint ?? ""],
+  ).map((result, index) => ({ item: result.item, index }));
+}
+
+/** The cursor position a list should open on: the current choice, else the top. */
+export function initialIndex(items: readonly SelectOption[]): number {
+  const rows = buildRows(items, "");
+  const current = rows.find((row) => row.index !== null && row.item.checked === true);
+  return current?.index ?? 0;
+}

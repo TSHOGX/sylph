@@ -59,13 +59,14 @@ import {
   sessionFlags,
   type Agent,
   type ConfigOption,
+  type LinkFailure,
   type Session,
   type SessionCommand,
 } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
 import { useT, type Translate } from "@/lib/i18n";
 import { SlashMenu, useSlashMatches } from "@/components/slash-menu";
-import { commandRoute } from "@/lib/slash";
+import { commandRoute, slashStatus, type SlashStatus } from "@/lib/slash";
 import {
   ConfigControl,
   configItems,
@@ -82,7 +83,12 @@ import { Button, IconButton } from "@/components/ui/button";
 import { MenuButton, type MenuItem } from "@/components/ui/menu";
 import { Overlay } from "@/components/overlay";
 import {
-  CheckIcon,
+  SelectFilter,
+  SelectRows,
+  SelectScroll,
+  useSelectList,
+} from "@/components/ui/select-list";
+import {
   ChevronDownIcon,
   ChipIcon,
   FileImageIcon,
@@ -159,10 +165,14 @@ export function Composer({
   onSend,
   commands = [],
   config = [],
+  agentConnecting = false,
+  agentFailure,
+  onReattach,
   onRunCommand,
   onSetConfig,
   sending,
   sendError,
+  configError,
   onStop,
   stopping,
   canInterrupt = false,
@@ -197,12 +207,33 @@ export function Composer({
    * session. Reading the descriptor left the model control permanently empty.
    */
   config?: ConfigOption[];
+  /**
+   * Whether a handshake is in flight.
+   *
+   * Passed so `/` can say "connecting" instead of appearing broken. Establishing
+   * a link spawns an agent CLI and takes seconds, and that window is precisely
+   * when a user opening a session types the first slash.
+   */
+  agentConnecting?: boolean;
+  /** Why there is no live agent, when an attempt failed. */
+  agentFailure?: LinkFailure;
+  /** Retry establishing the link. Absent when there is nothing to retry. */
+  onReattach?: () => void;
   /** Invoke a prompt command instead of sending the text as a message. */
   onRunCommand?: (name: string, rest: string) => void;
   /** Set one config option. A control command resolves to this, never to a turn. */
   onSetConfig?: (configId: string, value: string | boolean) => void;
   sending: boolean;
   sendError: unknown;
+  /**
+   * Why the last config change failed, when one did.
+   *
+   * Rendered rather than dropped because a refused set otherwise looks exactly like
+   * a broken control: the chip keeps its old value and nothing says why. An agent
+   * genuinely can refuse — an option it no longer offers, or a vendor CLI that
+   * rejects the value — and that is the user's cue to pick something else.
+   */
+  configError?: unknown;
   onStop: () => void;
   stopping: boolean;
   /** Whether the agent declared it can end a turn without ending the session. */
@@ -230,9 +261,29 @@ export function Composer({
   // be in command mode while the text says otherwise - and deleting the slash
   // closes it without anything having to notice.
   const slashQuery = /^\/([^\s]*)$/.exec(text)?.[1];
-  const slashOpen = slashQuery !== undefined && commands.length > 0;
+  const slashTyping = slashQuery !== undefined;
   const slashMatches = useSlashMatches(commands, slashQuery ?? "");
-  const slashActive = slashOpen && slashMatches.length > 0;
+  // `slashActive` gates the *listbox* keys and ARIA wiring, so it requires real
+  // options to move through. Whether the surface appears at all is a separate
+  // question, below: a status row is not a listbox, and claiming a combobox with
+  // no options would point `aria-activedescendant` at an element that does not
+  // exist.
+  const slashActive = slashTyping && slashMatches.length > 0;
+  // Why there is nothing to offer, when there is nothing to offer.
+  //
+  // Previously the menu required `commands.length > 0` to open at all, so typing
+  // `/` against a detached or still-connecting agent did nothing whatsoever — no
+  // menu, no message, no indication the key had been read. That is the same
+  // observable behaviour as an unimplemented feature, and it is what a
+  // misconfigured install looked like from the composer. A deliberate keystroke
+  // now always produces an answer, even when the answer is "not yet".
+  const status = slashStatus({
+    typing: slashTyping,
+    matchCount: slashMatches.length,
+    commandCount: commands.length,
+    connecting: agentConnecting,
+    failed: Boolean(agentFailure),
+  });
 
   // Reset the highlight when the candidate set changes, or a narrowing query
   // leaves the selection pointing past the end of a shorter list.
@@ -644,6 +695,11 @@ export function Composer({
           <label htmlFor={messageId} className="sr-only">
             {t("composer.message")}
           </label>
+          {/* Exactly one of these can be showing: `slashActive` requires matches
+              and `status` is non-null only when there are none. Written as two
+              conditions rather than a ternary so neither has to be read as the
+              other's fallback — the menu is a listbox the textarea drives, the
+              status row is an announcement it does not. */}
           {slashActive && (
             <div className="absolute inset-x-0 bottom-full z-30 mb-2">
               <SlashMenu
@@ -654,6 +710,11 @@ export function Composer({
                 onPick={pickCommand}
                 listboxId={slashListboxId}
               />
+            </div>
+          )}
+          {status && (
+            <div className="absolute inset-x-0 bottom-full z-30 mb-2">
+              <SlashStatus status={status} failure={agentFailure} onReattach={onReattach} />
             </div>
           )}
           <textarea
@@ -931,6 +992,14 @@ export function Composer({
           </p>
         )}
 
+        {configError != null && (
+          <p role="alert" className="mt-1 text-2xs text-danger">
+            {configError instanceof ApiError || configError instanceof Error
+              ? t("composer.setConfigFailed", { reason: configError.message })
+              : t("composer.setConfigFailedGeneric")}
+          </p>
+        )}
+
         <div className="mt-1 flex items-center justify-between gap-3 px-1">
           {/* Hidden on a phone, where it would be false: Return inserts a newline
               there. A hint that describes the wrong platform is worse than none. */}
@@ -978,6 +1047,77 @@ export function Composer({
   );
 }
 
+/**
+ * What `/` says when it has no commands to offer.
+ *
+ * The composer used to render nothing in this case, which is the one thing it
+ * must not do: pressing `/` is a deliberate act, and a deliberate act that
+ * produces no visible change is indistinguishable from a broken control. That is
+ * how a backend with zero discovered adapters presented — as a composer ignoring
+ * a keystroke, three layers from the actual cause.
+ *
+ * Not a `listbox`. There is nothing selectable here, so announcing options a
+ * screen reader cannot move through would be a lie, and `aria-activedescendant`
+ * would point at an id that does not exist. It is a `status`, which is announced
+ * on appearance without stealing focus from the textarea.
+ */
+function SlashStatus({
+  status,
+  failure,
+  onReattach,
+}: {
+  status: SlashStatus;
+  failure?: LinkFailure;
+  onReattach?: () => void;
+}) {
+  const t = useT();
+
+  // Only a handshake failure is worth retrying. `no_adapter` is a configuration
+  // fact — no number of retries installs an adapter — so offering a button there
+  // would invite the user to keep paying a process spawn for an outcome that
+  // cannot change.
+  const retryable = status === "unavailable" && failure?.code !== "no_adapter";
+
+  const label =
+    status === "connecting"
+      ? t("composer.slash.connecting")
+      : status === "unavailable"
+        ? failure?.code === "no_adapter"
+          ? t("composer.slash.noAdapter")
+          : t("composer.slash.unavailable")
+        : status === "none"
+          ? t("composer.slash.none")
+          : t("composer.slash.noMatch");
+
+  return (
+    <div
+      role="status"
+      className="rounded-lg border border-line bg-raised px-3 py-2 shadow-lg"
+    >
+      <div className="flex items-baseline gap-2">
+        <span className="min-w-0 flex-1 text-xs text-ink-muted">{label}</span>
+        {retryable && onReattach && (
+          <button
+            type="button"
+            onClick={onReattach}
+            className="shrink-0 rounded border border-line-strong px-1.5 py-0.5 text-2xs font-medium text-ink hover:bg-sunken focus-ring"
+          >
+            {t("composer.slash.retry")}
+          </button>
+        )}
+      </div>
+      {/* The server's own words, kept for the case a human has to act on them —
+          a missing adapter names the agent, a failed handshake names what broke.
+          Secondary to the sentence above, which is what most readers need. */}
+      {status === "unavailable" && failure?.message && (
+        <p className="mt-1 break-words font-mono text-3xs leading-relaxed text-ink-faint">
+          {failure.message}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** The one option a control command named, or nothing when it names none. */
 function configFor(config: ConfigOption[], configId: string): ConfigOption[] {
   const option = config.find((candidate) => candidate.id === configId);
@@ -1012,51 +1152,51 @@ function ConfigDialog({
         : configMenuItems(config, onSet, t),
     [config, onSet, t],
   );
+  const name =
+    config.length === 1
+      ? (config[0].name ?? config[0].id)
+      : t("composer.configureEllipsis");
+
+  // The same list the row's menu renders, so `/model` and the model chip cannot
+  // disagree about filtering, ordering, or which row is current. `onClose` is not
+  // passed: the caller closes this dialog from `onSet`, because setting a value is
+  // a mutation whose response is what the surface behind re-renders from.
+  const list = useSelectList(items);
 
   return (
     <Overlay
-      title={config.length === 1 ? (config[0].name ?? config[0].id) : t("composer.configureEllipsis")}
+      title={name}
       onClose={onClose}
-      // Nothing inside is a text field, so without this focus stays on the page
-      // behind the dialog and it cannot be answered or dismissed by keyboard.
-      autoFocus
+      // A filterable list focuses its own field; a short one has nothing to focus,
+      // so the dialog itself must take focus or it cannot be answered or dismissed
+      // by keyboard at all.
+      autoFocus={!list.search}
     >
       {items.length === 0 ? (
-        <p className="px-4 py-3 text-xs text-ink-muted">
-          {t("composer.noConfigOptions")}
-        </p>
+        <p className="px-4 py-3 text-xs text-ink-muted">{t("composer.noConfigOptions")}</p>
       ) : (
-        <ul role="menu" className="max-h-96 overflow-y-auto overscroll-contain py-1">
-          {items.map((item, index) => (
-            <li key={`${item.label}-${index}`} role="none">
-              <button
-                type="button"
-                role={item.checked === undefined ? "menuitem" : "menuitemradio"}
-                aria-checked={item.checked}
-                disabled={item.disabled}
-                onClick={() => {
-                  if (item.disabled) return;
-                  item.onSelect();
-                }}
-                className={`flex w-full items-center gap-2 px-4 py-2 text-left text-xs ${
-                  item.disabled
-                    ? "cursor-default font-medium text-ink-faint"
-                    : "text-ink hover:bg-active"
-                }`}
-              >
-                {item.checked ? (
-                  <CheckIcon size={14} />
-                ) : (
-                  <span aria-hidden className="w-3.5" />
-                )}
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                {item.hint ? (
-                  <span className="shrink-0 text-3xs text-ink-faint">{item.hint}</span>
-                ) : null}
-              </button>
-            </li>
-          ))}
-        </ul>
+        <>
+          {/* Always ready: a dialog is visible from its first paint, unlike an
+              anchored popover that has to be measured before it can take focus. */}
+          {list.search && <SelectFilter list={list} name={name} />}
+          {list.search ? (
+            <SelectScroll list={list} label={name} fill>
+              <SelectRows list={list} density="comfortable" />
+            </SelectScroll>
+          ) : (
+            <div
+              role="menu"
+              aria-label={name}
+              aria-activedescendant={list.activeDescendant}
+              onKeyDown={list.onKeyDown}
+              className="flex min-h-0 flex-col"
+            >
+              <SelectScroll list={list} label={name} fill>
+                <SelectRows list={list} density="comfortable" />
+              </SelectScroll>
+            </div>
+          )}
+        </>
       )}
     </Overlay>
   );

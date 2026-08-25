@@ -63,6 +63,13 @@ export const en = {
   "action.interrupt": "Interrupt",
   "action.on": "On",
   "action.off": "Off",
+  // A choice list past `SELECT_SEARCH_THRESHOLD` options gains a filter field.
+  // `{name}` is what is being filtered, so the field's accessible name never
+  // collides with the list's own — two controls a screen reader cannot tell apart
+  // is a real defect, not test fragility.
+  "select.filter.label": "Filter {name}",
+  "select.filter.placeholder": "Type to filter",
+  "select.filter.none": "No matches",
   "action.loading": "Loading...",
   "action.expand": "Expand",
   "action.collapse": "Collapse",
@@ -138,8 +145,22 @@ export const en = {
   // A control command opens a picker instead of sending a message. Short because it
   // is a badge in a dense list, not a sentence.
   "composer.setting": "setting",
+  // What `/` answers when it has no commands to offer. Four distinct states,
+  // because they need four different responses from the user: wait, fix the
+  // install, accept that this agent has none, or retype.
+  "composer.slash.connecting": "Connecting to the agent to load its commands...",
+  "composer.slash.noAdapter":
+    "This session's agent was not found, so it reports no commands.",
+  "composer.slash.unavailable": "The agent could not be reached, so it reports no commands.",
+  "composer.slash.none": "This agent reports no slash commands.",
+  "composer.slash.noMatch": "No command matches.",
+  "composer.slash.retry": "Retry",
   "composer.agentDefault": "Agent default",
   "composer.configureEllipsis": "Configure...",
+  // A refused config change. The agent's own words are carried through: it knows why
+  // it declined and the user needs that, not a generic failure.
+  "composer.setConfigFailed": "Could not apply that setting: {reason}",
+  "composer.setConfigFailedGeneric": "Could not apply that setting.",
   "composer.noConfigOptions": "This agent reports nothing to configure here.",
   "composer.attachEllipsis": "Attach files...",
   "composer.saveToWorkspace": "Save attachments to workspace...",
@@ -360,6 +381,9 @@ export const en = {
   "settings.agents.models.none": "No runners discovered. Check SYLPH_RUNNERS_DIR, then refresh.",
   "settings.agents.models.noFlag": "declares no model flag",
   "settings.agents.models.runnerDefault": "Runner default",
+  // Names one agent's model control. Distinct from the section label, which names
+  // the whole list: the control and its container must not share a name.
+  "settings.agents.models.forAgent": "{agent} model",
   "settings.agents.discovery.label": "Discovery",
   "settings.agents.discovery.hint": "Re-runs `--describe` against every runner script.",
   "settings.agents.discovery.button": "Refresh runners",

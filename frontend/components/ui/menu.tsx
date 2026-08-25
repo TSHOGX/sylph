@@ -7,7 +7,8 @@
  * - `Menu` is anchored to a trigger element (a dropdown), and becomes a bottom
  *   sheet on a phone, where a 200px popover pinned to a 32px button is both hard
  *   to hit and prone to landing under the on-screen keyboard.
- * - `MenuItems` is the shared list: roles, arrow navigation, Escape, checkmarks.
+ * - Rows, the cursor, and filtering are `ui/select-list`, shared with the config
+ *   dialog — which is not a menu, but is the same list.
  *
  * # Why this replaced every `<select>` in the composer
  *
@@ -23,150 +24,39 @@
  * as a system wheel with its own typography, which is exactly the "assembled from
  * different kits" quality this pass is removing.
  *
- * # Roles
+ * # A long list scrolls, and a long catalogue is filterable
  *
- * `menu`/`menuitem`, with `aria-activedescendant` for the virtual cursor and
- * `menuitemradio` + `aria-checked` when a group of items is a single choice. The
- * container holds DOM focus and rows are not tab stops — the pattern ARIA
- * prescribes, and the only one where arrow keys and typing do not fight.
+ * The rows live in their own scroll container rather than in the panel. The panel is
+ * `overflow-hidden` for its rounded corners, so without one a list taller than the
+ * panel was clipped outright with no way to reach the rest — a model catalogue of a
+ * dozen entries was simply unusable. Past `SELECT_SEARCH_THRESHOLD` choices a filter
+ * field appears and the surface switches from the menu pattern to the combobox
+ * pattern; see `ui/select-list.tsx` for why that switch is mandatory rather than
+ * stylistic.
  */
 
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useIsMobile } from "@/lib/viewport";
 import { Sheet } from "@/components/ui/sheet";
-import { CheckIcon } from "@/components/icons";
-
-export interface MenuItem {
-  label: string;
-  onSelect: () => void;
-  /** Leading icon. Decorative; the label is the accessible name. */
-  icon?: ReactNode;
-  /** Trailing hint — a shortcut, or a value. */
-  hint?: string;
-  /** Renders as a dimmed, unfocusable row: the action exists but does not apply. */
-  disabled?: boolean;
-  /** Draws a separator above this row. */
-  separated?: boolean;
-  /**
-   * Marks this row as the current choice in a single-select group, which also
-   * switches its role to `menuitemradio`. `undefined` for a plain action, so an
-   * action is never announced as an unchecked option.
-   */
-  checked?: boolean;
-  /** Destructive: stop, discard, delete. */
-  danger?: boolean;
-}
-
-/* ── Shared list ──────────────────────────────────────────────────────────── */
-
-function MenuItems({
-  items,
-  activeIndex,
-  setActiveIndex,
-  onChoose,
-  rowId,
-}: {
-  items: MenuItem[];
-  activeIndex: number;
-  setActiveIndex: (index: number) => void;
-  onChoose: (item: MenuItem) => void;
-  rowId: (index: number) => string;
-}) {
-  const enabled = items.filter((item) => !item.disabled);
-  // Reserve the check column only when something in this menu is checkable, so an
-  // action menu is not indented for a state it never shows.
-  const checkable = items.some((item) => item.checked !== undefined);
-
-  return (
-    <>
-      {items.map((item) => {
-        const enabledIndex = enabled.indexOf(item);
-        const active = enabledIndex === activeIndex && enabledIndex >= 0;
-        return (
-          <div key={item.label}>
-            {item.separated && (
-              <div role="separator" className="my-1 border-t border-line" />
-            )}
-            <button
-              type="button"
-              id={enabledIndex >= 0 ? rowId(enabledIndex) : undefined}
-              role={item.checked === undefined ? "menuitem" : "menuitemradio"}
-              aria-checked={item.checked}
-              disabled={item.disabled}
-              // The container owns focus and moves a virtual cursor instead.
-              tabIndex={-1}
-              onMouseEnter={() => enabledIndex >= 0 && setActiveIndex(enabledIndex)}
-              onClick={() => onChoose(item)}
-              className={`tap-row flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs ${
-                item.disabled
-                  ? "cursor-default text-ink-faint"
-                  : item.danger
-                    ? active
-                      ? "bg-danger-bg text-danger"
-                      : "text-danger"
-                    : active
-                      ? "bg-hover text-ink"
-                      : "text-ink-soft"
-              }`}
-            >
-              {checkable && (
-                <span className="w-4 shrink-0 text-ink-muted">
-                  {item.checked && <CheckIcon size={14} />}
-                </span>
-              )}
-              {item.icon && <span className="shrink-0 text-ink-muted">{item.icon}</span>}
-              <span className="min-w-0 flex-1 truncate">{item.label}</span>
-              {item.hint && (
-                <span className="shrink-0 font-mono text-3xs text-ink-muted">{item.hint}</span>
-              )}
-            </button>
-          </div>
-        );
-      })}
-    </>
-  );
-}
+import {
+  SelectFilter,
+  SelectRows,
+  SelectScroll,
+  useSelectList,
+} from "@/components/ui/select-list";
+import type { SelectChoice } from "@/lib/select-list";
 
 /**
- * Arrow navigation over the enabled subset.
+ * A menu row.
  *
- * Wraps at both ends, which is what a menu does everywhere; Home and End are also
- * bound because a long menu is faster to traverse that way.
+ * Structurally a `SelectChoice`; the alias is kept because it is what every call
+ * site in the app already names, and because a menu row is the only one that can be
+ * `danger`.
  */
-function useMenuKeys(count: number, onClose: () => void, onCommit: (index: number) => void) {
-  const [activeIndex, setActiveIndex] = useState(0);
+export type MenuItem = SelectChoice;
 
-  const onKeyDown = useCallback(
-    (event: React.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        // Stopped so it closes this menu only, not an overlay behind it.
-        event.stopPropagation();
-        onClose();
-        return;
-      }
-      if (count === 0) return;
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        setActiveIndex((index) => (index + 1) % count);
-      } else if (event.key === "ArrowUp") {
-        event.preventDefault();
-        setActiveIndex((index) => (index - 1 + count) % count);
-      } else if (event.key === "Home") {
-        event.preventDefault();
-        setActiveIndex(0);
-      } else if (event.key === "End") {
-        event.preventDefault();
-        setActiveIndex(count - 1);
-      } else if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        onCommit(activeIndex);
-      }
-    },
-    [count, activeIndex, onClose, onCommit],
-  );
-
-  return { activeIndex, setActiveIndex, onKeyDown };
-}
+/* ── Dismissal ────────────────────────────────────────────────────────────── */
 
 /**
  * Dismiss on an outside press, on scroll, and on resize.
@@ -185,26 +75,44 @@ function useDismiss(
 ) {
   useEffect(() => {
     if (!enabled) return;
-    // Pointer-down rather than click: a menu that survives until mouseup can be
-    // dismissed by a drag that began elsewhere, which feels stuck.
-    function onPointerDown(event: PointerEvent) {
+
+    /**
+     * Outside dismiss on `click`, not `pointerdown`.
+     *
+     * A capture-phase `pointerdown` on the document runs before the row's own
+     * `click`, so the menu unmounted mid-gesture and the selection never landed —
+     * the same failure as the sheet above, and the reason the mobile path needs the
+     * `enabled` guard at all. `click` fires after the row has been activated.
+     */
+    function onClick(event: MouseEvent) {
       if (!ref.current?.contains(event.target as Node)) onClose();
     }
-    // Scrolling detaches the menu from whatever it was anchored to. Capture phase,
-    // because scroll does not bubble from the pane that actually scrolled.
-    document.addEventListener("pointerdown", onPointerDown, true);
-    window.addEventListener("scroll", onClose, true);
+
+    /**
+     * Scroll detaches the menu from whatever it was anchored to — except when the
+     * thing that scrolled is the menu's own list, which is the common case now that
+     * a long catalogue scrolls inside the panel. Closing on that made the bottom of
+     * every model list unreachable.
+     */
+    function onScroll(event: Event) {
+      if (ref.current?.contains(event.target as Node)) return;
+      onClose();
+    }
+
+    // Capture phase, because scroll does not bubble from the pane that scrolled.
+    document.addEventListener("click", onClick, true);
+    window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onClose);
     return () => {
-      document.removeEventListener("pointerdown", onPointerDown, true);
-      window.removeEventListener("scroll", onClose, true);
+      document.removeEventListener("click", onClick, true);
+      window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onClose);
     };
   }, [ref, onClose, enabled]);
 }
 
 const PANEL =
-  "z-50 min-w-48 max-w-[min(20rem,calc(100vw-1rem))] overflow-hidden rounded-xl border border-line bg-raised py-1 shadow-xl outline-none";
+  "z-50 flex min-w-48 max-w-[min(22rem,calc(100vw-1rem))] flex-col overflow-hidden rounded-xl border border-line bg-raised shadow-xl outline-none";
 
 /* ── Point-anchored (right-click) ─────────────────────────────────────────── */
 
@@ -223,25 +131,11 @@ export function ContextMenu({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ left: x, top: y });
-  const baseId = useId();
-  const enabled = items.filter((item) => !item.disabled);
 
-  const choose = useCallback(
-    (item: MenuItem) => {
-      onClose();
-      item.onSelect();
-    },
-    [onClose],
-  );
-
-  const { activeIndex, setActiveIndex, onKeyDown } = useMenuKeys(
-    enabled.length,
-    onClose,
-    (index) => {
-      const item = enabled[index];
-      if (item) choose(item);
-    },
-  );
+  // A context menu is a short list of actions on the thing that was right-clicked,
+  // so it is never filterable: there is nothing to filter, and a text field would
+  // take the focus the container needs for arrow keys.
+  const list = useSelectList(items, { searchable: false, onClose });
 
   // Clamped after mount, when the real size is known. Guessing the height from the
   // click coordinates alone still clips a menu opened near the bottom edge.
@@ -263,19 +157,15 @@ export function ContextMenu({
       ref={ref}
       role="menu"
       aria-label={label}
-      aria-activedescendant={enabled.length > 0 ? `${baseId}-${activeIndex}` : undefined}
+      aria-activedescendant={list.activeDescendant}
       tabIndex={-1}
       style={{ left: position.left, top: position.top }}
-      onKeyDown={onKeyDown}
+      onKeyDown={list.onKeyDown}
       className={`fixed ${PANEL}`}
     >
-      <MenuItems
-        items={items}
-        activeIndex={activeIndex}
-        setActiveIndex={setActiveIndex}
-        onChoose={choose}
-        rowId={(index) => `${baseId}-${index}`}
-      />
+      <SelectScroll list={list} label={label}>
+        <SelectRows list={list} />
+      </SelectScroll>
     </div>
   );
 }
@@ -289,6 +179,7 @@ export function Menu({
   label,
   title,
   align = "start",
+  searchable = "auto",
 }: {
   /** The trigger. Positioning reads its rect; focus returns to it on close. */
   anchor: HTMLElement | null;
@@ -299,33 +190,26 @@ export function Menu({
   title?: string;
   /** Which edge of the trigger the panel lines up with. */
   align?: "start" | "end";
+  /** Show a filter field. `auto` turns it on for long single-select catalogues. */
+  searchable?: boolean | "auto";
 }) {
   const isMobile = useIsMobile();
   const ref = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
-  const baseId = useId();
-  const enabled = items.filter((item) => !item.disabled);
 
-  const choose = useCallback(
-    (item: MenuItem) => {
-      onClose();
-      item.onSelect();
-    },
-    [onClose],
-  );
+  const list = useSelectList(items, { searchable, onClose });
 
-  const { activeIndex, setActiveIndex, onKeyDown } = useMenuKeys(
-    enabled.length,
-    onClose,
-    (index) => {
-      const item = enabled[index];
-      if (item) choose(item);
-    },
-  );
-
-  // Measured after mount for the same reason as the context menu, plus one more:
-  // the composer's controls sit at the bottom of the viewport, so a menu placed
-  // below its trigger would open off-screen. It flips above when it does not fit.
+  /**
+   * Measured after mount for the same reason as the context menu, plus one more:
+   * the composer's controls sit at the bottom of the viewport, so a menu placed
+   * below its trigger would open off-screen. It flips above when it does not fit.
+   *
+   * Deliberately *not* dependent on the query. Filtering changes the panel's height,
+   * and re-measuring on every keystroke walked the panel up and down under the
+   * cursor as the user typed. The list's own height is capped, so the panel opened
+   * at its full size is the size it keeps — which makes one measurement correct for
+   * the life of the menu.
+   */
   useEffect(() => {
     if (isMobile) return;
     const node = ref.current;
@@ -359,23 +243,29 @@ export function Menu({
    *
    * `focusedRef` so this fires once. Without it, a re-render that re-measures would
    * pull focus back out of a row the user had arrowed to.
+   *
+   * A filterable menu hands focus to its field instead — through the same
+   * `position !== null` gate, passed down as `ready`, because React's `autoFocus`
+   * fires at mount and would hit the invisible panel in exactly the way described
+   * above. That is what made the first search implementation swallow every
+   * keystroke.
    */
   const focusedRef = useRef(false);
   useEffect(() => {
-    if (isMobile || position === null || focusedRef.current) return;
+    if (isMobile || position === null || focusedRef.current || list.search) return;
     focusedRef.current = true;
     ref.current?.focus();
-  }, [position, isMobile]);
+  }, [position, isMobile, list.search]);
 
   /**
    * Hand focus back to the trigger when the menu closes.
    *
    * A menu that takes focus and does not return it drops a keyboard user at the top
    * of the document (WCAG 2.4.3). It also breaks the *next* surface in a chain: an
-   * item that opens a dialog — "Run a command..." — has the menu unmount in the same
-   * commit the dialog mounts, and the dialog captures `document.activeElement` as
-   * the opener it will later restore to. With focus on a disappearing menu, that
-   * capture is `<body>`, so closing the dialog stranded focus there.
+   * item that opens a dialog has the menu unmount in the same commit the dialog
+   * mounts, and the dialog captures `document.activeElement` as the opener it will
+   * later restore to. With focus on a disappearing menu, that capture is `<body>`,
+   * so closing the dialog stranded focus there.
    *
    * React runs every cleanup in a commit before every effect, so this restores the
    * trigger before the dialog reads `activeElement` — which is what makes the chain
@@ -391,43 +281,69 @@ export function Menu({
   // Popover only. The sheet owns its own dismissal, and this would fight the tap.
   useDismiss(ref, onClose, !isMobile);
 
-  const list = (
-    <MenuItems
-      items={items}
-      activeIndex={activeIndex}
-      setActiveIndex={setActiveIndex}
-      onChoose={choose}
-      rowId={(index) => `${baseId}-${index}`}
-    />
-  );
+  const filter = list.search ? (
+    <SelectFilter list={list} name={label} ready={position !== null} />
+  ) : null;
 
   // On a phone the same items become a bottom sheet: reachable one-handed, rows at
   // full touch height, and never clipped by the on-screen keyboard.
   if (isMobile) {
     return (
       <Sheet title={title ?? label} onClose={onClose}>
-        <div role="menu" aria-label={label} className="pane min-h-0 flex-1 pb-safe">
-          {list}
-        </div>
+        {filter}
+        {/*
+          The role sits on the scrolling list in the combobox pattern and on a
+          wrapper in the menu pattern, so a sheet gets one or the other and never
+          both — a `role="menu"` around a `listbox` would nest two patterns.
+        */}
+        {list.search ? (
+          <SelectScroll list={list} label={label} fill>
+            <SelectRows list={list} />
+          </SelectScroll>
+        ) : (
+          <div
+            role="menu"
+            aria-label={label}
+            aria-activedescendant={list.activeDescendant}
+            onKeyDown={list.onKeyDown}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <SelectScroll list={list} label={label} fill>
+              <SelectRows list={list} />
+            </SelectScroll>
+          </div>
+        )}
       </Sheet>
     );
   }
 
-  return (
+  const panel = (
     <div
       ref={ref}
-      role="menu"
-      aria-label={label}
-      aria-activedescendant={enabled.length > 0 ? `${baseId}-${activeIndex}` : undefined}
-      tabIndex={-1}
-      onKeyDown={onKeyDown}
+      // In the combobox pattern the field is the control and the rows are its
+      // listbox, so the panel is a plain container: a `role="menu"` here would
+      // declare a menu that contains an `<input>`, which is invalid and which axe
+      // reports.
+      role={list.search ? undefined : "menu"}
+      aria-label={list.search ? undefined : label}
+      aria-activedescendant={list.search ? undefined : list.activeDescendant}
+      tabIndex={list.search ? undefined : -1}
+      // The field owns the keys when there is one; it is where focus is.
+      onKeyDown={list.search ? undefined : list.onKeyDown}
       // Hidden until measured, so it does not flash at the wrong place for a frame.
       style={position ?? { left: -9999, top: 0 }}
       className={`fixed ${PANEL} ${position ? "" : "invisible"}`}
     >
-      {list}
+      {filter}
+      <SelectScroll list={list} label={label}>
+        <SelectRows list={list} />
+      </SelectScroll>
     </div>
   );
+
+  // Portalled to the body: the composer's controls sit inside `overflow-hidden`
+  // scrolling ancestors, which would clip a panel positioned against the viewport.
+  return createPortal(panel, document.body);
 }
 
 /**
@@ -442,6 +358,7 @@ export function MenuButton({
   title,
   items,
   align,
+  searchable = "auto",
   children,
 }: {
   /**
@@ -459,6 +376,7 @@ export function MenuButton({
   title?: string;
   items: MenuItem[];
   align?: "start" | "end";
+  searchable?: boolean | "auto";
   /** Renders the trigger. Spread `trigger` onto the button element. */
   children: (trigger: {
     ref: (node: HTMLElement | null) => void;
@@ -469,6 +387,7 @@ export function MenuButton({
 }) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
 
   return (
     <>
@@ -482,10 +401,11 @@ export function MenuButton({
         <Menu
           anchor={anchor}
           items={items}
-          onClose={() => setOpen(false)}
+          onClose={close}
           label={label}
           title={title}
           align={align}
+          searchable={searchable}
         />
       )}
     </>

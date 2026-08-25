@@ -65,12 +65,34 @@ export function configItems(
     ];
   }
 
-  return option.options.map((choice) => ({
+  /**
+   * The current choice, as a position rather than a predicate.
+   *
+   * `checked: choice.value === currentValue` reads like the obvious thing and is
+   * wrong: it is a *filter*, so if an agent ever reports two choices with the same
+   * value, every one of them is marked current and the list shows two checkmarks
+   * with no way to tell which is real. That happened — `pi` offered
+   * `deepseek-v4-pro` from two different providers, so a bare id was not a unique
+   * value. The adapter now qualifies its values, but a single-select group having
+   * exactly one current row is a property of *single-select*, not of any one
+   * agent's spelling, so it is enforced here too. Two layers, because the client
+   * renders whatever an agent it has never seen reports.
+   *
+   * First match wins when values do collide: something has to, and the first row is
+   * the one a user scanning from the top would assume.
+   */
+  const current = option.options.findIndex(
+    (choice) => choice.value === option.currentValue,
+  );
+
+  return option.options.map((choice, index) => ({
     label: choice.name?.trim() || choice.value,
     // The agent's own description, which for a model list is what distinguishes
-    // otherwise similar entries — pricing for `claude`, the provider for `pi`.
+    // otherwise similar entries — pricing for `claude`, the provider for `pi`. Load
+    // bearing rather than decorative when two providers offer the same model under
+    // the same display name, which is the only thing telling those rows apart.
     hint: choice.description,
-    checked: choice.value === option.currentValue,
+    checked: index === current,
     onSelect: () => onSet(choice.value),
   }));
 }

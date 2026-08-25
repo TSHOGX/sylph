@@ -66,6 +66,14 @@ export interface AgentSession {
   /** Set one typed config option; the response replaces the cached surface. */
   setConfig: (configId: string, value: string | boolean) => void;
   settingConfig: boolean;
+  /**
+   * Why the last config change failed, when one did.
+   *
+   * Surfaced rather than swallowed because a refused set is otherwise
+   * indistinguishable from a broken control: the value simply does not change, with
+   * nothing said.
+   */
+  configError: unknown;
 }
 
 export function useAgentSession(sessionId: string | undefined): AgentSession {
@@ -198,11 +206,24 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
   // triggering a refetch. Setting one option can change another's choices — effort
   // levels depend on the selected model for both installed agents — so an optimistic
   // local value would be wrong exactly when it matters.
+  //
+  // The failure path is not decoration. An agent can *refuse* a set — an adapter
+  // sending the wrong field name to its vendor CLI gets a failed RPC back — and with
+  // no `onError` the rejection had nowhere to go: the surface kept its old value, the
+  // control re-rendered from it, and the only observable outcome was that clicking a
+  // model did nothing. That is precisely how a real adapter bug presented as a broken
+  // picker. Invalidating re-reads the true surface rather than leaving a value this
+  // client only believes it set, and `configError` is what lets the UI say so.
   const configMutation = useMutation({
     mutationFn: ({ configId, value }: { configId: string; value: string | boolean }) =>
       api.sessions.setConfig(sessionId!, configId, value),
     onSuccess: (link) => {
       queryClient.setQueryData(["session", sessionId, "capabilities"], link);
+    },
+    onError: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["session", sessionId, "capabilities"],
+      });
     },
   });
 
@@ -250,5 +271,6 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
     setConfig: (configId: string, value: string | boolean) =>
       configMutation.mutate({ configId, value }),
     settingConfig: configMutation.isPending,
+    configError: configMutation.error,
   };
 }
