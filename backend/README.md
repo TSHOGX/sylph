@@ -5,9 +5,9 @@ Rust backend for Sylph Web, providing REST API and SSE streaming for coding agen
 ## Architecture
 
 - **Framework**: Axum 0.8 + Tokio 1.44
-- **Database**: SQLite with SQLx (compile-time query checking)
+- **Database**: SQLite with SQLx (runtime queries; see the note in `AGENTS.md`)
 - **Port**: 4317 (127.0.0.1 only)
-- **Data**: `~/.agents/data/sylph/web/live.db`
+- **Data**: `~/.sylph/data/live.db`
 
 ## Build
 
@@ -21,12 +21,24 @@ cargo build --release
 cargo run --release
 ```
 
-Or with custom configuration:
+Subcommands:
 
 ```bash
-export SYLPH_WEB_PORT=8080
-export SYLPH_WEB_DATA_DIR=/custom/path
-cargo run --release
+cargo run -- doctor                    # what configuration resolved to
+cargo run -- config init               # create a missing config.toml or SOUL.md
+cargo run -- config path               # print the config file's path
+cargo run -- migrate --from DIR        # bring an older data directory in
+```
+
+## Configuration
+
+Everything lives under `~/.sylph`, configured by `~/.sylph/config.toml`, which is
+created fully commented on first start. `docs/configuration.md` is authoritative.
+
+For a throwaway instance, one variable is enough:
+
+```bash
+SYLPH_HOME=/tmp/sylph-scratch SYLPH_PORT=8080 cargo run --release
 ```
 
 ## Development
@@ -46,14 +58,15 @@ cargo fmt
 
 ## Environment Variables
 
+An environment variable overrides `config.toml`, which overrides a default derived
+from the root. The full table is in `docs/configuration.md`; the ones used most:
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SYLPH_WEB_HOST` | `127.0.0.1` | Bind address |
-| `SYLPH_WEB_PORT` | `4317` | Port number |
-| `SYLPH_WEB_DATA_DIR` | `~/.agents/data/sylph/web` | Data directory |
-| `SYLPH_RUNNERS_DIR` | `~/.agents/skills/sylph/runners` | Runners directory |
-| `TRACEDB_BIN` | `~/Workspace/trace-db/target/release/trace-db` | TraceDB binary |
-| `LOG_LEVEL` | `info` | Log level (trace, debug, info, warn, error) |
+| `SYLPH_HOME` | `~/.sylph` | The root holding config, identity, data, and scratch |
+| `SYLPH_PORT` | `4317` | Port number |
+| `SYLPH_HOST` | `127.0.0.1` | Bind address. Non-loopback needs an auth change first |
+| `SYLPH_LOG`, then `RUST_LOG` | `info` | Log filter |
 
 ## API Endpoints
 

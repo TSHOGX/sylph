@@ -124,7 +124,21 @@ impl Report {
             },
             path_entry("paths.data_dir", "SYLPH_DATA_DIR", &resolved.data_dir),
             path_entry("paths.agents_dir", "SYLPH_AGENTS_DIR", &resolved.agents_dir),
-            path_entry("paths.soul", "SYLPH_SOUL", &resolved.soul),
+            // Identity has a third state the other paths do not: explicitly
+            // declined, which the protocol spells as an empty value. Rendering that
+            // as a missing path would report a deliberate choice as a broken
+            // setting, so it is named instead and carries no existence flag —
+            // there is no path whose existence could be checked.
+            Entry {
+                key: "paths.soul".to_string(),
+                value: match &resolved.soul.value {
+                    Some(path) => path.display().to_string(),
+                    None => "(none — sessions run on the agent's own identity)".to_string(),
+                },
+                source: resolved.soul.source,
+                env_var: "SYLPH_SOUL".to_string(),
+                exists: resolved.soul.value.as_deref().map(exists),
+            },
             path_entry(
                 "paths.quick_start_dir",
                 "SYLPH_QUICK_START_DIR",
@@ -218,16 +232,12 @@ impl Report {
 
         out.push_str("\nBundled adapters\n");
         for candidate in &self.bundled_agent_candidates {
-            let mark = if candidate.chosen {
-                "->"
-            } else if candidate.exists {
-                "  "
-            } else {
-                "  "
-            };
+            // Only the chosen row is marked, and only absence is annotated. Ticking
+            // every present directory turns the one line that needs attention into
+            // one of four.
             out.push_str(&format!(
                 "{} {}{}\n",
-                mark,
+                if candidate.chosen { "->" } else { "  " },
                 candidate.path,
                 if candidate.exists { "" } else { "  (absent)" }
             ));
@@ -365,6 +375,25 @@ mod tests {
         let rendered = report.render();
         assert!(rendered.contains("-> "), "the winner is marked: {rendered}");
         assert!(rendered.contains("(absent)"));
+    }
+
+    /// Identity declined is a supported configuration, not a broken path. Rendering
+    /// it as `MISSING` would report a deliberate choice as a fault, and there is no
+    /// path whose existence could be checked.
+    #[test]
+    fn declined_identity_is_named_rather_than_reported_missing() {
+        let env = [("HOME", "/home/u"), ("SYLPH_SOUL", "")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let resolved = Resolved::from_parts(&env, &FileConfig::default(), false);
+        let bundled = vec![PathBuf::from("/nope/adapters")];
+        let report = Report::build(&resolved, &bundled, &bundled[0]);
+
+        let soul = report.entries.iter().find(|e| e.key == "paths.soul").unwrap();
+        assert_eq!(soul.exists, None, "there is no path to check");
+        assert!(soul.value.contains("none"), "says so plainly: {}", soul.value);
+        assert_eq!(soul.source, Source::Env);
     }
 
     /// Rendered output gets pasted into issues, so it stays plain text.

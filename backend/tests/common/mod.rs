@@ -221,6 +221,17 @@ impl TestBackend {
         &self.config.quick_start_dir
     }
 
+    /// Where this backend's adapters live.
+    ///
+    /// Exposed for the tests that remove one to simulate an uninstalled agent.
+    /// Spelling the directory out at the call site puts the layout in two places,
+    /// and the copy in the test stops removing anything the moment the layout
+    /// moves — leaving a test that still asserts the detached path but no longer
+    /// produces it.
+    pub fn agents_dir(&self) -> &Path {
+        &self.config.agents_dir
+    }
+
     /// The configured browse root — the throwaway tree's top level.
     ///
     /// Distinct from [`Self::workdir`], which is a directory *inside* it. Tests

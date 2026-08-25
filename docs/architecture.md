@@ -271,10 +271,14 @@ enumeration is the part that scales with an attacker's ignorance of the layout.
 
 ## Runner Discovery
 
-Runners live under `~/.agents/skills/sylph/runners/{name}/runner.sh`.
+Adapters are searched in two roots, bundled first: the `adapters/` directory
+shipped beside the binary, then `~/.sylph/agents/`. An agent is a directory holding
+an executable `adapter.sh`. Bundled first means a user-added adapter of the same
+name *shadows* rather than duplicates — the escape hatch when a vendor changes
+faster than the shipped adapter catches up. See `docs/configuration.md`.
 
 Discovery:
-1. Backend scans runners on startup
+1. Backend scans both roots on startup
 2. Calls `runner.sh --describe` for each
 3. Parses JSON capability descriptor
 4. Caches in memory (refresh via API)
@@ -396,9 +400,12 @@ answers "what happened here" when the user has no search term.
 `SYLPH_WEB_BACKEND` is compiled into the route manifest, so it must be set for
 `next build` and not only for `next start`. See `docs/installation.md`.
 
-**Data directory:**
-- `~/.agents/data/sylph/web/live.db` — SQLite journal
-- `~/.agents/data/sylph/web/attachments/{session}/{turn}/` — staged files
+**Sylph home** (`~/.sylph` by default, `SYLPH_HOME` to relocate):
+- `config.toml` — settings; `SOUL.md` — the identity preamble
+- `data/live.db` — SQLite journal
+- `data/history.db`, `data/blobs/` — consolidated history and its payloads
+- `data/attachments/{session}/{turn}/` — staged files
+- `agents/` — user-added adapters; `scratch/` — Quick Start's working directory
 
 ## Extension Points
 

@@ -47,7 +47,11 @@
 # The identity preamble appended to a Sylph session's prompt. Edit it freely; it
 # is yours. Delete it and every session runs on the agent's own identity, which
 # is a supported state rather than an error.
-#   env: SYLPH_SOUL
+#
+# An *empty* value means "never inject identity", which is different from leaving
+# this commented out: unset resolves the path below, empty declines outright and
+# nothing is seeded there.
+#   env: SYLPH_SOUL (empty string also means decline)
 # soul = "~/.sylph/SOUL.md"
 
 # Where Quick Start sessions run — the directory used when you ask something

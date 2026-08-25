@@ -449,6 +449,52 @@ async fn session_returns_to_idle_after_a_turn() {
     assert_eq!(json_body(response).await["session"]["status"], "idle");
 }
 
+/// A terminal turn must never be observable on a running session.
+///
+/// The two are separate rows and cannot be written in one transaction, so
+/// something is briefly visible between them; this pins *which*. A client that
+/// polls the turn and then reads the session is the ordinary shape — it is what
+/// the composer does to decide whether to accept the next message — and seeing a
+/// finished turn on a "running" session is what makes it refuse.
+///
+/// The window was two statements wide and merely improbable until closing open
+/// trajectories put a query and a per-trajectory emit inside it. Asserting once
+/// would pass on the old ordering by luck, so this drives many turns and checks
+/// the pair every time.
+#[tokio::test]
+async fn a_settled_turn_is_never_visible_on_a_running_session() {
+    let backend = TestBackend::start().await;
+    let session_id = backend.create_session("mock").await;
+
+    for attempt in 0..12 {
+        let response = backend
+            .post_authed(
+                &format!("/api/v1/sessions/{session_id}/turns"),
+                json!({"text": "hello"}),
+            )
+            .await;
+        let turn_id = json_body(response).await["turn"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        backend.await_turn(&turn_id).await;
+
+        // Read immediately, with nothing between: any sleep here would hide the
+        // very interleaving this exists to catch.
+        let session = json_body(
+            backend
+                .get_authed(&format!("/api/v1/sessions/{session_id}"))
+                .await,
+        )
+        .await;
+        assert_eq!(
+            session["session"]["status"], "idle",
+            "turn {turn_id} was terminal while the session still read as running \
+             (attempt {attempt})"
+        );
+    }
+}
+
 #[tokio::test]
 async fn idempotency_key_returns_the_original_turn() {
     let backend = TestBackend::start().await;

@@ -91,6 +91,13 @@ else, and no legacy location is consulted.
 `SYLPH_BROWSE_ROOTS` is colon-separated, matching `PATH`. In the file it is a
 list of strings.
 
+`paths.soul` has a third state the others do not. An **empty** value — `soul = ""`
+or `SYLPH_SOUL=""` — means *never inject identity*, which the adapter protocol
+reserves and which is different from leaving it unset: unset resolves the default
+path, empty declines outright and nothing is seeded there. A configured path that
+does not exist also resolves to no identity, matching the adapters' own
+`[[ -f "$SOUL_PATH" ]] || SOUL_PATH=""`.
+
 Paths accept `~` and `~/…`, because a hand-edited config that rejected the
 spelling a user would naturally type would be a worse file to hand-edit.
 
@@ -110,7 +117,7 @@ agreement with them.
 
 `SOUL.md` is seeded only on first run, never restored afterwards. Deleting it is
 a meaningful act — the protocol reserves "no identity" — and re-creating a file a
-user removed would be the app arguing with them. `sylph-web config init --soul`
+user removed would be the app arguing with them. `sylph-web-backend config init`
 puts it back on request.
 
 ## TraceDB
@@ -132,7 +139,7 @@ native import report themselves unavailable, and `/api/v1/health` says
 ## Inspecting what resolved
 
 ```sh
-sylph-web doctor
+sylph-web-backend doctor
 ```
 
 reports every resolved path, whether it exists, which one the config file
@@ -151,7 +158,7 @@ open.
 ## Moving an existing install
 
 ```sh
-sylph-web migrate --from <old-data-dir>
+sylph-web-backend migrate --from <old-data-dir>
 ```
 
 copies a journal, history, blob store, and attachments into `~/.sylph/data`,
@@ -163,7 +170,7 @@ maintains.
 An install that lived under `~/.agents/data/sylph/web` migrates with:
 
 ```sh
-sylph-web migrate --from ~/.agents/data/sylph/web
+sylph-web-backend migrate --from ~/.agents/data/sylph/web
 ```
 
 ## What is not here

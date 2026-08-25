@@ -59,15 +59,16 @@ pub struct Config {
 
     /// The identity preamble, when a readable one exists.
     ///
-    /// `None` means no `SOUL.md` was found, which is not an error: such an install
-    /// runs every session on the agent's own identity, and the UI says so rather
-    /// than offering a toggle over a file that does not exist. The path is
-    /// resolved once, here, so the settings panel shows the same file the adapter
-    /// will read instead of a second guess at where it might be.
+    /// `None` means either that no `SOUL.md` was found or that identity was
+    /// explicitly declined. Neither is an error: such an install runs every session
+    /// on the agent's own identity, and the UI says so rather than offering a toggle
+    /// over a file that does not exist. Resolved once, here, so the settings panel
+    /// shows the same file the adapter will read.
     pub soul_path: Option<PathBuf>,
-    /// Where `SOUL.md` was looked for, whether or not it was found. Needed to tell
-    /// a user where to put one.
-    pub soul_candidate: PathBuf,
+    /// Where `SOUL.md` was looked for, or `None` when identity was declined
+    /// outright. Needed to tell a user where to put one — and to know when there is
+    /// nowhere, because they asked for none.
+    pub soul_candidate: Option<PathBuf>,
 
     /// Where a Quick Start session runs.
     pub quick_start_dir: PathBuf,
@@ -126,7 +127,7 @@ impl Config {
             agents_dir: resolved.agents_dir.value.clone(),
             bundled_agents_dir,
             bundled_agents_candidates,
-            soul_path: readable_soul(&resolved.soul.value),
+            soul_path: resolved.soul.value.as_deref().and_then(readable_soul),
             soul_candidate: resolved.soul.value.clone(),
             quick_start_dir: resolved.quick_start_dir.value.clone(),
             browse_roots: resolved.browse_roots.value.clone(),
@@ -170,7 +171,6 @@ impl Config {
 fn readable_soul(candidate: &Path) -> Option<PathBuf> {
     candidate.is_file().then(|| candidate.to_path_buf())
 }
-
 /// Where adapters shipped with the binary live, and everywhere that was tried.
 ///
 /// The binary's own directory is authoritative, and is the only candidate that
@@ -288,11 +288,15 @@ pub fn seed(resolved: &Resolved) -> anyhow::Result<Vec<String>> {
 /// Separate from [`seed`] so that restoring identity is something a user asks for
 /// (`config init`) rather than something a restart does to them.
 ///
-/// Only written when the parent directory already exists. A `paths.soul` pointing
-/// somewhere absent is a configuration error to report, not one to paper over by
-/// creating directories the user did not ask for.
+/// Nothing is written when identity was declined outright — an empty `SYLPH_SOUL`
+/// or `paths.soul = ""` — because seeding a file there would silently re-enable the
+/// injection the install asked not to have. Nor when the parent directory is
+/// missing: a `paths.soul` pointing somewhere absent is a configuration error to
+/// report, not one to paper over by creating directories the user did not ask for.
 pub fn seed_soul(resolved: &Resolved) -> anyhow::Result<Vec<String>> {
-    let soul = &resolved.soul.value;
+    let Some(soul) = resolved.soul.value.as_ref() else {
+        return Ok(Vec::new());
+    };
     if soul.exists() || !soul.parent().map(Path::is_dir).unwrap_or(false) {
         return Ok(Vec::new());
     }
@@ -317,6 +321,19 @@ mod tests {
         Resolved::from_parts(&env, &resolve::FileConfig::default(), false)
     }
 
+    /// The resolved `SOUL.md` path, for the tests that write or delete one.
+    ///
+    /// Panics when identity was declined, which is the correct outcome: a test
+    /// reaching for the path in that case has confused "no file" with "no identity
+    /// asked for", and those are the two states this module keeps apart.
+    fn soul_of(resolved: &Resolved) -> &Path {
+        resolved
+            .soul
+            .value
+            .as_deref()
+            .expect("this resolution asked for identity")
+    }
+
     /// A first run must leave a usable, documented install behind — including for
     /// `cargo run`, which is the path that actually gets exercised.
     #[test]
@@ -331,7 +348,7 @@ mod tests {
         assert!(resolved.agents_dir.value.is_dir());
         assert!(resolved.quick_start_dir.value.is_dir());
         assert!(resolved.config_path.is_file());
-        assert!(resolved.soul.value.is_file());
+        assert!(soul_of(&resolved).is_file());
         assert_eq!(notes.len(), 2, "the config and the soul are both reported");
 
         // The seeded file must parse with the parser that will read it next start.
@@ -347,7 +364,7 @@ mod tests {
         seed(&resolved).unwrap();
 
         std::fs::write(&resolved.config_path, "[server]\nport = 9999\n").unwrap();
-        std::fs::write(&resolved.soul.value, "# mine").unwrap();
+        std::fs::write(soul_of(&resolved), "# mine").unwrap();
 
         let notes = seed(&resolved).unwrap();
 
@@ -356,7 +373,7 @@ mod tests {
             std::fs::read_to_string(&resolved.config_path).unwrap(),
             "[server]\nport = 9999\n"
         );
-        assert_eq!(std::fs::read_to_string(&resolved.soul.value).unwrap(), "# mine");
+        assert_eq!(std::fs::read_to_string(soul_of(&resolved)).unwrap(), "# mine");
     }
 
     /// Deleting `SOUL.md` means "no identity", which the protocol reserves. An app
@@ -366,13 +383,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let resolved = resolved_in(tmp.path());
         seed(&resolved).unwrap();
-        std::fs::remove_file(&resolved.soul.value).unwrap();
+        std::fs::remove_file(soul_of(&resolved)).unwrap();
 
         // The config file now exists, so this is the ordinary restart path.
         let notes = seed(&resolved).unwrap();
 
         assert!(
-            !resolved.soul.value.exists(),
+            !soul_of(&resolved).exists(),
             "a restart must not re-create it: {notes:?}"
         );
         assert!(Config::from_resolved(&resolved).soul_path.is_none());
@@ -385,14 +402,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let resolved = resolved_in(tmp.path());
         seed(&resolved).unwrap();
-        std::fs::remove_file(&resolved.soul.value).unwrap();
+        std::fs::remove_file(soul_of(&resolved)).unwrap();
 
         let notes = seed_soul(&resolved).unwrap();
 
         assert_eq!(notes.len(), 1);
-        assert!(resolved.soul.value.is_file());
+        assert!(soul_of(&resolved).is_file());
         assert_eq!(
-            std::fs::read_to_string(&resolved.soul.value).unwrap(),
+            std::fs::read_to_string(soul_of(&resolved)).unwrap(),
             resolve::BUNDLED_SOUL
         );
     }
@@ -404,10 +421,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let resolved = resolved_in(tmp.path());
         seed(&resolved).unwrap();
-        std::fs::write(&resolved.soul.value, "# mine").unwrap();
+        std::fs::write(soul_of(&resolved), "# mine").unwrap();
 
         assert!(seed_soul(&resolved).unwrap().is_empty());
-        assert_eq!(std::fs::read_to_string(&resolved.soul.value).unwrap(), "# mine");
+        assert_eq!(std::fs::read_to_string(soul_of(&resolved)).unwrap(), "# mine");
     }
 
     #[test]
@@ -418,6 +435,40 @@ mod tests {
 
         assert!(config.soul_path.is_none());
         assert_eq!(config.soul_candidate, resolved.soul.value);
+    }
+
+    /// Declining identity must not be answered with a seeded file.
+    ///
+    /// The protocol reserves an empty `SYLPH_SOUL` for "inject nothing", so seeding
+    /// the default path would turn an explicit refusal into silent injection — which
+    /// is exactly what happened until the resolver stopped treating empty as unset.
+    #[test]
+    fn declining_identity_seeds_nothing_and_reports_no_candidate() {
+        let tmp = TempDir::new().unwrap();
+        let env = [
+            ("HOME", tmp.path().display().to_string()),
+            ("SYLPH_SOUL", String::new()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let resolved = Resolved::from_parts(&env, &resolve::FileConfig::default(), false);
+
+        let notes = seed(&resolved).unwrap();
+
+        assert!(
+            !tmp.path().join(".sylph").join("SOUL.md").exists(),
+            "no identity file may appear: {notes:?}"
+        );
+        // And `config init` must not undo the decision either.
+        assert!(seed_soul(&resolved).unwrap().is_empty());
+
+        let config = Config::from_resolved(&resolved);
+        assert!(config.soul_path.is_none());
+        assert!(
+            config.soul_candidate.is_none(),
+            "there is no candidate, because none was asked for"
+        );
     }
 
     /// The two tiers and the blob store are one store split for SQLite's sake, so

@@ -98,18 +98,22 @@ fn doctor() -> anyhow::Result<()> {
         .unwrap_or(0);
     println!("\nYour agents      {installed} with an adapter.sh in {}", agents.display());
 
-    let soul = &resolved.soul.value;
-    println!(
-        "Identity         {}",
-        if soul.is_file() {
-            format!("{} will be injected into Sylph sessions", soul.display())
-        } else {
-            format!(
-                "none at {} — every session runs on the agent's own identity",
-                soul.display()
-            )
+    // Three states, not two: a resolved file, a path with nothing at it, and
+    // identity declined outright. The last is a supported configuration rather than
+    // a problem, so it reads as a statement instead of a warning.
+    let identity = match resolved.soul.value.as_ref() {
+        Some(path) if path.is_file() => {
+            format!("{} will be injected into Sylph sessions", path.display())
         }
-    );
+        Some(path) => format!(
+            "none at {} — every session runs on the agent's own identity",
+            path.display()
+        ),
+        None => "declined in configuration — every session runs on the agent's own \
+                 identity"
+            .to_string(),
+    };
+    println!("Identity         {identity}");
 
     Ok(())
 }

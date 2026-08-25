@@ -2394,13 +2394,13 @@ usable. `overflowingElements()` instead reports every element whose box extends
 past the right edge, which is both the actual defect and actionable when it
 regresses.
 
-**Wipe `.e2e-data/` before trusting a timing result.** The journal is never
+**Wipe `.e2e-home/` before trusting a timing result.** The journal is never
 cleared, and each spec's `mkdtemp` workdir becomes a permanent sidebar group —
 grouping is by workdir, so a directory used once and deleted still renders a
 group forever. At 151 groups (148 of them dead single-session directories) the
 suite ran 35 minutes instead of 1.5, and two or three specs failed per run on
 the 30s timeout: a different two or three each time, which reads as flakiness
-rather than as accumulated fixture state. `rm -rf frontend/.e2e-data` is free —
+rather than as accumulated fixture state. `rm -rf frontend/.e2e-home` is free —
 it is gitignored and the backend recreates it. Raising the timeout does not
 help, because the cost grows without bound.
 

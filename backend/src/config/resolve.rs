@@ -204,7 +204,14 @@ pub struct Resolved {
     pub port: Origin<u16>,
     pub data_dir: Origin<PathBuf>,
     pub agents_dir: Origin<PathBuf>,
-    pub soul: Origin<PathBuf>,
+    /// Where `SOUL.md` was looked for, or `None` when identity was explicitly
+    /// declined.
+    ///
+    /// `None` is not "unset": the adapter protocol reserves an empty `SYLPH_SOUL`
+    /// for "inject nothing", so this distinguishes *no identity was asked for* from
+    /// *identity resolves to a path that may or may not exist*. Collapsing the two
+    /// is what let an install asking for no identity be seeded one anyway.
+    pub soul: Origin<Option<PathBuf>>,
     pub quick_start_dir: Origin<PathBuf>,
     pub browse_roots: Origin<Vec<PathBuf>>,
     pub tracedb_bin: Origin<PathBuf>,
@@ -299,7 +306,27 @@ impl Resolved {
         // hand-edited configuration, and burying it inside the directory whose
         // documented purpose is "machine state you back up and never open" is how
         // a user never finds it.
-        let soul = path("SYLPH_SOUL", file.paths.soul.as_ref(), home.join("SOUL.md"));
+        //
+        // Resolved separately from the paths above because an *explicit empty*
+        // value is meaningful here rather than missing: the adapter protocol
+        // reserves `SYLPH_SOUL=""` for "inject nothing", and every other setting
+        // treats blank as unset. Folding this one into the shared helper is what
+        // made an install that asked for no identity get a seeded `SOUL.md` and
+        // silent injection.
+        let soul = match env.get("SYLPH_SOUL").map(String::as_str) {
+            Some(value) if value.trim().is_empty() => Origin::new(None, Source::Env),
+            Some(value) => Origin::new(Some(expand_tilde(value.trim(), &home_str)), Source::Env),
+            None => match file.paths.soul.as_deref() {
+                // The same spelling in the file, for the same reason: an install
+                // that never wants identity should be able to say so durably
+                // rather than only through its supervisor's environment.
+                Some(value) if value.trim().is_empty() => Origin::new(None, Source::File),
+                Some(value) => {
+                    Origin::new(Some(expand_tilde(value.trim(), &home_str)), Source::File)
+                }
+                None => Origin::new(Some(home.join("SOUL.md")), Source::Default),
+            },
+        };
         let quick_start_dir = path(
             "SYLPH_QUICK_START_DIR",
             file.paths.quick_start_dir.as_ref(),
@@ -417,7 +444,7 @@ mod tests {
         assert_eq!(r.config_path, PathBuf::from("/home/u/.sylph/config.toml"));
         assert_eq!(r.data_dir.value, PathBuf::from("/home/u/.sylph/data"));
         assert_eq!(r.agents_dir.value, PathBuf::from("/home/u/.sylph/agents"));
-        assert_eq!(r.soul.value, PathBuf::from("/home/u/.sylph/SOUL.md"));
+        assert_eq!(r.soul.value, Some(PathBuf::from("/home/u/.sylph/SOUL.md")));
         assert_eq!(r.quick_start_dir.value, PathBuf::from("/home/u/.sylph/scratch"));
     }
 
@@ -429,7 +456,7 @@ mod tests {
 
         assert_eq!(r.data_dir.value, PathBuf::from("/opt/inst/data"));
         assert_eq!(r.agents_dir.value, PathBuf::from("/opt/inst/agents"));
-        assert_eq!(r.soul.value, PathBuf::from("/opt/inst/SOUL.md"));
+        assert_eq!(r.soul.value, Some(PathBuf::from("/opt/inst/SOUL.md")));
         assert_eq!(r.quick_start_dir.value, PathBuf::from("/opt/inst/scratch"));
         assert_eq!(r.config_path, PathBuf::from("/opt/inst/config.toml"));
     }
@@ -478,6 +505,45 @@ mod tests {
 
         assert_eq!(r.data_dir.value, PathBuf::from("/from-file"));
         assert_eq!(r.data_dir.source, Source::File);
+    }
+
+    /// `SYLPH_SOUL` is the one exception to the rule above, because the adapter
+    /// protocol reserves an empty value for "inject nothing".
+    ///
+    /// This is not a nicety: treating it as unset made an install that asked for no
+    /// identity resolve the default path, get a `SOUL.md` seeded there, and inject
+    /// it into every session — the exact opposite of what was configured. Caught by
+    /// the E2E suite, which sets it to `""` and asserts the UI reports no identity.
+    #[test]
+    fn an_empty_soul_means_no_identity_rather_than_the_default_path() {
+        let r = resolve(&[("HOME", "/home/u"), ("SYLPH_SOUL", "")], FileConfig::default());
+
+        assert_eq!(r.soul.value, None, "empty means decline, not unset");
+        assert_eq!(r.soul.source, Source::Env);
+    }
+
+    /// The same spelling works in the file, so an install that never wants identity
+    /// can say so durably rather than only through its supervisor's environment.
+    #[test]
+    fn an_empty_soul_in_the_file_also_means_no_identity() {
+        let mut file = FileConfig::default();
+        file.paths.soul = Some(String::new());
+
+        let r = Resolved::from_parts(&env(&[("HOME", "/home/u")]), &file, true);
+
+        assert_eq!(r.soul.value, None);
+        assert_eq!(r.soul.source, Source::File);
+    }
+
+    #[test]
+    fn a_configured_soul_path_is_expanded_like_any_other() {
+        let r = resolve(
+            &[("HOME", "/home/u"), ("SYLPH_SOUL", "~/identity/SOUL.md")],
+            FileConfig::default(),
+        );
+
+        assert_eq!(r.soul.value, Some(PathBuf::from("/home/u/identity/SOUL.md")));
+        assert_eq!(r.soul.source, Source::Env);
     }
 
     /// `$HOME` is always a browse root, so the picker has somewhere to land even

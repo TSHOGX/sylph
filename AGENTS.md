@@ -35,6 +35,7 @@ those, and duplicating them here only creates a second copy to forget.
 | Endpoint contracts | `docs/api-design.md`, `docs/api-v1.openapi.json` |
 | Tables, indexes, migrations | `docs/database-schema.md` |
 | UI structure and conventions | `docs/frontend-architecture.md` |
+| Where files live, what a setting does | `docs/configuration.md` |
 
 Record progress in commit messages and the roadmap. Do not add new progress,
 handoff, or summary documents: they duplicate the roadmap, then drift from it.
@@ -57,8 +58,8 @@ cd frontend && npm run build && npx eslint . && npm run e2e
 `npm run build` type-checks, so it is the TypeScript gate; there is no separate
 `tsc` step.
 
-E2E starts both servers itself on offset ports with a throwaway data directory
-and a mock runner, so it never touches your real journal, archive, or agents.
+E2E starts both servers itself on offset ports with a throwaway `SYLPH_HOME` and a
+mock adapter, so it never touches your real journal, archive, or agents.
 Do not start servers by hand for it. It shells out to `cargo`, so the `PATH`
 caveat below applies to E2E too, and a cold run compiles the backend first.
 
@@ -66,24 +67,76 @@ Run the checks for every part of the repo you touched, not only the one you
 edited most. Backend and frontend share a wire contract, so a change on either
 side can break the other's tests.
 
-## Environment
+## Configuration
+
+Everything Sylph owns is under **one root**, `~/.sylph`, and everything a user
+configures is in **one file**, `~/.sylph/config.toml`. Both are created on first
+start, including under `cargo run`. `docs/configuration.md` is authoritative for
+the layout, the settings table, and why it is shaped this way.
+
+Resolution is **environment, then file, then a default derived from the root**.
+Environment wins so a throwaway instance or a test needs no edit to a user's file;
+the file wins over the default because that is what the file is for. Nothing
+outside the root is consulted, and no former location is kept as a fallback.
 
 | Variable | Applies to | Default |
 | --- | --- | --- |
-| `SYLPH_WEB_HOST` | backend | `127.0.0.1` |
-| `SYLPH_WEB_PORT` | backend | `4317` |
-| `SYLPH_WEB_DATA_DIR` | backend | `$HOME/.agents/data/sylph/web` |
-| `SYLPH_RUNNERS_DIR` | backend | `$HOME/.agents/skills/sylph/runners` |
-| `SYLPH_AGENTS_DIR` | backend | first existing of `<exe dir>/adapters`, `<repo>/adapters`, `$HOME/.local/share/sylph-web/adapters` |
-| `SYLPH_SOUL` | backend | `<runners_dir>/../SOUL.md` |
-| `TRACEDB_BIN` | backend | `$HOME/Workspace/trace-db/target/release/trace-db` |
-| `SYLPH_WEB_BROWSE_ROOTS` | backend | `$HOME` |
-| `RUST_LOG` | backend | `info` |
+| `SYLPH_HOME` | backend | `$HOME/.sylph` |
+| `SYLPH_CONFIG` | backend | `<home>/config.toml` |
+| `SYLPH_HOST` | backend | `127.0.0.1` |
+| `SYLPH_PORT` | backend | `4317` |
+| `SYLPH_DATA_DIR` | backend | `<home>/data` |
+| `SYLPH_AGENTS_DIR` | backend | `<home>/agents` |
+| `SYLPH_SOUL` | backend | `<home>/SOUL.md` |
+| `SYLPH_QUICK_START_DIR` | backend | `<home>/scratch` |
+| `SYLPH_BROWSE_ROOTS` | backend | *(none; `$HOME` always included)* |
+| `SYLPH_TRACEDB_BIN` | backend | `trace-db` on `PATH` |
+| `SYLPH_LOG`, then `RUST_LOG` | backend | `info` |
+| `SYLPH_BUNDLED_AGENTS_DIR` | backend, tests and packagers only | `<exe dir>/adapters`, then `<repo>/adapters` |
 | `SYLPH_WEB_BACKEND` | frontend | `http://localhost:4317` |
 | `SYLPH_WEB_DEV_ORIGINS` | frontend, `next dev` only | *(none)* |
 | `SYLPH_WEB_PREFIX` | `scripts/install.sh` | `$HOME/.local/share/sylph-web` |
 | `SYLPH_WEB_BIN_DIR` | `scripts/install.sh` | `$HOME/.local/bin` |
 | `SYLPH_WEB_FRONTEND_PORT` | `scripts/install.sh` | `3000` |
+
+Each of these has a `config.toml` key except the first two (which locate the file
+itself) and `SYLPH_BUNDLED_AGENTS_DIR`. That one is environment-only on purpose:
+which adapters ship with a binary is decided by whoever built it, not by a user, and
+offering it in the file would invite pointing a supported setting at adapters
+versioned against another protocol release. E2E sets it because bundled resolution
+would otherwise find the repo's real `adapters/` and run the developer's actual
+agent CLIs.
+
+`SYLPH_AGENTS_DIR` is the *user's own* adapters, searched **after** the bundled
+ones so a name there shadows a bundled adapter — the escape hatch when a vendor
+changes faster than the shipped adapter catches up. Copying bundled adapters into
+it would freeze them at install time and break the next upgrade.
+
+`SYLPH_BROWSE_ROOTS` is colon-separated and *adds* to `$HOME`, which is always
+browsable. It bounds `/api/v1/fs/*`, the only endpoint that lists directories the
+client names — so widening it widens what any client of this backend can enumerate.
+
+`SYLPH_SOUL` points at the identity preamble. An explicit *empty* value is
+meaningful rather than missing — the protocol reserves it for "no identity" — and a
+configured path that does not exist also resolves to none, matching the adapters'
+own `[[ -f "$SOUL_PATH" ]] || SOUL_PATH=""`. Reporting a configured-but-absent file
+as present would let the UI promise an injection that never happens. It is resolved
+once, in `Config`, so the settings panel shows the same file the adapter reads.
+`GET /api/v1/soul` reports what resolved.
+
+The journal is always `live.db` inside the data dir, with `history.db` and `blobs/`
+beside it; all three are derived rather than separately configurable, because they
+are one store split for SQLite's sake.
+
+TraceDB is a **separate project** this one depends on. It defaults to a `PATH`
+lookup, and `tracedb.bin` pins a checkout build. Unreachable is not a failure: live
+sessions work and archive features report themselves unavailable — check
+`/api/v1/health` for `tracedb.available`.
+
+Three surfaces report what resolved, all from one producer so they cannot
+disagree: `sylph-web-backend doctor`, `GET /api/v1/config`, and Settings →
+Configuration. `sylph-web-backend migrate --from DIR` moves an older data
+directory in.
 
 `SYLPH_WEB_DEV_ORIGINS` is comma-separated **hostnames**, no scheme and no port.
 Next 16 blocks cross-site requests to `/_next/*` as DNS-rebinding defence, so a
@@ -91,32 +144,6 @@ browser reaching the dev server from a LAN IP gets 403s on every chunk and the p
 freezes before React hydrates — which reads as a backend failure rather than a
 dev-server policy. It is not needed for localhost, nor behind the loopback reverse
 proxy, which rewrites `Origin`. See `docs/development.md`.
-
-`SYLPH_AGENTS_DIR` holds the *bundled* adapters, which ship with the binary because
-an adapter is versioned with the protocol it implements. Unset, resolution prefers
-`<exe dir>/adapters` — the only candidate that stays right when the install tree is
-moved or copied — then the repo, then the install path. Set explicitly, it is obeyed
-even if absent: searching past an operator's own typo would report adapters they did
-not choose. `SYLPH_RUNNERS_DIR` is the separate, user-added set, searched after the
-bundled ones so a user can shadow a bundled adapter by name.
-
-`SYLPH_WEB_BROWSE_ROOTS` is colon-separated and *adds* to `$HOME`, which is
-always browsable. It bounds `/api/v1/fs/*`, the only endpoint that lists
-directories the client names — so widening it widens what any client of this
-backend can enumerate. Set it when projects live outside the home directory.
-
-`SYLPH_SOUL` points at the identity preamble, and the backend resolves it the way
-the runners do so the two cannot disagree about whether injection is active. An
-explicit *empty* value is meaningful rather than missing — the runner protocol
-reserves it for "no identity" — and a configured path that does not exist also
-resolves to none, matching the runner's `[[ -f "$SOUL_PATH" ]] || SOUL_PATH=""`.
-Reporting a configured-but-absent file as present would let the UI promise an
-injection that never happens. `GET /api/v1/soul` reports what resolved.
-
-The journal is always `live.db` inside the data dir; it is derived, not
-separately configurable. `TRACEDB_BIN` defaults to a release build in a sibling
-checkout rather than a `PATH` lookup, so TraceDB-dependent features degrade
-until that binary exists — check `/api/v1/health` for `tracedb.available`.
 
 ## Pitfalls Worth Remembering
 
@@ -179,7 +206,7 @@ tree, a compiler or linter can capture a half-written file and report an error
 whose line numbers do not match the source. Re-run before believing it.
 
 **The E2E data directory is never wiped, so specs must not count shared state.**
-`frontend/.e2e-data/` accumulates every session across every run — it passed 240
+`frontend/.e2e-home/` accumulates every session across every run — it passed 240
 during Phase 7 and 357 during Phase 9 — and the sidebar caps its listing at 200. A
 spec that creates a session in `/tmp` and asserts "the group grew by one" therefore
 passes for months and then fails permanently once the shared group reaches that
@@ -197,7 +224,7 @@ single-session directory each, and every page load pays for all of them.
 Measured during Phase 9: the suite went from 1.5 minutes to 35 minutes, and two
 or three specs failed per run on the 30s default timeout — a *different* two or
 three each time, which is what makes it read as flakiness rather than as a
-fixture problem. `rm -rf frontend/.e2e-data` is the fix, and it is free: the
+fixture problem. `rm -rf frontend/.e2e-home` is the fix, and it is free: the
 directory is gitignored and the backend recreates `live.db` on start. Do that
 before trusting a timing result or diagnosing an intermittent E2E failure.
 Raising the timeout does not help, because the cost grows without bound.
@@ -549,6 +576,46 @@ Three mobile failures survived 41 green specs because every one of them ran at
 a variant. Note also that a `devices["iPhone …"]` profile runs in *Chromium*
 unless WebKit is installed, so it claims iOS coverage it does not have — prefer
 a Chromium device profile and be explicit about what is therefore untested.
+
+**A default that is one machine's absolute path is wrong everywhere else.**
+`TRACEDB_BIN` defaulted to `$HOME/Workspace/trace-db/target/release/trace-db` — a
+sibling checkout that exists on exactly one machine, so every other install got a
+silently unavailable archive that looked like a TraceDB bug. A dependency on a
+separate project resolves through `PATH`, which is where its own install puts it;
+an absolute default is only ever right by coincidence, and the coincidence holds
+just long enough to be believed.
+
+**A test that hardcodes what the code hardcodes proves only that they agree.**
+`workspaces_group_sessions_and_always_include_quick_start` asserted the Quick Start
+directory ends with `/.agents`, so the endpoint and the test were wrong about the
+product together and neither could catch the other. Assert against the *configured*
+value read back from the harness. The same rule caught a second one: a test removed
+an adapter via `browse_root().join("runners")`, and once the harness layout moved it
+silently deleted nothing while still asserting the detached path.
+
+**A settings key the bind ignores is worse than one that is not offered.**
+`SYLPH_WEB_HOST` was read into `Config` and then discarded — `main` bound
+`([127,0,0,1], port)` literally — so setting it did nothing, with no error. Either
+honour a setting or do not accept it. It now binds what was asked for and warns
+loudly when that is not loopback, which is a decision the operator can see rather
+than one the code quietly overrules.
+
+**Two writes that settle one logical fact will be observed between.** A turn's
+terminal status and its session returning to `idle` are separate rows and cannot be
+one transaction, so the only question is which inconsistency a client can see.
+Settling the turn first left a finished turn on a `running` session — the state that
+makes the composer refuse the next message — and the window was two statements wide
+and merely improbable until closing delegated trajectories put a query and a
+per-trajectory emit inside it. Three integration tests then failed *by timing*, a
+different subset each run, which reads as flakiness rather than as ordering. Write
+the row that makes the next action legal first.
+
+**Seeding a file keyed on its own absence overrides a deliberate deletion.**
+`SOUL.md` is seeded on first run, and deleting it means "no identity" — which the
+protocol reserves. A seeding rule that only checked whether the file existed
+restored it on every restart, silently re-enabling injection. "First run" has to
+mean *the config file did not exist*, and restoring identity belongs behind an
+explicit `config init`.
 
 ## Spec and Code Evolution
 
