@@ -36,6 +36,7 @@
 
 import { useMemo, useState } from "react";
 import {
+  trajectoryName,
   trajectoryReport,
   type TimelineNode,
   type TrajectoryStatus,
@@ -209,7 +210,11 @@ function OverviewRow({
   row: WaterfallRow;
   onFocus: (trajectory: string) => void;
 }) {
-  const name = row.node.row.event.name?.trim() || "Subagent";
+  // Shared with the card rather than recomputed. These are the two surfaces that name
+  // one node, and a second copy of the rule lets them disagree — at which point this
+  // row's `aria-label` no longer matches the region name the card renders, and the
+  // locator that finds one stops finding the other.
+  const name = trajectoryName(row.node);
   const indent = Math.min(row.depth, MAX_LABEL_INDENT);
 
   const body = (

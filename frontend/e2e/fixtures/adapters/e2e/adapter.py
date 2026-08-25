@@ -494,6 +494,25 @@ class Fixture:
                     event("thinking", "completed", streamId="fo-{}-think".format(name.lower()),
                           span=sid, text="{} is starting.".format(name))
 
+            # A delegate with NO name, which nothing else in this suite emits.
+            #
+            # This is the case a real `claude` session produces constantly: a
+            # delegation's `subagent_type`/`description` arrives as streamed partial
+            # JSON, so at `started` there is usually nothing to name it with. The client
+            # falls back to "Subagent" at render time, and until now no fixture reached
+            # that path — every one of the twelve `subagent` opens here carried a name,
+            # so the fallback existed and was covered only by unit tests.
+            #
+            # That mattered in a way a green suite hid: the label it produces is
+            # "Subagent delegation", which *contains* "agent delegation", so a
+            # `{ name: "<tool> delegation" }` locator is ambiguous with it. Five such
+            # locators were given `exact: true` to fix exactly that — and no test could
+            # produce the string they were guarding against, so the guards were correct
+            # and unexercised. This row makes them load-bearing.
+            #
+            # Closed quickly and forwarding nothing: it must not compete for "slowest".
+            event("subagent", "started", streamId="fo-nameless")
+
             # A nested delegate inside the slowest one, so the overview has to carry
             # depth as well as duration — and so a deep row's bar stays on the shared
             # axis instead of being indented off it.
@@ -502,6 +521,9 @@ class Fixture:
 
             time.sleep(0.1)
             event("subagent", "completed", streamId="fo-format", text="formatted")
+            # Closed with no name on this phase either, so the row is nameless for its
+            # whole life rather than acquiring one at the end.
+            event("subagent", "completed", streamId="fo-nameless")
             time.sleep(0.15)
             event("subagent", "completed", streamId="fo-lint", text="clean")
             time.sleep(0.15)
