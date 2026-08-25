@@ -25,6 +25,21 @@ async function runDelegation(page: import("@playwright/test").Page) {
   await expect(page.getByText("Fanning out to two agents.")).toBeVisible({
     timeout: 15000,
   });
+  // And then for the turn to *settle*, which `runPromotion` already did and this did
+  // not. Half the specs below assert on state only the turn-settle sweep produces —
+  // a stranded delegation being closed, a rollup counting a whole subtree — so
+  // starting to assert while events are still arriving makes the spec that fails
+  // whichever one raced. Measured: three of nine full-suite runs failed here, a
+  // different spec each time, which reads as flakiness rather than as one shared
+  // dependency on a signal nobody waited for.
+  //
+  // Send/Stop is that signal. Not `Send` being *enabled*: that also tracks whether
+  // the textarea holds text, so it is disabled on an idle empty composer and waiting
+  // for it waits for something that never happens. The composer renders Stop while a
+  // turn is live and Send once it is not, so the control's *presence* is the one fact.
+  await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0, {
+    timeout: 20000,
+  });
 }
 
 test("each delegation is one card, named for the agent rather than the tool", async ({
@@ -127,9 +142,13 @@ test("a delegation the agent never closed is resolved when the turn ends", async
   // The fixture opens this one and never closes it. Without the server closing
   // open trajectories on settle, the card spins forever — a permanent "running"
   // on finished work, which reads as a hung session.
+  // No timeout of its own: `runDelegation` already waited for the turn to settle, so
+  // this is an assertion about the settled record rather than a race the deadline
+  // happens to win. A generous timeout here was doing the waiting the helper should
+  // have done, and doing it in only some of these specs.
   const stranded = page.getByRole("region", { name: "Stranded delegation" });
   await expect(stranded).toBeVisible();
-  await expect(stranded).toContainText("never finished", { timeout: 15000 });
+  await expect(stranded).toContainText("never finished");
 
   // Not "failed": nobody said it failed, only that nobody said. Reporting an
   // interrupted delegation as a broken one is a different claim.
@@ -331,7 +350,9 @@ test("a promoted host left open is closed by the server, not left spinning", asy
   // "never finished" is the abandoned wording, kept distinct from "failed": the
   // server closing what an adapter left open means nobody reported an outcome, and
   // colouring that as a failure reports an interrupted turn as a broken one.
-  await expect(host).toContainText("never finished", { timeout: 20000 });
+  // `runPromotion` waited for the turn to settle, so the sweep has already run and
+  // this needs no deadline of its own.
+  await expect(host).toContainText("never finished");
   await expect(host).not.toContainText("running");
 });
 
@@ -432,6 +453,62 @@ test("a delegate that finishes late is reported as finishing, not as abandoned",
   // the later one is the truth, so the delegate's own outcome has to be on the page:
   // reporting only the sweep's close would say the work never finished when it had.
   await expect(page.getByText("the background worker finished")).toBeVisible();
+
+  // And — the half that was missing — the *dispatching* turn's own card has to agree.
+  // A trajectory id is session-scoped, so the outcome arriving on a later turn is about
+  // this card, and the server records it here rather than leaving the correction
+  // unreachable. Before that, the earlier card kept the sweep's `abandoned` close: the
+  // delegation read "never finished" a few lines above the agent reporting that it had,
+  // and the earlier one is the one a reader scrolls to.
+  //
+  // The delegate lives inside its `Workflow` host, and a collapsed card mounts none of
+  // its subtree — so the host has to be opened before the card exists in the DOM at
+  // all. Asserting on it directly reported "0 found", which reads as the card being
+  // absent rather than unmounted.
+  const host = page.getByRole("region", { name: /Workflow delegation/ });
+  await host.getByRole("button", { name: "Workflow", exact: true }).click();
+
+  const dispatched = host.getByRole("region", {
+    name: "Background: worker delegation",
+  });
+  await expect(dispatched).toHaveCount(1);
+
+  // Asserted on the card's *status*, not on its summary text: a declared trajectory's
+  // card renders its name, badges, rollup, and children, and never its own `text` — so
+  // the delegate's summary is stored and not displayed here, and asserting on it would
+  // be asserting on something the card does not claim to show.
+  //
+  // These two are the whole correction. "never finished" is the abandoned wording and
+  // "outlived its turn" the badge that goes with it; both were on this card before, and
+  // both are statements about work that had already reported back.
+  await expect(dispatched).not.toContainText("never finished");
+  await expect(dispatched).not.toContainText("outlived its turn");
+  // And it is not still spinning either, which is the other way to get this wrong: the
+  // sweep leaving it open without anything ever closing it.
+  await expect(dispatched).not.toContainText("running");
+  await expect(dispatched).toContainText("finished");
+});
+
+test("a late outcome does not leave an abandoned host on the turn it arrives on", async ({
+  page,
+}) => {
+  await createSession(page);
+  await page.getByLabel("Message").fill("unprompted please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(
+    page.getByText("The background worker finished while you were away."),
+  ).toBeVisible({ timeout: 20000 });
+
+  // The late close names its host by `span`, and that host belongs to the turn that
+  // dispatched it. A bare reference used to promote it into a trajectory on the
+  // *agent's* turn, where nothing had opened it — so the sweep closed it as abandoned
+  // and the timeline grew a card for a `Workflow` that had completed cleanly, on a turn
+  // it never ran in.
+  //
+  // Asserted across the whole page: this scenario's one delegation is reconciled and
+  // its host succeeded, so nothing in it is unresolved. Any "never finished" here is
+  // either the contradiction or the fabrication, and both are defects.
+  await expect(page.getByText("never finished")).toHaveCount(0);
 });
 
 test("focusing a promoted host shows its own call, not an empty pane", async ({

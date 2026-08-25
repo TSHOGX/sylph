@@ -12,7 +12,9 @@
 //! the model that made approvals and interrupt unreachable.
 
 pub mod closer;
+pub mod reconcile;
 pub mod turn;
 
 pub use closer::TurnCloser;
+pub use reconcile::{TrajectoryOutcome, TrajectoryReconciler};
 pub use turn::{LinkedSupervisor, Outcome, TurnRequest};

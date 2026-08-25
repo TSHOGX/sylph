@@ -1577,9 +1577,26 @@ agent says is backgrounded, which is *expected* to outlive its turn and report o
 later agent-initiated turn. Both records existed, on different turns, and the earlier
 card said the work never finished when it demonstrably had. `is_backgrounded` was
 already measured but unused; the adapter now re-attaches it to every phase (only
-`task_started` reports it) and the sweep skips those trajectories. This closes the
-reconciliation item this section previously carried: there is no contradiction to
-reconcile, because the wrong record is no longer written.
+`task_started` reports it) and the sweep skips those trajectories.
+
+That was half the fix, and the claim that it closed the reconciliation item was
+wrong — verified end to end afterwards, and it had traded a wrong record for **no**
+record. A trajectory with no close folded into no block, so the delegation vanished
+from the dispatching turn entirely and its children reattached to the root; and the
+skip only ever applied to `claude`, since every other adapter reports no flag and so
+still got the contradicting `abandoned` close. A third defect sat underneath both: the
+late outcome's `span` named its host from the earlier turn, and that bare reference
+promoted the host into a trajectory on the *arriving* turn, where the sweep then closed
+it as abandoned — a fabricated failure for a `Workflow` that had succeeded.
+
+What actually closes it is treating a trajectory id as session-scoped
+(`docs/session-protocol.md` § Delegated trajectories): a turn now closes only what it
+holds, consolidation preserves an open trajectory as running rather than dropping it,
+and a late outcome is recorded on the turn that owns the trajectory — correcting only a
+provisional record, never one the agent itself stated. Startup closes what neither can
+reach, in both tiers, because after a restart no backgrounded task can report. The flag
+remains worth sending: it is the difference between a card that reads *running* until
+the report arrives and one that reads *never finished* until then.
 
 **Focus mode had the same blind spot the card did.** Re-rooting renders a node's
 `children`, which discards a promoted host's own row — so focusing a `Workflow` whose

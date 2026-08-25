@@ -483,6 +483,14 @@ enum Behavior {
     /// exchange (`init`, assistant, `result`) reporting it, with stdout still open.
     /// Every one of those events used to be dropped for arriving outside a turn.
     Backgrounded,
+    /// The same shape, with the delegate declaring `is_backgrounded` on every phase.
+    ///
+    /// What a *cooperating* adapter sends: `claude` reports the flag only on
+    /// `task_started`, so its adapter re-attaches it to each later phase. The
+    /// turn-settle sweep skips such a trajectory, which is the branch
+    /// [`Behavior::Backgrounded`] cannot reach — that one exercises every adapter
+    /// that reports nothing, which is all of them except `claude`.
+    BackgroundedFlagged,
     /// Accept the turn and never finish it, so a stop or interrupt can arrive.
     Slow,
     /// Fail the handshake, so the agent is unusable.
@@ -509,6 +517,10 @@ impl MockRunner {
     /// An adapter that reports a delegate finishing after its turn ended.
     pub fn backgrounded(name: &str) -> Self {
         Self { name: name.to_string(), behavior: Behavior::Backgrounded }
+    }
+
+    pub fn backgrounded_flagged(name: &str) -> Self {
+        Self { name: name.to_string(), behavior: Behavior::BackgroundedFlagged }
     }
 
     pub fn broken_describe(name: &str) -> Self {
@@ -588,6 +600,33 @@ impl MockRunner {
         # Everything below arrives with the turn already settled. Before agent
         # turns existed these were dropped, so the completion never reached a
         # client and the delegate stayed abandoned forever.
+        time.sleep(0.4)
+        ev("subagent", "completed", streamId="bg-task", span="bg-host",
+           text="worker finished")
+        ev("turn", "started")
+        ev("assistant", "completed", streamId="bg-a2",
+           text="the background worker finished")
+        ev("turn", "completed", text="the background worker finished")
+"#
+            }
+            Behavior::BackgroundedFlagged => {
+                r#"
+        ok(mid)
+        ev("tool_call", "completed", streamId="bg-host", name="Workflow",
+           text='{"script": "background(worker)"}')
+        # The flag rides on `started` only, which is where the vendor reports it —
+        # `claude` sends `is_backgrounded` on `task_started` and on no later
+        # notification. The sweep therefore has to find it from whichever phase
+        # carried it, not from the phase it happens to be looking at.
+        ev("subagent", "started", streamId="bg-task", span="bg-host",
+           name="Background: worker", data={"is_backgrounded": True})
+        ev("tool_result", "completed", streamId="bg-host", name="Workflow",
+           text="dispatched")
+        ev("assistant", "completed", streamId="bg-a1", text="dispatched")
+        ev("turn", "completed", text="dispatched")
+
+        # The real outcome, on a turn of the agent's own, with the flag *absent* —
+        # exactly as the vendor sends a close.
         time.sleep(0.4)
         ev("subagent", "completed", streamId="bg-task", span="bg-host",
            text="worker finished")

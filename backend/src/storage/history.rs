@@ -22,6 +22,7 @@ use sqlx::Row;
 use tracing::{debug, info, warn};
 
 use crate::models::Event;
+use crate::supervisor::TrajectoryOutcome;
 use crate::storage::cas::{self, BlobStore, Payload};
 use crate::storage::fold::{self, Delta, Folded};
 
@@ -459,6 +460,105 @@ impl HistoryStore {
         .context("Could not resolve a watermark to a sequence number")
     }
 
+    /// Record a trajectory's real outcome on the consolidated turn that owns it.
+    ///
+    /// The history-tier half of [`crate::db::JournalStore::reconcile_trajectory`]; see
+    /// there for why the amendment exists and what it may claim. Both are attempted
+    /// unconditionally by the caller, because consolidation can move the row between
+    /// the two tiers at any moment and neither can be checked first without a race.
+    ///
+    /// Read-modify-write rather than an `UPDATE`, so the amendment goes through
+    /// `put_blocks` and inherits its text encoding and CAS accounting. A block's text
+    /// may be inline, compressed, or externalized, and an `UPDATE` writing a bare
+    /// string would leave `text_encoding` and `text_len` describing the previous
+    /// payload — a row that reads back as garbage for the one delegation that most
+    /// needs explaining.
+    pub async fn reconcile_trajectory(
+        &self,
+        session_id: &str,
+        stream_id: &str,
+        except_turn_id: &str,
+        outcome: &TrajectoryOutcome<'_>,
+    ) -> Result<bool> {
+        let Some(row) = sqlx::query(
+            "SELECT * FROM blocks
+              WHERE session_id = ? AND stream_id = ? AND turn_id <> ?
+                AND kind = 'subagent'
+              ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(stream_id)
+        .bind(except_turn_id)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(false);
+        };
+
+        let mut block = self.row_to_block(row).await?;
+        if !outcome.supersedes(block.phase.as_deref(), block.data.as_ref()) {
+            return Ok(false);
+        }
+
+        outcome.apply(
+            &mut block.phase,
+            &mut block.text,
+            &mut block.is_error,
+            &mut block.data,
+            &mut block.source,
+        );
+        self.put_blocks(std::slice::from_ref(&block)).await?;
+        Ok(true)
+    }
+
+    /// Close trajectories this tier still holds as running, returning how many.
+    ///
+    /// The counterpart to [`crate::db::JournalStore::close_stale_trajectories`], one
+    /// tier down, and it exists because consolidation now *preserves* a trajectory the
+    /// turn-settle sweep deliberately left open. That is right while the process lives:
+    /// backgrounded work is running, and `started` says so. It is wrong across a
+    /// restart — the adapter is gone, so the outcome can never arrive — and a block
+    /// left `started` is then a card that spins forever, which is the exact failure the
+    /// sweep exists to prevent, displaced from the journal into history.
+    ///
+    /// Run at startup only, which is what makes the reasoning sound: no link survives a
+    /// restart, so every trajectory found here belongs to a process that cannot report.
+    /// During normal operation the same block is a true statement and must be left
+    /// alone.
+    ///
+    /// `abandoned` and not `failed`, for the same reason everywhere else: nobody said
+    /// this failed, only that nobody said. And still not final — if a resumed session
+    /// somehow reports the outcome later, `reconcile_trajectory` amends this row,
+    /// because a server-authored close is exactly what it is entitled to overwrite.
+    pub async fn close_running_trajectories(&self) -> Result<u64> {
+        let rows = sqlx::query(
+            "SELECT * FROM blocks
+              WHERE kind = 'subagent' AND phase = 'started'",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Could not list trajectories left running in history")?;
+
+        let mut closed = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut block = self.row_to_block(row).await?;
+            block.phase = Some("completed".to_string());
+            block.is_error = true;
+            block.source = "server".to_string();
+            block.data = Some(serde_json::json!({
+                "closedBy": "server",
+                "reason": "backend_restarted",
+            }));
+            closed.push(block);
+        }
+
+        let count = closed.len() as u64;
+        if count > 0 {
+            self.put_blocks(&closed).await?;
+        }
+        Ok(count)
+    }
+
     pub async fn block_count(&self, session_id: &str) -> Result<i64> {
         sqlx::query_scalar("SELECT COUNT(*) FROM blocks WHERE session_id = ?")
             .bind(session_id)
@@ -508,6 +608,25 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
     let mut first_arrival: HashMap<String, i64> = HashMap::new();
     // The best name any phase gave a block, since not every phase carries one.
     let mut names: HashMap<String, String> = HashMap::new();
+    // Trajectories declared here and never closed, keyed by id, holding the latest
+    // `subagent` row that spoke about each.
+    //
+    // Without this a declared-but-open trajectory folds into *no block at all*: its
+    // `started` phase carries no text, so it never reaches `pending` either, and the
+    // whole delegation disappears from history while its children survive and
+    // reattach to the root. That used to be unreachable in practice, because the
+    // turn-settle sweep closed everything before consolidation ran — and then
+    // backgrounded work became a deliberate exception to the sweep, which made this
+    // the *normal* path for exactly the delegations that outlive their turn.
+    // Measured: a `Workflow`'s backgrounded delegate was absent from the dispatching
+    // turn entirely, so the fix that stopped the sweep writing a wrong record had
+    // traded it for no record.
+    //
+    // Kept at its `started` phase on purpose. A client reads a trajectory's status
+    // off its phase, so `started` says *running*, which is what the work is. The
+    // alternative — closing it here — would restate the contradiction consolidation
+    // is not entitled to invent: nothing has reported an outcome yet.
+    let mut open_trajectories: HashMap<String, Event> = HashMap::new();
     let mut blocks = Vec::new();
 
     for event in events {
@@ -516,6 +635,11 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
         match event.phase.as_deref() {
             Some("started") | Some("delta") => {
                 let Some(id) = stream_id else { continue };
+                if event.kind == "subagent" {
+                    // Latest wins: progress is a snapshot, and a later phase may carry
+                    // a name or a flag the first did not.
+                    open_trajectories.insert(id.clone(), event.clone());
+                }
                 first_arrival.entry(id.clone()).or_insert(event.created_at_ms);
                 // A name given by an earlier phase is kept, because for some blocks
                 // that is the *only* phase that has it. A delegated trajectory is
@@ -539,6 +663,15 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
             // `completed`, or no phase at all: server-authored events are stable
             // and unstreamed.
             _ => {
+                // This trajectory has an outcome, so it is no longer open. A
+                // `tool_result` counts as well as a `subagent` close: a promoted
+                // host's lifecycle is its result (§ Promotion).
+                if let Some(id) = stream_id.as_ref() {
+                    if event.kind == "subagent" || event.kind == "tool_result" {
+                        open_trajectories.remove(id);
+                    }
+                }
+
                 let deltas = stream_id
                     .as_ref()
                     .and_then(|id| pending.remove(id))
@@ -589,6 +722,50 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 });
             }
         }
+    }
+
+    // Trajectories still open when the turn ended. Preserved rather than dropped, and
+    // preserved *as open* — see `open_trajectories` above for why both halves matter.
+    //
+    // Emitted before the leftover-delta pass so a trajectory that also streamed text
+    // is claimed here, with its identity intact, rather than there as an anonymous
+    // `incomplete` block.
+    for (stream_id, declaring) in open_trajectories {
+        let deltas = pending.remove(&stream_id).unwrap_or_default();
+        let started_at_ms = first_arrival
+            .get(&stream_id)
+            .copied()
+            .unwrap_or(declaring.created_at_ms);
+        let text: String = deltas.iter().map(|d| d.text.as_str()).collect();
+        let folded = fold::fold(&deltas, &text, started_at_ms);
+
+        blocks.push(Block {
+            session_id: declaring.session_id.clone(),
+            seq: declaring.seq,
+            turn_id: declaring.turn_id.clone().unwrap_or_default(),
+            kind: declaring.kind.clone(),
+            // The phase *is* the claim: this delegation has not reported an outcome.
+            phase: Some("started".to_string()),
+            span: declaring.span.clone(),
+            name: declaring
+                .name
+                .clone()
+                .or_else(|| names.remove(&stream_id)),
+            stream_id: Some(stream_id),
+            text,
+            folded,
+            // Carried forward because it is what says this was expected to outlive
+            // its turn — the one durable record of that, once the journal rows are
+            // gone.
+            data: match declaring.data_json.as_str() {
+                "" | "{}" => None,
+                raw => serde_json::from_str(raw).ok(),
+            },
+            is_error: false,
+            source: declaring.source.clone(),
+            started_at_ms,
+            created_at_ms: declaring.created_at_ms,
+        });
     }
 
     // Deltas whose `completed` never arrived — the link died mid-block. Kept as a

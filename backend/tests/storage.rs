@@ -126,6 +126,161 @@ async fn a_trajectory_keeps_the_name_an_earlier_phase_gave_it() {
     );
 }
 
+/// A trajectory the sweep deliberately left open survives consolidation, still open.
+///
+/// Both halves are load-bearing. It has to *survive*, because a `subagent` `started`
+/// carries no text and so reached neither the completed path nor the leftover-delta
+/// path — the whole delegation folded into no block at all, and its children then
+/// reattached to the root on the next read. And it has to survive *as open*, because a
+/// client reads a trajectory's status off its phase: `started` says running, which is
+/// what backgrounded work is, and consolidation is not entitled to invent an outcome
+/// nobody reported.
+///
+/// This became reachable when the turn-settle sweep started skipping backgrounded
+/// work. Measured before the fix: a `Workflow`'s backgrounded delegate was absent from
+/// the dispatching turn entirely, so the change that stopped a wrong record being
+/// written had traded it for no record at all.
+#[tokio::test]
+async fn a_trajectory_left_open_survives_consolidation_as_running() {
+    let (history, _dir) = history_store().await;
+
+    let mut opened = event(1, "subagent", Some("started"), Some("bg-task"), "", 1000);
+    opened.name = Some("Background: worker".to_string());
+    opened.data_json = r#"{"is_backgrounded":true}"#.to_string();
+    let sibling = event(2, "assistant", Some("completed"), Some("a1"), "dispatched", 1100);
+
+    history
+        .put_blocks(&history::consolidate(&[opened, sibling]))
+        .await
+        .unwrap();
+
+    let stored = history.blocks("s1", -1).await.unwrap();
+    let trajectory = stored
+        .iter()
+        .find(|b| b.stream_id.as_deref() == Some("bg-task"))
+        .expect("the delegation is still in history");
+
+    assert_eq!(
+        trajectory.phase.as_deref(),
+        Some("started"),
+        "still open, because nothing has reported an outcome"
+    );
+    assert_eq!(trajectory.name.as_deref(), Some("Background: worker"));
+    assert!(
+        !trajectory.is_error,
+        "running work is not an error; only a server-authored close is"
+    );
+    assert!(
+        trajectory
+            .data
+            .as_ref()
+            .and_then(|d| d.get("is_backgrounded"))
+            .is_some(),
+        "the flag survives, since after this the journal rows are gone"
+    );
+}
+
+/// A restart closes what history still holds as running.
+///
+/// The counterpart to the journal's startup sweep, and the gap that preserving open
+/// trajectories opens: `started` is true only while the process that would report the
+/// outcome is alive. No link survives a restart, so a block left running afterwards is
+/// a card that spins forever — the exact failure the sweep exists to prevent,
+/// displaced one tier down.
+#[tokio::test]
+async fn a_restart_closes_a_trajectory_history_still_holds_as_running() {
+    let (history, _dir) = history_store().await;
+
+    let mut opened = event(1, "subagent", Some("started"), Some("bg-task"), "", 1000);
+    opened.name = Some("Background: worker".to_string());
+    history
+        .put_blocks(&history::consolidate(&[opened]))
+        .await
+        .unwrap();
+
+    let closed = history.close_running_trajectories().await.unwrap();
+    assert_eq!(closed, 1);
+
+    let stored = history.blocks("s1", -1).await.unwrap();
+    let trajectory = stored
+        .iter()
+        .find(|b| b.stream_id.as_deref() == Some("bg-task"))
+        .expect("the delegation");
+    assert_eq!(trajectory.phase.as_deref(), Some("completed"));
+    assert_eq!(
+        trajectory
+            .data
+            .as_ref()
+            .and_then(|d| d.get("closedBy"))
+            .and_then(|v| v.as_str()),
+        Some("server"),
+        "attributed to the server, so a client reports it abandoned rather than failed"
+    );
+
+    // Idempotent: a second start finds nothing left running.
+    assert_eq!(history.close_running_trajectories().await.unwrap(), 0);
+}
+
+/// A late outcome corrects the record in history, not only in the journal.
+///
+/// Which tier holds a trajectory depends on whether consolidation has run, which no
+/// caller can observe — so the correction has to work here too, or a delegation
+/// reporting back a second after its turn is fixed while one reporting back a minute
+/// later is not.
+#[tokio::test]
+async fn a_late_outcome_corrects_a_consolidated_trajectory() {
+    let (history, _dir) = history_store().await;
+
+    let mut swept = event(1, "subagent", Some("completed"), Some("bg-task"), "", 1000);
+    swept.name = Some("Background: worker".to_string());
+    swept.data_json = r#"{"closedBy":"server","reason":"abandoned"}"#.to_string();
+    swept.is_error = true;
+    swept.source = "server".to_string();
+    history
+        .put_blocks(&history::consolidate(&[swept]))
+        .await
+        .unwrap();
+
+    let amended = history
+        .reconcile_trajectory(
+            "s1",
+            "bg-task",
+            "turn-later",
+            &sylph_web_backend::supervisor::TrajectoryOutcome {
+                text: "worker finished",
+                is_error: false,
+                reported_on_turn_id: "turn-later",
+            },
+        )
+        .await
+        .unwrap();
+    assert!(amended);
+
+    let stored = history.blocks("s1", -1).await.unwrap();
+    let trajectory = stored
+        .iter()
+        .find(|b| b.stream_id.as_deref() == Some("bg-task"))
+        .expect("the delegation");
+    assert_eq!(
+        trajectory.text, "worker finished",
+        "read back through the same encoding path put_blocks wrote it with"
+    );
+    assert!(!trajectory.is_error);
+    assert!(
+        trajectory
+            .data
+            .as_ref()
+            .and_then(|d| d.get("closedBy"))
+            .is_none(),
+        "the server has stopped claiming this close"
+    );
+    assert_eq!(
+        trajectory.name.as_deref(),
+        Some("Background: worker"),
+        "the name survives, since only the outcome changed"
+    );
+}
+
 /// Deltas must not survive as rows. Storing them individually is the ~20× cost
 /// the fold exists to avoid.
 #[tokio::test]

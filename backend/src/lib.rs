@@ -167,6 +167,24 @@ impl AppState {
             crate::storage::cas::BlobStore::new(config.blobs_dir.clone()),
         )
         .await?;
+        // The same repair as `close_stale_trajectories` above, one tier down.
+        // Consolidation preserves a trajectory the turn-settle sweep deliberately left
+        // open — backgrounded work, which is genuinely still running — and `started` is
+        // a true statement only while the process that would report it is alive. No
+        // link survives a restart, so anything still `started` here can never be
+        // reported on and would spin forever.
+        //
+        // Before the sweeper, so a turn consolidated by this run is not immediately
+        // re-examined, and after the journal sweep above so the two cannot both claim
+        // the same trajectory.
+        let stranded = history.close_running_trajectories().await?;
+        if stranded > 0 {
+            tracing::warn!(
+                "Closed {} delegated trajectory(ies) left running in history by a previous backend session",
+                stranded
+            );
+        }
+
         let consolidator = crate::storage::Consolidator::new(store.clone(), history.clone());
         // Catches whatever a crash or a restart left unconsolidated, then keeps
         // watching. A turn that settles normally is handled the moment it does.
@@ -215,6 +233,17 @@ impl AppState {
         // would sit `running` forever and wedge its session, because the composer
         // refuses a message while a turn is live.
         links.set_closer(turns.closer()).await;
+        // And the half that reaches *backwards*: a delegation that outlived its turn
+        // reports its outcome on a later one, and the record it corrects belongs to the
+        // turn that opened it (`crate::supervisor::reconcile`). Both stores, because
+        // consolidation decides which tier holds that record and no caller can observe
+        // when it runs.
+        links
+            .set_reconciler(crate::supervisor::TrajectoryReconciler::new(
+                store.clone(),
+                history.clone(),
+            ))
+            .await;
         let tracedb = TraceDbClient::new(config.tracedb_bin.clone());
 
         // Retention needs the archive client, so it is built after it. The

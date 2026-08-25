@@ -167,6 +167,14 @@ pub struct LinkManager {
     /// so both can reach it without the cycle a direct call back would create
     /// (`supervisor::closer`). Set once at startup, like `waiters`.
     closer: Arc<RwLock<Option<crate::supervisor::closer::TurnCloser>>>,
+    /// Applies a delegation's late outcome to the turn that owns it.
+    ///
+    /// A trajectory id is session-scoped, so an outcome arriving on a later turn is
+    /// about an earlier turn's record (`crate::supervisor::reconcile`). Reaching the
+    /// storage tier from here is what that needs, and it is held the same way
+    /// `closer` is because the two are wired at the same point for the same reason:
+    /// the drain task is where these events land.
+    reconciler: Arc<RwLock<Option<crate::supervisor::TrajectoryReconciler>>>,
     links: Arc<RwLock<HashMap<String, Entry>>>,
     /// Serializes establishment per session.
     ///
@@ -196,6 +204,7 @@ impl LinkManager {
             seq,
             waiters: Arc::new(RwLock::new(None)),
             closer: Arc::new(RwLock::new(None)),
+            reconciler: Arc::new(RwLock::new(None)),
             links: Arc::new(RwLock::new(HashMap::new())),
             establishing: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -220,6 +229,15 @@ impl LinkManager {
     /// agent cannot have started a turn before the thing that settles turns exists.
     pub async fn set_closer(&self, closer: crate::supervisor::closer::TurnCloser) {
         *self.closer.write().await = Some(closer);
+    }
+
+    /// Hand the manager the path that records a delegation's late outcome.
+    ///
+    /// Late for the same reason as the two above. Absent, the only cost is that a
+    /// cross-turn outcome is not reconciled — the event itself is still journaled and
+    /// published — so this cannot wedge anything if wiring is ever missed.
+    pub async fn set_reconciler(&self, reconciler: crate::supervisor::TrajectoryReconciler) {
+        *self.reconciler.write().await = Some(reconciler);
     }
 
     /// Tell a waiting turn how it ended.
@@ -620,6 +638,31 @@ impl LinkManager {
                 "DATA LOSS: event seq {} kind '{}' on session {} was published but not journaled: {}",
                 event.seq, event.kind, session_id, error
             );
+        }
+
+        // A delegation's outcome may belong to an earlier turn, because a trajectory id
+        // is session-scoped and backgrounded work reports back after the turn that
+        // dispatched it has settled. Done here rather than when the turn settles so the
+        // correction is already in place by the time a client refetches history, which
+        // it does on the settle it would otherwise race.
+        if event.kind == "subagent" && event.phase.as_deref() == Some("completed") {
+            if let Some(stream_id) = event.stream_id.clone() {
+                let reconciler = self.reconciler.read().await.clone();
+                if let Some(reconciler) = reconciler {
+                    reconciler
+                        .record(
+                            session_id,
+                            &stream_id,
+                            &turn_id,
+                            &crate::supervisor::TrajectoryOutcome {
+                                text: &event.text,
+                                is_error: event.is_error,
+                                reported_on_turn_id: &turn_id,
+                            },
+                        )
+                        .await;
+                }
+            }
         }
 
         let settles = event.kind == "turn" && event.phase.as_deref() == Some("completed");
