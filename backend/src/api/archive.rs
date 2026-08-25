@@ -297,6 +297,18 @@ pub async fn list(
         {
             Ok(page) => page,
             Err(detail) => {
+                // Loud once, quiet after — see `report_tracedb_failure`. An absent
+                // archive is a supported configuration, so it is one fact about the
+                // install rather than one fault per request. Measured in the E2E log
+                // before this bound existed: ~30 identical lines per page load,
+                // because the sidebar and the history overlay each list several
+                // directories, and 2339 in a full run.
+                //
+                // Demoting *every* occurrence to `debug` was the other candidate and
+                // is worse: it also hides the first failure, which is the one that
+                // tells an operator their archive is misconfigured. The response
+                // carries `available: false` and `detail` either way, so the client
+                // renders the real reason regardless of the log level.
                 report_tracedb_failure(&state, "TraceDB list failed", &detail);
                 return Ok(Json(ArchiveListResponse {
                     sessions: Vec::new(),

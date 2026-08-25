@@ -53,6 +53,14 @@ const PASS_BATCH: i64 = 64;
 /// them buys nothing while making two numbers to keep in mind.
 const PASS_INTERVAL: Duration = Duration::from_secs(300);
 
+/// How many sessions the byte report names.
+///
+/// The report exists to answer "which session do I go look at", which a handful
+/// answers and a full listing does not — it would put every session in a
+/// diagnostics response, and growth is a heavily skewed distribution: one
+/// long-lived sandbox session dwarfs forty ordinary ones.
+const LARGEST_REPORTED: i64 = 10;
+
 /// What a completed pass did, for `/diagnostics`.
 ///
 /// Reported because a subsystem whose correct behaviour is "nothing happened" is
@@ -80,6 +88,27 @@ pub struct PassReport {
     pub terminal: usize,
     pub blocks_pruned: u64,
     pub blobs_swept: u64,
+    /// Bytes of record held across every session ever measured, and how many.
+    ///
+    /// Present because the counts above answer "was anything dropped" and cannot
+    /// answer "how much is being kept" — and for a terminal session, which is
+    /// *supposed* to keep everything, the second is the only question with an
+    /// actionable answer. See
+    /// [`HistoryStore::measure_session_bytes`](crate::storage::HistoryStore::measure_session_bytes)
+    /// for what a byte is here: the logical record, not the footprint on disk.
+    pub bytes_held: i64,
+    pub sessions_measured: i64,
+    /// Net change across the sessions this pass measured.
+    ///
+    /// Signed: negative means pruning outpaced arrival, which is a working
+    /// archive rather than an anomaly.
+    pub bytes_grew_by: i64,
+    /// The largest sessions, largest first, each with its own growth.
+    ///
+    /// Bounded to a handful. The question this answers is "which session do I go
+    /// look at", and a full listing would put every session in a diagnostics
+    /// response to answer a question about its head.
+    pub largest_sessions: Vec<crate::storage::history::SessionBytes>,
     /// Sessions whose pass failed, so their history is simply kept.
     pub failed: usize,
     /// Whether the archive could be reached at all this pass.
@@ -93,6 +122,34 @@ pub struct PassReport {
     /// ask" is not "asked and nothing is safe". Writing a watermark would claim a
     /// check that never happened.
     pub archive_available: bool,
+}
+
+/// Bytes for a log line, in the unit a reader can act on.
+///
+/// A raw count is the wrong shape here: `1183741952` and `118374195` differ by an
+/// order of magnitude and read as the same length, which is exactly the
+/// distinction the line exists to convey. The wire format keeps raw integers —
+/// a client should not have to parse a rendered string back.
+fn human_bytes(bytes: i64) -> String {
+    const KIB: f64 = 1024.0;
+    let magnitude = bytes.unsigned_abs() as f64;
+    let sign = if bytes < 0 { "-" } else { "" };
+
+    for (limit, unit) in [
+        (KIB, "B"),
+        (KIB * KIB, "KiB"),
+        (KIB * KIB * KIB, "MiB"),
+    ] {
+        if magnitude < limit {
+            let scaled = magnitude / (limit / KIB);
+            return if unit == "B" {
+                format!("{sign}{magnitude:.0} B")
+            } else {
+                format!("{sign}{scaled:.1} {unit}")
+            };
+        }
+    }
+    format!("{sign}{:.1} GiB", magnitude / (KIB * KIB * KIB))
 }
 
 /// Runs retention passes over consolidated history.
@@ -174,6 +231,20 @@ impl RetentionScheduler {
                     warn!("Retention pass failed for {}: {:#}", session_id, error);
                 }
             }
+
+            // Measured on every path, including the two `run_one` returns early
+            // on and the one that failed. Bytes held is a local fact that needs no
+            // authority, and the install where nothing can be confirmed — no
+            // TraceDB, so nothing is ever pruned — is precisely the one whose
+            // growth is unbounded. Measuring only where a watermark was written
+            // would leave that install's report empty.
+            //
+            // After the prune rather than before, so the number is what is held
+            // now rather than what was held a moment ago.
+            match self.history.record_session_bytes(&session_id).await {
+                Ok(measured) => report.bytes_grew_by += measured.grew_by.unwrap_or(0),
+                Err(error) => debug!("Could not measure {}: {:#}", session_id, error),
+            }
         }
 
         // Once per pass, not once per session: reachability spans sessions, so this
@@ -183,10 +254,58 @@ impl RetentionScheduler {
             Err(error) => warn!("Could not sweep unreferenced blobs: {:#}", error),
         }
 
+        // Read after the loop so the total and the rows beside it are one
+        // observation. Both are whole-store facts rather than per-pass ones: a
+        // bounded batch means this pass measured 64 sessions, and an operator
+        // asking what is being kept means all of them.
+        match self.history.total_bytes().await {
+            Ok((bytes, sessions)) => {
+                report.bytes_held = bytes;
+                report.sessions_measured = sessions;
+            }
+            Err(error) => warn!("Could not total held bytes: {:#}", error),
+        }
+        match self.history.largest_sessions(LARGEST_REPORTED).await {
+            Ok(largest) => report.largest_sessions = largest,
+            Err(error) => warn!("Could not list the largest sessions: {:#}", error),
+        }
+
         if report.blocks_pruned > 0 || report.blobs_swept > 0 {
             info!(
-                "Retention pass: examined {}, pruned {} block(s), swept {} blob(s)",
-                report.examined, report.blocks_pruned, report.blobs_swept
+                "Retention pass: examined {}, pruned {} block(s), swept {} blob(s), \
+                 holding {} across {} session(s)",
+                report.examined,
+                report.blocks_pruned,
+                report.blobs_swept,
+                human_bytes(report.bytes_held),
+                report.sessions_measured
+            );
+        } else if report.bytes_grew_by > 0 {
+            // One line naming the single largest holder, not one per growing
+            // session: growth every pass is the *expected* state of a terminal
+            // session, so a line per session would be an unbounded stream
+            // reporting correct behaviour. `/diagnostics` carries the whole list
+            // for anyone who wants it, and this says only enough to know whether
+            // to go look.
+            //
+            // At `info` rather than `warn`: growth is not a fault. There is no
+            // threshold above which this subsystem would be entitled to delete a
+            // terminal session's record, so a warning would name a problem the
+            // reader cannot act on through any setting — see `docs/storage.md` for
+            // why no such bound is offered.
+            info!(
+                "Retention pass: holding {} across {} session(s), {} added this pass{}",
+                human_bytes(report.bytes_held),
+                report.sessions_measured,
+                human_bytes(report.bytes_grew_by),
+                match report.largest_sessions.first() {
+                    Some(largest) => format!(
+                        "; largest is {} at {}",
+                        largest.session_id,
+                        human_bytes(largest.bytes)
+                    ),
+                    None => String::new(),
+                }
             );
         } else if !report.archive_available && report.examined > 0 {
             // Once per pass, not once per session, and at debug because an install

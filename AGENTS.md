@@ -116,8 +116,15 @@ changes faster than the shipped adapter catches up. Copying bundled adapters int
 it would freeze them at install time and break the next upgrade.
 
 `SYLPH_BROWSE_ROOTS` is colon-separated and *adds* to `$HOME`, which is always
-browsable. It bounds `/api/v1/fs/*`, the only endpoint that lists directories the
-client names — so widening it widens what any client of this backend can enumerate.
+browsable. It bounds **two** things, and the second is the larger one: what
+`/api/v1/fs/*` may *enumerate*, and what a client may *name* as a session's
+`workdir` on `POST /sessions` and `POST /sessions/import`. A workdir is the
+`current_dir` of a spawned agent, so widening this setting widens where arbitrary
+code may run — not merely what names are visible. The Quick Start directory is
+permitted in addition, always, since both `SYLPH_HOME` and `paths.quick_start_dir`
+can move it outside `$HOME`. One key rather than two because `/fs/*` exists solely
+to name a workdir, so a second key would have to be kept equal to this one; see
+`docs/configuration.md` § `browse_roots` bounds where agents run.
 
 `SYLPH_SOUL` points at the identity preamble. An explicit *empty* value is
 meaningful rather than missing — the protocol reserves it for "no identity" — and a
@@ -902,6 +909,57 @@ and merely improbable until closing delegated trajectories put a query and a
 per-trajectory emit inside it. Three integration tests then failed *by timing*, a
 different subset each run, which reads as flakiness rather than as ordering. Write
 the row that makes the next action legal first.
+
+**A setting that bounds one endpoint makes the unbounded one invisible.**
+`SYLPH_BROWSE_ROOTS` bounded what `/api/v1/fs/*` may *enumerate*, was documented as
+such in three places, and had 16 containment tests behind it — so path containment
+read as solved. Meanwhile `POST /sessions` called `Path::exists` on `workdir` and
+nothing else, and that string is the `current_dir` of a spawned agent: any client of
+this backend could start an agent anywhere on the filesystem. The *narrower*
+capability being carefully bounded is what kept the wider one from being looked at,
+and the roadmap note saying enumeration "is the part that matters" was true when
+written and then load-bearing in the wrong direction. When a setting bounds one
+endpoint, enumerate every other endpoint consuming the same kind of value, and rank
+them by what the value lets a caller *do* rather than by how the setting is named.
+Both paths now share `paths::contain_in_any`, because a containment rule written
+twice is one that will diverge.
+
+**A write cannot canonicalize its own target, so containment on the parent leaves
+one component unchecked.** `canonicalize` needs an existing path and the file
+usually does not exist yet, so every write endpoint here contains the *parent* and
+appends the final name verbatim. That is correct and incomplete: a pre-existing
+symlink at that last component is inside the root by name, points wherever it
+likes, and `fs::write` follows it — so `overwrite` was a write outside the workdir,
+arriving through the one component the check could not see. `remove` was already
+safe by construction (unlinking never touches a target) and its doc comment even
+asserted that a final escaping symlink is "only ever unlinked, never opened or
+written to" — an invariant that was true of `remove` and false of `upload` two
+hundred lines away. Inspect an existing entry with `symlink_metadata`, then resolve
+and re-check; and when one function documents an invariant about a shared
+containment idiom, check every other function that uses the idiom against it.
+Verify such a fix by reverting it and watching the test fail — otherwise the test
+only proves it agrees with the code.
+
+**Canonicalizing a stored path changes every comparison against it.** Journalling
+the canonical `workdir` — right, since it defeats a symlink re-pointed after the
+check and stops two spellings becoming two sidebar groups — silently split the Quick
+Start group, because `/workspaces` compared that canonical value against the
+*configured* `quick_start_dir` and reported `isQuickStart: false` for every Quick
+Start session. Nothing errored: the row and the sessions it counts simply stopped
+being the same directory. Anything that groups, compares, or displays a path has to
+be re-checked when the recorded spelling changes, and on macOS this is not an edge
+case — `/tmp`, `os.tmpdir()`, and everything under `/var` all differ from their
+canonical form, so the bug is invisible on Linux CI and certain on a developer's
+machine.
+
+**A fixture's comment is not evidence about the fixture.** The E2E config set
+`SYLPH_BROWSE_ROOTS: "/tmp"` under a comment saying "the specs create sessions in
+`/tmp`". They have not since `mkdtemp(os.tmpdir())` was introduced — that is
+`/var/folders/…/T` on macOS, not under `/tmp` — and nothing could observe the
+disagreement while the value was unenforced. Enforcing it would have failed a dozen
+specs at once, reading as a product regression. Read what a fixture's values
+actually resolve to rather than what its comment claims, especially before making
+something depend on them.
 
 **Seeding a file keyed on its own absence overrides a deliberate deletion.**
 `SOUL.md` is seeded on first run, and deleting it means "no identity" — which the

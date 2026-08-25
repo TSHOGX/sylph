@@ -40,7 +40,7 @@ Health check with version information.
 
 #### `GET /api/v1/diagnostics`
 
-Detailed system state (sessions, turns, runners).
+Detailed system state (sessions, turns, runners, retention).
 
 **Response 200:**
 ```json
@@ -48,9 +48,56 @@ Detailed system state (sessions, turns, runners).
   "sessions": { "total": 15, "idle": 12, "running": 3 },
   "turns": { "queued": 0, "running": 2, "completed": 143 },
   "agents": ["claude", "codex", "pi"],
-  "uptime_seconds": 8642
+  "uptimeSeconds": 8642,
+  "retention": {
+    "ranAtMs": 1724058000000,
+    "examined": 64,
+    "confirmed": 12,
+    "withheld": 52,
+    "terminal": 41,
+    "unchanged": 9,
+    "blocksPruned": 318,
+    "blobsSwept": 4,
+    "archiveAvailable": true,
+    "bytesHeld": 4183740928,
+    "sessionsMeasured": 357,
+    "bytesGrewBy": 12043776,
+    "largestSessions": [
+      {
+        "sessionId": "s_abc123",
+        "bytes": 1183741952,
+        "blocks": 21044,
+        "measuredAtMs": 1724058000000,
+        "grewBy": 8388608,
+        "grewOverMs": 300000
+      }
+    ]
+  }
 }
 ```
+
+Authenticated, unlike `/health`: it carries counts, local filesystem paths, and
+runner failure messages.
+
+`retention` is the last completed pass, or `null` before the first one. Two things
+about its shape are load-bearing, both covered in `docs/storage.md`:
+
+- **`withheld` beside `terminal`** is what separates correct behaviour from a
+  broken pass. A terminal session is *supposed* to keep everything, while a
+  delegated session that keeps withholding means the archive is not confirming it —
+  and an all-`unchanged` pass means the ingestion daemon has stopped advancing.
+- **The byte fields answer "which session is growing".** The counts cannot: forty
+  small withheld sessions and one enormous one report identically. `bytesHeld` is
+  the *logical* record across every measured session, not the footprint on disk, so
+  it exceeds what `du` reports on the data directory — it is a ranking measure, not
+  a disk gauge. `grewBy` is signed (negative means pruning worked) and **absent
+  when a session has been measured only once**, because one observation is not a
+  trend and reporting zero would claim stability.
+
+There is deliberately no configurable size bound. A terminal session's record is
+the only copy, so a size-triggered prune is a size-triggered deletion of data
+nothing else holds — the same trade a time-based rule makes, refused for the same
+reason. `docs/storage.md` § Why no configurable upper bound is offered.
 
 ### Identity
 
@@ -282,10 +329,33 @@ session that must never be reset. See `GET /api/v1/soul` for the text this gover
 }
 ```
 
+**`workdir` is bounded, and the bound is configuration.** It must resolve inside
+`paths.browse_roots` or the Quick Start directory, checked on the canonical path so
+`..` and symlinks are resolved rather than pattern-matched. This is the same root
+set `GET /api/v1/fs/*` browses, deliberately: that endpoint exists to name a
+workdir, so a second bound would be a second thing to keep equal.
+
+The reason it is bounded at all is that this field is the `current_dir` of a
+spawned agent process, and a coding agent reads and writes the tree it is pointed
+at — so it decides where arbitrary code runs. Existence, the only property it was
+checked for previously, says nothing about whether it should. See
+`docs/configuration.md` § `browse_roots` bounds where agents run.
+
+The **canonical** path is journalled, not the string as sent, so two spellings of
+one directory do not become two workspaces and the recorded path carries no
+symlinked component that could be re-pointed after the check.
+
 **Errors:**
-- `400` — invalid agent, workdir missing, flags validation
+- `400` — invalid agent, workdir missing or not a directory, flags validation
+- `403` — `POLICY_VIOLATION`: the workdir exists but is outside the permitted
+  roots. Distinct from `400` on purpose: the request is well-formed and the fix is
+  in `config.toml`, not in the request. The message lists what is permitted.
 - `409` — session already exists (rare, UUID collision)
 - `422` — `identityMode` outside the enumeration
+
+A session already recorded outside the permitted roots stays fully readable:
+nothing re-checks a journalled workdir on read, list, or resume. Narrowing
+configuration must not orphan history.
 
 #### `POST /api/v1/sessions/import`
 
@@ -330,12 +400,31 @@ the originating agent or TraceDB. `id` remains the Sylph Web route key. Native
 imports also expose `traceSessionId`, the complete TraceDB id. The backend uses
 both forms when reconciling a live row with an archive row.
 
+**The archived working directory is bounded exactly like a created one**, and this
+is not belt-and-braces. The archive holds every session any agent ever ran on this
+machine, so an unbounded import is a *general* way to start an agent anywhere: find
+a row that ran in the target directory, adopt it, send a turn. That the path came
+from the archive rather than from the request body changes who chose it, not what
+happens next — resuming spawns a process there either way.
+
+The consequence is that an archived session which ran outside
+`paths.browse_roots` cannot be imported until that directory is permitted. The
+error says so, and says what importing would enable, so the refusal reads as a
+policy decision rather than as a broken archive.
+
 **Errors:**
 - `400` — malformed `traceSessionId`, no runner for the originating agent, or
   the archived working directory no longer exists
+- `403` — `POLICY_VIOLATION`: the archived working directory exists but is outside
+  the directories this install permits sessions to run in
 - `404` — no such archived session (`TRACE_SESSION_NOT_FOUND`)
 - `409` — already imported (`SESSION_ALREADY_IMPORTED`)
+- `422` — `TRACE_SESSION_NOT_RESUMABLE`: the archive recorded no working directory
 - `503` — TraceDB unreachable (`TRACEDB_UNAVAILABLE`)
+
+Those five are deliberately distinct because they have five different fixes:
+nothing to do, widen configuration, wrong id, already done, and reinstall the
+agent. Collapsing any pair would send a reader to the wrong layer.
 
 #### `GET /api/v1/sessions/{id}`
 
@@ -1267,9 +1356,29 @@ a client-supplied directory, the destination goes through the same containment
 check as reads, and an existing file is refused unless `overwrite` is explicitly
 true. Per-file size shares the 8 MiB attachment ceiling.
 
-Errors: `POLICY_VIOLATION` (403) outside the workdir, `INVALID_REQUEST` (400) for
-an existing file without `overwrite`, `ATTACHMENT_INVALID` (400) for malformed
-base64 or an oversized payload.
+**`overwrite` does not follow a symlink out of the workdir.** Containment for a
+write is established on the *parent directory*, because the file usually does not
+exist yet and canonicalization needs an existing path — which leaves the last
+component unresolved. A pre-existing symlink there is inside the root by name and
+points wherever it likes, and a plain write follows it, so `overwrite` was a write
+outside the workdir arriving through the one component the check could not see.
+An existing entry is now inspected with `symlink_metadata` and, when it is a link,
+resolved and re-checked. A link resolving *inside* the workdir still writes through
+to its target, because that is a write the agent itself can plainly make and
+refusing every link would be stricter than the stated line; a dangling link is
+refused, since where the write would land cannot be established and creating its
+target would be inventing one.
+
+`DELETE` was already safe from this by construction — unlinking a link never
+touches its target — and its implementation asserts that a final escaping symlink
+is "only ever unlinked, never opened or written to". That invariant held for
+`DELETE` and not for this endpoint; it now holds for both. `POST .../directory`
+refuses an existing target outright, so it was never reachable.
+
+Errors: `POLICY_VIOLATION` (403) outside the workdir, including through a symlink
+at the destination, `INVALID_REQUEST` (400) for an existing file without
+`overwrite`, `ATTACHMENT_INVALID` (400) for malformed base64 or an oversized
+payload.
 
 #### `POST /api/v1/sessions/{id}/files/directory`
 
