@@ -263,6 +263,17 @@ test("a delegation can be reached from the overview by keyboard", async ({ page 
 
   // Longest first, so the slow one is the first row in the list rather than something
   // to be found among twenty overlapping bars.
+  //
+  // Guarded, and this one is not about exactness — it is about the *press* surviving.
+  // When the turn settles the transcript swaps from the live stream to consolidated
+  // history, which re-mounts the strip: `order` resets to `structure` and this click is
+  // gone. In structure order rows follow the tree, and after consolidation a block is
+  // keyed by its *close*, so an early-closing delegate precedes the slow one — the
+  // first row is then legitimately not Survey. It presented as the ordering control not
+  // working, which is three layers from a re-mount. An earlier version of this spec was
+  // left unguarded on the reasoning that ordering holds for bounds too; it does, but the
+  // pressed order does not.
+  await stillLive(page, "the pressed ordering could be read");
   const rows = overview.getByRole("listitem");
   await expect(rows.first()).toContainText("Survey");
 
@@ -301,6 +312,42 @@ test("a collapsed delegation shows what it concluded, without being opened", asy
   // rollup-style leak would caption every row with the last one to arrive.
   await expect(survey).not.toContainText("formatted");
   await expect(page.getByRole("region", { name: "Lint delegation" })).toContainText("clean");
+});
+
+/**
+ * A delegation whose name never arrived still gets a card and a row.
+ *
+ * The case a real `claude` session produces constantly — a delegation's brief arrives as
+ * streamed partial JSON, so at `started` there is nothing to name it with — and which no
+ * fixture reached until now: all twelve `subagent` opens in this suite carried a name, so
+ * the client's fallback was covered by unit tests and by nothing that renders.
+ *
+ * It is also what makes five `exact: true` locators in this suite load-bearing rather
+ * than merely correct. The fallback label is "Subagent delegation", which *contains*
+ * "agent delegation" — so `{ name: "Agent delegation" }` is ambiguous with it, which
+ * cost two real failures. Before this row, no test could produce the string those guards
+ * exist for.
+ */
+test("a delegation with no name still renders, and does not shadow a named one", async ({
+  page,
+}) => {
+  test.slow();
+  await runFanoutSettled(page);
+
+  // The fallback reached the DOM as a real card, not as an empty or dropped row.
+  await expect(
+    page.getByRole("region", { name: "Subagent delegation", exact: true }),
+  ).toBeVisible();
+
+  // And the guard works: an exact locator for a *named* delegation must not pick up the
+  // fallback, even though "Subagent delegation" contains its text. Without `exact` this
+  // resolves to two elements and fails strict mode — which is the failure mode the
+  // `exact: true` fixes across this suite were added for, now actually reachable.
+  const overview = await openOverview(page);
+  await expect(overview.getByRole("button", { name: /^Subagent,/ })).toHaveCount(0);
+  // Nameless *and* forwarded nothing, so it is not navigable — the same rule the card
+  // follows. It still appears, because a row that reported nothing must not vanish.
+  await expect(overview.getByText(/^Subagent, /)).toBeVisible();
 });
 
 test("a promoted host reports its outcome, not its own arguments", async ({ page }) => {
