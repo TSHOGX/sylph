@@ -179,6 +179,8 @@ export function Composer({
   onInterrupt,
   canSteer = false,
   onSteer,
+  blockedCount = 0,
+  onShowBlocked,
 }: {
   session: Session;
   agents: Agent[];
@@ -242,6 +244,18 @@ export function Composer({
   /** Whether the agent declared it accepts text mid-turn. */
   canSteer?: boolean;
   onSteer?: (text: string) => void;
+  /**
+   * How many requests the agent is blocked on with their panel dismissed.
+   *
+   * Rendered because dismissing is not answering: the request stays open and the
+   * agent stays stopped, and with the panel hidden nothing else on screen said so.
+   * The dialog's own documentation claimed the composer reported this long before it
+   * did — a blocked session that looks merely idle is the worst of the two failures,
+   * because the user waits for an agent that is waiting for them.
+   */
+  blockedCount?: number;
+  /** Bring a dismissed request's panel back. */
+  onShowBlocked?: () => void;
 }) {
   const queryClient = useQueryClient();
   const router = useRouter();
@@ -610,6 +624,32 @@ export function Composer({
           above the viewport - in the DOM, styled correctly, and permanently
           offscreen. */}
       <div className="relative mx-auto max-w-3xl">
+        {/* A dismissed request left the agent blocked with nothing on screen saying
+            so, which reads as an idle session rather than a waiting one. `role=status`
+            because it appears without the user acting. */}
+        {blockedCount > 0 && (
+          <p
+            role="status"
+            className="mb-2 flex flex-wrap items-center gap-2 text-2xs text-ink-muted"
+          >
+            <span
+              aria-hidden
+              className="size-1.5 shrink-0 rounded-full bg-warning-solid"
+            />
+            {blockedCount > 1
+              ? t("approval.pendingCount", { count: blockedCount })
+              : t("composer.blocked")}
+            {onShowBlocked ? (
+              <button
+                type="button"
+                onClick={onShowBlocked}
+                className="focus-ring rounded underline underline-offset-2 hover:text-ink"
+              >
+                {t("composer.blockedShow")}
+              </button>
+            ) : null}
+          </p>
+        )}
         <form
           onSubmit={(event) => {
             event.preventDefault();

@@ -121,6 +121,27 @@ pub async fn resolve(
 
     let input_json = body.input.as_ref().map(|value| value.to_string());
 
+    // And when the request declared a form, the answer has to fit it. Checked here,
+    // before the claim below, for a reason the ordering makes load-bearing: a
+    // malformed answer that reached the UPDATE would consume the single-winner claim
+    // and mark the request resolved, leaving the agent blocked on a question nobody
+    // can answer any more. Refusing first leaves it open and answerable.
+    //
+    // This is the same rule that governs `option` above and a `set_config` value: the
+    // client renders whatever an agent it has never seen reported, so the server is
+    // what keeps a malformed answer from reaching a vendor CLI whose handling of one
+    // is undefined.
+    if let Some(form) = request.form() {
+        // Only when the answer is being submitted. Declining carries no values, and
+        // requiring a complete form in order to say "don't answer" would make a
+        // required field into a trap the user cannot leave.
+        let declining = body.option.starts_with("deny") || body.option == "cancel";
+        if !declining {
+            form.validate(body.input.as_ref())
+                .map_err(Error::InvalidRequest)?;
+        }
+    }
+
     // Claimed in one statement, so two clients answering together produce one
     // winner rather than two forwarded answers.
     let resolved = state

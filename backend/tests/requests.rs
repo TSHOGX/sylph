@@ -31,6 +31,7 @@ async fn raise_request(server: &TestBackend, session_id: &str, tool: &str) -> Pe
         .to_string(),
         default_option: Some("deny".to_string()),
         risk: Some("destructive".to_string()),
+        form_json: None,
         allow_persistent: true,
         expires_at_ms: None,
         status: "pending".to_string(),
@@ -560,4 +561,192 @@ async fn establishing_a_link_does_not_reorder_a_session_as_recent() {
             .as_i64()
             .unwrap();
     assert!(newer_updated >= after, "the newer session is still the newer one");
+}
+
+/// A request that declares a form, the way an agent's own question does.
+///
+/// The options are verbs here, not answers: the fields carry what was chosen, which
+/// is what makes "pick, then annotate, then submit" expressible.
+async fn raise_question(server: &TestBackend, session_id: &str) -> PendingRequest {
+    let request = PendingRequest {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.to_string(),
+        turn_id: "turn-1".to_string(),
+        adapter_request_id: "adapter-req-2".to_string(),
+        kind: "choice".to_string(),
+        tool: Some("AskUserQuestion".to_string()),
+        tool_use_id: None,
+        title: "Two questions".to_string(),
+        detail_json: "{}".to_string(),
+        options_json: json!([
+            {"id": "submit", "label": "Send answer"},
+            {"id": "deny", "label": "Don't answer"}
+        ])
+        .to_string(),
+        form_json: Some(
+            json!({"fields": [
+                {"type": "select", "id": "q:0", "label": "Indentation?", "mode": "one",
+                 "choices": [{"value": "Tabs"}, {"value": "Spaces"}],
+                 "notes": {"label": "Notes"}},
+                {"type": "select", "id": "q:1", "label": "Linters?", "mode": "many",
+                 "required": true,
+                 "choices": [{"value": "ESLint"}, {"value": "Clippy"}]}
+            ]})
+            .to_string(),
+        ),
+        default_option: Some("deny".to_string()),
+        risk: Some("safe".to_string()),
+        allow_persistent: true,
+        expires_at_ms: None,
+        status: "pending".to_string(),
+        chosen_option: None,
+        resolved_input_json: None,
+        resolved_by: None,
+        created_at_ms: 1_700_000_000_000,
+        resolved_at_ms: None,
+    };
+    server
+        .state
+        .store
+        .create_pending_request(&request)
+        .await
+        .expect("request must persist")
+}
+
+/// A form has to survive the journal, because a request may be answered by a client
+/// that attached long after it was raised — and a client cannot render what it was
+/// never told was being asked for.
+#[tokio::test]
+async fn a_declared_form_reaches_a_client_that_lists_the_request() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    raise_question(&server, &session_id).await;
+
+    let response = server
+        .get_authed(&format!("/api/v1/sessions/{}/requests", session_id))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+
+    let form: serde_json::Value =
+        serde_json::from_str(body[0]["formJson"].as_str().expect("a form must be listed"))
+            .unwrap();
+    assert_eq!(form["fields"].as_array().unwrap().len(), 2);
+    assert_eq!(form["fields"][1]["mode"], "many");
+}
+
+/// A well-formed answer is accepted and recorded. Without a live link the claim
+/// still happens and the forward reports there is nothing waiting — which is the
+/// correct order, and what the sibling race test relies on.
+#[tokio::test]
+async fn a_form_answer_is_recorded_with_its_values_and_notes() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    let request = raise_question(&server, &session_id).await;
+
+    let response = server
+        .post_authed(
+            &format!("/api/v1/requests/{}/resolve", request.id),
+            json!({"option": "submit", "input": {
+                "values": {"q:0": "Tabs", "q:1": ["ESLint"]},
+                "notes": {"q:0": "only for generated files"}
+            }}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(response).await["error"]["code"], "LINK_GONE");
+
+    let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "resolved");
+    let recorded = stored.resolved_input_json.expect("the answer must be recorded");
+    assert!(recorded.contains("Tabs"), "{recorded}");
+    assert!(recorded.contains("only for generated files"), "{recorded}");
+}
+
+/// Every way an answer can fail to fit the form it answers, refused before the
+/// claim. The ordering is the point: a malformed answer that reached the UPDATE
+/// would mark the request resolved and leave the agent blocked on a question nobody
+/// can answer any more.
+#[tokio::test]
+async fn an_answer_that_does_not_fit_the_form_is_refused_and_leaves_it_open() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    let cases = [
+        // A field the request never asked for.
+        json!({"values": {"nope": "Tabs"}, "notes": {}}),
+        // A single-select handed a list, and a multi-select handed a bare string.
+        json!({"values": {"q:0": ["Tabs"], "q:1": ["ESLint"]}}),
+        json!({"values": {"q:0": "Tabs", "q:1": "ESLint"}}),
+        // A value outside the offered choices, on a field that did not allow one.
+        json!({"values": {"q:0": "Semicolons", "q:1": ["ESLint"]}}),
+        // Notes on a field that never offered them.
+        json!({"values": {"q:1": ["ESLint"]}, "notes": {"q:1": "sneaky"}}),
+        // A required field left unanswered.
+        json!({"values": {"q:0": "Tabs"}}),
+    ];
+
+    for input in cases {
+        let request = raise_question(&server, &session_id).await;
+        let response = server
+            .post_authed(
+                &format!("/api/v1/requests/{}/resolve", request.id),
+                json!({"option": "submit", "input": input.clone()}),
+            )
+            .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "must refuse {input}"
+        );
+
+        let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.status, "pending",
+            "a refused answer must leave the request answerable: {input}"
+        );
+    }
+}
+
+/// Declining carries no answers, so a required field cannot become a trap the user
+/// has no way out of.
+#[tokio::test]
+async fn declining_a_form_does_not_require_it_to_be_complete() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    let request = raise_question(&server, &session_id).await;
+
+    let response = server
+        .post_authed(
+            &format!("/api/v1/requests/{}/resolve", request.id),
+            json!({"option": "deny"}),
+        )
+        .await;
+    // Claimed, then reported as having nowhere to go — not refused as incomplete.
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(response).await["error"]["code"], "LINK_GONE");
+
+    let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    assert_eq!(stored.chosen_option.as_deref(), Some("deny"));
+}
+
+/// An approval declares no form, and must keep behaving exactly as it did: its
+/// subject is one proposed tool input, which a client renders from `detail`.
+#[tokio::test]
+async fn a_request_with_no_form_still_accepts_an_edited_proposal() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    let request = raise_request(&server, &session_id, "Bash").await;
+
+    let response = server
+        .post_authed(
+            &format!("/api/v1/requests/{}/resolve", request.id),
+            json!({"option": "allow", "input": {"command": "rm -rf build/tmp"}}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "resolved");
+    assert!(stored.form_json.is_none());
 }

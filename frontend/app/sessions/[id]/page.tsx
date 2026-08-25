@@ -478,8 +478,10 @@ export default function SessionPage() {
 
       {/* More than one request can be open at once — a dismissed approval stays
           pending and the agent stays blocked — so the count is stated rather than
-          leaving the others invisible behind the first. */}
-      {agent.requests.length > 1 && (
+          leaving the others invisible behind the first. Only while a panel is
+          showing: once one is dismissed the composer reports the whole backlog, and
+          two counts of the same thing in one column is worse than either. */}
+      {pendingRequest && agent.requests.length > 1 && (
         <p className="border-t border-line bg-canvas px-3 pt-2 text-2xs text-ink-muted">
           {t("approval.pendingCount", { count: agent.requests.length })}
         </p>
@@ -545,6 +547,12 @@ export default function SessionPage() {
         // The running turn is named as a precondition, so a steer that races the
         // turn boundary is refused rather than delivered into the next conversation.
         onSteer={(value) => agent.steer(value, liveTurnId ?? undefined)}
+        // Dismissing hides a panel without answering, so the agent stays blocked.
+        // Reported here because with the panel gone nothing else on screen would
+        // say so, and a blocked session that merely looks idle leaves the user
+        // waiting for an agent that is waiting for them.
+        blockedCount={pendingRequest ? 0 : agent.requests.length}
+        onShowBlocked={() => setDismissedRequest(null)}
       />
 
     </>

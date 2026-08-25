@@ -389,6 +389,69 @@ lid strands an agent forever. If the link dies with requests outstanding, they
 are journaled as `abandoned` so the timeline explains why the turn stopped
 instead of showing an unexplained gap.
 
+### Request forms
+
+An approval asks one thing about one proposed input, and the shape above is enough
+for it. A *question* is not that: the agent authored the choices, there may be
+several questions in one ask, and the answer can legitimately be something the agent
+did not offer. A request therefore declares the input it wants collected, in an
+optional `form`:
+
+```json
+{"t":"request","id":"r7","kind":"choice","title":"Two questions",
+ "form":{"fields":[
+   {"id":"q:0","type":"select","label":"Indentation?","mode":"one",
+    "choices":[{"value":"Tabs","description":"Tab characters"},
+               {"value":"Spaces","description":"Space characters"}],
+    "allowOther":true,"notes":{"label":"Notes (optional)"}},
+   {"id":"q:1","type":"select","label":"Linters?","mode":"many",
+    "choices":[{"value":"ESLint"},{"value":"Prettier"},{"value":"Clippy"}]}]},
+ "options":[{"id":"submit","label":"Submit"},
+            {"id":"deny","label":"Don't answer"}]}
+```
+
+```json
+{"t":"resolve","id":"r7","option":"submit",
+ "input":{"values":{"q:0":"Tabs","q:1":["ESLint","Prettier"]},
+          "notes":{"q:0":"only for generated files"}}}
+```
+
+Field types are `select` (with `mode` `one` or `many`, and `choices` carrying the
+agent's own `description` — on a question the description is most of what makes the
+options readable) and `text` (with `multiline`, `prefill`, `placeholder`). A field
+may declare `required`, `allowOther` — permitting a value outside `choices`, which is
+a real answer rather than a note — and `notes`, a free-text annotation attached to
+the pick rather than replacing it.
+
+**A form is declared, never inferred.** Before this existed, a client guessed what
+to collect by sniffing `detail` for field names it recognized (`command`,
+`file_path`, `url`, …). A question's detail carries none of those, so a `choice`
+rendered as buttons with nowhere to type and an `elicitation` — whose entire purpose
+is free text — rendered as a read-only dump of its own placeholder. Guessing cannot
+be made to work: only the agent knows what it is asking for. **Absent means the
+older behaviour**, which keeps a minimal adapter and every existing approval correct.
+
+**`options` are verbs; fields carry data.** A `choice` previously overloaded
+`options` as both the answer and the submit button, which is why picking one had to
+submit immediately and why a note had nowhere to live. With a form present, an option
+is what to *do* with the answer — submit it, or decline to give one.
+
+The server validates `input` against the stored form before claiming the request:
+an unknown field id, a `one` field given an array, a value outside `choices` where
+`allowOther` is not set, or a missing `required` field is refused. This is the same
+rule that governs `options` and `set_config` values, and for the same reason — the
+client renders whatever an agent it has never seen reported, so the server is what
+keeps a malformed answer from reaching a vendor CLI that will do something undefined
+with it.
+
+**Answering completely is not cosmetic.** Measured against `claude` 2.1.238: a reply
+carrying every question's answer is delivered to the model as *"Your questions have
+been answered … You can now continue with these answers in mind"*, while a reply
+that answers one of two arrives as the weaker *"The user answered …"*. Forwarding
+only the first question of a multi-question ask therefore degrades the answer the
+model acts on, which is why one form carries N fields rather than one question.
+
+
 ## Events the adapter sends
 
 The event kinds are `thinking`, `assistant`, `tool_call`, `tool_result`, `usage`,

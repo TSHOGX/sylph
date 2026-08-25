@@ -291,6 +291,275 @@ impl CapabilityFacets {
     }
 }
 
+/// One choice within a [`FormField::Select`].
+///
+/// Separate from [`ConfigChoice`] despite the similar shape: a config choice names a
+/// setting's value and carries `name` for display, while this names an *answer* the
+/// agent authored. Merging them would tie the request vocabulary to the config
+/// vocabulary, and the two change for unrelated reasons.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormChoice {
+    pub value: String,
+    /// Display text, when it differs from the value. Absent means render the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// What choosing this means.
+    ///
+    /// Load-bearing rather than decorative on a question the agent authored:
+    /// "Tabs" and "Spaces" say far less than the sentences beside them, and that
+    /// difference is most of what makes a terminal's picker readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Whether a select takes one answer or several.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectMode {
+    One,
+    Many,
+}
+
+impl Default for SelectMode {
+    /// One, so a field that omits `mode` is single-select. The permissive default
+    /// matters in the safe direction: reading a single answer as a list would send
+    /// an agent an array where it expected a string.
+    fn default() -> Self {
+        Self::One
+    }
+}
+
+/// A free-text annotation a user may attach to an answer.
+///
+/// Distinct from the answer itself. `claude` carries these as `annotations[question]
+/// .notes` alongside the picked label, and the two are not interchangeable: a note
+/// explains or qualifies a pick, while replacing the pick with prose loses which
+/// option was chosen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotesSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+}
+
+/// One input a request wants collected.
+///
+/// `rename_all_fields` is required, not tidy: with only the container `rename_all`
+/// the *variant names* are renamed and the fields inside them are not, so
+/// `allowOther` on the wire parses as `false` while everything compiles and every
+/// non-variant field works. This is the same trap [`ConfigOption`] documents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum FormField {
+    Select {
+        id: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default)]
+        mode: SelectMode,
+        #[serde(default)]
+        choices: Vec<FormChoice>,
+        /// Whether an answer outside `choices` is allowed.
+        ///
+        /// `claude`'s question dialog always offers an "Other" row, and what a user
+        /// types there is the answer — not a note on one of the offered options. A
+        /// client must be able to send it, and the server must not refuse it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_other: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        other_label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notes: Option<NotesSpec>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        required: bool,
+    },
+    Text {
+        id: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        multiline: bool,
+        /// Text to start from, which the user edits. `pi` sends this for its
+        /// `editor` dialog, where discarding it would lose the draft being revised.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefill: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        required: bool,
+    },
+}
+
+impl FormField {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Select { id, .. } | Self::Text { id, .. } => id,
+        }
+    }
+
+    fn is_required(&self) -> bool {
+        match self {
+            Self::Select { required, .. } | Self::Text { required, .. } => *required,
+        }
+    }
+
+    /// Whether this field accepts `value`, and why not when it does not.
+    ///
+    /// The error text names the field and what was wrong with the value rather than
+    /// saying the field is unknown: an error that names the wrong layer sends the
+    /// investigation to the wrong layer, which is exactly what made a refused config
+    /// write read as a dead control.
+    fn accepts(&self, value: &serde_json::Value) -> Result<(), String> {
+        match self {
+            Self::Select {
+                id,
+                mode,
+                choices,
+                allow_other,
+                ..
+            } => {
+                let offered = |candidate: &str| {
+                    *allow_other
+                        || choices.is_empty()
+                        || choices.iter().any(|choice| choice.value == candidate)
+                };
+
+                match mode {
+                    SelectMode::One => {
+                        let Some(candidate) = value.as_str() else {
+                            return Err(format!("'{id}' takes a single string answer"));
+                        };
+                        if !offered(candidate) {
+                            return Err(format!("'{candidate}' is not a choice '{id}' offered"));
+                        }
+                    }
+                    SelectMode::Many => {
+                        let Some(items) = value.as_array() else {
+                            return Err(format!("'{id}' takes a list of answers"));
+                        };
+                        for item in items {
+                            let Some(candidate) = item.as_str() else {
+                                return Err(format!("'{id}' takes a list of strings"));
+                            };
+                            if !offered(candidate) {
+                                return Err(format!("'{candidate}' is not a choice '{id}' offered"));
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Self::Text { id, .. } => {
+                if value.is_string() {
+                    Ok(())
+                } else {
+                    Err(format!("'{id}' takes text"))
+                }
+            }
+        }
+    }
+
+    /// Whether `value` counts as an answer for a `required` field.
+    ///
+    /// Empty is unanswered rather than answered-with-nothing: an agent that marked a
+    /// field required is blocked until it has something, and forwarding `""` would
+    /// report an answer it never received.
+    fn is_answered(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::String(text) => !text.trim().is_empty(),
+            serde_json::Value::Array(items) => !items.is_empty(),
+            serde_json::Value::Null => false,
+            _ => true,
+        }
+    }
+}
+
+/// The input a request wants collected, declared by the agent that raised it.
+///
+/// Declared rather than inferred, and that is the whole point. A client used to guess
+/// from `detail`'s field names, which cannot work: only the agent knows what it is
+/// asking for, so a question rendered with nowhere to type and an `elicitation`
+/// rendered as a read-only dump of its own placeholder. See
+/// `docs/session-protocol.md` § Request forms.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Form {
+    #[serde(default)]
+    pub fields: Vec<FormField>,
+}
+
+/// A client's answers to a [`Form`], as they travel on `resolve`'s `input`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormAnswer {
+    #[serde(default)]
+    pub values: std::collections::HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub notes: std::collections::HashMap<String, String>,
+}
+
+impl Form {
+    pub fn field(&self, id: &str) -> Option<&FormField> {
+        self.fields.iter().find(|field| field.id() == id)
+    }
+
+    /// Whether `input` is a well-formed answer to this form.
+    ///
+    /// Validated here for the same reason `options` and a `set_config` value are: the
+    /// client renders whatever an agent it has never seen reported, so the server is
+    /// what keeps a malformed answer from reaching a vendor CLI whose handling of one
+    /// is undefined. Checked *before* the request is claimed, so a rejected answer
+    /// does not consume the single-winner UPDATE and leave the agent unanswerable.
+    pub fn validate(&self, input: Option<&serde_json::Value>) -> Result<(), String> {
+        let Some(input) = input else {
+            // No input at all is only an answer if nothing was required. A form whose
+            // fields are all optional is legitimately answerable by submitting it
+            // empty.
+            return match self.fields.iter().find(|field| field.is_required()) {
+                Some(field) => Err(format!("'{}' is required", field.id())),
+                None => Ok(()),
+            };
+        };
+
+        let answer: FormAnswer = serde_json::from_value(input.clone())
+            .map_err(|_| "the answer is not shaped like a form answer".to_string())?;
+
+        for (id, value) in &answer.values {
+            let Some(field) = self.field(id) else {
+                return Err(format!("'{id}' is not a field this request asked for"));
+            };
+            field.accepts(value)?;
+        }
+
+        for id in answer.notes.keys() {
+            match self.field(id) {
+                Some(FormField::Select { notes: Some(_), .. }) => {}
+                Some(_) => return Err(format!("'{id}' does not take notes")),
+                None => return Err(format!("'{id}' is not a field this request asked for")),
+            }
+        }
+
+        for field in self.fields.iter().filter(|field| field.is_required()) {
+            let answered = answer
+                .values
+                .get(field.id())
+                .is_some_and(FormField::is_answered);
+            if !answered {
+                return Err(format!("'{}' is required", field.id()));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// An option offered on an adapter request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -336,6 +605,14 @@ pub struct AdapterRequest {
     pub detail: Option<serde_json::Value>,
     #[serde(default)]
     pub options: Vec<RequestOption>,
+    /// The input this request wants collected, when it declares one.
+    ///
+    /// Absent means the older behaviour, where a client renders `detail` and edits
+    /// whichever field it recognizes — which is right for an approval, whose whole
+    /// subject is one proposed tool input. See `docs/session-protocol.md`
+    /// § Request forms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<Form>,
     /// Which option applies if the user declines to choose. Deliberately not
     /// auto-applied by the server: a timeout that silently approves would remove
     /// the user from the decision the protocol exists to give them.
@@ -739,6 +1016,178 @@ mod tests {
         assert_eq!(request.options.len(), 2);
         assert!(request.options[1].persistent);
         assert_eq!(request.risk.as_deref(), Some("destructive"));
+    }
+
+    /// A form is the input a request declares it wants, and every part of a field
+    /// has to survive the parse. `allowOther` is the one worth naming: it lives
+    /// inside an enum variant, where `rename_all` alone does not reach — it would
+    /// read as `false` while everything compiled, silently refusing the answer a
+    /// user typed into an "Other" row.
+    #[test]
+    fn a_request_form_parses_every_part_of_its_fields() {
+        let line = r#"{"t":"request","id":"r7","kind":"choice","title":"Two questions",
+            "form":{"fields":[
+              {"type":"select","id":"q:0","label":"Indentation?","mode":"one",
+               "choices":[{"value":"Tabs","description":"Tab characters"},
+                          {"value":"Spaces"}],
+               "allowOther":true,"notes":{"label":"Notes"}},
+              {"type":"select","id":"q:1","label":"Linters?","mode":"many",
+               "choices":[{"value":"ESLint"},{"value":"Clippy"}],"required":true},
+              {"type":"text","id":"why","label":"Why?","multiline":true,
+               "prefill":"because"}]},
+            "options":[{"id":"submit","label":"Submit"}]}"#;
+        let Some(Inbound::Request { request, .. }) = parse_inbound(line) else {
+            panic!("must parse as a request");
+        };
+        let form = request.form.expect("the form must parse");
+        assert_eq!(form.fields.len(), 3);
+
+        let FormField::Select {
+            mode,
+            allow_other,
+            choices,
+            notes,
+            ..
+        } = &form.fields[0]
+        else {
+            panic!("the first field is a select");
+        };
+        assert_eq!(*mode, SelectMode::One);
+        assert!(allow_other, "allowOther must survive the variant rename");
+        assert_eq!(choices[0].description.as_deref(), Some("Tab characters"));
+        assert!(choices[1].description.is_none());
+        assert!(notes.is_some());
+
+        let FormField::Select { mode, .. } = &form.fields[1] else {
+            panic!("the second field is a select");
+        };
+        assert_eq!(*mode, SelectMode::Many);
+
+        let FormField::Text {
+            multiline, prefill, ..
+        } = &form.fields[2]
+        else {
+            panic!("the third field is text");
+        };
+        assert!(multiline);
+        assert_eq!(prefill.as_deref(), Some("because"));
+    }
+
+    /// Absent means the older behaviour, which is what keeps every approval — and
+    /// every already-stored request — correct under the new code.
+    #[test]
+    fn a_request_without_a_form_declares_none() {
+        let line = r#"{"t":"request","id":"r8","kind":"approval","title":"x"}"#;
+        let Some(Inbound::Request { request, .. }) = parse_inbound(line) else {
+            panic!("must parse as a request");
+        };
+        assert!(request.form.is_none());
+    }
+
+    /// A field that omits `mode` is single-select. The default matters in the safe
+    /// direction: reading one answer as a list would hand an agent an array where it
+    /// expected a string.
+    #[test]
+    fn a_select_field_without_a_mode_takes_one_answer() {
+        let field: FormField =
+            serde_json::from_str(r#"{"type":"select","id":"q","choices":[{"value":"a"}]}"#)
+                .unwrap();
+        let FormField::Select { mode, .. } = &field else {
+            panic!("must parse as a select");
+        };
+        assert_eq!(*mode, SelectMode::One);
+    }
+
+    fn two_field_form() -> Form {
+        serde_json::from_str(
+            r#"{"fields":[
+                 {"type":"select","id":"q:0","mode":"one",
+                  "choices":[{"value":"Tabs"},{"value":"Spaces"}],
+                  "notes":{"label":"Notes"}},
+                 {"type":"select","id":"q:1","mode":"many",
+                  "choices":[{"value":"ESLint"},{"value":"Clippy"}]}]}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_well_formed_answer_to_a_form_is_accepted() {
+        let form = two_field_form();
+        let answer = serde_json::json!({
+            "values": {"q:0": "Tabs", "q:1": ["ESLint", "Clippy"]},
+            "notes": {"q:0": "only for generated files"},
+        });
+        assert!(form.validate(Some(&answer)).is_ok());
+    }
+
+    /// The server refuses what the client should not have sent, for the same reason
+    /// it refuses an option the agent never offered: an unrecognized value reaching a
+    /// vendor CLI does something undefined, and the layer that is not at fault is the
+    /// one that gets debugged.
+    #[test]
+    fn an_answer_the_form_did_not_ask_for_is_refused() {
+        let form = two_field_form();
+
+        let unknown = serde_json::json!({"values": {"nope": "Tabs"}});
+        assert!(form.validate(Some(&unknown)).is_err());
+
+        // A single-select handed a list, and a multi-select handed a bare string.
+        // Either would reach the adapter as the wrong JSON type.
+        let listed = serde_json::json!({"values": {"q:0": ["Tabs"]}});
+        assert!(form.validate(Some(&listed)).is_err());
+        let scalar = serde_json::json!({"values": {"q:1": "ESLint"}});
+        assert!(form.validate(Some(&scalar)).is_err());
+
+        // A value outside `choices` on a field that did not permit one.
+        let invented = serde_json::json!({"values": {"q:0": "Semicolons"}});
+        assert!(form.validate(Some(&invented)).is_err());
+
+        // Notes on a field that never offered them.
+        let noted = serde_json::json!({"values": {}, "notes": {"q:1": "hmm"}});
+        assert!(form.validate(Some(&noted)).is_err());
+    }
+
+    /// `allowOther` is what the terminal's "Other" row sends, and it is an answer
+    /// rather than a note — so a value outside `choices` has to be accepted where the
+    /// agent said it may be.
+    #[test]
+    fn a_field_allowing_other_accepts_a_value_it_never_offered() {
+        let form: Form = serde_json::from_str(
+            r#"{"fields":[{"type":"select","id":"q","mode":"one",
+                 "choices":[{"value":"Tabs"}],"allowOther":true}]}"#,
+        )
+        .unwrap();
+        let answer = serde_json::json!({"values": {"q": "Tabs in Makefiles only"}});
+        assert!(form.validate(Some(&answer)).is_ok());
+    }
+
+    /// Empty is unanswered, not answered-with-nothing. An agent that marked a field
+    /// required is blocked until it has something, and forwarding `""` would report
+    /// an answer it never received.
+    #[test]
+    fn a_required_field_must_actually_be_answered() {
+        let form: Form = serde_json::from_str(
+            r#"{"fields":[{"type":"text","id":"why","required":true}]}"#,
+        )
+        .unwrap();
+
+        assert!(form.validate(None).is_err());
+        assert!(form
+            .validate(Some(&serde_json::json!({"values": {}})))
+            .is_err());
+        assert!(form
+            .validate(Some(&serde_json::json!({"values": {"why": "   "}})))
+            .is_err());
+        assert!(form
+            .validate(Some(&serde_json::json!({"values": {"why": "because"}})))
+            .is_ok());
+    }
+
+    /// A form whose fields are all optional is legitimately answerable by submitting
+    /// it empty, so no input at all cannot be a blanket refusal.
+    #[test]
+    fn an_all_optional_form_accepts_an_empty_answer() {
+        assert!(two_field_form().validate(None).is_ok());
     }
 
     /// The rule that makes version skew survivable: a message type this server

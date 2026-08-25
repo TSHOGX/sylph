@@ -158,6 +158,25 @@ def soul_path():
     return default if os.path.isfile(default) else ""
 
 
+def form_answer_of(user_input):
+    """The `{values, notes}` a client sent on `resolve`, defensively.
+
+    The server validates a form answer against the declared form, so a well-behaved
+    client's payload is already the right shape. This still tolerates a missing or
+    wrongly-typed part rather than raising: an exception here would leave the turn
+    parked until the CLI's own deadline, which reads as the agent hanging, and a
+    partial answer is worth forwarding over none.
+    """
+    if not isinstance(user_input, dict):
+        return {}, {}
+    values = user_input.get("values")
+    notes = user_input.get("notes")
+    return (
+        values if isinstance(values, dict) else {},
+        notes if isinstance(notes, dict) else {},
+    )
+
+
 class Session:
     """One `claude` process and the translation around it."""
 
@@ -180,11 +199,12 @@ class Session:
         # vendor request id -> 'can_use_tool' | 'dialog'. A permission and a dialog
         # take different response shapes, and guessing wrong parks the turn.
         self.request_kinds = {}
-        # vendor request id -> the labels AskUserQuestion offered, so a picked
-        # index can be resolved back to the label the CLI expects.
-        self.dialog_options = {}
-        # vendor request id -> the AskUserQuestion input, so a picked option can
-        # be written back into the shape the tool expects.
+        # vendor request id -> the AskUserQuestion question texts, in the order they
+        # were forwarded. The text is the CLI's own key into `answers`, so answering
+        # needs the index-to-text map back.
+        self.question_texts = {}
+        # vendor request id -> the AskUserQuestion input, so the answers can be
+        # written back into the shape the tool expects.
         self.question_inputs = {}
         self.lock = threading.Lock()
 
@@ -320,16 +340,16 @@ class Session:
         allow = option in ("allow", "allow_always")
 
         if kind == "question":
-            labels = self.dialog_options.pop(vendor_id, [])
-            picked = None
-            if str(option).startswith("option:"):
-                index = int(str(option).split(":", 1)[1])
-                if index < len(labels):
-                    picked = labels[index]
+            texts = self.question_texts.pop(vendor_id, [])
+            base = dict(self.question_inputs.pop(vendor_id, {}) or {})
 
-            if picked is None:
+            if option in ("deny", "cancel"):
                 # Declining to answer is a denied tool call, which the agent
                 # handles as "the user did not pick one" rather than as an error.
+                # `message`, never `feedback`: measured against claude 2.1.238, a
+                # `feedback` key here is rejected as a malformed permission result
+                # and the model is told the callback is broken — so the user's
+                # refusal is reported as an integration bug.
                 self.to_claude({
                     "type": "control_response",
                     "response": {"subtype": "success", "request_id": vendor_id,
@@ -338,20 +358,48 @@ class Session:
                 })
                 return
 
-            # Allowed, with the answer written into the tool input. The CLI reads
-            # the choice back from `updatedInput`, so this is the channel by which
-            # a picked option reaches the model.
-            base = dict(self.question_inputs.pop(vendor_id, {}) or {})
-            questions = base.get("questions") or []
-            if questions:
-                questions = [dict(q) for q in questions]
-                questions[0]["selectedOptions"] = [picked]
-                base["questions"] = questions
+            # The answers, keyed by question *text*. This is the CLI's own key: it
+            # builds the tool result by reading `answers[question]`, and a reply that
+            # does not populate it is reported to the model as "The user did not
+            # answer the questions" — which is exactly the bug this replaced. The
+            # previous shape wrote `questions[0].selectedOptions`, a key that does not
+            # occur anywhere in the CLI binary, so a correct pick was silently lost.
+            values, notes = form_answer_of(user_input)
+            answers = {}
+            annotations = {}
+            for index, text in enumerate(texts):
+                value = values.get("q:{}".format(index))
+                if isinstance(value, list):
+                    # Multi-select arrives as a list and is delivered comma-joined,
+                    # which is what the tool's output schema documents and what its
+                    # own parser reads back. The flattening happens here because it
+                    # is a vendor detail; the protocol carries a list.
+                    picked = ", ".join(str(item) for item in value if str(item).strip())
+                elif value is None:
+                    picked = ""
+                else:
+                    picked = str(value)
+                if picked:
+                    answers[text] = picked
+                note = (notes.get("q:{}".format(index)) or "").strip()
+                if note:
+                    annotations[text] = {"notes": note}
+
+            updated = dict(base)
+            updated["answers"] = answers
+            if annotations:
+                updated["annotations"] = annotations
+            if not answers and not annotations:
+                # Submitted with nothing filled in. Sent as `response` rather than as
+                # empty answers, because the CLI reads that as "the user replied in
+                # prose" instead of "the user answered nothing".
+                updated["response"] = "The user submitted no answer."
+
             self.to_claude({
                 "type": "control_response",
                 "response": {"subtype": "success", "request_id": vendor_id,
                              "response": {"behavior": "allow",
-                                          "updatedInput": base or None}},
+                                          "updatedInput": updated}},
             })
             return
 
@@ -377,21 +425,16 @@ class Session:
         # A dialog. `cancelled` is the CLI's own spelling for "the user declined",
         # and it is distinct from a permission's `deny`: the flow was abandoned
         # rather than refused, so Claude continues differently.
-        if not allow and option != "submit" and not str(option).startswith("option:"):
+        if not allow and option not in ("submit",):
             body = {"behavior": "cancelled"}
-        elif str(option).startswith("option:"):
-            # AskUserQuestion: the index the user picked, resolved back to the
-            # option's own label — the CLI matches on what it offered, not on an
-            # index it never sent us.
-            index = int(str(option).split(":", 1)[1])
-            offered = self.dialog_options.pop(vendor_id, [])
-            chosen = offered[index] if index < len(offered) else None
-            body = {"behavior": "completed",
-                    "result": {"choice": chosen} if chosen is not None else {}}
         else:
             body = {"behavior": "completed"}
             if user_input is not None:
-                body["result"] = user_input
+                # A form answer is unwrapped to the values the dialog asked for. The
+                # `{values, notes}` envelope is Sylph's transport, not a shape any
+                # vendor dialog expects back.
+                values, _ = form_answer_of(user_input)
+                body["result"] = values or user_input
 
         self.to_claude({
             "type": "control_response",
@@ -539,43 +582,72 @@ class Session:
         })
 
     def _forward_question(self, vendor_id, request):
-        """Turn an AskUserQuestion tool call into a choice the user can make.
+        """Turn an AskUserQuestion tool call into a form the user can fill in.
 
-        Only the first question is offered. The tool can carry several, but Sylph's
-        request shape is one question with one set of options, and answering a
-        multi-question call partially would hand Claude an incomplete reply. The
-        remaining questions stay in `detail`, so a client can show what else was
-        asked rather than silently dropping it.
+        Every question is forwarded, as one `select` field each. Sending only the
+        first was a measurable loss rather than a simplification: answering all of
+        them is reported to the model as "Your questions have been answered … you can
+        now continue with these answers in mind", while answering one of two arrives
+        as the weaker "The user answered …". The tool caps a call at four questions,
+        so the panel stays finite.
+
+        Field ids are positional (`q:0`), and `question_texts` keeps the index-to-text
+        map. The text is the CLI's own key into `answers`, so it has to survive the
+        round trip — but sending it as the field id would put a whole sentence, and
+        whatever punctuation it contains, into an identifier a client echoes back.
         """
         payload = request.get("input") or {}
         questions = payload.get("questions") or []
-        first = questions[0] if questions else {}
 
-        labels = []
-        options = []
-        for index, option in enumerate(first.get("options") or []):
-            if isinstance(option, dict):
-                label = option.get("label") or ""
-                description = option.get("description")
-            else:
-                label, description = str(option), None
-            labels.append(label)
-            options.append({
-                "id": "option:{}".format(index),
-                "label": label or "Option {}".format(index + 1),
-                # Carried so a client can explain a choice rather than only name
-                # it, which is most of what makes the terminal's picker readable.
-                **({"description": description} if description else {}),
-            })
+        fields = []
+        texts = []
+        for index, question in enumerate(questions):
+            if not isinstance(question, dict):
+                continue
+            text = question.get("question") or "Question {}".format(index + 1)
+            texts.append(text)
+            multi = bool(question.get("multiSelect"))
 
-        # Deny is still offered: the user must be able to decline to answer, and
-        # the agent handles that as a refused tool call.
-        options.append({"id": "deny", "label": "Don't answer"})
+            choices = []
+            for option in question.get("options") or []:
+                if isinstance(option, dict):
+                    label = option.get("label") or ""
+                    description = option.get("description")
+                else:
+                    label, description = str(option), None
+                if not label:
+                    continue
+                # `value` is the label, because the label is what the CLI matches on
+                # when it builds the tool result — it never sent us an id.
+                choice = {"value": label}
+                if description:
+                    choice["description"] = description
+                choices.append(choice)
 
-        self.dialog_options[vendor_id] = labels
+            field = {
+                "type": "select",
+                "id": "q:{}".format(index),
+                "label": text,
+                "mode": "many" if multi else "one",
+                "choices": choices,
+                # The CLI's own dialog always offers an "Other" row and treats what
+                # is typed there as the answer. Withholding it here would make this
+                # client strictly less able to answer than the terminal.
+                "allowOther": True,
+            }
+            if question.get("header"):
+                field["description"] = question["header"]
+            if not multi:
+                # Notes ride in `annotations`, which the CLI reads alongside the pick
+                # rather than instead of it. Offered only on a single-select, matching
+                # the terminal, where a note qualifies one chosen option.
+                field["notes"] = {}
+            fields.append(field)
+
+        self.question_texts[vendor_id] = texts
         self.question_inputs[vendor_id] = payload
         # Answered through the permission path, because that is what it is on the
-        # wire — the option index is translated back into the tool input.
+        # wire: the answers are written into the tool input.
         self.request_kinds[vendor_id] = "question"
 
         emit({
@@ -584,13 +656,17 @@ class Session:
             "kind": "choice",
             "tool": "AskUserQuestion",
             "toolUseId": request.get("tool_use_id"),
-            "title": first.get("question") or "Claude has a question",
-            "detail": {
-                "header": first.get("header"),
-                "multiSelect": bool(first.get("multiSelect")),
-                "questions": questions,
-            },
-            "options": options,
+            "title": (texts[0] if len(texts) == 1 else None)
+                     or "Claude has a question",
+            "detail": {"questions": questions},
+            "form": {"fields": fields},
+            # Verbs, not answers: the form carries what was chosen, so an option is
+            # what to do with it. Declining is still offered — the user must be able
+            # to refuse to answer, which the agent handles as a denied tool call.
+            "options": [
+                {"id": "submit", "label": "Send answer"},
+                {"id": "deny", "label": "Don't answer"},
+            ],
             "default": "deny",
             "risk": "safe",
         })
@@ -608,30 +684,14 @@ class Session:
         payload = request.get("payload") or {}
         self.request_kinds[vendor_id] = "dialog"
 
-        # AskUserQuestion: the agent offers concrete options, and forwarding them
-        # verbatim is the whole point — this is the one dialog where the *agent*
-        # decided what the choices are.
-        if kind == "permission_ask_user_question":
-            questions = payload.get("questions") or []
-            first = questions[0] if questions else {}
-            options = []
-            labels = []
-            for index, option in enumerate(first.get("options") or []):
-                label = option.get("label") if isinstance(option, dict) else str(option)
-                labels.append(label)
-                options.append({"id": "option:{}".format(index), "label": label or "Option"})
-            options.append({"id": "cancel", "label": "Cancel"})
-            self.dialog_options[vendor_id] = labels
-            emit({
-                "t": "request",
-                "id": vendor_id,
-                "kind": "choice",
-                "title": first.get("question") or "Claude has a question",
-                "detail": {"header": first.get("header"), "questions": questions},
-                "options": options,
-                "default": "cancel",
-            })
-            return
+        # Note there is deliberately no `permission_ask_user_question` branch here.
+        # The kind is declared at `initialize` — the declaration is what stops the CLI
+        # degrading the flow to prose — but measured against claude 2.1.238 the ask
+        # arrives as a `can_use_tool` for the AskUserQuestion tool, carrying
+        # `requires_user_interaction: true`, and never as a `request_user_dialog`. A
+        # branch here was dead code that also answered in the wrong shape, and a
+        # plausible-looking dead branch is worse than none: it reads as the path being
+        # handled.
 
         if kind == "permission_enter_plan_mode":
             emit({

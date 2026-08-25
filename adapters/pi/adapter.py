@@ -570,16 +570,26 @@ class Session:
         if method == "select":
             offered = msg.get("options") or []
             self.ui_options[vendor_id] = offered
-            options = [
-                {"id": "option:{}".format(index), "label": str(label)}
-                for index, label in enumerate(offered)
-            ]
-            options.append({"id": "cancel", "label": "Cancel"})
             emit({
                 "t": "request", "id": vendor_id, "kind": "choice",
                 "title": msg.get("title") or "pi has a question",
                 "detail": {"options": offered},
-                "options": options, "default": "cancel",
+                # Declared as a form rather than as options-that-are-answers, so the
+                # pick and the act of sending it are separable — which is what lets a
+                # user change their mind before committing.
+                "form": {"fields": [{
+                    "type": "select",
+                    "id": "choice",
+                    "label": msg.get("title") or "Choose one",
+                    "mode": "one",
+                    "choices": [{"value": str(label)} for label in offered],
+                    "required": True,
+                }]},
+                "options": [
+                    {"id": "submit", "label": "Send"},
+                    {"id": "cancel", "label": "Cancel"},
+                ],
+                "default": "cancel",
                 "expiresAtMs": expires,
             })
             return
@@ -607,6 +617,19 @@ class Session:
                     "prefill": msg.get("prefill"),
                     "multiline": method == "editor",
                 },
+                # The whole purpose of this kind is free text, and before it declared
+                # a field there was nowhere to type: a client guessing from `detail`'s
+                # keys found none it recognized and rendered the placeholder as
+                # read-only JSON. `prefill` is carried because an `editor` dialog is
+                # usually a draft being revised, and discarding it loses the draft.
+                "form": {"fields": [{
+                    "type": "text",
+                    "id": "text",
+                    "label": msg.get("title") or "Your answer",
+                    "multiline": method == "editor",
+                    "prefill": msg.get("prefill") or "",
+                    "placeholder": msg.get("placeholder") or "",
+                }]},
                 "options": [
                     {"id": "submit", "label": "Submit"},
                     {"id": "cancel", "label": "Cancel"},
@@ -647,25 +670,19 @@ class Session:
                         "confirmed": True})
             return
 
-        if option.startswith("option:"):
-            offered = self.ui_options.pop(vendor_id, [])
-            try:
-                index = int(option.split(":", 1)[1])
-            except ValueError:
-                index = -1
-            if 0 <= index < len(offered):
-                self.to_pi({"type": "extension_ui_response", "id": vendor_id,
-                            "value": offered[index]})
-            else:
-                # An index that names nothing is a dismissal rather than a guess: a
-                # wrong pick would hand the extension a choice the user never made.
-                self.to_pi({"type": "extension_ui_response", "id": vendor_id,
-                            "cancelled": True})
+        # `submit` on a select, an input, or an editor. A select's answer is the label
+        # pi offered, echoed back verbatim: pi matches on the string it sent, and the
+        # server has already refused anything that was not among them.
+        offered = self.ui_options.pop(vendor_id, None)
+        value = text_of(user_input)
+        if offered is not None and value not in offered:
+            # A value naming nothing pi offered is a dismissal rather than a guess: a
+            # wrong pick would hand the extension a choice the user never made.
+            self.to_pi({"type": "extension_ui_response", "id": vendor_id,
+                        "cancelled": True})
             return
-
-        # `submit` on an input or editor: the text the user typed is the value.
         self.to_pi({"type": "extension_ui_response", "id": vendor_id,
-                    "value": text_of(user_input)})
+                    "value": value})
 
 
 def text_of(user_input):
@@ -675,6 +692,16 @@ def text_of(user_input):
     if isinstance(user_input, str):
         return user_input
     if isinstance(user_input, dict):
+        # A form answer, which is the shape a declared form resolves to. Only one
+        # field is ever declared here, so whichever value is present is the answer.
+        values = user_input.get("values")
+        if isinstance(values, dict):
+            for key in ("choice", "text"):
+                if isinstance(values.get(key), str):
+                    return values[key]
+            for candidate in values.values():
+                if isinstance(candidate, str):
+                    return candidate
         for key in ("value", "text", "input"):
             if isinstance(user_input.get(key), str):
                 return user_input[key]

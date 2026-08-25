@@ -357,3 +357,39 @@ test("a long catalogue is a filterable sheet that does not grab focus", async ({
   await expect(page.getByRole("button", { name: /^Provider model:/ })).toHaveText(/Qwen 3 Max/);
   expect(await overflowingElements(page)).toEqual([]);
 });
+
+/**
+ * An agent's question, on a phone.
+ *
+ * The densest surface in the app: two grouped choice lists, a note field, and a verb
+ * row, all inside a panel above the composer. Every part of it is new, and a layout
+ * bug here is invisible to the desktop suite — at 1280px the same markup is merely
+ * roomy.
+ */
+test("a request form fits the viewport and is answerable by tapping", async ({ page }) => {
+  await createSession(page);
+
+  await page.getByLabel("Message").fill("question please");
+  await page.getByRole("button", { name: "Send", exact: true }).tap();
+
+  const panel = page.getByTestId("approval-dialog");
+  await expect(panel).toBeVisible({ timeout: 15000 });
+  expect(await overflowingElements(page)).toEqual([]);
+
+  // Tapped rather than checked: the whole row is the label, which is what makes a
+  // 16px control usable in a 44px target.
+  await panel.getByRole("radio", { name: "Tabs" }).tap();
+  await panel.getByRole("checkbox", { name: "ESLint" }).tap();
+  await panel.getByLabel("Notes (optional)").fill("only generated files");
+  expect(await overflowingElements(page)).toEqual([]);
+
+  await panel.getByRole("button", { name: "Send answer" }).tap();
+
+  // The answer the agent received, which the fixture echoes into its result. A
+  // result is collapsed to one line by default, so its body is behind `more`.
+  const result = page.getByRole("region", { name: "Tool result" });
+  await expect(result).toBeVisible({ timeout: 15000 });
+  await result.getByRole("button", { name: "more" }).tap();
+  await expect(result).toContainText('"q:0": "Tabs"');
+  expect(await overflowingElements(page)).toEqual([]);
+});

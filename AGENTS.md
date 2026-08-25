@@ -500,6 +500,39 @@ a variant. Note also that a `devices["iPhone …"]` profile runs in *Chromium*
 unless WebKit is installed, so it claims iOS coverage it does not have — prefer
 a Chromium device profile and be explicit about what is therefore untested.
 
+**Writing an answer into a vendor field that does not exist is silent.** The
+`AskUserQuestion` reply set `questions[0].selectedOptions`, a key that occurs
+**nowhere** in the 321 MB `claude` binary. The CLI builds its tool result by reading
+`answers[question]`, found nothing there, and told the model *"The user did not answer
+the questions."* — so a correct pick, correctly rendered and correctly transported,
+presented as a UI that had lost the click. Nothing errored at any layer, and
+`verify-dialogs.py` passed throughout, because it asserted that a dialog *arrived* and
+that answering unblocked the turn — both true while the answer was being dropped.
+Grep the binary for the key and round-trip one real payload; and assert on the tool
+result the model actually reads, since "the panel closed" and "the answer arrived" are
+different claims and only the second is the feature. This is the fourth instance of
+the vendor-key family above.
+
+**A client cannot guess what input a request wants.** The approval dialog chose what
+to collect by sniffing `detail` for field names it knew (`command`, `file_path`,
+`url`). That is right for an approval, whose subject *is* one proposed tool input, and
+unfixable for anything else: a question's detail carries `questions`/`multiSelect`, so
+an agent's own question rendered as bare buttons with nowhere to type a note or an
+answer outside the list, and an `elicitation` — whose entire purpose is free text —
+rendered as a read-only dump of its own placeholder. Only the agent knows what it is
+asking for, so the request declares a `form` and the client renders exactly that.
+Note the shape this forced apart: `choice` had overloaded `options` as both the answer
+and the submit button, which is *why* picking had to submit immediately and why a note
+had nowhere to live. When a surface cannot express something, check whether one field
+is carrying two meanings.
+
+**Answering a multi-part vendor ask partially degrades the answer, quietly.**
+`AskUserQuestion` carries up to four questions; forwarding only the first left the
+rest unanswered, and the CLI's reply to the model differs by wording rather than by
+error: all answered is *"Your questions have been answered … you can now continue with
+these answers in mind"*, while one of two is the weaker *"The user answered …"*. Both
+look like success from the outside.
+
 ## Spec and Code Evolution
 
 Neither code nor spec wins automatically when they diverge. Stop, identify

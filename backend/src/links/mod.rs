@@ -598,6 +598,14 @@ impl LinkManager {
                 .map(|d| d.to_string())
                 .unwrap_or_else(|| "{}".to_string()),
             options_json: serde_json::to_string(&request.options).unwrap_or_else(|_| "[]".into()),
+            // Serialized rather than stored as sent, so what a client renders and what
+            // the server validates an answer against are the same bytes. A form that
+            // fails to serialize is dropped to `None`, which degrades to answering by
+            // option rather than leaving the request unrenderable.
+            form_json: request
+                .form
+                .as_ref()
+                .and_then(|form| serde_json::to_string(form).ok()),
             default_option: request.default.clone(),
             risk: request.risk.clone(),
             allow_persistent: request.allow_persistent,

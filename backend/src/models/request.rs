@@ -29,6 +29,14 @@ pub struct PendingRequest {
     pub title: String,
     pub detail_json: String,
     pub options_json: String,
+    /// The input this request declared it wants collected, as JSON.
+    ///
+    /// `None` is an approval: its subject is one proposed tool input, which a client
+    /// renders from `detail_json`. A request that declares a form is answered against
+    /// that form instead, and the server validates the answer against it — see
+    /// `docs/session-protocol.md` § Request forms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_option: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,6 +71,15 @@ impl PendingRequest {
 
     pub fn options(&self) -> serde_json::Value {
         serde_json::from_str(&self.options_json).unwrap_or_else(|_| serde_json::json!([]))
+    }
+
+    /// The declared form, when this request has one.
+    ///
+    /// A malformed stored form is treated as absent rather than as an error: the
+    /// request is still answerable through its options, and refusing to render it at
+    /// all would strand the agent over a display concern.
+    pub fn form(&self) -> Option<crate::adapter::wire::Form> {
+        serde_json::from_str(self.form_json.as_deref()?).ok()
     }
 
     pub fn is_open(&self) -> bool {

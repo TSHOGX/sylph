@@ -260,6 +260,15 @@ export interface PendingRequest {
   detailJson: string;
   /** JSON array of `RequestOption`. */
   optionsJson: string;
+  /**
+   * JSON: the input this request declared it wants collected, when it declares one.
+   *
+   * Absent is an approval, whose subject is one proposed tool input rendered from
+   * `detailJson`. Parsed by `requestFormOf` in `lib/request-form.ts`; see
+   * `docs/session-protocol.md` § Request forms for why it is declared rather than
+   * inferred from `detailJson`'s field names.
+   */
+  formJson?: string;
   defaultOption?: string;
   /** `safe` | `destructive` | `network`. Advisory, for emphasis. */
   risk?: string;

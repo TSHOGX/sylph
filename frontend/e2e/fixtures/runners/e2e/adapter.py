@@ -212,6 +212,67 @@ class Fixture:
             })
             return
 
+        elif "question" in text:
+            # A declared form, which is the shape an agent's own question takes: the
+            # fields carry the answers and the options are verbs. Two fields, because
+            # one could not observe that two radio groups stay independent — a single
+            # shared `name` would make answering the second clear the first.
+            #
+            # `allowOther` and `notes` are both on the first field on purpose: they are
+            # the two affordances whose absence was the reported bug, and neither has
+            # any coverage unless a fixture declares them.
+            emit({
+                "t": "request", "id": "req-{}".format(self.turn), "kind": "choice",
+                "tool": "AskUserQuestion",
+                "title": "Two questions",
+                "detail": {},
+                "form": {"fields": [
+                    {"type": "select", "id": "q:0", "label": "Indentation?",
+                     "mode": "one", "allowOther": True,
+                     "otherLabel": "Something else",
+                     "notes": {"label": "Notes (optional)"},
+                     "choices": [
+                         {"value": "Tabs", "description": "Indent with tabs."},
+                         {"value": "Spaces", "description": "Indent with spaces."},
+                     ]},
+                    {"type": "select", "id": "q:1", "label": "Linters?",
+                     "mode": "many", "required": True,
+                     "choices": [
+                         {"value": "ESLint"},
+                         {"value": "Prettier"},
+                         {"value": "Clippy"},
+                     ]},
+                ]},
+                "options": [
+                    {"id": "submit", "label": "Send answer"},
+                    {"id": "deny", "label": "Don't answer"},
+                ],
+                "default": "deny", "risk": "safe",
+            })
+            return
+
+        elif "elicit" in text:
+            # A text form, carrying a prefill. This is the kind whose entire purpose
+            # is free text and which, before a form could be declared, rendered as a
+            # read-only dump of its own placeholder.
+            emit({
+                "t": "request", "id": "req-{}".format(self.turn),
+                "kind": "elicitation",
+                "title": "Describe the change",
+                "detail": {},
+                "form": {"fields": [
+                    {"type": "text", "id": "text", "label": "Summary",
+                     "multiline": True, "required": True,
+                     "prefill": "Refactor the ", "placeholder": "One sentence"},
+                ]},
+                "options": [
+                    {"id": "submit", "label": "Submit"},
+                    {"id": "cancel", "label": "Cancel"},
+                ],
+                "default": "cancel",
+            })
+            return
+
         elif "paced" in text:
             # Deliberately slow, so "did the UI paint mid-turn" is observable rather
             # than inferred. Each stage is separated by far longer than a frame, so a
@@ -352,10 +413,19 @@ def serve():
         elif t == "resolve":
             # The answer arrives, so the blocked turn can finish. A denial is still an
             # answer: the turn ends either way, which is what the timeline shows.
+            #
+            # The received `input` is echoed into the result verbatim, so a spec can
+            # assert what the *agent* got rather than only that the panel closed. That
+            # distinction is the whole lesson of the bug this scenario exists for: the
+            # panel closed, the turn resumed, and the answer had been dropped.
             option = msg.get("option")
+            if option in ("deny", "cancel"):
+                text = "Declined by the user."
+            else:
+                text = "Received: {}".format(
+                    json.dumps(msg.get("input"), sort_keys=True))
             event("tool_result", "completed", streamId="blk-approved", name="Bash",
-                  text="Denied by the user." if option == "deny" else "Command ran.",
-                  isError=option == "deny" or None)
+                  text=text, isError=option == "deny" or None)
             fixture._reply()
             fixture.settle()
 

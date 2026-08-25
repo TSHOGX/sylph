@@ -183,6 +183,62 @@ frame cannot be journalled twice. `seq` is per session, not per turn, so
 `events_session_idx` orders by it rather than by timestamp — two events written in
 the same millisecond still have one defined order.
 
+#### pending_requests
+
+What an agent is blocked on, waiting for a human. A resource rather than a stream
+message, because the agent waits until someone answers: a client closing its laptop
+must not strand it, and the answer has to be possible from a frontend that was not
+attached when the request was raised.
+
+```sql
+CREATE TABLE pending_requests (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  turn_id TEXT NOT NULL,
+  adapter_request_id TEXT NOT NULL,
+  kind TEXT NOT NULL,                  -- approval | dialog | elicitation | choice
+  tool TEXT,
+  tool_use_id TEXT,
+  title TEXT NOT NULL DEFAULT '',
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  options_json TEXT NOT NULL DEFAULT '[]',
+  form_json TEXT,                      -- the declared input, when there is one
+  default_option TEXT,
+  risk TEXT,
+  allow_persistent INTEGER NOT NULL DEFAULT 1,
+  expires_at_ms INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending',  -- pending | resolved | abandoned
+  chosen_option TEXT,
+  resolved_input_json TEXT,
+  resolved_by TEXT,
+  created_at_ms INTEGER NOT NULL,
+  resolved_at_ms INTEGER
+);
+
+CREATE INDEX pending_requests_open
+  ON pending_requests(session_id, created_at_ms) WHERE status = 'pending';
+CREATE INDEX pending_requests_by_adapter_id
+  ON pending_requests(adapter_request_id, status);
+```
+
+`pending_requests_open` is partial because resolved rows accumulate without bound and
+never appear in the hot "what is this session waiting on" query.
+
+`adapter_request_id` is the adapter's own id, scoped to one link and never serialized
+to a client — a client-supplied adapter id would be a way to answer a request that
+was never raised. Clients address a request by `id`.
+
+`status = 'pending'` in the resolve UPDATE's WHERE clause is the entire concurrency
+control: two clients answering at once both run it, SQLite serializes them, and
+exactly one gets a row back. A restart marks every still-pending row `abandoned`
+rather than leaving it answerable, because no link survives a restart — but the row
+is kept, so the timeline can explain why a turn stopped instead of showing a gap.
+
+`form_json` is the input the request declared it wants collected, and absent is
+meaningful rather than missing: a request with no form is an approval, whose subject
+is the one proposed tool input in `detail_json`. See `docs/session-protocol.md`
+§ Request forms.
+
 ## TraceDB
 
 TraceDB is accessed only through its JSON protocol. The service never queries TraceDB's SQLite schema directly.
@@ -202,22 +258,30 @@ TraceDB writes come from the agent's native store (ingestion is external to Sylp
 ## Migrations
 
 Numbered SQL migrations in `backend/migrations/`, applied by `sqlx::migrate!` on
-startup. There is currently exactly one:
+startup:
 
 ```
 001_initial_schema.sql
+002_pending_requests.sql       -- what an agent is blocked on
+003_agent_event_vocabulary.sql
+004_request_affordances.sql    -- allow_persistent, expires_at_ms
+005_request_form.sql           -- form_json
 ```
 
 Attachments and commands need no migration of their own: attachments are staged on
 disk under the data directory rather than in a table, and a command invocation is a
-column on `turns`. `app_meta.schema_version` carries `1`, and `/api/v1/health`
-reports it so a packaged install can be checked against the binary running it.
+column on `turns`. `app_meta.schema_version` is reported by `/api/v1/health` so a
+packaged install can be checked against the binary running it.
 
 Migration rules:
 - Each migration is idempotent (use `IF NOT EXISTS`)
 - Migrations are append-only (never edit a deployed migration)
 - Before deployment, schemas are disposable (change in place). Treat installed
   state, not a date, as the signal that this has flipped
+
+The append-only rule is not merely tidiness here: `sqlx` checksums each migration
+file, so editing a deployed one makes every existing journal refuse to open. That is
+why `004` and `005` add columns to the table `002` created rather than amending it.
 
 There are no `sqlx::query!` macros here, only runtime `sqlx::query`, so there is no
 `DATABASE_URL` and no `.sqlx` offline directory. A schema mistake surfaces in the

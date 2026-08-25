@@ -138,6 +138,19 @@ export const en = {
   "approval.edited": "Edited - the agent will run this instead.",
   "approval.pendingCount": "{count} waiting",
   "approval.stale": "Someone already answered this.",
+  // A question the agent asked, rather than permission it needs.
+  "approval.question": "Waiting for your answer.",
+  "approval.submit": "Send answer",
+  "approval.incomplete": "Answer the required questions to send.",
+  // An "Other" answer is the answer, not a note on one of the offered options, so
+  // it is worded as a choice rather than as a comment field.
+  "form.other": "Something else",
+  "form.otherPlaceholder": "Type your answer",
+  "form.notes": "Notes (optional)",
+  // Shown in the composer while a request is dismissed but still open: the agent is
+  // blocked and nothing else on screen would say so.
+  "composer.blocked": "The agent is waiting on you.",
+  "composer.blockedShow": "Show request",
   "composer.agent": "Agent",
   "composer.model": "Model",
   "composer.thinking": "Thinking",

@@ -493,6 +493,87 @@ Stop a running turn.
 
 Process receives SIGTERM, escalates to SIGKILL after 2 seconds.
 
+### Requests
+
+The inversion: the agent asks, and a human answers. A request is a resource rather
+than a stream message, because the agent blocks until it is answered — so it has to
+outlive every client and be answerable from a frontend that attached an hour later.
+`docs/session-protocol.md` § Requests the adapter sends governs the wire shape.
+
+#### `GET /api/v1/sessions/{id}/requests`
+
+What this session is waiting on, oldest first — read from the journal rather than
+from the link, so it answers after a reconnect, from a different frontend, and for a
+session whose link has since died. That last case is exactly when a user needs to
+know why nothing is happening.
+
+**Response 200:**
+```json
+[
+  {
+    "id": "req_abc123",
+    "sessionId": "s_def456",
+    "turnId": "t_ghi789",
+    "kind": "choice",
+    "tool": "AskUserQuestion",
+    "title": "Two questions",
+    "detailJson": "{}",
+    "optionsJson": "[{\"id\":\"submit\",\"label\":\"Send answer\"},{\"id\":\"deny\",\"label\":\"Don't answer\"}]",
+    "formJson": "{\"fields\":[{\"type\":\"select\",\"id\":\"q:0\",\"mode\":\"one\",\"choices\":[{\"value\":\"Tabs\"},{\"value\":\"Spaces\"}],\"allowOther\":true,\"notes\":{}}]}",
+    "defaultOption": "deny",
+    "risk": "safe",
+    "allowPersistent": true,
+    "status": "pending",
+    "createdAtMs": 1730000000000
+  }
+]
+```
+
+`formJson` is the input the request declared it wants collected. Absent means an
+approval, whose subject is the one proposed tool input in `detailJson` — see
+§ Request forms in the protocol doc for why it is declared rather than inferred.
+
+The adapter's own request id is never serialized. A client that could send it could
+answer a request that was never raised.
+
+#### `POST /api/v1/requests/{id}/resolve`
+
+Answer one. Addressed by request id at the top level rather than under a session,
+because the id is what the answer is *about*.
+
+```json
+{
+  "option": "submit",
+  "input": {
+    "values": {"q:0": "Tabs", "q:1": ["ESLint", "Clippy"]},
+    "notes": {"q:0": "only for generated files"}
+  }
+}
+```
+
+For a request with no form, `input` is instead an edited version of what the agent
+proposed — how "allow, but change the command" works. Absent means "as proposed".
+
+**Response 200** carries the resolved request.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `INVALID_REQUEST` | An option the agent never offered, or an answer that does not fit the declared form |
+| 404 | `REQUEST_NOT_FOUND` | No such request |
+| 409 | `REQUEST_ALREADY_RESOLVED` | Someone else answered first |
+| 409 | `LINK_GONE` | The answer was recorded, but no live agent is waiting for it |
+
+Both validations exist for the same reason: an unrecognized value reaches the vendor
+CLI, and what happens there is undefined — for an approval, "undefined" must never be
+able to mean "allow". Validation happens *before* the row is claimed, so a refused
+answer leaves the request open and answerable rather than consuming it.
+
+The claim is a single `UPDATE ... WHERE status = 'pending'`, so two clients answering
+at once produce one winner; the answer reaches the adapter only after the claim
+succeeds, which is what stops the loser also reaching it. `LINK_GONE` is a real
+outcome rather than an error to hide: the user did answer, and saying nothing is
+waiting beats a success that went nowhere.
+
 ### Workspaces
 
 #### `GET /api/v1/workspaces`
