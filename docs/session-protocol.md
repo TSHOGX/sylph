@@ -396,7 +396,7 @@ The event kinds are `thinking`, `assistant`, `tool_call`, `tool_result`, `usage`
 
 | `kind` | Carries |
 | --- | --- |
-| `subagent` | `parentToolUseId`, the child's own events nested |
+| `subagent` | Opens a delegated trajectory; its `streamId` is that trajectory's id (§ Delegated trajectories) |
 | `plan` | A proposed plan, so plan mode is reviewable rather than prose |
 | `diff` | A structured patch, so a file change renders as a diff not a tool log |
 | `compact` | A compaction boundary, so the timeline shows where context was condensed |
@@ -404,10 +404,83 @@ The event kinds are `thinking`, `assistant`, `tool_call`, `tool_result`, `usage`
 | `capabilities` | `facets`, applied per facet (§ Capability facets) |
 | `notice` | Agent-originated notification worth surfacing |
 
-`subagent` is the one that changes what the UI can be. A subagent's trajectory
-arrives tagged with its parent tool call, so the timeline can nest it — which is
-what the terminal does, and what TraceDB already records as lineage. v1 saw only
-an opaque `Task` tool call with a wall of text.
+`subagent` is the one that changes what the UI can be, and it needs its own
+section because it is the only event kind that describes *structure* rather than
+content.
+
+## Delegated trajectories
+
+A turn is not a sequence. An agent delegates, its delegates delegate, and a
+dynamic workflow fans out to a dozen agents at once and then synthesizes. The
+event stream has to carry that shape, because a client cannot recover it.
+
+**One field carries all of it.** Every event may name the trajectory it belongs
+to:
+
+```
+span   the trajectory this event happened in. Absent means the root turn.
+```
+
+A `subagent` event *is* the trajectory's own record: its `streamId` is the
+trajectory id, and its `span` names the trajectory it was delegated *from*.
+Everything else follows:
+
+```json
+{"t":"event","kind":"subagent","phase":"started","streamId":"s1","name":"Explore"}
+{"t":"event","kind":"thinking","phase":"delta","streamId":"b3","span":"s1","text":"…"}
+{"t":"event","kind":"subagent","phase":"started","streamId":"s2","span":"s1","name":"Verify"}
+{"t":"event","kind":"tool_call","phase":"completed","streamId":"t9","span":"s2","name":"Bash"}
+{"t":"event","kind":"subagent","phase":"completed","streamId":"s2","span":"s1"}
+{"t":"event","kind":"subagent","phase":"completed","streamId":"s1"}
+```
+
+`s2` is a child of `s1` because it carries `span:"s1"`, by exactly the same rule
+that puts the `thinking` block there. Depth is unbounded, siblings may run
+concurrently, and a workflow phase is simply a trajectory whose children are
+trajectories. No case in the protocol distinguishes any of these, which is what
+makes it a generalization rather than three features.
+
+**Why a pointer and not nesting.** The table above once said the child's events
+arrived *nested inside* the parent event. That cannot be implemented: an envelope
+has to be closed before it is sent, and a trajectory streams for minutes. It also
+contradicts the journal, where an event is a row — a nested payload would make one
+row hold a subtree, so a delta inside it could not be addressed, deduplicated, or
+pruned. A flat stream of events carrying a parent pointer is what distributed
+tracing settled on for the same reason, and it is already how the vendor speaks:
+`claude` tags a subagent's output with `parent_tool_use_id` on the envelope.
+
+**`span` is not `streamId`.** `streamId` identifies one block across its phases;
+`span` identifies the trajectory a block ran in. A `subagent` event is the one
+place they meet, because opening a trajectory is itself a block with a lifecycle.
+
+**A `subagent` event is always stable, at every phase.** Ordinarily `started` and
+`delta` are ephemeral projections that never reach the journal (§ `docs/storage.md`).
+That rule is right for content and wrong for structure: the `started` phase is
+where a trajectory's identity, name, and parent live, so dropping it would leave
+every child event in the journal pointing at a parent that was never recorded.
+After a reload the whole delegated subtree would flatten into the parent's own work
+— which is precisely the pre-`span` bug, reintroduced by the storage tier instead
+of by the protocol.
+
+**An unknown `span` is not an error.** A client that receives an event naming a
+trajectory it has not seen renders it at the root rather than dropping it. The
+alternative loses work in exactly the case where structure is least reliable: a
+link that died mid-delegation, or an adapter emitting out of order.
+
+**A trajectory has its own outcome.** `phase:"completed"` with `isError` closes it,
+so a delegation that failed three levels down is reportable at every level above
+it without a client inferring failure from the absence of a result. An adapter that
+loses a trajectory — its link died, its vendor stopped reporting — leaves it open,
+and the server closes open trajectories when the turn terminates, for the same
+reason a pending request becomes `abandoned`: an unexplained gap is worse than a
+recorded failure.
+
+**What the adapter must keep separate.** Vendor block state has to be keyed by
+trajectory, not by the vendor's own block index. `claude` numbers content blocks
+per message, and two concurrent subagents both start at index 0 — an adapter with
+one index-keyed map merges their deltas into one another's text. That is data
+corruption, not a display fault, and it is invisible until two delegates run at
+once.
 
 ## Slash commands are turns
 

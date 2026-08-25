@@ -181,6 +181,7 @@ pub fn block_to_event(block: &crate::storage::Block) -> StreamEvent {
         kind: block.kind.clone(),
         phase: block.phase.clone(),
         stream_id: block.stream_id.clone(),
+        span: block.span.clone(),
         name: block.name.clone(),
         text: block.text.clone(),
         data: block.data.clone(),

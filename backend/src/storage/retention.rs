@@ -194,6 +194,7 @@ mod tests {
             kind: "assistant".to_string(),
             phase: Some("completed".to_string()),
             stream_id: Some(format!("a{seq}")),
+            span: None,
             name: None,
             text: format!("block {seq}"),
             folded: None,

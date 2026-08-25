@@ -30,6 +30,7 @@ fn event(seq: i32, kind: &str, phase: Option<&str>, stream: Option<&str>, text: 
         kind: kind.to_string(),
         phase: phase.map(str::to_string),
         stream_id: stream.map(str::to_string),
+        span: None,
         name: None,
         text: text.to_string(),
         data_json: "{}".to_string(),
@@ -77,6 +78,52 @@ async fn a_streamed_block_replays_exactly_what_the_client_saw() {
     // Timing is reconstructed too, which is what makes a paced replay possible.
     let arrivals: Vec<i64> = replayed.iter().map(|d| d.at_ms).collect();
     assert_eq!(arrivals, vec![1100, 1134, 1185, 1197]);
+}
+
+/// A delegated trajectory keeps its identity through consolidation.
+///
+/// Found by an E2E failure whose symptom was two layers away: every subagent card
+/// in the timeline read "Subagent" after a turn consolidated, which looked like a
+/// frontend fallback firing. The name had been dropped here — folding kept only the
+/// `completed` event's fields, and a trajectory is named on `started` (or renamed by
+/// the `delta` carrying its parsed brief), because its close reports an outcome
+/// rather than an identity.
+#[tokio::test]
+async fn a_trajectory_keeps_the_name_an_earlier_phase_gave_it() {
+    let (history, _dir) = history_store().await;
+
+    let mut opened = event(1, "subagent", Some("started"), Some("s1"), "", 1000);
+    opened.name = Some("Explore".to_string());
+    let mut renamed = event(2, "subagent", Some("delta"), Some("s1"), "", 1100);
+    renamed.name = Some("code-reviewer".to_string());
+    // Closes with no name of its own, which is what every real adapter does.
+    let closed = event(3, "subagent", Some("completed"), Some("s1"), "", 1200);
+
+    let child = {
+        let mut e = event(4, "assistant", Some("completed"), Some("b1"), "found it", 1150);
+        e.span = Some("s1".to_string());
+        e
+    };
+
+    history
+        .put_blocks(&history::consolidate(&[opened, renamed, closed, child]))
+        .await
+        .unwrap();
+
+    let stored = history.blocks("s1", -1).await.unwrap();
+    let trajectory = stored.iter().find(|b| b.kind == "subagent").unwrap();
+    assert_eq!(
+        trajectory.name.as_deref(),
+        Some("code-reviewer"),
+        "the latest name any phase gave it, since the brief parses after it opens"
+    );
+
+    let nested = stored.iter().find(|b| b.kind == "assistant").unwrap();
+    assert_eq!(
+        nested.span.as_deref(),
+        Some("s1"),
+        "without this the subtree flattens onto the root after a reload"
+    );
 }
 
 /// Deltas must not survive as rows. Storing them individually is the ~20× cost

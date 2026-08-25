@@ -1243,7 +1243,86 @@ mistaken for "agents do X", and it earned its place immediately:
   it duplicated. Invisible under v1, where the outcome arrived as a process envelope
   that never reached the timeline.
 
+### Delegated trajectories: the protocol promised a tree it could not carry
+
+`subagent` was in the v3 event table from the start, described as carrying "the
+child's own events nested". Nothing implemented it, and the description could not
+be implemented: an envelope must be closed before it is sent, and a trajectory
+streams for minutes. Meanwhile the field it would have needed did not exist —
+`StreamEvent` had no parent pointer, the `events` table had no column, and the
+timeline had no `subagent` case, so a delegation fell through to a bare status
+line.
+
+The measured consequence was worse than a missing feature. `adapters/claude/`
+called `_stream_event(msg["event"])`, dropping the envelope's
+`parent_tool_use_id` — the only thing distinguishing a delegate's output from the
+parent's. Every subagent's thinking, prose, and tool calls were published *as the
+root agent's own*. And `self.blocks` was keyed by claude's content-block index
+alone, which numbers per message: two concurrent delegates both open index 0, so
+one's deltas appended to the other's text. That is corrupted output, not a layout
+fault, and it was invisible until two delegates ran at once.
+
+**One field carries subagents, nested subagents, and dynamic workflows.** An
+event's `span` names the trajectory it ran in; a `subagent` event's `streamId` *is*
+a trajectory id. A nested delegation is one whose `span` names another, and a
+workflow phase is a trajectory whose children are trajectories — no case in the
+protocol distinguishes them, which is what makes it a generalization rather than
+three features. Distributed tracing settled on a flat stream with a parent pointer
+for the same reason, and it is already how the vendor speaks.
+
+**The tree is navigated, not displayed.** One indent per depth runs out of viewport
+before it runs out of tree, so a trajectory is one collapsed card, indentation caps
+at two levels, and focus mode re-roots with a breadcrumb. Collapsing is also the
+performance design: a closed card mounts no descendants, so DOM cost tracks what
+the user opened rather than what the agent did — which is a stronger property than
+the memoization the timeline already had, and why virtualization is still not
+needed.
+
+**Every card reports its whole subtree,** because a collapsed row is otherwise
+where a failure goes to die. A descendant failure escalates its ancestors, and a
+failed branch expands itself down to the tool that failed. `abandoned` stays
+distinct from `failed`: the server closes trajectories an adapter left open when a
+turn terminates, and reporting that as a failure would call an interrupted turn a
+broken one.
+
+### Bugs this surfaced below the UI
+
+Each was found by a test, and each presented somewhere other than where it lived:
+
+- **`is_stable()` disagreed with the `stability` field beside it.** It re-derived
+  the answer from the phase, which was equivalent until `subagent` became stable at
+  every phase — after which a trajectory's `started` was classified stable,
+  published as stable, and then not journaled. One fact with two derivations
+  diverges the moment either grows a case.
+- **Consolidation dropped a trajectory's name.** Folding kept only the `completed`
+  event's fields, but a trajectory is named on `started` and renamed by the `delta`
+  carrying its parsed brief; its close reports an outcome, not an identity. So every
+  card read "Subagent" once a turn consolidated, which looked like a frontend
+  fallback firing two layers up.
+- **A focus control named "focus" collides with every sibling.** Visible text wins
+  over `title` for the accessible name, so twenty delegations presented twenty
+  indistinguishable controls. The same accessible-name collision that once failed 40
+  specs at once.
+- **A two-card fixture cannot observe a tree bug.** The E2E fixture now emits two
+  concurrent trajectories with interleaved events, one nested three deep, a failure
+  at the bottom, and one left open — because grouping by arrival order, flattening at
+  depth 2, and a permanently spinning card each pass a shallower fixture.
+
 ### Open items
+
+- **`pi` reports no child trajectories,** so its adapter declares no `subagent`
+  capability and its sessions render exactly as before. Nothing to fix; worth
+  stating, because it means the tree is currently exercised by one real agent plus
+  the fixture.
+- **TraceDB's archived sessions stay flat.** It records a delegation as a separate
+  session with its own lineage, not as a trajectory inside one stream, so an
+  archived transcript has no `span` and the sidebar's rolled-up count is still how
+  delegation appears there. Unifying the two views is a real design question and
+  not a translation.
+- **A structure overview is not built.** `flattenTrajectories` exists and the
+  breadcrumb uses the path, but there is no waterfall or graph answering "which of
+  these twenty agents was slow" at a glance. The rollups cover *whether* to drill
+  in; they do not compare siblings.
 
 - **Multi-user is not solved by this work**, only un-foreclosed: authorization has
   one place to live, and request resolution records a resolver. Authentication

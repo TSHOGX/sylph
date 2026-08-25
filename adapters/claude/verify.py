@@ -13,6 +13,12 @@ Checks, in order:
   2. `open` returns the project's real slash commands (dozens, not two).
   3. A turn produces streamed assistant text and a completed turn event.
   4. An approval is raised, answered, and the turn continues past it.
+  5. A delegation arrives as a trajectory whose child events are tagged with it.
+
+The last one is why this file exists rather than only a fixture: whether this CLI
+tags a subagent's output the way the adapter assumes is a fact about software we do
+not control, and the adapter previously discarded that tag entirely — publishing
+every delegate's work as the root agent's own.
 """
 import json
 import os
@@ -194,6 +200,43 @@ new_model = next((o for o in new_config if o["id"] == "model"), None)
 check("the model is now what was asked for",
       bool(new_model and new_model.get("currentValue") == "sonnet"),
       str(new_model.get("currentValue") if new_model else None))
+
+print("8. a delegation is reported as a trajectory, not as an opaque tool call")
+# The one claim no fixture can settle: that this CLI's own envelope actually tags a
+# subagent's output the way the adapter assumes. Two of three earlier guesses about
+# this CLI's shapes were wrong and each one compiled, so it is measured here.
+#
+# Costs a real delegated turn, which is why it is last.
+state["events"].clear()
+state["turn_done"].clear()
+send({"t": "send", "id": "c9", "text":
+      "Use the Task tool to launch one subagent that reads README.md and reports "
+      "its first heading. Do not read the file yourself."})
+await_reply("c9")
+check("the delegated turn completed",
+      state["turn_done"].wait(timeout=240),
+      "no completed turn event within 240s")
+
+events = state["events"]
+spans = [e for e in events if e.get("kind") == "subagent"]
+opened_spans = {e.get("streamId") for e in spans if e.get("phase") == "started"}
+check("opens a trajectory for the delegation", bool(opened_spans),
+      "{} trajectories".format(len(opened_spans)))
+check("closes every trajectory it opened",
+      opened_spans <= {e.get("streamId") for e in spans if e.get("phase") == "completed"},
+      "unclosed: {}".format(sorted(opened_spans - {
+          e.get("streamId") for e in spans if e.get("phase") == "completed"})))
+check("names the delegation something other than the tool",
+      all(e.get("name") != "Task" for e in spans),
+      ", ".join(sorted({str(e.get("name")) for e in spans})))
+
+# The whole point: the child's work has to arrive tagged, or it is published as the
+# parent's own and no client can tell them apart.
+inside = [e for e in events if e.get("span") in opened_spans]
+check("tags the delegate's own events with its trajectory", bool(inside),
+      "{} events inside a trajectory".format(len(inside)))
+check("no event names a trajectory that was never opened",
+      all(e.get("span") in opened_spans for e in events if e.get("span")))
 
 send({"t": "close", "id": "z1"})
 try:

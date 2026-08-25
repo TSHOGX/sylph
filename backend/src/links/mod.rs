@@ -710,6 +710,9 @@ impl LinkManager {
             kind: kind.to_string(),
             phase: None,
             stream_id: None,
+            // Session-scoped, so never inside a delegation: this fires between
+            // turns, when no trajectory is open.
+            span: None,
             name: None,
             text: String::new(),
             data: Some(data),
