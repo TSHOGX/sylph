@@ -308,6 +308,30 @@ opened, presenting as a UI bug in the composer's model control. When adapting a 
 shape, print one real payload rather than inferring field names — two of three guesses
 about this CLI's shapes were wrong, and each one compiled.
 
+This is the most-repeated defect in this file: **six instances so far**, each one
+compiling, each surfacing one or two layers from the cause. They are catalogued
+individually below (`pi`'s `set_model`, the invented `task_*` subtypes,
+`AskUserQuestion`'s `selectedOptions`, `requestedSchema` versus `requested_schema`,
+and `pi`'s never-emitted `agent_start`) because the *specific* keys are what a reader
+needs. The general rule is the one above, plus three shapes worth knowing before
+writing any adapter:
+
+- **A type in a vendor's event union is not a promise that anything emits it.** `pi`
+  0.84.4 declares `agent_start` and `agent_end`, documents them, and has **zero emit
+  sites** in its shipped bundle — its `Task` tool builds a nested agent whose events
+  reach an internal callback that never touches the transport. An adapter written
+  from the type definitions ships a tree that never populates. Grep the
+  implementation for emit sites, not the types for declarations.
+- **An SDK object's attribute names and its JSON wire names are different
+  namespaces.** The MCP spec says `requestedSchema`; the Python SDK's dataclass field
+  is `requested_schema` with the camelCase form as a Pydantic *alias*, and `claude`
+  passes `__dict__` without `by_alias=True`. So the spec-correct key reads `None`
+  against a spec-compliant SDK. When the payload came from an SDK rather than off a
+  socket, read the Python side.
+- **Ask the binary.** Grepping the 321 MB `claude` binary for a key is cheap and
+  decisive: `selectedOptions` occurs nowhere in it, which would have caught that
+  instance before it shipped.
+
 **serde's `rename_all` does not rename fields inside enum variants.** An internally
 tagged enum needs `rename_all_fields` as well, or camelCase wire fields inside a
 variant parse as `None` while the code compiles and every non-variant field works.
@@ -572,6 +596,31 @@ a different row. The symptom is a click that appears to do nothing, three layers
 the cause. `lib/select-list.ts` returns each row with its own index, or `null` when it
 cannot be chosen, so no renderer computes one and the two spaces cannot exist.
 
+The corollary for a surface holding *two* lists: **one cursor per list, plus an
+explicit owner for the focused pane.** The history overlay ran a single cursor across
+a workspace pane and a session pane, so `Tab` and `ArrowDown` disagreed about which
+was active — the same dual-cursor defect one level up. Two `useSelectList` instances
+with a named owner cannot disagree, because there is no shared index to disagree
+about.
+
+**A navigation list must omit `aria-selected` entirely, not report `false`.** Reporting
+`false` on every row claims a selection state the list does not have, and a screen
+reader repeats it per row. The combobox-over-listbox pattern does not require the
+attribute on rows that are navigation targets rather than choices — so leave it off,
+and keep it only where a row genuinely is or is not the current value.
+
+**`aria-activedescendant` belongs on the focused control, not on the list it names.**
+This is the one an automated checker cannot catch, and it cost a VoiceOver pass to
+find. Where the input and the listbox are the *same* node, putting it on the listbox
+is accidentally correct — which is why the command palette worked. Where they are two
+nodes, as in the history overlay, focus sits on the input while the attribute sits on
+the popup, and arrowing through sessions announces **nothing at all**: the cursor moves
+without focus moving, and the announcement follows focus. axe passes either way,
+because it verifies the id resolves and cannot verify that a screen reader will walk
+the relationship. Third instance this session of well-formed ARIA that a real reader
+still fails — **axe checks that the graph is valid; a screen reader walks it.** Both
+are needed, and neither substitutes.
+
 **A `role="menu"` may not contain a text field.** Adding a filter to a menu is not a
 styling change: a menu may only contain menu items, so an `<input>` inside one is
 invalid ARIA that axe reports and that leaves a screen reader with a control its
@@ -684,10 +733,31 @@ until two delegates run simultaneously. Key such state by `(trajectory, index)`.
 
 **Visible text beats `title` for a control's accessible name.** A per-card "focus"
 button with `title="Focus Explore"` is announced as "focus" — so twenty delegations
-present twenty controls a screen reader cannot tell apart. Use `aria-label`. And
-note the converse when testing: Playwright's `getByRole` name matching is a
-substring match, so `{ name: "Explore" }` also matches "Focus Explore"; distinct
-names still need `exact: true`.
+present twenty controls a screen reader cannot tell apart. Use `aria-label`.
+
+**Playwright's name and text matching is a case-insensitive substring, and this has
+bitten three times in one file.** `getByRole({ name: "Explore" })` also matches
+"Focus Explore"; `getByText("slowest")` also matches the "slowest first" button
+beside it, so a count assertion read 1 whether or not any row was badged. Distinct
+names need `exact: true`.
+
+Two harder forms, both of which pass indefinitely first:
+
+- **A name that is a substring of a *fallback* name.** `trajectoryName` answers
+  "Subagent" for a nameless node, and `{ name: "Agent delegation" }` matches
+  "Subagent delegation". The collision exists only in the states that render a
+  nameless node, so it passes until it fails in a state that is never the one under
+  test — presenting as the card being wrong rather than the locator being loose.
+  This appeared in four places in `delegation.spec.ts` while the *button* two lines
+  below one of them was already guarded with `exact`: the rule was known, applied to
+  the control, and missed on the region it labels.
+- **A negative assertion on a container.** `toContainText` walks the subtree, so any
+  `not.toContainText(X)` on a trajectory card is coupled to copy *anywhere beneath
+  it* — including fixture summary text a later change adds. Such a locator can also
+  be satisfied for the wrong reason: one asserting a delegate's outcome was matching
+  the agent's prose the whole time, so the spec named the thing and never observed
+  it. A locator that passes for the wrong reason is worse than one that fails,
+  because it retires the question.
 
 **A collapsed subtree must report what it hides, or collapsing is lossy.** Hiding
 a delegation's work by default is only defensible if a failure three levels down is
@@ -776,7 +846,46 @@ then exist, on different turns, and the earlier card still says the work never
 finished when it demonstrably did. The flag is reported only by `task_started`, so the
 adapter re-attaches it to every later phase — the server reads whichever row it finds.
 Keep the exclusion narrow: an ordinary delegation left open is the permanent spinner
-the sweep exists to prevent.
+the sweep exists to prevent. Startup recovery deliberately *ignores* the flag, in both
+tiers, because a dead process cannot report — so "abandoned after a restart" stays a
+truthful terminal state and must remain distinguishable from "still running in the
+background".
+
+**Skipping a step that writes a wrong record can delete the right one.** That
+exclusion removed the contradiction and, unnoticed, the delegation: a trajectory with
+no close carries no text, so it folded into no block and its children reattached to the
+root — the flattening `span` exists to prevent, reappearing one layer down. The
+roadmap recorded the item as closed. When a fix is "stop writing X", check what still
+writes the *record*: an exception to a producer can make its consumer's default the new
+bug, and the observable difference between "wrongly described" and "absent" is one card
+nobody looks for. It also only ever helped `claude`; every other adapter reports no
+flag and kept getting the contradicting close.
+
+**A cross-turn `span` fabricates a trajectory on the turn it lands on.** A late outcome
+names its host from an earlier turn, and promotion-by-reference then made the sweep
+close a host that had already succeeded — a failure record for work that never ran
+there. The obvious repair, "skip an id another turn declared", is *not available*:
+consolidation moves the earlier turn's rows to `history.db`, so the evidence of which
+turn owned the host is gone by the time the late outcome arrives. The decidable rule is
+that some row *on this turn* must carry the id as its `stream_id`. Anything inferring
+structure from a pointer has to ask whether the pointer's target is even in scope.
+
+**When correct behaviour is the *withholding* of a signal, a timing failure is
+indistinguishable from the feature working.** A fan-out spec's live window closed
+mid-run under load, so a badge that is deliberately withheld after settling was simply
+absent — reading as a broken overview rather than as a hold that was too short. The
+window is consumed from both ends: it opens before the browser paints, and the whole
+assertion sequence has to fit inside it rather than merely start there. Assert the
+window is still open immediately before each dependent assertion, so a closed one fails
+saying so.
+
+**A fixture's *timing* is part of the contract, not only its size.** The server stamps
+`createdAtMs` on arrival, so a scenario emitting its whole tree inside one millisecond
+gives every bar equal length — and a client computing durations from the wrong field
+then passes the entire suite. Related: a delegate that forwards nothing cannot be timed
+from its interior at all, so "each delegate forwards at least one event" is a fixture
+*requirement* rather than a nod to realism. This is the sibling of the size rule
+recorded above; both say the fixture's shape is the test.
 
 **Focus mode re-roots to `children`, which discards a promoted host's own row.** Right
 for a declared `subagent`, whose row carries no content of its own; wrong for a
@@ -817,6 +926,46 @@ whose event is re-folded from its phases every build: those are the rows most wo
 skipping and were the only ones that could never be skipped. Before trusting a memo,
 check which object the producer actually preserves — `lib/timeline-rows.test.ts` pins
 it.
+
+**`useState(derived)` captures a snapshot, and with streamed data the snapshot is
+usually stale.** React uses a `useState` initializer once. Both
+`useState(status.failed)` and `useState(node.status === "failed")` in `timeline.tsx`
+read a flag that arrives *after* mount: a tool call mounts when its `tool_call`
+arrives and its failure is known when the `tool_result` does, and a delegation's
+status escalates when a descendant fails, which is always later. So
+auto-expand-on-failure fired only when both landed in one render — meaning only
+against a mock fast enough to batch them, which is the whole suite. The trajectory
+instance was the worse one: a failed branch stayed collapsed over the tool that
+failed, which is the collapsing-must-not-be-lossy rule breaking silently.
+
+The repair is derived state with a *remembered override*, not an effect. An effect
+that force-opens on the transition re-opens a branch the user deliberately collapsed
+every time another descendant fails. And note the second bug hiding in the same
+expression: `expandAll ?? open` silently outranked the per-row toggle. **Three inputs
+to one boolean need a stated precedence, or two of them are latent bugs** — here
+expand-all, then the user's toggle, then the derived default.
+
+**A publishing gap is indistinguishable from a missing measurement.**
+`history::consolidate` computed and stored `started_at_ms`; `block_to_event` did not
+put it on the wire. A consolidated block is keyed on its close, so every settled
+trajectory reported an end and no beginning — and a turn switches to consolidated
+history moments after settling, so that is every delegation a user scrolls back to.
+The delegation overview was therefore *designed* around durations being
+unreconstructible after settle, with a documented lower-bound fallback, because the
+value looked impossible to obtain while it sat in the table the whole time. Before
+building around a limit, check whether the producer already records what you need and
+only the wire drops it.
+
+**Making the honest rows exact is what lets a dishonest one be crowned.** Publishing
+that field turned every settled duration exact, which for the first time let the
+overview offer a rank — and the badge landed on a row labelled "never finished". A
+trajectory still open when its turn ended acquires an end timestamp from the server's
+close or the turn's own end, so the subtraction is exact over a span whose real end
+nobody reported; its true duration can only be longer, so it cannot lose a comparison
+and must not win one. **An "is it sound" check on the arithmetic is not an "is it
+finished" check on the subject**, and the rank needs both. While every row was a
+bound no rank was offered at all, so the gap was unobservable: removing one
+degradation can expose a second that the first was masking.
 
 **Two nodes naming each other silently delete both.** A cycle in `span` pointers is
 not merely a recursion hazard. Attachment holds the first as an orphan waiting for
@@ -876,6 +1025,29 @@ rest unanswered, and the CLI's reply to the model differs by wording rather than
 error: all answered is *"Your questions have been answered … you can now continue with
 these answers in mind"*, while one of two is the weaker *"The user answered …"*. Both
 look like success from the outside.
+
+**A setting that carefully bounds one endpoint makes the unbounded one invisible.**
+`SYLPH_BROWSE_ROOTS` was documented in three places with 16 tests behind it, so
+containment read as solved — while `POST /sessions` called `Path::exists` and spawned
+an agent in any directory a client named. The *narrower* capability being visibly
+bounded is what kept the wider one from being looked at, and the roadmap's own note
+that enumeration "is the part that matters" was load-bearing in the wrong direction.
+When a bound exists, ask which operations it does *not* cover.
+
+**A write cannot canonicalize its own target, and a check on a resolved path does not
+govern an operation on an unresolved one.** Two holes of the same shape, found a day
+apart. An `overwrite: true` upload wrote *through* a pre-existing symlink out of the
+workdir, because the target does not exist yet — so containment sits on the parent and
+the final component is appended verbatim. And a read canonicalized for the check and
+then opened the original path, so a symlink *inside* the workdir pointing out of it
+passed and was followed.
+
+The rule that fixes both: **derive the path you operate on from the check itself** —
+canonicalize once, into one variable, and use that variable. A `contain_in_any` check
+paired with a path it did not produce is not a bound. Note also that `remove` was
+already correct and its doc comment stated the exact invariant `upload` violated, two
+hundred lines away: when one function documents an invariant about a shared idiom,
+every other user of that idiom needs checking against it.
 
 **A default that is one machine's absolute path is wrong everywhere else.**
 `TRACEDB_BIN` defaulted to `$HOME/Workspace/trace-db/target/release/trace-db` — a
