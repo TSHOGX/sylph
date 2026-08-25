@@ -138,6 +138,28 @@ Consolidation is also the recovery path. A turn found in `journal.db` at startup
 whose status is terminal was interrupted mid-consolidation, and is simply
 consolidated again.
 
+**An open delegated trajectory is preserved, and preserved as open.** Step 2 keys
+a block on its `completed` event, so a trajectory that never closed had no block
+to be: its `started` phase carries no text, so it reached neither the completed
+path nor the leftover-delta path, and the whole delegation vanished from history
+while its children survived and reattached to the root. Such a block is therefore
+written from its declaring phase, keeping `phase: "started"` — a client reads a
+trajectory's status off its phase, so that says *running*, which is what the work
+is. Consolidation is not entitled to invent an outcome nobody reported.
+
+This matters because a trajectory left open is no longer exceptional. The
+turn-settle sweep deliberately skips work an adapter declares backgrounded
+(`docs/session-protocol.md` § Delegated trajectories), so for exactly the
+delegations that outlive their turn, reaching consolidation still open is the
+normal path rather than a crash artifact.
+
+`started` is a true statement only while the process that would report the
+outcome is alive, and no link survives a restart. So startup closes what history
+still holds as running, as `abandoned` — the same repair the journal's own startup
+sweep performs, one tier down, and for the same reason: an unexplained gap is
+worse than a recorded one. It stays correctable, because a server-authored close
+is precisely what a later real outcome may overwrite.
+
 ### Thresholds, and why these numbers
 
 **4 KB for externalization.** Below a filesystem block, a separate file wastes

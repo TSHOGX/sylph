@@ -685,7 +685,13 @@ impl JournalStore {
 
         let mut closed = 0u64;
         for turn_id in turns {
-            let open = self.open_trajectories(&turn_id).await?;
+            // Backgrounded work included, unlike the turn-settle sweep. That exception
+            // holds a delegation open because the agent will report back; here the
+            // agent is gone, so nothing will, and leaving it open trades one wrong
+            // record for a card that spins forever.
+            let open = self
+                .open_trajectories_including_backgrounded(&turn_id)
+                .await?;
             if open.is_empty() {
                 continue;
             }
@@ -935,14 +941,79 @@ impl JournalStore {
     /// as abandoned writes a contradiction its own later completion cannot undo —
     /// both records then exist, on different turns, and the earlier card still says
     /// the work never finished when it demonstrably did. Silence is the honest answer
-    /// here, and it is bounded: the agent reports back, and a crash is caught by
-    /// `close_stale_trajectories` on the next start.
+    /// here, and it is bounded three ways: the agent reports back and
+    /// `crate::supervisor::reconcile` records that on the turn that opened the
+    /// trajectory; a crash is caught by
+    /// [`Self::open_trajectories_including_backgrounded`] on the next start, which
+    /// deliberately does *not* honour the flag; and a trajectory that reached history
+    /// still open is closed there by
+    /// `crate::storage::HistoryStore::close_running_trajectories`.
+    ///
+    /// Leaving it open is only safe because consolidation *preserves* an open
+    /// trajectory rather than folding it into nothing. It did not, and the two changes
+    /// together are what make the exception honest: on its own, skipping the sweep
+    /// deleted the delegation from the dispatching turn instead of misdescribing it.
+    ///
+    /// **A turn may only close a trajectory it actually holds.** A trajectory id is
+    /// session-scoped, not turn-scoped, so a *late* event can name one that an earlier
+    /// turn opened — which is exactly what backgrounded work does when it reports its
+    /// outcome on an agent-initiated turn. A bare `span` reference used to promote that
+    /// id into a trajectory *on the receiving turn*, where nothing had opened it and
+    /// nothing ever would, so the sweep closed it as abandoned. Measured: a `Workflow`
+    /// host that had already completed cleanly on the dispatching turn acquired a
+    /// second, fabricated `abandoned` close on the agent's turn — a record of a failure
+    /// that never happened, on a turn the host never ran in, escalating a card that had
+    /// done nothing wrong.
+    ///
+    /// So a candidate survives only if some row *on this turn* carries it as its
+    /// `stream_id`. That is precisely what opening one means, by either route: a
+    /// declaring `subagent` row, or a `tool_call` this turn's own children name as
+    /// their span (§ Promotion).
+    ///
+    /// The narrower rule — "skip it only when another turn on this session declared it"
+    /// — was tried first and cannot work, which is worth recording because it is the
+    /// more obvious design. The evidence it needs does not survive: consolidation moves
+    /// the earlier turn's rows into `history.db` and deletes them here, so by the time
+    /// a late outcome arrives the journal no longer holds anything saying which turn
+    /// owned the host, and a second DB cannot be reached from this query. The rule above
+    /// needs no such evidence — it asks only about the turn being swept.
+    ///
+    /// It also stops the sweep inventing a close for a `span` that names nothing
+    /// anywhere. That is the right answer for the same reason: a client already renders
+    /// an unknown `span` at the root (§ Delegated trajectories), whereas a server-authored
+    /// close for an id nothing opened conjures a node whose only phase is its own ending.
     ///
     /// Returns `(stream_id, span, name)` — the parent and name are needed to emit a
     /// closing event that lands in the right place in the tree.
     pub async fn open_trajectories(
         &self,
         turn_id: &str,
+    ) -> Result<Vec<(String, Option<String>, Option<String>)>> {
+        self.open_trajectories_inner(turn_id, true).await
+    }
+
+    /// Every open trajectory, *including* work declared backgrounded.
+    ///
+    /// The exclusion above rests on one premise: the agent is still alive and will
+    /// report back. At startup that premise is false — no link survives a restart, so a
+    /// backgrounded task inside a dead process can no more report than an abandoned one
+    /// can. Honouring the flag there would leave the work open forever, which is the
+    /// permanent spinner the sweep exists to prevent, reached by way of the exception
+    /// that exists to prevent a wrong record.
+    ///
+    /// So the flag is respected exactly while it means something, and the caller says
+    /// which situation it is in rather than this query guessing.
+    pub async fn open_trajectories_including_backgrounded(
+        &self,
+        turn_id: &str,
+    ) -> Result<Vec<(String, Option<String>, Option<String>)>> {
+        self.open_trajectories_inner(turn_id, false).await
+    }
+
+    async fn open_trajectories_inner(
+        &self,
+        turn_id: &str,
+        respect_background_flag: bool,
     ) -> Result<Vec<(String, Option<String>, Option<String>)>> {
         let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
             // `open.id` is the trajectory; `seq` orders the sweep by when each was
@@ -960,13 +1031,13 @@ impl JournalStore {
                         MAX(span) AS any_span,
                         MAX(name) AS any_name
                    FROM events
-                  WHERE turn_id = ? AND kind = 'subagent' AND stream_id IS NOT NULL
+                  WHERE turn_id = ?1 AND kind = 'subagent' AND stream_id IS NOT NULL
                   GROUP BY stream_id
                  UNION ALL
                  SELECT span AS id, MIN(seq) AS seq,
                         NULL, NULL, NULL, NULL
                    FROM events
-                  WHERE turn_id = ? AND span IS NOT NULL
+                  WHERE turn_id = ?1 AND span IS NOT NULL
                   GROUP BY span
              )
              SELECT open.id,
@@ -975,28 +1046,39 @@ impl JournalStore {
                FROM open
               WHERE NOT EXISTS (
                     SELECT 1 FROM events done
-                     WHERE done.turn_id = ?
+                     WHERE done.turn_id = ?1
                        AND done.stream_id = open.id
                        AND done.phase = 'completed'
                        AND done.kind IN ('subagent', 'tool_result')
               )
               -- Backgrounded work is still running, not abandoned. Matched on the
-              -- adapter's own flag, carried on every phase of the trajectory so this
-              -- finds it whichever row survives.
-              AND NOT EXISTS (
+              -- adapter's own flag, on *any* phase of the trajectory: the vendor
+              -- reports it once, at the start, so reading only the latest row would
+              -- un-background the very work the flag protects.
+              --
+              -- Skipped entirely when the caller says the agent is gone, because then
+              -- nothing can report and silence explains nothing.
+              AND (NOT ?2 OR NOT EXISTS (
                     SELECT 1 FROM events bg
-                     WHERE bg.turn_id = ?
+                     WHERE bg.turn_id = ?1
                        AND bg.stream_id = open.id
                        AND bg.kind = 'subagent'
                        AND json_extract(bg.data_json, '$.is_backgrounded') = 1
+              ))
+              -- This turn must actually hold the trajectory, not merely mention it.
+              -- A bare `span` with no row of its own here is a reference *outward*:
+              -- most often to a trajectory an earlier turn opened, which is what a
+              -- late outcome carries.
+              AND EXISTS (
+                    SELECT 1 FROM events mine
+                     WHERE mine.turn_id = ?1
+                       AND mine.stream_id = open.id
               )
               GROUP BY open.id
               ORDER BY MIN(open.seq)",
         )
         .bind(turn_id)
-        .bind(turn_id)
-        .bind(turn_id)
-        .bind(turn_id)
+        .bind(respect_background_flag)
         .fetch_all(&self.pool)
         .await
         .map_err(Error::Database)?;
@@ -1108,6 +1190,76 @@ impl JournalStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(Error::Database)
+    }
+
+    /// Record a trajectory's real outcome on the turn that owns it.
+    ///
+    /// The journal-tier half of the operation `crate::supervisor::reconcile` documents
+    /// — read there for why a late outcome amends an earlier record instead of being
+    /// moved onto it, and which records are provisional enough to amend.
+    ///
+    /// Selected by `(session_id, stream_id)` and *not* by turn, which is the whole
+    /// point: a trajectory id is session-scoped, so the turn holding the record is not
+    /// the turn the outcome arrived on. `turn_id <> ?` excludes the arriving turn so
+    /// the late close cannot amend itself.
+    pub async fn reconcile_trajectory(
+        &self,
+        session_id: &str,
+        stream_id: &str,
+        except_turn_id: &str,
+        outcome: &crate::supervisor::TrajectoryOutcome<'_>,
+    ) -> Result<bool> {
+        let Some(row) = sqlx::query_as::<_, Event>(
+            "SELECT * FROM events
+              WHERE session_id = ? AND stream_id = ? AND turn_id <> ?
+                AND kind = 'subagent'
+              ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(stream_id)
+        .bind(except_turn_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::Database)?
+        else {
+            return Ok(false);
+        };
+
+        let mut data: Option<serde_json::Value> = match row.data_json.as_str() {
+            "" | "{}" => None,
+            raw => serde_json::from_str(raw).ok(),
+        };
+        if !outcome.supersedes(row.phase.as_deref(), data.as_ref()) {
+            return Ok(false);
+        }
+
+        let mut phase = row.phase.clone();
+        let mut text = row.text.clone();
+        let mut is_error = row.is_error;
+        let mut source = row.source.clone();
+        outcome.apply(&mut phase, &mut text, &mut is_error, &mut data, &mut source);
+
+        let result = sqlx::query(
+            "UPDATE events
+                SET phase = ?, text = ?, is_error = ?, source = ?, data_json = ?
+              WHERE session_id = ? AND seq = ?",
+        )
+        .bind(&phase)
+        .bind(&text)
+        .bind(is_error)
+        .bind(&source)
+        .bind(
+            data.as_ref()
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "{}".to_string()),
+        )
+        .bind(session_id)
+        .bind(row.seq)
+        .execute(&self.pool)
+        .await
+        .map_err(Error::Database)?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     /// Mark every open request on a session abandoned, returning how many.
@@ -1406,15 +1558,19 @@ mod tests {
         let store = seeded(dir.path()).await;
 
         store
-            .append_event(&span_event(1, "subagent", "delta", "task-a", Some("host-1")))
+            .append_event(&span_event(1, "tool_call", "completed", "host-1", None))
+            .await
+            .expect("host");
+        store
+            .append_event(&span_event(2, "subagent", "delta", "task-a", Some("host-1")))
             .await
             .expect("progress");
 
         let open = store.open_trajectories("turn-1").await.expect("query");
         let ids: Vec<&str> = open.iter().map(|row| row.0.as_str()).collect();
         // Both, and that is the point: the delegate is declared, and naming a host
-        // as its span promotes that host too. Sweeping one and not the other would
-        // leave whichever was missed spinning.
+        // this turn also emitted promotes that host too. Sweeping one and not the
+        // other would leave whichever was missed spinning.
         assert!(ids.contains(&"task-a"), "the delegate is open: {ids:?}");
         assert!(ids.contains(&"host-1"), "so is its host: {ids:?}");
 
@@ -1426,6 +1582,37 @@ mod tests {
             delegate.1.as_deref(),
             Some("host-1"),
             "its host travels with it, so the close lands inside the container"
+        );
+    }
+
+    /// A `span` naming nothing this turn emitted is not this turn's to close.
+    ///
+    /// This fixture used to omit the host's `tool_call` and still assert the host was
+    /// swept, on the reasoning that a missed host spins forever. That reasoning does
+    /// not hold when the host has no row: there is no card to spin, and the server's
+    /// close would *invent* one whose only phase is its own ending.
+    ///
+    /// What forced the change is that this shape is indistinguishable, in the journal,
+    /// from a delegation reporting its outcome on a later turn — consolidation has by
+    /// then deleted the rows that would say which turn owned the host. So the choice is
+    /// between a phantom container for a malformed `span`, and a fabricated `abandoned`
+    /// record on every backgrounded delegation that ever reports back. The second is
+    /// measured and routine; the first is neither.
+    #[tokio::test]
+    async fn a_span_this_turn_never_emitted_is_not_swept() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        store
+            .append_event(&span_event(1, "subagent", "completed", "task-a", Some("elsewhere")))
+            .await
+            .expect("a late outcome, naming a host from another turn");
+
+        let open = store.open_trajectories("turn-1").await.expect("query");
+        let ids: Vec<&str> = open.iter().map(|row| row.0.as_str()).collect();
+        assert!(
+            !ids.contains(&"elsewhere"),
+            "the foreign host is left alone: {ids:?}"
         );
     }
 
@@ -1507,6 +1694,64 @@ mod tests {
             !ids.contains(&"bg-task"),
             "backgrounded work is not swept: {ids:?}"
         );
+    }
+
+    /// The flag is found on whichever phase carried it, not on the latest one.
+    ///
+    /// `claude` reports `is_backgrounded` on `task_started` and on no later
+    /// notification, so its adapter re-attaches it — but an adapter nobody has written
+    /// yet need not, and a `delta` arriving after the start must not un-background the
+    /// trajectory. Reading only the newest row would close exactly the work the flag
+    /// exists to protect.
+    #[tokio::test]
+    async fn the_background_flag_survives_a_later_phase_that_omits_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        let mut started = span_event(1, "subagent", "started", "bg-task", Some("host-1"));
+        started.data_json = r#"{"is_backgrounded":true}"#.to_string();
+        store.append_event(&started).await.expect("open");
+        // Progress, with no flag — the shape the vendor actually sends.
+        store
+            .append_event(&span_event(2, "subagent", "delta", "bg-task", Some("host-1")))
+            .await
+            .expect("progress");
+
+        let open = store.open_trajectories("turn-1").await.expect("query");
+        let ids: Vec<&str> = open.iter().map(|row| row.0.as_str()).collect();
+        assert!(
+            !ids.contains(&"bg-task"),
+            "still backgrounded despite the later phase: {ids:?}"
+        );
+    }
+
+    /// A restart closes backgrounded work too, because nothing can report it any more.
+    ///
+    /// The exception the turn-settle sweep makes rests on the agent being alive to
+    /// report back. No link survives a restart, so honouring the flag at startup would
+    /// leave the delegation open forever — the permanent spinner the sweep exists to
+    /// prevent, reached by way of the exception that exists to prevent a wrong record.
+    #[tokio::test]
+    async fn a_restart_closes_backgrounded_work_the_settle_sweep_would_skip() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        let mut started = span_event(1, "subagent", "started", "bg-task", None);
+        started.data_json = r#"{"is_backgrounded":true}"#.to_string();
+        store.append_event(&started).await.expect("open");
+
+        // The settle sweep leaves it alone; the startup sweep must not.
+        assert!(
+            store
+                .open_trajectories("turn-1")
+                .await
+                .expect("settle sweep")
+                .is_empty(),
+            "while the agent lives, this is work in progress"
+        );
+
+        let closed = store.close_stale_trajectories().await.expect("startup sweep");
+        assert_eq!(closed, 1, "once the agent is gone, nothing will report it");
     }
 
     /// The same delegate, without the flag, is still swept.
@@ -1669,5 +1914,151 @@ mod tests {
             .await
             .expect("lookup")
             .is_none());
+    }
+
+    /// A late outcome corrects the sweep's provisional close on the earlier turn.
+    ///
+    /// The contradiction this removes: both records existed, on different turns, and
+    /// the earlier card said the work never finished when it demonstrably had.
+    #[tokio::test]
+    async fn a_late_outcome_corrects_the_turn_that_opened_the_trajectory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        let mut swept = span_event(1, "subagent", "completed", "bg-task", Some("bg-host"));
+        swept.data_json = r#"{"closedBy":"server","reason":"abandoned"}"#.to_string();
+        swept.is_error = true;
+        swept.source = "server".to_string();
+        store.append_event(&swept).await.expect("the sweep's close");
+
+        let amended = store
+            .reconcile_trajectory(
+                "web-1",
+                "bg-task",
+                "turn-2",
+                &crate::supervisor::TrajectoryOutcome {
+                    text: "worker finished",
+                    is_error: false,
+                    reported_on_turn_id: "turn-2",
+                },
+            )
+            .await
+            .expect("reconcile");
+        assert!(amended, "the provisional close was corrected");
+
+        let row = store
+            .turn_events_after("turn-1", -1)
+            .await
+            .expect("read back")
+            .into_iter()
+            .find(|e| e.stream_id.as_deref() == Some("bg-task"))
+            .expect("the trajectory is still on the turn that opened it");
+
+        assert_eq!(row.text, "worker finished");
+        assert!(!row.is_error, "a reported outcome is not an error");
+        // `closedBy` is the *only* thing a client reads to decide `abandoned`, so
+        // leaving it would keep rendering "never finished" over work that finished.
+        assert!(
+            !row.data_json.contains("closedBy"),
+            "the server no longer claims this close: {}",
+            row.data_json
+        );
+        assert!(
+            row.data_json.contains("reportedOnTurnId"),
+            "and the correction says where the outcome came from: {}",
+            row.data_json
+        );
+    }
+
+    /// An outcome the agent already stated is never rewritten by a later mention.
+    ///
+    /// Only two records are provisional — the sweep's own close, and a trajectory left
+    /// open. A delegate that closed cleanly on its own turn and is described again later
+    /// is being summarized, not re-decided; letting the last word win would let a
+    /// summary quoting an earlier failure invert the outcome it quotes.
+    #[tokio::test]
+    async fn a_settled_outcome_is_not_rewritten_by_a_later_mention() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        let mut settled = span_event(1, "subagent", "completed", "task-a", None);
+        settled.text = "the delegate failed".to_string();
+        settled.is_error = true;
+        store.append_event(&settled).await.expect("its own close");
+
+        let amended = store
+            .reconcile_trajectory(
+                "web-1",
+                "task-a",
+                "turn-2",
+                &crate::supervisor::TrajectoryOutcome {
+                    text: "all good",
+                    is_error: false,
+                    reported_on_turn_id: "turn-2",
+                },
+            )
+            .await
+            .expect("reconcile");
+
+        assert!(!amended, "an agent-stated outcome stands");
+        let row = store
+            .turn_events_after("turn-1", -1)
+            .await
+            .expect("read back")
+            .into_iter()
+            .find(|e| e.stream_id.as_deref() == Some("task-a"))
+            .expect("the row");
+        assert_eq!(row.text, "the delegate failed");
+        assert!(row.is_error);
+    }
+
+    /// A trajectory still open on the earlier turn is closed by its real outcome.
+    ///
+    /// This is the shape a *cooperating* adapter produces: the sweep skipped it because
+    /// it was flagged backgrounded, so there is no provisional close to correct — only
+    /// an open trajectory waiting for the report this delivers.
+    #[tokio::test]
+    async fn a_late_outcome_closes_a_trajectory_the_sweep_left_open() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        let mut open = span_event(1, "subagent", "started", "bg-task", Some("bg-host"));
+        open.data_json = r#"{"is_backgrounded":true}"#.to_string();
+        open.name = Some("Background: worker".to_string());
+        store.append_event(&open).await.expect("left open");
+
+        assert!(store
+            .reconcile_trajectory(
+                "web-1",
+                "bg-task",
+                "turn-2",
+                &crate::supervisor::TrajectoryOutcome {
+                    text: "worker finished",
+                    is_error: false,
+                    reported_on_turn_id: "turn-2",
+                },
+            )
+            .await
+            .expect("reconcile"));
+
+        let row = store
+            .turn_events_after("turn-1", -1)
+            .await
+            .expect("read back")
+            .into_iter()
+            .find(|e| e.stream_id.as_deref() == Some("bg-task"))
+            .expect("the row");
+        assert_eq!(row.phase.as_deref(), Some("completed"));
+        assert_eq!(row.text, "worker finished");
+        assert_eq!(
+            row.name.as_deref(),
+            Some("Background: worker"),
+            "the name given at open survives the correction"
+        );
+        assert!(
+            row.data_json.contains("is_backgrounded"),
+            "and so does the flag that explains why it outlived its turn: {}",
+            row.data_json
+        );
     }
 }

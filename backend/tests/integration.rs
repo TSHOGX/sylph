@@ -4312,3 +4312,202 @@ async fn a_backgrounded_delegates_real_outcome_is_recorded() {
         "the delegate's own completion was journaled, not only the server's close"
     );
 }
+
+/// Every record of one delegation agrees about whether it finished.
+///
+/// The defect this pins is not that two records exist — the outcome genuinely arrives
+/// on a later turn, and a client watching that turn should see it. It is that they
+/// *contradicted*: the dispatching turn kept the sweep's `abandoned` close, so the
+/// earlier card said the work never finished while the later one said it had, and the
+/// earlier one is the one a reader scrolls to.
+///
+/// Asserted across every turn rather than on one, because which turn holds which record
+/// is exactly what was wrong.
+#[tokio::test]
+async fn no_record_of_a_late_delegate_still_calls_it_abandoned() {
+    let backend =
+        common::TestBackend::start_with_runners(&[common::MockRunner::backgrounded("bg")]).await;
+    let session_id = backend.create_session("bg").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "dispatch"}),
+        )
+        .await;
+    let first_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&first_id).await;
+
+    let history = await_reconciled(&backend, &session_id, "bg-task").await;
+
+    // The correction landed on the turn that opened the trajectory, and it is a real
+    // outcome rather than a server-authored guess.
+    let corrected = find_event(&history, "bg-task").expect("the delegation's record");
+    assert_eq!(corrected["text"], "worker finished");
+    assert!(
+        corrected["data"]["closedBy"].is_null(),
+        "the server has stopped claiming this close: {corrected}"
+    );
+    assert_eq!(
+        corrected["data"]["reconciled"], true,
+        "and says it was corrected: {corrected}"
+    );
+
+    // No record anywhere still says the work was abandoned.
+    for entry in history["turns"].as_array().unwrap() {
+        for event in entry["events"].as_array().unwrap() {
+            if event["streamId"] == "bg-task" {
+                assert_ne!(
+                    event["data"]["reason"], "abandoned",
+                    "a contradicting record survived on turn {}: {event}",
+                    entry["turn"]["id"]
+                );
+            }
+        }
+    }
+}
+
+/// A late outcome does not fabricate an abandoned host on the turn it arrives on.
+///
+/// A trajectory id is session-scoped, so the late close carries a `span` naming the
+/// host from the turn that dispatched it. That bare reference used to promote the host
+/// into a trajectory *on the agent's turn*, where nothing had opened it — so the sweep
+/// closed it as abandoned and the timeline grew a card for a `Workflow` that had
+/// completed cleanly, on a turn it never ran in.
+#[tokio::test]
+async fn a_late_outcome_does_not_abandon_the_host_it_names() {
+    let backend =
+        common::TestBackend::start_with_runners(&[common::MockRunner::backgrounded("bg")]).await;
+    let session_id = backend.create_session("bg").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "dispatch"}),
+        )
+        .await;
+    let first_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&first_id).await;
+
+    let history = await_reconciled(&backend, &session_id, "bg-task").await;
+
+    for entry in history["turns"].as_array().unwrap() {
+        let agent_turn = entry["turn"]["origin"] == "agent";
+        for event in entry["events"].as_array().unwrap() {
+            if agent_turn && event["streamId"] == "bg-host" {
+                panic!(
+                    "the host was closed on a turn it never ran in: {event}"
+                );
+            }
+        }
+    }
+
+    // And the host's own turn still reports it as the success it was.
+    let host = find_event(&history, "bg-host").expect("the host's own record");
+    assert!(
+        host["data"]["closedBy"].is_null(),
+        "the dispatching call succeeded and stays that way: {host}"
+    );
+}
+
+/// A cooperating adapter's delegation is still on the turn that dispatched it.
+///
+/// `is_backgrounded` stops the sweep closing work that is expected to outlive its turn.
+/// On its own that traded a wrong record for *no* record: a trajectory with no close
+/// folded into no block, so the delegation vanished from the dispatching turn and its
+/// children reattached to the root. The turn has to keep the delegation, and the
+/// delegation has to end up carrying its real outcome.
+#[tokio::test]
+async fn a_flagged_delegate_stays_on_its_turn_and_records_its_outcome() {
+    let backend = common::TestBackend::start_with_runners(&[
+        common::MockRunner::backgrounded_flagged("bgf"),
+    ])
+    .await;
+    let session_id = backend.create_session("bgf").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "dispatch"}),
+        )
+        .await;
+    let first_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&first_id).await;
+
+    let history = await_reconciled(&backend, &session_id, "bg-task").await;
+
+    // On the dispatching turn, not merely somewhere on the session.
+    let dispatching = history["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["turn"]["id"] == first_id.as_str())
+        .expect("the dispatching turn");
+    let delegate = dispatching["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["streamId"] == "bg-task")
+        .expect("the delegation is still on the turn that dispatched it");
+
+    assert_eq!(delegate["phase"], "completed");
+    assert_eq!(delegate["text"], "worker finished");
+    assert_eq!(
+        delegate["span"], "bg-host",
+        "and still inside its host, so the subtree did not flatten"
+    );
+}
+
+/// Poll until a trajectory's record carries a real outcome, then return the history.
+///
+/// The correction is applied when the late event arrives, which is after the
+/// dispatching turn has settled — so a read taken immediately can legitimately still
+/// see the provisional record. Polling for the *settled* state is what makes these
+/// assertions about the design rather than about scheduling.
+async fn await_reconciled(
+    backend: &common::TestBackend,
+    session_id: &str,
+    stream_id: &str,
+) -> Value {
+    let mut last = Value::Null;
+    for _ in 0..100 {
+        last = json_body(
+            backend
+                .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+                .await,
+        )
+        .await;
+        if find_event(&last, stream_id)
+            .is_some_and(|event| event["data"]["reconciled"] == true)
+        {
+            return last;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("trajectory {stream_id} was never reconciled; history was {last}");
+}
+
+/// The record for one trajectory, on whichever turn holds it.
+fn find_event<'a>(history: &'a Value, stream_id: &str) -> Option<&'a Value> {
+    history["turns"].as_array()?.iter().find_map(|entry| {
+        entry["events"]
+            .as_array()?
+            .iter()
+            .find(|e| e["streamId"] == stream_id && e["data"]["reconciled"] == true)
+            .or_else(|| {
+                entry["events"]
+                    .as_array()?
+                    .iter()
+                    .find(|e| e["streamId"] == stream_id)
+            })
+    })
+}

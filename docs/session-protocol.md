@@ -592,6 +592,32 @@ and the server closes open trajectories when the turn terminates, for the same
 reason a pending request becomes `abandoned`: an unexplained gap is worse than a
 recorded failure.
 
+**A trajectory id is session-scoped, not turn-scoped.** Two rules follow, and
+without them a delegation that outlives its turn cannot be described at all.
+
+*A turn closes only what it holds.* The turn-settle sweep resolves a trajectory
+only when some event on that turn carries it as its `streamId` — a declaring
+`subagent` row, or a `tool_call` its own children name (§ Promotion). A bare `span`
+naming something this turn never emitted is a reference outward, most often to a
+trajectory an earlier turn opened. Treating such a reference as an opening
+fabricates a record: measured, a `Workflow` that had completed cleanly on the
+dispatching turn acquired a second `abandoned` close on the agent's later turn, for
+work it never ran.
+
+*A late outcome is recorded on the turn that owns the trajectory.* Backgrounded
+work reports back after its turn has settled (§ An agent may start a turn), so its
+`completed` arrives on a different turn than its `started`. The event stays where it
+arrived — that is when it happened, and a client watching that turn should see it —
+and the server additionally corrects the owning turn's record, which is what keeps
+the two from contradicting. Only a provisional record may be corrected: a trajectory
+still open, or a close the *server* authored. An outcome the agent itself stated is
+never rewritten, because a later mention is a description and not a re-decision.
+
+This is what makes `abandoned` genuinely non-final rather than merely documented as
+such. It is also what makes skipping the sweep for backgrounded work safe: on its own
+that leaves no record on the dispatching turn at all, which trades a wrong answer for
+no answer.
+
 **What the adapter must keep separate.** Vendor block state has to be keyed by
 trajectory, not by the vendor's own block index. `claude` numbers content blocks
 per message, and two concurrent subagents both start at index 0 — an adapter with
