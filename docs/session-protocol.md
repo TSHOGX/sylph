@@ -396,7 +396,7 @@ The event kinds are `thinking`, `assistant`, `tool_call`, `tool_result`, `usage`
 
 | `kind` | Carries |
 | --- | --- |
-| `subagent` | Opens a delegated trajectory; its `streamId` is that trajectory's id (§ Delegated trajectories) |
+| `subagent` | Declares a delegated trajectory; its `streamId` is that trajectory's id. Any event's `span` may also promote its referent to one (§ Delegated trajectories) |
 | `plan` | A proposed plan, so plan mode is reviewable rather than prose |
 | `diff` | A structured patch, so a file change renders as a diff not a tool log |
 | `compact` | A compaction boundary, so the timeline shows where context was condensed |
@@ -423,6 +423,8 @@ span   the trajectory this event happened in. Absent means the root turn.
 
 A `subagent` event *is* the trajectory's own record: its `streamId` is the
 trajectory id, and its `span` names the trajectory it was delegated *from*.
+A `subagent` event *declares* a trajectory, but § Promotion below is what
+*defines* one — declaration is the richer path, not the required one.
 Everything else follows:
 
 ```json
@@ -452,6 +454,58 @@ tracing settled on for the same reason, and it is already how the vendor speaks:
 **`span` is not `streamId`.** `streamId` identifies one block across its phases;
 `span` identifies the trajectory a block ran in. A `subagent` event is the one
 place they meet, because opening a trajectory is itself a block with a lifecycle.
+
+### Promotion: a trajectory is defined by use, not by declaration
+
+**Any `streamId` that another event names as its `span` is a trajectory**,
+whatever kind of event opened it. A `tool_call` so named is *promoted*: it stays
+a tool call, and it also becomes the container its children already claim it is.
+
+This is a definition and not a fallback, because delegation is only knowable
+*retroactively*. An adapter learns that a tool call delegated when a child event
+arrives carrying its id — and by then the `tool_call` event has been sent and
+cannot be recalled. Anything that decides at open time is therefore a guess
+standing in for a fact that has not arrived. `claude`'s adapter guessed by tool
+name (`Task`), which was correct until the vendor shipped `Agent` and `Workflow`;
+an MCP server can add another at any time, so the whitelist could not have been
+completed, only extended after each report. Promotion needs no list: an agent
+nobody has written yet nests correctly by tagging its children, which is the same
+`span` it must already set for its output to be attributed at all.
+
+Declaration keeps a purpose it does not share with promotion. A `subagent` event
+carries a *name* before any child exists, and states an *outcome* independent of
+its host's — so an adapter that knows it is delegating should still declare, and
+one that only discovers it in hindsight is no longer silently wrong. Both produce
+the same tree.
+
+**A promoted trajectory closes with its host.** A `tool_call`'s `completed` phase
+means its input finished streaming, not that the delegated work finished — the
+`tool_result` sharing its `streamId` is the close, and its `isError` is the
+outcome. A client must not read a promoted node's lifecycle off its phase, or
+every delegation reads as finished the moment its arguments are parsed.
+
+**One host may run many delegates, so a trajectory id must be the delegate's.**
+`claude`'s `Workflow` fans out to N agents under a single `tool_use_id`; keying a
+trajectory by the host collapses all N into one row, where the last name to arrive
+wins and every earlier delegate's identity is lost. Measured: a two-agent workflow
+rendered as one card reading `Demo: agent-2`. An id must come from whatever the
+vendor gives *per delegate* — `task_id` for `claude` — with the host named as its
+`span`. This is the same rule as *What the adapter must keep separate* below, one
+level up: never key a trajectory by something the vendor multiplexes.
+
+**Progress is a snapshot, so it is not delta text.** A vendor's progress
+notification re-sends its whole current summary rather than a suffix, so appending
+each one repeats it — measured at six copies of one sentence. A `subagent` event
+carries such a summary as `data.progress`, which replaces, leaving `text`
+append-only as everywhere else in the protocol.
+
+**A trajectory with no interior says so.** A vendor may report that delegated work
+exists without forwarding any of it — `claude` forwards interior events for its
+built-in delegation and only lifecycle notifications for the rest. A *closed*
+trajectory with no children is therefore a real state and not a loading one, and a
+client must distinguish it from a running trajectory that has not reported yet.
+Rendering both as an empty expandable card invites the user to keep opening a
+branch that will never fill.
 
 **A `subagent` event is always stable, at every phase.** Ordinarily `started` and
 `delta` are ephemeral projections that never reach the journal (§ `docs/storage.md`).

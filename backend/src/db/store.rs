@@ -657,6 +657,103 @@ impl JournalStore {
         Ok(result.rows_affected())
     }
 
+    /// Close every trajectory left open by a turn that died without settling.
+    ///
+    /// The normal path is `TurnSupervisor::settle`, which emits these closes before
+    /// scheduling consolidation. A crash runs neither: `interrupt_stale_turns` marks
+    /// the turn interrupted, which makes it *consolidatable*, and consolidation then
+    /// folds a `subagent` `started` that has no text and no close into no block at
+    /// all — so the trajectory disappears from history while its children survive,
+    /// and they reattach to the root on the next read. The delegation is gone and
+    /// its work is misattributed, both permanently.
+    ///
+    /// Written straight to the journal because there is no hub and no client at
+    /// startup. Consolidation reads the journal, so a row is all that is needed for
+    /// history to come out right; anyone who later streams the session reads these
+    /// from history like any other event.
+    ///
+    /// Returns how many were closed.
+    pub async fn close_stale_trajectories(&self) -> Result<u64> {
+        let turns = sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT turn_id FROM events
+              WHERE turn_id IS NOT NULL AND (kind = 'subagent' OR span IS NOT NULL)",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::Database)?;
+
+        let mut closed = 0u64;
+        for turn_id in turns {
+            let open = self.open_trajectories(&turn_id).await?;
+            if open.is_empty() {
+                continue;
+            }
+
+            let Some((session_id, next_seq)) = self.turn_tail(&turn_id).await? else {
+                continue;
+            };
+
+            for (offset, (stream_id, span, name)) in open.into_iter().enumerate() {
+                let event = Event {
+                    // Assigned by the insert; `append_event` does not read it.
+                    id: None,
+                    seq: next_seq + offset as i32,
+                    session_id: session_id.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    kind: "subagent".to_string(),
+                    phase: Some("completed".to_string()),
+                    stream_id: Some(stream_id),
+                    span,
+                    name,
+                    text: String::new(),
+                    // The same shape `settle` emits, so a client cannot tell which
+                    // path closed a trajectory — and `abandoned` stays distinct from
+                    // `failed`, because nobody reported an outcome here either.
+                    data_json: r#"{"closedBy":"server","reason":"backend_restarted"}"#
+                        .to_string(),
+                    is_error: true,
+                    stability: "stable".to_string(),
+                    source: "server".to_string(),
+                    created_at_ms: now_ms(),
+                    reconciled_at_ms: None,
+                };
+                self.append_event(&event).await?;
+                closed += 1;
+            }
+        }
+
+        Ok(closed)
+    }
+
+    /// A turn's session, and the next free sequence number *in that session*.
+    ///
+    /// Session-scoped and not turn-scoped, because `events` is
+    /// `UNIQUE(session_id, seq)`: a later turn on the same session already holds
+    /// higher numbers, so continuing from this turn's own maximum would collide with
+    /// it and the insert would fail. Appending at the session tail puts the close
+    /// after the delegation it closes, which is what a reader needs.
+    async fn turn_tail(&self, turn_id: &str) -> Result<Option<(String, i32)>> {
+        let Some(session_id) =
+            sqlx::query_scalar::<_, String>("SELECT session_id FROM turns WHERE id = ?")
+                .bind(turn_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(Error::Database)?
+        else {
+            return Ok(None);
+        };
+
+        let max_seq = sqlx::query_scalar::<_, Option<i32>>(
+            "SELECT MAX(seq) FROM events WHERE session_id = ?",
+        )
+        .bind(&session_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Error::Database)?;
+
+        Ok(Some((session_id, max_seq.unwrap_or(0) + 1)))
+    }
+
     pub async fn count_turns_by_status(&self, session_id: Option<&str>) -> Result<Vec<(String, i64)>> {
         sqlx::query_as::<_, (String, i64)>(
             r#"
@@ -804,10 +901,26 @@ impl JournalStore {
     /// text. Including both would render every token twice.
     /// Delegated trajectories this turn opened and never closed, oldest first.
     ///
-    /// A trajectory is a `subagent` block, so it closes the way any block does: a
-    /// `completed` phase sharing its `stream_id`. One left open means the adapter
-    /// stopped reporting it — its link died, its vendor went quiet, the turn was
-    /// interrupted mid-delegation — and the server closes it on the turn's behalf.
+    /// One left open means the adapter stopped reporting it — its link died, its
+    /// vendor went quiet, the turn was interrupted mid-delegation — and the server
+    /// closes it on the turn's behalf.
+    ///
+    /// **What counts as a trajectory here mirrors the protocol's definition, not
+    /// the `subagent` kind.** This query used to match `phase = 'started'` on a
+    /// `subagent` row, and both halves of that were too narrow. A trajectory opened
+    /// by a `delta` — which is every `claude` workflow delegate, since its first
+    /// notification is progress rather than a start — was invisible to this sweep,
+    /// as was a promoted `tool_call` (`docs/session-protocol.md` § Promotion). The
+    /// consequence is the exact spinner this function exists to prevent, reached
+    /// through a door it did not check: measured on a real session, two workflow
+    /// cards read *running* permanently, across reloads, because nothing ever
+    /// closed them and nothing ever would.
+    ///
+    /// So the set is every id that is **declared** (any `subagent` event names it as
+    /// its `stream_id`) or **referenced** (any event names it as its `span`), minus
+    /// every id already closed. A promoted trajectory's close is its own
+    /// `tool_result`, because a `tool_call`'s `completed` phase reports that its
+    /// input finished streaming and says nothing about the delegated work.
     ///
     /// The alternative is a spinner that never resolves, and worse, a subtree the
     /// UI must report as *running* forever because nothing ever said otherwise.
@@ -821,21 +934,46 @@ impl JournalStore {
         turn_id: &str,
     ) -> Result<Vec<(String, Option<String>, Option<String>)>> {
         let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-            "SELECT started.stream_id, started.span, started.name
-               FROM events started
-              WHERE started.turn_id = ?
-                AND started.kind = 'subagent'
-                AND started.phase = 'started'
-                AND started.stream_id IS NOT NULL
-                AND NOT EXISTS (
-                      SELECT 1 FROM events done
-                       WHERE done.turn_id = started.turn_id
-                         AND done.kind = 'subagent'
-                         AND done.phase = 'completed'
-                         AND done.stream_id = started.stream_id
-                )
-              ORDER BY started.seq",
+            // `open.id` is the trajectory; `seq` orders the sweep by when each was
+            // first seen; `span` and `name` are carried so the closing event lands
+            // in the right place in the tree, taken from the row that knows them —
+            // a declaring `subagent` row when there is one, since a promoted host's
+            // own `span` is its grandparent and its `name` is the tool's.
+            "WITH open AS (
+                 SELECT stream_id AS id,
+                        MIN(seq) AS seq,
+                        -- MAX ignores NULLs, so a phase that carried the value
+                        -- wins over one that did not, whatever order they arrived.
+                        MAX(CASE WHEN kind = 'subagent' THEN span END) AS declared_span,
+                        MAX(CASE WHEN kind = 'subagent' THEN name END) AS declared_name,
+                        MAX(span) AS any_span,
+                        MAX(name) AS any_name
+                   FROM events
+                  WHERE turn_id = ? AND kind = 'subagent' AND stream_id IS NOT NULL
+                  GROUP BY stream_id
+                 UNION ALL
+                 SELECT span AS id, MIN(seq) AS seq,
+                        NULL, NULL, NULL, NULL
+                   FROM events
+                  WHERE turn_id = ? AND span IS NOT NULL
+                  GROUP BY span
+             )
+             SELECT open.id,
+                    MAX(COALESCE(open.declared_span, open.any_span)),
+                    MAX(COALESCE(open.declared_name, open.any_name))
+               FROM open
+              WHERE NOT EXISTS (
+                    SELECT 1 FROM events done
+                     WHERE done.turn_id = ?
+                       AND done.stream_id = open.id
+                       AND done.phase = 'completed'
+                       AND done.kind IN ('subagent', 'tool_result')
+              )
+              GROUP BY open.id
+              ORDER BY MIN(open.seq)",
         )
+        .bind(turn_id)
+        .bind(turn_id)
         .bind(turn_id)
         .fetch_all(&self.pool)
         .await
@@ -1228,6 +1366,174 @@ mod tests {
 
         let open = store.open_trajectories("turn-1").await.expect("query");
         assert_eq!(open.len(), 1);
+    }
+
+    /// A trajectory whose first event was a `delta` is still swept.
+    ///
+    /// Every `claude` workflow delegate is this shape: its first notification is
+    /// progress, not a start. Matching `phase = 'started'` skipped them, so the
+    /// turn-settle sweep never closed them and their cards read *running*
+    /// permanently, across reloads — which is the bug this whole query exists to
+    /// prevent, reached through a door it did not check.
+    #[tokio::test]
+    async fn a_trajectory_opened_by_a_delta_is_still_closed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        store
+            .append_event(&span_event(1, "subagent", "delta", "task-a", Some("host-1")))
+            .await
+            .expect("progress");
+
+        let open = store.open_trajectories("turn-1").await.expect("query");
+        let ids: Vec<&str> = open.iter().map(|row| row.0.as_str()).collect();
+        // Both, and that is the point: the delegate is declared, and naming a host
+        // as its span promotes that host too. Sweeping one and not the other would
+        // leave whichever was missed spinning.
+        assert!(ids.contains(&"task-a"), "the delegate is open: {ids:?}");
+        assert!(ids.contains(&"host-1"), "so is its host: {ids:?}");
+
+        let delegate = open
+            .iter()
+            .find(|row| row.0 == "task-a")
+            .expect("the delegate");
+        assert_eq!(
+            delegate.1.as_deref(),
+            Some("host-1"),
+            "its host travels with it, so the close lands inside the container"
+        );
+    }
+
+    /// A `tool_call` another event names as its `span` is a trajectory.
+    ///
+    /// Promotion (`docs/session-protocol.md` § Promotion). Delegation is only
+    /// knowable retroactively, so a host that never declared itself must still be
+    /// swept — otherwise an interrupted turn leaves its container spinning while
+    /// every child inside it is resolved.
+    #[tokio::test]
+    async fn a_promoted_tool_call_is_swept_when_nothing_closed_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        store
+            .append_event(&span_event(1, "tool_call", "completed", "host-1", None))
+            .await
+            .expect("host");
+        store
+            .append_event(&span_event(2, "thinking", "completed", "b1", Some("host-1")))
+            .await
+            .expect("child");
+
+        let open = store.open_trajectories("turn-1").await.expect("query");
+        assert_eq!(
+            open.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+            vec!["host-1"],
+            "the host is open; its child is not a trajectory"
+        );
+    }
+
+    /// A promoted host's `tool_result` closes it, so the sweep leaves it alone.
+    ///
+    /// A `tool_call`'s own `completed` phase reports that its arguments finished
+    /// streaming and says nothing about the delegated work, so the result is the
+    /// only close it has.
+    #[tokio::test]
+    async fn a_tool_result_closes_the_trajectory_its_call_hosted() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        store
+            .append_event(&span_event(1, "tool_call", "completed", "host-1", None))
+            .await
+            .expect("host");
+        store
+            .append_event(&span_event(2, "thinking", "completed", "b1", Some("host-1")))
+            .await
+            .expect("child");
+        store
+            .append_event(&span_event(3, "tool_result", "completed", "host-1", None))
+            .await
+            .expect("result");
+
+        let open = store.open_trajectories("turn-1").await.expect("query");
+        assert!(open.is_empty(), "a resolved host is not open: {open:?}");
+    }
+
+    /// Many delegates under one host are many trajectories, not one.
+    ///
+    /// `claude`'s `Workflow` fans out under a single `tool_use_id`. Keyed by the
+    /// host, all of them collapse into one row where the last name wins — measured
+    /// on a real session as a two-agent workflow rendering as a single card.
+    #[tokio::test]
+    async fn every_delegate_under_one_host_is_swept_separately() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        store
+            .append_event(&span_event(1, "tool_call", "completed", "host-1", None))
+            .await
+            .expect("host");
+        for (seq, task) in [(2, "task-a"), (3, "task-b")] {
+            store
+                .append_event(&span_event(seq, "subagent", "started", task, Some("host-1")))
+                .await
+                .expect("delegate");
+        }
+        store
+            .append_event(&span_event(4, "subagent", "completed", "task-a", Some("host-1")))
+            .await
+            .expect("close one");
+
+        let open = store.open_trajectories("turn-1").await.expect("query");
+        let ids: Vec<&str> = open.iter().map(|row| row.0.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["host-1", "task-b"],
+            "the closed delegate is gone; its sibling and their host are not"
+        );
+    }
+
+    /// A crash skips `settle`, so startup has to close what it left open.
+    ///
+    /// Consolidation folds a trajectory with no close into no block at all, so the
+    /// delegation vanishes from history while its children survive and reattach to
+    /// the root: the work is misattributed permanently.
+    #[tokio::test]
+    async fn startup_closes_a_trajectory_a_crash_left_open() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        store
+            .append_event(&span_event(1, "subagent", "started", "task-a", None))
+            .await
+            .expect("open");
+        store
+            .append_event(&span_event(2, "thinking", "completed", "b1", Some("task-a")))
+            .await
+            .expect("child");
+
+        let closed = store.close_stale_trajectories().await.expect("sweep");
+        assert_eq!(closed, 1);
+
+        let open = store.open_trajectories("turn-1").await.expect("query");
+        assert!(open.is_empty(), "nothing is left open: {open:?}");
+
+        let events = store
+            .turn_events_for_consolidation("turn-1")
+            .await
+            .expect("read back");
+        let close = events
+            .iter()
+            .find(|e| e.kind == "subagent" && e.phase.as_deref() == Some("completed"))
+            .expect("a closing event was journaled");
+        assert!(
+            close.data_json.contains("\"closedBy\":\"server\""),
+            "attributed to the server so the UI reports it as abandoned, not failed"
+        );
+        assert_eq!(close.stream_id.as_deref(), Some("task-a"));
+
+        // Idempotent: a second startup finds nothing to do.
+        assert_eq!(store.close_stale_trajectories().await.expect("again"), 0);
     }
 
     #[tokio::test]

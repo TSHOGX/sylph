@@ -35,10 +35,28 @@
         }
       }
     },
+    "/api/v1/config": {
+      "get": {
+        "summary": "Read what configuration resolved to",
+        "description": "Returns every resolved setting with the source that supplied it, plus every bundled-adapter directory considered. The same report `sylph-web-backend doctor` renders, served so the terminal and the settings panel cannot disagree. It exists because every failure in this area has one shape: a path resolves somewhere nothing lives, the server starts, /health reports fine, and the symptom appears layers away as an empty agent list or a dead slash key. A resolved value alone cannot distinguish a wrong path from a path that is not being read, so each entry names its source and the variable that overrides it. Read-only, deliberately: paths.browse_roots bounds what any client of this backend may enumerate and paths.agents_dir names directories the server executes programs from, so a loopback HTTP surface able to rewrite either is a materially larger threat model than one that displays them — the config file stays the durable, reviewable record. Authenticated, since every value is an absolute local filesystem path.",
+        "responses": {
+          "200": {
+            "description": "The resolved configuration and its provenance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/soul": {
       "get": {
         "summary": "Read the Sylph identity preamble",
-        "description": "Returns the resolved SOUL.md with its path, size, and mtime. Exists because the toggle governing injection is meaningless without it: SOUL.md lives under ~/.agents/skills/sylph/, outside the repo and outside any other surface the app offers, so a user asked to consent to appending it has nowhere else to read it. A missing SOUL.md is a 200 carrying available:false rather than a 404 \u2014 an install without one is ordinary and runs every session natively, which the client has to be able to say. A file that resolved but cannot be read is a separate error field rather than a 5xx, because the settings panel must render the toggle either way. Resolution mirrors the runners' own rule (<runners_dir>/../SOUL.md, overridden by SYLPH_SOUL, where an explicit empty value means no identity).",
+        "description": "Returns the resolved SOUL.md with its path, size, and mtime. Exists because the toggle governing injection is meaningless without it: SOUL.md lives under the Sylph home directory, outside any other surface the app offers, so a user asked to consent to appending it has nowhere else to read it. A missing SOUL.md is a 200 carrying available:false rather than a 404 — an install without one is ordinary and runs every session natively, which the client has to be able to say. A file that resolved but cannot be read is a separate error field rather than a 5xx, because the settings panel must render the toggle either way. Resolved once in Config as paths.soul (~/.sylph/SOUL.md by default, overridden by SYLPH_SOUL, where an explicit empty value means no identity and a configured-but-absent path resolves to none).",
         "responses": {
           "200": {
             "description": "Resolved identity text, or available:false when no SOUL.md exists",
@@ -163,7 +181,7 @@
       },
       "patch": {
         "summary": "Update a session's per-turn flags or title",
-        "description": "Flags are validated against the agent's own `--describe` schema on write, rather than being dropped silently at turn time. A flag the agent does not declare, or a value outside an enumerated flag's `choices`, is rejected. An empty `choices` list means the flag is free-form and only its name is checked. If the session's runner is no longer installed its flags cannot be validated, so they cannot be changed \u2014 failing is better than storing a value that would be discarded later. Both fields are optional; sending neither is a no-op.",
+        "description": "Flags are validated against the agent's own `--describe` schema on write, rather than being dropped silently at turn time. A flag the agent does not declare, or a value outside an enumerated flag's `choices`, is rejected. An empty `choices` list means the flag is free-form and only its name is checked. If the session's runner is no longer installed its flags cannot be validated, so they cannot be changed — failing is better than storing a value that would be discarded later. Both fields are optional; sending neither is a no-op.",
         "parameters": [
           {
             "$ref": "#/components/parameters/SessionId"
@@ -201,7 +219,7 @@
       },
       "delete": {
         "summary": "Discard an empty Sylph session",
-        "description": "Deletes the session only if it is `sylph` origin and has no turns, so this cannot destroy work: an imported native session and any session that has run a turn are both left untouched. It exists for the draft a user creates by picking a directory and then navigates away from without sending anything. Idempotent \u2014 a session that does not qualify, or does not exist, still answers 204, because the client's intent is 'do not leave a draft behind' rather than 'assert this row existed'.",
+        "description": "Deletes the session only if it is `sylph` origin and has no turns, so this cannot destroy work: an imported native session and any session that has run a turn are both left untouched. It exists for the draft a user creates by picking a directory and then navigates away from without sending anything. Idempotent — a session that does not qualify, or does not exist, still answers 204, because the client's intent is 'do not leave a draft behind' rather than 'assert this row existed'.",
         "parameters": [
           {
             "$ref": "#/components/parameters/SessionId"
@@ -704,7 +722,7 @@
     "/api/v1/sessions/{sessionId}/files/document": {
       "get": {
         "summary": "Read a spreadsheet, CSV, Word document, or PowerPoint deck as structure",
-        "description": "Parsed server-side, because the npm alternative (SheetJS 0.18.5) is unmaintained with two unpatched High CVEs on this exact parse-untrusted-input path and is 7.5 MB unpacked against a ~4 KB first-load budget. The response is a union on `kind`: `grid` for .xlsx/.xlsm/.xlsb/.xls/.ods/.csv/.tsv, `blocks` for .docx/.pptx. Spreadsheets are windowed \u2014 `rows` defaults to 200 and caps at 500, and an out-of-range window is clamped rather than refused, since a 50000x30 sheet takes ~600ms to materialize and would be a ~50 MB response. Files over 25 MiB are refused before parsing; a zip part is bounded both by its declared header size and by the actual read, because the declared figure is attacker-supplied.",
+        "description": "Parsed server-side, because the npm alternative (SheetJS 0.18.5) is unmaintained with two unpatched High CVEs on this exact parse-untrusted-input path and is 7.5 MB unpacked against a ~4 KB first-load budget. The response is a union on `kind`: `grid` for .xlsx/.xlsm/.xlsb/.xls/.ods/.csv/.tsv, `blocks` for .docx/.pptx. Spreadsheets are windowed — `rows` defaults to 200 and caps at 500, and an out-of-range window is clamped rather than refused, since a 50000x30 sheet takes ~600ms to materialize and would be a ~50 MB response. Files over 25 MiB are refused before parsing; a zip part is bounded both by its declared header size and by the actual read, because the declared figure is attacker-supplied.",
         "parameters": [
           {
             "$ref": "#/components/parameters/SessionId"
@@ -878,7 +896,7 @@
     "/api/v1/fs/tree": {
       "get": {
         "summary": "List subdirectories of one browsable directory",
-        "description": "Directories only, one level per request. There is deliberately no `/fs/content`: this surface exists so a user can name a workspace, and enumerating directory names is a strictly smaller disclosure than serving bytes \u2014 reading bytes stays session-scoped, where the root is journalled rather than chosen. A symlink leaving the permitted roots is omitted from the listing rather than merely refused, so it is never advertised as a node to try. `parent` is absent when the listed directory is itself a root, which is what stops a client offering a 'go up' that would leave the permitted set.",
+        "description": "Directories only, one level per request. There is deliberately no `/fs/content`: this surface exists so a user can name a workspace, and enumerating directory names is a strictly smaller disclosure than serving bytes — reading bytes stays session-scoped, where the root is journalled rather than chosen. A symlink leaving the permitted roots is omitted from the listing rather than merely refused, so it is never advertised as a node to try. `parent` is absent when the listed directory is itself a root, which is what stops a client offering a 'go up' that would leave the permitted set.",
         "parameters": [
           {
             "name": "path",
@@ -919,7 +937,7 @@
     "/api/v1/auth/token": {
       "get": {
         "summary": "Bootstrap the session cookie",
-        "description": "Sets the `SameSite=Strict` HttpOnly auth cookie for a loopback client, which is why the frontend must proxy `/api/v1/*` same-origin: a browser will not send the cookie across ports. Exempt from auth, alongside `/health`. The token is regenerated on every backend start, so open browser sessions are invalidated by a restart \u2014 that is the design, not a bug to fix by persisting the token.",
+        "description": "Sets the `SameSite=Strict` HttpOnly auth cookie for a loopback client, which is why the frontend must proxy `/api/v1/*` same-origin: a browser will not send the cookie across ports. Exempt from auth, alongside `/health`. The token is regenerated on every backend start, so open browser sessions are invalidated by a restart — that is the design, not a bug to fix by persisting the token.",
         "security": [],
         "responses": {
           "200": {
@@ -1141,7 +1159,7 @@
               "preserve"
             ],
             "default": "sylph",
-            "description": "Whether SOUL.md is appended to the agent's prompt. Defaults to sylph, so a client that omits it keeps the original behaviour. A closed enumeration so a misspelling is a 422 naming the field, rather than a journal row carrying a value nothing downstream matches \u2014 which would read as \"not sylph\" everywhere and silently disable injection. Separate from origin: opting out of injection does not make a session native. The WebApp created it, so Sylph lifecycle policy still applies and origin stays sylph."
+            "description": "Whether SOUL.md is appended to the agent's prompt. Defaults to sylph, so a client that omits it keeps the original behaviour. A closed enumeration so a misspelling is a 422 naming the field, rather than a journal row carrying a value nothing downstream matches — which would read as \"not sylph\" everywhere and silently disable injection. Separate from origin: opting out of injection does not make a session native. The WebApp created it, so Sylph lifecycle policy still applies and origin stays sylph."
           }
         }
       },
@@ -1447,7 +1465,7 @@
           },
           "isQuickStart": {
             "type": "boolean",
-            "description": "True for ~/.agents, which the sidebar lists separately."
+            "description": "True for the configured Quick Start directory, which the sidebar lists separately."
           },
           "archivedCount": {
             "type": "integer",
@@ -1466,7 +1484,7 @@
         "properties": {
           "quickStartDir": {
             "type": "string",
-            "description": "Absolute $HOME/.agents."
+            "description": "Absolute path of the Quick Start directory, resolved server-side: the browser can neither expand ~ nor know what paths.quick_start_dir was set to."
           },
           "dataDir": {
             "type": "string",
@@ -1898,7 +1916,7 @@
           },
           "t": {
             "type": "string",
-            "description": "Drives alignment \u2014 numbers and dates right, text left.",
+            "description": "Drives alignment — numbers and dates right, text left.",
             "enum": [
               "text",
               "number",
@@ -1920,7 +1938,7 @@
       },
       "BlocksPayload": {
         "type": "object",
-        "description": "Word and PowerPoint share this shape: a slide is a section whose blocks follow it, so one renderer serves both. A structured list rather than Markdown or HTML \u2014 Markdown would mean escaping prose containing * or _ or | on the way out and re-parsing it on the way in, and HTML would reintroduce an innerHTML path into a frontend built to avoid one.",
+        "description": "Word and PowerPoint share this shape: a slide is a section whose blocks follow it, so one renderer serves both. A structured list rather than Markdown or HTML — Markdown would mean escaping prose containing * or _ or | on the way out and re-parsing it on the way in, and HTML would reintroduce an innerHTML path into a frontend built to avoid one.",
         "required": [
           "blocks",
           "truncated"
@@ -1941,7 +1959,7 @@
                 },
                 "index": {
                   "type": "integer",
-                  "description": "0-based position in presentation order, which comes from p:sldIdLst resolved through the presentation rels \u2014 not from sorting filenames, since slide10.xml sorts before slide2.xml."
+                  "description": "0-based position in presentation order, which comes from p:sldIdLst resolved through the presentation rels — not from sorting filenames, since slide10.xml sorts before slide2.xml."
                 },
                 "notes": {
                   "type": "string",
@@ -2062,7 +2080,7 @@
           "data": {
             "type": "string",
             "format": "byte",
-            "description": "File bytes, base64, no `data:` prefix \u2014 the same encoding turn attachments use."
+            "description": "File bytes, base64, no `data:` prefix — the same encoding turn attachments use."
           },
           "overwrite": {
             "type": "boolean",
@@ -2256,7 +2274,104 @@
           },
           "error": {
             "type": "string",
-            "description": "Why no content is present, when a path resolved but could not be read. Distinguishes \"there is no SOUL.md\" from \"there is one and it is unreadable\" \u2014 different problems with different fixes."
+            "description": "Why no content is present, when a path resolved but could not be read. Distinguishes \"there is no SOUL.md\" from \"there is one and it is unreadable\" — different problems with different fixes."
+          }
+        }
+      },
+      "ConfigReport": {
+        "type": "object",
+        "required": [
+          "home",
+          "configPath",
+          "configPresent",
+          "entries",
+          "bundledAgentCandidates"
+        ],
+        "properties": {
+          "home": {
+            "type": "string",
+            "description": "The one root every path defaults under.",
+            "example": "/Users/you/.sylph"
+          },
+          "configPath": {
+            "type": "string",
+            "description": "The file to edit. Shown so a user knows what to open.",
+            "example": "/Users/you/.sylph/config.toml"
+          },
+          "configPresent": {
+            "type": "boolean",
+            "description": "False before a first run seeds it, and after a user deletes it. Stated rather than implied, because a table of values needs to say when none of them came from a file."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConfigEntry"
+            }
+          },
+          "bundledAgentCandidates": {
+            "type": "array",
+            "description": "Every directory bundled-adapter resolution tried, in order, with the one it took marked. Without it 'no agents' is unactionable: a missing install and a mistyped path give the same empty list and need opposite fixes.",
+            "items": {
+              "$ref": "#/components/schemas/ConfigCandidate"
+            }
+          }
+        }
+      },
+      "ConfigEntry": {
+        "type": "object",
+        "required": [
+          "key",
+          "value",
+          "source",
+          "envVar"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Dotted key as it appears in config.toml.",
+            "example": "paths.data_dir"
+          },
+          "value": {
+            "type": "string",
+            "example": "/Users/you/.sylph/data"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "env",
+              "file",
+              "default"
+            ],
+            "description": "Which source won. Precedence is environment, then file, then a default derived from the root."
+          },
+          "envVar": {
+            "type": "string",
+            "description": "The variable that overrides this setting, named here so acting on the row needs no table elsewhere.",
+            "example": "SYLPH_DATA_DIR"
+          },
+          "exists": {
+            "type": "boolean",
+            "description": "Whether the path is there. ABSENT rather than false for settings that are not paths — a log level rendered as missing reports a working setting as broken. A bare command name (the tracedb.bin default) is checked against PATH, since a filesystem check would call a working install absent."
+          }
+        }
+      },
+      "ConfigCandidate": {
+        "type": "object",
+        "required": [
+          "path",
+          "exists",
+          "chosen"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "chosen": {
+            "type": "boolean",
+            "description": "True for the one directory discovery actually reads."
           }
         }
       }

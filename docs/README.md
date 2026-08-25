@@ -8,6 +8,7 @@ development practices.
 
 ### Getting Started
 - **[Installation Guide](installation.md)** — Install and run Sylph Web locally
+- **[Configuration](configuration.md)** — `~/.sylph`, `config.toml`, and moving an existing install
 - **[Development Guide](development.md)** — Set up a development environment
 - **[Roadmap](roadmap.md)** — Project status, completed phases, and future work
 
@@ -33,6 +34,7 @@ development practices.
 | Tables, indexes, migrations | [database-schema.md](database-schema.md) |
 | UI structure and conventions | [frontend-architecture.md](frontend-architecture.md) |
 | How to install/deploy | [installation.md](installation.md) |
+| Where files live, what a setting does | [configuration.md](configuration.md) |
 | How to develop locally | [development.md](development.md) |
 | Identity, origin, and `SOUL.md` | [architecture.md](architecture.md#session-model) |
 | Translations and locale | [frontend-architecture.md](frontend-architecture.md#internationalization) |

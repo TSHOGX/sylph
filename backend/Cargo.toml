@@ -26,6 +26,11 @@ sqlx = { version = "0.8", features = [
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# The on-disk config format. TOML rather than JSON because this file is
+# hand-edited and seeded fully commented: JSON has no comments, so a seeded file
+# could not explain itself, and every default would have to be duplicated into
+# prose that drifts. `toml` deserializes through serde, which is already here.
+toml = "1.1"
 
 # Async utilities
 futures = "0.3"

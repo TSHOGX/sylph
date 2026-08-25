@@ -97,11 +97,7 @@ impl AppState {
         let discovery_env: Arc<dyn crate::env::Environment> =
             Arc::new(crate::env::LocalEnvironment::new());
         let registry = Arc::new(Mutex::new(
-            Registry::new(
-                vec![config.agents_dir.clone(), config.runners_dir.clone()],
-                discovery_env,
-            )
-            .await?,
+            Registry::new(config.agent_roots(), discovery_env).await?,
         ));
         {
             let registry = registry.lock().await;
@@ -119,10 +115,10 @@ impl AppState {
             if usable == 0 {
                 tracing::error!(
                     "No usable agents. Sessions cannot run and no slash commands will be \
-                     offered. Bundled adapters were looked for in {:?}; user agents in {:?}. \
-                     Set SYLPH_AGENTS_DIR to override.",
-                    config.agents_dir_candidates,
-                    config.runners_dir,
+                     offered. Bundled adapters were looked for in {:?}; your own agents in \
+                     {:?}. Run `sylph-web doctor` to see what resolved.",
+                    config.bundled_agents_candidates,
+                    config.agents_dir,
                 );
             }
         }
@@ -134,6 +130,18 @@ impl AppState {
             tracing::warn!(
                 "Interrupted {} stale turns from a previous backend session",
                 interrupted
+            );
+        }
+
+        // Before the consolidator can move those turns. A crash skips `settle`, so
+        // a delegation open at crash time has no closing event — and consolidation
+        // folds a trajectory with no close into no block at all, which loses the
+        // delegation while keeping its children, reattaching them to the root.
+        let closed = store.close_stale_trajectories().await?;
+        if closed > 0 {
+            tracing::warn!(
+                "Closed {} delegated trajectory(ies) left open by a previous backend session",
+                closed
             );
         }
 
@@ -254,6 +262,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/health", get(api::health::health))
         .route("/api/v1/auth/token", get(middleware::auth::bootstrap_token))
         .route("/api/v1/diagnostics", get(api::health::diagnostics))
+        // What configuration resolved to, and which source supplied each value.
+        // Read-only: see `api::config` for why a loopback HTTP surface must not be
+        // able to rewrite `browse_roots` or `agents_dir`.
+        .route("/api/v1/config", get(api::config::get))
         .route(
             "/api/v1/agents",
             get(api::agents::list).post(api::agents::refresh),

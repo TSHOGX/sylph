@@ -44,23 +44,24 @@ not come up, so a broken install does not look like a successful one.
 
 ## Paths and settings
 
+Sylph keeps everything it owns under `~/.sylph` and takes its settings from
+`~/.sylph/config.toml`. Both are created on first start. See
+[**configuration.md**](configuration.md) for the file and the full settings table.
+
+The installer itself reads only these:
+
 | Variable | Default | What it controls |
 | --- | --- | --- |
+| `SYLPH_HOME` | `~/.sylph` | Config, identity, data, scratch — everything Sylph owns |
+| `SYLPH_PORT` | `4317` | Backend port |
+| `SYLPH_WEB_FRONTEND_PORT` | `3000` | Frontend port |
 | `SYLPH_WEB_PREFIX` | `~/.local/share/sylph-web` | Where the install lives |
 | `SYLPH_WEB_BIN_DIR` | `~/.local/bin` | Where launchers are linked |
-| `SYLPH_WEB_DATA_DIR` | `~/.agents/data/sylph/web` | The journal (`journal.db`) |
-| `SYLPH_WEB_PORT` | `4317` | Backend port |
-| `SYLPH_WEB_FRONTEND_PORT` | `3000` | Frontend port |
-| `SYLPH_RUNNERS_DIR` | `~/.agents/skills/sylph/runners` | Runner discovery |
-| `SYLPH_SOUL` | `<runners_dir>/../SOUL.md` | The identity preamble. An explicit empty value means no identity, so every session runs on the agent's own |
-| `TRACEDB_BIN` | `~/Workspace/trace-db/target/release/trace-db` | TraceDB binary |
-| `SYLPH_WEB_BROWSE_ROOTS` | *(none; `$HOME` is implicit)* | Extra directories the workspace picker may browse |
-| `RUST_LOG` | `info` | Backend log verbosity |
 
 Set them for the install command, not just at start time:
 
 ```sh
-SYLPH_WEB_PORT=4400 SYLPH_WEB_FRONTEND_PORT=3400 ./scripts/install.sh
+SYLPH_PORT=4400 SYLPH_WEB_FRONTEND_PORT=3400 ./scripts/install.sh
 ```
 
 The backend port in particular has to be set at build time. Next compiles its
@@ -68,14 +69,39 @@ proxy target into the route manifest, so a port supplied only when starting is
 ignored and the UI talks to `4317` regardless. The installer handles this; it is
 worth knowing if you build by hand.
 
-Overrides you set are written into the LaunchAgent plist, because launchd starts
-processes with a bare environment and would not otherwise see them.
+Everything else — the data directory, your own agents, the identity preamble, the
+TraceDB binary, browse roots, log level — is set in `config.toml` rather than
+here, so it is not something the installer has to know about or propagate. That is
+the point of the single root: the LaunchAgent plist carries `SYLPH_HOME` and does
+not grow a key every time a setting is added.
 
 ## Your data
 
-The journal at `$SYLPH_WEB_DATA_DIR/journal.db` holds sessions and turns created
-through the web app. It is the only state the installer touches, and it survives
-upgrades and uninstalls.
+Everything is under `~/.sylph`:
+
+```
+~/.sylph/
+├── config.toml      Your settings. Edit freely; commented on creation.
+├── SOUL.md          The identity preamble. Yours to edit or delete.
+├── agents/          Agent adapters you added.
+├── data/            The journal, history, blobs, attachments. Back this up.
+└── scratch/         Where Quick Start sessions run.
+```
+
+`data/` is the one directory that matters for backup, and it is one subtree on
+purpose: the two SQLite tiers, the blob store, and staged attachments reference
+each other, so copying `data/` copies a consistent whole and copying part of it
+does not.
+
+The installer touches only `data/`, and it survives upgrades and uninstalls.
+`--purge` deletes the whole root, which is the one operation that needs asking
+for.
+
+To check what actually resolved:
+
+```sh
+sylph-web-backend doctor
+```
 
 Schema changes are applied on startup and recorded in the database, so a
 development journal carries into a packaged install with no separate migration
@@ -95,6 +121,25 @@ git pull
 
 The previous version is kept alongside the new one, together with a copy of the
 journal taken before the new version could migrate it.
+
+## Moving data from an earlier install
+
+Sylph used to keep its journal under `~/.agents/data/sylph/web`. Nothing reads
+that location any more — a path kept as a fallback is a second layout nobody
+maintains — so an existing install brings its data across explicitly, once:
+
+```sh
+sylph-web-backend migrate --from ~/.agents/data/sylph/web
+```
+
+That copies the journal, consolidated history, blob store, and staged attachments
+into `~/.sylph/data`, leaving the original untouched. It refuses rather than
+merging if `~/.sylph/data` already holds a journal: two journals cannot be
+combined, since session ids are unique per store and the blob index would
+reference rows that are not there. Move the existing one aside first, or pass
+`--force` to replace it.
+
+Stop the server before migrating, so nothing is mid-write.
 
 ## Rolling back
 
@@ -140,22 +185,35 @@ launchctl list | grep dev.sylph.web
 ## Uninstalling
 
 ```sh
-./scripts/install.sh --uninstall     # removes the install, keeps your journal
-./scripts/install.sh --purge         # also deletes the journal
+./scripts/install.sh --uninstall     # removes the install, keeps ~/.sylph
+./scripts/install.sh --purge         # also deletes ~/.sylph
 ```
 
+`--purge` removes your config, identity file, sessions, and history. It is a
+separate flag for that reason.
+
 ## Troubleshooting
+
+Start with `sylph-web-backend doctor`. It prints every resolved path, which source
+supplied it, and whether it exists — which is the answer to most of what follows.
+Settings → Configuration shows the same thing in the UI.
 
 **Port already in use.** The installer stops its own agent before checking, so
 this means another process holds the port. Find it with
 `lsof -ti :4317 -sTCP:LISTEN`, or install on a different port.
 
-**No agents in the dropdown.** The backend found no runners. Check
-`SYLPH_RUNNERS_DIR`, then `/api/v1/diagnostics` — a runner that exists but
-failed to describe itself is listed there with its error rather than hidden.
+**No agents in the dropdown.** The backend discovered none. `doctor` reports how
+many adapters it found and every directory it searched; `/api/v1/diagnostics` adds
+any that were found but failed their handshake, with the error rather than hidden.
 
-**The archive is empty or search returns nothing.** Check `TRACEDB_BIN` points at
-a real binary and that `/api/v1/health` reports `tracedb.available: true`.
+**The archive is empty or search returns nothing.** TraceDB is a separate install.
+Check `doctor` marks `tracedb.bin` as found, and that `/api/v1/health` reports
+`tracedb.available: true`. Set `tracedb.bin` in `config.toml` if it lives in a
+checkout rather than on `PATH`.
+
+**A setting in `config.toml` seems to be ignored.** An environment variable
+overrides the file. `doctor` names the source of every value, so a row reading
+`SYLPH_…` rather than `config.toml` is the answer.
 
 **One half is up and the other is not.** It should not persist: the launcher
 exits when either process dies, so the LaunchAgent restarts the pair. If it

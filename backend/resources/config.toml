@@ -1,0 +1,89 @@
+# Sylph configuration
+#
+# This file was created for you on first run. Every setting below is commented
+# out and shows its default, so nothing here changes behaviour until you
+# uncomment it. Delete a line to go back to the default.
+#
+# Everything Sylph owns lives under one root — this file's directory. Point
+# SYLPH_HOME somewhere else to move the whole install, including this file.
+#
+# An environment variable always wins over this file, so a one-off run or a
+# second instance needs no edit here. Paths may start with `~`.
+#
+# Full reference: docs/configuration.md
+# Inspect what actually resolved: `sylph-web doctor`
+
+
+[server]
+
+# Address to bind. Loopback only: Sylph has no authentication story for a
+# network-reachable deployment, and exposing it beyond 127.0.0.1 needs a
+# threat-model change first, not just this line.
+#   env: SYLPH_HOST
+# host = "127.0.0.1"
+
+# Backend port. The frontend must be built knowing this — Next compiles its proxy
+# target into the route manifest — so change it with the installer rather than
+# only here.
+#   env: SYLPH_PORT
+# port = 4317
+
+
+[paths]
+
+# Everything durable: the journal, consolidated history, the blob store, and
+# staged attachments. This is the directory to back up, and the one to point at
+# an external volume if your home directory is small.
+#   env: SYLPH_DATA_DIR
+# data_dir = "~/.sylph/data"
+
+# Your own agent adapters. Each is a directory holding an executable
+# `adapter.sh`. Adapters shipped with Sylph are found beside the binary and are
+# not here — they are replaced on upgrade. A name here shadows a bundled one,
+# which is how you run a fixed adapter before the next release.
+#   env: SYLPH_AGENTS_DIR
+# agents_dir = "~/.sylph/agents"
+
+# The identity preamble appended to a Sylph session's prompt. Edit it freely; it
+# is yours. Delete it and every session runs on the agent's own identity, which
+# is a supported state rather than an error.
+#
+# An *empty* value means "never inject identity", which is different from leaving
+# this commented out: unset resolves the path below, empty declines outright and
+# nothing is seeded there.
+#   env: SYLPH_SOUL (empty string also means decline)
+# soul = "~/.sylph/SOUL.md"
+
+# Where Quick Start sessions run — the directory used when you ask something
+# without choosing a project. Files an agent creates in a quick session land
+# here.
+#   env: SYLPH_QUICK_START_DIR
+# quick_start_dir = "~/.sylph/scratch"
+
+# Extra directories the workspace picker may browse. Your home directory is
+# always included and does not need listing. Set this when projects live outside
+# it — an external volume, a shared checkout.
+#
+# This bounds what any client of this backend can enumerate, so widening it is a
+# real disclosure decision and not a convenience.
+#   env: SYLPH_BROWSE_ROOTS (colon-separated, like PATH)
+# browse_roots = ["/Volumes/work", "~/src"]
+
+
+[tracedb]
+
+# TraceDB is a separate project that Sylph reads durable cross-agent history
+# from. Found on PATH by default. Pin it when you run a build from a checkout.
+#
+# Sylph runs fine without it: live sessions work, and archive search and native
+# session import report themselves unavailable.
+#   env: SYLPH_TRACEDB_BIN
+# bin = "~/Workspace/trace-db/target/release/trace-db"
+
+
+[log]
+
+# Verbosity, in `tracing` filter syntax. `debug` for troubleshooting, or a
+# per-module filter like "info,sylph_web_backend::adapter=debug".
+#   env: SYLPH_LOG, then RUST_LOG
+# level = "info"

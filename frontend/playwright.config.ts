@@ -13,7 +13,19 @@ import path from "node:path";
  */
 const BACKEND_PORT = 4318;
 const FRONTEND_PORT = 3101;
-const dataDir = path.join(__dirname, ".e2e-data");
+/**
+ * The suite's own Sylph home.
+ *
+ * One directory rather than a variable per path, which is the point of the single
+ * root: the backend seeds `data/`, `agents/`, `scratch/`, and a `config.toml`
+ * inside it exactly as a first run does, so E2E exercises the real first-run path
+ * instead of a hand-assembled approximation of it.
+ *
+ * Named `.e2e-home` rather than `.e2e-data` because it now holds more than data,
+ * and because the rename makes the stale `.e2e-data` from an older checkout
+ * visibly unused rather than silently half-read.
+ */
+const sylphHome = path.join(__dirname, ".e2e-home");
 
 export default defineConfig({
   testDir: "./e2e",
@@ -79,22 +91,26 @@ export default defineConfig({
       stdout: "pipe",
       stderr: "pipe",
       env: {
-        SYLPH_WEB_PORT: String(BACKEND_PORT),
-        SYLPH_WEB_DATA_DIR: dataDir,
-        SYLPH_RUNNERS_DIR: path.join(__dirname, "e2e", "fixtures", "runners"),
-        // Pinned to the same fixtures tree. Left unset, bundled-adapter resolution
-        // finds the repo's real `adapters/`, so the suite would discover `claude`
-        // and `pi` and run the developer's actual agent CLIs — spawning real
-        // processes, and making specs pass or fail on which agents happen to be
-        // installed. Naming it keeps the fixture the only agent that exists.
+        SYLPH_HOME: sylphHome,
+        SYLPH_PORT: String(BACKEND_PORT),
+        // Pinned to the fixtures tree, and pinned for *both* roots. Left unset,
+        // bundled-adapter resolution finds the repo's real `adapters/`, so the
+        // suite would discover `claude` and `pi` and run the developer's actual
+        // agent CLIs — spawning real processes, and making specs pass or fail on
+        // which agents happen to be installed. Naming it keeps the fixture the
+        // only agent that exists.
         SYLPH_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "runners"),
+        SYLPH_BUNDLED_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "runners"),
         // Point at a path that does not exist so archive-dependent screens
         // exercise their unavailable state instead of the developer's archive.
-        TRACEDB_BIN: path.join(dataDir, "absent-trace-db"),
-        // Browse roots default to `$HOME`, but the specs create sessions in
-        // `/tmp`. Naming both keeps the directory picker assertable without
+        SYLPH_TRACEDB_BIN: path.join(sylphHome, "absent-trace-db"),
+        // Browse roots always include `$HOME`, but the specs create sessions in
+        // `/tmp`. Naming it keeps the directory picker assertable without
         // depending on what happens to live in the developer's home directory.
-        SYLPH_WEB_BROWSE_ROOTS: "/tmp",
+        SYLPH_BROWSE_ROOTS: "/tmp",
+        // No identity, so the fixture adapter is not handed a `SOUL.md` the specs
+        // never assert on. The protocol reserves the empty string for this.
+        SYLPH_SOUL: "",
       },
     },
     {

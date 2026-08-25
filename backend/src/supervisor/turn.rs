@@ -354,6 +354,24 @@ impl LinkedSupervisor {
             return;
         }
 
+        // The session holds no running turn from this moment, so it is idle from
+        // this moment — written here rather than after the terminal events below.
+        //
+        // The two writes are separate rows and cannot be one transaction, so
+        // *something* is briefly observable between them; the question is only
+        // which inconsistency a client can see. Settling the turn first and the
+        // session last means a client that reads a terminal turn and then the
+        // session sees a finished turn on a "running" session, which is the state
+        // that makes the composer refuse the next message. The reverse — a session
+        // already idle while its turn is a moment from terminal — costs nothing,
+        // because idle is also what the session is between turns.
+        //
+        // The window used to be two statements wide and was merely improbable.
+        // Closing open trajectories put a query and a per-trajectory emit inside
+        // it, which is enough to fail an assertion that polls the turn and then
+        // reads the session.
+        let _ = self.store.update_session_status(session_id, "idle").await;
+
         // Close delegated trajectories the adapter left open, before the turn's
         // own terminal events. A subtree with no closing event is one the UI must
         // keep reporting as running, because nothing ever said otherwise — so an
@@ -431,8 +449,6 @@ impl LinkedSupervisor {
                 ),
             )
             .await;
-
-        let _ = self.store.update_session_status(session_id, "idle").await;
 
         self.hub.close(turn_id).await;
 

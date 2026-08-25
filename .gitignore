@@ -34,6 +34,7 @@ coverage/
 test-results/
 /frontend/playwright-report/
 /frontend/blob-report/
+/frontend/.e2e-home/
 /frontend/.e2e-data/
 /frontend/test-results/
 
