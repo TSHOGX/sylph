@@ -196,7 +196,22 @@ async function runPromotion(page: import("@playwright/test").Page) {
   await createSession(page);
   await page.getByLabel("Message").fill("promote this workflow");
   await page.getByRole("button", { name: "Send", exact: true }).click();
+
+  // Waits for the *settled* turn, not for the scenario's first line.
+  //
+  // `docs/roadmap.md` records why: every spec here asserts on state the turn-settle
+  // sweep produces, so waiting on an early card starts asserting while later events are
+  // still arriving — and the spec that fails is then whichever one raced, which reads
+  // as flakiness rather than as one shared dependency. This scenario emits four hosts
+  // and a backgrounded Bash, so the gap between its first line and its last is wide
+  // enough to lose a host count to.
+  //
+  // The composer re-enabling is the observable end of the turn: it is disabled while
+  // one is live, so this is the settled record rather than a deadline.
   await expect(page.getByText("Running a workflow.")).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+    timeout: 20000,
+  });
 }
 
 /**
@@ -415,4 +430,63 @@ test("a delegate that finishes late is reported as finishing, not as abandoned",
   // the later one is the truth, so the delegate's own outcome has to be on the page:
   // reporting only the sweep's close would say the work never finished when it had.
   await expect(page.getByText("the background worker finished")).toBeVisible();
+});
+
+test("focusing a promoted host shows its own call, not an empty pane", async ({
+  page,
+}) => {
+  await runPromotion(page);
+
+  // Focus re-roots to a node's *children*, which is right for a declared `subagent` —
+  // its row carries no content of its own. A promoted host is a tool call as well as
+  // a container, so dropping its row discards the script that defines what its
+  // delegates are: focusing the `Agent` host, whose interior claude never forwards,
+  // showed a breadcrumb over nothing at all. A delegation that genuinely reported
+  // nothing then looks identical to a broken one.
+  const agent = page.getByRole("region", { name: "Agent delegation" });
+  await agent.getByRole("button", { name: "Focus Agent" }).click();
+
+  // The breadcrumb confirms we re-rooted, and the call is on screen with it.
+  const trail = page.getByRole("navigation", { name: "Delegation path" });
+  await expect(trail).toBeVisible();
+  await expect(trail.getByRole("button", { name: "Turn" })).toBeVisible();
+  await expect(page.getByText("summarize")).toBeVisible();
+});
+
+test("focusing a host with no interior says so rather than showing blank", async ({
+  page,
+}) => {
+  await runPromotion(page);
+
+  const agent = page.getByRole("region", { name: "Agent delegation" });
+  await agent.getByRole("button", { name: "Focus Agent" }).click();
+
+  // An empty pane is indistinguishable from a still-loading one, and this delegation
+  // is finished: nothing further is coming, so the view has to say that.
+  await expect(
+    page.getByText("This delegation forwarded none of its own events."),
+  ).toBeVisible();
+});
+
+test("a backgrounded shell command is a tool call, not a delegation", async ({
+  page,
+}) => {
+  await runPromotion(page);
+
+  // claude reports `run_in_background` Bash through the same `task_*` notifications a
+  // delegation uses, and only `task_type` separates them (`local_bash` against
+  // `local_agent`). Classifying by the notification alone published a shell command as
+  // a subagent card named after the command, and its error escalated the Bash call
+  // hosting it — so a turn that had done nothing wrong read `failed` from its first
+  // moment. This asserts the shape: the failed Bash row is present, and no delegation
+  // card claims to be it.
+  // Two Bash rows in this scenario — one from a delegate, one backgrounded — so the
+  // one under test is selected by its command rather than by position.
+  const bash = page
+    .getByRole("region", { name: "Bash tool call" })
+    .filter({ hasText: "workflows" });
+  await expect(bash).toContainText("permission denied");
+  await expect(
+    page.getByRole("region", { name: /find .* delegation/ }),
+  ).toHaveCount(0);
 });

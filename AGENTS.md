@@ -36,6 +36,9 @@ those, and duplicating them here only creates a second copy to forget.
 | Tables, indexes, migrations | `docs/database-schema.md` |
 | UI structure and conventions | `docs/frontend-architecture.md` |
 | Where files live, what a setting does | `docs/configuration.md` |
+| What an adapter may send, and when | `docs/session-protocol.md` |
+| How history is kept, replayed, pruned | `docs/storage.md` |
+| Where a session's work runs | `docs/environments.md` |
 
 Record progress in commit messages and the roadmap. Do not add new progress,
 handoff, or summary documents: they duplicate the roadmap, then drift from it.
@@ -178,7 +181,7 @@ untested.
 **Testing "it streams" needs a runner slower than one render.** Every E2E spec
 asserted final state against a mock runner that finished in well under a second,
 so a client that dropped every mid-turn event passed the entire suite. The `paced`
-scenario in `frontend/e2e/fixtures/runners/e2e/runner.sh` spaces its stages a
+scenario in `frontend/e2e/fixtures/runners/e2e/adapter.py` spaces its stages a
 second apart, and `e2e/streaming.spec.ts` asserts an earlier stage is on screen
 while a later one has not been emitted yet. Asserting only the end state cannot
 distinguish streaming from batching.
@@ -679,6 +682,41 @@ children is therefore a real terminal state rather than a loading one, and the U
 to say so on the card — presented as expandable it invites opening a branch that can
 never fill, and saying it only after the click is the lossy collapse the tree exists
 to avoid.
+
+**Not every `task_*` notification is a delegation, and `task_type` is the only thing
+that says so.** `run_in_background` on Bash reports through the same channel a
+subagent does. Measured on claude 2.x: `task_type: "local_bash"` for a backgrounded
+shell job against `"local_agent"` for a real delegation, and neither `task_updated`
+nor `task_notification` carries the field at all — so it has to be remembered from
+`task_started`, or a close opens the very node its start was filtered out of.
+Classifying by the notification alone published a *shell command* as a subagent: a
+card named `find / -maxdepth 8 -ipath "*workflows*" …`, whose error flag escalated the
+Bash call hosting it, so a turn that had done nothing wrong read `failed` from its
+first moment. Filter narrowly and let an unknown type through — guessing wrong that
+way costs a missing subtree, while the other way mislabels a tool call as an agent,
+which is what shipped. `adapters/claude/adapter_test.py` pins it, and exists because
+`verify.py` cannot: it spends real tokens and only sees whatever shapes one live turn
+happens to produce, so every *classification* bug in this adapter's history was
+invisible to it.
+
+**`is_backgrounded` inverts the turn-settle sweep.** The sweep closes trajectories an
+adapter left open so that silence never has to explain a gap — right in general, and
+wrong for work the agent says runs in the background, which is *expected* to outlive
+its turn and to report its own outcome on a later agent-initiated turn. Closing it as
+abandoned writes a contradiction that the real completion cannot undo: both records
+then exist, on different turns, and the earlier card still says the work never
+finished when it demonstrably did. The flag is reported only by `task_started`, so the
+adapter re-attaches it to every later phase — the server reads whichever row it finds.
+Keep the exclusion narrow: an ordinary delegation left open is the permanent spinner
+the sweep exists to prevent.
+
+**Focus mode re-roots to `children`, which discards a promoted host's own row.** Right
+for a declared `subagent`, whose row carries no content of its own; wrong for a
+promoted `tool_call`, whose row *is* the call defining what its delegates are. Focusing
+a `Workflow` whose interior the vendor never forwards showed a breadcrumb over an empty
+pane — so a delegation that had genuinely reported nothing looked identical to a broken
+one. Anywhere the tree is re-rooted or collapsed has to answer the same question the
+card does: what does this node hold that is not in its children?
 
 **A vendor's notification subtypes are not guessable, and a wrong guess is
 silent.** `task_completed` and `task_failed` do not exist. The real set is

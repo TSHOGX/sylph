@@ -1504,16 +1504,44 @@ Four things this settled:
 `abandoned` is consequently not final: a delegate the turn-settle sweep closed may
 report its real outcome on a later turn, and the later record is the truth.
 
+### Backgrounded work is not abandoned work, and a shell job is not a delegate
+
+Two defects a real dynamic-workflow turn exposed, both from the same source: the
+adapter classified a `task_*` notification without reading what the vendor said the
+task *was*.
+
+**A backgrounded Bash rendered as a subagent.** `run_in_background` reports through
+exactly the channel a delegation does, and `task_type` is the only discriminator —
+measured, `local_bash` against `local_agent`, and *neither* `task_updated` nor
+`task_notification` carries it, so it has to be remembered from `task_started` or a
+close re-opens the node its start was filtered out of. The card was named after the
+command (`find / -maxdepth 8 -ipath "*workflows*" …`) and its error flag escalated the
+Bash call hosting it, so a turn that had done nothing wrong read `failed` from its
+first moment. Unknown types are still allowed through: guessing wrong that way costs a
+missing subtree, while the other way mislabels a tool call as an agent.
+
+**The sweep contradicted work that later succeeded.** Closing an open trajectory when
+a turn settles is right because silence cannot explain a gap — and wrong for work the
+agent says is backgrounded, which is *expected* to outlive its turn and report on a
+later agent-initiated turn. Both records existed, on different turns, and the earlier
+card said the work never finished when it demonstrably had. `is_backgrounded` was
+already measured but unused; the adapter now re-attaches it to every phase (only
+`task_started` reports it) and the sweep skips those trajectories. This closes the
+reconciliation item this section previously carried: there is no contradiction to
+reconcile, because the wrong record is no longer written.
+
+**Focus mode had the same blind spot the card did.** Re-rooting renders a node's
+`children`, which discards a promoted host's own row — so focusing a `Workflow` whose
+interior the vendor never forwards showed a breadcrumb over nothing. Fixed where the
+card was, and the empty case now says which of "still running" or "forwarded nothing"
+it is.
+
+`adapters/claude/adapter_test.py` is new and is why these are pinned: `verify.py`
+spends real tokens and only observes whatever shapes one live turn produces, so every
+*classification* bug in this adapter's history was invisible to it. 17 cases, no CLI.
+
 ### Open items
 
-- **Two records exist for a backgrounded delegate, and nothing reconciles them.** The
-  sweep's `abandoned` close and the delegate's own later completion are both journaled,
-  on different turns. A reader sees the truth because the later one is on screen too,
-  but the earlier card still says the work never finished. Reconciling them means
-  addressing a trajectory across turn boundaries, which the tree does not currently do.
-- **`is_backgrounded` is carried but not used.** `task_started` reports it, so the sweep
-  could leave a backgrounded delegate open instead of closing it as abandoned —
-  removing the contradiction above at its source rather than after the fact.
 - **`pi` reports no child trajectories yet,** so its sessions render as before.
   Promotion is what makes adding them an adapter change alone: emitting a `subagent`
   per delegate, or merely tagging child events with a `span`, is enough for its own

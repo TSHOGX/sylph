@@ -220,6 +220,20 @@ class Session:
         # trajectory it closes sits inside a container — leaving the container open
         # forever, which is the same spinner one layer up.
         self.task_hosts = {}
+        # task id -> its `task_type`, remembered from `task_started`.
+        #
+        # Only `task_started` carries it, and it is what separates a delegation
+        # (`local_agent`) from a backgrounded shell job (`local_bash`) reporting
+        # through the same notifications. Without the memo a close is unclassifiable
+        # and re-opens the node its start was filtered out of.
+        self.task_kinds = {}
+        # task id -> whether the vendor said it runs in the background.
+        #
+        # Reported only by `task_started`, like `task_type`, and it changes what the
+        # server should do when the turn ends: backgrounded work is *expected* to
+        # outlive its turn, so closing it as abandoned records a contradiction that its
+        # own later completion cannot undo.
+        self.task_backgrounded = {}
         self.message_id = "claude"
         self.message_seq = 0
         self.turn_open = False
@@ -1126,6 +1140,32 @@ class Session:
         if trajectory in self.closed_trajectories:
             return
 
+        # Not every `task_*` notification describes a delegation.
+        #
+        # `run_in_background` on Bash reports through this exact channel, and
+        # `task_type` is the only thing that distinguishes it: measured on claude 2.x,
+        # `local_bash` for a backgrounded shell job against `local_agent` for a real
+        # delegation. Treating both as trajectories published a *shell command* as a
+        # subagent — one card named `find / -maxdepth 8 -ipath "*workflows*" …`, its
+        # error flag escalating the Bash call that hosted it, so a turn that had done
+        # nothing wrong read `failed` from its first moment. A tool call already
+        # renders as a tool call; wrapping one in a delegation card adds a layer that
+        # describes nothing.
+        #
+        # Remembered from `task_started`, because neither `task_updated` nor
+        # `task_notification` carries `task_type` — so a close would otherwise be
+        # unclassifiable and would open the very node its `started` was filtered out
+        # of. Unknown types are *allowed* through: a vendor adding a delegating task
+        # kind should nest by default, and the failure mode of guessing wrong here is
+        # a missing subtree rather than a mislabelled one.
+        task_type = msg.get("task_type")
+        if task_type:
+            self.task_kinds[trajectory] = task_type
+        if msg.get("is_backgrounded"):
+            self.task_backgrounded[trajectory] = True
+        if self.task_kinds.get(trajectory) == "local_bash":
+            return
+
         # Which delegates run under this host, recorded on the way in. `task_updated`
         # carries no `tool_use_id` at all, so a close cannot be placed in the tree
         # from its own payload — without this it would land at the root while the
@@ -1149,7 +1189,15 @@ class Session:
 
         data = {k: v for k, v in msg.items()
                 if k in ("task_id", "subagent_type", "tool_use_id",
-                         "last_tool_name", "spawn_depth", "task_type")}
+                         "last_tool_name", "spawn_depth", "task_type",
+                         "is_backgrounded")}
+        # Carried on every phase, not only the `started` that reports it, because the
+        # server reads it off whichever row it has. A delegation the vendor says is
+        # backgrounded is *expected* to outlive its turn, so the turn-settle sweep must
+        # not close it as abandoned — it will report its own outcome later, and a close
+        # written before that arrives contradicts it permanently.
+        if self.task_backgrounded.get(trajectory):
+            data["is_backgrounded"] = True
         if name:
             data["progress"] = str(name)
 

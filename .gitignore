@@ -59,3 +59,6 @@ __pycache__/
 
 # Local agent worktrees and session metadata
 .claude/
+
+# Written by `adapters/claude/verify.py` to force a real approval, per-run.
+adapters/*/.verify-settings.json

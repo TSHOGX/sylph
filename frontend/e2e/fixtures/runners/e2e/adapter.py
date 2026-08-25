@@ -405,6 +405,23 @@ class Fixture:
                   span="pr-host-d", name="Barrier: worker-1")
             event("tool_result", "completed", streamId="pr-host-d",
                   name="Workflow", text="dispatched; running in background")
+
+            # A backgrounded *Bash* job, which is not a delegation at all. claude
+            # reports it through the same `task_*` notifications as an agent and only
+            # `task_type` tells them apart, so an adapter that classifies by the
+            # notification alone publishes a shell command as a subagent — a card
+            # named after the command, whose error flag then escalates the Bash call
+            # hosting it, so a turn that did nothing wrong reads `failed` from its
+            # first moment. Measured on a real session.
+            #
+            # A correct adapter emits no trajectory for this, so the fixture emits the
+            # *tool call* alone: what a client must render is one failed Bash row and
+            # no delegation card anywhere near it.
+            self._tool("pr-bg-bash", "Bash",
+                       {"command": 'find / -ipath "*workflows*"',
+                        "run_in_background": True},
+                       "find: permission denied", is_error=True,
+                       data={"exitCode": 1})
             self._reply()
 
         elif "paced" in text:

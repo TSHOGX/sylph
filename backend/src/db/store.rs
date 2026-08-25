@@ -928,6 +928,16 @@ impl JournalStore {
     /// That is the same reasoning that makes a pending request `abandoned` rather
     /// than left pending: a recorded failure explains a gap, and silence does not.
     ///
+    /// **Backgrounded work is excluded, because for it the reasoning inverts.** A
+    /// delegation the agent says runs in the background is *expected* to outlive its
+    /// turn and to report its own outcome afterwards, on an agent-initiated turn. It
+    /// is not a gap that silence has to explain; it is work still running. Closing it
+    /// as abandoned writes a contradiction its own later completion cannot undo —
+    /// both records then exist, on different turns, and the earlier card still says
+    /// the work never finished when it demonstrably did. Silence is the honest answer
+    /// here, and it is bounded: the agent reports back, and a crash is caught by
+    /// `close_stale_trajectories` on the next start.
+    ///
     /// Returns `(stream_id, span, name)` — the parent and name are needed to emit a
     /// closing event that lands in the right place in the tree.
     pub async fn open_trajectories(
@@ -970,9 +980,20 @@ impl JournalStore {
                        AND done.phase = 'completed'
                        AND done.kind IN ('subagent', 'tool_result')
               )
+              -- Backgrounded work is still running, not abandoned. Matched on the
+              -- adapter's own flag, carried on every phase of the trajectory so this
+              -- finds it whichever row survives.
+              AND NOT EXISTS (
+                    SELECT 1 FROM events bg
+                     WHERE bg.turn_id = ?
+                       AND bg.stream_id = open.id
+                       AND bg.kind = 'subagent'
+                       AND json_extract(bg.data_json, '$.is_backgrounded') = 1
+              )
               GROUP BY open.id
               ORDER BY MIN(open.seq)",
         )
+        .bind(turn_id)
         .bind(turn_id)
         .bind(turn_id)
         .bind(turn_id)
@@ -1461,6 +1482,51 @@ mod tests {
 
         let open = store.open_trajectories("turn-1").await.expect("query");
         assert!(open.is_empty(), "a resolved host is not open: {open:?}");
+    }
+
+    /// Backgrounded work is still running, not abandoned.
+    ///
+    /// The sweep exists so silence never has to explain a gap. For work the agent said
+    /// runs in the background the reasoning inverts: it is *expected* to outlive its
+    /// turn and to report its own outcome on an agent-initiated turn afterwards, so a
+    /// close written now is a contradiction that later completion cannot undo — both
+    /// records would exist, on different turns, and the earlier card would say the
+    /// work never finished when it demonstrably did.
+    #[tokio::test]
+    async fn a_backgrounded_delegate_is_left_open_rather_than_abandoned() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        let mut started = span_event(1, "subagent", "started", "bg-task", Some("host-1"));
+        started.data_json = r#"{"is_backgrounded":true,"task_type":"local_agent"}"#.to_string();
+        store.append_event(&started).await.expect("open");
+
+        let open = store.open_trajectories("turn-1").await.expect("query");
+        let ids: Vec<&str> = open.iter().map(|row| row.0.as_str()).collect();
+        assert!(
+            !ids.contains(&"bg-task"),
+            "backgrounded work is not swept: {ids:?}"
+        );
+    }
+
+    /// The same delegate, without the flag, is still swept.
+    ///
+    /// The exclusion has to be narrow: an ordinary delegation left open is the spinner
+    /// this whole query exists to prevent, so a predicate that skipped everything would
+    /// trade one silent failure for another.
+    #[tokio::test]
+    async fn a_delegate_with_no_background_flag_is_still_swept() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        store
+            .append_event(&span_event(1, "subagent", "started", "fg-task", Some("host-1")))
+            .await
+            .expect("open");
+
+        let open = store.open_trajectories("turn-1").await.expect("query");
+        let ids: Vec<&str> = open.iter().map(|row| row.0.as_str()).collect();
+        assert!(ids.contains(&"fg-task"), "an ordinary delegate is swept: {ids:?}");
     }
 
     /// Many delegates under one host are many trajectories, not one.

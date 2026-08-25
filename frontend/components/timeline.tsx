@@ -133,7 +133,8 @@ export function Timeline({
   // trajectory is gone — a cleared turn, a switched session — and the view falls
   // back to the root instead of rendering an empty pane.
   const trail = focus ? pathTo(roots, focus) : null;
-  const shown = trail ? trail[trail.length - 1].children : roots;
+  const focused = trail ? trail[trail.length - 1] : null;
+  const shown = focused ? focused.children : roots;
 
   return (
     <div className="space-y-1.5">
@@ -143,6 +144,29 @@ export function Timeline({
           onFocus={setFocus}
           onClear={() => setFocus(null)}
         />
+      )}
+      {/* The focused trajectory's own row, above the work beneath it.
+          Focus re-roots to `children`, which is right for a declared `subagent` —
+          its row carries no content of its own. A *promoted* host is a tool call as
+          well as a container (§ Promotion), so dropping its row discards the call
+          that defines what its delegates are: focusing a `Workflow` whose interior
+          was never forwarded showed a breadcrumb over an empty pane, which is what
+          made a delegation that had genuinely reported nothing look like a broken
+          one. The card renders this inline for the same reason; focus is the same
+          question one level up. */}
+      {focused && focused.row.event.kind !== "subagent" && (
+        <TimelineRowView
+          row={focused.row}
+          onOpenFile={onOpenFile}
+          expandAll={expandAll}
+        />
+      )}
+      {focused && shown.length === 0 && (
+        <p className="py-1 text-2xs text-ink-muted">
+          {focused.status === "running"
+            ? "Waiting for this delegation's first output…"
+            : "This delegation forwarded none of its own events."}
+        </p>
       )}
       {shown.map((node) => (
         <MemoizedNode
