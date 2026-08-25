@@ -74,7 +74,7 @@ mod tests {
     /// database out from under the pool.
     async fn store() -> (JournalStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = JournalStore::new(dir.path().join("live.db").to_str().unwrap())
+        let store = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
             .await
             .expect("store");
         (store, dir)

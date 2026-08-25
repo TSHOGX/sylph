@@ -757,10 +757,10 @@ impl JournalStore {
             sqlx::query(
                 r#"
                 INSERT INTO events (
-                    session_id, turn_id, seq, kind, phase, stream_id, name,
+                    session_id, turn_id, seq, kind, phase, stream_id, span, name,
                     text, data_json, is_error, stability, source, created_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&event.session_id)
@@ -769,6 +769,7 @@ impl JournalStore {
             .bind(&event.kind)
             .bind(&event.phase)
             .bind(&event.stream_id)
+            .bind(&event.span)
             .bind(&event.name)
             .bind(&event.text)
             .bind(&event.data_json)
@@ -1089,8 +1090,8 @@ mod tests {
 
     /// A session and turn to hang events on. Both are foreign keys, so an event
     /// cannot be journaled without them.
-    async fn seeded(dir: &std::path::Path) -> LiveStore {
-        let store = LiveStore::new(dir.join("live.db").to_str().unwrap())
+    async fn seeded(dir: &std::path::Path) -> JournalStore {
+        let store = JournalStore::new(dir.join("journal.db").to_str().unwrap())
             .await
             .expect("store");
         store
@@ -1232,7 +1233,7 @@ mod tests {
     #[tokio::test]
     async fn archive_identity_matches_native_root_but_not_subagent_prefix() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = JournalStore::new(dir.path().join("live.db").to_str().unwrap())
+        let store = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
             .await
             .expect("store");
         store

@@ -274,6 +274,8 @@ mod tests {
             source: "agent".to_string(),
             created_at_ms: 2000 + seq as i64,
             reconciled_at_ms: None,
+            // Root turn: these fixtures test batching, not delegation.
+            span: None,
         }
     }
 
@@ -358,6 +360,32 @@ mod tests {
         assert_eq!(
             deltas, 3,
             "every delta must be on disk before the fold runs, not just some"
+        );
+    }
+
+    /// A batched event must carry every column the unbatched path does.
+    ///
+    /// `span` is nullable, so omitting it from the batch insert succeeds and loses
+    /// the delegation shape of every batched delta — the failure is silent, and it
+    /// surfaces two layers away as a replay that flattens a workflow's parallel
+    /// phases into one sequence. This is not hypothetical: the batch insert was
+    /// written before `span` existed and did exactly that until this test.
+    #[tokio::test]
+    async fn a_batched_delta_keeps_its_delegation_span() {
+        let (store, _dir, turn_id) = journal().await;
+        let writer = JournalWriter::new(store.clone());
+
+        let mut delegated = ephemeral(&turn_id, 0, "inside a subagent");
+        delegated.span = Some("agent-explore".to_string());
+        writer.append(&delegated, false).await.unwrap();
+        writer.flush_turn(&turn_id).await;
+
+        let events = store.turn_events_for_consolidation(&turn_id).await.unwrap();
+        assert_eq!(
+            events.first().and_then(|event| event.span.clone()),
+            Some("agent-explore".to_string()),
+            "the batch insert must bind every column, not the ones that existed \
+             when it was written"
         );
     }
 
