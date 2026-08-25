@@ -1311,9 +1311,12 @@ class Session:
         # delegate — which is why progress is a `delta` however it was announced.
         if trajectory not in self.task_trajectories:
             self.task_trajectories[trajectory] = host
+            # `name or None`, not a placeholder: same reasoning as `_task_label`. An
+            # unnamed delegation is journaled, and a guess written into `name` is
+            # indistinguishable later from a name the agent chose.
             event("subagent", "started",
                   streamId=trajectory, span=span,
-                  name=name or "Subagent", data=data)
+                  name=name or None, data=data)
             return
 
         event("subagent", "delta",
@@ -1326,16 +1329,28 @@ def _task_label(content):
     "Task" is the tool's name, not the work's: a timeline of six identical rows
     reading "Task" is unreadable. The input carries better, but it only arrives as
     streamed partial JSON, so at `started` there is usually nothing yet — the
-    trajectory is renamed by the `delta` that carries its parsed brief. Falling
-    back to "Subagent" rather than "Task" keeps the vendor's tool name out of the
-    UI, since the server's vocabulary is trajectories.
+    trajectory is renamed by the `delta` that carries its parsed brief.
+
+    Returns `None` rather than a placeholder when nothing is known yet, and that
+    distinction is the point. `name` means "what this delegation is called", so
+    `None` says nobody knows while a literal asserts a name the adapter cannot
+    support — and the guess does not stay in the UI, it is *journaled*.
+    `history::consolidate` keeps the best name any phase gave a block, so a later
+    `delta` carrying the real brief normally wins; but when the brief never finishes
+    streaming — the delegation fails early, or the link dies mid-input — the
+    placeholder becomes the trajectory's durable name in `history.db`,
+    indistinguishable from one an agent actually chose.
+
+    Display is unaffected: the client's `trajectoryName` already falls back to the
+    same word, so omitting the field renders the identical string. Keeping the
+    vendor's tool name out of the UI is the client's job, and it is doing it.
     """
     payload = content.get("input")
     if isinstance(payload, dict):
         label = payload.get("subagent_type") or payload.get("description")
         if label:
             return str(label)
-    return "Subagent"
+    return None
 
 
 def flatten(content):

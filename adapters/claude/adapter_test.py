@@ -529,6 +529,45 @@ class NestedTrajectoriesCarrySpanOnEveryPhase(Emitted):
             self.assertEqual(phase.get("span"), "toolu_wf", phase["phase"])
 
 
+class AnUnknownNameIsOmittedRatherThanGuessed(Emitted):
+    """A delegation whose brief has not streamed yet carries no `name`.
+
+    `name` means "what this delegation is called", so a placeholder asserts a name
+    the adapter cannot support — and the guess is *journaled*, not merely displayed.
+    `history::consolidate` keeps the best name any phase gave a block, so a later
+    `delta` with the real brief normally wins; when the brief never finishes streaming
+    (early failure, or the link dying mid-input) a placeholder would become the
+    trajectory's durable name in `history.db`, indistinguishable from a real one.
+
+    Display is unaffected either way: the client's `trajectoryName` falls back to the
+    same word. That is what makes this subtraction safe to make on its own.
+    """
+
+    def test_a_task_open_with_no_input_yet_sends_no_name(self):
+        self.session._stream_event(
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "toolu_a", "name": "Task"}},
+            None)
+        opened = [e for e in self.trajectories() if e.get("phase") == "started"]
+        self.assertTrue(opened, "the delegation opened")
+        self.assertIsNone(
+            opened[0].get("name"),
+            "an unknown name is absent, not the literal 'Subagent'")
+
+    def test_the_brief_still_names_it_once_it_arrives(self):
+        self.session._stream_event(
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "toolu_b", "name": "Task"}},
+            None)
+        self.session._stream_event(
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"partial_json": '{"subagent_type":"Explore"}'}}, None)
+        self.session._stream_event({"type": "content_block_stop", "index": 0}, None)
+        named = [e.get("name") for e in self.trajectories()]
+        self.assertIn("Explore", named,
+                      "omitting the placeholder does not cost the real name")
+
+
 class UnaddressableNotification(Emitted):
     """A notification with no id at all still happened."""
 
