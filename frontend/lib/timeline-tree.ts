@@ -677,6 +677,46 @@ export function pathTo(
 }
 
 /**
+ * What a delegation says about itself: its closing summary, else its latest progress.
+ *
+ * The protocol records both — `task_notification` carries the delegate's own summary,
+ * and `data.progress` is a snapshot the vendor re-sends — and the card rendered
+ * neither, so a delegate's account of its work was stored and never shown. That is the
+ * one piece of *content* a collapsed row can carry: without it the row is a status and
+ * a set of counts, which says that work happened and nothing about what came of it.
+ * It matters more now that a late outcome can arrive on a turn of the agent's own,
+ * because then this summary is the whole of what a user learns about work that
+ * finished after the turn that dispatched it.
+ *
+ * Two rules, and both are why this is a function here rather than an expression in the
+ * renderer — `lib/timeline-tree.test.ts` can pin them, and a component in a `node`
+ * test environment cannot be rendered at all:
+ *
+ * 1. **A promoted host's `text` is not a summary.** It is the tool call's serialized
+ *    arguments (a `Workflow` script, a JSON blob), so reading `text` uniformly would
+ *    put a wall of JSON where a sentence belongs. Its outcome instead arrives as the
+ *    `subagent` close kept *beside* the row — `trajectoryClose`, which exists exactly
+ *    so a promotion does not overwrite the call.
+ * 2. **A close outranks progress.** Progress is a snapshot of work in flight; once the
+ *    delegation reports an outcome, the snapshot describes a state that has been
+ *    superseded. Preferring the fresher-arriving field would leave a finished
+ *    delegation captioned with its own last guess.
+ */
+export function trajectoryReport(node: TimelineNode): string | undefined {
+  const { row } = node;
+  const declared = row.event.kind === "subagent";
+
+  // A declared trajectory's own text is its summary. A promoted host's is its
+  // arguments, so its summary can only come from the close held beside the row.
+  const summary = declared ? row.event.text : row.trajectoryClose?.text;
+  if (summary?.trim()) return summary.trim();
+
+  const progress = (row.event.data as { progress?: unknown } | undefined)?.progress;
+  if (typeof progress === "string" && progress.trim()) return progress.trim();
+  return undefined;
+}
+
+/**
  * Every trajectory in the tree, depth-first, for an outline.
  *
  * `seen` carries the same guard as `computeRollup` and `canonicalize`, and for the

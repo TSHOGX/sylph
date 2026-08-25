@@ -452,7 +452,15 @@ test("a delegate that finishes late is reported as finishing, not as abandoned",
   // nothing more is coming — and backgrounded work *is* coming. Both records exist and
   // the later one is the truth, so the delegate's own outcome has to be on the page:
   // reporting only the sweep's close would say the work never finished when it had.
-  await expect(page.getByText("the background worker finished")).toBeVisible();
+  //
+  // `exact` because the delegate's summary is now rendered on its card as well as
+  // narrated in the agent's prose, and a substring match resolves to both — the prose
+  // reads "The background worker finished while you were away." This asserting on the
+  // *card's* copy is the stronger claim anyway: it is the record on the turn that
+  // dispatched the work, which is the one a reader scrolls back to.
+  await expect(
+    page.getByText("the background worker finished", { exact: true }),
+  ).toBeVisible();
 
   // And — the half that was missing — the *dispatching* turn's own card has to agree.
   // A trajectory id is session-scoped, so the outcome arriving on a later turn is about
@@ -473,10 +481,12 @@ test("a delegate that finishes late is reported as finishing, not as abandoned",
   });
   await expect(dispatched).toHaveCount(1);
 
-  // Asserted on the card's *status*, not on its summary text: a declared trajectory's
-  // card renders its name, badges, rollup, and children, and never its own `text` — so
-  // the delegate's summary is stored and not displayed here, and asserting on it would
-  // be asserting on something the card does not claim to show.
+  // Asserted on the card's *status*, because that is what this test is about. The note
+  // that used to be here said a declared trajectory's card "never renders its own
+  // `text`", and that has stopped being true: the delegate's summary was stored and
+  // never shown, which is exactly the case where a late outcome is the only account a
+  // user gets, so the card now reports it. The assertion above covers that copy; these
+  // two cover the status it sits beside.
   //
   // These two are the whole correction. "never finished" is the abandoned wording and
   // "outlived its turn" the badge that goes with it; both were on this card before, and

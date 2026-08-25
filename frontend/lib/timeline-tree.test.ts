@@ -4,6 +4,7 @@ import {
   buildTree,
   flattenTrajectories,
   pathTo,
+  trajectoryReport,
   type TimelineNode,
 } from "@/lib/timeline-tree";
 import type { StreamEvent } from "@/lib/api";
@@ -472,5 +473,107 @@ describe("promotion", () => {
     )));
 
     expect(second[0]).toBe(first[0]);
+  });
+});
+
+/**
+ * What a collapsed delegation can say about itself.
+ *
+ * The backend records a delegate's summary and the card showed neither it nor the
+ * progress snapshot, so the one line of *content* a collapsed row could carry was
+ * stored and never rendered. These pin the two rules that make reading it safe, both of
+ * which fail silently: a promoted host's `text` is its tool arguments, and a progress
+ * snapshot describes work a close has already superseded.
+ */
+describe("trajectoryReport", () => {
+  it("reports a declared delegation's closing summary", () => {
+    const nodes = tree([
+      opens("s1", "Explore"),
+      ev({
+        kind: "subagent",
+        phase: "completed",
+        streamId: "s1",
+        text: "Found 3 call sites.",
+      }),
+    ]);
+
+    expect(trajectoryReport(nodes[0])).toBe("Found 3 call sites.");
+  });
+
+  it("prefers a close over the progress snapshot it supersedes", () => {
+    // Progress is a snapshot of work in flight. Once an outcome is reported the
+    // snapshot describes a state that no longer holds, so a delegation that finished
+    // would otherwise be captioned with its own last guess.
+    const nodes = tree([
+      opens("s1", "Verify"),
+      ev({
+        kind: "subagent",
+        phase: "delta",
+        streamId: "s1",
+        data: { progress: "Working on it" },
+      }),
+      ev({ kind: "subagent", phase: "completed", streamId: "s1", text: "All 12 pass." }),
+    ]);
+
+    expect(trajectoryReport(nodes[0])).toBe("All 12 pass.");
+  });
+
+  it("falls back to progress while a delegation is still running", () => {
+    const nodes = tree([
+      opens("s1", "Verify"),
+      ev({
+        kind: "subagent",
+        phase: "delta",
+        streamId: "s1",
+        data: { progress: "Working on it" },
+      }),
+    ]);
+
+    expect(trajectoryReport(nodes[0])).toBe("Working on it");
+  });
+
+  it("never reports a promoted host's arguments as its summary", () => {
+    // A promoted host's `text` is the tool call's serialized input, so reading `text`
+    // uniformly puts a JSON blob where a sentence belongs. Its outcome arrives as the
+    // `subagent` close held *beside* the row, which is what `trajectoryClose` is for.
+    const nodes = tree([
+      ev({
+        kind: "tool_call",
+        phase: "completed",
+        streamId: "host",
+        name: "Workflow",
+        text: JSON.stringify({ script: "parallel([a, b])" }),
+      }),
+      ev({
+        kind: "subagent",
+        phase: "completed",
+        streamId: "host",
+        text: "both agents done",
+      }),
+    ]);
+
+    const host = nodes.find((node) => node.trajectory === "host")!;
+    expect(host.row.event.kind).toBe("tool_call");
+    expect(trajectoryReport(host)).toBe("both agents done");
+    expect(trajectoryReport(host)).not.toContain("script");
+  });
+
+  it("says nothing when a delegation reported nothing", () => {
+    const nodes = tree([opens("s1", "Quiet"), closes("s1")]);
+    expect(trajectoryReport(nodes[0])).toBeUndefined();
+  });
+
+  it("ignores a blank or non-string report rather than rendering an empty line", () => {
+    const blank = tree([
+      opens("s1", "Blank"),
+      ev({ kind: "subagent", phase: "completed", streamId: "s1", text: "   " }),
+    ]);
+    expect(trajectoryReport(blank[0])).toBeUndefined();
+
+    const wrongType = tree([
+      opens("s2", "Odd"),
+      ev({ kind: "subagent", phase: "delta", streamId: "s2", data: { progress: 42 } }),
+    ]);
+    expect(trajectoryReport(wrongType[0])).toBeUndefined();
   });
 });

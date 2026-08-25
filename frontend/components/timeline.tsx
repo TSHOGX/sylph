@@ -50,6 +50,7 @@ import {
   buildRows,
   buildTree,
   pathTo,
+  trajectoryReport,
   type TimelineNode,
   type TimelineRow,
   type TrajectoryStatus,
@@ -382,6 +383,7 @@ function TrajectoryCard({
   // trajectory chrome — so a promoted host showed its name, a rollup, and nothing
   // else, and opening or focusing one was answered with an empty pane.
   const promoted = node.row.event.kind !== "subagent";
+  const report = trajectoryReport(node);
 
   const empty = node.children.length === 0;
   const unreported = empty && node.status === "abandoned";
@@ -428,10 +430,26 @@ function TrajectoryCard({
           </span>
         )}
 
+        {/* The badge's own explanation used to deny the mechanism that produces it.
+            It said an agent "cannot report back after its turn, because its process
+            exits with the turn" — and measured on `claude` 2.x that is false: stdout
+            stays open, the delegate's completion arrives *after* its turn's `result`,
+            and the agent opens an exchange of its own to report it. That is why
+            agent-initiated turns exist at all. So the tooltip explained this state
+            with the very behaviour that resolves it, teaching a model of the product
+            that the product contradicts.
+
+            What is actually true is narrower and still worth saying: nobody has
+            reported an outcome *yet*. `abandoned` is not final — a late outcome is
+            written against the turn that owns the trajectory, so this row can still
+            acquire one. The one case that is terminal is a restart: startup recovery
+            deliberately ignores `is_backgrounded`, because a process that no longer
+            exists cannot report, and that has to stay distinguishable from work still
+            running in the background. */}
         {unreported && (
           <span
             className="shrink-0 rounded bg-hover px-1 text-3xs text-ink-muted"
-            title="Still running when the turn ended, so the server closed it. Nothing was reported about what it did — an agent cannot report back after its turn, because its process exits with the turn."
+            title="Still running when the turn ended, so the server closed it. Nobody has reported an outcome yet — if the agent reports one later it appears here, on this turn. Work left open across a server restart stays unresolved, because a process that no longer exists cannot report."
           >
             outlived its turn
           </span>
@@ -466,6 +484,22 @@ function TrajectoryCard({
           </button>
         </span>
       </div>
+
+      {/* The delegate's own account of its work, which the backend records and this
+          card did not show. It sits above the counts because it is the only line here
+          that is *content*: the counts say work happened, and this says what came of
+          it. Two lines at most — a summary can run long, and a card that grows without
+          bound stops being one row per delegation, which is the property the whole tree
+          is built on. `title` carries the rest rather than a "more" control, since the
+          full text is one click away inside the branch. */}
+      {report && (
+        <p
+          className="line-clamp-2 pb-0.5 pr-2 text-2xs text-ink-soft"
+          title={report}
+        >
+          {report}
+        </p>
+      )}
 
       <p className="pb-1 pr-2 text-3xs text-ink-muted">
         <RollupSummary node={node} />
