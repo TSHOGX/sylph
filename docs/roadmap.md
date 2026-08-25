@@ -5,7 +5,9 @@
 **Architecture:**
 - Backend: Rust + Axum + SQLx (Phase 1 complete)
 - Frontend: Next.js 16 + React 19 + TanStack Query (Phase 2 complete)
-- Database: SQLite (live journal) + TraceDB (stable history)
+- Database: SQLite, split into `journal.db` (hot, unconsolidated turns) and
+  `history.db` (warm, consolidated blocks) with `blobs/` beside them, plus TraceDB
+  for durable cross-agent history (`docs/storage.md`)
 
 **Completed:**
 - Phase 1: backend core on port 4317 — 11 routes, LiveStore, TurnSupervisor,
@@ -34,15 +36,58 @@ ran as two tracks — the interaction and composer redesign, and the Artifacts f
 viewer — both of which have landed, as has Phase 8 (the start screen); see the
 sections at the end of this file.
 
-**Current test totals, measured on the merged tree at Phase 11:** 141 backend unit,
-134 backend integration (plus 3 ignored by default that parse files from real Office
-tooling), 230 frontend unit, 79 E2E. The per-phase counts below are what each phase measured on
-its own branch and are left as its record; they do not add up to these, because the
-two Phase 7 tracks were developed in parallel and each counted only its own suite.
-Re-measure by running the suites, not by adding the sections.
+**Phase 12 (Native Sessions) is in progress, and most of it is on `main`.** What has
+landed changes enough of the system that the summary above would mislead without it:
 
-**Current first-load JS: 198.2 KB gzipped**, measured by summing the gzipped size of
-the scripts a prerendered route references after `npm run build`.
+- `sylph.agent.v3` — an adapter is a long-lived process and a turn is a message on
+  its link, replacing v1's process-per-turn contract, which is deleted rather than
+  kept behind a flag (`docs/session-protocol.md`)
+- Delegated trajectories render as a navigable tree, with a trajectory defined by
+  *use* rather than by declaration, so a vendor's new delegating tool needs no
+  whitelist entry
+- An agent may start a turn (`origin: "agent"`), so work that outlives the turn that
+  dispatched it can still report back
+- Lossless tiered history with replay over HTTP, pruned only on a downstream
+  authority's confirmation, plus a retention scheduler (`docs/storage.md`)
+- One home under `~/.sylph` and one file to configure it (`docs/configuration.md`)
+- A request declares the input it wants, rather than the client sniffing its detail
+  for field names it recognizes
+- Facet-scoped capability surfaces and typed control commands, so a partial update
+  cannot speak for the whole surface
+- One choice-list engine behind every picker (`lib/select-list.ts`)
+
+Its own section at the end of this file carries the reasoning, the measurements, and
+the open items — that section is authoritative for Phase 12, not this list.
+
+**Current test totals, measured on `main` after the four Phase 12 worktrees merged:**
+300 backend unit, 183 backend integration across three binaries (143 `integration`,
+24 `requests`, 16 `storage`, plus 3 ignored by default that parse files from real
+Office tooling), 333 frontend unit in 20 files, 134 E2E specs in 16 files.
+
+The per-phase counts below are what each phase measured on its own branch and are
+left as its record; they do not add up to these, because parallel tracks each
+counted only their own suite. Re-measure by running the suites, not by adding the
+sections — `cargo test`, `npm test`, and `npx playwright test --list` report all
+four numbers directly.
+
+**Current first-load JS: 221.1 KB gzipped**, measured on `main` after the Phase 12
+merges by summing the gzipped size of the 13 scripts `/` references — the same recipe
+each phase used:
+
+```sh
+cd frontend && SYLPH_WEB_BACKEND=http://localhost:4317 npm run build
+grep -o '/_next/static/chunks/[^"]*\.js' .next/server/app/index.html | sort -u
+# then sum `gzip -c` over each
+```
+
+This is **past the 200 KB budget Phase 4 set**, and knowingly so: Phase 9 already
+recorded the crossing at 203.9 KB and Phase 12 added the delegation tree, the choice-list
+engine, and declared request forms on top. The budget stays in the file as the number
+that triggers a look rather than one that forbids a feature — principle 4 in
+`docs/README.md` is that limits do not get to veto value — but "current" had been
+stale at 198.2 KB through two phases that each measured higher, which is the failure
+mode worth avoiding. Re-measure with the recipe above; do not carry the number
+forward.
 
 ### Open Decisions
 
@@ -55,11 +100,11 @@ only legitimate way to inject `SOUL.md` into a native session, so it should be
 an explicit, auditable operation rather than a field on a general update. Not
 implemented either way yet.
 
-**Runner protocol:** the backend consumes `sylph.runner.v1` NDJSON lines
-(`SYLPH_STREAM_FORMAT=ndjson-v1`) as specified in the Sylph skill's
-`references/runner-protocol.md`. Event kinds: `thinking`, `assistant`,
-`tool_call`, `tool_result`, `usage`, `status`; phases `started`/`delta`/
-`completed`, where only `completed` is durable.
+An entry describing the runner protocol used to sit here, and it was never a
+decision — it was a settled fact, which is how it went on describing
+`sylph.runner.v1` and `SYLPH_STREAM_FORMAT=ndjson-v1` for a release after Phase 12
+deleted that path. The agent seam is `sylph.agent.v3` and `docs/session-protocol.md`
+owns it.
 
 ## Phase 1: Backend Core (Weeks 1-3) — Complete
 

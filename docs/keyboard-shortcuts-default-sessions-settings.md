@@ -140,7 +140,11 @@ in modern apps (VS Code, Linear, Raycast), not just search.
 
 ---
 
-## 2. Default Session & ~/.agents Workspace
+## 2. Default Session & the Quick Start Workspace
+
+> The path named throughout this section, `~/.agents`, was superseded in Phase 12
+> by `paths.quick_start_dir` (`~/.sylph/scratch` by default). See "What Shipped,
+> and What Did Not".
 
 ### Problem
 
@@ -662,7 +666,15 @@ this document as a description of the code:
   should not route through a button that re-asks. The behaviour survives in
   `Mod+Shift+O` / `Mod+J`, the command palette, and every sidebar group's context menu — all
   through one shared creator (`lib/create-session.ts`). The "Quick Sessions" grouping
-  under `~/.agents` is unchanged.
+  is unchanged in shape.
+- **The Quick Start directory is no longer `~/.agents`, and is no longer a fixed
+  path.** Section 2 and the summary both name `~/.agents`, because that is where the
+  global agent data lived when this was written. Phase 12 gave Sylph its own root, so the
+  directory is now `paths.quick_start_dir` — `~/.sylph/scratch` by default, and
+  configurable per install. Read every `~/.agents` in this document as "the
+  configured scratch directory" — including the one in the summary above. Nothing in the UI derives or displays the path: it
+  comes back from `GET /config` as `quickStartDir`, because a client that derived it
+  would disagree with a configured one. `docs/configuration.md` is authoritative.
 - **"Open in Default App" and "Reveal in Finder" are not implemented.** Both need the
   backend to spawn a process against a client-supplied path, which is a local
   code-execution surface and wants a threat-model decision rather than a menu entry.

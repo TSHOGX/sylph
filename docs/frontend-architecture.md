@@ -703,7 +703,7 @@ depend on mount order.
 | `Mod+Shift+K` | Browse this workspace's archived history |
 | `Mod+P` | Command palette |
 | `Mod+Shift+O` | New session (pick a directory) |
-| `Mod+J` | Quick Start in `~/.agents` |
+| `Mod+J` | Quick Start in the configured scratch directory |
 | `Mod+B` / `Mod+\` | Toggle left / right pane |
 | `Mod+,` | Settings |
 | `Mod+.` | Stop the running turn |
@@ -759,7 +759,7 @@ is whether the invocation already names a working directory.
 
 | Surface | Path | Why |
 | --- | --- | --- |
-| ⚡ Quick Start, `Mod+J`, palette | `useQuickCreateSession` | The directory is fixed: the backend-resolved `~/.agents`. |
+| ⚡ Quick Start, `Mod+J`, palette | `useQuickCreateSession` | The directory is fixed, but not by the client: it is whatever the backend resolved `paths.quick_start_dir` to (`~/.sylph/scratch` by default), read from `GET /config` as `quickStartDir`. A client that derived the path would disagree with a configured one, so no label names it. |
 | Sidebar group → "New session here" | `useQuickCreateSession` | A group **is** a directory. The right-click already named it. |
 | `Mod+Shift+O`, empty-state button | `overlay: "newSession"` → same mutation | No directory yet, so a picker asks for that and nothing else. |
 
@@ -785,7 +785,7 @@ So whenever the invocation carries a directory, a dialog has nothing left to ask
 and is only something to dismiss. `lib/create-session.ts` is that mutation, and it
 is what makes "Quick Start" a special case of a general action rather than its own
 mechanism — before it, Quick Start had a private hook in the shell and the sidebar
-routed to the form, which is why right-clicking the fixed `~/.agents` group still
+routed to the form, which is why right-clicking the fixed Quick Start group still
 asked for a working directory.
 
 The sidebar group menu carried both variants for one release: "New session here"
@@ -1712,7 +1712,41 @@ collapsing is lossy rather than deferred.
 **`abandoned` is not `failed`.** A trajectory the server closed on turn
 termination says nobody ever reported an outcome; a failed one says the work
 reported an error. Colouring the first red would report an interrupted turn as a
-broken one.
+broken one. Three consequences follow, and each was a real misreading of one real
+session where a `Workflow` dispatched a backgrounded delegate and returned cleanly:
+
+- **A server close is not a rollup failure.** The server marks its own closing
+  event `isError` so the row reads as unresolved rather than clean — but counting
+  that as a descendant failure escalated every ancestor, so a workflow whose own
+  `tool_result` succeeded was badged red because one delegate was still running at
+  turn end. `rowFailed` in `lib/timeline-tree.ts` therefore excludes a
+  server-closed row, while the trajectory still reports `abandoned` as its own
+  status. The distinction is erased one level *above* the node that holds it, which
+  is why the rollup has to know about it.
+- **"No interior" and "outlived its turn" are different claims, and only one is a
+  measurement.** `no interior` means the host finished and forwarded none of its
+  delegate's events — a real terminal state, and the common case for every
+  delegating tool except `Task` (see § Delegation). Abandoned-and-empty is the
+  opposite: it was still running when we stopped listening, so *nothing* is known
+  about its interior. Rendering both badges together stated two things that cannot
+  both be the point. Note that work the agent declares backgrounded is now exempt
+  from the turn-settle sweep entirely, so `abandoned` no longer appears on a delegate
+  that was *expected* to outlive its turn — see the roadmap's "Backgrounded work is
+  not abandoned work".
+- **A promoted host renders its own call.** The row keeps `kind: "tool_call"`
+  precisely so the tool's name, arguments, and result survive promotion, so a card
+  that drew only trajectory chrome answered opening a `Workflow` with an empty
+  pane. The call renders above the work it dispatched, because that is the order it
+  happened in — and a promoted host therefore stays expandable even with nothing
+  forwarded, while a *declared* trajectory with no interior has nothing at all and
+  keeps its disclosure suppressed. `aria-expanded` on a control with nothing to
+  expand is a promise the tree cannot keep. **Focus is the same question one level
+  up**: it re-roots to `children`, which is right for a declared `subagent` whose row
+  carries no content of its own and wrong for a promoted host — focusing a `Workflow`
+  whose interior was never forwarded showed a breadcrumb over an empty pane, which
+  made a delegation that had genuinely reported nothing look broken. `Timeline`
+  renders the focused row itself when it is not a `subagent`, and says why the pane
+  is empty rather than leaving it blank.
 
 ## Data Flow Patterns
 
@@ -2492,11 +2526,21 @@ journal.** Specs share one backend and run serially, so by the time a spec runs
 other sessions exist. `page.route` is how the empty-app and slow-listing branches
 become deterministic, and it is the *client's* branch under test either way.
 
-The mock runner (`e2e/fixtures/runners/e2e/runner.sh`) branches on its prompt to
-emit three scenarios: a plain streamed reply, a tool sequence with a real diff and
-a failing command, and a 1000-event bulk transcript. Its payloads mirror what the
-shipped runners emit, transcribed from their source — a fixture that emitted a
-tidier shape would test a protocol nothing speaks.
+The mock adapter (`e2e/fixtures/runners/e2e/adapter.sh`, which execs `adapter.py`)
+branches on its prompt to emit ten scenarios: a plain streamed reply, a tool
+sequence with a real diff and a failing command, a 1000-event bulk transcript, an
+approval, a question, an elicitation, a delegation, a promoted host, an
+agent-initiated turn (`unprompted`), and `paced`. Its payloads mirror what the
+shipped adapters emit, transcribed from their source — a fixture that emitted a
+tidier shape would test a protocol nothing speaks. Two properties of this fixture
+are load-bearing rather than incidental. `paced` spaces its stages a second apart,
+because a runner that finishes inside one render cannot distinguish streaming from
+batching. And it declares *two* select options in the same `model` category, one
+with two choices and one with the long `CATALOGUE`: below the filter threshold a
+config option is a `menu` of `menuitemradio`s and above it a combobox over a
+`listbox`, which is a different ARIA contract rather than a different width. Both
+land on the composer's control row together, so one screen asserts both patterns —
+a fixture offering only the short shape cannot observe a list-length bug at all.
 
 **A note on shortcut tests.** Pressing a shortcut immediately after `page.goto`
 races hydration: the listener is attached by an effect, so the key can land on

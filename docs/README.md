@@ -18,6 +18,12 @@ development practices.
 - **[API Design](api-design.md)** — REST API contracts and endpoint specifications
 - **[Database Schema](database-schema.md)** — SQLite schema, migrations, data model
 
+### Contracts & Subsystems
+- **[Session Protocol](session-protocol.md)** — `sylph.agent.v3`: the contract between the server and a pluggable agent
+- **[Storage](storage.md)** — Lossless tiered history, replay, and watermark-gated retention
+- **[Control Plane](control-plane.md)** — Why one server owns session policy and frontends are transports
+- **[Environments](environments.md)** — Where a session's work actually happens
+
 ### UX & Interface Design
 - **[Agent UI Design Analysis](agent-ui-design-analysis.md)** — Why agent workspaces differ from chat UIs
 - **[Keyboard Shortcuts](keyboard-shortcuts-default-sessions-settings.md)** — Shortcuts, Quick Start, Settings
@@ -39,6 +45,10 @@ development practices.
 | Identity, origin, and `SOUL.md` | [architecture.md](architecture.md#session-model) |
 | Translations and locale | [frontend-architecture.md](frontend-architecture.md#internationalization) |
 | Which shortcuts a browser reserves | [frontend-architecture.md](frontend-architecture.md#keyboard-model) |
+| What an adapter may send, and when | [session-protocol.md](session-protocol.md) |
+| How history is kept, replayed, pruned | [storage.md](storage.md) |
+| Why the server owns session policy | [control-plane.md](control-plane.md) |
+| Where a session's work runs | [environments.md](environments.md) |
 
 ### Design Decisions
 

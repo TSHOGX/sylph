@@ -297,66 +297,94 @@ containment check. Browsing therefore adds *enumeration*, not the ability to nam
 a path — a distinction worth keeping in mind before widening `browse_roots`, since
 enumeration is the part that scales with an attacker's ignorance of the layout.
 
-## Runner Discovery
+## Agent Discovery
 
 Adapters are searched in two roots, bundled first: the `adapters/` directory
 shipped beside the binary, then `~/.sylph/agents/`. An agent is a directory holding
-an executable `adapter.sh`. Bundled first means a user-added adapter of the same
+an executable `adapter.sh`.
+
+A note on names, because three are in play and only one is current. An **agent** is
+what a user picks; an **adapter** is the `adapter.sh` that speaks for it; a **runner**
+was v1's process-per-turn script and no longer exists. The word survives in paths —
+`backend/src/runners/`, `frontend/e2e/fixtures/runners/` — which are not worth a
+rename, but nothing they contain is a v1 runner. The startup log says `Agent
+discovery: N usable, M broken`, and that string is what to grep for when a session
+cannot be created. Bundled first means a user-added adapter of the same
 name *shadows* rather than duplicates — the escape hatch when a vendor changes
 faster than the shipped adapter catches up. See `docs/configuration.md`.
 
-Discovery:
-1. Backend scans both roots on startup
-2. Calls `runner.sh --describe` for each
-3. Parses JSON capability descriptor
-4. Caches in memory (refresh via API)
+Discovery is a **live handshake**, not a static descriptor read. The backend
+scans both roots on startup, and for each directory holding an `adapter.sh` it
+spawns the adapter, exchanges `hello`/`ok`, and keeps what came back — then caches
+it in memory, refreshable via the API. `DISCOVERY_TIMEOUT` is 10s, matching the
+link's own budget: an adapter that cannot say who it is in ten seconds will not run
+a turn either. `docs/session-protocol.md` § Handshake is authoritative for the
+frames.
 
-**Descriptor schema** (`AgentSpec` in `backend/src/models/agent.rs`):
+A directory that holds a `runner.sh` or `runner.py` but no `adapter.sh` is recorded
+as **broken**, not skipped. Such a directory is an agent this server cannot speak
+to rather than an ordinary folder, and skipping it silently is what once made a
+stale tree report zero usable *and* zero broken — so nothing anywhere said the
+directory had been seen and rejected.
+
+**Descriptor schema** (`AgentDescriptor` in `backend/src/runners/mod.rs`):
 ```json
 {
   "name": "claude",
-  "version": "3.1.0",
   "description": "Claude Code",
+  "version": "2.1.238",
+  "session_key": "…",
   "flags": {
-    "model": {"choices": ["opus-5", "sonnet-5"], "default": "opus-5"},
-    "effort": {"choices": ["low", "medium", "high"], "default": "medium"}
+    "model": {"choices": ["opus-5", "sonnet-5"], "description": "…"},
+    "effort": {"choices": ["low", "medium", "high", "xhigh", "max"]}
   },
-  "commands": {
-    "compact": {"description": "Compact context", "args": {}}
-  }
+  "commands": {},
+  "supports": ["interrupt", "steer", "approval", "subagent", "slash"]
 }
 ```
 
-`flags` and `commands` are maps keyed by name, not arrays. A flag with an empty
+The shape is unchanged from the v1 descriptor so no client had to change: `flags`
+and `commands` are still maps keyed by name, not arrays. `version` is the agent
+CLI's own, learned from the handshake rather than declared by the wrapper.
+
+`flags` is the **spawn-time** option schema: what can be chosen before a session
+exists, which is all the create-a-session screen can know. A flag with an empty
 `choices` list is free-form; an enumerated one is validated against its own
-enumeration when `PATCH /sessions/{id}` writes it. This is the only source of what
-the composer offers, which is why `codex` correctly shows effort with no model
-selector — nothing in the UI hardcodes a model list.
+enumeration when `PATCH /sessions/{id}` writes it. Nothing in the UI hardcodes a
+model list, which is why `codex` correctly shows effort with no model selector.
+Anything adjustable on a *live* session is a config facet instead
+(`docs/session-protocol.md` § Session config).
 
-Turn invocation:
-```sh
-SYLPH_STREAM_FORMAT=ndjson-v1 SYLPH_SOUL={path|""} runner.sh \
-  --workdir {workdir} \
-  --session-id {backend_session_id} \
-  --flag model=opus-5 --flag effort=high \
-  --attachment {path} \
-  --command {name} --arg {key}={value}
-# prompt on stdin, closed at EOF
-```
+`commands` here is usually **empty, and deliberately so**. A project's real command
+list depends on files the CLI reads at startup, so it belongs to a session rather
+than to an agent: `GET /sessions/{id}/capabilities` is where dozens of them come
+from. The field stays in the shape so the settings UI still renders.
 
-The prompt is written to **stdin**, not passed as an argument: a turn's text is
-unbounded and would otherwise hit `ARG_MAX`. Flags are passed as repeated
-`--flag key=value` pairs rather than as named options, so a new flag an agent
-declares needs no backend change.
+`supports` is a closed vocabulary that drives the UI directly — a composer must not
+offer interrupt to an adapter that cannot interrupt.
 
-`SYLPH_SOUL` is where the identity invariant is enforced. Injection is the runner's
-job, but *whether* it happens is the backend's: a native session sends the empty
-string, which the protocol reserves for "inject nothing". An unset variable means
-"resolve your default", which is not the same thing.
+**A turn is not an invocation.** Under v3 the adapter is a long-lived process and
+a turn is a message on its link, so there is no per-turn command line: the session
+is opened once with `open`, and each turn is a `send` frame on the same stdin.
+`docs/session-protocol.md` is authoritative for both. What the process gets at
+spawn time is the environment; what it gets per turn is a frame.
 
-The child runs in a new process group, so a stop signal reaches the CLI the runner
-exec'd rather than only the wrapper script. Runners stream NDJSON to stdout; the
-backend consumes it incrementally.
+Identity is still enforced at that seam, and still through `SYLPH_SOUL`. Injection
+is the adapter's job, but *whether* it happens is the backend's: a native session
+sends the empty string, which the protocol reserves for "inject nothing". An unset
+variable means "resolve your default", which is not the same thing — and a
+configured path that does not exist resolves to none, matching the adapters' own
+`[[ -f "$SOUL_PATH" ]] || SOUL_PATH=""`.
+
+The child runs in a new process group (`process_group(0)`), so a stop signal reaches
+the CLI the adapter exec'd rather than only the wrapper script. Adapters stream
+NDJSON to stdout and the backend consumes it incrementally — one frame per line,
+which is what lets a turn be observed while it runs rather than after it ends.
+
+There is no degraded path for v1: `runner.sh` is not discovered, `SYLPH_STREAM_FORMAT`
+has no meaning, and a directory without `adapter.sh` is not an agent. The reasoning
+for refusing a compatibility shim is in `docs/session-protocol.md` § "v1 is not
+supported".
 
 ## Data Flow
 
