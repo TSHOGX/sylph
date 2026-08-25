@@ -1385,8 +1385,9 @@ second line had to fork the engine. Three things followed from that fork.
   surface the user reached.
 - **`useListNavigation` is a second engine.** Four call sites re-derive
   `fuzzyRank` + `scrollActiveIntoView` + row ids + `autoFocus` around it, each with
-  its own cursor clamping — the same shape the model picker was fixed for. Two are
-  now converted; the palette and the search overlay are not, and are listed below.
+  its own cursor clamping — the same shape the model picker was fixed for. Two were
+  converted in this pass; the palette, the search overlay, and the history browser's
+  session list followed later, and the hook is now deleted.
 - **`shortenHome` was the buggy copy of a function the picker had got right.**
   `shortenHome("/Users/hsw-backup/x", "/Users/hsw")` returned `~-backup/x`, naming a
   directory that does not exist. Five call sites used the buggy one and the tested
@@ -1657,13 +1658,19 @@ spends real tokens and only observes whatever shapes one live turn produces, so 
   remain unbuilt, and non-loopback binding stays a separate explicit change.
 - **Khora needs a Template carrying the agent CLIs and adapters**, since the
   adapter runs inside the environment. None exists yet.
-- **The command palette and the search overlay still run on `useListNavigation`.**
-  Both are combobox-over-a-ranked-list, which is what `useSelectList` now is, so the
-  conversion is mechanical — and until it happens `useListNavigation` cannot be
-  deleted and the next picker can still copy the wrong pattern. Left out of this pass
-  because both own paged or async sources and the workspace surfaces did not, so
-  converting them is a separate change with its own failure modes rather than a
-  rename. The history overlay's *session* list is the same case.
+- ✅ **The palette, the search overlay, and the history browser are migrated, and
+  `useListNavigation` is deleted.** It was not the mechanical rename the item
+  predicted. The palette needed hidden match words (`keywords`) for the aliases its
+  rows do not show, the archive hit needed a third line (`excerpt`) for the snippet
+  that is the only text on it containing the query, and the search overlay could not
+  be filtered by `buildRows` at all: its two sources are ranked by different engines
+  and the archive's ranking is over transcripts the browser never loaded, so
+  re-scoring would have demoted every hit found by its body. That one keeps its own
+  ranking through `external` and hands back only the query. Auditing the migrated
+  surfaces with a list open found two ARIA faults the old hand-rolled markup carried
+  as well — a `separator` and a paging button inside `role="listbox"` — and one focus
+  bug in all three: React's `autoFocus` fires before `useDialog` records the opener,
+  so each field was captured *as* the opener and closing dropped focus on `<body>`.
 - **An `ingest_status` op on `trace-db api`** is worth asking upstream for. TraceDB
   now emits a durable ingestion ack, but its only surfaces are a gRPC ingest
   response and `doctor --json`, measured at **2m34s** because doctor walks every

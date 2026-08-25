@@ -1001,6 +1001,7 @@ in the sidebar for the same kind of control.
 | `ui/button.tsx` | `Button`, `IconButton`, `Kbd` | Variants are semantic (`primary`, `secondary`, `ghost`, `danger`, `chip`), so a caller picks by meaning. `IconButton` requires `label` — an icon-only control with no accessible name is the most repeated shape in the app, so the failure is a type error rather than an audit finding |
 | `ui/menu.tsx` | `ContextMenu`, `Menu`, `MenuButton`, `MenuItem` | One behaviour, three positionings: anchored to a point (right-click), to a trigger (dropdown), or as a bottom sheet on mobile |
 | `ui/sheet.tsx` | `Sheet`, `Drawer` | The mobile surfaces |
+| `ui/select-list.tsx` | `useSelectList`, `SelectFilter`, `SelectRows`, `SelectScroll` | The one choice-list engine. Every menu, picker, and overlay list in the app; `lib/select-list.ts` holds the rules it renders. See below |
 | `ui/dialog.tsx` | `AlertDialog`, `PromptDialog` | Decision dialogs: confirm a destructive action, ask for one short value. See below for why they are two components |
 | `lib/use-dialog.ts` | `useDialog` | Focus trap, focus restoration, Escape |
 
@@ -1043,6 +1044,76 @@ focuses the *container* when nothing inside the surface claims focus, even with
 focus left on `<body>` the Escape key never arrives. The full-screen file viewer
 has no auto-focusing control of its own, so it opened and could not be dismissed
 by keyboard at all.
+
+The mirror-image failure, which cost the three shortcut overlays their focus
+restoration: **a descendant that focuses itself synchronously is captured as the
+opener.** React's `autoFocus` fires during the commit, before this hook's mount
+effect records `document.activeElement` — so a field declared that way *is* what the
+effect sees, and closing the surface "restores" focus to a node that is unmounting,
+dropping it on `<body>` (WCAG 2.4.3). `SelectFilter` defers its focus by a microtask,
+which lands after every ancestor's effects without ever showing an unfocused frame.
+No spec caught this for three overlays because the two whose restoration *was*
+covered — the settings panel and the config picker — have no auto-focusing control at
+all; `e2e/accessibility.spec.ts` now asserts it for each field that does.
+
+#### One choice list, and why there is no second one
+
+Every list a user picks from — menus, the model catalogue, the workspace and folder
+pickers, the command palette, search, and the history browser — is
+`useSelectList` over rows from `lib/select-list.ts`. The rules are in the pure
+module because that is what makes them testable without a DOM: what is shown, what
+is elided, and what number each row carries.
+
+**The invariant is one cursor, assigned where the rows are built.** `buildRows`
+returns rows in render order, each already carrying its own index — or `null` when
+it cannot be chosen. No renderer computes one, so `activeIndex` cannot be
+interpreted against a second list. The bug this forecloses is specific: a cursor
+counted over *enabled items* against a renderer numbering *all rows* puts the
+highlight, `aria-activedescendant`, and the committed value on three different
+rows, and the symptom is a click that appears to do nothing three layers from the
+cause.
+
+`useListNavigation` in `overlay.tsx` was the second engine and is **deleted**. It
+took a row count, so each caller numbered its own rows — the dual-index shape
+above, structurally — and it could not draw a group heading or host a filter field,
+so the palette hand-rolled grouping and four call sites each re-derived the
+combobox ARIA. Deleting rather than deprecating it is the point: a hook that still
+compiles is a pattern the next picker copies, and this one's failure mode is
+invisible until a list grows a non-selectable row.
+
+Three things the engine grew to absorb the last three callers, each because a
+migration would otherwise have lost a real capability:
+
+| Field | For | Why it is shaped this way |
+| --- | --- | --- |
+| `keywords` | The palette's aliases — `cancel` reaching "Stop the running turn" | Matched, never rendered, and ranked *below* the visible hint: a row that matched on hidden text shows nothing explaining why it is there, so it must not displace one whose visible text matched |
+| `excerpt` | The archive hit's match snippet | Rendered, never matched. It is the *product* of TraceDB's ranking over a transcript the browser never loaded, so re-ranking by it would launder that ranking through a weaker one — and without it an archive row is a title that does not contain the query |
+| `external` | The search overlay's query | Ranking stays with the caller. Live sessions rank client-side and archive hits server-side, live fixed above archive; `buildRows` could only re-score the archive by its title, which is precisely the text that did not match. The query has to leave the hook anyway — it drives a debounced request |
+
+`external` should stay rare, and the reason is worth stating: a caller that ranks
+its own rows also owns keeping `detail` searchable, which is the guarantee the row
+model exists to make. Everything else — numbering, heading elision, one checked row
+per group — still runs.
+
+**A heading is a `disabled` row**, which is the same flag that gives it no cursor
+position and makes a query elide it. One fact, not three agreeing ones.
+
+**The ARIA pattern is chosen by whether there is a text field**, because a
+`role="menu"` may only contain menu items — an `<input>` in one is invalid ARIA that
+axe reports and that leaves a screen reader with a control its container says cannot
+exist. So a filterable list is the combobox pattern instead: input as `combobox`,
+rows as a `listbox` of `option`s, `aria-selected` for the current value,
+`aria-activedescendant` for the cursor. Two consequences found by auditing with a
+list actually open, which a static read does not catch:
+
+- **A `separator` is a legal child of a `menu` and not of a `listbox`**, which admits
+  only options and groups. The same separated row therefore draws an announced rule
+  in one pattern and a decorative one in the other.
+- **The role is claimed only while there are options to contain.** The container also
+  holds the states that are not rows — a spinner, a retry button, "no matches" — and
+  a `listbox` around one of those is the same `aria-required-children` failure. For
+  the same reason `aria-expanded` tracks whether the list is rendered rather than
+  being a constant.
 
 #### Menus replaced every `<select>`
 
@@ -2115,6 +2186,11 @@ Filtering is deliberately local. TraceDB's full-text search is already `Mod+K`,
 and re-querying it per keystroke would spawn a subprocess per character to answer
 a narrower question; the footer says the filter covers loaded sessions only.
 
+**Paging is a footer control, not a row.** As the last child of the list it was both
+invalid ARIA — a `listbox` admits only options — and below however many rows had
+loaded, which is the one place a user paging a thousand sessions has to scroll to
+reach. The footer is fixed, so it is one keystroke away at any scroll position.
+
 Changing the scope goes through `WorkspacePicker`, not a `<select>`. On a real
 archive that select is 200+ options sharing a `~/Workspace/` prefix, ordered by
 recency and reachable only by first letter — and it could not name a directory the
@@ -2425,7 +2501,10 @@ Checked in a real browser, because none of it is verifiable statically:
   keyboard operation with no script.
 - Pickers follow the combobox pattern: focus stays on the input, rows carry
   `aria-selected`, and the input carries `aria-activedescendant`. This is the only
-  arrangement where typing and arrow-navigating do not fight over focus.
+  arrangement where typing and arrow-navigating do not fight over focus. It is also
+  mandatory rather than chosen — a `role="menu"` may not contain a text field. Every
+  picker, the palette, search, and the history browser are now the same code, so this
+  is one implementation rather than seven agreeing ones; see **One choice list**.
 - Toggle buttons carry `aria-pressed`; the open session's sidebar link carries
   `aria-current="page"`.
 - Streaming status is announced through `aria-live="polite"`.
@@ -2589,7 +2668,7 @@ mock runner, so a run never touches the real journal, archive, or agents.
 | `session-lifecycle.spec.ts` | Create, send, stream, reload-replay, sidebar grouping, resuming from `/` |
 | `start-screen.spec.ts` | Usable before the listing settles, first-run guide vs recents, create button matching its shortcut, key hints reflecting a rebind |
 | `timeline.spec.ts` | Tool calls as regions, inline diff, failure auto-expansion, Markdown, 1000-event render budget |
-| `workspace-shell.spec.ts` | Pane toggles and persistence, palette, search, focus restoration, settings round-trip, Artifacts tree, history browser, dialog-free creation |
+| `workspace-shell.spec.ts` | Pane toggles and persistence, palette including grouping and a cursor that skips headings, search including an archive hit's match snippet, focus restoration, settings round-trip, Artifacts tree, history browser, dialog-free creation |
 | `file-viewer.spec.ts` | Tree/viewer swap preserving expansion, fullscreen and focus return, dialog sizing to content vs filling for a page, single-modal invariant, CSV table, sandboxed HTML refusing script and cookie access, image zoom, axe over both scales |
 | `streaming.spec.ts` | Mid-turn painting against a deliberately paced runner |
 | `workspace-picking.spec.ts` | The three "which directory" flows: filter focused on open, folder browsing filterable inside one focus trap, a typed path reaching an unlisted folder, Enter-opens vs `Mod+Enter`-chooses |
@@ -2597,8 +2676,8 @@ mock runner, so a run never touches the real journal, archive, or agents.
 | `commands.spec.ts` | The slash menu after a completed turn, and a control command opening a picker rather than sending a message |
 | `file-operations.spec.ts` | Folder creation and its in-place errors, deletes that ask first, uploads including drop and overwrite, context menus, the raw route, and axe over both dialogs |
 | `settings-identity-i18n.spec.ts` | Identity reporting when no `SOUL.md` resolves, language switching repainting and retagging, and a shortcut recorder refusing combos the browser keeps |
-| `accessibility.spec.ts` | Skip link, focus trapping and restoration, axe-core audit of every surface including both start-screen states |
-| `mobile.spec.ts` | Phone-only: composer fits the viewport, sidebars out of flow, drawer and sheet behaviour, document cannot scroll, PWA installability, dark mode before paint |
+| `accessibility.spec.ts` | Skip link, focus trapping and restoration including a picker's own field not becoming the node focus returns to, axe-core audit of every surface including both start-screen states and every overlay's list open |
+| `mobile.spec.ts` | Phone-only: composer fits the viewport, sidebars out of flow, drawer and sheet behaviour, document cannot scroll, PWA installability, dark mode before paint, the shortcut overlays' fields at or above 16px |
 
 #### Why a second project exists
 

@@ -66,6 +66,49 @@ test("the command palette opens, filters, and runs an action", async ({ page }) 
   await expect(page.getByRole("complementary", { name: "Artifacts" })).toBeVisible();
 });
 
+/**
+ * Grouping, and the cursor that has to mean one thing in both modes.
+ *
+ * The palette drew its group headings itself and numbered its cursor over commands
+ * while rendering over rows — two index spaces, which is the bug where the highlight,
+ * `aria-activedescendant`, and Enter each point at a different row. It now builds rows
+ * through `lib/select-list.ts`, where a heading is a disabled row and takes no cursor
+ * position at all.
+ *
+ * What that is observable as: headings are present unfiltered and gone once a query
+ * narrows the list, and the first Down arrow lands on the first *command* rather than
+ * on the heading above it. A spec asserting only that a heading renders would pass
+ * against the version that mis-numbered them.
+ */
+test("the palette groups commands, and the cursor skips the headings", async ({ page }) => {
+  await createSession(page);
+
+  await page.keyboard.press("ControlOrMeta+p");
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+
+  // A heading is a disabled option: rendered, inert, and not a cursor stop.
+  const headings = dialog.getByRole("option", { disabled: true });
+  await expect(headings.filter({ hasText: "Navigation" })).toHaveCount(1);
+
+  // One Down from the opening cursor position moves within the commands. `aria-selected`
+  // is the current *value* in this pattern and nothing here has one, so the cursor is
+  // read off `aria-activedescendant` — the attribute that pointed at the wrong row.
+  const input = dialog.getByRole("combobox");
+  await input.press("ArrowDown");
+  const active = await input.getAttribute("aria-activedescendant");
+  expect(active).toBeTruthy();
+  // An attribute selector, not `#id`: these ids come from `useId`, whose output
+  // carries characters that are not valid in a CSS id selector.
+  await expect(dialog.locator(`[id="${active}"]`)).toBeEnabled();
+
+  // Filtering drops every heading, because a heading introduces rows that are no
+  // longer beneath it.
+  await input.fill("session");
+  await expect(dialog.getByRole("option", { disabled: true })).toHaveCount(0);
+  await expect(dialog.getByRole("option").first()).toBeEnabled();
+});
+
 test("global search finds a session and opens it", async ({ page }) => {
   await createSession(page);
   const sessionUrl = page.url();
@@ -94,6 +137,57 @@ test("global search finds a session and opens it", async ({ page }) => {
   await expect(page.getByRole("heading", { level: 1 })).toContainText(
     "Findable needle session",
   );
+});
+
+/**
+ * An archive hit shows why it matched.
+ *
+ * The E2E backend points `TRACEDB_BIN` at a path that does not exist, so no spec has
+ * ever rendered an archive row — the search overlay's other half. That matters here
+ * because the archive row is the only one carrying a match excerpt, and the excerpt is
+ * the only thing on it that contains the query: TraceDB ranked the hit by full-text
+ * search over the transcript, text the browser never loaded, so a row showing just a
+ * title and a path is a result the user cannot account for. Interception is what makes
+ * the path reachable; the markup under test is the client's either way.
+ */
+test("an archive hit renders its match snippet, which is the only text carrying the query", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  await page.route("**/api/v1/search?*", (route) =>
+    route.fulfill({
+      json: {
+        available: true,
+        results: [
+          {
+            id: "claude:9bdacb6e-0000-4000-8000-000000000001",
+            agent: "claude",
+            title: "Notes",
+            cwd: "/tmp/archived-project",
+            bestMatch: { snippet: "the supervisor deadlocked on the\nsettle sweep" },
+            startedAtMs: 1_700_000_000_000,
+            endedAtMs: 1_700_000_060_000,
+          },
+        ],
+      },
+    }),
+  );
+
+  await expect(page.getByLabel("Message")).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+k");
+  const dialog = page.getByRole("dialog");
+  // Two characters is the threshold below which the archive is not queried at all.
+  await dialog.getByRole("combobox", { name: /search query/i }).fill("deadlock");
+
+  const hit = dialog.getByRole("option").filter({ hasText: "Notes" });
+  await expect(hit).toContainText("archive");
+  // Collapsed whitespace: a snippet spanning lines in the transcript is one line here,
+  // and a raw newline inside a truncating row renders as a gap of arbitrary width.
+  await expect(hit).toContainText("the supervisor deadlocked on the settle sweep");
+  // The path is still its own line, not displaced by the snippet: `/tmp/x` and
+  // `/tmp/x-old` are distinguishable only by it.
+  await expect(hit).toContainText("/tmp/archived-project");
 });
 
 test("Escape closes an overlay and returns focus to its opener", async ({ page }) => {

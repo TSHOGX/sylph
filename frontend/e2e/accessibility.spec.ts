@@ -278,6 +278,12 @@ test("every overlay has no automated accessibility violations", async ({ page })
   for (const [combo, name] of [
     ["ControlOrMeta+k", "search overlay"],
     ["ControlOrMeta+p", "command palette"],
+    // The history browser was absent from this loop while it was the one overlay
+    // rendering a paging button and a status line *inside* its `role="listbox"` —
+    // `aria-required-children`, the same invalid-ARIA class as an `<input>` in a
+    // `role="menu"`. It is also the overlay a machine without TraceDB sees in its
+    // degraded state, which is where the non-option children appear.
+    ["ControlOrMeta+Shift+k", "history browser"],
     ["ControlOrMeta+Comma", "settings panel"],
   ] as const) {
     await page.keyboard.press(combo);
@@ -285,6 +291,43 @@ test("every overlay has no automated accessibility violations", async ({ page })
     await audit(page, name);
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toBeHidden();
+  }
+});
+
+/**
+ * A picker's own field must not become the node focus is restored to.
+ *
+ * React's `autoFocus` fires during the commit, before `useDialog`'s mount effect
+ * records where focus came from — so a field declared that way was captured *as* the
+ * opener, and closing the overlay "restored" focus to a node that was unmounting,
+ * dropping it on `<body>` (WCAG 2.4.3). The three overlays all declared it, and no
+ * spec caught it because the two overlays whose focus restoration *was* covered — the
+ * settings panel and the config picker — have no auto-focusing control at all.
+ *
+ * The fix is `SelectFilter`'s deferred focus, which lands after every ancestor's
+ * effects. This asserts the outcome rather than the mechanism: focus is in the field
+ * on open, and back on the composer on close.
+ */
+test("an overlay's filter takes focus without becoming the node focus returns to", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  const composer = page.getByLabel("Message");
+  await composer.click();
+  await expect(composer).toBeFocused();
+
+  for (const [combo, name] of [
+    ["ControlOrMeta+p", /command query/i],
+    ["ControlOrMeta+k", /search query/i],
+    ["ControlOrMeta+Shift+k", /filter this workspace/i],
+  ] as const) {
+    await page.keyboard.press(combo);
+    await expect(page.getByRole("combobox", { name })).toBeFocused();
+
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await expect(composer).toBeFocused();
   }
 });
 

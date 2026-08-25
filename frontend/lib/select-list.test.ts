@@ -157,6 +157,47 @@ describe("buildRows, the detail line", () => {
   });
 });
 
+/**
+ * The two fields the palette and the archive search needed, and the asymmetry
+ * between them: one is matched and never rendered, the other rendered and never
+ * matched.
+ */
+describe("buildRows, keywords and the excerpt", () => {
+  it("matches a keyword the row never shows, so an alias reaches its command", () => {
+    const rows = buildRows(
+      [choice("Stop the running turn", { keywords: "cancel interrupt" })],
+      "interrupt",
+    );
+
+    expect(rows.map((row) => row.item.label)).toEqual(["Stop the running turn"]);
+  });
+
+  /**
+   * A row matched on hidden text shows the user nothing explaining why it is there,
+   * so it must never displace a row whose visible text matched. Both candidates carry
+   * the same string, leaving only the field it sits in as the variable.
+   */
+  it("ranks a visible hint match above an invisible keyword match", () => {
+    const rows = buildRows(
+      [choice("first", { keywords: "sylph" }), choice("second", { hint: "sylph" })],
+      "sylph",
+    );
+
+    expect(rows[0].item.label).toBe("second");
+  });
+
+  /**
+   * The excerpt is the *product* of a match — TraceDB's full-text hit on a transcript
+   * the browser never loaded — so re-ranking by it would launder the caller's ranking
+   * through a weaker one. `meta` is excluded for a different reason: it names nothing.
+   */
+  it("does not match the excerpt", () => {
+    expect(
+      buildRows([choice("notes", { excerpt: "the deadlock in the supervisor" })], "deadlock"),
+    ).toEqual([]);
+  });
+});
+
 describe("shouldSearch", () => {
   const choices = (count: number) =>
     Array.from({ length: count }, (_, i) => choice(`Model ${i}`));
