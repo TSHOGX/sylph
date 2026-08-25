@@ -493,10 +493,28 @@ describe("trajectoryName", () => {
   });
 
   it("falls back for a trajectory with no name, and treats blank as none", () => {
-    // Two producers can leave this empty: an adapter that declares a trajectory before
-    // its brief parses, and the server's own close, which carries no name at all.
-    expect(trajectoryName(tree([opens("s1"), closes("s1")])[0])).toBe("Subagent");
-    expect(trajectoryName(tree([opens("s2", "   "), closes("s2")])[0])).toBe("Subagent");
+    // The server's own close carries no name at all, and an adapter that declares a
+    // trajectory before its brief parses now sends none either — so this path is the
+    // common one rather than a corner.
+    expect(trajectoryName(tree([opens("s1"), closes("s1")])[0])).toBe("Unnamed");
+    expect(trajectoryName(tree([opens("s2", "   "), closes("s2")])[0])).toBe("Unnamed");
+  });
+
+  it("uses a fallback no tool name is a substring of", () => {
+    // Not a style rule. The previous fallback was "Subagent", and "Subagent delegation"
+    // *contains* "agent delegation" — while `Agent` is a tool `claude` ships — so every
+    // `{ name: "<tool> delegation" }` locator was ambiguous with it by construction, and
+    // only in the states that produce a nameless row. That passed indefinitely and then
+    // failed under load, twice, reading as a broken card rather than a loose locator.
+    // Asserted against the tool names that actually reach this label.
+    const fallback = trajectoryName(tree([opens("s1"), closes("s1")])[0]);
+    const label = `${fallback} delegation`;
+    for (const tool of ["Task", "Agent", "Workflow", "Bash", "Read", "Edit"]) {
+      expect(
+        label.toLowerCase(),
+        `"${label}" must not contain "${tool} delegation"`,
+      ).not.toContain(`${tool.toLowerCase()} delegation`);
+    }
   });
 
   it("is the single definition both naming surfaces use", () => {
@@ -509,7 +527,7 @@ describe("trajectoryName", () => {
     const named = tree([opens("s1", "Explore"), closes("s1")])[0];
     const bare = tree([opens("s2"), closes("s2")])[0];
     for (const node of [named, bare]) {
-      expect(trajectoryName(node)).toBe(node.row.event.name?.trim() || "Subagent");
+      expect(trajectoryName(node)).toBe(node.row.event.name?.trim() || "Unnamed");
       expect(trajectoryName(node).trim()).not.toBe("");
     }
   });

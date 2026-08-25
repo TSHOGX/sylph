@@ -668,6 +668,34 @@ session where a `Workflow` dispatched a backgrounded delegate and returned clean
   `pr-host-d`'s result reads "dispatched; running in background". Pinned by a unit test
   rather than a comment, because a comment cannot fail: it was confirmed by adding the
   `row.result` fallback and watching the test reject that exact string.
+- **A nameless delegation is called "Unnamed", and the rename order was the whole
+  problem.** `trajectoryName` is the sole definition — it was duplicated in the card and
+  the strip, which let one node be named two ways and a locator that found one stop
+  finding the other. Its fallback used to be "Subagent", and that was wrong twice over.
+  As *copy* it restated a category the chrome already carries, where "Unnamed" states
+  what the row knows: nobody reported what this is — the same rule as the `≥` on a
+  bounded duration. As a *string* it was a substring-superset of a tool name `claude`
+  ships, so `"Subagent delegation"` contains `"agent delegation"` and every
+  `{ name: "<tool> delegation" }` locator was ambiguous with it by construction — in
+  exactly the states that render a nameless row, which is why it passed indefinitely and
+  then failed twice under load, reading as a broken card. No tool name is a substring of
+  "Unnamed delegation", so the class is closed rather than guarded per instance; the
+  `exact: true` guards stay because `exact` is the correct expression of "this one
+  region" regardless.
+
+  **The ordering is the transferable part.** The adapter was *also* producing that
+  string, sending `"Subagent"` as a wire `name` whenever a delegation's brief had not
+  finished streaming — a data defect, not a display one, since `name` means "what this is
+  called" and the guess is journaled: `consolidate` keeps the best name any phase gave a
+  block, so a brief that never finishes leaves the placeholder as the trajectory's
+  durable name. Renaming the client first would have given one condition two labels, the
+  adapter's string for trajectories it named and the new one for the rest — worse than a
+  single imprecise label, and invisible until a card renders. So: **when two layers both
+  supply a default for one field, the layer that writes data stops first and the layer
+  that renders changes second.** And the bound on the fix is worth stating, because it
+  sounds better than it is — rows already journaled with the literal are permanently
+  indistinguishable from a genuine name. There was nothing to migrate because nothing can
+  tell them apart, so a historical "Subagent" row is not evidence an agent chose it.
 - **A promoted host renders its own call.** The row keeps `kind: "tool_call"`
   precisely so the tool's name, arguments, and result survive promotion, so a card
   that drew only trajectory chrome answered opening a `Workflow` with an empty

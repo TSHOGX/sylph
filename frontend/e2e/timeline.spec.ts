@@ -359,11 +359,13 @@ test("a collapsed delegation shows what it concluded, without being opened", asy
  * fixture reached until now: all twelve `subagent` opens in this suite carried a name, so
  * the client's fallback was covered by unit tests and by nothing that renders.
  *
- * It is also what makes five `exact: true` locators in this suite load-bearing rather
- * than merely correct. The fallback label is "Subagent delegation", which *contains*
- * "agent delegation" — so `{ name: "Agent delegation" }` is ambiguous with it, which
- * cost two real failures. Before this row, no test could produce the string those guards
- * exist for.
+ * It also pins the label itself, which is not cosmetic. The fallback used to be
+ * "Subagent", and "Subagent delegation" *contains* "agent delegation" while `Agent` is a
+ * tool `claude` ships — so every `{ name: "<tool> delegation" }` locator was ambiguous
+ * with it by construction, in exactly the states that produce a nameless row. That
+ * passed indefinitely and then failed twice under load, reading as a broken card rather
+ * than a loose locator. "Unnamed" is a substring of no tool name, so the class is closed
+ * rather than guarded instance by instance.
  */
 test("a delegation with no name still renders, and does not shadow a named one", async ({
   page,
@@ -373,18 +375,20 @@ test("a delegation with no name still renders, and does not shadow a named one",
 
   // The fallback reached the DOM as a real card, not as an empty or dropped row.
   await expect(
-    page.getByRole("region", { name: "Subagent delegation", exact: true }),
+    page.getByRole("region", { name: "Unnamed delegation", exact: true }),
   ).toBeVisible();
 
-  // And the guard works: an exact locator for a *named* delegation must not pick up the
-  // fallback, even though "Subagent delegation" contains its text. Without `exact` this
-  // resolves to two elements and fails strict mode — which is the failure mode the
-  // `exact: true` fixes across this suite were added for, now actually reachable.
+  // The old label is gone from the page entirely. Asserted because the rename's whole
+  // point is that no tool name is a substring of what replaced it — a stray "Subagent"
+  // from any producer would quietly reopen the collision class.
+  await expect(page.getByText("Subagent", { exact: true })).toHaveCount(0);
+
+  // And a named delegation's locator does not pick up the fallback row.
   const overview = await openOverview(page);
-  await expect(overview.getByRole("button", { name: /^Subagent,/ })).toHaveCount(0);
+  await expect(overview.getByRole("button", { name: /^Unnamed,/ })).toHaveCount(0);
   // Nameless *and* forwarded nothing, so it is not navigable — the same rule the card
   // follows. It still appears, because a row that reported nothing must not vanish.
-  await expect(overview.getByText(/^Subagent, /)).toBeVisible();
+  await expect(overview.getByText(/^Unnamed, /)).toBeVisible();
 });
 
 test("a promoted host reports its outcome, not its own arguments", async ({ page }) => {

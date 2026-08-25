@@ -189,7 +189,8 @@ test("delegation structure survives a reload", async ({ page }) => {
 
   const verify = page.getByRole("region", { name: "Verify delegation" });
   await expect(verify).toBeVisible({ timeout: 15000 });
-  // Named, not "Subagent": the name came from a phase that consolidation folds away.
+  // Named, not "Unnamed": the name came from a phase that consolidation folds away, so
+  // this fails if the fold keeps only the closing event's fields.
   await expect(page.getByRole("region", { name: "Explore delegation" })).toBeVisible();
   await expect(verify.getByRole("region", { name: "Worker delegation" })).toBeVisible();
 
@@ -324,12 +325,17 @@ test("a host that forwarded no interior says so instead of offering an empty car
   // saying so only after the click is the lossy collapse the tree exists to avoid.
   //
   // `exact` because `getByRole` matches an accessible name by case-insensitive
-  // *substring*, and "Subagent delegation" — the label a trajectory with no name of
-  // its own renders — contains "agent delegation". So this locator is ambiguous by
-  // construction with the fallback name, and a build that produces one resolves to two
-  // elements and fails strict mode, which reads as the card being wrong rather than as
-  // the locator being loose. The disclosure below already guards the same hazard
-  // against "Focus Agent"; the region needed it for the same reason.
+  // *substring*. This was added for a specific collision: the nameless-trajectory label
+  // was "Subagent delegation", which contains "agent delegation", so this locator was
+  // ambiguous with it by construction — and only in the states that render a nameless
+  // row, which is why it passed indefinitely and then failed twice under load, reading
+  // as the card being wrong rather than the locator being loose.
+  //
+  // That collision is gone: the fallback is now "Unnamed", which no tool name is a
+  // substring of. The guard stays anyway, and not out of superstition — `exact` is the
+  // correct expression of "this one region" regardless, and the class it protects
+  // against reopens the moment any label is added that a tool name prefixes. The
+  // disclosure below guards the same hazard against "Focus Agent", which is live.
   const agent = page.getByRole("region", { name: "Agent delegation", exact: true });
   await expect(agent).toContainText("no interior");
   // Collapsed, the card says what came back from inside it — nothing — without the
@@ -408,8 +414,8 @@ test("a host with no forwarded interior is still worth opening", async ({ page }
   // to show: the call itself is still there, so this one keeps its disclosure while a
   // *declared* trajectory with no interior does not have one to keep.
   //
-  // `exact` for the reason given above: a bare "Agent delegation" also matches
-  // "Subagent delegation".
+  // `exact` for the reason given above: it expresses "this one region", and the
+  // substring collision it was added for is closed rather than impossible.
   const agent = page.getByRole("region", { name: "Agent delegation", exact: true });
   await expect(agent).toContainText("no interior");
   const disclosure = agent.getByRole("button", { name: "Agent", exact: true });
