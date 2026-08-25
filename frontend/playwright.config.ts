@@ -10,9 +10,16 @@ import path from "node:path";
  *
  * Ports are offset from the defaults (4317 / 3000) so a run cannot collide with
  * a development server the user already has open.
+ *
+ * Both are overridable because a worktree is a second checkout of this same
+ * config: two suites running side by side would otherwise bind the same two
+ * ports, and the loser reports a server that failed to start rather than a port
+ * that was taken. Set `SYLPH_E2E_PORT_OFFSET` per worktree — one number moves
+ * both ports together, so they cannot be offset inconsistently.
  */
-const BACKEND_PORT = 4318;
-const FRONTEND_PORT = 3101;
+const PORT_OFFSET = Number(process.env.SYLPH_E2E_PORT_OFFSET ?? 0);
+const BACKEND_PORT = 4318 + PORT_OFFSET;
+const FRONTEND_PORT = 3101 + PORT_OFFSET;
 /**
  * The suite's own Sylph home.
  *
