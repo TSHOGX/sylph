@@ -142,7 +142,15 @@ pub async fn list(
             {
                 Ok(page) => page,
                 Err(detail) => {
-                    tracing::warn!("Archive workspace scan failed: {}", detail);
+                    // Same discipline as the archive listing: an absent binary is
+                    // one fact about the run that the client has already announced,
+                    // and this endpoint is polled by the workspace picker, so a
+                    // warn per request rebuilds an unbounded stream one layer up.
+                    crate::api::archive::report_tracedb_failure(
+                        &state,
+                        "Archive workspace scan failed",
+                        &detail,
+                    );
                     break;
                 }
             };

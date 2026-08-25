@@ -23,7 +23,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError, api } from "@/lib/api";
+import { ApiError, api, type ArchiveDelegate } from "@/lib/api";
 import { formatTimestamp } from "@/lib/format";
 import { densityClasses, useSettings } from "@/lib/settings";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
@@ -198,6 +198,8 @@ export default function ArchivedSessionPage() {
         />
       )}
 
+      <LineageBar parentId={data.parentId} forkedFrom={data.forkedFrom} />
+
       <ContinuationBar
         sessionId={data.sessionId}
         resumable={Boolean(data.cwd)}
@@ -217,6 +219,10 @@ export default function ArchivedSessionPage() {
 
       <div className="min-h-0 flex-1 pane px-4 py-3">
         <div className={`mx-auto max-w-3xl ${density.text}`}>
+          <Delegations
+            delegations={data.delegations ?? []}
+            truncated={data.delegationsTruncated}
+          />
           {data.events.length === 0 ? (
             <p className="py-8 text-center text-sm text-ink-muted">
               This archived session recorded no events.
@@ -239,6 +245,129 @@ export default function ArchivedSessionPage() {
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * Where this session sits in the archive's session-level tree.
+ *
+ * Half of a real archive is delegated work, so a transcript that says nothing
+ * about its lineage misrepresents most of what it renders: a delegate opened from
+ * a search hit reads as a conversation someone started. Rendered as a link rather
+ * than a label because the parent is the context that explains the transcript.
+ *
+ * A fork is kept visually distinct and separately worded. It is a different
+ * relationship — the same conversation resumed, replaying its origin's whole
+ * prefix — and calling it a parent would claim delegation that did not happen.
+ */
+function LineageBar({ parentId, forkedFrom }: { parentId?: string; forkedFrom?: string }) {
+  if (!parentId && !forkedFrom) return null;
+
+  return (
+    <aside
+      aria-label="Session lineage"
+      className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-line bg-sunken px-4 py-1.5 text-2xs text-ink-soft"
+    >
+      {parentId && (
+        <>
+          <span>Delegated work. Its parent session holds the request that started it.</span>
+          <Link
+            href={`/archive/${encodeURIComponent(parentId)}`}
+            className="rounded border border-line-strong bg-raised px-2 py-0.5 font-medium hover:bg-hover focus-ring"
+          >
+            Open parent session
+          </Link>
+        </>
+      )}
+      {forkedFrom && (
+        <>
+          <span>
+            Forked from another session, so it replays that conversation before continuing.
+          </span>
+          <Link
+            href={`/archive/${encodeURIComponent(forkedFrom)}`}
+            className="rounded border border-line-strong bg-raised px-2 py-0.5 font-medium hover:bg-hover focus-ring"
+          >
+            Open origin session
+          </Link>
+        </>
+      )}
+    </aside>
+  );
+}
+
+/**
+ * The sessions this one delegated to.
+ *
+ * Above the transcript rather than inside it, and that placement is the honest
+ * part. A live turn carries delegation per event, so the timeline can nest a
+ * subagent's work inside the tool call that spawned it. The archive stores no
+ * equivalent: measured across all five agents, no archived event carries a parent
+ * pointer of that kind, and the id suffix that might attribute a child to a
+ * specific call is an opaque hash in 1918 of 2104 cases. So there is no honest
+ * place *inside* the transcript to put these, and putting them at a guessed one
+ * would render nine in ten delegations under the wrong tool call while looking
+ * exactly like the live tree.
+ *
+ * What is real is that these sessions were delegated by this one, and that each is
+ * a transcript of its own. That is what this renders: a list, at the top, that
+ * says its own limits.
+ */
+function Delegations({
+  delegations,
+  truncated,
+}: {
+  delegations: ArchiveDelegate[];
+  truncated: boolean;
+}) {
+  if (delegations.length === 0) return null;
+
+  return (
+    <section aria-labelledby="delegations-heading" className="mb-4 rounded-lg border border-line">
+      <h2
+        id="delegations-heading"
+        className="border-b border-line bg-sunken px-3 py-1.5 text-2xs font-medium text-ink-soft"
+      >
+        Delegated {delegations.length} session{delegations.length === 1 ? "" : "s"}
+        {truncated && " (partial list)"}
+      </h2>
+      <ul className="divide-y divide-line">
+        {delegations.map((delegate) => (
+          <li key={delegate.id}>
+            <Link
+              href={`/archive/${encodeURIComponent(delegate.id)}`}
+              className="block px-3 py-1.5 hover:bg-hover focus-ring"
+            >
+              <span className="flex items-baseline gap-2">
+                <span className="min-w-0 flex-1 truncate text-xs text-ink">
+                  {delegate.title ?? (
+                    <span className="text-ink-muted">Untitled {delegate.agent} session</span>
+                  )}
+                </span>
+                <span className="shrink-0 text-3xs text-ink-muted">
+                  {delegate.events.toLocaleString()} events
+                </span>
+              </span>
+              {/* Only present when it differs from this session's own directory,
+                  which is the case worth showing: a delegate commonly runs in a
+                  worktree, and 484 of 2238 measured did. */}
+              {delegate.cwd && (
+                <span className="mt-0.5 block truncate font-mono text-3xs text-ink-muted">
+                  ran in {delegate.cwd}
+                </span>
+              )}
+            </Link>
+          </li>
+        ))}
+      </ul>
+      <p className="border-t border-line px-3 py-1 text-3xs text-ink-muted">
+        {/* Said plainly, because the alternative is a reader inferring that the
+            transcript below is missing structure it never had. */}
+        Each delegation is a session of its own. The archive records no link to the
+        exact tool call that started one, so they are listed here rather than nested
+        in the transcript.
+      </p>
+    </section>
   );
 }
 

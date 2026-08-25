@@ -755,6 +755,14 @@ export interface ArchiveSession {
   /** Subagent sessions folded into this row rather than listed separately. */
   subagentCount: number;
   /**
+   * The folded subagents themselves, so the count is reachable rather than trivia.
+   *
+   * Session-level: the archive records no event-level parent pointer, so this says
+   * a delegation happened, never where in the parent's transcript it happened.
+   * Absent rather than empty when there are none.
+   */
+  subagents?: ArchiveDelegate[];
+  /**
    * Origin's TraceDB id when this session is a fork of another.
    *
    * A fork replays its origin's whole prefix, so the two read as one conversation
@@ -765,6 +773,27 @@ export interface ArchiveSession {
   forkOf?: string;
   /** Live session id when already imported, so the UI opens it instead. */
   sessionId?: string;
+}
+
+/**
+ * One delegated session, as its parent's archive row reports it.
+ *
+ * Thinner than {@link ArchiveSession} on purpose: this is a disclosure row under
+ * its parent, not a listing of its own, and every field comes from the page the
+ * server was already reading. `title` is only what the archive recorded — there is
+ * no opening-ask fallback here, because that costs a request per child and one
+ * measured parent has 193 of them.
+ */
+export interface ArchiveDelegate {
+  id: string;
+  agent: string;
+  /** The archive's own title. `codex` and `pi` record none at all. */
+  title?: string;
+  /** Set only when this delegate ran somewhere other than its parent. */
+  cwd?: string;
+  events: number;
+  startedAtMs?: number;
+  endedAtMs?: number;
 }
 
 export interface ArchiveListResponse {
@@ -850,6 +879,38 @@ export interface ArchiveTranscript {
   cwd?: string;
   startedAtMs?: number;
   events: StreamEvent[];
+  /**
+   * Sessions this one delegated to. Absent rather than empty when there are none.
+   *
+   * Complete for delegates whose id carries the parent as a prefix, which is 2104
+   * of 2316 in a real archive. The rest record only a parent the listing cannot
+   * see, and are reached from the parent's directory listing instead.
+   */
+  delegations?: ArchiveDelegate[];
+  /** True when the delegation scan stopped early, so the list may be short. */
+  delegationsTruncated: boolean;
+  /**
+   * The session that delegated this one, when it is delegated work.
+   *
+   * Half of a real archive is delegated, so without this a transcript opened from
+   * a search hit reads as a conversation someone started.
+   */
+  parentId?: string;
+  /**
+   * The session this one forked or resumed from. A different relationship from
+   * {@link parentId}: a fork replays its origin's whole prefix, which is what
+   * explains a transcript that appears to open mid-conversation.
+   */
+  forkedFrom?: string;
+  /**
+   * True when the archive records no event-level delegation structure — which is
+   * every agent measured, so this is always true today.
+   *
+   * Stated by the server rather than assumed here, because it decides the honest
+   * rendering: the events carry no `span`, so a delegation is a separate session
+   * to open, and the view must not draw its tool calls as hosting trajectories.
+   */
+  flat: boolean;
   /** True when `limit` cut the stream short. */
   truncated: boolean;
   sessionId?: string;
