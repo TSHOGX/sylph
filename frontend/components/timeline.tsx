@@ -42,6 +42,7 @@
  * rather than a render-count one.
  */
 
+import dynamic from "next/dynamic";
 import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
 import type { StreamEvent } from "@/lib/api";
 import { formatTime } from "@/lib/format";
@@ -79,6 +80,19 @@ import {
   XIcon,
   type IconProps,
 } from "@/components/icons";
+
+/**
+ * The sibling-comparison strip, split out of the first-load bundle.
+ *
+ * Every session route pays for this file; only a turn that delegated *and* whose user
+ * opened the strip needs the waterfall. `ssr: false` because it renders nothing until
+ * a state change, so there is no markup worth streaming — and the chunk has fetched
+ * long before the click that reveals it.
+ */
+const DelegationOverview = dynamic(
+  () => import("@/components/delegation-overview").then((m) => m.DelegationOverview),
+  { ssr: false },
+);
 
 /**
  * Presentation category to icon.
@@ -168,6 +182,12 @@ export function Timeline({
             : "This delegation forwarded none of its own events."}
         </p>
       )}
+      {/* Scoped to what is on screen, so the comparison is always between rows the
+          user can see as siblings — under focus that is the branch in hand, not the
+          hundred trajectories of the whole turn. Above the rows because it is a map of
+          them, and it renders nothing at all unless two delegations are in scope: one
+          delegation compares to nothing, and the card already states its duration. */}
+      <DelegationOverview nodes={shown} onFocus={setFocus} />
       {shown.map((node) => (
         <MemoizedNode
           key={node.key}

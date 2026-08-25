@@ -676,18 +676,30 @@ export function pathTo(
   return null;
 }
 
-/** Every trajectory in the tree, depth-first, for an outline. */
+/**
+ * Every trajectory in the tree, depth-first, for an outline.
+ *
+ * `seen` carries the same guard as `computeRollup` and `canonicalize`, and for the
+ * same reason: `buildTree` repairs a `span` cycle by *reachability*, which roots the
+ * survivor without breaking the child pointers — so two nodes holding each other are
+ * reachable and still cyclic. Every other walk over `children` already guarded; this
+ * one did not, and it is the one an overview iterates on every build. Unbounded
+ * recursion in a render path is a frozen tab.
+ */
 export function flattenTrajectories(
   nodes: TimelineNode[],
   depth = 0,
+  seen: Set<TimelineNode> = new Set(),
 ): { node: TimelineNode; depth: number }[] {
   const out: { node: TimelineNode; depth: number }[] = [];
   for (const node of nodes) {
+    if (seen.has(node)) continue;
+    seen.add(node);
     if (node.trajectory) {
       out.push({ node, depth });
-      out.push(...flattenTrajectories(node.children, depth + 1));
+      out.push(...flattenTrajectories(node.children, depth + 1, seen));
     } else {
-      out.push(...flattenTrajectories(node.children, depth));
+      out.push(...flattenTrajectories(node.children, depth, seen));
     }
   }
   return out;
