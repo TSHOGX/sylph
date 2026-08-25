@@ -1,5 +1,12 @@
 # Agent UI Design Analysis
 
+> **Status: the argument, written before the work.** This is not a specification and
+> is not maintained against the code. It records why the conversation canvas is shaped
+> the way it is, which is worth keeping and is not recoverable from the
+> implementation. For what the code does, read `docs/frontend-architecture.md`; where
+> the two differ, that file wins. "What Shipped" at the end lists the deliberate
+> departures.
+
 This document analyzes agent interaction patterns from production coding agents to inform
 Sylph Web's conversation canvas redesign. Unlike chat-oriented LLM UIs (ChatGPT, Gemini),
 coding agents require a **workspace-oriented** interface that emphasizes tool execution,

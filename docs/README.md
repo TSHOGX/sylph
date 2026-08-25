@@ -162,10 +162,12 @@ the code: `agent-ui-design-analysis.md` and
 reasoning still governs the UI — the case against chat bubbles, and the shape of the
 shortcut map — and each marks where the shipped implementation diverged from it.
 
-Note one divergence that is easy to trip over: the shortcuts document proposes
-`Cmd+N` and `Shift+Cmd+N` throughout, and a browser reserves both. The shipped
-bindings are `Mod+Shift+O` and `Mod+J`. Its "What Shipped, and What Did Not" section
-records this; `frontend-architecture.md` carries the current map.
+Both now open with a status banner saying so, so a reader learns what kind of
+document they are in before the first claim rather than at the end. Where a
+divergence would mislead a reader who stops early, it is corrected in the body
+instead of only in the closing errata — the shortcuts document's reserved bindings
+(`Mod+Shift+O` and `Mod+J`, not the `Cmd+N` a browser takes first) and its Quick
+Start path are both fixed inline for that reason.
 
 When they disagree with `frontend-architecture.md` or `roadmap.md`, those win. A
 design document records what was intended; the architecture spec records what is

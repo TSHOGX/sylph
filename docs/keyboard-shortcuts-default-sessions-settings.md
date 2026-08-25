@@ -1,5 +1,15 @@
 # Keyboard Shortcuts, Default Sessions & Settings Design
 
+> **Status: the argument, written before the work.** This is not a specification and
+> is not maintained against the code. It records the workflow reasoning behind
+> shortcuts, Quick Start, and Settings, which is worth keeping and is not recoverable
+> from the implementation. Authoritative sources: `docs/frontend-architecture.md` for
+> the shortcut map and UI structure, `docs/configuration.md` for paths and settings.
+> Where they differ from this, they win. Two corrections are applied inline rather
+> than deferred to the end — the reserved-combo bindings in §1 and the Quick Start
+> path note in §2 — because a correction 500 lines after the claim is read too late.
+> "What Shipped, and What Did Not" lists the rest.
+
 This document specifies the enhanced UX features for Sylph Web based on user workflow analysis
 and comparison with similar agent tools.
 
@@ -68,9 +78,9 @@ in modern apps (VS Code, Linear, Raycast), not just search.
 | Command | Action | Shortcut Hint |
 |---------|--------|---------------|
 | **Session Management** | | |
-| New Session | Opens new session dialog | `Cmd+N` |
-| New Session in Current Space | Creates session in active workspace | `Shift+Cmd+N` |
-| Close Session | Closes current session (keeps in history) | `Cmd+W` |
+| New Session | Opens new session dialog | `Mod+Shift+O` |
+| New Session in Current Space | Creates session in active workspace | `Mod+J` |
+| Close Session | Closes current session (keeps in history) | — (`Cmd+W` closes the tab) |
 | Duplicate Session | Forks current session (future) | - |
 | **Navigation** | | |
 | Search Sessions | Opens global search | `Cmd+K` |
@@ -103,9 +113,8 @@ in modern apps (VS Code, Linear, Raycast), not just search.
 │  > new session                                      │
 │                                                     │
 │  🎯 Session Management                              │
-│    New Session                              Cmd+N   │
-│    New Session in Current Space       Shift+Cmd+N   │
-│    Close Session                            Cmd+W   │
+│    New Session                      Shift+Cmd+O     │
+│    New Session in Current Space           Cmd+J     │
 │                                                     │
 │  🧭 Navigation                                      │
 │    Search Sessions                          Cmd+K   │
@@ -124,9 +133,9 @@ in modern apps (VS Code, Linear, Raycast), not just search.
 |----------|--------|-------|
 | `Cmd/Ctrl+K` | Global search | Global |
 | `Cmd/Ctrl+P` | Command palette | Global |
-| `Cmd/Ctrl+N` | New session | Global |
-| `Shift+Cmd/Ctrl+N` | New session in current space | In session view |
-| `Cmd/Ctrl+W` | Close current session | In session view |
+| `Shift+Cmd/Ctrl+O` | New session | Global |
+| `Cmd/Ctrl+J` | New session in current space (Quick Start) | Global |
+| `Shift+Cmd/Ctrl+K` | Browse workspace history | Global |
 | `Cmd/Ctrl+B` | Toggle left sidebar | Global |
 | `Cmd/Ctrl+\` | Toggle right sidebar | Global |
 | `Cmd/Ctrl+,` | Open settings | Global |
@@ -137,6 +146,21 @@ in modern apps (VS Code, Linear, Raycast), not just search.
 | `Esc` | Close modal/dialog | Global |
 | `Enter` | Submit message / Confirm action | Context-dependent |
 | `Shift+Enter` | New line in input | In message input |
+
+**Why not `Cmd+N`, `Cmd+Shift+N`, or `Cmd+W`.** This document originally proposed
+all three, and none of them is reachable: Chrome has reserved `Ctrl/Cmd+N` (new
+window), `+T` (new tab), `+W` (close tab) and their shifted forms since version 4,
+above the page's own handlers and beyond the reach of `preventDefault`. A binding
+the browser answers first is not a binding that can be fixed later — so New Session
+is `Mod+Shift+O`, Quick Start is `Mod+J`, and closing a session has no accelerator
+because the one users would reach for closes their tab instead. The recorder in
+§3.5 refuses any reserved combo and names what the browser does with it, rather
+than accepting a binding that would silently never fire. `lib/combo.ts` holds the
+reserved set; `docs/frontend-architecture.md` holds the current map.
+
+Every binding here is rebindable, so treat the table as defaults rather than as
+the key that will be in effect. Surfaces that teach a shortcut read the live
+binding through `useShortcutHint`.
 
 ---
 
@@ -336,7 +360,7 @@ Effort level:
 **Default Workspace:**
 ```
 Quick Start sessions created in:
-~/.agents  [Always fixed, cannot change]
+~/.sylph/scratch  [Read-only here; set per install]
 
 Recent workspaces:
 ┌────────────────────────────┬──────────┬─────────────┐
@@ -370,7 +394,7 @@ Customize keyboard shortcuts:
 ├──────────────────────────────┼──────────────┼──────────┤
 │ Global Search                │ Cmd+K        │ [Edit]   │
 │ Command Palette              │ Cmd+P        │ [Edit]   │
-│ New Session                  │ Cmd+N        │ [Edit]   │
+│ New Session                  │ Shift+Cmd+O  │ [Edit]   │
 │ Toggle Left Sidebar          │ Cmd+B        │ [Edit]   │
 │ Toggle Right Sidebar         │ Cmd+\        │ [Edit]   │
 │ Stop Current Turn            │ Cmd+.        │ [Edit]   │
@@ -687,14 +711,10 @@ this document as a description of the code:
   management are all there. Bounded rendering is an architecture property, not a
   preference to expose — see `docs/frontend-architecture.md`.
 
-- **`Cmd+N` and `Shift+Cmd+N` are not the bindings, and never could have been.**
-  Every table in this document proposes them for New Session and Quick Start, and a
-  browser takes both before the page sees them — Chrome has reserved `Ctrl/Cmd+N`,
-  `+T`, `+W` and their shifted forms since version 4, beyond the reach of
-  `preventDefault`. The shipped defaults are **`Mod+Shift+O`** and **`Mod+J`**, and
-  the recorder now refuses any reserved combo, naming what the browser does instead.
-  Read the tables below as "New Session has a binding, and it is rebindable" — the
-  specific keys they name are wrong. `docs/frontend-architecture.md` has the current
-  map and the reasoning.
+- **The reserved-combo bindings are corrected in place.** This document originally
+  proposed `Cmd+N`, `Shift+Cmd+N`, and `Cmd+W`, which a browser answers before the
+  page sees them. The tables in §1 now carry the shipped defaults and the reasoning
+  sits beside the map rather than here, because a reader who reaches §1 first would
+  otherwise try the wrong keys for 500 lines before finding the correction.
 
 The rest of the shortcut map is current.
