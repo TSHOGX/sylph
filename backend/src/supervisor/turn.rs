@@ -297,59 +297,78 @@ impl LinkedSupervisor {
             return Ok(false);
         }
 
+        // Settled *before* the link is touched at all, and this ordering is the whole
+        // point of the method.
+        //
+        // Every way of ending a turn from here asks the agent to stop producing, and
+        // an agent that stops producing is one its drain task will observe closing —
+        // which `handle_close` reports as `LinkLost`. That is true of the transport and
+        // false about what happened: the user asked for this. Claiming the outcome
+        // first means the drain task's attempt finds the turn already terminal
+        // (`finish_turn` guards on status) and does nothing.
+        //
+        // Settling only *after* interrupting was a race rather than a fix, because the
+        // agent may exit while `interrupt` is still in flight — `stopping_a_running_turn_cancels_it`
+        // failed roughly two runs in five on it, reporting `LINK_LOST`, and the
+        // detach fallback below was already written to avoid exactly this on its own
+        // path. Both paths now inherit it from one place.
+        //
+        // Settling first also means the record does not wait on `interrupt` to answer,
+        // which is what makes stop unconditional: a user asking to stop must not be
+        // told the agent declined.
+        self.settle(&session_id, turn_id, Outcome::Interrupted).await;
+
         match self.links.get(&session_id).await {
             Some(link) => {
                 if link.interrupt().await.is_err() {
                     // Either the agent cannot interrupt or it refused. Falling
-                    // back to a signal is what makes stop unconditional: a user
-                    // asking to stop must not be told the agent declined.
+                    // back to a signal is what makes stop unconditional. Killing the
+                    // adapter costs the session, so it stays the fallback.
                     warn!(
                         "Turn {} could not be interrupted; tearing the link down",
                         turn_id
                     );
-                    // Settled *before* detaching, and this ordering is the whole
-                    // point. Tearing the link down makes its drain task observe a
-                    // close and settle the turn as LINK_LOST — which is true of
-                    // the transport and false about what happened: the user asked
-                    // for this. Claiming the outcome first means the drain task's
-                    // later attempt finds the turn already settled and does
-                    // nothing, so the record says cancelled.
-                    self.settle(&session_id, turn_id, Outcome::Interrupted).await;
                     self.links.detach(&session_id, "stopped").await;
-                    return Ok(true);
                 }
             }
             None => {
-                // No link, but a turn still marked running: settle it rather than
-                // leaving the row inconsistent with reality.
+                // No link, but a turn still marked running: the settle above is what
+                // keeps the row consistent with reality.
                 debug!("Stop for turn {} found no link", turn_id);
             }
         }
 
-        // Settled here rather than waiting for a `turn` event, because an
-        // interrupted agent may not emit one. If it does, `finish_turn`'s guard
-        // makes this the outcome that stands.
-        self.settle(&session_id, turn_id, Outcome::Interrupted).await;
         Ok(true)
     }
 
     /// Record a turn's terminal state and close its stream.
     async fn settle(&self, session_id: &str, turn_id: &str, outcome: Outcome) {
-        // Claimed before the turn is recorded, and that order is load-bearing.
+        // Recorded before the waiter is released, and that order is load-bearing.
         //
-        // Removing the waiter drops the oneshot sender, which wakes whoever is parked
-        // in `run()` with a `RecvError` — and that path reads as "the link died", so
-        // it settles the turn as LINK_LOST. Claiming first means that second
-        // settlement finds the turn already terminal and does nothing. Reversed, a
-        // user's stop is reported as the agent having exited: true of the transport,
-        // false about what happened.
+        // Releasing the waiter drops the oneshot sender, which wakes whoever is parked
+        // in `run()` with a `RecvError` — and that path reads as "the link died", so it
+        // settles the turn as LINK_LOST. `finish_turn` guards on status, so whichever
+        // outcome is *written* first is the one that stands: writing ours first makes
+        // that second settlement a no-op.
         //
-        // This is the only part of settling that is the supervisor's own. Everything
-        // below it is shared with the link manager, which has to settle turns nobody
-        // is waiting on — see `supervisor::closer`.
-        self.waiters.lock().await.remove(turn_id);
-
+        // Releasing first was a race rather than an ordering, because `close` awaits.
+        // The woken task could reach `finish_turn` inside that window and win, so a
+        // deliberate stop was reported as the agent having exited — true of the
+        // transport, false about what happened. It failed
+        // `stopping_a_running_turn_cancels_it` a few runs in ten, which reads as
+        // flakiness rather than as an ordering bug. Claiming the waiter is not what
+        // makes a stop win; recording the outcome is.
+        //
+        // Releasing it at all is still necessary — the map would otherwise hold a
+        // sender for a turn nobody will settle, and `stop` reads that map to decide
+        // whether a turn is in flight.
+        //
+        // This is the only part of settling that is the supervisor's own. The `close`
+        // below is shared with the link manager, which has to settle turns nobody is
+        // waiting on — see `supervisor::closer`.
         self.closer.close(session_id, turn_id, outcome).await;
+
+        self.waiters.lock().await.remove(turn_id);
     }
 
     async fn emit(
