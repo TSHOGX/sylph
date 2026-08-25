@@ -20,6 +20,7 @@ import { useSettings, type ShortcutAction } from "@/lib/settings";
 import { formatCombo, useIsMac } from "@/lib/shortcuts";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
+import { useT } from "@/lib/i18n";
 import { Overlay, scrollActiveIntoView, useListNavigation } from "@/components/overlay";
 import { Kbd } from "@/components/ui/button";
 import { CommandIcon } from "@/components/icons";
@@ -51,6 +52,7 @@ function readRecent(): string[] {
 }
 
 export function CommandPalette() {
+  const t = useT();
   const router = useRouter();
   const queryClient = useQueryClient();
   const { closeOverlay, runAction, leftOpen, rightOpen } = useWorkspaceUI();
@@ -72,8 +74,8 @@ export function CommandPalette() {
     () => [
       {
         id: "new-session",
-        label: "New session",
-        group: "Session",
+        label: t("palette.cmd.newSession"),
+        group: t("palette.group.session"),
         action: "newSession",
         run: () => runAction("newSession"),
       },
@@ -83,39 +85,39 @@ export function CommandPalette() {
         // so naming one here would be wrong for anyone who set it — and the label
         // is the wrong place to learn a path in any case; Settings → Configuration
         // reports the resolved one.
-        label: "Quick Start session",
-        group: "Session",
+        label: t("palette.cmd.quickStart"),
+        group: t("palette.group.session"),
         action: "quickStart",
         keywords: "default scratch quick",
         run: () => runAction("quickStart"),
       },
       {
         id: "stop-turn",
-        label: "Stop the running turn",
-        group: "Session",
+        label: t("palette.cmd.stopTurn"),
+        group: t("palette.group.session"),
         action: "stopTurn",
         keywords: "cancel interrupt",
         run: () => runAction("stopTurn"),
       },
       {
         id: "search",
-        label: "Search sessions and archive",
-        group: "Navigation",
+        label: t("palette.cmd.search"),
+        group: t("palette.group.navigation"),
         action: "search",
         run: () => runAction("search"),
       },
       {
         id: "browse-history",
-        label: "Browse this workspace's archived history",
-        group: "Navigation",
+        label: t("palette.cmd.browseHistory"),
+        group: t("palette.group.navigation"),
         action: "browseWorkspaceHistory",
         keywords: "past previous archive tracedb directory workdir",
         run: () => runAction("browseWorkspaceHistory"),
       },
       {
         id: "start-screen",
-        label: "Go to the start screen",
-        group: "Navigation",
+        label: t("palette.cmd.startScreen"),
+        group: t("palette.group.navigation"),
         keywords: "home welcome recent start new session",
         run: () => {
           closeOverlay();
@@ -124,8 +126,8 @@ export function CommandPalette() {
       },
       {
         id: "archive",
-        label: "Go to archive search page",
-        group: "Navigation",
+        label: t("palette.cmd.archive"),
+        group: t("palette.group.navigation"),
         keywords: "tracedb history import",
         run: () => {
           closeOverlay();
@@ -134,39 +136,41 @@ export function CommandPalette() {
       },
       {
         id: "toggle-left",
-        label: leftOpen ? "Hide workspaces sidebar" : "Show workspaces sidebar",
-        group: "View",
+        label: t(leftOpen ? "palette.cmd.hideLeft" : "palette.cmd.showLeft"),
+        group: t("palette.group.view"),
         action: "toggleLeftSidebar",
         run: () => runAction("toggleLeftSidebar"),
       },
       {
         id: "toggle-right",
-        label: rightOpen ? "Hide artifacts sidebar" : "Show artifacts sidebar",
-        group: "View",
+        label: t(rightOpen ? "palette.cmd.hideRight" : "palette.cmd.showRight"),
+        group: t("palette.group.view"),
         action: "toggleRightSidebar",
         keywords: "files preview",
         run: () => runAction("toggleRightSidebar"),
       },
       {
         id: "expand-all",
-        label: "Expand all thinking and tool blocks",
-        group: "View",
+        label: t("palette.cmd.expandAll"),
+        group: t("palette.group.view"),
         action: "expandAll",
         run: () => runAction("expandAll"),
       },
       {
         id: "collapse-all",
-        label: "Collapse all thinking and tool blocks",
-        group: "View",
+        label: t("palette.cmd.collapseAll"),
+        group: t("palette.group.view"),
         action: "collapseAll",
         run: () => runAction("collapseAll"),
       },
       {
         id: "toggle-thinking",
-        label: settings.expandThinking
-          ? "Collapse thinking blocks by default"
-          : "Expand thinking blocks by default",
-        group: "View",
+        label: t(
+          settings.expandThinking
+            ? "palette.cmd.collapseThinking"
+            : "palette.cmd.expandThinking",
+        ),
+        group: t("palette.group.view"),
         keywords: "reasoning preference",
         run: () => {
           update({ expandThinking: !settings.expandThinking });
@@ -175,10 +179,12 @@ export function CommandPalette() {
       },
       {
         id: "toggle-tool-output",
-        label: settings.expandToolOutput
-          ? "Collapse tool output by default"
-          : "Expand tool output by default",
-        group: "View",
+        label: t(
+          settings.expandToolOutput
+            ? "palette.cmd.collapseToolOutput"
+            : "palette.cmd.expandToolOutput",
+        ),
+        group: t("palette.group.view"),
         run: () => {
           update({ expandToolOutput: !settings.expandToolOutput });
           closeOverlay();
@@ -186,8 +192,13 @@ export function CommandPalette() {
       },
       {
         id: "density",
-        label: `Cycle density (currently ${settings.density})`,
-        group: "View",
+        // The density *value* is translated too, read from the same keys the settings
+        // panel renders — interpolating the raw enum would put an English word
+        // inside a Chinese sentence.
+        label: t("palette.cmd.density", {
+          density: t(`settings.density.${settings.density}`),
+        }),
+        group: t("palette.group.view"),
         keywords: "spacing compact comfortable",
         run: () => {
           const order = ["compact", "normal", "comfortable"] as const;
@@ -198,16 +209,16 @@ export function CommandPalette() {
       },
       {
         id: "settings",
-        label: "Open settings",
-        group: "Settings",
+        label: t("palette.cmd.settings"),
+        group: t("palette.group.settings"),
         action: "openSettings",
         keywords: "preferences configuration",
         run: () => runAction("openSettings"),
       },
       {
         id: "refresh-agents",
-        label: "Refresh agent runners",
-        group: "Settings",
+        label: t("palette.cmd.refreshAgents"),
+        group: t("palette.group.settings"),
         keywords: "discover describe",
         run: () => {
           // Re-runs `--describe` discovery on the backend, then seeds the cache
@@ -220,8 +231,8 @@ export function CommandPalette() {
       },
       {
         id: "reload-data",
-        label: "Reload sessions and workspaces",
-        group: "Settings",
+        label: t("palette.cmd.reloadData"),
+        group: t("palette.group.settings"),
         keywords: "refresh invalidate cache",
         run: () => {
           void queryClient.invalidateQueries();
@@ -240,6 +251,11 @@ export function CommandPalette() {
       settings.expandToolOutput,
       settings.density,
       update,
+      // Every label is translated, so a language change has to rebuild the list.
+      // Without this the palette keeps the labels it was first opened with, and the
+      // *filter* keeps matching them — so a search would hit a row whose visible
+      // text no longer contains what was typed.
+      t,
     ],
   );
 
@@ -300,7 +316,7 @@ export function CommandPalette() {
   const grouped = !query.trim();
 
   return (
-    <Overlay title="Command palette" onClose={closeOverlay} describedBy="palette-hint">
+    <Overlay title={t("palette.title")} onClose={closeOverlay} describedBy="palette-hint">
       <div className="flex items-center gap-2 border-b border-line px-3 py-2.5">
         <span className="text-ink-muted">
           <CommandIcon size={15} />
@@ -311,12 +327,12 @@ export function CommandPalette() {
           aria-expanded
           aria-controls="palette-results"
           aria-activedescendant={ranked.length > 0 ? `palette-row-${activeIndex}` : undefined}
-          aria-label="Search commands"
+          aria-label={t("palette.field")}
           autoFocus
           value={query}
           onChange={(event) => setPicker({ query: event.target.value, active: 0 })}
           onKeyDown={(event) => onKeyDown(event, activeIndex, setActive)}
-          placeholder="Run a command..."
+          placeholder={t("palette.placeholder")}
           className="flex-1 bg-transparent text-sm outline-none placeholder:text-ink-muted"
         />
       </div>
@@ -325,11 +341,11 @@ export function CommandPalette() {
         ref={listRef}
         id="palette-results"
         role="listbox"
-        aria-label="Commands"
+        aria-label={t("palette.list")}
         className="min-h-0 flex-1 pane py-1"
       >
         {ranked.length === 0 ? (
-          <p className="px-3 py-6 text-center text-xs text-ink-muted">No matching command.</p>
+          <p className="px-3 py-6 text-center text-xs text-ink-muted">{t("palette.none")}</p>
         ) : (
           ranked.map((command, index) => {
             const previous = index > 0 ? ranked[index - 1] : undefined;
@@ -337,7 +353,7 @@ export function CommandPalette() {
             const wasRecent = previous ? grouped && recent.includes(previous.id) : false;
             const showHeading =
               grouped && (index === 0 || (isRecent !== wasRecent) || (!isRecent && command.group !== previous?.group));
-            const heading = isRecent ? "Recent" : command.group;
+            const heading = isRecent ? t("palette.group.recent") : command.group;
             const combo = command.action ? shortcutFor.get(command.action) : undefined;
 
             return (
@@ -371,7 +387,7 @@ export function CommandPalette() {
         id="palette-hint"
         className="shrink-0 border-t border-line bg-sunken px-3 py-1.5 text-3xs text-ink-muted"
       >
-        ↑↓ navigate · ↵ run · Esc close
+        {t("palette.keys")}
       </footer>
     </Overlay>
   );

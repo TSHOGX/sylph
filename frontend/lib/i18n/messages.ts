@@ -133,6 +133,58 @@ export const en = {
   "search.archiveBadge": "archive",
   "search.searchingArchive": "searching archive...",
 
+  // The command palette (`Mod+P`).
+  //
+  // Group names are keys rather than literals because they are *rendered* as
+  // headings, not just used to sort — and the palette flattens the groups away as
+  // soon as the user types, so an untranslated heading is visible in exactly the
+  // state a new user opens first.
+  "palette.title": "Command palette",
+  "palette.field": "Command query",
+  "palette.placeholder": "Run a command...",
+  "palette.list": "Commands",
+  "palette.none": "No matching command.",
+  "palette.group.session": "Session",
+  "palette.group.navigation": "Navigation",
+  "palette.group.view": "View",
+  "palette.group.settings": "Settings",
+  // Not a group an author assigns: the palette promotes recently used commands
+  // above the authored order, so this heading labels a run of rows that could have
+  // come from any group.
+  "palette.group.recent": "Recent",
+  // "run" rather than "choose": this list executes rather than picking a value.
+  "palette.keys": "↑↓ navigate · ↵ run · Esc close",
+
+  // Command labels. Named after the command id so the two cannot drift apart.
+  //
+  // No directory in `quickStart`: it is configurable, so naming one would be wrong
+  // for anyone who changed it, and Settings → Configuration reports what resolved.
+  "palette.cmd.newSession": "New session",
+  "palette.cmd.quickStart": "Quick Start session",
+  "palette.cmd.stopTurn": "Stop the running turn",
+  "palette.cmd.search": "Search sessions and archive",
+  "palette.cmd.browseHistory": "Browse this workspace's archived history",
+  "palette.cmd.startScreen": "Go to the start screen",
+  "palette.cmd.archive": "Go to archive search page",
+  // Each toggle reads as the action it performs, not the state it is in, so the
+  // label answers "what happens if I press this" rather than "what is true now".
+  "palette.cmd.hideLeft": "Hide workspaces sidebar",
+  "palette.cmd.showLeft": "Show workspaces sidebar",
+  "palette.cmd.hideRight": "Hide artifacts sidebar",
+  "palette.cmd.showRight": "Show artifacts sidebar",
+  "palette.cmd.expandAll": "Expand all thinking and tool blocks",
+  "palette.cmd.collapseAll": "Collapse all thinking and tool blocks",
+  "palette.cmd.collapseThinking": "Collapse thinking blocks by default",
+  "palette.cmd.expandThinking": "Expand thinking blocks by default",
+  "palette.cmd.collapseToolOutput": "Collapse tool output by default",
+  "palette.cmd.expandToolOutput": "Expand tool output by default",
+  // `{density}` is the *translated* value, read from `settings.density.*` rather
+  // than interpolated raw — the same words the settings panel shows for it.
+  "palette.cmd.density": "Cycle density (currently {density})",
+  "palette.cmd.settings": "Open settings",
+  "palette.cmd.refreshAgents": "Refresh agent runners",
+  "palette.cmd.reloadData": "Reload sessions and workspaces",
+
   // Sidebar: workspaces and their sessions.
   "sidebar.title": "Sessions by workspace",
   "sidebar.quickSessions": "Quick Sessions",
