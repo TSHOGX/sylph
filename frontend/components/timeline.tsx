@@ -687,7 +687,7 @@ function TimelineRowView({
       // A trajectory reaching here is one `buildTree` did not turn into a node,
       // which means it carried no `streamId` — so it has no identity to nest
       // anything under and nothing to show beyond that it happened. Rendering it
-      // as a status line would put a bare "Subagent" row in the timeline; the
+      // as a status line would put a bare "Unnamed" row in the timeline; the
       // node path is the only place a delegation is legible.
       return null;
     case "turn":

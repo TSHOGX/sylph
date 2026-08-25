@@ -684,35 +684,68 @@ export function pathTo(
  * one node two ways — and the strip's `aria-label` would stop matching the card's region
  * name, which nothing type-checks and no test asserts.
  *
- * Note what the fallback is *not*: it is not the only source of the string "Subagent".
- * `claude`'s adapter sends that literal as the `name` on the wire whenever a
- * delegation's brief has not finished streaming (`_task_label`), which at `started` is
- * the usual case. So renaming this fallback would not remove "Subagent" from the screen
- * — it would only change which of the two producers put it there.
+ * # Why this is the only producer, and what that took
  *
- * The adapter's half is the more serious one, and it is a *data* defect rather than a
- * display one. `name` means "what this delegation is called", so `null` says nobody
- * knows yet while `"Subagent"` asserts a name the adapter cannot support. That guess is
- * journaled: `history::consolidate` keeps the best name any phase gave a block, so a
- * later `delta` carrying the real brief normally wins — but when the brief never
- * finishes streaming (the delegation fails early, or the link dies mid-input) the
- * placeholder becomes the trajectory's durable name in `history.db`, indistinguishable
- * from one an agent chose.
+ * It was not always. `claude`'s adapter used to send the literal `"Subagent"` as the
+ * `name` on the wire whenever a delegation's brief had not finished streaming — which at
+ * `started` is the usual case, since the brief arrives as partial JSON. So the string on
+ * screen had two producers, and renaming this one would only have changed which of them
+ * put it there.
  *
- * **The order of the two fixes matters, and this half must go second.** A fallback here
- * is a presentation decision and belongs here; the adapter omitting `name` is a
- * subtraction, and the server already carries it as `Option<String>` throughout. But
- * renaming *this* while the adapter still sends the literal would give one condition two
- * labels — "Subagent" for the trajectories the adapter named, whatever this says for the
- * ones it did not — which is worse than today's single imprecise label. Adapter first,
- * then this, and only then does the substring-collision class close (see
- * `e2e/delegation.spec.ts`: "Subagent delegation" contains "agent delegation", so a
- * `{ name: "<tool> delegation" }` locator is ambiguous with the fallback by
- * construction).
+ * The adapter's half was the more serious one, and it was a *data* defect rather than a
+ * display one. `name` means "what this delegation is called", so `null` says nobody knows
+ * yet while a literal asserts a name the adapter cannot support — and that guess is
+ * journaled. `history::consolidate` keeps the best name any phase gave a block, so a
+ * later `delta` carrying the real brief normally wins; but when the brief never finishes
+ * streaming (the delegation fails early, or the link dies mid-input) the placeholder
+ * becomes the trajectory's durable name in `history.db`.
+ *
+ * `_task_label` now returns `None`, so this is the sole producer and the rename above is
+ * safe. **The bound on what that fixed is worth stating exactly, because it sounds
+ * better than it is: rows already journaled with the literal are permanently
+ * indistinguishable from a genuine name.** There was nothing to migrate not because the
+ * data is fine but because nothing can tell the two apart — the fix stops new guesses and
+ * cannot undo old ones. So a historical `"Subagent"` row is not evidence that an agent
+ * named it that, and any analysis over archived names has to treat those as unknowable
+ * rather than as data.
+ *
+ * The **ordering** is the part worth keeping now that both halves have landed, because it
+ * is the trap anyone repeating this shape will walk into. The two fixes were not
+ * interchangeable: renaming *this* while the adapter still sent a literal would have given
+ * one condition two labels — the adapter's string for trajectories it named, this one for
+ * those it did not — which is worse than a single imprecise label, and invisible until a
+ * card renders. The general rule: when two layers both supply a default for one field,
+ * the layer that *writes data* stops first and the layer that *renders* changes second.
  */
 export function trajectoryName(node: TimelineNode): string {
-  return node.row.event.name?.trim() || "Subagent";
+  return node.row.event.name?.trim() || UNNAMED_TRAJECTORY;
 }
+
+/**
+ * What a delegation is called when nobody said.
+ *
+ * "Unnamed" rather than "Subagent", for two reasons that point the same way.
+ *
+ * **It states what is true.** The fallback fires exactly when no name arrived, and
+ * "Subagent" restates a category the chrome already carries — the branch icon, the
+ * card, the word "delegation" in the region label all say that much. "Unnamed" says the
+ * thing the row actually knows: the agent did not report what this is. That is the same
+ * rule as the `≥` on a bounded duration and as the "outlived its turn" wording — a
+ * surface may not claim more than it has.
+ *
+ * **It closes a collision class rather than guarding each instance.** "Subagent
+ * delegation" *contains* "agent delegation", and `Agent` is a tool `claude` ships, so
+ * every `{ name: "<tool> delegation" }` locator was ambiguous with the fallback by
+ * construction. That cost two real failures and five `exact: true` fixes. No tool name
+ * is a substring of "Unnamed delegation", so a future locator is safe without anyone
+ * remembering the rule. The `exact: true` guards stay regardless: they are correct on
+ * their own terms, and cost nothing.
+ *
+ * Deliberately a named constant rather than an inline literal, because the ordering
+ * hazard above is a property of *this string's relationship to the adapter's*, and a
+ * grep for it should land somewhere that explains that.
+ */
+const UNNAMED_TRAJECTORY = "Unnamed";
 
 /**
  * What a delegation says about itself: its closing summary, else its latest progress.
