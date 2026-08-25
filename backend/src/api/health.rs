@@ -82,8 +82,8 @@ pub struct DiagnosticsResponse {
     agents: Vec<String>,
     broken_runners: HashMap<String, String>,
     /// Every directory bundled-adapter resolution considered, in order, plus the
-    /// user agents directory. Present because "no agents" is otherwise
-    /// unactionable: a missing install and a mistyped `SYLPH_AGENTS_DIR` give the
+    /// user's own agents directory. Present because "no agents" is otherwise
+    /// unactionable: a missing install and a mistyped `paths.agents_dir` give the
     /// same empty list and need opposite fixes. Authenticated, since these are
     /// local filesystem paths.
     agent_roots: Vec<String>,
@@ -138,9 +138,9 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         broken_runners,
         agent_roots: state
             .config
-            .agents_dir_candidates
+            .bundled_agents_candidates
             .iter()
-            .chain(std::iter::once(&state.config.runners_dir))
+            .chain(std::iter::once(&state.config.agents_dir))
             .map(|path| path.display().to_string())
             .collect(),
         tracedb: state.tracedb.archive_counts().await,

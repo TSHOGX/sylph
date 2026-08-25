@@ -26,10 +26,11 @@ import { LOCALE_NAMES, LOCALES, useT, type Locale, type MessageKey } from "@/lib
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Overlay } from "@/components/overlay";
 import { IdentitySection } from "@/components/settings-identity";
+import { ConfigSection } from "@/components/settings-config";
 import { MenuButton, type MenuItem } from "@/components/ui/menu";
 import { ChevronDownIcon } from "@/components/icons";
 
-type Section = "general" | "identity" | "agents" | "workspaces" | "shortcuts";
+type Section = "general" | "identity" | "agents" | "workspaces" | "config" | "shortcuts";
 
 const SECTIONS: Array<{ id: Section; label: MessageKey }> = [
   { id: "general", label: "settings.section.general" },
@@ -39,6 +40,11 @@ const SECTIONS: Array<{ id: Section; label: MessageKey }> = [
   { id: "identity", label: "settings.section.identity" },
   { id: "agents", label: "settings.section.agents" },
   { id: "workspaces", label: "settings.section.workspaces" },
+  // Near the end, because it is the section a user opens when something is wrong
+  // rather than when they want to change something — and it is the one that
+  // answers "where does this install keep everything", which is the question the
+  // sections above raise.
+  { id: "config", label: "settings.section.config" },
   { id: "shortcuts", label: "settings.section.shortcuts" },
 ];
 
@@ -87,6 +93,7 @@ export function SettingsPanel() {
           {section === "identity" && <IdentitySection />}
           {section === "agents" && <AgentsSection />}
           {section === "workspaces" && <WorkspacesSection />}
+          {section === "config" && <ConfigSection />}
           {section === "shortcuts" && <ShortcutsSection />}
         </div>
       </div>
@@ -97,11 +104,6 @@ export function SettingsPanel() {
 function GeneralSection() {
   const { settings, update, reset } = useSettings();
   const t = useT();
-  const workspaces = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: () => api.workspaces.list(),
-    staleTime: 60_000,
-  });
 
   return (
     <div className="space-y-4">
@@ -158,11 +160,13 @@ function GeneralSection() {
         />
       </Field>
 
-      <Field label={t("settings.dataDir.label")} hint={t("settings.dataDir.hint")}>
-        <p className="rounded border border-line bg-sunken px-2 py-1 font-mono text-2xs text-ink-muted">
-          {workspaces.data?.dataDir ?? t("action.loading")}
-        </p>
-      </Field>
+      {/*
+        The data directory used to be shown here as a lone read-only path. It has
+        moved into the Configuration section, where it sits beside the source that
+        supplied it and whether it exists — which is what a user reading a path
+        actually needs. A second copy here would be the same value with less of
+        the context that makes it useful.
+      */}
 
       {/*
         Cache management is in the design sketch but not here: there is nothing to

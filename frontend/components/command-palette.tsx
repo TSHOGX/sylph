@@ -79,10 +79,14 @@ export function CommandPalette() {
       },
       {
         id: "quick-start",
-        label: "Quick Start session in ~/.agents",
+        // No directory in the label. It is configurable (`paths.quick_start_dir`),
+        // so naming one here would be wrong for anyone who set it — and the label
+        // is the wrong place to learn a path in any case; Settings → Configuration
+        // reports the resolved one.
+        label: "Quick Start session",
         group: "Session",
         action: "quickStart",
-        keywords: "default scratch agents",
+        keywords: "default scratch quick",
         run: () => runAction("quickStart"),
       },
       {

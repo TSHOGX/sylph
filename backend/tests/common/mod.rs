@@ -78,58 +78,71 @@ impl TestBackend {
         let temp = TempDir::new().expect("failed to create temp dir");
         let root = temp.path();
 
+        // The harness root *is* the Sylph home, so every path resolves the way
+        // production resolves it — from one root — rather than being assembled
+        // field by field here. A hand-built `Config` was how the harness came to
+        // describe a layout the resolver no longer produced.
+        let agents_dir = root.join("agents");
+        let workdir = root.join("workspace");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+
         if let Some(text) = soul {
             std::fs::write(root.join("SOUL.md"), text).unwrap();
         }
 
-        let data_dir = root.join("data");
-        let runners_dir = root.join("runners");
-        let workdir = root.join("workspace");
-        std::fs::create_dir_all(&data_dir).unwrap();
-        std::fs::create_dir_all(&runners_dir).unwrap();
-        std::fs::create_dir_all(&workdir).unwrap();
-
         for runner in runners {
-            runner.install(&runners_dir);
+            runner.install(&agents_dir);
         }
 
-        let config = Config {
-            host: "127.0.0.1".to_string(),
-            port: 0,
-            database_path: data_dir.join("live.db").display().to_string(),
-            // Both tiers inside the throwaway tree, so a test never touches the
-            // developer's real history or blob store.
-            history_path: data_dir.join("history.db").display().to_string(),
-            blobs_dir: data_dir.join("cas"),
-            data_dir,
-            // v2 adapters live beside the v1 runners in the harness tree, so a
-            // test that installs one gets it discovered without a second root to
-            // set up.
-            agents_dir: runners_dir.clone(),
-            // Only the harness tree, so a diagnostics assertion cannot pick up a
-            // path that depends on where this checkout happens to live.
-            agents_dir_candidates: vec![runners_dir.clone()],
-            runners_dir,
-            // Absent unless a test opts in: TraceDB-dependent paths must
-            // degrade rather than make every test depend on an external binary.
-            tracedb_bin: match &tracedb {
-                Some(stub) => stub.install(root),
-                None => root.join("nonexistent-trace-db"),
-            },
-            // The harness root, not `$HOME`: browsing tests must resolve inside
-            // the throwaway tree so they assert the real containment rule
-            // without depending on the developer's home directory.
-            browse_roots: vec![root.to_path_buf()],
-            // Resolved the way production does — `<runners_dir>/../SOUL.md`,
-            // which is the harness root — but only when a test wrote one. Left
-            // `None` otherwise, so identity-injection tests opt in and every
-            // other test keeps running with no soul, as it did before.
-            soul_path: {
-                let candidate = root.join("SOUL.md");
-                candidate.is_file().then_some(candidate)
-            },
-            cookie_secret: "test-secret-token".to_string(),
-        };
+        // Resolved from an explicit environment rather than the process's own, so
+        // tests run concurrently: `std::env::set_var` is process-global and unsafe
+        // in a threaded test binary.
+        let env: sylph_web_backend::config::resolve::Env = [
+            ("HOME", root.display().to_string()),
+            ("SYLPH_HOME", root.display().to_string()),
+            // The harness root, not `$HOME`: browsing tests must resolve inside the
+            // throwaway tree so they assert the real containment rule without
+            // depending on the developer's home directory.
+            ("SYLPH_BROWSE_ROOTS", root.display().to_string()),
+            (
+                // Absent unless a test opts in, so TraceDB-dependent paths degrade
+                // rather than making every test need an external binary.
+                "SYLPH_TRACEDB_BIN",
+                match &tracedb {
+                    Some(stub) => stub.install(root).display().to_string(),
+                    None => root.join("nonexistent-trace-db").display().to_string(),
+                },
+            ),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+
+        let resolved = sylph_web_backend::config::Resolved::from_parts(
+            &env,
+            &sylph_web_backend::config::resolve::FileConfig::default(),
+            false,
+        );
+        // Seeded like a first run, so the harness exercises the same directory
+        // creation production does — and so `data_dir` exists before the store
+        // opens. `SOUL.md` written above survives, since seeding never overwrites.
+        sylph_web_backend::config::seed(&resolved).unwrap();
+        // A first run also *creates* a `SOUL.md`, which for the harness would
+        // silently turn identity injection on for every test. Only the tests that
+        // ask for one should have one, so the seeded copy is removed again — after
+        // seeding rather than instead of it, so the seeding path stays exercised.
+        if soul.is_none() {
+            std::fs::remove_file(root.join("SOUL.md")).ok();
+        }
+
+        let mut config = Config::from_resolved(&resolved);
+        config.port = 0;
+        // Only the harness tree, so a diagnostics assertion cannot pick up a path
+        // that depends on where this checkout happens to live.
+        config.bundled_agents_dir = agents_dir.clone();
+        config.bundled_agents_candidates = vec![agents_dir];
+        config.cookie_secret = "test-secret-token".to_string();
 
         let state = AppState::build(config.clone())
             .await
@@ -198,6 +211,16 @@ impl TestBackend {
         &self.workdir
     }
 
+    /// Where Quick Start sessions run, as configuration resolved it.
+    ///
+    /// Exposed so a test asserts against the *configured* directory rather than a
+    /// literal path. A test that hardcoded one could only ever confirm that the
+    /// endpoint agreed with the test, which is how the endpoint kept reporting a
+    /// directory belonging to another project.
+    pub fn quick_start_dir(&self) -> &Path {
+        &self.config.quick_start_dir
+    }
+
     /// The configured browse root — the throwaway tree's top level.
     ///
     /// Distinct from [`Self::workdir`], which is a directory *inside* it. Tests
@@ -263,6 +286,32 @@ impl TestBackend {
                 .unwrap(),
         )
         .await
+    }
+
+    /// An authenticated request with an arbitrary method.
+    ///
+    /// Exists for the read-only assertions: proving a route rejects `PUT` needs a
+    /// method the typed helpers do not offer, and adding a helper per verb would be
+    /// four functions to prove one property.
+    pub async fn request_authed(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Response<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "127.0.0.1")
+            .header(header::COOKIE, &self.cookie);
+        let body = match body {
+            Some(value) => {
+                builder = builder.header(header::CONTENT_TYPE, "application/json");
+                Body::from(value.to_string())
+            }
+            None => Body::empty(),
+        };
+        self.send(builder.body(body).unwrap()).await
     }
 
     pub async fn post_authed(&self, path: &str, body: Value) -> Response<Body> {
