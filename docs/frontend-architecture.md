@@ -2746,7 +2746,7 @@ journal.** Specs share one backend and run serially, so by the time a spec runs
 other sessions exist. `page.route` is how the empty-app and slow-listing branches
 become deterministic, and it is the *client's* branch under test either way.
 
-The mock adapter (`e2e/fixtures/runners/e2e/adapter.sh`, which execs `adapter.py`)
+The mock adapter (`e2e/fixtures/adapters/e2e/adapter.sh`, which execs `adapter.py`)
 branches on its prompt to emit ten scenarios: a plain streamed reply, a tool
 sequence with a real diff and a failing command, a 1000-event bulk transcript, an
 approval, a question, an elicitation, a delegation, a promoted host, an

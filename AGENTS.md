@@ -188,7 +188,7 @@ untested.
 **Testing "it streams" needs a runner slower than one render.** Every E2E spec
 asserted final state against a mock runner that finished in well under a second,
 so a client that dropped every mid-turn event passed the entire suite. The `paced`
-scenario in `frontend/e2e/fixtures/runners/e2e/adapter.py` spaces its stages a
+scenario in `frontend/e2e/fixtures/adapters/e2e/adapter.py` spaces its stages a
 second apart, and `e2e/streaming.spec.ts` asserts an earlier stage is on screen
 while a later one has not been emitted yet. Asserting only the end state cannot
 distinguish streaming from batching.
@@ -262,7 +262,7 @@ this bug and not a product one.
 
 **An E2E fixture that cannot be discovered fails the suite while looking like a
 product bug.** Discovery requires `adapter.sh`; after the v1 runner path was deleted,
-`frontend/e2e/fixtures/runners/e2e/` still held only `runner.sh`, so the backend
+`frontend/e2e/fixtures/adapters/e2e/` still held only `runner.sh`, so the backend
 reported `Agent discovery: 0 usable, 0 broken` and every spec that created a session
 or ran a turn failed against an agent that did not exist. The failures read as broken
 features, not as a missing fixture. When a protocol version changes, the fixture is

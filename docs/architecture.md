@@ -303,14 +303,19 @@ Adapters are searched in two roots, bundled first: the `adapters/` directory
 shipped beside the binary, then `~/.sylph/agents/`. An agent is a directory holding
 an executable `adapter.sh`.
 
-A note on names, because three are in play and only one is current. An **agent** is
-what a user picks; an **adapter** is the `adapter.sh` that speaks for it; a **runner**
-was v1's process-per-turn script and no longer exists. The word survives in paths —
-`backend/src/runners/`, `frontend/e2e/fixtures/runners/` — which are not worth a
-rename, but nothing they contain is a v1 runner. The startup log says `Agent
-discovery: N usable, M broken`, and that string is what to grep for when a session
-cannot be created. Bundled first means a user-added adapter of the same
-name *shadows* rather than duplicates — the escape hatch when a vendor changes
+Two words, both current: an **agent** is what a user picks, and an **adapter** is the
+`adapter.sh` that speaks for it. A **runner** was v1's process-per-turn script, deleted
+in Phase 12; the name no longer appears in a path. It survives only in comments that
+describe the v1 contract as history, where it is the right word.
+
+Discovery still recognizes a directory holding `runner.sh` or `runner.py` and no
+`adapter.sh` — not for compatibility, but to report it as **broken** rather than skip
+it. Such a directory is an agent that cannot be spoken to, not an absent one, and
+silently skipping it is what produced the `0 usable, 0 broken` total failure.
+
+The startup log says `Agent discovery: N usable, M broken`, and that string is what to
+grep for when a session cannot be created. Bundled first means a user-added adapter of
+the same name *shadows* rather than duplicates — the escape hatch when a vendor changes
 faster than the shipped adapter catches up. See `docs/configuration.md`.
 
 Discovery is a **live handshake**, not a static descriptor read. The backend

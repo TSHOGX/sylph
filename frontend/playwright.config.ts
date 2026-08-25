@@ -107,8 +107,8 @@ export default defineConfig({
         // agent CLIs — spawning real processes, and making specs pass or fail on
         // which agents happen to be installed. Naming it keeps the fixture the
         // only agent that exists.
-        SYLPH_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "runners"),
-        SYLPH_BUNDLED_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "runners"),
+        SYLPH_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "adapters"),
+        SYLPH_BUNDLED_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "adapters"),
         // Point at a path that does not exist so archive-dependent screens
         // exercise their unavailable state instead of the developer's archive.
         SYLPH_TRACEDB_BIN: path.join(sylphHome, "absent-trace-db"),
