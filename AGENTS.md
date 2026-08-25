@@ -543,6 +543,71 @@ tool that failed. Keep `abandoned` distinct from `failed` — the server closing
 trajectory an adapter left open means nobody reported an outcome, and colouring that
 red reports an interrupted turn as a broken one.
 
+**Delegation is only knowable retroactively, so nothing may decide it at open
+time.** An adapter learns a tool call delegated when a child arrives carrying its
+id — after the `tool_call` event was published. `claude`'s adapter guessed by tool
+name (`Task`), which was right until the vendor shipped `Agent` and `Workflow`, and
+an MCP server can add another whenever it likes: the whitelist could not be
+completed, only extended after each bug report. Two real `Workflow` cards therefore
+read *running* permanently with no interior, and the four `Agent` calls beside them
+had their children rooted beside the call instead of inside it. A trajectory is now
+defined by *use* — any `streamId` another event names as its `span` is one, and a
+`tool_call` so named is promoted in place (`docs/session-protocol.md` § Promotion).
+The corollary is that a promoted host's lifecycle is its `tool_result`: a
+`tool_call`'s `completed` phase means its *arguments* finished streaming, so reading
+the phase reports every delegation as finished the instant its input parsed.
+
+**`--forward-subagent-text` only forwards for the built-in `Task`.** Measured on
+claude 2.x by printing one real delegated turn: an `Agent` delegation produced *zero*
+`stream_event` envelopes carrying `parent_tool_use_id`, and the delegate's own `Read`
+arrived as a top-level assistant message indistinguishable from the root agent's
+work. So for every delegating tool except `Task`, the interior cannot be attributed
+at all and the `task_*` notifications are the whole record. A trajectory with no
+children is therefore a real terminal state rather than a loading one, and the UI has
+to say so on the card — presented as expandable it invites opening a branch that can
+never fill, and saying it only after the click is the lossy collapse the tree exists
+to avoid.
+
+**A vendor's notification subtypes are not guessable, and a wrong guess is
+silent.** `task_completed` and `task_failed` do not exist. The real set is
+`task_started`, `task_progress`, `task_updated`, `task_notification` — a close
+arrives either as `task_updated` with `patch.status`, or as `task_notification` with
+`status` plus the delegate's `summary`. Branching on the invented names compiled,
+never fired, and left every delegate open forever; the symptom was a spinning card,
+three layers from the missing branch. Worse, `task_updated` carries **no
+`tool_use_id`**, so the host has to be remembered from `task_started` or the close
+lands at the root while the trajectory it closes sits inside a container — which
+leaves the container open, the same spinner one level up. This is the fourth instance
+of the vendor-key pitfall in this file: print one real payload instead of inferring
+field names.
+
+**One host multiplexes N delegates, so a trajectory id must be the delegate's.**
+`claude`'s `Workflow` fans out under a single `tool_use_id`. Keyed by the host, a
+two-agent workflow rendered as *one* card reading `Demo: agent-2` — the last name to
+arrive won and `agent-1` was absent from the timeline entirely. The per-delegate
+identity is `task_id`, with the host as its `span`. Same rule as the content-block
+index pitfall above, one level up: never key a trajectory by something the vendor
+multiplexes. A fixture with one delegate per host cannot observe this — with N=1 the
+collapse is indistinguishable from correct.
+
+**A cache keyed on an object the producer reallocates never hits.** The timeline's
+`NODE_CACHE` was keyed on `TimelineRow`, and `buildRows` reuses a settled row's
+*event* while always allocating a fresh row to hold it — so the cache could not hit
+once, and it sat declared-and-unread with a comment describing a guarantee
+`buildRows` does not make. Keying on the event fixed it, except for trajectory rows,
+whose event is re-folded from its phases every build: those are the rows most worth
+skipping and were the only ones that could never be skipped. Before trusting a memo,
+check which object the producer actually preserves — `lib/timeline-rows.test.ts` pins
+it.
+
+**Two nodes naming each other silently delete both.** A cycle in `span` pointers is
+not merely a recursion hazard. Attachment holds the first as an orphan waiting for
+the second, which then adopts it *and* is adopted by it — so neither is a root,
+neither is reachable, and the pair vanishes from the timeline with nothing reporting
+it missing. No single-pass attachment can detect this, so `buildTree` repairs it by
+reachability afterwards, and the rollup carries a visited guard because unbounded
+recursion in a render path is a frozen tab.
+
 **A layout bug below a breakpoint is invisible to a suite that runs above it.**
 Three mobile failures survived 41 green specs because every one of them ran at
 1280px, where the same code is merely cramped. A viewport is an instrument, not

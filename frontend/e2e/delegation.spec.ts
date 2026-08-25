@@ -178,3 +178,106 @@ test("delegation structure survives a reload", async ({ page }) => {
   await expect(page.getByRole("region", { name: "Worker delegation" })).toHaveCount(1);
   await expect(verify).toContainText("1 nested");
 });
+
+/**
+ * Promotion: delegation by a tool that never declared itself one.
+ *
+ * `docs/session-protocol.md` § Promotion. Every delegating tool outside claude's
+ * built-in `Task` has this shape — `Agent`, `Workflow`, anything an MCP server
+ * adds — and none of it was covered, which is how two real workflow cards shipped
+ * reading *running* permanently with no visible interior.
+ *
+ * The `promote` scenario emits three hosts on purpose: one multiplexing two
+ * delegates with a failure in the second, one reporting no interior at all, and one
+ * left open so only the server closes it. A host with a single delegate cannot
+ * observe the collapse this exists to catch.
+ */
+async function runPromotion(page: import("@playwright/test").Page) {
+  await createSession(page);
+  await page.getByLabel("Message").fill("promote this workflow");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByText("Running a workflow.")).toBeVisible({ timeout: 15000 });
+}
+
+test("every delegate under one host gets its own card", async ({ page }) => {
+  await runPromotion(page);
+
+  // The measured bug: keyed by the host, two delegates collapsed into one row and
+  // the last name won — "Demo: agent-1" was absent from the timeline entirely.
+  await expect(
+    page.getByRole("region", { name: "Demo: agent-1 delegation" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Demo: agent-2 delegation" }),
+  ).toBeVisible();
+});
+
+test("a delegating tool nobody declared still contains its delegates", async ({
+  page,
+}) => {
+  await runPromotion(page);
+
+  // The host is a `tool_call`; its children name it as their span, which is the
+  // whole of what makes it their container. Nesting, not adjacency: the delegate
+  // must be *inside* the host's region, or the delegation reads as flat.
+  const host = page.getByRole("region", { name: /Workflow delegation/ }).first();
+  // `exact` matters: the card also carries a "Focus Workflow" control, and
+  // `getByRole` name matching is a substring match, so a bare "Workflow" is
+  // ambiguous between the disclosure and the focus button.
+  const disclosure = host.getByRole("button", { name: "Workflow", exact: true });
+  // Toggled only if it is closed. This host's second delegate failed, and a card
+  // whose subtree contains a failure opens itself — so an unconditional click
+  // *collapses* it, and the assertion below then fails on a tree that was correct.
+  if ((await disclosure.getAttribute("aria-expanded")) !== "true") {
+    await disclosure.click();
+  }
+  await expect(
+    host.getByRole("region", { name: "Demo: agent-1 delegation" }),
+  ).toBeVisible();
+});
+
+test("a promoted host reports a failure buried in a delegate while collapsed", async ({
+  page,
+}) => {
+  await runPromotion(page);
+
+  // The rule that makes collapsing deferral rather than loss. `agent-2` failed two
+  // levels down; a green host hiding that is worse than not collapsing at all.
+  const host = page.getByRole("region", { name: /Workflow delegation/ }).first();
+  // Collapsed, so this is read off the rollup rather than the failed row itself —
+  // which is the property that makes collapsing deferral rather than loss.
+  await expect(host).toContainText("failed");
+});
+
+test("a host that forwarded no interior says so instead of offering an empty card", async ({
+  page,
+}) => {
+  await runPromotion(page);
+
+  // A closed trajectory with no children is a terminal state, not a loading one.
+  // Presented as expandable it invites opening a branch that can never fill, and
+  // saying so only after the click is the lossy collapse the tree exists to avoid.
+  const agent = page.getByRole("region", { name: "Agent delegation" });
+  await expect(agent).toContainText("no interior");
+  // Nothing to expand, so it must not claim there is.
+  await expect(agent.getByRole("button", { expanded: false })).toHaveCount(0);
+});
+
+test("a promoted host left open is closed by the server, not left spinning", async ({
+  page,
+}) => {
+  await runPromotion(page);
+
+  // The path `phase = 'started'` missed entirely: this host's trajectory was opened
+  // by a delegate naming it, so the turn-settle sweep never saw it and the card
+  // stayed *running* across reloads. Measured on a real session before the fix.
+  // The host, not the delegate: the delegate declared itself and was always swept,
+  // while its *container* was promoted and is the thing the old query missed.
+  const host = page.getByRole("region", { name: /Workflow delegation/ }).last();
+  await expect(host).toBeVisible();
+  // "never finished" is the abandoned wording, kept distinct from "failed": the
+  // server closing what an adapter left open means nobody reported an outcome, and
+  // colouring that as a failure reports an interrupted turn as a broken one.
+  await expect(host).toContainText("never finished", { timeout: 20000 });
+  await expect(host).not.toContainText("running");
+});

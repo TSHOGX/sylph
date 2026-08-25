@@ -314,6 +314,16 @@ function TrajectoryCard({
   const name = trajectoryName(node);
   const tone = STATUS_TONE[node.status ?? "running"];
 
+  // A finished delegation with no interior is not going to acquire one. Some hosts
+  // report that delegated work happened without forwarding any of it — `claude`
+  // forwards interior events for its built-in delegation and only lifecycle
+  // notifications for the rest — so this is a real terminal state, not a pending
+  // one. Presented as expandable it invites the user to keep opening a branch that
+  // can never fill, and telling them only *after* they open it is the same lossy
+  // collapse the tree exists to avoid. Said on the card instead, and the disclosure
+  // stops claiming there is something behind it.
+  const hollow = node.children.length === 0 && node.status !== "running";
+
   return (
     <section
       aria-label={`${name} delegation`}
@@ -324,14 +334,32 @@ function TrajectoryCard({
           <BranchIcon size={13} />
         </span>
 
-        <button
-          type="button"
-          onClick={() => setOpen(!isOpen)}
-          aria-expanded={isOpen}
-          className="min-w-0 shrink truncate rounded px-0.5 font-medium text-ink hover:bg-hover focus-ring"
-        >
-          {name}
-        </button>
+        {hollow ? (
+          // Not a button: `aria-expanded` on a control with nothing to expand is a
+          // promise the tree cannot keep, and a screen reader would announce it as
+          // collapsed content that never appears.
+          <span className="min-w-0 shrink truncate px-0.5 font-medium text-ink">
+            {name}
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setOpen(!isOpen)}
+            aria-expanded={isOpen}
+            className="min-w-0 shrink truncate rounded px-0.5 font-medium text-ink hover:bg-hover focus-ring"
+          >
+            {name}
+          </button>
+        )}
+
+        {hollow && (
+          <span
+            className="shrink-0 rounded bg-hover px-1 text-3xs text-ink-muted"
+            title="This host reported that delegated work ran, but forwarded none of its events."
+          >
+            no interior
+          </span>
+        )}
 
         {node.rollup.depth > 0 && (
           <span
@@ -367,7 +395,7 @@ function TrajectoryCard({
         <RollupSummary node={node} />
       </p>
 
-      {isOpen && (
+      {isOpen && !hollow && (
         <div
           className={`space-y-1.5 pb-1.5 ${
             depth < MAX_INDENT ? "border-l border-line pl-2" : ""
@@ -375,9 +403,7 @@ function TrajectoryCard({
         >
           {node.children.length === 0 ? (
             <p className="py-1 text-2xs text-ink-muted">
-              {node.status === "running"
-                ? "Waiting for the delegate's first output…"
-                : "This delegation reported no events of its own."}
+              Waiting for the delegate&apos;s first output…
             </p>
           ) : (
             node.children.map((child) => (

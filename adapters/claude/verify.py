@@ -53,6 +53,9 @@ state = {
     "events": [],
     "turn_done": threading.Event(),
     "request_seen": threading.Event(),
+    # Set for the delegated turn, where requests come from tools this script does
+    # not choose and blocking on one stalls the whole check.
+    "autoanswer": threading.Event(),
 }
 
 
@@ -76,6 +79,16 @@ def reader():
         elif t == "request":
             state["requests"].append(msg)
             state["request_seen"].set()
+            # Anything raised while `autoanswer` is set is allowed immediately.
+            #
+            # Step 4 answers one approval by hand, which is the point of that check.
+            # A *delegated* turn raises its own, from tools this script never named —
+            # and with nobody answering them the agent waits forever, so the turn
+            # never completes and every assertion after it reads mid-flight state.
+            # That presented as the delegation checks failing, three layers from the
+            # cause: the script was the thing that had stopped, not the adapter.
+            if state["autoanswer"].is_set():
+                send({"t": "resolve", "id": msg.get("id"), "option": "allow"})
         elif t == "event":
             state["events"].append(msg)
             if msg.get("kind") == "turn" and msg.get("phase") == "completed":
@@ -209,6 +222,10 @@ print("8. a delegation is reported as a trajectory, not as an opaque tool call")
 # Costs a real delegated turn, which is why it is last.
 state["events"].clear()
 state["turn_done"].clear()
+# The delegate runs tools this script did not name, and each one may raise an
+# approval. Unanswered, the turn never completes and every assertion below measures
+# a turn still in flight — which is what made these checks read as adapter faults.
+state["autoanswer"].set()
 send({"t": "send", "id": "c9", "text":
       "Use the Task tool to launch one subagent that reads README.md and reports "
       "its first heading. Do not read the file yourself."})
@@ -230,13 +247,45 @@ check("names the delegation something other than the tool",
       all(e.get("name") != "Task" for e in spans),
       ", ".join(sorted({str(e.get("name")) for e in spans})))
 
+# A trajectory need not be *declared* to exist: any id another event names as its
+# span is one, and a `tool_call` so named is promoted to its container
+# (`docs/session-protocol.md` § Promotion). So the set a child may legitimately
+# point at is every declared trajectory plus every block this adapter published —
+# which is what makes a delegating tool nobody whitelisted still nest correctly.
+published = {e.get("streamId") for e in events if e.get("streamId")}
+trajectories = opened_spans | published
+
 # The whole point: the child's work has to arrive tagged, or it is published as the
 # parent's own and no client can tell them apart.
-inside = [e for e in events if e.get("span") in opened_spans]
+inside = [e for e in events if e.get("span") in trajectories]
 check("tags the delegate's own events with its trajectory", bool(inside),
       "{} events inside a trajectory".format(len(inside)))
-check("no event names a trajectory that was never opened",
-      all(e.get("span") in opened_spans for e in events if e.get("span")))
+# A span naming nothing at all is still a defect: the client roots such an event
+# rather than dropping it, so the delegation silently flattens.
+dangling = sorted({e.get("span") for e in events
+                   if e.get("span") and e.get("span") not in trajectories})
+check("every span names a trajectory that exists", not dangling,
+      "dangling: {}".format(dangling))
+
+# A trajectory with no children is not itself a defect: measured on claude 2.x,
+# `--forward-subagent-text` tags nothing for `Agent`, so its delegate's work arrives
+# untagged and the interior genuinely cannot be attributed. What *would* be a defect
+# is such a trajectory carrying nothing at all — no children and no closing text
+# leaves a card that can only ever say "running", which is the bug this whole change
+# removes. So the requirement is that every hollow trajectory is at least *reported*:
+# it closes, and its close says what the delegate answered.
+hollow = sorted({
+    t for t in opened_spans
+    if not any(e.get("span") == t for e in events)
+})
+unreported = sorted({
+    t for t in hollow
+    if not any(e.get("streamId") == t and e.get("phase") == "completed"
+               and (e.get("text") or "") for e in events)
+})
+check("a delegation with no forwarded interior still reports its outcome",
+      not unreported,
+      "hollow: {} / of those unreported: {}".format(hollow, unreported))
 
 send({"t": "close", "id": "z1"})
 try:

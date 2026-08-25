@@ -47,6 +47,17 @@ export interface TimelineRow {
    * cannot report how long it took.
    */
   closedAtMs?: number;
+  /**
+   * A `subagent` close that arrived for a row which is not itself a `subagent`.
+   *
+   * A promoted `tool_call` (`docs/session-protocol.md` § Promotion) is normally
+   * closed by its own `tool_result`. When the work is abandoned there is no result,
+   * and the server's closing event is all there is — but folding that into `event`
+   * would rewrite a tool call into a subagent, losing the tool's name, arguments,
+   * and card. Kept beside it so the row stays a tool call that is known to have
+   * been abandoned.
+   */
+  trajectoryClose?: StreamEvent;
   key: string;
 }
 
@@ -130,6 +141,14 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
   const openBlocks = new Map<string, number>();
   /** streamId -> index in `rows` of the tool call awaiting its result. */
   const callIndex = new Map<string, number>();
+  /**
+   * streamId -> index in `rows`, for every id ever seen. Unlike `openBlocks`,
+   * nothing is ever removed: a promoted trajectory's server-issued close arrives
+   * long after its `tool_call` completed and was dropped from `openBlocks`, and
+   * without a durable index that close cannot find the row it belongs to. It then
+   * became a second root row, which is how an abandoned delegation showed up twice.
+   */
+  const rowIndex = new Map<string, number>();
 
   for (const event of events) {
     const id = event.streamId;
@@ -159,6 +178,33 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
     // for a text block — would drop the name the brief supplied and leave every
     // card reading "Subagent".
     if (event.kind === "subagent" && id) {
+      // A `subagent` event addressing a row that is not one: the host of a promoted
+      // trajectory. Its own lifecycle is its `tool_result`, so this is recorded
+      // beside the row rather than folded into it — merging would rewrite the tool
+      // call into a subagent and discard its name, arguments, and card.
+      const host = rowIndex.get(id);
+      if (host !== undefined && rows[host].event.kind !== "subagent") {
+        if (event.phase === "completed") {
+          rows[host] = {
+            ...rows[host],
+            trajectoryClose: event,
+            closedAtMs: rows[host].closedAtMs ?? event.createdAtMs,
+          };
+        } else {
+          // Progress on a promoted host. `data` replaces because a progress
+          // summary is a snapshot (§ Promotion), and text is left alone: the
+          // host's own text is its tool arguments, which this does not describe.
+          rows[host] = {
+            ...rows[host],
+            event: {
+              ...rows[host].event,
+              data: event.data ?? rows[host].event.data,
+            },
+          };
+        }
+        continue;
+      }
+
       const at = openBlocks.get(id);
       if (at !== undefined) {
         const existing = rows[at].event;
@@ -166,7 +212,7 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
           ...rows[at],
           closedAtMs:
             event.phase === "completed" ? event.createdAtMs : rows[at].closedAtMs,
-          event: {
+          event: mergedEvent(event, {
             ...existing,
             phase: event.phase,
             // A later name is better informed: the agent's type is only known
@@ -176,11 +222,12 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
             data: event.data ?? existing.data,
             isError: event.isError || existing.isError,
             span: existing.span ?? event.span,
-          },
+          }),
         };
         continue;
       }
       openBlocks.set(id, rows.length);
+      rowIndex.set(id, rows.length);
       rows.push({ event: { ...event }, key: rowKey(event, rows.length) });
       continue;
     }
@@ -195,6 +242,7 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
         };
       } else {
         openBlocks.set(id, rows.length);
+        rowIndex.set(id, rows.length);
         if (event.kind === "tool_call") callIndex.set(id, rows.length);
         rows.push({ event: { ...event }, key: rowKey(event, rows.length) });
       }
@@ -219,6 +267,7 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
 
     if (id) {
       openBlocks.set(id, rows.length);
+      rowIndex.set(id, rows.length);
       if (event.kind === "tool_call") callIndex.set(id, rows.length);
     }
     rows.push({ event, key: rowKey(event, rows.length) });
@@ -232,6 +281,46 @@ function rowKey(event: StreamEvent, index: number): string {
 }
 
 /**
+ * Merged events from previous builds, keyed by the arriving event that produced them.
+ *
+ * A trajectory's row folds its phases into a *new* event object, so unlike every
+ * other row its event identity changed on each build — and identity is what both the
+ * node cache and the renderer's comparator compare. The consequence was the opposite
+ * of the intent: settled delegations, the rows most worth skipping, were the only
+ * ones that could never be skipped, so a session with many of them re-rendered all of
+ * them per token.
+ *
+ * Keyed on the arriving event because it is unique to one phase of one block, and the
+ * fold is a pure function of that event and the prefix before it — which, while a
+ * turn streams, does not change. `WeakMap`, so an entry lives exactly as long as the
+ * event and nothing has to be invalidated.
+ */
+const MERGE_CACHE = new WeakMap<StreamEvent, StreamEvent>();
+
+/** The previous build's object for this fold, when it produced an equal one. */
+function mergedEvent(arriving: StreamEvent, merged: StreamEvent): StreamEvent {
+  const cached = MERGE_CACHE.get(arriving);
+  if (cached && sameEvent(cached, merged)) return cached;
+  MERGE_CACHE.set(arriving, merged);
+  return merged;
+}
+
+/** Field-wise comparison of the fields the fold above can change. */
+function sameEvent(a: StreamEvent, b: StreamEvent): boolean {
+  return (
+    a.phase === b.phase &&
+    a.name === b.name &&
+    a.text === b.text &&
+    a.data === b.data &&
+    a.isError === b.isError &&
+    a.span === b.span &&
+    a.seq === b.seq &&
+    a.kind === b.kind &&
+    a.streamId === b.streamId
+  );
+}
+
+/**
  * Assemble rows into the tree their `span` fields describe.
  *
  * Single pass, then a bottom-up rollup. An event naming a trajectory that was
@@ -241,17 +330,23 @@ function rowKey(event: StreamEvent, index: number): string {
  * there would hide exactly the failure the user is looking for.
  */
 /**
- * Nodes from the previous build, keyed by the row object they wrapped.
+ * Nodes from the previous build, keyed by the **event** their row wrapped.
  *
- * `buildRows` deliberately returns the *same* row object for a row whose content
- * did not change, which is what lets the memoized renderer skip settled history
- * during a stream. Allocating a fresh node per row would throw that away one layer
- * up: every node identity would change on every token, and the memo comparison
- * would never succeed — so a fan-out would re-render its whole subtree at token
- * rate. A `WeakMap` keyed on the row means a node survives exactly as long as the
- * row it describes, with no cache to invalidate.
+ * The memoized renderer compares nodes by identity, so a fresh node per build makes
+ * every comparison fail and a fan-out re-renders its whole subtree at token rate.
+ * Reuse therefore has to survive across builds.
+ *
+ * Keyed on the event and not the row, which is the distinction that makes this work
+ * at all: `buildRows` reuses the *event* object of an unchanged row, but always
+ * allocates a new row to hold it. A cache keyed on the row can never hit — which is
+ * why the one this replaces sat declared and unread, describing a guarantee
+ * `buildRows` does not make. `lib/timeline-rows.test.ts` pins the guarantee it does
+ * make, and `MemoizedNode`'s comparator already depends on it.
+ *
+ * A `WeakMap` means an entry lives exactly as long as the event it describes, so
+ * there is no cache to invalidate and no growth across a long session.
  */
-const NODE_CACHE = new WeakMap<TimelineRow, TimelineNode>();
+const NODE_CACHE = new WeakMap<StreamEvent, TimelineNode>();
 
 /** Element-wise identity, to decide whether a cached node can be reused. */
 function sameChildren(a: TimelineNode[], b: TimelineNode[]): boolean {
@@ -265,12 +360,31 @@ export function buildTree(rows: TimelineRow[]): TimelineNode[] {
   const byTrajectory = new Map<string, TimelineNode>();
   /** Children of a trajectory not yet seen, kept until it arrives. */
   const orphans = new Map<string, TimelineNode[]>();
-  /** Nodes built this pass, so reuse is decided after children are known. */
+  /** Every node this pass built, so the reachability repair below can find them. */
   const built: TimelineNode[] = [];
 
+  // Promotion (`docs/session-protocol.md` § Promotion): a row whose id another row
+  // names as its `span` is a trajectory, whatever kind of event opened it. Resolved
+  // in its own pass because it is a property of the *whole* list — a `tool_call`
+  // becomes a container only once a child referencing it has arrived, which is
+  // always after the call itself. One extra linear scan over rows already in memory,
+  // which is what buys the guarantee that no delegation renders flat.
+  const referenced = new Set<string>();
   for (const row of rows) {
+    if (row.event.span) referenced.add(row.event.span);
+    // A `subagent` event addressing a row that is not one is the other way a host is
+    // named: not "my work happened in you" but "you are a delegation, and here is
+    // its outcome". That is the only signal a host reporting *no* interior ever
+    // gets — nothing carries its id as a span, because nothing was forwarded — so
+    // without this it stayed a plain tool call and the delegation was invisible.
+    // Measured against `claude`'s `Agent`, which forwards no interior at all.
+    if (row.trajectoryClose?.streamId) referenced.add(row.trajectoryClose.streamId);
+  }
+
+  for (const row of rows) {
+    const id = row.event.streamId;
     const trajectory =
-      row.event.kind === "subagent" ? row.event.streamId : undefined;
+      id && (row.event.kind === "subagent" || referenced.has(id)) ? id : undefined;
 
     const node: TimelineNode = {
       row,
@@ -292,7 +406,11 @@ export function buildTree(rows: TimelineRow[]): TimelineNode[] {
     }
 
     const parentId = row.event.span;
-    if (!parentId) {
+    // A row naming itself is rooted, not parented. `claude` reports a nested
+    // delegation's interior events with the child's own id in both fields, and a
+    // node held as its own child is unreachable from the root — the subtree
+    // vanishes, and `computeRollup` would recurse on it forever.
+    if (!parentId || parentId === trajectory) {
       roots.push(node);
       continue;
     }
@@ -311,8 +429,87 @@ export function buildTree(rows: TimelineRow[]): TimelineNode[] {
   // A parent that never arrived. Surfaced at the root so nothing is swallowed.
   for (const stranded of orphans.values()) roots.push(...stranded);
 
-  for (const node of roots) computeRollup(node);
-  return roots;
+  // Anything a cycle made unreachable. Two rows naming each other attach to one
+  // another and to nothing else, so neither is a root and neither is reachable —
+  // the whole pair disappears from the timeline. That is strictly worse than the
+  // recursion the rollup guards against, because it is silent: work that arrived
+  // is not rendered and nothing reports it missing. No single-pass attachment can
+  // prevent it (the first waits as an orphan for the second, which then adopts it
+  // and is adopted by it), so it is repaired here instead, where reachability is
+  // decidable. Rooting the survivor keeps the events visible, which is the same
+  // trade the protocol already makes for an unknown `span`.
+  const reachable = new Set<TimelineNode>();
+  const stack = [...roots];
+  while (stack.length) {
+    const node = stack.pop()!;
+    if (reachable.has(node)) continue;
+    reachable.add(node);
+    stack.push(...node.children);
+  }
+  for (const node of built) {
+    if (!reachable.has(node)) {
+      roots.push(node);
+      // Marked before descending, so a sibling inside the same cycle is not rooted
+      // a second time as this one's descendant.
+      const inner = [node];
+      while (inner.length) {
+        const seen = inner.pop()!;
+        if (reachable.has(seen)) continue;
+        reachable.add(seen);
+        inner.push(...seen.children);
+      }
+    }
+  }
+
+  for (const node of roots) computeRollup(node, new Set());
+
+  // Bottom-up, because a node is only interchangeable with its cached twin once
+  // its children are — and a parent canonicalized before its children would keep
+  // pointing at the nodes they replaced.
+  return roots.map((root) => canonicalize(root));
+}
+
+/**
+ * Reuse the node from the previous build when nothing about this one differs.
+ *
+ * This is what lets the memoized renderer skip settled history while a turn
+ * streams. `buildRows` already returns the same row object for an unchanged row,
+ * but the node wrapping it was allocated fresh on every build — so every memo
+ * comparison one layer up failed anyway, and a fan-out re-rendered its whole
+ * subtree at token rate. Children are compared by identity, which after this pass
+ * means an unchanged subtree compares in one pointer check per child.
+ */
+function canonicalize(
+  node: TimelineNode,
+  seen: Set<TimelineNode> = new Set(),
+): TimelineNode {
+  // Same cycle hazard as `computeRollup`, and the same guard. A revisited node is
+  // returned as-is rather than re-canonicalized.
+  if (seen.has(node)) return node;
+  seen.add(node);
+
+  for (let i = 0; i < node.children.length; i += 1) {
+    node.children[i] = canonicalize(node.children[i], seen);
+  }
+
+  const cached = NODE_CACHE.get(node.row.event);
+  if (
+    cached &&
+    cached.trajectory === node.trajectory &&
+    cached.status === node.status &&
+    // The rest of the row. An event can be shared while what surrounds it changed:
+    // a tool call gains a result, a trajectory gains a close. Compared by identity
+    // for the same reason as the event itself — `buildRows` reuses these objects too.
+    cached.row.result === node.row.result &&
+    cached.row.trajectoryClose === node.row.trajectoryClose &&
+    cached.row.closedAtMs === node.row.closedAtMs &&
+    sameChildren(cached.children, node.children)
+  ) {
+    return cached;
+  }
+
+  NODE_CACHE.set(node.row.event, node);
+  return node;
 }
 
 /**
@@ -321,8 +518,19 @@ export function buildTree(rows: TimelineRow[]): TimelineNode[] {
  * Recursive rather than iterative because the depth is the *user's* nesting — a
  * handful of levels in practice, bounded by how many times an agent delegates
  * within one turn. A stack would buy nothing and obscure the shape.
+ *
+ * `seen` is not a formality. `span` is now honoured from any event rather than only
+ * a declared `subagent` (§ Promotion), so more ids reach this code, and two rows
+ * naming each other build a cycle no single-pass attachment can detect: the first
+ * waits in `orphans` for the second, which then adopts it *and* is adopted by it.
+ * Unbounded recursion in a render path is a frozen tab, so the tree is walked with
+ * a guard rather than the input being trusted to be acyclic. A revisited node
+ * contributes nothing, which keeps every aggregate a count of distinct work.
  */
-function computeRollup(node: TimelineNode): Rollup {
+function computeRollup(node: TimelineNode, seen: Set<TimelineNode>): Rollup {
+  if (seen.has(node)) return EMPTY_ROLLUP;
+  seen.add(node);
+
   let events = 0;
   let trajectories = 0;
   let tools = 0;
@@ -333,7 +541,7 @@ function computeRollup(node: TimelineNode): Rollup {
   let sawTokens = false;
 
   for (const child of node.children) {
-    const sub = computeRollup(child);
+    const sub = computeRollup(child, seen);
     events += sub.events + 1;
     trajectories += sub.trajectories + (child.trajectory ? 1 : 0);
     tools += sub.tools + (isCompletedTool(child.row) ? 1 : 0);
@@ -383,6 +591,24 @@ function computeRollup(node: TimelineNode): Rollup {
  */
 function trajectoryStatus(node: TimelineNode, failures: number): TrajectoryStatus {
   const event = node.row.event;
+
+  // A promoted trajectory (§ Promotion) is a tool call, and a tool call's
+  // `completed` phase means its *arguments* finished streaming — the delegated work
+  // has not started. Reading the phase here would report every delegation as
+  // finished the instant its input parsed. Its close is the `tool_result` sharing
+  // its id, or, when the work was abandoned, the server's own closing event.
+  if (event.kind !== "subagent") {
+    const close = node.row.trajectoryClose;
+    if (close) {
+      const closedBy = (close.data as { closedBy?: string } | undefined)?.closedBy;
+      if (closedBy === "server") return "abandoned";
+      return close.isError || failures > 0 ? "failed" : "done";
+    }
+    const result = node.row.result;
+    if (!result || result.phase !== "completed") return "running";
+    return result.isError || failures > 0 ? "failed" : "done";
+  }
+
   if (event.phase !== "completed") return "running";
   const closedBy = (event.data as { closedBy?: string } | undefined)?.closedBy;
   if (closedBy === "server") return "abandoned";
