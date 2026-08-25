@@ -237,14 +237,26 @@ export function useSelectList<T extends SelectChoice>(
  * to land after the whole commit, including every ancestor's effects, without ever
  * showing an unfocused frame.
  */
-export function SelectFilter({
+export function SelectFilter<T extends SelectChoice>({
   list,
   name,
+  placeholder,
   ready = true,
 }: {
-  list: SelectList<SelectChoice>;
+  // Generic, like `SelectRows` and `SelectScroll`. Pinned to the base type it
+  // silently relied on array covariance to accept a richer list, which is the kind
+  // of asymmetry that reads as "this one cannot be used here".
+  list: SelectList<T>;
   /** What is being filtered, for the field's own accessible name. */
   name: string;
+  /**
+   * Overrides the generic "Type to filter".
+   *
+   * Worth a prop because the useful hint is list-specific: a workspace list is
+   * filtered by *any part of the path*, which is not what a user assumes from a
+   * list whose visible column is a leaf name.
+   */
+  placeholder?: string;
   ready?: boolean;
 }) {
   const t = useT();
@@ -285,7 +297,7 @@ export function SelectFilter({
         value={list.query}
         onChange={(event) => list.setQuery(event.target.value)}
         onKeyDown={list.onKeyDown}
-        placeholder={t("select.filter.placeholder")}
+        placeholder={placeholder ?? t("select.filter.placeholder")}
         // `text-base` under a coarse pointer: mobile Safari zooms the page when a
         // focused field's text is under 16px and does not zoom back out.
         className="min-w-0 flex-1 bg-transparent text-base outline-none placeholder:text-ink-muted md:text-xs"
@@ -300,6 +312,18 @@ export function SelectFilter({
  * One renderer for both patterns, because the difference between them is three
  * attributes and everything a row *does* — hover moves the cursor, click commits,
  * the check column reserves space only when something is checkable — is identical.
+ *
+ * # Why a row shape rather than a render callback
+ *
+ * Every richer picker in the app — workspaces, archived sessions, the palette —
+ * originally forked the whole engine because this renderer could only draw
+ * `icon / label / hint`, and a workspace needs its path on a second line. The seam
+ * that fixed that is `detail` and `meta` on the row *model*, not a `renderRow`
+ * escape hatch, and the difference matters: `detail` is part of the searchable
+ * contract in `lib/select-list.ts`, so a two-line row cannot render text the
+ * filter is unable to reach. A callback would have let exactly that back in, and
+ * would also have handed each call site the ARIA attributes and the cursor wiring
+ * to get subtly wrong — which is how the four hand-rolled comboboxes drifted.
  */
 export function SelectRows<T extends SelectChoice>({
   list,
@@ -313,6 +337,9 @@ export function SelectRows<T extends SelectChoice>({
   // Reserve the check column only when something here is checkable, so an action
   // menu is not indented for a state it never shows.
   const checkable = list.rows.some((row) => row.item.checked !== undefined);
+  // Derived per list, not per row, so a filtered result whose matches happen to
+  // carry no detail line does not shrink its rows mid-list as the user types.
+  const twoLine = list.rows.some((row) => row.item.detail !== undefined);
   const padding = density === "comfortable" ? "px-4 py-2" : "px-3 py-1.5";
 
   if (list.rows.length === 0) {
@@ -362,18 +389,55 @@ export function SelectRows<T extends SelectChoice>({
               }`}
             >
               {checkable && (
-                <span aria-hidden className="w-4 shrink-0 text-ink-muted">
+                <span
+                  aria-hidden
+                  className={`w-4 shrink-0 text-ink-muted ${twoLine ? "mt-0.5 self-start" : ""}`}
+                >
                   {item.checked && <CheckIcon size={14} />}
                 </span>
               )}
               {item.icon && (
-                <span aria-hidden className="shrink-0 text-ink-muted">
+                <span
+                  aria-hidden
+                  // Top-aligned on a two-line row so the glyph sits beside the
+                  // label rather than floating between the two lines.
+                  className={`shrink-0 text-ink-muted ${twoLine ? "mt-0.5 self-start" : ""}`}
+                >
                   {item.icon}
                 </span>
               )}
-              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+              {/* One line collapses to the label itself, so a menu row keeps the
+                  exact box it had before `detail` existed — no wrapper, no extra
+                  baseline to disagree about. */}
+              {item.detail === undefined && item.meta === undefined ? (
+                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+              ) : (
+                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span className="flex min-w-0 items-baseline gap-2">
+                    <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                    {item.meta !== undefined && (
+                      <span className="shrink-0 text-3xs text-ink-muted">{item.meta}</span>
+                    )}
+                  </span>
+                  {item.detail !== undefined && (
+                    // `title` so the full path is recoverable on hover: the line is
+                    // truncated, and a path is the one string where the elided end
+                    // is often the part that disambiguates.
+                    <span
+                      title={item.detail}
+                      className="truncate font-mono text-3xs text-ink-muted"
+                    >
+                      {item.detail}
+                    </span>
+                  )}
+                </span>
+              )}
               {item.hint && (
-                <span className="max-w-[45%] shrink-0 truncate font-mono text-3xs text-ink-muted">
+                <span
+                  className={`max-w-[45%] shrink-0 truncate font-mono text-3xs text-ink-muted ${
+                    twoLine ? "mt-0.5 self-start" : ""
+                  }`}
+                >
                   {item.hint}
                 </span>
               )}

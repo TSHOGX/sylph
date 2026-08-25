@@ -225,8 +225,9 @@ frontend/
 │   ├── search-overlay.tsx      # Cmd+K
 │   ├── command-palette.tsx     # Cmd+P
 │   ├── settings-panel.tsx      # Cmd+,
-│   ├── history-overlay.tsx     # Cmd+Shift+K, plus the workspace switcher
-│   ├── directory-picker.tsx    # Server-enumerated folder chooser
+│   ├── history-overlay.tsx     # Cmd+Shift+K
+│   ├── workspace-picker.tsx    # Known workspaces, ranked and filterable
+│   ├── directory-picker.tsx    # Server-enumerated folder chooser, filterable
 │   ├── composer.tsx            # Message entry, + menu, config controls, attachments
 │   ├── attachment-picker.tsx
 │   ├── slash-menu.tsx          # The agent's own commands, as the user types
@@ -768,8 +769,10 @@ removal has a different reason:
 
 - **`workdir`** — the one field a session cannot start without, and the one a text
   input served worst. An absolute path typed from memory fails as a backend
-  rejection; `DirectoryPicker` enumerates server-side, so the path is chosen and
-  cannot be mistyped.
+  rejection; the picker enumerates server-side, so the path is chosen and cannot
+  be mistyped. It opens on `WorkspacePicker` rather than on the filesystem,
+  because a new session almost always belongs in a directory this machine has
+  already worked in — see **Choosing a place** below.
 - **`agent`** — switchable in the composer until the first turn (`AgentSwitcher`),
   which is strictly more forgiving than deciding before the conversation exists.
 - **`model` / `effort`** — composer controls on every turn. Choosing once at
@@ -804,6 +807,61 @@ passed as `--flag model=...` and fail at turn time — far from the setting that
 caused it. Both degrade to a silent, correct fallback instead, and only "no
 runners at all" surfaces as an error, because that is the one case with no
 sensible default.
+
+### Choosing a place
+
+Three flows ask "which directory": `Mod+N`, the sidebar's **New Workspace…**, and
+the history browser's scope control. All three open `WorkspacePicker`, and the
+reason they share one surface is that they were not sharing one before. The
+filterable workspace list existed only inside `history-overlay.tsx`, while the
+other two opened `DirectoryPicker` directly — so the two most common ways of
+naming a directory started at `$HOME` and navigated down by mouse, even though the
+backend already answers "which directories do you work in, most recent first" and
+the component rendering that answer was fifty lines away.
+
+`WorkspacePicker` ranks known workspaces by recency, filters on the full path
+rather than the leaf name (the segment someone remembers is often in the middle:
+`huawei`, `sylph`), and shows each one's archived and live counts so an empty
+directory is visible before it is opened. It requests `includeArchived`, sharing
+the query key with the history browser: a directory with a live session is already
+one click away in the sidebar, so the ones worth listing here are mostly the ones
+that exist only in TraceDB.
+
+**Browse folders… is a footer button, not a row.** A row would be ranked against
+the workspaces and dropped by the very query that failed to match any of them —
+which is exactly the moment the filesystem is what the user needs. For the same
+reason an empty list does not auto-fall-through to browsing: `Mod+N` opening a
+different surface depending on how much history the machine has is worse than one
+extra click, and the empty state names the next step.
+
+`DirectoryPicker` is the fallback, and it is filterable too. It was a plain `<ul>`
+of buttons — no filter, no arrow keys, no Enter — on the surface that backs every
+"where should this go" question in the app, while `~/Workspace` holds dozens of
+children and the listing caps at 2000. Both now use `ui/select-list`, so the
+cursor, the ARIA pattern, and scroll-into-view are the same code rather than a
+fourth hand-rolled copy.
+
+Two things are specific to the folder browser:
+
+- **Enter opens, `Mod+Enter` chooses.** A click has always navigated rather than
+  chosen, because one gesture meaning both is the ambiguity that makes
+  double-click pickers feel unpredictable. The keyboard inherits that, so the
+  modifier supplies the gesture that was missing to make the keyboard path
+  complete rather than merely present. It falls back to the listed directory when
+  the cursor is on nothing, which is what the confirm button would do.
+- **A path-shaped query navigates instead of filtering.** Typing or pasting
+  `~/Workspace/x` is the fastest route to a directory the list has never shown,
+  and `~` is expanded client-side from the `home` the roots listing carries.
+  `pathFromQuery` decides which a query is, and is unit-tested: reading a plain
+  filter as a path would request a directory the user never named.
+
+Going up lives in the breadcrumb bar rather than as a row. As a row it was both
+filterable — `par` matched "Parent folder" — and the row the cursor opened on, so
+the first Enter in a fresh directory navigated *away* from it.
+
+Each surface **replaces** the one before it rather than stacking, so exactly one
+focus trap is ever mounted; see the mode-swap reasoning under
+**Browsing history**.
 
 ### `/` — the start screen, not a session list
 
@@ -1887,14 +1945,11 @@ Filtering is deliberately local. TraceDB's full-text search is already `Mod+K`,
 and re-querying it per keystroke would spawn a subprocess per character to answer
 a narrower question; the footer says the filter covers loaded sessions only.
 
-Changing the scope goes through a **workspace switcher**, not a `<select>`. On a
-real archive that select is 200+ options sharing a `~/Workspace/` prefix, ordered
-by recency and reachable only by first letter — and it could not name a directory
-the archive has never seen at all. The switcher ranks known workspaces by recency,
-filters on the full path rather than the leaf name (the segment someone remembers
-is often in the middle: `huawei`, `sylph`), shows each one's archived and live
-counts so an empty directory is visible before it is opened, and falls back to
-`DirectoryPicker` for anything unlisted.
+Changing the scope goes through `WorkspacePicker`, not a `<select>`. On a real
+archive that select is 200+ options sharing a `~/Workspace/` prefix, ordered by
+recency and reachable only by first letter — and it could not name a directory the
+archive has never seen at all. See **Choosing a place** for what the picker does
+and why all three callers share it.
 
 It is a **mode swap inside the same modal**, not a second modal. Nesting `Overlay`
 in `Overlay` puts two focus traps on one DOM path: the outer trap's
@@ -2307,7 +2362,7 @@ that a passing test would not mean much. Those live in Playwright.
 
 ### E2E — Playwright (`npm run e2e`)
 
-**58 specs across two projects** — 51 at desktop width, 7 on a phone. Both
+**99 specs across two projects** — 91 at desktop width, 8 on a phone. Both
 servers start automatically on offset ports with a throwaway data directory and a
 mock runner, so a run never touches the real journal, archive, or agents.
 
@@ -2319,6 +2374,11 @@ mock runner, so a run never touches the real journal, archive, or agents.
 | `workspace-shell.spec.ts` | Pane toggles and persistence, palette, search, focus restoration, settings round-trip, Artifacts tree, history browser, dialog-free creation |
 | `file-viewer.spec.ts` | Tree/viewer swap preserving expansion, fullscreen and focus return, dialog sizing to content vs filling for a page, single-modal invariant, CSV table, sandboxed HTML refusing script and cookie access, image zoom, axe over both scales |
 | `streaming.spec.ts` | Mid-turn painting against a deliberately paced runner |
+| `workspace-picking.spec.ts` | The three "which directory" flows: filter focused on open, folder browsing filterable inside one focus trap, a typed path reaching an unlisted folder, Enter-opens vs `Mod+Enter`-chooses |
+| `select-list.spec.ts` | The shared choice list itself: filter appearing only past the threshold, cursor opening on the current value, one checkmark per group, a refused write surfacing |
+| `commands.spec.ts` | The slash menu after a completed turn, and a control command opening a picker rather than sending a message |
+| `file-operations.spec.ts` | Folder creation and its in-place errors, deletes that ask first, uploads including drop and overwrite, context menus, the raw route, and axe over both dialogs |
+| `settings-identity-i18n.spec.ts` | Identity reporting when no `SOUL.md` resolves, language switching repainting and retagging, and a shortcut recorder refusing combos the browser keeps |
 | `accessibility.spec.ts` | Skip link, focus trapping and restoration, axe-core audit of every surface including both start-screen states |
 | `mobile.spec.ts` | Phone-only: composer fits the viewport, sidebars out of flow, drawer and sheet behaviour, document cannot scroll, PWA installability, dark mode before paint |
 

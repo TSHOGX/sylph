@@ -1243,6 +1243,51 @@ mistaken for "agents do X", and it earned its place immediately:
   it duplicated. Invisible under v1, where the outcome arrived as a process envelope
   that never reached the timeline.
 
+### One choice-list engine, and the surfaces that were not using it
+
+The model catalogue got scroll, filter, and a keyboard path. The surfaces that
+answer *where* a session runs did not, and the reason was structural rather than an
+oversight: `SelectRows` could only draw `icon / label / hint`, so anything needing a
+second line had to fork the engine. Three things followed from that fork.
+
+- **`Mod+N` and the sidebar's New Workspace… opened a raw filesystem browse.** No
+  filter, no arrow keys, no Enter — on the surface backing every "which directory"
+  question in the app, while `~/Workspace` holds dozens of children and the listing
+  caps at 2000. Meanwhile the filterable workspace list already existed, private to
+  `history-overlay.tsx` and reachable only from the history browser. The defect was
+  not a missing feature; it was that the surface *with* the feature was not the
+  surface the user reached.
+- **`useListNavigation` is a second engine.** Four call sites re-derive
+  `fuzzyRank` + `scrollActiveIntoView` + row ids + `autoFocus` around it, each with
+  its own cursor clamping — the same shape the model picker was fixed for. Two are
+  now converted; the palette and the search overlay are not, and are listed below.
+- **`shortenHome` was the buggy copy of a function the picker had got right.**
+  `shortenHome("/Users/hsw-backup/x", "/Users/hsw")` returned `~-backup/x`, naming a
+  directory that does not exist. Five call sites used the buggy one and the tested
+  one was private to `directory-picker.tsx`, so consolidation moved the *behaviour*,
+  not the name.
+
+The seam that fixed it is `detail` and `meta` on the row model rather than a
+`renderRow` callback, and the distinction is the point: `detail` is part of the
+searchable contract in `lib/select-list.ts`, so a two-line row cannot render text
+the filter is unable to reach. A callback would have re-admitted exactly that, and
+would also have handed each call site the ARIA attributes and cursor wiring to get
+subtly wrong — which is how the four hand-rolled comboboxes drifted in the first
+place.
+
+Two bugs worth recording from the conversion:
+
+- **`onClose` on a shared list means "the list owns the surface", and here it does
+  not.** Passing it made `commit` tear the overlay down after the action — which is
+  right for a menu and wrong for both new surfaces: in the folder browser a commit
+  *navigates*, so the picker closed on the first folder opened, and in the history
+  browser the caller wants to swap back to its session list. Escape belongs to
+  `Overlay` on both.
+- **A row that navigates must not sit among rows that choose.** "Parent folder" as a
+  list row was filterable (`par` matched it) and was the row the cursor opened on, so
+  the first Enter in a fresh directory navigated *away* from it. It moved to the
+  breadcrumb bar, where the trail it belongs to already lives.
+
 ### Open items
 
 - **Multi-user is not solved by this work**, only un-foreclosed: authorization has
@@ -1259,3 +1304,10 @@ mistaken for "agents do X", and it earned its place immediately:
 - **The `journal.db` / `history.db` split is designed but not built.** The
   supervisor still writes one `live.db`, so the WAL-checkpoint hazard the split
   exists to prevent is currently live.
+- **The command palette and the search overlay still run on `useListNavigation`.**
+  Both are combobox-over-a-ranked-list, which is what `useSelectList` now is, so the
+  conversion is mechanical — and until it happens `useListNavigation` cannot be
+  deleted and the next picker can still copy the wrong pattern. Left out of this pass
+  because both own paged or async sources and the workspace surfaces did not, so
+  converting them is a separate change with its own failure modes rather than a
+  rename. The history overlay's *session* list is the same case.

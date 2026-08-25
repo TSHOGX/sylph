@@ -56,10 +56,23 @@ export function sessionLabel(session: {
  * browser cannot expand `~`. It is optional because every caller renders before
  * that listing settles, and an unabbreviated absolute path is a correct first
  * paint — where waiting for the prefix would blank the path entirely.
+ *
+ * # The sibling guard is not defensive, it is a fix
+ *
+ * A bare `startsWith` rewrites `/Users/hsw-backup/x` as `~-backup/x`, which names a
+ * directory that does not exist and hides the one that does. `home` itself must also
+ * abbreviate to `~` rather than to the empty string, which would render a workspace
+ * row with no path at all. The directory picker carried a second copy of this
+ * function that got both cases right, with tests; this is that behaviour, under the
+ * name every other call site already imports.
  */
 export function shortenHome(path: string, home?: string): string {
-  if (home && path.startsWith(home)) return `~${path.slice(home.length)}`;
-  return path;
+  if (!home || !path.startsWith(home)) return path;
+  const rest = path.slice(home.length);
+  if (rest === "") return "~";
+  // Only a path *separator* after the prefix means "inside home". Anything else is
+  // a sibling directory whose name merely starts the same way.
+  return rest.startsWith("/") ? `~${rest}` : path;
 }
 
 /** The id users can paste into the originating agent or TraceDB. */

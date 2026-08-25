@@ -37,8 +37,8 @@ import dynamic from "next/dynamic";
 // Code-split: the picker pulls in its own queries and markup, and the sidebar
 // renders on first paint. Loading it eagerly would put a modal nobody has opened
 // into the first-load bundle, which is within 4 KB of its budget.
-const DirectoryPicker = dynamic(
-  () => import("@/components/directory-picker").then((m) => m.DirectoryPicker),
+const WorkspacePicker = dynamic(
+  () => import("@/components/workspace-picker").then((m) => m.WorkspacePicker),
   { ssr: false },
 );
 import { ContextMenu, MenuButton, type MenuItem } from "@/components/ui/menu";
@@ -295,8 +295,13 @@ export function WorkspaceSidebar() {
       )}
     </nav>
 
+    {/* The workspace list, not a raw browse: binding a directory that already holds
+        archived history is the common case — a project worked on before this UI
+        existed — and that directory is absent from the sidebar precisely because
+        nothing has bound it yet. The filesystem stays one click away for a folder
+        with no history at all. */}
     {picking && (
-      <DirectoryPicker
+      <WorkspacePicker
         title={t("sidebar.newWorkspace")}
         confirmLabel={t("sidebar.bindWorkspace")}
         onChoose={bindWorkspace}

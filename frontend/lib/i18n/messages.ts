@@ -52,6 +52,7 @@ export const en = {
   "app.backendUnreachableTitle": "Cannot reach the backend",
   "app.backendUnreachableBody": "Sylph Web needs the Rust backend running on",
   "app.retry": "Retry",
+  "app.back": "Back",
 
   "action.close": "Close",
   "action.cancel": "Cancel",
@@ -70,6 +71,10 @@ export const en = {
   "select.filter.label": "Filter {name}",
   "select.filter.placeholder": "Type to filter",
   "select.filter.none": "No matches",
+  // The keyboard contract, shown in a picker's footer. One string rather than one
+  // per surface: every list here answers the same three keys, and three copies is
+  // how two of them come to disagree.
+  "select.keys": "↑↓ navigate · ↵ choose · Esc close",
   "action.loading": "Loading...",
   "action.expand": "Expand",
   "action.collapse": "Collapse",
@@ -129,6 +134,44 @@ export const en = {
   "sidebar.loadingHistory": "Loading history...",
   "sidebar.archiveUnavailable": "Archive unavailable — showing live sessions only",
   "sidebar.turnRunning": "A turn is running",
+
+  // Choosing a workspace: the directories this machine has worked in, ranked by
+  // recency. Reached from `Mod+N`, the sidebar, and the history browser, which is
+  // why these are their own namespace rather than any one caller's.
+  "workspacePicker.title": "Choose a workspace",
+  "workspacePicker.filterName": "workspaces",
+  // Names the *path* explicitly: the visible column is a leaf name, so nothing
+  // else tells the user that a middle segment will match.
+  "workspacePicker.filterPlaceholder": "Filter by any part of the path...",
+  "workspacePicker.loading": "Loading workspaces...",
+  "workspacePicker.loadFailed": "Could not load workspaces",
+  "workspacePicker.empty": "No workspaces yet. Browse for a folder to start one.",
+  "workspacePicker.browse": "Browse folders...",
+  "workspacePicker.browseTitle": "Browse for a folder",
+  "workspacePicker.archived": "{count} archived",
+  "workspacePicker.live": "{count} live",
+  // The history browser's own verb for the filesystem fallback, which is where a
+  // chosen folder lands when it was reached by browsing rather than by picking.
+  "history.showHistory": "Show its history",
+
+  // The filesystem fallback: one directory level per request.
+  "directoryPicker.title": "Choose a folder",
+  "directoryPicker.confirm": "Use this folder",
+  "directoryPicker.filterName": "folders",
+  "directoryPicker.filterPlaceholder": "Filter folders, or type a path...",
+  "directoryPicker.folders": "Folders",
+  "directoryPicker.path": "Path",
+  "directoryPicker.roots": "Starting points",
+  "directoryPicker.parent": "Parent folder",
+  "directoryPicker.loading": "Loading folders...",
+  "directoryPicker.empty": "No subfolders here. Choose this folder, or go up.",
+  "directoryPicker.noMatch": "No subfolder matches.",
+  "directoryPicker.truncated": "Only the first folders are listed. Narrow down by opening one.",
+  "directoryPicker.listFailed": "Could not list that folder.",
+  "directoryPicker.goTo": "Go to {path}",
+  // Enter opens a folder; the modifier chooses it outright. Stated in the footer
+  // because a modifier no affordance mentions is a feature nobody finds.
+  "directoryPicker.keys": "↑↓ navigate · ↵ open · ⌘↵ choose · Esc close",
 
   // Composer.
   "approval.fallbackTitle": "The agent needs permission",

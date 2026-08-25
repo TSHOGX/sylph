@@ -71,8 +71,14 @@ test("every control in the create picker has an accessible name", async ({ page 
   await gotoReady(page);
   await page.keyboard.press("ControlOrMeta+Shift+o");
   await expect(page.getByRole("dialog")).toBeVisible();
+  // Both surfaces of the create path, not just the first: the workspace list and
+  // the folder browser are separate component trees, and the browser is the one
+  // that navigates entirely by button — the crumb trail, the roots, the up
+  // control. Auditing only the list would leave those uncovered.
+  await expect(page.getByRole("combobox", { name: /filter workspaces/i })).toBeVisible();
+  await page.getByRole("button", { name: "Browse folders..." }).click();
   // Wait for the listing, so the audit sees folder rows rather than the spinner.
-  await expect(page.getByRole("list", { name: "Folders" })).toBeVisible();
+  await expect(page.getByRole("listbox", { name: "Folders" })).toBeVisible();
 
   const unnamed = await page.evaluate(() => {
     // Buttons are included, not just fields: this surface navigates by button,
@@ -166,8 +172,17 @@ test("the create picker has no automated accessibility violations", async ({ pag
   await gotoReady(page);
   await page.keyboard.press("ControlOrMeta+Shift+o");
   await expect(page.getByRole("dialog")).toBeVisible();
-  await expect(page.getByRole("list", { name: "Folders" })).toBeVisible();
-  await audit(page, "create session picker");
+
+  // Audited with a list actually open, in both states. A filterable list is the
+  // combobox pattern, and the invalid-ARIA failure that pattern exists to avoid —
+  // an `<input>` inside a `role="menu"` — is only reachable while the surface is
+  // rendered. A static read does not catch it.
+  await expect(page.getByRole("combobox", { name: /filter workspaces/i })).toBeVisible();
+  await audit(page, "workspace picker");
+
+  await page.getByRole("button", { name: "Browse folders..." }).click();
+  await expect(page.getByRole("listbox", { name: "Folders" })).toBeVisible();
+  await audit(page, "folder browser");
 });
 
 test("the conversation canvas has no automated accessibility violations", async ({

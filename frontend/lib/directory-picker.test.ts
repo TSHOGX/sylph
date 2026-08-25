@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { abbreviate, breadcrumbs } from "@/components/directory-picker";
+import { breadcrumbs, pathFromQuery } from "@/components/directory-picker";
+import { shortenHome } from "@/lib/format";
 import type { BrowseRoot } from "@/lib/api";
 
 const HOME = "/Users/hsw";
@@ -8,23 +9,76 @@ const roots: BrowseRoot[] = [
   { name: "Volumes", path: "/Volumes/work" },
 ];
 
-describe("abbreviate", () => {
+/**
+ * These were written against a second copy of this function that lived in the
+ * picker, `abbreviate`. `lib/format`'s `shortenHome` — which five other call sites
+ * already used — got the last two cases wrong, so the copies were consolidated onto
+ * the tested behaviour rather than the popular one. The cases stay here because the
+ * picker is where a mis-abbreviated path does real damage: it names a directory
+ * that does not exist.
+ */
+describe("shortenHome", () => {
   it("replaces the home prefix so long paths stay readable", () => {
-    expect(abbreviate("/Users/hsw/Workspace/sylph-web", HOME)).toBe("~/Workspace/sylph-web");
-    expect(abbreviate(HOME, HOME)).toBe("~");
+    expect(shortenHome("/Users/hsw/Workspace/sylph-web", HOME)).toBe("~/Workspace/sylph-web");
+    expect(shortenHome(HOME, HOME)).toBe("~");
   });
 
   it("leaves paths outside home alone", () => {
-    expect(abbreviate("/Volumes/work/project", HOME)).toBe("/Volumes/work/project");
+    expect(shortenHome("/Volumes/work/project", HOME)).toBe("/Volumes/work/project");
   });
 
   /** A sibling sharing the prefix must not be rewritten as if it were inside. */
   it("does not abbreviate a prefix sibling", () => {
-    expect(abbreviate("/Users/hsw-backup/x", HOME)).toBe("/Users/hsw-backup/x");
+    expect(shortenHome("/Users/hsw-backup/x", HOME)).toBe("/Users/hsw-backup/x");
   });
 
   it("passes the path through when home is unknown", () => {
-    expect(abbreviate("/Users/hsw/x", undefined)).toBe("/Users/hsw/x");
+    expect(shortenHome("/Users/hsw/x", undefined)).toBe("/Users/hsw/x");
+  });
+});
+
+/**
+ * A typed path is a navigation target, not a filter — so the rule that decides
+ * which one a query is has to be exact. Reading a plain filter as a path would
+ * send a request for a directory the user never named.
+ */
+describe("pathFromQuery", () => {
+  it("reads an absolute path as a target", () => {
+    expect(pathFromQuery("/Volumes/work", HOME)).toBe("/Volumes/work");
+  });
+
+  it("expands the home shorthand, which a browser cannot do itself", () => {
+    expect(pathFromQuery("~/Workspace", HOME)).toBe("/Users/hsw/Workspace");
+    expect(pathFromQuery("~", HOME)).toBe(HOME);
+  });
+
+  /** Without `home` the expansion would be a guess, and a guessed path leads to a refusal. */
+  it("declines the shorthand when home is unknown", () => {
+    expect(pathFromQuery("~/Workspace", undefined)).toBeNull();
+    expect(pathFromQuery("~", undefined)).toBeNull();
+  });
+
+  it("treats an ordinary word as a filter, not a path", () => {
+    expect(pathFromQuery("sylph", HOME)).toBeNull();
+    expect(pathFromQuery("", HOME)).toBeNull();
+    // A relative path is still not something the backend can resolve: it takes
+    // absolute paths, and there is no directory for "relative to" to mean.
+    expect(pathFromQuery("Workspace/sylph", HOME)).toBeNull();
+  });
+
+  /** So `~/Workspace/` and `~/Workspace` are one path rather than two cache entries. */
+  it("drops a trailing separator", () => {
+    expect(pathFromQuery("~/Workspace/", HOME)).toBe("/Users/hsw/Workspace");
+    expect(pathFromQuery("/Volumes/work//", HOME)).toBe("/Volumes/work");
+  });
+
+  /** The root itself is a legitimate target when it is a configured root. */
+  it("keeps the filesystem root addressable", () => {
+    expect(pathFromQuery("/", HOME)).toBe("/");
+  });
+
+  it("ignores surrounding whitespace, which a paste often carries", () => {
+    expect(pathFromQuery("  /Volumes/work  ", HOME)).toBe("/Volumes/work");
   });
 });
 

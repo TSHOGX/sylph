@@ -25,10 +25,18 @@ test("a new session accepts a turn and streams the reply", async ({ page }) => {
   const picker = page.getByRole("dialog");
   await expect(picker).toBeVisible();
 
-  // `SYLPH_WEB_BROWSE_ROOTS` is `/tmp`, so the picker opens there and the
-  // confirm button needs no navigation. Choosing the directory is the only input
-  // a session takes: no agent select, no title, no path typed from memory.
-  await expect(picker.getByRole("list", { name: "Folders" })).toBeVisible();
+  // It opens on known workspaces, ranked by recency — a new session almost always
+  // belongs in a directory this machine has already worked in. Asserted by the
+  // filter's own name rather than by a row, because whether any workspace exists
+  // depends on shared `.e2e-data` this spec must not count.
+  await expect(picker.getByRole("combobox", { name: /filter workspaces/i })).toBeVisible();
+
+  // Then the filesystem, for a directory that has genuinely never been used.
+  // `SYLPH_WEB_BROWSE_ROOTS` is `/tmp`, so browsing opens there and the confirm
+  // button needs no navigation. Choosing the directory is the only input a
+  // session takes: no agent select, no title, no path typed from memory.
+  await picker.getByRole("button", { name: "Browse folders..." }).click();
+  await expect(picker.getByRole("listbox", { name: "Folders" })).toBeVisible();
   await picker.getByRole("button", { name: "Start session here" }).click();
 
   // Creation navigates to the session, so the composer is the signal it worked.
