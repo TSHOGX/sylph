@@ -80,7 +80,7 @@ pub struct DiagnosticsResponse {
     sessions: HashMap<String, i64>,
     turns: HashMap<String, i64>,
     agents: Vec<String>,
-    broken_runners: HashMap<String, String>,
+    broken_adapters: HashMap<String, String>,
     /// Every directory bundled-adapter resolution considered, in order, plus the
     /// user's own agents directory. Present because "no agents" is otherwise
     /// unactionable: a missing install and a mistyped `paths.agents_dir` give the
@@ -124,7 +124,7 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         .into_iter()
         .collect();
 
-    let (agents, broken_runners) = {
+    let (agents, broken_adapters) = {
         let registry = state.registry.lock().await;
         let mut agents: Vec<String> = registry
             .list_agents()
@@ -134,7 +134,7 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         // Discovery order follows directory iteration, which is not stable;
         // sort so the output does not churn between calls.
         agents.sort();
-        (agents, registry.broken_runners().clone())
+        (agents, registry.broken_adapters().clone())
     };
 
     Ok(Json(DiagnosticsResponse {
@@ -144,7 +144,7 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         sessions,
         turns,
         agents,
-        broken_runners,
+        broken_adapters,
         agent_roots: state
             .config
             .bundled_agents_candidates

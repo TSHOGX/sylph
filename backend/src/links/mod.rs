@@ -28,7 +28,7 @@ use crate::db::JournalStore;
 use crate::env::Environment;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::models::PendingRequest;
-use crate::runners::Registry;
+use crate::agents::Registry;
 
 /// How long a link may sit unused before it is torn down.
 ///
