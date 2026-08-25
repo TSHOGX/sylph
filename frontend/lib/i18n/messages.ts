@@ -110,6 +110,29 @@ export const en = {
   "shell.newSession.title": "New session",
   "shell.newSession.confirm": "Start session here",
 
+  // Searching live sessions and the archive together (`Mod+K`).
+  //
+  // `search.field` is deliberately *not* `shell.search`, which names the top-bar
+  // button that opens this overlay. Giving the button and the field inside it one
+  // accessible name leaves a screen reader two controls it cannot tell apart — the
+  // collision that failed forty specs at once and is recorded under Pitfalls.
+  "search.title": "Search sessions",
+  "search.field": "Search query",
+  "search.placeholder": "Search live sessions and the TraceDB archive...",
+  "search.results": "Search results",
+  "search.none": "No matching sessions.",
+  "search.empty": "No sessions yet.",
+  // "open" rather than `select.keys`' "choose": this list navigates to a session
+  // rather than picking a value, and the footer is the only place that says so.
+  "search.keys": "↑↓ navigate · ↵ open · Esc close",
+  "search.archiveUnavailable": "Archive unavailable — live sessions only",
+  "search.importFailed": "Import failed.",
+  // Lowercase on purpose: these sit in a trailing badge or beside the field, not
+  // in a sentence.
+  "search.importing": "importing...",
+  "search.archiveBadge": "archive",
+  "search.searchingArchive": "searching archive...",
+
   // Sidebar: workspaces and their sessions.
   "sidebar.title": "Sessions by workspace",
   "sidebar.quickSessions": "Quick Sessions",

@@ -23,6 +23,7 @@ import { liveSessionsQuery } from "@/lib/sessions-query";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useDebounced } from "@/lib/use-debounced";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
+import { useT, type Translate } from "@/lib/i18n";
 import { Overlay, scrollActiveIntoView, useListNavigation } from "@/components/overlay";
 import {
   ArchiveIcon,
@@ -36,6 +37,7 @@ type Row =
   | { type: "archive"; hit: SearchResult };
 
 export function SearchOverlay() {
+  const t = useT();
   const router = useRouter();
   const queryClient = useQueryClient();
   const { closeOverlay } = useWorkspaceUI();
@@ -131,7 +133,7 @@ export function SearchOverlay() {
   const home = workspacesQuery.data?.home;
 
   return (
-    <Overlay title="Search sessions" onClose={closeOverlay} describedBy="search-hint">
+    <Overlay title={t("search.title")} onClose={closeOverlay} describedBy="search-hint">
       <div className="flex items-center gap-2 border-b border-line px-3 py-2.5">
         <span className="text-ink-muted">
           <SearchIcon size={15} />
@@ -142,16 +144,16 @@ export function SearchOverlay() {
           aria-expanded
           aria-controls="search-results"
           aria-activedescendant={rows.length > 0 ? `search-row-${activeIndex}` : undefined}
-          aria-label="Search sessions and archive"
+          aria-label={t("search.field")}
           autoFocus
           value={query}
           onChange={(event) => setPicker({ query: event.target.value, active: 0 })}
           onKeyDown={(event) => onKeyDown(event, activeIndex, setActive)}
-          placeholder="Search live sessions and the TraceDB archive..."
+          placeholder={t("search.placeholder")}
           className="flex-1 bg-transparent text-sm outline-none placeholder:text-ink-muted"
         />
         {archiveQuery.isFetching && (
-          <span className="text-3xs text-ink-muted">searching archive...</span>
+          <span className="text-3xs text-ink-muted">{t("search.searchingArchive")}</span>
         )}
       </div>
 
@@ -159,12 +161,12 @@ export function SearchOverlay() {
         ref={listRef}
         id="search-results"
         role="listbox"
-        aria-label="Search results"
+        aria-label={t("search.results")}
         className="min-h-0 flex-1 pane py-1"
       >
         {rows.length === 0 ? (
           <p className="px-3 py-6 text-center text-xs text-ink-muted">
-            {query.trim() ? "No matching sessions." : "No sessions yet."}
+            {query.trim() ? t("search.none") : t("search.empty")}
           </p>
         ) : (
           rows.map((row, index) => (
@@ -177,6 +179,7 @@ export function SearchOverlay() {
               onHover={() => setActive(index)}
               onSelect={() => commit(index)}
               importing={importSession.isPending && activeIndex === index}
+              t={t}
             />
           ))
         )}
@@ -186,17 +189,15 @@ export function SearchOverlay() {
         id="search-hint"
         className="flex shrink-0 items-center justify-between gap-2 border-t border-line bg-sunken px-3 py-1.5 text-3xs text-ink-muted"
       >
-        <span>↑↓ navigate · ↵ open · Esc close</span>
+        <span>{t("search.keys")}</span>
         {archiveQuery.data && !archiveQuery.data.available && (
-          <span className="text-warning">
-            Archive unavailable — live sessions only
-          </span>
+          <span className="text-warning">{t("search.archiveUnavailable")}</span>
         )}
         {importSession.error && (
           <span role="alert" className="text-danger">
             {importSession.error instanceof Error
               ? importSession.error.message
-              : "Import failed."}
+              : t("search.importFailed")}
           </span>
         )}
       </footer>
@@ -212,6 +213,7 @@ function SearchRow({
   onHover,
   onSelect,
   importing,
+  t,
 }: {
   row: Row;
   index: number;
@@ -220,6 +222,14 @@ function SearchRow({
   onHover: () => void;
   onSelect: () => void;
   importing: boolean;
+  /**
+   * Passed down rather than read from `useT` here.
+   *
+   * A row is rendered once per result and the hook subscribes to the settings
+   * store, so calling it per row would add one subscription per visible session
+   * for a value that cannot differ between them.
+   */
+  t: Translate;
 }) {
   const isLive = row.type === "live";
   const title = isLive ? sessionLabel(row.session) : (row.hit.title ?? row.hit.ask ?? row.hit.id);
@@ -262,7 +272,7 @@ function SearchRow({
         <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink">{title}</span>
         {!isLive && (
           <span className="shrink-0 rounded bg-hover px-1 text-3xs font-medium text-ink-muted">
-            {importing ? "importing..." : "archive"}
+            {importing ? t("search.importing") : t("search.archiveBadge")}
           </span>
         )}
         <span className="shrink-0 text-3xs text-ink-muted">{formatRelative(when)}</span>
