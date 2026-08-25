@@ -34,7 +34,8 @@ those, and duplicating them here only creates a second copy to forget.
 | System design, data flow | `docs/architecture.md` |
 | Endpoint contracts | `docs/api-design.md`, `docs/api-v1.openapi.json` |
 | Tables, indexes, migrations | `docs/database-schema.md` |
-| UI structure and conventions | `docs/frontend-architecture.md` |
+| How the frontend is built | `docs/frontend-architecture.md` |
+| Panes, surfaces, components, tokens | `docs/ui-layout.md` |
 | Where files live, what a setting does | `docs/configuration.md` |
 | What an adapter may send, and when | `docs/session-protocol.md` |
 | How history is kept, replayed, pruned | `docs/storage.md` |
