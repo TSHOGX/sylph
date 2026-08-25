@@ -1561,3 +1561,14 @@ report its real outcome on a later turn, and the later record is the truth.
   forever is correct — the record is the only copy — but a long-lived sandbox
   session accumulates without limit by design, and nothing yet surfaces *which*
   sessions are responsible. `/diagnostics` reports the terminal count, not the bytes.
+- **`e2e/delegation.spec.ts` is timing-sensitive under full-suite load.** Measured
+  over nine runs of the file after the four-worktree merge: three runs had one or two
+  failures and six were clean, and the failing spec was a *different* one each time
+  (`:122`, `:298`, `:321`, `:343`). Every one of them asserts on the turn-settle
+  sweep that closes trajectories an adapter left open, so they all wait on the same
+  two-write window `docs/roadmap.md` already describes — the row that makes the next
+  action legal, then the trajectory closes. Each passes 5/5 in isolation, which is
+  what makes it read as flakiness rather than as a shared dependency on one window.
+  Do not raise the timeout: the fix is for the specs to assert on the settled record
+  rather than on a rendered card appearing within a deadline. Note this is *not* the
+  `.e2e-home` accumulation pitfall — it reproduces on a freshly wiped fixture.
