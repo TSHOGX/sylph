@@ -114,8 +114,84 @@ def soul_path():
     return default if os.path.isfile(default) else ""
 
 
+# A model's identity is (provider, id), not id alone.
+#
+# Measured against pi 0.84.3: of 372 offered models, two ids are each offered by *two*
+# providers — `deepseek-v4-pro` by both `ikun-deepseek` and `huaweicloud`, and `glm-5.2`
+# by both `ikun-glm` and `huaweicloud`. A config value of the bare id is therefore
+# ambiguous in three separate ways, all of which were real:
+#
+#   * The client marks the current choice by matching `value == currentValue`, so both
+#     rows were checked at once. That is the reported symptom.
+#   * One of the two colliding rows is unreachable: a lookup from id to provider can
+#     only answer with one of them, so selecting either sent the same request.
+#   * `pi` accepts either provider for these ids and reports back which one it used, so
+#     the surface could disagree with the request that produced it.
+#
+# The delimiter is a space rather than the conventional `/`, and that is load-bearing:
+# 350 of those 372 ids *already contain* `/` (`anthropic/claude-opus-5`,
+# `stealth/ox-alpha`), so splitting on the first or last slash would mis-parse the
+# majority of the catalogue. A space appears in no provider and no id, which makes the
+# split unambiguous. Providers are a closed set of five here, none containing a space.
+#
+# This is opaque to the client by design: a `ConfigChoice.value` is a token to echo
+# back, never something to parse. Only this adapter knows the encoding, which is what
+# lets it change without a server or UI change.
+MODEL_KEY_SEPARATOR = " "
+
+
+def model_key(model):
+    """The stable, unambiguous value for one catalogue entry.
+
+    Accepts the dict shape `get_available_models` and `get_state` both use, and the
+    bare string an older pi might report. Returns `None` for anything unusable, so a
+    malformed entry is dropped rather than becoming a row that cannot be selected.
+    """
+    if isinstance(model, str):
+        return model or None
+    if not isinstance(model, dict):
+        return None
+    model_id = model.get("id")
+    if not model_id:
+        return None
+    provider = model.get("provider")
+    # No provider means nothing to disambiguate, so the id stands alone rather than
+    # gaining an empty prefix that `split_model_key` would then have to special-case.
+    if not provider:
+        return model_id
+    return "{}{}{}".format(provider, MODEL_KEY_SEPARATOR, model_id)
+
+
+def split_model_key(value):
+    """`(provider, model_id)` from a value this adapter issued.
+
+    Split once from the left: the provider cannot contain the separator, and the id
+    can contain anything but it. A value carrying no separator is a bare id from a
+    catalogue that reported no provider — `set_model` needs one, so that is reported
+    as unusable rather than sent as a request pi would reject with a message about a
+    field the user never saw.
+    """
+    if not isinstance(value, str) or not value:
+        return None, None
+    if MODEL_KEY_SEPARATOR not in value:
+        return None, None
+    provider, model_id = value.split(MODEL_KEY_SEPARATOR, 1)
+    return (provider or None), (model_id or None)
+
+
 class UnknownConfig(Exception):
     """A config id this adapter cannot set."""
+
+
+class InvalidConfigValue(Exception):
+    """A config id this adapter *can* set, given a value it cannot use.
+
+    Separate from `UnknownConfig` because the two need different messages and the
+    wrong one misdirects: answering a malformed model with "'model' is not settable"
+    says the option does not exist, when in fact the option is fine and the value was
+    not. A message that names the wrong layer is how a config bug gets investigated
+    as a UI bug.
+    """
 
 
 class Session:
@@ -136,6 +212,9 @@ class Session:
         self.message_id = "pi"
         self.current_model = None
         self.current_thinking = None
+        # The catalogue entry for the selected model, as `get_state` reported it.
+        # `config()` sets this; `surface()` reads `contextWindow` off it.
+        self.current_model_entry = None
         # vendor request id -> the option strings pi offered, so a picked index can
         # be resolved back to the literal value pi expects. It matches on what it
         # sent, not on an index it never saw.
@@ -230,8 +309,24 @@ class Session:
         Both are queried fresh. Thinking levels especially: they answer for the
         *currently selected* model, so a cached list goes stale the moment the model
         changes — which is the reason `set_config` returns the whole facet.
+
+        The *current* values are read from pi as well, not taken from what this
+        adapter last set. Those are two different claims: pi is the only thing that
+        knows whether a `set_model` was honoured, and a session can also be steered
+        by pi's own TUI commands. Trusting the local copy meant a surface built by
+        any path other than `open` — a re-attach, a `set_config` reply — reported
+        `currentValue: null` while the session plainly had a model, so the composer
+        chip fell back to "agent default" and the checkmark sat on no row at all.
         """
         options = []
+
+        state = self.call("get_state")
+        # Kept for `surface()`, which needs this same entry's `contextWindow`. Held
+        # rather than re-read: a second `get_state` is both an extra RPC and a second
+        # answer that can disagree with the one the options were built from.
+        self.current_model_entry = state.get("model")
+        self.current_model = model_key(self.current_model_entry)
+        self.current_thinking = state.get("thinkingLevel")
 
         models = self.call("get_available_models").get("models") or []
         if models:
@@ -243,10 +338,13 @@ class Session:
                 "currentValue": self.current_model,
                 "options": [
                     {
-                        "value": model["id"],
+                        "value": model_key(model),
                         "name": model.get("name") or model["id"],
-                        # The provider is what disambiguates two models with the
-                        # same display name, which happens across providers.
+                        # The provider is what disambiguates two models with the same
+                        # display name, which measurably happens: pi 0.84.3 offers two
+                        # "Claude Opus 5" (anthropic direct and via openrouter) and two
+                        # each of "DeepSeek V4 Pro" and "GLM-5.2". Without this the rows
+                        # are indistinguishable on screen.
                         "description": model.get("provider"),
                     }
                     for model in models
@@ -269,16 +367,16 @@ class Session:
 
     def surface(self):
         """Every facet, for `open` and for a full refresh."""
-        state = self.call("get_state")
-        model = state.get("model")
-        self.current_model = model.get("id") if isinstance(model, dict) else model
-        self.current_thinking = state.get("thinkingLevel")
-
+        # `config()` reads the live state itself and records the selected model, so
+        # this reuses that rather than issuing its own `get_state`: two reads of one
+        # fact are an extra round trip and can disagree, which would put a context
+        # window under a model the options never mentioned.
         surface = {
             "commands": self.commands(),
             "subagents": [],
             "config": self.config(),
         }
+        model = self.current_model_entry
         # pi reports a per-model context window, so this facet is real here. The
         # claude adapter deliberately omits it: its `initialize` reports no window at
         # all, and inventing a number would put a fabricated denominator under a usage
@@ -289,7 +387,24 @@ class Session:
 
     def apply_config(self, config_id, value):
         if config_id == "model":
-            self.call("set_model", model=value)
+            # `provider` + `modelId`, and both are mandatory.
+            #
+            # Measured against pi 0.84.3, because guessing here fails in a way that
+            # looks like the UI: `set_model(model=...)` is answered
+            # `Model not found: undefined/undefined` — pi interpolating the two
+            # fields it looked for and found absent — and `set_model(provider=,
+            # model=)` gets `anthropic/undefined`, which is what proves `provider`
+            # is read and the id field is spelled something else. That error is
+            # returned as a failed RPC, so the value silently never changed and the
+            # composer kept rendering the old model.
+            provider, model_id = split_model_key(value)
+            if not provider or not model_id:
+                raise InvalidConfigValue(
+                    "{!r} does not name a provider and a model. Values for this option"
+                    " are issued by this adapter and must be echoed back"
+                    " unchanged.".format(value)
+                )
+            self.call("set_model", provider=provider, modelId=model_id)
             self.current_model = value
         elif config_id == "thinking":
             self.call("set_thinking_level", level=value)
@@ -728,6 +843,11 @@ def serve():
                 except UnknownConfig:
                     err(mid, "UNSUPPORTED_FIELD",
                         "'{}' is not settable on a pi session".format(config_id))
+                    continue
+                except InvalidConfigValue as bad:
+                    # The option exists and the value does not fit it, which is a
+                    # different failure from an unknown option and has to read as one.
+                    err(mid, "INVALID_VALUE", str(bad))
                     continue
                 # The refreshed facet: setting the model changes which thinking
                 # levels exist, so the old options may no longer be valid.

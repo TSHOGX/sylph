@@ -174,6 +174,31 @@ impl ConfigOption {
             Self::Select { id, .. } | Self::Boolean { id, .. } => id,
         }
     }
+
+    /// Whether this option would accept `value`.
+    ///
+    /// A `select` accepts exactly the values it enumerated, and a `boolean` exactly a
+    /// JSON boolean. Checked for the same reason a request option is: an unrecognized
+    /// value reaches the vendor CLI, and what happens there is undefined — `pi`
+    /// answered a malformed model with `Model not found: undefined/undefined`, which
+    /// surfaced two layers away as a picker that appeared to do nothing.
+    ///
+    /// A `select` that enumerated nothing accepts anything, because that is an agent
+    /// declaring a free-form field rather than an empty choice — refusing every value
+    /// would make such an option unusable rather than safe.
+    pub fn accepts(&self, value: &serde_json::Value) -> bool {
+        match self {
+            Self::Select { options, .. } => {
+                if options.is_empty() {
+                    return value.is_string();
+                }
+                value
+                    .as_str()
+                    .is_some_and(|candidate| options.iter().any(|choice| choice.value == candidate))
+            }
+            Self::Boolean { .. } => value.is_boolean(),
+        }
+    }
 }
 
 /// A subagent definition the agent can delegate to.
@@ -573,6 +598,7 @@ impl Outbound {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn line_of(message: &Outbound, id: &str) -> serde_json::Value {
         let line = message.to_line(id);
@@ -798,6 +824,78 @@ mod tests {
         assert_eq!(value["t"], "set_config");
         assert_eq!(value["configId"], "model");
         assert_eq!(value["value"], "opus-5");
+    }
+
+    /// A value a `select` did not enumerate is refused.
+    ///
+    /// The reason this is validated at all: an unrecognized value reaches the vendor
+    /// CLI, and `pi` answered a malformed model with `Model not found:
+    /// undefined/undefined` — an error naming fields no user ever saw, three layers
+    /// from where anyone could read it. The approval path has always checked its
+    /// option against what was offered; this closes the same gap for config.
+    #[test]
+    fn a_select_accepts_only_the_values_it_enumerated() {
+        let option: ConfigOption = serde_json::from_str(
+            r#"{"type":"select","id":"model","currentValue":"a",
+                "options":[{"value":"a"},{"value":"b"}]}"#,
+        )
+        .unwrap();
+
+        assert!(option.accepts(&json!("a")));
+        assert!(option.accepts(&json!("b")));
+        assert!(!option.accepts(&json!("c")));
+        // Not a string at all: a client sending the wrong JSON type is as wrong as one
+        // sending an unknown name, and for the same reason.
+        assert!(!option.accepts(&json!(true)));
+        assert!(!option.accepts(&json!(null)));
+    }
+
+    /// An enumerated-nothing `select` is a free-form field, not an empty choice.
+    ///
+    /// Refusing every value there would make such an option unusable rather than safe.
+    #[test]
+    fn a_select_with_no_choices_accepts_any_string() {
+        let option: ConfigOption = serde_json::from_str(
+            r#"{"type":"select","id":"cwd","options":[]}"#,
+        )
+        .unwrap();
+
+        assert!(option.accepts(&json!("/tmp/anywhere")));
+        assert!(!option.accepts(&json!(7)));
+    }
+
+    #[test]
+    fn a_boolean_accepts_only_a_json_boolean() {
+        let option: ConfigOption =
+            serde_json::from_str(r#"{"type":"boolean","id":"fastMode"}"#).unwrap();
+
+        assert!(option.accepts(&json!(true)));
+        assert!(option.accepts(&json!(false)));
+        // Notably not the *strings* — a client sending "true" is sending something the
+        // adapter would have to guess about.
+        assert!(!option.accepts(&json!("true")));
+        assert!(!option.accepts(&json!(1)));
+    }
+
+    /// Two providers offering the same model are two distinct values.
+    ///
+    /// Measured on `pi` 0.84.3: `deepseek-v4-pro` and `glm-5.2` are each offered by two
+    /// providers, so a bare id was not a unique value — which is what made two rows
+    /// read as current at once. Whatever an adapter does to disambiguate, both spellings
+    /// have to survive validation independently, or one provider becomes unreachable.
+    #[test]
+    fn provider_qualified_values_are_each_accepted_on_their_own() {
+        let option: ConfigOption = serde_json::from_str(
+            r#"{"type":"select","id":"model","currentValue":"ikun-glm glm-5.2",
+                "options":[{"value":"ikun-glm glm-5.2"},
+                           {"value":"huaweicloud glm-5.2"}]}"#,
+        )
+        .unwrap();
+
+        assert!(option.accepts(&json!("ikun-glm glm-5.2")));
+        assert!(option.accepts(&json!("huaweicloud glm-5.2")));
+        // The bare id is now nobody's value, so it must not slip through.
+        assert!(!option.accepts(&json!("glm-5.2")));
     }
 
     fn prompt_command(name: &str) -> CommandSpec {

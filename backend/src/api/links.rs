@@ -246,9 +246,26 @@ pub async fn set_config(
     // option is validated: an id the adapter does not recognize reaches the vendor
     // CLI as an unknown setting, and what that does is undefined.
     let surface = link.capabilities().await;
-    if !surface.config.iter().any(|option| option.id() == body.config_id) {
+    let Some(option) = surface
+        .config
+        .iter()
+        .find(|option| option.id() == body.config_id)
+    else {
         return Err(Error::InvalidRequest(format!(
             "'{}' is not a config option this session offers",
+            body.config_id
+        )));
+    };
+
+    // And the *value* has to be one it enumerated. Validating only the id was the
+    // asymmetry worth closing: the approval path has always checked its option
+    // against what was offered, while a config value went through untouched. A
+    // mistyped one then reached the vendor CLI, which is exactly how `pi` came to
+    // answer `Model not found: undefined/undefined` — an error whose wording named
+    // fields no user had ever seen, three layers from where it could be read.
+    if !option.accepts(&body.value) {
+        return Err(Error::InvalidRequest(format!(
+            "that is not a value '{}' offers",
             body.config_id
         )));
     }

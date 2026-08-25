@@ -394,6 +394,98 @@ by keyboard. Focus in a second effect, after the position commits. The same
 class of failure applies to any dialog with no auto-focusing control of its own:
 focus the container, or the key handler is unreachable.
 
+**`autoFocus` walks into that same trap, and a text field makes it worse.** React's
+`autoFocus` fires at mount, which for an anchored popover is before it has been
+measured and therefore while it is still `invisible` — so a filter field declared that
+way never receives focus, every keystroke goes to the trigger, and the field reads as
+dead. Gate focusing on the same "is it visible yet" state the positioning uses.
+
+**A child's focus call runs before its modal ancestor has recorded the opener.**
+React runs child effects before parent effects, and `useDialog` captures
+`document.activeElement` in its own mount effect so it can hand focus back on close.
+A descendant that focuses itself synchronously is therefore captured *as* the opener,
+so closing the surface "restores" focus to a node that is unmounting and drops it on
+`<body>` (WCAG 2.4.3). Defer such a focus by a microtask so it lands after the whole
+commit. This is invisible on the surfaces whose input is a direct child of the dialog,
+which is why it survived until a shared list component was focused from two depths.
+
+**One cursor per list, assigned where the rows are built.** A choice list renders
+non-selectable rows (group headings) when unfiltered and not when filtered, so a
+cursor counted over "enabled items" and a renderer numbering "all items" disagree —
+and the highlight, `aria-activedescendant`, and the committed value then each point at
+a different row. The symptom is a click that appears to do nothing, three layers from
+the cause. `lib/select-list.ts` returns each row with its own index, or `null` when it
+cannot be chosen, so no renderer computes one and the two spaces cannot exist.
+
+**A `role="menu"` may not contain a text field.** Adding a filter to a menu is not a
+styling change: a menu may only contain menu items, so an `<input>` inside one is
+invalid ARIA that axe reports and that leaves a screen reader with a control its
+container says cannot exist. A filterable list has to become the combobox pattern
+instead — input as `combobox`, rows as a `listbox` of `option`s, `aria-selected`
+rather than `aria-checked`. Audit both states with a list actually open; a static read
+will not catch it.
+
+**`pi`'s `set_model` takes `provider` + `modelId`, not `model`.** Measured against pi
+0.84.3. Sending `model=` is answered `Model not found: undefined/undefined` — pi
+interpolating the two fields it looked for and found absent — and `provider=` plus
+`model=` narrows it to `anthropic/undefined`, which is what identifies *which* field is
+misspelled. The provider is not part of the value a client sends, so it has to be looked
+up from `get_available_models` (372 entries on a real install, so cache it); do not parse
+it out of the id, because ids like `stealth/ox-alpha` contain a slash that is not a
+provider separator. This is the third instance of the vendor-key pitfall above, and the
+most expensive: the refusal came back as a failed RPC that nothing surfaced, so a correct
+picker looked broken and the investigation went to the UI twice before reaching here.
+
+**A config value must be unique, because `checked` is computed as a filter.** Every
+producer writes `checked: choice.value === currentValue`, which marks *every* match — so
+the moment two choices share a value, both rows show a checkmark and neither is
+identifiably the real one. Measured on `pi` 0.84.3: of 372 offered models, `deepseek-v4-pro`
+and `glm-5.2` are each offered by two providers, and three display names are duplicated
+(two "Claude Opus 5", one direct and one via openrouter). A model's identity is
+`(provider, id)`, never the id alone, and the bare id also made one of each pair
+*unreachable* — a by-id lookup can only answer with one provider. The adapter therefore
+issues provider-qualified values, `lib/select-list.ts` enforces one current row per
+single-select group regardless of what an agent reports, and the backend validates the
+value against what was enumerated. Three layers, because the client renders whatever an
+agent it has never seen reports — including agents written by other people.
+
+**Do not delimit a composite config value with `/`.** 350 of `pi`'s 372 model ids already
+contain one (`anthropic/claude-opus-5`, `stealth/ox-alpha`), so splitting on the first or
+last slash mis-parses the majority of the catalogue. A space works because no provider and
+no id contains one. A `ConfigChoice.value` is opaque to the client by contract — a token to
+echo back, never to parse — which is what lets the encoding change without a server or UI
+change.
+
+**An error that names the wrong layer sends the investigation to the wrong layer.**
+Answering a malformed value with "'model' is not settable on a pi session" says the option
+does not exist, when the option was fine and the value was not. `pi`'s adapter now
+separates `UnknownConfig` from `InvalidConfigValue` for exactly this reason. The general
+form cost two rounds here: a refused write with no error path in the client presents as a
+dead control, so the layer that is *not* at fault is the one that gets debugged.
+
+**An adapter must read current values from the vendor, not from what it last set.**
+`pi`'s `config()` reported `currentValue: self.current_model`, a field only `surface()`
+ever populated — so any surface built by another path (a re-attach, a `set_config` reply)
+reported `null` while the session plainly had a model, and the chip fell back to "agent
+default" with the checkmark on no row. The vendor is also the only thing that knows
+whether a set was *honoured*, and a session can be steered by the agent's own TUI
+besides.
+
+**A mutation with no error path turns any backend refusal into a phantom UI bug.** The
+config mutation had `onSuccess` and nothing else, so a rejected set left the cached
+surface untouched, the control re-rendered from it, and the sole observable outcome was
+that clicking a model did nothing. Every layer was behaving correctly and the symptom
+pointed at the one layer that was not at fault. A refused write must invalidate and be
+rendered; the E2E fixture therefore refuses one value on purpose so the failure path
+stays covered.
+
+**A two-item fixture cannot observe a list-length bug.** Every symptom of the model
+catalogue being unscrollable and unsearchable was invisible to a green suite because
+the E2E fixture declared model options two at a time — below any panel's height and
+below the filter threshold, so no spec could reach either behaviour. Real agents report
+a dozen to twenty-one. When a control's defect is a function of how much it holds, the
+fixture's size is part of the test, not a detail of it.
+
 **An accessible-name collision is a defect, not test fragility.** Labelling a
 button "Add to this message" beside a textarea labelled "Message" leaves two
 controls a screen reader cannot distinguish — and `getByLabel("Message")` then
