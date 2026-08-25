@@ -570,6 +570,34 @@ tool that failed. Keep `abandoned` distinct from `failed` — the server closing
 trajectory an adapter left open means nobody reported an outcome, and colouring that
 red reports an interrupted turn as a broken one.
 
+**An agent speaks between turns, and "no turn is running" was read as "nothing can
+be said".** Events arriving with no turn in flight were dropped — defensibly, since
+an event carries no turn id and a guessed one misplaces it in the transcript forever.
+The error was the conclusion: measured on `claude` 2.x, a session with backgrounded
+work emits the delegate's completion *after* its turn's `result` and then an entire
+exchange of its own to report it, stdout still open, process still alive. So the drop
+discarded exactly the completion a user had been promised, and no monitor, schedule,
+or background job could reach a client however the rest of the stack was built. The
+server now opens an **agent-initiated turn** (`origin: "agent"`) on the first
+out-of-turn event — the first of *any* kind, because the vendor's own `turn`/`started`
+arrives after the payload, so waiting for the bracket keeps the announcement and drops
+what it announces. Three consequences worth holding onto: such a turn has no waiter,
+so settling it means recording terminal state directly rather than waking one, and
+leaving it unsettled wedges the session (a live turn refuses new messages); its
+`requestText` is empty, so a client that does not render `origin` shows an answer to a
+message the user never wrote; and a delegate closed by the turn-settle sweep may later
+report its *real* outcome on that turn, so `abandoned` is not final.
+
+**A waiter's absence means two different things.** `settle_turn` returned early when
+no turn was parked on an outcome, which was accidentally correct and became wrong the
+moment agent turns existed. Claiming the waiter first is how a user's stop wins over
+the link teardown it causes — so settling every waiter-less turn made a deliberate
+stop get reported as `LINK_LOST`, because the teardown reached the closer while the
+supervisor was still on its way there. An agent turn never had a waiter; a user's turn
+whose waiter is gone has one owner already. `origin` is what separates them, and the
+integration suite catches it: `stopping_a_running_turn_cancels_it` failed the moment
+the distinction was missing.
+
 **Delegation is only knowable retroactively, so nothing may decide it at open
 time.** An adapter learns a tool call delegated when a child arrives carrying its
 id — after the `tool_call` event was published. `claude`'s adapter guessed by tool

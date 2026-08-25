@@ -125,7 +125,29 @@ export default function SessionPage() {
     () => history.find((entry) => !TERMINAL.has(entry.turn.status))?.turn.id ?? null,
     [history],
   );
-  const watchedTurnId = sentTurnId ?? adoptedTurnId;
+
+  // This tab's claim expires once history holds its turn as terminal.
+  //
+  // `sentTurnId` has to outrank adoption while a turn this tab started is in flight,
+  // and must stop doing so the moment it is not: an *agent-initiated* turn is adopted
+  // from history, so a claim that never expires means the agent's own turn is never
+  // streamed — it appears only on the next reload, which is how a delivered
+  // notification still reads as a missing one.
+  //
+  // Derived rather than cleared in an effect. Reading it out of history is also what
+  // keeps the handover gapless: the claim ends exactly when history can render the
+  // turn instead, so there is no frame where it is neither live nor in history.
+  const sentIsSettled = useMemo(
+    () =>
+      Boolean(
+        sentTurnId &&
+          history.some(
+            (entry) => entry.turn.id === sentTurnId && TERMINAL.has(entry.turn.status),
+          ),
+      ),
+    [sentTurnId, history],
+  );
+  const watchedTurnId = (sentIsSettled ? null : sentTurnId) ?? adoptedTurnId;
 
   const watchedTurn = useQuery({
     queryKey: ["turn", watchedTurnId],
@@ -150,6 +172,7 @@ export default function SessionPage() {
     void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "history"] });
     void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
   }, [finished, queryClient, sessionId]);
+
 
   const sendTurn = useMutation({
     // `override` carries a resent turn's text. Its attachments are deliberately
@@ -765,6 +788,17 @@ function TurnSection({
 
   return (
     <section aria-label={`Turn ${entry.turn.id}`} className="border-t border-line pt-1 first:border-t-0">
+      {/* A turn nobody asked for has to say so. Its `requestText` is empty, so
+          unlabelled it renders as an answer to a message the user never wrote —
+          and the thing it is usually reporting is work they had stopped expecting
+          to hear about, which makes the provenance the most useful part. */}
+      {entry.turn.origin === "agent" && (
+        <p className="flex items-center gap-1.5 pt-1 text-3xs text-ink-muted">
+          <span className="rounded bg-hover px-1">unprompted</span>
+          <span>the agent reported this on its own</span>
+        </p>
+      )}
+
       <Timeline events={entry.events} onOpenFile={onOpenFile} expandAll={expandAll} />
 
       {entry.turn.errorMessage && (

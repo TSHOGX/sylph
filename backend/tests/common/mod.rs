@@ -475,6 +475,14 @@ enum Behavior {
     /// the outcome. The nearest real failure is an agent that ends a turn having
     /// produced nothing, which is what this now exercises.
     NoOutput,
+    /// Dispatch a delegate, end the turn, then report the delegate's completion
+    /// *after* the turn has settled — and open a turn of its own to say so.
+    ///
+    /// What `claude` 2.x actually does with backgrounded work, measured: after a
+    /// turn's `result` it emits the delegate's completion and then an entire
+    /// exchange (`init`, assistant, `result`) reporting it, with stdout still open.
+    /// Every one of those events used to be dropped for arriving outside a turn.
+    Backgrounded,
     /// Accept the turn and never finish it, so a stop or interrupt can arrive.
     Slow,
     /// Fail the handshake, so the agent is unusable.
@@ -496,6 +504,11 @@ impl MockRunner {
 
     pub fn slow(name: &str) -> Self {
         Self { name: name.to_string(), behavior: Behavior::Slow }
+    }
+
+    /// An adapter that reports a delegate finishing after its turn ended.
+    pub fn backgrounded(name: &str) -> Self {
+        Self { name: name.to_string(), behavior: Behavior::Backgrounded }
     }
 
     pub fn broken_describe(name: &str) -> Self {
@@ -559,6 +572,31 @@ impl MockRunner {
         ev("turn", "completed", text="", isError=True)
 "#
             }
+            Behavior::Backgrounded => {
+                r#"
+        ok(mid)
+        # A host that dispatches and returns. Its delegate outlives the turn.
+        ev("tool_call", "completed", streamId="bg-host", name="Workflow",
+           text='{"script": "background(worker)"}')
+        ev("subagent", "started", streamId="bg-task", span="bg-host",
+           name="Background: worker")
+        ev("tool_result", "completed", streamId="bg-host", name="Workflow",
+           text="dispatched")
+        ev("assistant", "completed", streamId="bg-a1", text="dispatched")
+        ev("turn", "completed", text="dispatched")
+
+        # Everything below arrives with the turn already settled. Before agent
+        # turns existed these were dropped, so the completion never reached a
+        # client and the delegate stayed abandoned forever.
+        time.sleep(0.4)
+        ev("subagent", "completed", streamId="bg-task", span="bg-host",
+           text="worker finished")
+        ev("turn", "started")
+        ev("assistant", "completed", streamId="bg-a2",
+           text="the background worker finished")
+        ev("turn", "completed", text="the background worker finished")
+"#
+            }
             Behavior::Slow => {
                 r#"
         ok(mid)
@@ -592,7 +630,7 @@ impl MockRunner {
 
         format!(
             r#"#!/usr/bin/env python3
-import json, sys
+import json, sys, time
 
 NAME = {name:?}
 

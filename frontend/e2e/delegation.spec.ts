@@ -368,3 +368,51 @@ test("a host with no forwarded interior is still worth opening", async ({ page }
   await disclosure.click();
   await expect(agent).toContainText("summarize");
 });
+
+/**
+ * A turn the agent started on its own.
+ *
+ * The gap this closes was total and silent: an event arriving with no turn running was
+ * dropped, so a delegate finishing after its turn had settled was discarded along with
+ * the agent's own report of it. A user told "I'll let you know when it's done" was
+ * never going to be told, and nothing anywhere said why.
+ */
+test("work that finishes after its turn is reported in a turn of the agent's own", async ({
+  page,
+}) => {
+  await createSession(page);
+  await page.getByLabel("Message").fill("unprompted please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+
+  // The dispatching turn ends first, with the delegate still open.
+  await expect(page.getByText("Dispatching a background worker.")).toBeVisible({
+    timeout: 15000,
+  });
+
+  // Then the report arrives with nobody having asked for it. This is the assertion the
+  // whole change exists for: before it, this text never reached the page at all.
+  await expect(
+    page.getByText("The background worker finished while you were away."),
+  ).toBeVisible({ timeout: 20000 });
+
+  // Labelled, because its `requestText` is empty: unlabelled it reads as an answer to
+  // a message the user never wrote.
+  await expect(page.getByText("the agent reported this on its own")).toBeVisible();
+});
+
+test("a delegate that finishes late is reported as finishing, not as abandoned", async ({
+  page,
+}) => {
+  await createSession(page);
+  await page.getByLabel("Message").fill("unprompted please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(
+    page.getByText("The background worker finished while you were away."),
+  ).toBeVisible({ timeout: 20000 });
+
+  // The turn-settle sweep closes what an adapter left open, which is right when
+  // nothing more is coming — and backgrounded work *is* coming. Both records exist and
+  // the later one is the truth, so the delegate's own outcome has to be on the page:
+  // reporting only the sweep's close would say the work never finished when it had.
+  await expect(page.getByText("the background worker finished")).toBeVisible();
+});

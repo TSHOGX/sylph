@@ -196,6 +196,11 @@ impl AppState {
             consolidator.clone(),
         );
         links.set_waiters(turns.waiters()).await;
+        // The other half of settling: a turn the *agent* started has no waiter, so
+        // resolving a channel cannot end it. Without this the first unprompted turn
+        // would sit `running` forever and wedge its session, because the composer
+        // refuses a message while a turn is live.
+        links.set_closer(turns.closer()).await;
         let tracedb = TraceDbClient::new(config.tracedb_bin.clone());
 
         Ok(Self {

@@ -59,6 +59,18 @@ export interface Turn {
   sessionId: string;
   incarnationId: string | null;
   status: TurnStatus;
+  /**
+   * Who started this turn.
+   *
+   * `agent` means nobody did: the agent spoke after its previous turn had settled,
+   * which is how backgrounded work reports finishing. Such a turn has an empty
+   * `requestText` by construction, so this is the only thing that distinguishes it
+   * from a user who sent nothing — and without the distinction it reads as a reply to
+   * a message the user never wrote.
+   *
+   * Optional so a response from an older backend still parses.
+   */
+  origin?: "user" | "agent";
   requestText: string;
   commandInvocationId: string | null;
   idempotencyKey: string | null;

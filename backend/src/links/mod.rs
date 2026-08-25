@@ -152,6 +152,14 @@ pub struct LinkManager {
     /// cycle, since it calls `ensure` — the drain task resolves the channel the
     /// supervisor is parked on. Set once at startup.
     waiters: Arc<RwLock<Option<crate::supervisor::turn::TurnWaiters>>>,
+    /// Records terminal state for a turn no waiter exists for.
+    ///
+    /// An agent-initiated turn has no waiter by definition — nobody asked for it, so
+    /// nothing is parked on its outcome — and resolving a channel is therefore not
+    /// enough to settle one. This is the supervisor's own settling path, factored out
+    /// so both can reach it without the cycle a direct call back would create
+    /// (`supervisor::closer`). Set once at startup, like `waiters`.
+    closer: Arc<RwLock<Option<crate::supervisor::closer::TurnCloser>>>,
     links: Arc<RwLock<HashMap<String, Entry>>>,
     /// Serializes establishment per session.
     ///
@@ -178,6 +186,7 @@ impl LinkManager {
             soul_path,
             seq,
             waiters: Arc::new(RwLock::new(None)),
+            closer: Arc::new(RwLock::new(None)),
             links: Arc::new(RwLock::new(HashMap::new())),
             establishing: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -196,23 +205,71 @@ impl LinkManager {
         *self.waiters.write().await = Some(waiters);
     }
 
+    /// Hand the manager the settling path for turns with no waiter.
+    ///
+    /// Late for the same reason as `set_waiters`, and safe for the same reason: an
+    /// agent cannot have started a turn before the thing that settles turns exists.
+    pub async fn set_closer(&self, closer: crate::supervisor::closer::TurnCloser) {
+        *self.closer.write().await = Some(closer);
+    }
+
     /// Tell a waiting turn how it ended.
-    async fn settle_turn(&self, turn_id: &str, outcome: crate::supervisor::turn::Outcome) {
+    async fn settle_turn(&self, session_id: &str, turn_id: &str, outcome: crate::supervisor::turn::Outcome) {
         // Cloned out from under the read guard, so the guard is not held across
         // the `lock().await` below — holding both would order two locks and
         // invite a deadlock the moment anything takes them the other way.
         let waiters = self.waiters.read().await.clone();
-        let Some(waiters) = waiters else {
-            return;
+        let waiting = match waiters {
+            // Taken out of the map in its own statement so the guard drops before the
+            // send. An `if let` here would hold the lock across it, and the receiving
+            // supervisor may re-enter this manager while draining.
+            Some(waiters) => waiters.lock().await.remove(turn_id),
+            None => None,
         };
-        // Taken out of the map in its own statement so the guard drops before the
-        // send. An `if let` here would hold the lock across it, and the receiving
-        // supervisor may re-enter this manager while draining.
-        let waiting = waiters.lock().await.remove(turn_id);
+
         if let Some(tx) = waiting {
             // A send error means the supervisor stopped waiting, which happens
             // when a stop already settled the turn. Benign.
             let _ = tx.send(outcome);
+            return;
+        }
+
+        // No waiter. Two very different reasons for that, and settling both here is a
+        // bug: an agent-initiated turn never had one, while a *user's* turn whose
+        // waiter is already gone is one the supervisor has claimed and is about to
+        // settle itself.
+        //
+        // Claiming the waiter first is how a stop wins over the link teardown it
+        // causes (see `TurnSupervisor::settle`). Settling every waiter-less turn here
+        // broke that: a stop tore down the link, `handle_close` raised `LinkLost`, and
+        // this path recorded it before the stop's own `cancelled` arrived — so a
+        // deliberate stop was reported as the agent having exited. The old early
+        // return was accidentally right about user turns; `origin` is what makes it
+        // deliberate.
+        match self.store.get_turn(turn_id).await {
+            Ok(Some(turn)) if turn.is_agent_initiated() => {}
+            Ok(_) => return,
+            Err(error) => {
+                error!("Could not read turn {} to settle it: {}", turn_id, error);
+                return;
+            }
+        }
+
+        // An agent-initiated turn is settled through the same closer the supervisor
+        // uses, so it consolidates, closes what it left open, and returns the session
+        // to idle by exactly the path a user's turn does. Left unsettled it would sit
+        // `running` forever, and the session with it: the composer refuses a message
+        // while a turn is live, so one unprompted turn would wedge the session.
+        if let Some(closer) = self.closer.read().await.clone() {
+            closer.close(session_id, turn_id, outcome).await;
+        } else {
+            // Only reachable before wiring completes, which is startup-order rather
+            // than a runtime condition — but a silent skip here is a wedged session,
+            // so it is worth a line.
+            error!(
+                "Turn {} completed with no waiter and no closer; it stays running",
+                turn_id
+            );
         }
     }
 
@@ -484,12 +541,29 @@ impl LinkManager {
     async fn absorb_event(&self, session_id: &str, body: serde_json::Value) {
         let turn_id = match self.store.running_turn_id(session_id).await {
             Ok(Some(id)) => id,
-            // An event outside a turn has nowhere to belong. It happens: an
-            // adapter may report a status as it settles. Logged rather than
-            // journaled under a guessed turn, since a wrong turn id puts the
-            // event in the wrong place in the transcript forever.
-            _ => {
-                debug!("Dropping out-of-turn event for session {}", session_id);
+            // No turn is running, and the agent is speaking anyway. That used to be
+            // treated as impossible and the event was dropped — the reasoning being
+            // that a guessed turn id puts an event in the wrong place in the
+            // transcript forever, which is true, and which is why the answer is to
+            // open the right turn rather than to guess one.
+            //
+            // Measured against claude 2.x: after a turn's `result`, a session with
+            // backgrounded work emits `background_tasks_changed`, `task_updated`, and
+            // `task_notification` when that work finishes, and then an entire exchange
+            // of its own — `init`, an assistant message, another `result`. Its stdout
+            // stays open and the process does not exit. So the drop discarded exactly
+            // the completion a user had been promised, along with the agent's own
+            // report of it, and no monitor, schedule, or background job could ever
+            // reach a client however the rest of the stack was built.
+            Ok(None) => match self.open_agent_turn(session_id).await {
+                Some(id) => id,
+                None => return,
+            },
+            Err(error) => {
+                error!(
+                    "Could not read the running turn for session {}: {}",
+                    session_id, error
+                );
                 return;
             }
         };
@@ -565,7 +639,76 @@ impl LinkManager {
             } else {
                 Outcome::Completed { stop_reason }
             };
-            self.settle_turn(&turn_id, outcome).await;
+            self.settle_turn(session_id, &turn_id, outcome).await;
+        }
+    }
+
+    /// Open a turn for an agent that spoke without being asked.
+    ///
+    /// A real turn, not a container: it consolidates, its events order by sequence,
+    /// and it appears in the transcript where it happened. `origin` records that
+    /// nobody prompted it, which a reader needs and an empty `request_text` cannot
+    /// say on its own (`migrations/006_turn_origin.sql`).
+    ///
+    /// Opened on the *first* out-of-turn event of any kind rather than on a
+    /// `turn`/`started`. The vendor's own turn boundary arrives partway through:
+    /// `task_notification` — the completion this exists to deliver — precedes it. So
+    /// waiting for the bracket would drop the payload and keep only the announcement.
+    /// The adapter's later `turn`/`started` then lands inside this turn instead of
+    /// opening a second one, because a turn is already running by then.
+    ///
+    /// `None` means the turn could not be recorded, and the caller drops the event.
+    /// That is the same outcome as before for a session whose row is gone — a link
+    /// outliving its session — and it stays a drop rather than an unattributed write.
+    async fn open_agent_turn(&self, session_id: &str) -> Option<String> {
+        let turn = crate::models::Turn {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            incarnation_id: None,
+            status: "running".to_string(),
+            origin: "agent".to_string(),
+            // Empty by construction: there was no request. `origin` is what
+            // distinguishes this from a user who sent nothing.
+            request_text: String::new(),
+            command_invocation_id: None,
+            idempotency_key: None,
+            error_code: None,
+            error_message: None,
+            runner_exit_code: None,
+            created_at_ms: now_ms(),
+            started_at_ms: Some(now_ms()),
+            completed_at_ms: None,
+            stopped_at_ms: None,
+        };
+
+        match self.store.create_turn(&turn).await {
+            Ok(created) => {
+                info!(
+                    "Session {} started a turn of its own ({})",
+                    session_id, created.id
+                );
+                // The session is running again, so the composer reflects that rather
+                // than inviting a message the agent is busy to receive.
+                let _ = self.store.update_session_status(session_id, "running").await;
+                // Announced on the session stream, which is the one a client holds
+                // between turns. Without this a client learns about the turn only by
+                // polling, so the notification it exists to carry arrives late or not
+                // at all.
+                self.publish_session_event(
+                    session_id,
+                    "turn-opened",
+                    serde_json::json!({"turnId": created.id, "origin": "agent"}),
+                )
+                .await;
+                Some(created.id)
+            }
+            Err(error) => {
+                error!(
+                    "Could not open an agent-initiated turn on session {}: {}",
+                    session_id, error
+                );
+                None
+            }
         }
     }
 
@@ -642,6 +785,7 @@ impl LinkManager {
         // "the agent stopped" from "the agent finished".
         if let Ok(Some(turn_id)) = self.store.running_turn_id(session_id).await {
             self.settle_turn(
+                session_id,
                 &turn_id,
                 crate::supervisor::turn::Outcome::LinkLost {
                     stderr_tail: stderr_tail.clone(),

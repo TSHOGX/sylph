@@ -4178,3 +4178,137 @@ mod soul {
         );
     }
 }
+
+/// An agent that speaks after its turn ended gets a turn of its own.
+///
+/// The case this exists for: a delegate dispatched into the background finishes after
+/// the turn that started it has settled. Measured against `claude` 2.x, the CLI
+/// reports that completion and then opens an entire exchange to describe it, with
+/// stdout still open — and every one of those events used to be dropped for arriving
+/// outside a turn, so the notification a user had been promised was discarded by the
+/// transport rather than never sent.
+#[tokio::test]
+async fn an_agent_that_speaks_after_its_turn_gets_a_turn_of_its_own() {
+    let backend =
+        common::TestBackend::start_with_runners(&[common::MockRunner::backgrounded("bg")]).await;
+    let session_id = backend.create_session("bg").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "dispatch a background worker"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let first_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    backend.await_turn(&first_id).await;
+
+    // Polled, because the agent's turn is produced by the drain task *after* the first
+    // turn settled — it cannot be observed from the request that started the exchange.
+    let mut agent_turn = None;
+    for _ in 0..100 {
+        let history = json_body(
+            backend
+                .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+                .await,
+        )
+        .await;
+        let found = history["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| {
+                entry["turn"]["origin"] == "agent" && entry["turn"]["status"] == "completed"
+            })
+            .cloned();
+        if let Some(entry) = found {
+            agent_turn = Some(entry);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let entry = agent_turn.expect("the agent's unprompted turn was recorded");
+    assert_ne!(
+        entry["turn"]["id"].as_str().unwrap(),
+        first_id,
+        "a turn of its own, not more events on the one that ended"
+    );
+    // Empty by construction: nobody asked. `origin` is what distinguishes this from a
+    // user who posted no text.
+    assert_eq!(entry["turn"]["requestText"], "");
+
+    // And the report itself survived, which is the whole point.
+    let text: String = entry["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["text"].as_str())
+        .collect();
+    assert!(
+        text.contains("the background worker finished"),
+        "the agent's late report reached the journal: {text}"
+    );
+}
+
+/// A delegate that finishes after its turn is journaled as finishing.
+///
+/// The turn-settle sweep closes what an adapter left open, which is right when nothing
+/// more is coming. Backgrounded work *is* coming, and its real outcome arrives on the
+/// agent's own turn — so both records exist and the later one is the truth. Before
+/// agent turns, the completion was dropped and `abandoned` was the only thing ever
+/// recorded about work that had in fact succeeded.
+#[tokio::test]
+async fn a_backgrounded_delegates_real_outcome_is_recorded() {
+    let backend =
+        common::TestBackend::start_with_runners(&[common::MockRunner::backgrounded("bg")]).await;
+    let session_id = backend.create_session("bg").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "dispatch"}),
+        )
+        .await;
+    let first_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    backend.await_turn(&first_id).await;
+
+    // Across every turn on the session: the delegate's close lands on whichever turn
+    // was running when it arrived, which is the agent's own rather than the one that
+    // dispatched it.
+    let mut found = false;
+    for _ in 0..100 {
+        let history = json_body(
+            backend
+                .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+                .await,
+        )
+        .await;
+        found = history["turns"].as_array().unwrap().iter().any(|entry| {
+            entry["events"].as_array().unwrap().iter().any(|e| {
+                e["kind"] == "subagent"
+                    && e["streamId"] == "bg-task"
+                    && e["source"] == "agent"
+                    && e["text"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("worker finished"))
+            })
+        });
+        if found {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        found,
+        "the delegate's own completion was journaled, not only the server's close"
+    );
+}
