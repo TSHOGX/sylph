@@ -555,13 +555,19 @@ class Fixture:
             # The composer swaps Send for Stop while a turn is live, so this hold is
             # observable rather than guessed at.
             #
-            # Three seconds and not one, because the window is consumed from both ends:
-            # it starts when this sleep begins, and a spec cannot assert until the
-            # browser has painted the reply. Page loads in this suite get slower as
-            # `.e2e-home` accumulates sessions, so a window sized to a fast run is a
-            # window that closes before the assertion on a loaded one — and the failure
-            # would read as a broken overview rather than as a missed window.
-            time.sleep(3)
+            # Eight seconds, and the number is empirical rather than generous. The
+            # window is consumed from *both* ends: it opens when this sleep begins, and
+            # a spec cannot assert until the browser has painted the reply — then it has
+            # to open the strip and read several rows, each with its own polling
+            # deadline. Page loads in this suite get slower as `.e2e-home` accumulates,
+            # so the whole assertion sequence has to fit, not merely start.
+            #
+            # Three seconds fit in isolation and did not under full-suite load: the
+            # slowest-row badge vanished mid-spec, because once the turn settles every
+            # duration degrades to a lower bound and the badge is deliberately withheld.
+            # That failure reads as a broken overview rather than as a closed window,
+            # which is what makes an under-sized hold worse than a slow one.
+            time.sleep(8)
 
         else:
             self._reply(stream=True)

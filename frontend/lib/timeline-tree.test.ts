@@ -558,6 +558,69 @@ describe("trajectoryReport", () => {
     expect(trajectoryReport(host)).not.toContain("script");
   });
 
+  it("never reports a promoted host's tool_result as its summary", () => {
+    // The obvious next step for anyone extending this, because a promoted host's
+    // lifecycle *is* its `tool_result` (§ Promotion) — so reading the result for its
+    // summary too looks consistent. It is not: a result is the tool's output, not the
+    // delegation's account of itself.
+    //
+    // And it is load-bearing. A card's text is matched by `not.toContainText(...)` in
+    // `e2e/delegation.spec.ts`, so a status word inside a summary fails those as though
+    // the status were wrong — a status bug three layers from the cause. The string here
+    // is the real fixture's (`pr-host-d`), which contains "running" and is the exact
+    // ammunition those assertions are exposed to.
+    const nodes = tree([
+      ev({
+        kind: "tool_call",
+        phase: "completed",
+        streamId: "host",
+        name: "Workflow",
+        text: JSON.stringify({ script: "parallel([sleep20, sleep15])" }),
+      }),
+      ev({ kind: "subagent", phase: "started", streamId: "task", span: "host", name: "W" }),
+      ev({
+        kind: "tool_result",
+        phase: "completed",
+        streamId: "host",
+        name: "Workflow",
+        text: "dispatched; running in background",
+      }),
+    ]);
+
+    const host = nodes.find((node) => node.trajectory === "host")!;
+    expect(host.row.result?.text).toBe("dispatched; running in background");
+    expect(trajectoryReport(host)).toBeUndefined();
+  });
+
+  it("reports nothing for a trajectory the server closed, rather than inventing one", () => {
+    // The sweep's closing event carries `String::new()` deliberately: nobody reported an
+    // outcome, and a card that filled that silence with the server's own close would be
+    // stating one. Pinned because the close is a `subagent` event on the row, which is
+    // exactly the shape a real summary has.
+    const nodes = tree([
+      ev({
+        kind: "tool_call",
+        phase: "completed",
+        streamId: "host",
+        name: "Workflow",
+        text: JSON.stringify({ script: "phase('Stage A')" }),
+      }),
+      ev({ kind: "subagent", phase: "started", streamId: "task", span: "host", name: "A" }),
+      ev({
+        kind: "subagent",
+        phase: "completed",
+        streamId: "host",
+        text: "",
+        isError: true,
+        data: { closedBy: "server", reason: "abandoned" },
+      }),
+    ]);
+
+    const host = nodes.find((node) => node.trajectory === "host")!;
+    expect(host.status).toBe("abandoned");
+    expect(trajectoryReport(host)).toBeUndefined();
+  });
+
   it("says nothing when a delegation reported nothing", () => {
     const nodes = tree([opens("s1", "Quiet"), closes("s1")]);
     expect(trajectoryReport(nodes[0])).toBeUndefined();

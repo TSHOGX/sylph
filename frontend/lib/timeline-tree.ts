@@ -697,6 +697,19 @@ export function pathTo(
  *    put a wall of JSON where a sentence belongs. Its outcome instead arrives as the
  *    `subagent` close kept *beside* the row — `trajectoryClose`, which exists exactly
  *    so a promotion does not overwrite the call.
+ *
+ *    **And not its `tool_result` either**, however reasonable that looks: a promoted
+ *    host's lifecycle *is* its result (`docs/session-protocol.md` § Promotion), so
+ *    reaching for `row.result` here is the obvious next step for anyone extending this.
+ *    It is wrong because a result is the tool's output, not the delegation's account of
+ *    itself — and it is load-bearing beyond taste. A card's text is matched by
+ *    `not.toContainText(...)` assertions in `e2e/delegation.spec.ts`, so a status word
+ *    appearing inside a summary fails them as though the *status* were wrong. The real
+ *    fixture already contains the ammunition: `pr-host-d`'s result reads
+ *    "dispatched; running in background", and the `promote` scenario asserts that host
+ *    is not `failed` and that a server-closed trajectory is not `running`. The test
+ *    below pins this so the rule fails here, next to the reason, rather than three
+ *    layers away as a status bug.
  * 2. **A close outranks progress.** Progress is a snapshot of work in flight; once the
  *    delegation reports an outcome, the snapshot describes a state that has been
  *    superseded. Preferring the fresher-arriving field would leave a finished

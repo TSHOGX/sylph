@@ -137,6 +137,22 @@ test("assistant prose renders Markdown without chat bubbles", async ({ page }) =
  * answer is visible without an overview, so a two-delegate scenario cannot observe
  * whether the comparison works.
  */
+/**
+ * Assert the turn is still live, so a closed window fails as itself.
+ *
+ * Exactness is only available while a turn is live, and the badge that depends on it is
+ * *deliberately* withheld once durations degrade to bounds. So a window that closed
+ * mid-spec presents as a missing badge — a broken overview — rather than as a timing
+ * problem, which is the most expensive way for this to fail. Called immediately before
+ * the assertions that need exactness, not only at the top.
+ */
+async function stillLive(page: Page, what: string) {
+  await expect(
+    page.getByRole("button", { name: "Stop", exact: true }),
+    `the turn settled before ${what}; the fixture's post-reply hold was too short for this run`,
+  ).toBeVisible();
+}
+
 /** Open the strip and hand back its region. */
 async function openOverview(page: Page) {
   const overview = page.getByRole("region", { name: "Delegation overview" });
@@ -154,6 +170,7 @@ test("a fan-out reports which delegation was the slow one", async ({ page }) => 
   await runFanoutLive(page);
 
   const overview = await openOverview(page);
+  await stillLive(page, "the slowest row could be read");
 
   // The answer, on the row it belongs to. `Survey` is the outlier the fixture builds;
   // asserting the label rather than a bar width is what keeps this about the claim
@@ -210,6 +227,7 @@ test("the overview is legible without seeing the bars", async ({ page }) => {
   await runFanoutLive(page);
 
   const overview = await openOverview(page);
+  await stillLive(page, "the accessible names could be read");
 
   // Each row's accessible name carries what its bar shows. A purely visual overview
   // excludes the reader who most needs a summary, so the durations, the ordering
@@ -290,13 +308,26 @@ test("a promoted host reports its outcome, not its own arguments", async ({ page
   await page.getByLabel("Message").fill("promote this please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Running a workflow.")).toBeVisible({ timeout: 15_000 });
+  // Waited to settle, so the tree is stable before it is read. Mid-stream this scenario
+  // is still opening and closing four hosts, and a card read then can be a row that a
+  // later phase reshapes.
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible({
+    timeout: 20_000,
+  });
 
   // A promoted host's `text` is its tool call's serialized input, so reading `text`
   // uniformly would caption the card with a JSON blob. Its outcome arrives as the
   // `subagent` close held beside the row — the field that exists so promotion does not
   // overwrite the call. `Agent` is the host that forwards no interior, which is exactly
   // where this summary is the only thing anyone can learn.
-  const agent = page.getByRole("region", { name: "Agent delegation" });
+  //
+  // `exact` is not optional here: accessible-name matching is a *substring* match, so
+  // "Agent delegation" also matches "Subagent delegation" — the fallback name a
+  // trajectory renders when it has none. This scenario can produce one, because
+  // `pr-host-b`'s close is a `subagent` event carrying text and no name, so a build that
+  // ever sees that close without its `tool_call` row makes an unnamed row from it. It
+  // cost a strict-mode failure that read as the summary being absent.
+  const agent = page.getByRole("region", { name: "Agent delegation", exact: true });
   await expect(agent).toContainText("reported nothing");
   await expect(agent).not.toContainText("summarize");
 });
