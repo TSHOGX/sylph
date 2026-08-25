@@ -1686,6 +1686,13 @@
               "null"
             ],
             "description": "Live session id when this archived session was already imported, so the UI opens the conversation instead of listing it twice."
+          },
+          "subagents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArchiveDelegate"
+            },
+            "description": "The folded subagents themselves; subagentCount is always its length. A count alone is a dead end, since half a real archive is delegated work and the client needs a way to open it. Session-level: the archive records no event-level parent pointer, so this says a delegation happened, never where in the parent's transcript. Omitted when there are none."
           }
         }
       },
@@ -1728,7 +1735,9 @@
           "id",
           "agent",
           "events",
-          "truncated"
+          "truncated",
+          "flat",
+          "delegationsTruncated"
         ],
         "properties": {
           "id": {
@@ -1773,6 +1782,29 @@
               "string",
               "null"
             ]
+          },
+          "delegations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArchiveDelegate"
+            },
+            "description": "Sessions this one delegated to. Complete for delegates whose id carries the parent as a prefix (2104 of 2316 measured); the rest record only a parent that only `show` reports, at 11.5 ms per row, and are reached from the parent's directory listing instead. Omitted when there are none."
+          },
+          "delegationsTruncated": {
+            "type": "boolean",
+            "description": "True when the delegation scan stopped at its row ceiling, so the list may be short. Distinguishes 'none' from 'did not finish looking'."
+          },
+          "parentId": {
+            "type": "string",
+            "description": "The session that delegated this one. Half of a real archive is delegated work, so without this a transcript opened from a search hit reads as a conversation someone started."
+          },
+          "forkedFrom": {
+            "type": "string",
+            "description": "The session this one forked or resumed from. A different relationship from parentId: a fork replays its origin's whole prefix, which is what explains a transcript that appears to open mid-conversation."
+          },
+          "flat": {
+            "type": "boolean",
+            "description": "True when the archive records no event-level delegation structure, which is every agent measured. No archived event carries a span: data_json is null on all 36308 events sampled, and parent_id is a per-agent conversation chain rather than a delegation pointer. Stated on the wire because it decides the honest rendering."
           }
         }
       },
@@ -2372,6 +2404,47 @@
           "chosen": {
             "type": "boolean",
             "description": "True for the one directory discovery actually reads."
+          }
+        }
+      },
+      "ArchiveDelegate": {
+        "type": "object",
+        "description": "One delegated session, as its parent reports it. Thinner than ArchiveSession on purpose: a disclosure row under its parent, built from the listing page the server was already reading. There is no opening-ask fallback for the title, because that costs a request per child and one measured parent has 193 of them.",
+        "required": [
+          "id",
+          "agent",
+          "events"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "TraceDB session id, including any /agent- suffix.",
+            "example": "claude:f1830315-5ce1-44e3-86c0-8f65ccbc961e/agent-a6e09e69b1b293ad2"
+          },
+          "agent": {
+            "type": "string",
+            "example": "claude"
+          },
+          "title": {
+            "type": "string",
+            "description": "The archive's own title. codex and pi record none."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Present only when this delegate ran somewhere other than its parent, which 484 of 2238 measured did."
+          },
+          "events": {
+            "type": "integer",
+            "format": "int64",
+            "example": 14
+          },
+          "startedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "endedAtMs": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       }

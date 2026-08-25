@@ -82,6 +82,23 @@ const MAX_UPSTREAM_ROWS: usize = 4000;
 /// discarded: wrong directory, subagent, or empty.
 const UPSTREAM_PAGE: usize = 500;
 
+/// How many rows the per-transcript delegation scan may examine.
+///
+/// Much larger than [`MAX_UPSTREAM_ROWS`], and for a reason that is about what the
+/// two ceilings mean rather than about generosity. That one bounds a *listing*,
+/// which is polled and which can honestly answer "here is a page, ask for more".
+/// This one bounds a search for the children of one session: there is no next page
+/// to defer to, so stopping early means reporting a session as having fewer
+/// delegates than it has.
+///
+/// Sized against the measured archive, not guessed: a full unfiltered pass is 4922
+/// rows in 10 pages at 164 ms, so 25000 rows is roughly 830 ms in the worst case
+/// and is paid only when someone deliberately opens a transcript. The ceiling
+/// exists so the request cannot become unbounded, not as a routine cut — an
+/// archive that reaches it gets `delegationsTruncated`, which is then a real signal
+/// instead of a constant.
+const MAX_DELEGATION_SCAN_ROWS: usize = 25_000;
+
 /// One archived session, as the sidebar and history browser render it.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +122,20 @@ pub struct ArchiveSession {
     pub events: i64,
     /// Subagent sessions spawned by this one, folded in rather than listed.
     pub subagent_count: i64,
+    /// The folded subagents themselves, in the order the archive reported them.
+    ///
+    /// A count alone is a dead end: the archive knows *which* sessions were
+    /// delegated — half of it is delegated work — and a user who reads "13
+    /// subagents" has no way to open any of them. The fold already visits every
+    /// child to count it, so reporting identity here costs nothing beyond the
+    /// bytes.
+    ///
+    /// Session-level, deliberately. See [`normalize_events`]: the archive records
+    /// no event-level parent pointer, so nothing here says *where* in the parent's
+    /// transcript a delegation happened, and the client must not imply that it
+    /// does.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subagents: Vec<ArchiveDelegate>,
     /// Set when this session is a fork of another: the origin's TraceDB id.
     ///
     /// A fork replays its origin's whole prefix, so the two read as one
@@ -119,6 +150,39 @@ pub struct ArchiveSession {
     /// UI opens the live conversation instead of showing it twice.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+}
+
+/// One delegated session, as its parent's row reports it.
+///
+/// Deliberately thinner than [`ArchiveSession`]: this is a row in a disclosure
+/// under its parent, not a listing of its own, and every field here comes from
+/// the `list` page the fold was already reading. In particular there is no
+/// `label` fallback to the opening user turn — that costs a second request per
+/// child, and one measured parent has 193 of them. `title` is whatever the
+/// archive recorded, which for `claude` is most sessions and for `codex` and `pi`
+/// is none; a client that wants more opens the child.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveDelegate {
+    /// TraceDB session id, including the `/agent-…` suffix when it has one.
+    pub id: String,
+    pub agent: String,
+    /// The archive's own title. Absent for the agents that record none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Recorded working directory, when it differs from the parent's.
+    ///
+    /// Present only when different, because equal is the common case and the
+    /// difference is the interesting one: 484 of 2238 subagents in the local
+    /// archive ran somewhere else, typically a worktree. A child listed under its
+    /// parent while having run elsewhere is worth saying so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub events: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at_ms: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -148,9 +212,39 @@ async fn parent_in_directory(state: &AppState, parent: &str, workdir: &str) -> b
         Ok(Some(session)) => session.cwd.as_deref().map(normalize).as_deref() == Some(workdir),
         Ok(None) => false,
         Err(detail) => {
-            tracing::warn!("Parent lookup failed for {}: {}", parent, detail);
+            report_tracedb_failure(
+                state,
+                &format!("Parent lookup failed for {}", parent),
+                &detail,
+            );
             false
         }
+    }
+}
+
+/// Build a delegate row from the `list` summary the fold already holds.
+///
+/// `cwd` is the child's normalized directory and `parent_cwd` the parent's;
+/// the field is reported only when they differ, so an ordinary same-directory
+/// delegation carries no redundant path.
+fn delegate_of(
+    summary: &crate::tracedb::SessionSummary,
+    cwd: &str,
+    parent_cwd: &str,
+) -> ArchiveDelegate {
+    ArchiveDelegate {
+        id: summary.id.clone(),
+        agent: summary.agent.clone(),
+        title: summary
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(crate::tracedb::summarize_line),
+        cwd: (cwd != parent_cwd).then(|| cwd.to_string()),
+        events: summary.events,
+        started_at_ms: summary.started_at_ms,
+        ended_at_ms: summary.ended_at_ms,
     }
 }
 
@@ -180,10 +274,10 @@ pub async fn list(
     // Parent id -> index in `rows`, so a child found after its parent increments
     // the right row.
     let mut by_parent: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    // Subagent counts for a parent not yet seen. The archive orders newest-first
-    // and a subagent commonly ends after the session that spawned it, so a child's
-    // row often arrives before its parent's.
-    let mut pending_children: std::collections::HashMap<String, i64> =
+    // Subagents of a parent not yet seen. The archive orders newest-first and a
+    // subagent commonly ends after the session that spawned it, so a child's row
+    // often arrives before its parent's.
+    let mut pending_children: std::collections::HashMap<String, Vec<ArchiveDelegate>> =
         std::collections::HashMap::new();
     // Sessions folded away, so a fork's other side is recognized whichever order
     // the two arrive in, and a child is never also listed as a row.
@@ -203,7 +297,7 @@ pub async fn list(
         {
             Ok(page) => page,
             Err(detail) => {
-                tracing::warn!("TraceDB list failed: {}", detail);
+                report_tracedb_failure(&state, "TraceDB list failed", &detail);
                 return Ok(Json(ArchiveListResponse {
                     sessions: Vec::new(),
                     next_cursor: None,
@@ -247,7 +341,11 @@ pub async fn list(
             // not.
             let metadata = state.tracedb.session_metadata(&summary.id).await;
             if let Err(detail) = &metadata {
-                tracing::warn!("Lineage lookup failed for {}: {}", summary.id, detail);
+                report_tracedb_failure(
+                    &state,
+                    &format!("Lineage lookup failed for {}", summary.id),
+                    detail,
+                );
             }
             let metadata = metadata.ok().flatten();
             let lineage = metadata
@@ -280,6 +378,8 @@ pub async fn list(
                     // commonly outlives its parent.
                     if let Some(&at) = by_parent.get(parent) {
                         rows[at].subagent_count += 1;
+                        let delegate = delegate_of(&summary, &cwd, &rows[at].cwd);
+                        rows[at].subagents.push(delegate);
                         continue;
                     }
                     // Cached: one parent commonly has dozens of children — 193 in
@@ -293,7 +393,14 @@ pub async fn list(
                         }
                     };
                     if local {
-                        *pending_children.entry(parent.to_string()).or_insert(0) += 1;
+                        // `local` is exactly "the parent's recorded cwd is this
+                        // workdir", so the parent's directory is known here without
+                        // having seen its row yet.
+                        let delegate = delegate_of(&summary, &cwd, &workdir);
+                        pending_children
+                            .entry(parent.to_string())
+                            .or_default()
+                            .push(delegate);
                         continue;
                     }
                     // Falls through and is listed.
@@ -339,9 +446,12 @@ pub async fn list(
                 .await?
                 .map(|session| session.id);
 
+            let subagents = pending_children.remove(&summary.id).unwrap_or_default();
+
             by_parent.insert(summary.id.clone(), rows.len());
             rows.push(ArchiveSession {
-                subagent_count: pending_children.remove(&summary.id).unwrap_or(0),
+                subagent_count: subagents.len() as i64,
+                subagents,
                 fork_of,
                 id: summary.id,
                 agent: summary.agent,
@@ -397,11 +507,137 @@ pub struct TranscriptResponse {
     pub started_at_ms: Option<i64>,
     /// Normalized into the same shape the live timeline renders.
     pub events: Vec<StreamEvent>,
+    /// Sessions this one delegated to, which is the downward half of the tree.
+    ///
+    /// Found by one pass over `list` bounded by [`MAX_DELEGATION_SCAN_ROWS`],
+    /// because TraceDB offers no parent
+    /// filter — the ops are `stats`, `search`, `list`, `show`, `reconstruct`, and
+    /// only `show` reports lineage, per session. Measured against the local
+    /// archive: a full unfiltered pass is 4922 rows in 10 pages at **164 ms**, and
+    /// building the child index from it costs 1 ms. A transcript is opened
+    /// deliberately rather than polled, so that is affordable where it would not
+    /// be on the sidebar's path.
+    ///
+    /// **Complete for delegates whose id carries the parent as a prefix, and
+    /// deliberately not otherwise.** 2104 of the archive's 2316 delegates are
+    /// named `<parent>/agent-…`, so a prefix test finds them from the listing
+    /// alone. The remaining 212 — almost all `opencode` — record only a
+    /// `parent_session_id`, which is visible only to `show`: finding them means a
+    /// metadata call per candidate row, measured at 11.5 ms each and **52.9 s**
+    /// across the archive. That is not a request anyone can wait on, so those
+    /// delegates are reached from their parent's *directory listing*, where the
+    /// fold already reads their metadata for a different reason.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub delegations: Vec<ArchiveDelegate>,
+    /// True when the delegation scan hit its row ceiling, so `delegations` may be
+    /// short. Distinguishes "no delegates" from "did not finish looking".
+    pub delegations_truncated: bool,
+    /// The session that delegated this one, when it is delegated work.
+    ///
+    /// Free: `show` already reports it, so this needs no extra request. It is the
+    /// upward half of the session-level tree — a delegate opened from its parent's
+    /// row can get back, and one opened from a search hit can find out it is not a
+    /// conversation someone started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// The session this one was forked or resumed from.
+    ///
+    /// A different relationship from `parentId` and not a delegation: a fork
+    /// replays its origin's whole prefix, so the two read as one conversation and
+    /// the link is what explains a transcript that opens mid-conversation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
+    /// True when the archive records no event-level delegation structure for this
+    /// agent, which is every agent measured.
+    ///
+    /// Stated on the wire rather than assumed by the client, because the honest
+    /// rendering depends on it: a flat transcript whose delegations are separate
+    /// sessions must not be drawn as though its tool calls host trajectories. See
+    /// [`normalize_events`].
+    pub flat: bool,
     /// True when `limit` cut the stream short.
     pub truncated: bool,
     /// Live session id when already imported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+}
+
+/// Report a failed TraceDB call at a level that matches what it means.
+///
+/// A query that failed because the binary is absent is not news: the client
+/// already announced that once at `error`, and it is a persistent state rather than
+/// a recurring event. The sidebar polls the listing for every expanded workspace,
+/// so logging it per request turns one missing install into an unbounded stream —
+/// measured at 2339 identical lines in a single E2E run, which is a no-TraceDB
+/// install by construction. A genuine query failure against a *reachable* archive
+/// is news, and still warns.
+pub(crate) fn report_tracedb_failure(state: &AppState, context: &str, detail: &str) {
+    if state.tracedb.unavailability_reported() {
+        tracing::debug!("{}: {}", context, detail);
+    } else {
+        tracing::warn!("{}: {}", context, detail);
+    }
+}
+
+/// Sessions the archive names as children of `parent`, newest first.
+///
+/// One pass over an unfiltered `list`, matching on the id prefix. The `cwd` filter
+/// is deliberately *not* used to narrow this: 484 of 2238 local delegates ran in a
+/// different directory than their parent, so filtering by the parent's directory
+/// would drop exactly the delegates whose location is most worth reporting — and
+/// the filter is an unanchored substring match besides.
+///
+/// Returns `(delegates, truncated)`. An unreachable archive answers empty rather
+/// than failing the transcript: the events are already in hand, and losing the
+/// delegation list is not worth losing the conversation over.
+async fn delegations_of(
+    state: &AppState,
+    parent: &str,
+    parent_cwd: Option<&str>,
+) -> (Vec<ArchiveDelegate>, bool) {
+    let prefix = format!("{parent}/");
+    let mut found: Vec<ArchiveDelegate> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut examined = 0usize;
+    let parent_cwd = parent_cwd.map(normalize).unwrap_or_default();
+
+    while examined < MAX_DELEGATION_SCAN_ROWS {
+        let page = match state.tracedb.list(None, UPSTREAM_PAGE, cursor.as_deref()).await {
+            Ok(page) => page,
+            Err(detail) => {
+                // Not an error for the caller: a transcript without its delegation
+                // list is still the transcript. Logged once per request, and the
+                // client is told the list is incomplete.
+                report_tracedb_failure(
+                    state,
+                    &format!("Delegation scan failed for {}", parent),
+                    &detail,
+                );
+                return (found, true);
+            }
+        };
+        examined += page.sessions.len();
+        let exhausted = page.next_cursor.is_none();
+        cursor = page.next_cursor;
+
+        for summary in &page.sessions {
+            if !summary.id.starts_with(&prefix) {
+                continue;
+            }
+            // An ingested-but-empty session has nothing to open.
+            if summary.events == 0 {
+                continue;
+            }
+            let cwd = summary.cwd.as_deref().map(normalize).unwrap_or_default();
+            found.push(delegate_of(summary, &cwd, &parent_cwd));
+        }
+
+        if exhausted {
+            return (found, false);
+        }
+    }
+
+    (found, true)
 }
 
 /// GET /api/v1/archive/sessions/{trace_id}
@@ -447,6 +683,21 @@ pub async fn transcript(
         .await?
         .map(|session| session.id);
 
+    // Lineage from the archive's own record, with the id suffix as the fallback it
+    // is elsewhere in this module: `parent_session_id` is authoritative but 199
+    // subagents record only a suffix, and the reverse case exists too.
+    let parent_id = match trace.session.lineage() {
+        Lineage::Subagent { parent } => Some(parent.to_string()),
+        _ => split_lineage(&trace.session.id).map(|(parent, _)| parent.to_string()),
+    };
+    let forked_from = match trace.session.lineage() {
+        Lineage::Fork { origin } => Some(origin.to_string()),
+        _ => None,
+    };
+
+    let (delegations, delegations_truncated) =
+        delegations_of(&state, trace_id, trace.session.cwd.as_deref()).await;
+
     Ok(Json(TranscriptResponse {
         id: trace.session.id,
         agent: trace.session.agent,
@@ -454,6 +705,14 @@ pub async fn transcript(
         cwd: trace.session.cwd,
         started_at_ms: trace.session.started_at_ms,
         events,
+        delegations,
+        delegations_truncated,
+        parent_id,
+        forked_from,
+        // No agent in the archive records an event-level parent pointer, so an
+        // archived transcript is flat as a matter of what was stored, not of what
+        // this endpoint chose to send.
+        flat: true,
         truncated,
         session_id,
     }))
@@ -555,11 +814,37 @@ fn normalize_events(events: &[TraceEvent]) -> Vec<StreamEvent> {
             // Archived events are settled history, never mid-stream.
             phase: Some("completed".to_string()),
             stream_id,
-            // TraceDB records a delegation as a *separate session* with its own
-            // lineage (§ `Lineage::Subagent`), not as a trajectory inside one
-            // session's stream — and its `parent_id` pairs a result to its call,
-            // which is a different relationship. So an archived stream is always
-            // root-level, and a delegated one is reached by opening that session.
+            // Always `None`, and that is a measurement rather than a shortcut.
+            //
+            // A live turn carries delegation in each event's `span`. Nothing in
+            // the archive carries an equivalent: `data_json` — the only place a
+            // raw vendor payload could survive, and where `claude`'s own
+            // `parent_tool_use_id` lives — is null on all 36308 events sampled
+            // across all five agents. So there is no event-level parent pointer
+            // to translate.
+            //
+            // `parent_id` is emphatically not one, and reusing it would be the
+            // damaging mistake here, because it means something different per
+            // agent. Measured over 164 sessions: for `claude` it is the
+            // `parentUuid` conversation chain, where 13689 of 15119 pointers
+            // name the immediately preceding event and fanout is 1 — as a `span`
+            // that nests a whole transcript into a single chain thousands deep.
+            // `opencode` uses it to group parts under a message (fanout 4-5),
+            // `pi` mixes both, and `codex` and `gemini` never set it at all.
+            // Only the `tool_result` → `tool_call` case is a real relationship,
+            // and that is what `stream_id` above already carries.
+            //
+            // Attribution to the *specific* call that delegated was measured and
+            // rejected: `claude` names a child `<parent>/agent-a<name>-<hash>`,
+            // but 1918 of 2104 suffixes in the local archive are hash-only with
+            // no name to match, so it recovers 8.8% and silently misattributes
+            // on collision. A structure that is right for one delegation in
+            // eleven is worse than an honest flat transcript, because nothing on
+            // screen distinguishes the two.
+            //
+            // So delegation is reported where the archive actually records it —
+            // session level, as `subagents` on a listing row and `parentId`
+            // here.
             span: None,
             name: event.name.clone(),
             text: event.text.clone().unwrap_or_default(),
@@ -693,6 +978,167 @@ mod tests {
             events[0].stream_id, events[1].stream_id,
             "a result must group with its call",
         );
+    }
+
+    /// Real ids from the local archive, because a wrong one passes.
+    ///
+    /// Both id spaces here are disjoint from Sylph's UUIDs, and an id that merely
+    /// looks plausible would satisfy every assertion below while proving nothing
+    /// about what TraceDB actually emits. These were read out of the archive with
+    /// `trace-db api`, and the parent/child pair is a genuine `claude` delegation
+    /// that ran in `/Users/hsw/Workspace/learn/ielts`.
+    const REAL_PARENT: &str = "claude:53e66af0-0ffa-49ed-8026-4e3823a285a9";
+    const REAL_CHILD: &str =
+        "claude:53e66af0-0ffa-49ed-8026-4e3823a285a9/agent-amorphology-ch05-137ddc835b490511";
+    /// A real `opencode` delegation, which records a parent while carrying no
+    /// suffix — the 212 cases the id shape cannot see.
+    const REAL_SUFFIXLESS_CHILD: &str = "opencode:ses_fc911ef21ffeea4YjsIy3jxkXR";
+    const REAL_SUFFIXLESS_PARENT: &str = "opencode:ses_fc9401b73ffePlTal4Zxc1XuzG";
+
+    fn trace_session(id: &str) -> crate::tracedb::TraceSession {
+        crate::tracedb::TraceSession {
+            id: id.to_string(),
+            agent: "claude".to_string(),
+            cwd: None,
+            title: None,
+            parent_session_id: None,
+            forked_from: None,
+            started_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_delegated_transcript_reports_the_parent_that_spawned_it() {
+        // The upward half of the session-level tree. Without it a delegate opened
+        // from a search hit reads as a conversation someone started, which for half
+        // the archive is wrong.
+        let mut child = trace_session(REAL_CHILD);
+        child.parent_session_id = Some(REAL_PARENT.to_string());
+
+        assert_eq!(
+            child.lineage(),
+            Lineage::Subagent { parent: REAL_PARENT },
+            "a recorded parent is the delegation link the transcript reports",
+        );
+    }
+
+    #[test]
+    fn a_delegate_recording_no_suffix_still_reports_its_parent() {
+        // `opencode` names a child as a session of its own, so the id shape says
+        // nothing. Only `parent_session_id` does, and reading the suffix alone
+        // leaves this session claiming to be work someone started.
+        let mut child = trace_session(REAL_SUFFIXLESS_CHILD);
+        child.agent = "opencode".to_string();
+        child.parent_session_id = Some(REAL_SUFFIXLESS_PARENT.to_string());
+
+        assert_eq!(
+            child.lineage(),
+            Lineage::Subagent {
+                parent: REAL_SUFFIXLESS_PARENT
+            },
+        );
+        assert!(
+            split_lineage(REAL_SUFFIXLESS_CHILD).is_none(),
+            "this id carries no suffix, which is why the recorded parent is the only signal",
+        );
+    }
+
+    #[test]
+    fn an_archived_transcript_carries_no_event_level_delegation_structure() {
+        // The claim the whole design rests on: the archive stores no equivalent of
+        // `span`, so nothing here may synthesize one. `parent_id` is the nearest
+        // field and is a different relationship — for `claude` it chains a
+        // conversation, so honouring it as a span would nest a transcript into a
+        // single chain thousands deep.
+        let mut first = trace_event("assistant", Some("thinking about it"));
+        first.native_id = Some("evt-1".to_string());
+        let mut second = trace_event("assistant", Some("still thinking"));
+        second.native_id = Some("evt-2".to_string());
+        // The conversation chain: the second event names the first as its parent.
+        second.parent_id = Some("evt-1".to_string());
+
+        let events = normalize_events(&[first, second]);
+
+        assert!(
+            events.iter().all(|event| event.span.is_none()),
+            "a conversation chain must never be published as delegation structure",
+        );
+    }
+
+    #[test]
+    fn a_result_still_pairs_with_its_call_even_though_nothing_gets_a_span() {
+        // The one real relationship `parent_id` does carry. Dropping spans must not
+        // cost this, or an archived tool call loses its output.
+        let mut call = trace_event("tool_call", Some("{}"));
+        call.native_id = Some("call-evt".to_string());
+        let mut result = trace_event("tool_result", Some("output"));
+        result.parent_id = Some("call-evt".to_string());
+
+        let events = normalize_events(&[call, result]);
+
+        assert_eq!(events[0].stream_id, events[1].stream_id);
+        assert!(events.iter().all(|event| event.span.is_none()));
+    }
+
+    #[test]
+    fn a_delegate_row_reports_its_directory_only_when_it_differs_from_its_parent() {
+        // 484 of 2238 subagents ran somewhere else, typically a worktree, and that
+        // difference is worth showing. Equality is the common case and repeating the
+        // parent's own path on every child row is noise.
+        let summary = crate::tracedb::SessionSummary {
+            id: REAL_CHILD.to_string(),
+            agent: "claude".to_string(),
+            cwd: Some("/Users/hsw/Workspace/learn/ielts".to_string()),
+            title: None,
+            model: None,
+            started_at_ms: None,
+            ended_at_ms: None,
+            events: 14,
+        };
+
+        let same = delegate_of(
+            &summary,
+            "/Users/hsw/Workspace/learn/ielts",
+            "/Users/hsw/Workspace/learn/ielts",
+        );
+        assert_eq!(same.cwd, None, "a same-directory delegate repeats no path");
+        assert_eq!(same.id, REAL_CHILD);
+        assert_eq!(same.events, 14);
+
+        let elsewhere = delegate_of(
+            &summary,
+            "/Users/hsw/Workspace/learn/ielts/worktree",
+            "/Users/hsw/Workspace/learn/ielts",
+        );
+        assert_eq!(
+            elsewhere.cwd.as_deref(),
+            Some("/Users/hsw/Workspace/learn/ielts/worktree"),
+            "a delegate that ran elsewhere must say so",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_absent_archive_is_reported_once_rather_than_once_per_request() {
+        // A supported degraded configuration must not produce a log line per
+        // request. The client announces the absent binary once at `error`; a caller
+        // that warns anyway rebuilds the unbounded stream one layer up, which is
+        // what the sidebar did to this endpoint — 2339 identical lines in one E2E
+        // run against a no-TraceDB install.
+        let client = crate::tracedb::Client::new("/nonexistent/trace-db".into());
+
+        assert!(
+            !client.unavailability_reported(),
+            "nothing has been said before the first attempt",
+        );
+        assert!(!client.probe().await, "an absent binary cannot answer");
+        assert!(
+            client.unavailability_reported(),
+            "after the first failure a caller must be able to see it was announced",
+        );
+        // Still unavailable, and still known to have been announced: quieter
+        // logging must never make an absent archive look present.
+        assert!(!client.probe().await);
+        assert!(client.unavailability_reported());
     }
 
     #[test]

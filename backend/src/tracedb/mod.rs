@@ -542,6 +542,25 @@ impl Client {
         self.stats().await.is_ok()
     }
 
+    /// Whether this client has already announced that the binary cannot be
+    /// spawned.
+    ///
+    /// Exists so a caller can hold to the same discipline the client does. An
+    /// absent TraceDB is a supported configuration and a *persistent state*, so it
+    /// is one fact about the run rather than one fault per request — the client
+    /// reports it once at `error` and at `debug` after. A caller that then logs its
+    /// own `warn` per request reproduces the unbounded stream one layer up, which
+    /// is exactly what the sidebar does to the archive listing: measured at **2339
+    /// identical lines** in one E2E run, which is precisely a no-TraceDB install.
+    ///
+    /// Reading this flag is deliberately not the same as string-matching the error.
+    /// The message text is TraceDB's and may be reworded; the flag is this client's
+    /// own record of having spoken.
+    pub fn unavailability_reported(&self) -> bool {
+        self.spawn_failure_reported
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Archive-wide counts. `None` when the archive is unreachable, which is the
     /// same meaning [`Self::probe`] carries.
     pub async fn archive_counts(&self) -> Option<ArchiveCounts> {
@@ -740,9 +759,15 @@ impl Client {
     /// Session-level metadata for one archived session, without its events.
     ///
     /// An event slice of `(0, 0)` asks for a single event, which is the cheapest
-    /// shape `show` offers: measured warm at ~0.5 ms and ~1.1 KB per call against
-    /// the local archive, the same order as the label lookup a listing already
-    /// pays, where a bare `show` on the same session returns up to 20 MB.
+    /// shape `show` offers — but cheapest is not cheap, and an earlier figure of
+    /// ~0.5 ms here was optimistic by more than an order of magnitude. Re-measured
+    /// over 300 sequential calls against a 4922-session archive: **11.5 ms** and
+    /// ~2.5 KB per call, so a 20-row listing page spends ~230 ms on lineage and a
+    /// whole-archive scan would cost 52.9 s. Still far cheaper than a bare `show`
+    /// on the same session, which returns up to 20 MB.
+    ///
+    /// The number is why callers cache per parent and why nothing on a polled path
+    /// walks the archive one row at a time.
     ///
     /// The listing needs this because `list` reports no lineage: without it,
     /// subagent detection falls back to the id suffix and misses the 199 sessions

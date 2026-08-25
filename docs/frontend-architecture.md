@@ -2075,6 +2075,47 @@ is offered as an explicit action, disabled with its reason shown when the archiv
 recorded no `cwd` — `POST /sessions/import` rejects those, and a button that always
 fails is worse than one that explains itself. There is no composer.
 
+#### Delegation is shown beside the transcript, not inside it
+
+A live turn nests a subagent's work inside the tool call that spawned it, because
+every event carries a `span`. An archived transcript carries none, and the page has
+to be built around that rather than around the resemblance: the backend sets
+`flat: true` and no archived event has a `span` at all, because TraceDB stores no
+event-level parent pointer (`docs/api-design.md` § An archived transcript is flat).
+
+So the page renders two session-level surfaces and nothing that imitates a
+trajectory:
+
+- **`LineageBar`**, above the transcript. `parentId` becomes "open parent session",
+  because half a real archive is delegated work and a delegate reached from a search
+  hit otherwise reads as a conversation someone started. `forkedFrom` gets its own
+  wording — a fork replays its origin's whole prefix, so calling it a parent would
+  claim a delegation that did not happen, and it is what explains a transcript that
+  seems to open mid-conversation.
+- **`Delegations`**, a list at the top of the pane, each row linking to that
+  session's own transcript.
+
+Placing that list *above* the transcript rather than at guessed points inside it is
+the load-bearing choice. Attribution to the specific call that delegated was
+measured: `claude` names a child `<parent>/agent-a<name>-<hash>`, but 1918 of 2104
+suffixes in a real archive are hash-only, so anchoring recovers 8.8% and
+misattributes on a collision. Nine in ten delegations would sit under the wrong tool
+call while looking exactly like the live tree, and a reader has no way to tell the
+two apart — so the panel states plainly that the archive records no link to the
+exact tool call, which is the one thing that keeps a flat view honest rather than
+merely poorer.
+
+The list is not a disclosure inside a sidebar row, and that is an ARIA constraint
+rather than a layout preference: a history-overlay row is a `role="option"`, which
+may not contain a button, the same rule that stops a `role="menu"` holding a text
+field. Session-level delegation therefore belongs on this page, where a `<section>`
+with a heading and a list of links is valid.
+
+E2E cannot reach any of this: the harness points `TRACEDB_BIN` at a path that does
+not exist, so the archive is empty by construction and these surfaces never render.
+They are covered by backend tests using **real** archive ids and by manual
+verification against a 4922-session archive.
+
 ## Performance Optimization
 
 ### Bundle size management

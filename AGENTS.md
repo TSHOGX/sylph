@@ -355,6 +355,48 @@ a spelling change fails a test rather than silently yielding `None`. Do not add
 dual-spelling aliases: they mask future renames and suppress parse errors that
 would catch breaking changes.
 
+**The archive stores no event-level delegation structure, and `parent_id` is not
+it.** A live turn carries `span` on every event; nothing archived does. `data_json`
+is the only field where a raw vendor payload could survive — where `claude`'s own
+`parent_tool_use_id` would be — and it is **null on all 36308 events sampled across
+all five agents**. `parent_id` is the field that looks like a span and means
+something different per agent: for `claude` it is the `parentUuid` conversation
+chain (13689 of 15119 pointers name the immediately preceding event, fanout 1), for
+`opencode` it groups parts under a message (fanout 4–5), `pi` mixes both, and
+`codex` and `gemini` never set it. Honouring `claude`'s as a `span` nests a whole
+transcript into one chain thousands deep. Its only real use is pairing a
+`tool_result` to its `tool_call`. Attribution to the *specific* delegating call was
+measured and rejected too: `claude` names a child `<parent>/agent-a<name>-<hash>`,
+but **1918 of 2104** suffixes are hash-only, so matching recovers 8.8% and
+misattributes on a collision — structure that is right for one delegation in eleven
+is worse than an honest flat view, because nothing on screen distinguishes them. So
+archived delegation is session-level in both directions (`parentId`, `delegations`),
+and the UI must say the archive records no link to the exact call.
+
+**`session_metadata` is 11.5 ms, not the 0.5 ms this file used to claim.**
+Re-measured over 300 sequential calls against a 4922-session archive: 11.5 ms and
+~2.5 KB each. So a 20-row listing page spends ~230 ms on lineage alone and a
+whole-archive metadata scan costs **52.9 s** — which rules out "just ask every row"
+for anything a user waits on, and is why the lineage fold caches per parent. By
+contrast a *full unfiltered `list`* is 4922 rows in 10 pages at **164 ms**, so
+deriving what you can from the listing is ~300× cheaper per fact than asking per
+row. Finding one session's children uses that: an id-prefix test over one pass
+finds 2104 of 2316 delegates, while the other 212 (almost all `opencode`, which
+records only a `parent_session_id`) would cost the 52.9 s scan and are reached from
+their parent's directory listing instead.
+
+**A caller that logs a degraded dependency per request rebuilds the flood the
+client was fixed to prevent.** `tracedb::Client` reports an absent binary once at
+`error` then at `debug` — but `api::archive` and `api::workspaces` each warned per
+request on top of that, and both are polled by the sidebar and workspace picker.
+Measured in one E2E run, which is a no-TraceDB install by construction: **2339
+identical `TraceDB list failed` lines**. The client now exposes
+`unavailability_reported()` so a caller can defer to what was already said, which is
+deliberately not the same as string-matching the error message — the text is
+TraceDB's and may be reworded, while the flag is the client's own record of having
+spoken. This is the second instance of the pitfall below, one layer up from where it
+was first fixed.
+
 **TraceDB's `cwd` filter is a substring match, not a path match.** `list` and
 `search` compile it to `cwd LIKE '%' || ? || '%'`, so asking for `/w/app` also
 returns `/w/app-old` and every subdirectory. Anything that means "this one
@@ -365,7 +407,8 @@ directory" must re-filter for exact equality after normalizing trailing slashes 
 are rows of their own and are 51% of a real local archive (2238 of 4416
 non-empty), so a listing that does not fold them into their parent is half noise.
 `list` carries no parent column, so lineage costs one `show` per candidate —
-`Client::session_metadata` is the cheap shape, ~0.5 ms and ~1 KB.
+`Client::session_metadata` is the cheapest shape, but see the measurement above:
+11.5 ms and ~2.5 KB, not the ~0.5 ms once recorded here.
 
 **The `/agent-` id suffix is not a reliable lineage signal.** It catches 2039
 subagents but misses 199 that record only a `parent_session_id`, almost all

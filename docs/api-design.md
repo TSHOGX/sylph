@@ -747,6 +747,15 @@ action taken from the archived view.
       "endedAtMs": 1787227503012,
       "events": 419,
       "subagentCount": 2,
+      "subagents": [
+        {
+          "id": "claude:f1830315-5ce1-44e3-86c0-8f65ccbc961e/agent-a6e09e69b1b293ad2",
+          "agent": "claude",
+          "events": 14,
+          "startedAtMs": 1787223601233,
+          "endedAtMs": 1787223795018
+        }
+      ],
       "sessionId": "0c3f..."
     }
   ],
@@ -784,13 +793,19 @@ it as empty. `nextCursor` continues from wherever the scan stopped.
 ##### Lineage
 
 The archive records two different relationships, and they want opposite
-treatment. Neither is reported by `list`, so each candidate row costs one cheap
-metadata `show` (~0.5 ms); the `/agent-` id suffix is only a fallback for when
+treatment. Neither is reported by `list`, so each candidate row costs one metadata
+`show` — measured at **11.5 ms** and ~2.5 KB per call over 300 calls against a
+4922-session archive, so a page of 20 rows spends roughly 230 ms on lineage alone
+and a whole-archive scan would cost 52.9 s. It is the cheapest shape `show` offers
+and far cheaper than a full transcript, but it is not free, which is why the fold
+caches per parent and why nothing polled walks the archive this way. The `/agent-`
+id suffix is only a fallback for when
 that lookup fails, because it misses the 199 sessions that record a parent without
 carrying a suffix.
 
 - **`parent_session_id` — delegated work.** Folded into the parent as
-  `subagentCount`, *provided the parent is in the directory being listed*. 484 of
+  `subagentCount` and `subagents`, *provided the parent is in the directory being
+  listed*. 484 of
   2238 subagents ran somewhere else — a worktree or a subdirectory — and folding
   those into an absent parent deletes them from the only listing that would show
   them, which emptied 42 directories, one holding 193 sessions. A cross-directory
@@ -803,6 +818,16 @@ carrying a suffix.
   its later work in the fork (1108 events against 389) and the other in the origin
   (2459 against 649). Since `list` is ordered by `endedAtMs` descending, the
   survivor is whichever is reached first.
+
+`subagents` carries the folded children themselves, and `subagentCount` is always
+its length. A count alone is a dead end: half the archive is delegated work, so a
+row reading "13 subagents" names sessions the archive can open while giving the
+client no way to reach any of them. The fold already visits every child to count
+it, so identity costs nothing beyond the bytes. Each entry is deliberately thinner
+than a listing row — no `label` fallback to the opening user turn, because that is
+a second request per child and one measured parent has 193 of them — and `cwd`
+appears only when the child ran somewhere other than its parent, which is the case
+worth showing.
 
 `forkOf` names the suppressed origin on a surviving fork row. Within one response
 the loser is already dropped, but a pair can straddle two pages — one measured
@@ -852,6 +877,17 @@ is 8167 events and 20 MB of JSON.
   "cwd": "/Users/you/Workspace/sylph-web",
   "startedAtMs": 1787223579574,
   "events": [{ "seq": 2, "kind": "user", "phase": "completed", "...": "..." }],
+  "delegations": [
+    {
+      "id": "claude:f1830315-5ce1-44e3-86c0-8f65ccbc961e/agent-a6e09e69b1b293ad2",
+      "agent": "claude",
+      "events": 14
+    }
+  ],
+  "delegationsTruncated": false,
+  "parentId": null,
+  "forkedFrom": null,
+  "flat": true,
   "truncated": false
 }
 ```
@@ -874,9 +910,75 @@ history endpoint use, so one timeline renderer serves both. Four adaptations:
   on both, `claude` points the result's `parent_id` at the call's `native_id` —
   and both are mapped onto one id.
 
+##### An archived transcript is flat, and says so
+
+A live turn carries delegation in every event: `span` names the trajectory an event
+ran in, so the timeline nests a subagent's work inside the tool call that spawned
+it. An archived transcript has **no `span` on any event**, `flat` is `true`, and
+that is a fact about what TraceDB stores rather than a limitation of this endpoint.
+
+Measured across all five agents in a real local archive, 36308 events sampled:
+`data_json` — the only field where a raw vendor payload could survive, and where
+`claude`'s own `parent_tool_use_id` would live — is **null on every event**. So no
+event-level parent pointer exists to translate.
+
+`parent_id` is the nearest-looking field and must not be mistaken for one, because
+it means a different thing per agent. Over 164 sessions:
+
+| Agent | What `parent_id` is | Shape |
+| --- | --- | --- |
+| `claude` | the `parentUuid` conversation chain | 13689 of 15119 name the immediately preceding event; fanout 1 |
+| `opencode` | parts grouped under a message | fanout 4–5 |
+| `pi` | a mix of both | fanout 1–3 |
+| `codex`, `gemini` | never set | absent entirely |
+
+Honouring `claude`'s as a `span` would nest a whole transcript into a single chain
+thousands deep. The one real relationship it carries — a `tool_result` pointing at
+its `tool_call` — is already what `streamId` above expresses.
+
+Attribution to the *specific* call that delegated was measured and rejected.
+`claude` names a child `<parent>/agent-a<name>-<hash>`, so a child whose suffix
+carries the Task call's `name` can be matched back to it — but **1918 of 2104**
+suffixes in the local archive are hash-only, so this recovers 8.8% and
+misattributes on a name collision. Structure that is right for one delegation in
+eleven is worse than an honest flat view, because nothing on screen distinguishes
+the two.
+
+So delegation is reported where the archive actually records it, at session level
+and in both directions:
+
+- **`parentId`** — the session that delegated this one. Free, since `show` already
+  reports it. Without it a delegate opened from a search hit reads as a
+  conversation someone started, which for half the archive is wrong.
+- **`forkedFrom`** — the session this one forked or resumed from. A *different*
+  relationship, and calling it a parent would claim a delegation that did not
+  happen; it is what explains a transcript that appears to open mid-conversation.
+- **`delegations`** — the sessions this one delegated to, with
+  `delegationsTruncated` distinguishing "none" from "did not finish looking".
+
+`delegations` costs one bounded pass over `list`, because TraceDB exposes no parent
+filter — the ops are `stats`, `search`, `list`, `show`, `reconstruct`, and only
+`show` reports lineage, one session at a time. A full unfiltered pass measures
+**164 ms** for 4922 rows in 10 pages, and a transcript is opened deliberately
+rather than polled, so that is affordable here where it would not be on the
+sidebar's path. The `cwd` filter is deliberately not used to narrow it: 484 of 2238
+delegates ran in a different directory than their parent, so filtering by the
+parent's directory would drop exactly the ones whose location is most worth
+reporting.
+
+It is complete for delegates whose id carries the parent as a prefix — **2104 of
+2316** — and deliberately not otherwise. The remaining 212, almost all `opencode`,
+record only a `parent_session_id`, visible only to `show`: finding them means a
+metadata call per candidate row, measured at 11.5 ms each and **52.9 s** across the
+archive. Those are reached from the parent's *directory listing* instead, where the
+fold already reads their metadata for a different reason.
+
 A missing session is `404 TRACE_SESSION_NOT_FOUND`; an unreachable archive is
 `503 TRACEDB_UNAVAILABLE`. Unlike the listing, a single transcript has no useful
-degraded form, so it reports the failure rather than rendering an empty one.
+degraded form, so it reports the failure rather than rendering an empty one. A
+delegation scan that fails while the transcript itself succeeded is *not* promoted
+to an error: the events are already in hand, and `delegationsTruncated` reports the
+list as incomplete.
 
 ### Files
 
