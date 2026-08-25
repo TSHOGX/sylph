@@ -535,7 +535,15 @@ Two remain, as arguments for *intent* rather than descriptions of the code:
 settings). Each now marks where the shipped implementation diverged from it.
 `docs/frontend-architecture.md` is authoritative for what the code does.
 
-## Phase 7: Interaction and Composer Redesign — Complete
+## Phase 7a: Interaction and Composer Redesign — Complete
+
+> **Why 7a and 7b rather than 7 and 8.** Two tracks ran in parallel and both were
+> written up as "Phase 7", so the number addressed two different bodies of work and a
+> per-phase count summed nothing. Renumbering the later one to 8 would have been the
+> tidier fix and the wrong one: ten references across `docs/` and `AGENTS.md`, plus
+> commit subjects, already name Phases 8 through 12 as they stand, so shifting them
+> would invalidate every one. A suffix disambiguates the heading and leaves all of
+> that valid. Do not renumber.
 
 **Goal:** remove the forms and stacked form-fields that Phase 6 left in the two
 surfaces a user touches most — creating a session, and writing a message.
@@ -627,7 +635,7 @@ the UI never showed.
   is nothing to preserve, so this is correct rather than a workaround — but it
   means the switcher is unavailable exactly where conversion would be interesting.
 
-## Phase 7: Artifacts file viewer — Complete
+## Phase 7b: Artifacts file viewer — Complete
 
 **Goal:** make the Artifacts pane answer "what did the agent do to my files?" for
 the formats an agent actually produces, not only for source code.
