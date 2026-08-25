@@ -134,6 +134,28 @@ impl Registry {
                 }
                 let adapter = path.join("adapter.sh");
                 if !adapter.exists() {
+                    // A directory holding a v1 `runner.sh` is an *agent* that this
+                    // server cannot speak to, not an ordinary directory. Skipping
+                    // it silently is what made a stale runners tree read as "this
+                    // agent does not exist": discovery reported zero usable and
+                    // zero broken, so nothing anywhere said the directory had been
+                    // seen and rejected. A README stays silent; this does not.
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                    if !name.is_empty()
+                        && !self.agents.contains_key(name)
+                        && !self.broken.contains_key(name)
+                        && (path.join("runner.sh").exists() || path.join("runner.py").exists())
+                    {
+                        warn!("Agent {} predates sylph.agent.v3: {:?} has a runner but no adapter.sh", name, path);
+                        self.broken.insert(
+                            name.to_string(),
+                            format!(
+                                "{:?} holds a v1 runner but no adapter.sh, so it cannot speak \
+                                 sylph.agent.v3",
+                                path
+                            ),
+                        );
+                    }
                     continue;
                 }
 
@@ -152,6 +174,11 @@ impl Registry {
                 match self.probe(&name, &adapter).await {
                     Ok(descriptor) => {
                         info!("Discovered agent {} at {:?}", name, adapter);
+                        // A later root may carry the v3 adapter for a name an
+                        // earlier root recorded as a v1 leftover. Usable wins:
+                        // leaving it listed as broken would report an agent as
+                        // unavailable while every link to it succeeded.
+                        self.broken.remove(&name);
                         self.agents.insert(
                             name,
                             AgentInfo { descriptor, adapter_path: adapter },
@@ -427,6 +454,62 @@ for raw in sys.stdin:
             .unwrap();
 
         assert_eq!(registry.list_agents().len(), 1);
+        assert!(registry.broken_runners().is_empty());
+    }
+
+    /// A v1 runner tree is an agent that cannot be spoken to, not an absent one.
+    ///
+    /// This is the shape that made a real slash menu look broken: `SYLPH_RUNNERS_DIR`
+    /// held four v1 agents with `runner.sh` and no `adapter.sh`, so discovery
+    /// reported "0 usable, 0 broken" and nothing anywhere said those directories
+    /// had been seen. The composer then had no commands to offer and no reason to
+    /// give, which reads as a broken feature rather than a stale install.
+    #[tokio::test]
+    async fn a_v1_runner_without_an_adapter_is_reported_rather_than_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let legacy = tmp.path().join("codex");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("runner.sh"), "#!/bin/sh\n").unwrap();
+
+        let registry = Registry::new(vec![tmp.path().to_path_buf()], environment())
+            .await
+            .unwrap();
+
+        assert!(!registry.has_agent("codex"));
+        assert!(
+            registry.broken_runners()["codex"].contains("adapter.sh"),
+            "the reason names what is missing: {:?}",
+            registry.broken_runners()
+        );
+    }
+
+    /// A v3 adapter in a later root outranks a v1 leftover of the same name.
+    ///
+    /// Otherwise an agent that every link reaches successfully is still listed as
+    /// broken, and the UI reports it unavailable while it works.
+    #[tokio::test]
+    async fn a_usable_adapter_clears_a_v1_leftover_of_the_same_name() {
+        let legacy_root = TempDir::new().unwrap();
+        let legacy = legacy_root.path().join("claude");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("runner.sh"), "#!/bin/sh\n").unwrap();
+
+        let adapter_root = TempDir::new().unwrap();
+        write_adapter(adapter_root.path(), "claude", &cooperative("claude", "1.0"));
+
+        // The v1 root first, so the leftover is recorded before the adapter is
+        // found — the order that would otherwise leave it listed as broken.
+        let registry = Registry::new(
+            vec![
+                legacy_root.path().to_path_buf(),
+                adapter_root.path().to_path_buf(),
+            ],
+            environment(),
+        )
+        .await
+        .unwrap();
+
+        assert!(registry.has_agent("claude"));
         assert!(registry.broken_runners().is_empty());
     }
 

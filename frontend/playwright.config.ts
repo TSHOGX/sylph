@@ -82,6 +82,12 @@ export default defineConfig({
         SYLPH_WEB_PORT: String(BACKEND_PORT),
         SYLPH_WEB_DATA_DIR: dataDir,
         SYLPH_RUNNERS_DIR: path.join(__dirname, "e2e", "fixtures", "runners"),
+        // Pinned to the same fixtures tree. Left unset, bundled-adapter resolution
+        // finds the repo's real `adapters/`, so the suite would discover `claude`
+        // and `pi` and run the developer's actual agent CLIs — spawning real
+        // processes, and making specs pass or fail on which agents happen to be
+        // installed. Naming it keeps the fixture the only agent that exists.
+        SYLPH_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "runners"),
         // Point at a path that does not exist so archive-dependent screens
         // exercise their unavailable state instead of the developer's archive.
         TRACEDB_BIN: path.join(dataDir, "absent-trace-db"),

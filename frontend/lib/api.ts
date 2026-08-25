@@ -198,6 +198,30 @@ export interface LinkState {
   /** Closed vocabulary: `interrupt`, `steer`, `approval`, `subagent`, `slash`, … */
   supports: string[];
   capabilities?: SessionCapabilities;
+  /**
+   * Why there is no live link, when establishing one was tried and failed.
+   *
+   * Absent when a link is attached, and when nobody has asked for one yet. This
+   * exists because an empty capability surface was ambiguous in a way that
+   * mattered: an agent declaring no commands, an adapter that is not installed,
+   * and a handshake still in flight all arrived as `{attached: false}`, so the UI
+   * could only render nothing — which reads as a dead key rather than as a
+   * missing install.
+   */
+  failure?: LinkFailure;
+}
+
+/** Why a link could not be established. */
+export interface LinkFailure {
+  /**
+   * `no_adapter` — the session's agent was not discovered; a retry cannot fix it.
+   * `handshake_failed` — the adapter would not come up; a retry may.
+   *
+   * Typed as an open union so an unknown code from a newer server still renders
+   * through `message` instead of throwing away the whole reason.
+   */
+  code: "no_adapter" | "handshake_failed" | (string & {});
+  message: string;
 }
 
 /** One option an agent offered on a request. */

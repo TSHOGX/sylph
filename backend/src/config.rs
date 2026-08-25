@@ -47,48 +47,87 @@ pub struct Config {
     pub history_path: String,
     /// Root of the content-addressed blob store.
     pub blobs_dir: PathBuf,
+    /// Every directory `agents_dir` resolution considered, in order.
+    ///
+    /// Kept so "zero agents discovered" can name where it looked. Without it the
+    /// operator is told only that nothing was found, which is the one fact that
+    /// does not help — a missing install and a mistyped `SYLPH_AGENTS_DIR` produce
+    /// the identical message and need opposite fixes.
+    pub agents_dir_candidates: Vec<PathBuf>,
+}
+
+/// Where bundled `adapter.sh` trees live, and everywhere that was tried.
+///
+/// A bundled adapter is versioned with the protocol it implements, so it ships
+/// *with the binary* rather than being installed separately. That makes the
+/// binary's own location the authoritative answer, and it is the only candidate
+/// that stays correct when the tree is moved or copied to another machine.
+///
+/// The compile-time repo path is last on purpose. It is a path on whichever
+/// machine ran `cargo build`, so it is right for `cargo run` and meaningless
+/// anywhere else — a release binary that fell back to it would claim to have
+/// found adapters in a directory that does not exist on the host. It is a dev
+/// convenience, never a deployment answer.
+///
+/// Every candidate is returned, not just the winner, because "zero agents
+/// discovered" is otherwise unanswerable: the operator needs to know which
+/// directories were consulted before they can tell a missing install from a
+/// misconfigured `SYLPH_AGENTS_DIR`.
+fn resolve_agents_dir(
+    home: &str,
+    configured: Option<&str>,
+    exe_dir: Option<&Path>,
+) -> (PathBuf, Vec<PathBuf>) {
+    // An explicit setting is obeyed even when it does not exist. Silently
+    // searching past it would hide the operator's own typo behind a directory
+    // they did not name, and report success for adapters they did not choose.
+    if let Some(path) = configured.filter(|p| !p.trim().is_empty()) {
+        let path = PathBuf::from(path.trim());
+        return (path.clone(), vec![path]);
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(dir) = exe_dir {
+        // An install stages adapters beside the binary.
+        candidates.push(dir.join("adapters"));
+        // `target/debug/<bin>` in a dev checkout: three levels up is the repo.
+        if let Some(repo) = dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+            candidates.push(repo.join("adapters"));
+        }
+    }
+    candidates.push(PathBuf::from(format!("{home}/.local/share/sylph-web/adapters")));
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend crate has a parent")
+            .join("adapters"),
+    );
+
+    let chosen = candidates
+        .iter()
+        .find(|path| path.is_dir())
+        .cloned()
+        // Nothing exists: report the first candidate so the error names the place
+        // an install is expected to put them, rather than the last fallback.
+        .unwrap_or_else(|| candidates[0].clone());
+
+    (chosen, candidates)
 }
 
 /// Resolve `SOUL.md` the way a runner resolves it.
 ///
-/// An explicit empty `SYLPH_SOUL` is meaningful, not missing: the runner
-/// protocol reserves it for "no identity", and the E2E fixtures rely on it to
-/// keep runs cheap. It therefore yields `None` here too, so the backend and the
-/// runner reach the same conclusion.
+/// An explicit empty `SYLPH_SOUL` is meaningful, not missing: the runner protocol
+/// reserves it for "no identity", and the E2E fixtures rely on it to keep runs
+/// cheap. It therefore yields `None` here too, so the backend and the runner
+/// reach the same conclusion.
 ///
 /// A path that does not exist also yields `None`, matching the runner's
 /// `[[ -f "$SOUL_PATH" ]] || SOUL_PATH=""` line. Reporting a configured-but-absent
 /// path as present would let the UI promise an injection that never happens.
-/// The env read is a parameter so this is a pure function: `std::env::set_var`
-/// is process-global and unsafe in a threaded test binary, so a test that had to
-/// set it could not run beside the others.
-/// Where bundled `adapter.sh` trees live.
 ///
-/// Installed builds expect `$HOME/.local/share/sylph-web/adapters`. A dev
-/// checkout keeps them at `<repo>/adapters`, which is one level above
-/// `backend/` — the compile-time manifest dir — so `cargo run` works without
-/// setting `SYLPH_AGENTS_DIR` when the install tree is absent.
-fn resolve_agents_dir(home: &str, configured: Option<&str>) -> PathBuf {
-    if let Some(path) = configured.filter(|p| !p.is_empty()) {
-        return PathBuf::from(path);
-    }
-
-    let install = PathBuf::from(format!("{home}/.local/share/sylph-web/adapters"));
-    if install.is_dir() {
-        return install;
-    }
-
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("backend crate has a parent")
-        .join("adapters");
-    if repo.is_dir() {
-        return repo;
-    }
-
-    install
-}
-
+/// The env read is a parameter so this is a pure function: `std::env::set_var` is
+/// process-global and unsafe in a threaded test binary, so a test that had to set
+/// it could not run beside the others.
 fn resolve_soul_path(runners_dir: &Path, configured: Option<&str>) -> Option<PathBuf> {
     let candidate = match configured {
         Some("") => return None,
@@ -118,7 +157,18 @@ impl Config {
                 .unwrap_or_else(|_| format!("{}/.agents/skills/sylph/runners", home)),
         );
 
-        let agents_dir = resolve_agents_dir(&home, env::var("SYLPH_AGENTS_DIR").ok().as_deref());
+        // The binary's own directory, which is where an install stages its
+        // bundled adapters. `current_exe` can fail on an exotic platform, so the
+        // resolver takes an `Option` and falls back to the home and repo paths
+        // rather than this being a hard startup failure.
+        let exe_dir = env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        let (agents_dir, agents_dir_candidates) = resolve_agents_dir(
+            &home,
+            env::var("SYLPH_AGENTS_DIR").ok().as_deref(),
+            exe_dir.as_deref(),
+        );
 
         let tracedb_bin = env::var("TRACEDB_BIN")
             .unwrap_or_else(|_| format!("{}/Workspace/trace-db/target/release/trace-db", home))
@@ -163,6 +213,7 @@ impl Config {
             cookie_secret,
             history_path,
             blobs_dir,
+            agents_dir_candidates,
         })
     }
 }
@@ -228,10 +279,48 @@ mod tests {
         let explicit = tmp.path().join("mine");
         std::fs::create_dir_all(&explicit).unwrap();
 
-        assert_eq!(
-            resolve_agents_dir("/unused", Some(explicit.to_str().unwrap())),
-            explicit
-        );
+        let (chosen, candidates) =
+            resolve_agents_dir("/unused", Some(explicit.to_str().unwrap()), None);
+        assert_eq!(chosen, explicit);
+        assert_eq!(candidates, vec![explicit]);
+    }
+
+    /// An explicit setting that does not exist must not be searched past.
+    ///
+    /// Falling through to a directory the operator did not name would report
+    /// adapters they did not choose, and hide their own typo while doing it.
+    #[test]
+    fn an_explicit_agents_dir_is_obeyed_even_when_absent() {
+        let (chosen, candidates) = resolve_agents_dir("/unused", Some("/no/such/adapters"), None);
+
+        assert_eq!(chosen, PathBuf::from("/no/such/adapters"));
+        assert_eq!(candidates.len(), 1);
+    }
+
+    /// An install stages adapters beside the binary, which is the only candidate
+    /// that survives the tree being moved or copied to another machine.
+    #[test]
+    fn agents_dir_prefers_the_directory_beside_the_binary() {
+        let tmp = TempDir::new().unwrap();
+        let beside = tmp.path().join("adapters");
+        std::fs::create_dir_all(&beside).unwrap();
+
+        let (chosen, _) = resolve_agents_dir("/no/such/home", None, Some(tmp.path()));
+        assert_eq!(chosen, beside);
+    }
+
+    /// `target/debug/<bin>` in a dev checkout: the repo is three levels up, and
+    /// finding it there is what makes `cargo run` work with no env var set.
+    #[test]
+    fn agents_dir_finds_the_repo_from_a_target_debug_binary() {
+        let tmp = TempDir::new().unwrap();
+        let exe_dir = tmp.path().join("backend/target/debug");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        let repo_adapters = tmp.path().join("adapters");
+        std::fs::create_dir_all(&repo_adapters).unwrap();
+
+        let (chosen, _) = resolve_agents_dir("/no/such/home", None, Some(&exe_dir));
+        assert_eq!(chosen, repo_adapters);
     }
 
     #[test]
@@ -242,7 +331,30 @@ mod tests {
             .join("adapters");
         assert!(repo.is_dir(), "repo adapters/ should exist in this checkout");
 
-        assert_eq!(resolve_agents_dir("/no/such/home", None), repo);
+        let (chosen, _) = resolve_agents_dir("/no/such/home", None, None);
+        assert_eq!(chosen, repo);
+    }
+
+    /// The install location is offered before the home and compile-time paths, and
+    /// every place tried is reported.
+    ///
+    /// This cannot assert the all-absent case: the last candidate is this repo's
+    /// own `adapters/`, which exists whenever the tests run. So it pins the
+    /// ordering — the directory beside the binary is asked about first — which is
+    /// the property that makes a moved or copied install still find its adapters.
+    #[test]
+    fn agents_dir_reports_every_place_it_looked_install_first() {
+        let tmp = TempDir::new().unwrap();
+        let exe_dir = tmp.path().join("prefix");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+
+        let (_, candidates) = resolve_agents_dir("/no/such/home", None, Some(&exe_dir));
+
+        assert_eq!(candidates[0], exe_dir.join("adapters"));
+        assert!(
+            candidates.contains(&PathBuf::from("/no/such/home/.local/share/sylph-web/adapters")),
+            "the install path is still consulted: {candidates:?}"
+        );
     }
 
     /// A configured path that points at a directory is not a readable soul.

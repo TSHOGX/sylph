@@ -106,6 +106,9 @@ impl TestBackend {
             // test that installs one gets it discovered without a second root to
             // set up.
             agents_dir: runners_dir.clone(),
+            // Only the harness tree, so a diagnostics assertion cannot pick up a
+            // path that depends on where this checkout happens to live.
+            agents_dir_candidates: vec![runners_dir.clone()],
             runners_dir,
             // Absent unless a test opts in: TraceDB-dependent paths must
             // degrade rather than make every test depend on an external binary.

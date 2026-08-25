@@ -31,7 +31,13 @@ pub async fn capabilities(
         // agent's failure rather than the request's: the session is still valid
         // and its history still readable, so this reports detached with a reason
         // rather than a 500 that would make the whole session look broken.
+        //
+        // The reason travels in the body. Logging it and returning a bare
+        // `attached: false` was the defect: a client could not tell a failure from
+        // an agent that simply declares no commands, so the only honest thing it
+        // could render was nothing at all.
         tracing::warn!("Could not establish a link for {}: {:#}", session_id, error);
+        return Ok(Json(state.links.state_after_failure(&session_id, &error).await));
     }
 
     Ok(Json(state.links.state(&session_id).await))

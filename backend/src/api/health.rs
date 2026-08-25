@@ -30,11 +30,25 @@ pub struct HealthResponse {
     api_version: String,
     schema_version: i64,
     tracedb: TraceDbHealth,
+    /// Whether any agent is usable at all.
+    ///
+    /// A server with zero agents answers every other probe successfully while no
+    /// session can run and no command can be offered, so liveness alone reports
+    /// healthy for a process that cannot do its job. A boolean rather than a count,
+    /// to keep this endpoint free of anything an unauthenticated caller should not
+    /// learn — `/diagnostics` carries the names and the failure reasons.
+    agents: AgentsHealth,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TraceDbHealth {
+    available: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentsHealth {
     available: bool,
 }
 
@@ -46,12 +60,14 @@ pub struct TraceDbHealth {
 pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>> {
     let schema_version = state.store.schema_version().await.unwrap_or(0);
     let available = state.tracedb.probe().await;
+    let agents_available = !state.registry.lock().await.list_agents().is_empty();
 
     Ok(Json(HealthResponse {
         ok: true,
         api_version: "1".to_string(),
         schema_version,
         tracedb: TraceDbHealth { available },
+        agents: AgentsHealth { available: agents_available },
     }))
 }
 
@@ -65,6 +81,12 @@ pub struct DiagnosticsResponse {
     turns: HashMap<String, i64>,
     agents: Vec<String>,
     broken_runners: HashMap<String, String>,
+    /// Every directory bundled-adapter resolution considered, in order, plus the
+    /// user agents directory. Present because "no agents" is otherwise
+    /// unactionable: a missing install and a mistyped `SYLPH_AGENTS_DIR` give the
+    /// same empty list and need opposite fixes. Authenticated, since these are
+    /// local filesystem paths.
+    agent_roots: Vec<String>,
     /// Archive-wide totals, or `null` when TraceDB is unreachable. Present
     /// here rather than in `/health` because it is a count, and `/health` is
     /// unauthenticated.
@@ -114,6 +136,13 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         turns,
         agents,
         broken_runners,
+        agent_roots: state
+            .config
+            .agents_dir_candidates
+            .iter()
+            .chain(std::iter::once(&state.config.runners_dir))
+            .map(|path| path.display().to_string())
+            .collect(),
         tracedb: state.tracedb.archive_counts().await,
         active_processes: state.turns.active_turn_count().await,
     }))

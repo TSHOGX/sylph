@@ -20,7 +20,12 @@
 
 import { useCallback, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type LinkState, type PendingRequest } from "@/lib/api";
+import {
+  api,
+  type LinkFailure,
+  type LinkState,
+  type PendingRequest,
+} from "@/lib/api";
 
 /**
  * How often to re-read pending requests as a backstop.
@@ -37,8 +42,16 @@ export interface AgentSession {
   link?: LinkState;
   /** Whether an agent process is attached right now. */
   attached: boolean;
-  /** True while the first handshake is in flight — it can take seconds. */
+  /**
+   * True while a handshake is in flight — it spawns an agent CLI and can take
+   * seconds. Covers a retry as well as the first attempt, because to the user
+   * they are the same wait and both need the same "not broken, just slow" signal.
+   */
   connecting: boolean;
+  /** Why there is no link, when an attempt failed. */
+  failure?: LinkFailure;
+  /** Establish a link now, after a failure. */
+  reattach: () => void;
   requests: PendingRequest[];
   /** The oldest unanswered request: what a dialog should show. */
   current?: PendingRequest;
@@ -63,12 +76,45 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
   // `staleTime: Infinity` with explicit invalidation on a `capabilities` event is
   // deliberate: refetching on window focus would spawn an agent process every time
   // the user tabbed back.
+  //
+  // The stale time is conditional because a failure is *also* a 200 here — the
+  // endpoint reports detached-with-reason rather than erroring, so the session
+  // stays readable. Cached forever, that made one failed handshake permanent for
+  // the life of the page: `/` stayed dead until a turn was sent or the tab
+  // reloaded, which is what made the symptom look intermittent rather than
+  // configured. A recoverable failure is therefore allowed to go stale, so the
+  // next mount or explicit retry tries again.
+  //
+  // `no_adapter` is exempt: no number of retries installs an adapter, and each
+  // attempt costs a process spawn. That one is cached like a success and cleared
+  // only by the user retrying or by a `link` event saying otherwise.
   const linkQuery = useQuery({
     queryKey: ["session", sessionId, "capabilities"],
     queryFn: () => api.sessions.capabilities(sessionId!),
     enabled,
-    staleTime: Infinity,
+    staleTime: (query) => {
+      const failure = query.state.data?.failure;
+      if (!failure) return Infinity;
+      return failure.code === "no_adapter" ? Infinity : 0;
+    },
     retry: false,
+  });
+
+  // Re-establish on demand. The endpoint is `POST /link`, which establishes
+  // eagerly, and its response *is* the new surface — so it is written straight
+  // into the cache rather than triggering a second round trip.
+  const reattachMutation = useMutation({
+    mutationFn: () => api.sessions.attach(sessionId!),
+    onSuccess: (link) => {
+      queryClient.setQueryData(["session", sessionId, "capabilities"], link);
+    },
+    onError: () => {
+      // A failed attach returns an error status rather than a body, so there is
+      // nothing to write. Invalidating lets the GET report the classified reason.
+      void queryClient.invalidateQueries({
+        queryKey: ["session", sessionId, "capabilities"],
+      });
+    },
   });
 
   const requestsQuery = useQuery({
@@ -183,7 +229,12 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
   return {
     link,
     attached: Boolean(link?.attached),
-    connecting: linkQuery.isLoading,
+    // `isFetching` rather than `isLoading`, so a retry reads as connecting too: a
+    // refetch over cached failure data is not "loading" to React Query, but it is
+    // exactly the wait the user needs told about.
+    connecting: linkQuery.isFetching || reattachMutation.isPending,
+    failure: link?.failure,
+    reattach: () => reattachMutation.mutate(),
     requests,
     current,
     can,

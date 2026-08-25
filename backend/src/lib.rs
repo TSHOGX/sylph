@@ -98,11 +98,26 @@ impl AppState {
         ));
         {
             let registry = registry.lock().await;
+            let usable = registry.list_agents().len();
             tracing::info!(
                 "Agent discovery: {} usable, {} broken",
-                registry.list_agents().len(),
+                usable,
                 registry.broken_runners().len()
             );
+            // Zero usable agents is not a quiet degradation: no session can be
+            // created and no existing one can offer a command, so every feature
+            // that depends on a live link fails while the server reports healthy.
+            // It was logged at the same level as success, one line among hundreds,
+            // which is how a stale binary with no adapters presented as a UI bug.
+            if usable == 0 {
+                tracing::error!(
+                    "No usable agents. Sessions cannot run and no slash commands will be \
+                     offered. Bundled adapters were looked for in {:?}; user agents in {:?}. \
+                     Set SYLPH_AGENTS_DIR to override.",
+                    config.agents_dir_candidates,
+                    config.runners_dir,
+                );
+            }
         }
 
         // Child processes do not survive a restart, so anything the journal

@@ -519,6 +519,12 @@ export default function SessionPage() {
         // session reports none, which is why the menu simply does not open
         // rather than offering a command that may no longer exist.
         commands={agent.link?.capabilities?.commands ?? []}
+        // Passed so `/` can explain itself instead of doing nothing. An empty
+        // command list has three causes needing three different responses, and
+        // the composer cannot tell them apart from the list alone.
+        agentConnecting={agent.connecting}
+        agentFailure={agent.failure}
+        onReattach={() => agent.reattach()}
         // Typed config from the live agent, which is what a control command like
         // `/model` resolves against instead of being sent as prompt text.
         config={agent.link?.capabilities?.config ?? []}

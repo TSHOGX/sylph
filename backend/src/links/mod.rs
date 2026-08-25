@@ -65,11 +65,68 @@ pub struct LinkState {
     pub supports: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<SessionCapabilities>,
+    /// Why there is no live link, when establishing one was tried and failed.
+    ///
+    /// An empty capability surface is ambiguous in a way that matters: an agent
+    /// that declares no commands, an adapter that does not exist, and a handshake
+    /// still in flight are three different situations needing three different
+    /// responses from the user, and they were indistinguishable to the client. The
+    /// server logged the reason and returned a bare `attached: false`, so the UI
+    /// could only show nothing — which is how a stale install presented as a
+    /// composer that ignored the `/` key.
+    ///
+    /// `None` means no attempt failed: either a link is attached, or nobody has
+    /// asked for one yet. A failure is not cached — the next read tries again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<LinkFailure>,
+}
+
+/// Why a link could not be established, in a shape a client can act on.
+///
+/// `code` is a closed vocabulary so the UI can choose its own words and offer the
+/// right recovery, and `message` carries the server's detail for the case where a
+/// human has to read it. A code the client does not recognize still renders,
+/// because the message is always populated.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkFailure {
+    pub code: LinkFailureCode,
+    pub message: String,
+}
+
+/// The session names an agent discovery did not find.
+///
+/// A distinct error type rather than a message to match on, so classification
+/// survives the wording being edited. It is the one link failure a retry cannot
+/// fix, which is exactly why the client has to be able to tell it apart.
+#[derive(Debug, thiserror::Error)]
+#[error("No adapter registered for agent '{0}'; it was not discovered")]
+pub struct NoAdapter(pub String);
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkFailureCode {
+    /// The session names an agent discovery did not find. Fixing this is an
+    /// install or configuration change, not a retry.
+    NoAdapter,
+    /// The adapter exists but would not come up: a crash, a timeout, a refused
+    /// handshake. Retrying can work.
+    HandshakeFailed,
 }
 
 impl LinkState {
     fn detached() -> Self {
-        Self { attached: false, agent: None, supports: Vec::new(), capabilities: None }
+        Self {
+            attached: false,
+            agent: None,
+            supports: Vec::new(),
+            capabilities: None,
+            failure: None,
+        }
+    }
+
+    fn failed(failure: LinkFailure) -> Self {
+        Self { failure: Some(failure), ..Self::detached() }
     }
 }
 
@@ -218,7 +275,33 @@ impl LinkManager {
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect(),
             capabilities: Some(entry.link.capabilities().await),
+            failure: None,
         }
+    }
+
+    /// The link state for a session whose establishment just failed.
+    ///
+    /// Classification happens here rather than in the handler because this module
+    /// is what knows the difference: a name the registry does not hold can only be
+    /// fixed by installing an adapter, while a handshake that timed out may work on
+    /// the next try. Collapsing both into one error would make the UI offer a retry
+    /// button for a condition no retry can change.
+    pub async fn state_after_failure(&self, session_id: &str, error: &anyhow::Error) -> LinkState {
+        // A link may have been established concurrently — by a turn, or by another
+        // client — between the failure and this call. The live answer wins.
+        let live = self.state(session_id).await;
+        if live.attached {
+            return live;
+        }
+
+        // Downcast rather than matching the message text: the reason a client sees
+        // must not depend on the wording of a log line, which is edited freely.
+        let code = if error.downcast_ref::<NoAdapter>().is_some() {
+            LinkFailureCode::NoAdapter
+        } else {
+            LinkFailureCode::HandshakeFailed
+        };
+        LinkState::failed(LinkFailure { code, message: format!("{:#}", error) })
     }
 
     pub async fn attached_count(&self) -> usize {
@@ -267,12 +350,7 @@ impl LinkManager {
             registry
                 .adapter_path(&session.agent)
                 .map(|path| path.to_path_buf())
-                .ok_or_else(|| {
-                    anyhow!(
-                        "No adapter registered for agent '{}'; it was not discovered",
-                        session.agent
-                    )
-                })?
+                .ok_or_else(|| anyhow::Error::new(NoAdapter(session.agent.clone())))?
         };
 
         // Identity is the server's decision, and the empty string is how the

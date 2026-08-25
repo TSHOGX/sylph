@@ -74,6 +74,7 @@ side can break the other's tests.
 | `SYLPH_WEB_PORT` | backend | `4317` |
 | `SYLPH_WEB_DATA_DIR` | backend | `$HOME/.agents/data/sylph/web` |
 | `SYLPH_RUNNERS_DIR` | backend | `$HOME/.agents/skills/sylph/runners` |
+| `SYLPH_AGENTS_DIR` | backend | first existing of `<exe dir>/adapters`, `<repo>/adapters`, `$HOME/.local/share/sylph-web/adapters` |
 | `SYLPH_SOUL` | backend | `<runners_dir>/../SOUL.md` |
 | `TRACEDB_BIN` | backend | `$HOME/Workspace/trace-db/target/release/trace-db` |
 | `SYLPH_WEB_BROWSE_ROOTS` | backend | `$HOME` |
@@ -90,6 +91,14 @@ browser reaching the dev server from a LAN IP gets 403s on every chunk and the p
 freezes before React hydrates — which reads as a backend failure rather than a
 dev-server policy. It is not needed for localhost, nor behind the loopback reverse
 proxy, which rewrites `Origin`. See `docs/development.md`.
+
+`SYLPH_AGENTS_DIR` holds the *bundled* adapters, which ship with the binary because
+an adapter is versioned with the protocol it implements. Unset, resolution prefers
+`<exe dir>/adapters` — the only candidate that stays right when the install tree is
+moved or copied — then the repo, then the install path. Set explicitly, it is obeyed
+even if absent: searching past an operator's own typo would report adapters they did
+not choose. `SYLPH_RUNNERS_DIR` is the separate, user-added set, searched after the
+bundled ones so a user can shadow a bundled adapter by name.
 
 `SYLPH_WEB_BROWSE_ROOTS` is colon-separated and *adds* to `$HOME`, which is
 always browsable. It bounds `/api/v1/fs/*`, the only endpoint that lists
@@ -201,6 +210,29 @@ or ran a turn failed against an agent that did not exist. The failures read as b
 features, not as a missing fixture. When a protocol version changes, the fixture is
 part of the protocol surface — check `Agent discovery: N usable` in the backend log
 before believing an E2E failure is about the UI.
+
+**Zero discovered agents is a silent, total failure that reads as a UI bug.** With no
+adapters, `/api/v1/agents` is empty, no session can be created, and every existing
+session reports `{"attached":false}` — so `commands` is `[]` and the composer's slash
+menu, which required a non-empty list to open at all, made `/` a dead keystroke. The
+cause is three layers from the symptom and the server logs `0 usable` at the same
+level as success. Three things now make it legible: discovery logs at `error` and
+names every directory it searched, `/health` reports `agents.available`, and
+`LinkState` carries a typed `failure` so the composer can say *which* of "still
+connecting", "adapter not installed", or "this agent has none" it is. A stale
+`runners/` tree holding v1 `runner.sh` with no `adapter.sh` is now reported as broken
+rather than skipped, because such a directory is an agent that cannot be spoken to,
+not an absent one. Check `Agent discovery: N usable` before believing an empty
+composer is a frontend bug.
+
+**A detached link is a 200, so caching it forever pins the failure.** `/capabilities`
+reports detached-with-reason rather than erroring, which keeps a session readable when
+its agent is gone — but under `staleTime: Infinity` that made one failed handshake
+permanent for the life of the page, and `/` stayed dead until a turn was sent or the
+tab reloaded. That is what made a deterministic config problem present as
+intermittent. The stale time is now conditional on the failure code: `no_adapter` is
+cached like a success because no retry installs an adapter, while a failed handshake
+is allowed to go stale.
 
 **A partial capability update must never be able to speak for the whole surface.**
 `claude` emits `system/init` once per *turn*, not once per process. An adapter that
