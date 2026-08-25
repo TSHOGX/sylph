@@ -425,7 +425,10 @@ Three things make it safe to run often and safe to run at all:
   archive is probed once per pass. Without it, delegated sessions are left entirely
   alone: not pruned, and *not* recorded as checked, because "cannot ask" must not be
   stored as "asked, and nothing is safe". An install without TraceDB is a supported
-  degraded state, and reporting it per session per pass forever would bury it.
+  degraded state, and reporting it per session per pass forever would bury it. The
+  same discipline applies one layer down: `tracedb::Client` reports a spawn failure
+  once at `error` and at `debug` after, because a timer-driven caller would otherwise
+  reproduce the identical unbounded stream from a single missing binary.
 * **Blob sweeping is per pass, not per session.** Reachability spans sessions — the
   same file read in two sessions is one blob — so the sweep is a global scan over
   `cas_refs`. Calling it per session would run that scan once per session for one

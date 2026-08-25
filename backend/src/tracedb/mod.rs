@@ -35,6 +35,15 @@ use tracing::{debug, error, warn};
 pub struct Client {
     inner: Arc<Mutex<Option<Connection>>>,
     bin_path: PathBuf,
+    /// Whether the spawn failure has already been reported at `error`.
+    ///
+    /// An absent binary is a persistent configuration state, not a recurring
+    /// event, and several callers poll this client on a timer — `/diagnostics` per
+    /// request, retention once per pass. Logging each attempt at `error` turns one
+    /// missing binary into an unbounded stream of identical lines, which is how a
+    /// supported degraded configuration comes to look like a fault. Reported once,
+    /// then at `debug`.
+    spawn_failure_reported: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct Connection {
@@ -515,6 +524,7 @@ impl Client {
         Self {
             inner: Arc::new(Mutex::new(None)),
             bin_path,
+            spawn_failure_reported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -886,7 +896,15 @@ impl Client {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
-                error!("Failed to spawn TraceDB at {:?}: {}", self.bin_path, e);
+                // First time loud, then quiet. See `spawn_failure_reported`.
+                if !self
+                    .spawn_failure_reported
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    error!("Failed to spawn TraceDB at {:?}: {}", self.bin_path, e);
+                } else {
+                    debug!("TraceDB still unavailable at {:?}: {}", self.bin_path, e);
+                }
                 format!("spawn failed: {}", e)
             })?;
 
@@ -905,8 +923,32 @@ impl Client {
 mod tests {
     use super::*;
 
-    /// Payloads here are copied from live `trace-db api` output, so a spelling
-    /// change in TraceDB fails a test instead of silently yielding `None`.
+    // Payloads here are copied from live `trace-db api` output, so a spelling
+    // change in TraceDB fails a test instead of silently yielding `None`.
+
+    /// An absent binary must be shouted about once, not on every attempt.
+    ///
+    /// Retention probes once per pass and `/diagnostics` probes per request, so an
+    /// `error!` per attempt turns one missing binary into an unbounded stream of
+    /// identical lines — which is what a no-TraceDB install, a supported
+    /// configuration, looked like in the E2E log. The flag is what bounds it, and
+    /// `probe` must keep answering `false` every time regardless.
+    #[tokio::test]
+    async fn an_absent_binary_is_reported_once_but_probed_honestly_every_time() {
+        let client = Client::new("/no/such/trace-db".into());
+
+        assert!(!client.probe().await, "an absent binary cannot answer");
+        assert!(
+            client
+                .spawn_failure_reported
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the first failure is recorded so the second stays quiet"
+        );
+        assert!(
+            !client.probe().await,
+            "still false: quieter logging must not make an absent archive look present"
+        );
+    }
 
     #[test]
     fn show_parses_the_snake_case_payload_trace_db_emits() {

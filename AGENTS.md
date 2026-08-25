@@ -288,9 +288,16 @@ which is what it was doing. The watermark row is written even when nothing is
 confirmed, and `/diagnostics` reports confirmed/withheld/terminal/unchanged
 separately, because a single "pruned: 0" answers none of the questions that matter.
 
-**A degraded dependency is one fact about the run, not one fault per item.** With no
-TraceDB — a supported configuration — probing per session turned one missing binary
-into a warning per session per pass, forever. Probe once per pass and report it once.
+**A degraded dependency is one fact about the run, not one fault per item — and not
+one per attempt either.** With no TraceDB, a supported configuration, probing per
+session turned one missing binary into a warning per session per pass. Probe once per
+pass. But that is only half of it: the *spawn* failure was also logged at `error` on
+every attempt, so a timer-driven caller reproduced the same unbounded stream one
+layer down — visible in the E2E log, which is exactly a no-TraceDB install. An absent
+binary is a persistent state, so `tracedb::Client` now reports it once at `error` and
+at `debug` thereafter. Any client polled on a timer needs that shape; the fix belongs
+in the client, not in each caller.
+
 The related rule: "cannot ask" must never be recorded as "asked, and nothing is
 safe", or a watermark claims a check that never happened.
 
