@@ -2920,13 +2920,13 @@ async fn fs_tree_lists_only_directories() {
     );
 }
 
-/// `~/.agents` is the Quick Start directory and a legitimate workspace, so a
-/// picker that hid dot-directories would hide a directory the product points at.
+/// `~/.sylph` is browsable and holds the Quick Start directory, so a picker that
+/// hid dot-directories would hide a directory the product itself points at.
 #[tokio::test]
 async fn fs_tree_lists_dot_directories() {
     let backend = TestBackend::start().await;
     let root = backend.workdir();
-    std::fs::create_dir_all(root.join(".agents")).unwrap();
+    std::fs::create_dir_all(root.join(".sylph")).unwrap();
 
     let body = json_body(
         backend
@@ -2944,7 +2944,7 @@ async fn fs_tree_lists_dot_directories() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&".agents"), "dotfiles must be pickable: {names:?}");
+    assert!(names.contains(&".sylph"), "dotfiles must be pickable: {names:?}");
 }
 
 #[tokio::test]
