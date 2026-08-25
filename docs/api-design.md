@@ -1254,9 +1254,29 @@ a client-supplied directory, the destination goes through the same containment
 check as reads, and an existing file is refused unless `overwrite` is explicitly
 true. Per-file size shares the 8 MiB attachment ceiling.
 
-Errors: `POLICY_VIOLATION` (403) outside the workdir, `INVALID_REQUEST` (400) for
-an existing file without `overwrite`, `ATTACHMENT_INVALID` (400) for malformed
-base64 or an oversized payload.
+**`overwrite` does not follow a symlink out of the workdir.** Containment for a
+write is established on the *parent directory*, because the file usually does not
+exist yet and canonicalization needs an existing path — which leaves the last
+component unresolved. A pre-existing symlink there is inside the root by name and
+points wherever it likes, and a plain write follows it, so `overwrite` was a write
+outside the workdir arriving through the one component the check could not see.
+An existing entry is now inspected with `symlink_metadata` and, when it is a link,
+resolved and re-checked. A link resolving *inside* the workdir still writes through
+to its target, because that is a write the agent itself can plainly make and
+refusing every link would be stricter than the stated line; a dangling link is
+refused, since where the write would land cannot be established and creating its
+target would be inventing one.
+
+`DELETE` was already safe from this by construction — unlinking a link never
+touches its target — and its implementation asserts that a final escaping symlink
+is "only ever unlinked, never opened or written to". That invariant held for
+`DELETE` and not for this endpoint; it now holds for both. `POST .../directory`
+refuses an existing target outright, so it was never reachable.
+
+Errors: `POLICY_VIOLATION` (403) outside the workdir, including through a symlink
+at the destination, `INVALID_REQUEST` (400) for an existing file without
+`overwrite`, `ATTACHMENT_INVALID` (400) for malformed base64 or an oversized
+payload.
 
 #### `POST /api/v1/sessions/{id}/files/directory`
 

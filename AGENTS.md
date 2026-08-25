@@ -863,6 +863,22 @@ them by what the value lets a caller *do* rather than by how the setting is name
 Both paths now share `paths::contain_in_any`, because a containment rule written
 twice is one that will diverge.
 
+**A write cannot canonicalize its own target, so containment on the parent leaves
+one component unchecked.** `canonicalize` needs an existing path and the file
+usually does not exist yet, so every write endpoint here contains the *parent* and
+appends the final name verbatim. That is correct and incomplete: a pre-existing
+symlink at that last component is inside the root by name, points wherever it
+likes, and `fs::write` follows it — so `overwrite` was a write outside the workdir,
+arriving through the one component the check could not see. `remove` was already
+safe by construction (unlinking never touches a target) and its doc comment even
+asserted that a final escaping symlink is "only ever unlinked, never opened or
+written to" — an invariant that was true of `remove` and false of `upload` two
+hundred lines away. Inspect an existing entry with `symlink_metadata`, then resolve
+and re-check; and when one function documents an invariant about a shared
+containment idiom, check every other function that uses the idiom against it.
+Verify such a fix by reverting it and watching the test fail — otherwise the test
+only proves it agrees with the code.
+
 **Canonicalizing a stored path changes every comparison against it.** Journalling
 the canonical `workdir` — right, since it defeats a symlink re-pointed after the
 check and stops two spellings becoming two sidebar groups — silently split the Quick

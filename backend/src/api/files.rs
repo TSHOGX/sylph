@@ -870,10 +870,47 @@ pub async fn upload(
         ));
     }
 
-    if target.exists() && !req.overwrite {
-        return Err(Error::InvalidRequest(format!(
-            "{filename} already exists. Send overwrite to replace it."
-        )));
+    // `symlink_metadata`, so an existing entry is inspected rather than followed.
+    // This is where the containment established on the *parent* stops being
+    // sufficient: the last component is deliberately left unresolved (the file
+    // usually does not exist yet, and `canonicalize` needs an existing path), so a
+    // pre-existing symlink there is inside the root by name and points wherever it
+    // likes. `tokio::fs::write` follows it, which turns `overwrite` into a write
+    // outside the workdir — the exact escape the check exists to prevent, arriving
+    // through the one component the check could not see.
+    //
+    // `remove` is safe from this by construction, because unlinking a link never
+    // touches its target, and its doc comment asserts that a final escaping
+    // symlink is "only ever unlinked, never opened or written to". That invariant
+    // was true of `remove` and false of this function; it is now true of both.
+    //
+    // Resolved and re-checked rather than refused outright: a symlink pointing
+    // *inside* the workdir is ordinary (a linked fixture, a shared config), and
+    // refusing every link would deny a write the agent driving this session can
+    // plainly make itself.
+    match std::fs::symlink_metadata(&target) {
+        Ok(existing) => {
+            if !req.overwrite {
+                return Err(Error::InvalidRequest(format!(
+                    "{filename} already exists. Send overwrite to replace it."
+                )));
+            }
+            if existing.file_type().is_symlink() {
+                // A broken link canonicalizes to nothing, so there is no target to
+                // prove contained — refuse rather than create the file it points at.
+                let resolved = paths::contain(&root, &target).map_err(|error| match error {
+                    Error::FileNotFound => Error::Forbidden(format!(
+                        "{filename} is a symbolic link that does not resolve, so where a \
+                         write would land cannot be established."
+                    )),
+                    other => other,
+                })?;
+                debug_assert!(resolved.starts_with(&root));
+            }
+        }
+        // Nothing there: the ordinary create path.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(paths::describe_io_error(&error, "read that path")),
     }
 
     let bytes = base64::Engine::decode(

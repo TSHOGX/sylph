@@ -3627,6 +3627,118 @@ async fn upload_refuses_to_overwrite_unless_asked() {
     );
 }
 
+/// Overwriting must not follow a symlink out of the workdir.
+///
+/// Containment for a write is established on the *parent* directory, because the
+/// file usually does not exist yet and `canonicalize` needs an existing path. That
+/// leaves the last component unresolved — so a pre-existing symlink there is inside
+/// the root by name and points wherever it likes, and `fs::write` follows it. The
+/// escape arrives through the one component the check could not see, which is why
+/// `remove` was written to unlink rather than walk and why the same care was owed
+/// here.
+#[cfg(unix)]
+#[tokio::test]
+async fn overwriting_a_symlink_out_of_the_workdir_is_refused() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let outside = TempDir::new().unwrap();
+    let victim = outside.path().join("victim.txt");
+    std::fs::write(&victim, "original outside content").unwrap();
+    // A link that *is* inside the workdir, pointing at a file that is not.
+    let link = backend.workdir().join("innocent.txt");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/files"),
+            json!({
+                "path": "",
+                "name": "innocent.txt",
+                "data": "b3ZlcndyaXR0ZW4=",
+                "overwrite": true,
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "POLICY_VIOLATION"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "original outside content",
+        "the file outside the workdir must be untouched"
+    );
+}
+
+/// A link pointing *inside* the workdir is ordinary and must still work.
+///
+/// The refusal above must be about where the write lands, not about symlinks:
+/// refusing every link would deny a write the agent driving this session can
+/// plainly make itself, which is the wider-than-the-agent line this endpoint holds.
+#[cfg(unix)]
+#[tokio::test]
+async fn overwriting_a_symlink_inside_the_workdir_still_works() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let real = backend.workdir().join("real.txt");
+    std::fs::write(&real, "original").unwrap();
+    let link = backend.workdir().join("alias.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/files"),
+            json!({
+                "path": "",
+                "name": "alias.txt",
+                "data": "bmV3",
+                "overwrite": true,
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        std::fs::read_to_string(&real).unwrap(),
+        "new",
+        "a link resolving inside the workdir writes through to its target"
+    );
+}
+
+/// A dangling link has no resolvable destination, so where a write would land
+/// cannot be established — and creating the file it names would be inventing one.
+#[cfg(unix)]
+#[tokio::test]
+async fn overwriting_a_dangling_symlink_is_refused() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let session_id = backend.create_session("agent").await;
+
+    let link = backend.workdir().join("dangling.txt");
+    std::os::unix::fs::symlink("/definitely/not/here.txt", &link).unwrap();
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/files"),
+            json!({
+                "path": "",
+                "name": "dangling.txt",
+                "data": "bmV3",
+                "overwrite": true,
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        !std::path::Path::new("/definitely/not/here.txt").exists(),
+        "a refused write must not have created the link's target"
+    );
+}
+
 #[tokio::test]
 async fn upload_rejects_malformed_base64() {
     let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
