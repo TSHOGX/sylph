@@ -206,10 +206,12 @@ async function runPromotion(page: import("@playwright/test").Page) {
   // and a backgrounded Bash, so the gap between its first line and its last is wide
   // enough to lose a host count to.
   //
-  // The composer re-enabling is the observable end of the turn: it is disabled while
-  // one is live, so this is the settled record rather than a deadline.
+  // Send/Stop is the observable end of the turn: the composer renders Stop while one is
+  // live and Send once it settles. Not `Send` being *enabled* — that also tracks
+  // whether the textarea has content, so it is disabled on an idle empty composer and
+  // asserting on it waits for something that never happens.
   await expect(page.getByText("Running a workflow.")).toBeVisible({ timeout: 15000 });
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+  await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0, {
     timeout: 20000,
   });
 }
