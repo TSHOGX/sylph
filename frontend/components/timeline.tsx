@@ -314,15 +314,38 @@ function TrajectoryCard({
   const name = trajectoryName(node);
   const tone = STATUS_TONE[node.status ?? "running"];
 
-  // A finished delegation with no interior is not going to acquire one. Some hosts
-  // report that delegated work happened without forwarding any of it — `claude`
-  // forwards interior events for its built-in delegation and only lifecycle
-  // notifications for the rest — so this is a real terminal state, not a pending
-  // one. Presented as expandable it invites the user to keep opening a branch that
-  // can never fill, and telling them only *after* they open it is the same lossy
-  // collapse the tree exists to avoid. Said on the card instead, and the disclosure
-  // stops claiming there is something behind it.
-  const hollow = node.children.length === 0 && node.status !== "running";
+  // Two different empty cards, and saying the wrong one misdescribes the run.
+  //
+  // `hollow`: the delegation *finished* and forwarded nothing. Some hosts report
+  // that delegated work happened without forwarding any of it — `claude` forwards
+  // interior events for its built-in delegation and only lifecycle notifications for
+  // the rest — so this is a real terminal state, not a pending one, and it will not
+  // acquire an interior later.
+  //
+  // `unreported`: the work was still running when its turn ended, so the server
+  // closed it. Nothing is known about its interior — not that there was none. The
+  // card used to say "no interior" here, which claims a measurement nobody took:
+  // it read "no interior / never finished" side by side, two statements that cannot
+  // both be the point, and focusing it showed nothing with no explanation of why.
+  //
+  // Either way the disclosure has to stop claiming there is something behind it,
+  // because telling the user only *after* they open it is the lossy collapse the
+  // tree exists to avoid.
+  // A promoted host is a tool call as well as a container (§ Promotion), and its own
+  // call is content the card would otherwise discard: the `Workflow` script that
+  // defines what the delegates *are*, and the result the tool returned. The row keeps
+  // `kind: "tool_call"` precisely so none of that is lost, but this card rendered only
+  // trajectory chrome — so a promoted host showed its name, a rollup, and nothing
+  // else, and opening or focusing one was answered with an empty pane.
+  const promoted = node.row.event.kind !== "subagent";
+
+  const empty = node.children.length === 0;
+  const unreported = empty && node.status === "abandoned";
+  const hollow = empty && !unreported && node.status !== "running";
+  // A promoted host always has its own call to show, so it stays expandable even when
+  // nothing was forwarded from inside it. The badge still says which of the two empty
+  // states this is; what changes is that opening it is no longer pointless.
+  const openable = promoted || (!hollow && !unreported);
 
   return (
     <section
@@ -334,7 +357,7 @@ function TrajectoryCard({
           <BranchIcon size={13} />
         </span>
 
-        {hollow ? (
+        {!openable ? (
           // Not a button: `aria-expanded` on a control with nothing to expand is a
           // promise the tree cannot keep, and a screen reader would announce it as
           // collapsed content that never appears.
@@ -358,6 +381,15 @@ function TrajectoryCard({
             title="This host reported that delegated work ran, but forwarded none of its events."
           >
             no interior
+          </span>
+        )}
+
+        {unreported && (
+          <span
+            className="shrink-0 rounded bg-hover px-1 text-3xs text-ink-muted"
+            title="Still running when the turn ended, so the server closed it. Nothing was reported about what it did — an agent cannot report back after its turn, because its process exits with the turn."
+          >
+            outlived its turn
           </span>
         )}
 
@@ -395,16 +427,31 @@ function TrajectoryCard({
         <RollupSummary node={node} />
       </p>
 
-      {isOpen && !hollow && (
+      {isOpen && openable && (
         <div
           className={`space-y-1.5 pb-1.5 ${
             depth < MAX_INDENT ? "border-l border-line pl-2" : ""
           }`}
         >
+          {/* The host's own call, above the work it dispatched, because that is the
+              order it happened in: the script defines the delegates, so reading it
+              after them inverts cause and effect. */}
+          {promoted && (
+            <TimelineRowView
+              row={node.row}
+              onOpenFile={onOpenFile}
+              expandAll={expandAll}
+            />
+          )}
+
           {node.children.length === 0 ? (
-            <p className="py-1 text-2xs text-ink-muted">
-              Waiting for the delegate&apos;s first output…
-            </p>
+            // Only reachable while running, or for a promoted host whose interior was
+            // never forwarded — the badge above already says which.
+            node.status === "running" ? (
+              <p className="py-1 text-2xs text-ink-muted">
+                Waiting for the delegate&apos;s first output…
+              </p>
+            ) : null
           ) : (
             node.children.map((child) => (
               <MemoizedNode

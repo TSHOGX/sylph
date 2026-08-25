@@ -536,6 +536,57 @@ one index-keyed map merges their deltas into one another's text. That is data
 corruption, not a display fault, and it is invisible until two delegates run at
 once.
 
+## An agent may start a turn
+
+A turn is not always a reply. An adapter may emit events with no turn in flight, and
+the server opens a turn for them rather than dropping them — an **agent-initiated**
+turn, recorded with `origin: "agent"` and an empty request text.
+
+This is not hypothetical and not rare. Measured on `claude` 2.x, a session holding
+backgrounded work emits, *after* the dispatching turn's `result`:
+
+```
+background_tasks_changed        the set of live background tasks changed
+task_updated                    patch{status: completed}
+task_notification               status, and the delegate's own summary
+init                            …and then an entire exchange of its own
+assistant                       "the background worker finished"
+result
+```
+
+Its stdout stays open and the process does not exit. So the agent reports late work,
+and reports it twice over: the delegate's outcome, then its own account of it.
+
+**Why the events cannot simply be dropped.** They were, and the reasoning was sound
+as far as it went: an event carries no turn id, the server files it under whichever
+turn is running, and a *guessed* id misplaces it in the transcript permanently. The
+error was concluding that no turn means nowhere to belong. The answer is to open the
+turn that does exist rather than to guess at one that does not — otherwise the only
+observable effect is that a delegation promised to report back never does, with
+nothing anywhere saying why.
+
+**Why a turn and not a lesser thing.** A turn is the unit that orders, consolidates,
+and prunes (`docs/storage.md`): `turn_id` is what consolidation iterates and what
+`events` is indexed by. Attaching these to no turn would leave rows the journal never
+folds and never releases — a leak whose size is set by how much unprompted work an
+agent does. Making them a turn costs one row and inherits every guarantee.
+
+**When the turn opens.** On the *first* out-of-turn event of any kind, not on a
+`turn`/`started`. The vendor's own bracket arrives partway through the sequence above
+— `task_notification`, the payload this exists to deliver, precedes it — so waiting
+for the bracket keeps the announcement and drops what it announces. A later
+`turn`/`started` then lands inside the already-open turn instead of opening a second.
+
+**How it settles.** By its own `turn`/`completed`, like any turn. Nothing is parked on
+its outcome, since nobody asked for it, so the server records terminal state directly
+rather than waking a waiter. It must settle: a session with a live turn refuses new
+messages, so one unprompted turn left running would wedge the session.
+
+**A client has to say who started it.** `requestText` is empty by construction, which
+is indistinguishable from a user who sent nothing — so an unlabelled agent turn reads
+as an answer to a message the user never wrote. `origin` is the only thing that
+carries this.
+
 ## Slash commands are turns
 
 A **prompt** command is delivered as `send` with `command` set:

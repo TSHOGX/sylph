@@ -238,10 +238,10 @@ impl JournalStore {
         sqlx::query_as::<_, Turn>(
             r#"
             INSERT INTO turns (
-                id, session_id, incarnation_id, status, request_text,
+                id, session_id, incarnation_id, status, origin, request_text,
                 command_invocation_id, idempotency_key, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
@@ -249,6 +249,7 @@ impl JournalStore {
         .bind(&turn.session_id)
         .bind(&turn.incarnation_id)
         .bind(&turn.status)
+        .bind(&turn.origin)
         .bind(&turn.request_text)
         .bind(&turn.command_invocation_id)
         .bind(&turn.idempotency_key)
@@ -1256,6 +1257,7 @@ mod tests {
                 session_id: "web-1".to_string(),
                 incarnation_id: None,
                 status: "running".to_string(),
+                origin: "user".to_string(),
                 request_text: "go".to_string(),
                 command_invocation_id: None,
                 idempotency_key: None,

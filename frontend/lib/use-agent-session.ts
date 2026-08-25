@@ -173,6 +173,19 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
                 queryKey: ["session", sessionId, "capabilities"],
               });
             }
+            // The agent started a turn nobody asked for — reporting backgrounded work
+            // that finished after the turn which dispatched it. This is the only
+            // notice a client gets: the turn's own events go to its turn-scoped
+            // stream, which nothing is attached to yet, and refetching history is what
+            // makes the page adopt it and start streaming. Without this the turn is
+            // real and journaled but invisible until a reload, which reads to the user
+            // as the notification never having arrived.
+            if (frame.includes("event: turn-opened")) {
+              void queryClient.invalidateQueries({
+                queryKey: ["session", sessionId, "history"],
+              });
+              void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+            }
           }
         }
       } catch {

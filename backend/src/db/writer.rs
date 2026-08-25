@@ -241,6 +241,7 @@ mod tests {
                 session_id: session.id.clone(),
                 incarnation_id: None,
                 status: "running".to_string(),
+                origin: "user".to_string(),
                 request_text: "hello".to_string(),
                 command_invocation_id: None,
                 idempotency_key: None,

@@ -11,6 +11,8 @@
 //! here is gone: it spawned a process per turn and read its exit code, which is
 //! the model that made approvals and interrupt unreachable.
 
+pub mod closer;
 pub mod turn;
 
+pub use closer::TurnCloser;
 pub use turn::{LinkedSupervisor, Outcome, TurnRequest};

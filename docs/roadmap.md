@@ -1416,8 +1416,59 @@ answers the approvals the delegate raises — unanswered, the turn never complet
 every assertion after it read mid-flight state, which is what made a script problem
 present as an adapter fault.
 
+### An agent may start a turn
+
+A `Workflow` that dispatched three backgrounded workers finished its turn in 22
+seconds and said "I'll notify you when it's done". Nothing ever arrived, and the
+delegate's card read *never finished* permanently.
+
+The delegate had in fact succeeded. `claude` reported it — measured, after the turn's
+`result`: `background_tasks_changed`, `task_updated`, `task_notification` carrying the
+delegate's own summary, and then `init`/`assistant`/`result`, an entire exchange the
+agent opened to describe what had happened. stdout stayed open; the process did not
+exit. Every one of those events reached `absorb_event`, found no turn running, and was
+dropped.
+
+The drop was defensible and the conclusion was wrong. An event carries no turn id, so
+the server files it under whichever turn is running, and a guessed id misplaces it in
+the transcript forever — all true, and none of it implies that no turn means nowhere to
+belong. **The server now opens the turn that exists** rather than guessing at one that
+does not: an agent-initiated turn, `origin: "agent"`, a real turn that consolidates and
+orders and prunes like any other. `turn_id` is what consolidation iterates, so anything
+less than a turn would leave rows the journal never folds and never releases.
+
+Four things this settled:
+
+- **It opens on the first out-of-turn event of any kind.** The vendor's own
+  `turn`/`started` arrives *after* `task_notification`, so waiting for the bracket
+  keeps the announcement and drops what it announces.
+- **It settles without a waiter.** Nobody is parked on an outcome nobody asked for, so
+  terminal state is recorded directly. `TurnCloser` is that path, factored out of the
+  supervisor so both reach one implementation — `LinkedSupervisor` owns a
+  `LinkManager`, so a call back the other way would be a cycle. Left unsettled, one
+  unprompted turn wedges its session, because a live turn refuses new messages.
+- **A waiter's absence means two different things.** An agent turn never had one; a
+  user's turn whose waiter is gone has an owner already, and settling it here reported
+  a deliberate stop as `LINK_LOST`. `origin` separates them.
+- **The client had to stop holding its claim.** `sentTurnId` outranked adoption and was
+  never released, so the agent's own turn was never streamed — it would have appeared
+  only on the next reload, which is how a delivered notification still reads as a
+  missing one. The claim now expires when history holds the turn as terminal, derived
+  rather than cleared, which also keeps the handover gapless.
+
+`abandoned` is consequently not final: a delegate the turn-settle sweep closed may
+report its real outcome on a later turn, and the later record is the truth.
+
 ### Open items
 
+- **Two records exist for a backgrounded delegate, and nothing reconciles them.** The
+  sweep's `abandoned` close and the delegate's own later completion are both journaled,
+  on different turns. A reader sees the truth because the later one is on screen too,
+  but the earlier card still says the work never finished. Reconciling them means
+  addressing a trajectory across turn boundaries, which the tree does not currently do.
+- **`is_backgrounded` is carried but not used.** `task_started` reports it, so the sweep
+  could leave a backgrounded delegate open instead of closing it as abandoned —
+  removing the contradiction above at its source rather than after the fact.
 - **`pi` reports no child trajectories yet,** so its sessions render as before.
   Promotion is what makes adding them an adapter change alone: emitting a `subagent`
   per delegate, or merely tagging child events with a `span`, is enough for its own

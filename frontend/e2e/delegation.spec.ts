@@ -199,17 +199,46 @@ async function runPromotion(page: import("@playwright/test").Page) {
   await expect(page.getByText("Running a workflow.")).toBeVisible({ timeout: 15000 });
 }
 
+/**
+ * Open every `Workflow` host, then return the one containing `delegate`.
+ *
+ * Two reasons this is a helper rather than a locator. A collapsed card mounts none
+ * of its subtree, so `filter({ has: <descendant> })` matches nothing until the host
+ * is open — and a card auto-opens only when its status is `failed` *at mount*, which
+ * during a stream is before its delegate's failure has arrived. So expansion is
+ * timing-dependent, and a spec that relies on it passes or fails on render order.
+ *
+ * Selecting by contained delegate rather than by position is the other half: three
+ * of the fixture's hosts are named `Workflow`, so `.last()` and `.nth()` silently
+ * retarget whenever the scenario grows one. A positional selector that keeps passing
+ * while pointing at the wrong row is worse than one that fails.
+ */
+async function workflowHosting(
+  page: import("@playwright/test").Page,
+  delegate: string,
+) {
+  const hosts = page.getByRole("region", { name: /Workflow delegation/ });
+  const count = await hosts.count();
+  for (let i = 0; i < count; i += 1) {
+    const disclosure = hosts.nth(i).getByRole("button", { name: "Workflow", exact: true });
+    if ((await disclosure.getAttribute("aria-expanded")) !== "true") {
+      await disclosure.click();
+    }
+  }
+  return hosts.filter({
+    has: page.getByRole("region", { name: `${delegate} delegation` }),
+  });
+}
+
 test("every delegate under one host gets its own card", async ({ page }) => {
   await runPromotion(page);
 
   // The measured bug: keyed by the host, two delegates collapsed into one row and
   // the last name won — "Demo: agent-1" was absent from the timeline entirely.
-  await expect(
-    page.getByRole("region", { name: "Demo: agent-1 delegation" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("region", { name: "Demo: agent-2 delegation" }),
-  ).toBeVisible();
+  const host = await workflowHosting(page, "Demo: agent-1");
+  await expect(host).toHaveCount(1);
+  await expect(host.getByRole("region", { name: "Demo: agent-1 delegation" })).toBeVisible();
+  await expect(host.getByRole("region", { name: "Demo: agent-2 delegation" })).toBeVisible();
 });
 
 test("a delegating tool nobody declared still contains its delegates", async ({
@@ -259,8 +288,11 @@ test("a host that forwarded no interior says so instead of offering an empty car
   // saying so only after the click is the lossy collapse the tree exists to avoid.
   const agent = page.getByRole("region", { name: "Agent delegation" });
   await expect(agent).toContainText("no interior");
-  // Nothing to expand, so it must not claim there is.
-  await expect(agent.getByRole("button", { expanded: false })).toHaveCount(0);
+  // Collapsed, the card says what came back from inside it — nothing — without the
+  // user having to open it to find that out. Whether it *can* be opened is a separate
+  // question, answered by the spec below: a promoted host still has its own call to
+  // show, while a declared trajectory with no interior has nothing at all.
+  await expect(agent).not.toContainText("summarize");
 });
 
 test("a promoted host left open is closed by the server, not left spinning", async ({
@@ -273,11 +305,114 @@ test("a promoted host left open is closed by the server, not left spinning", asy
   // stayed *running* across reloads. Measured on a real session before the fix.
   // The host, not the delegate: the delegate declared itself and was always swept,
   // while its *container* was promoted and is the thing the old query missed.
-  const host = page.getByRole("region", { name: /Workflow delegation/ }).last();
+  //
+  // Selected by the delegate it contains rather than by position. `.last()` silently
+  // retargeted the moment the fixture grew a fourth host, and a positional selector
+  // that still passes while pointing at the wrong row is worse than a failing one.
+  const host = await workflowHosting(page, "Stage A: A:item-1");
   await expect(host).toBeVisible();
   // "never finished" is the abandoned wording, kept distinct from "failed": the
   // server closing what an adapter left open means nobody reported an outcome, and
   // colouring that as a failure reports an interrupted turn as a broken one.
   await expect(host).toContainText("never finished", { timeout: 20000 });
   await expect(host).not.toContainText("running");
+});
+
+test("a host that dispatched successfully is not failed by a delegate the server closed", async ({
+  page,
+}) => {
+  await runPromotion(page);
+
+  // The reading that was wrong twice over on a real session. The call succeeded and
+  // returned; its delegate was still running when the turn ended, so the server
+  // closed that. `abandoned` means nobody reported an outcome — counting it as a
+  // descendant failure badged a workflow red for finishing exactly as designed.
+  const host = await workflowHosting(page, "Barrier: worker-1");
+  // `finished`, not `failed`. Asserted on the badge rather than on absence alone,
+  // because a card that failed to render at all would also "not contain failed".
+  await expect(host).toContainText("finished");
+  await expect(host).not.toContainText("failed");
+
+  // And the delegate must not claim "no interior": nobody looked, which is a
+  // different fact from a host that finished and forwarded nothing.
+  const worker = page.getByRole("region", { name: "Barrier: worker-1 delegation" });
+  await expect(worker).toContainText("outlived its turn");
+  await expect(worker).not.toContainText("no interior");
+});
+
+test("a promoted host shows its own call, not only the delegates under it", async ({
+  page,
+}) => {
+  await runPromotion(page);
+
+  // A promoted host is a tool call *and* a container, and the row keeps
+  // `kind: "tool_call"` so its name, arguments, and result survive. The card rendered
+  // only trajectory chrome, so a `Workflow` showed a name and a rollup and nothing
+  // else — opening or focusing one answered with an empty pane, which is what made a
+  // correctly-built tree look broken. The script is the part that matters: it is what
+  // defines what the delegates are.
+  const host = await workflowHosting(page, "Demo: agent-1");
+  await expect(host).toContainText("parallel");
+});
+
+test("a host with no forwarded interior is still worth opening", async ({ page }) => {
+  await runPromotion(page);
+
+  // `no interior` says nothing came back from inside. That is not the same as nothing
+  // to show: the call itself is still there, so this one keeps its disclosure while a
+  // *declared* trajectory with no interior does not have one to keep.
+  const agent = page.getByRole("region", { name: "Agent delegation" });
+  await expect(agent).toContainText("no interior");
+  const disclosure = agent.getByRole("button", { name: "Agent", exact: true });
+  await expect(disclosure).toHaveCount(1);
+  await disclosure.click();
+  await expect(agent).toContainText("summarize");
+});
+
+/**
+ * A turn the agent started on its own.
+ *
+ * The gap this closes was total and silent: an event arriving with no turn running was
+ * dropped, so a delegate finishing after its turn had settled was discarded along with
+ * the agent's own report of it. A user told "I'll let you know when it's done" was
+ * never going to be told, and nothing anywhere said why.
+ */
+test("work that finishes after its turn is reported in a turn of the agent's own", async ({
+  page,
+}) => {
+  await createSession(page);
+  await page.getByLabel("Message").fill("unprompted please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+
+  // The dispatching turn ends first, with the delegate still open.
+  await expect(page.getByText("Dispatching a background worker.")).toBeVisible({
+    timeout: 15000,
+  });
+
+  // Then the report arrives with nobody having asked for it. This is the assertion the
+  // whole change exists for: before it, this text never reached the page at all.
+  await expect(
+    page.getByText("The background worker finished while you were away."),
+  ).toBeVisible({ timeout: 20000 });
+
+  // Labelled, because its `requestText` is empty: unlabelled it reads as an answer to
+  // a message the user never wrote.
+  await expect(page.getByText("the agent reported this on its own")).toBeVisible();
+});
+
+test("a delegate that finishes late is reported as finishing, not as abandoned", async ({
+  page,
+}) => {
+  await createSession(page);
+  await page.getByLabel("Message").fill("unprompted please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(
+    page.getByText("The background worker finished while you were away."),
+  ).toBeVisible({ timeout: 20000 });
+
+  // The turn-settle sweep closes what an adapter left open, which is right when
+  // nothing more is coming — and backgrounded work *is* coming. Both records exist and
+  // the later one is the truth, so the delegate's own outcome has to be on the page:
+  // reporting only the sweep's close would say the work never finished when it had.
+  await expect(page.getByText("the background worker finished")).toBeVisible();
 });

@@ -255,6 +255,20 @@ class Fixture:
             event("subagent", "started", streamId="sub-stranded", name="Stranded")
             self._reply()
 
+        elif "unprompted" in text:
+            # A host that dispatches work into the background and returns. The turn
+            # ends here with the delegate still open; its completion arrives after
+            # settling, below.
+            event("assistant", "completed", streamId="up-intro",
+                  text="Dispatching a background worker.")
+            event("tool_call", "completed", streamId="up-host", name="Workflow",
+                  text=json.dumps({"script": "background(worker)"}))
+            event("subagent", "started", streamId="up-task", span="up-host",
+                  name="Background: worker")
+            event("tool_result", "completed", streamId="up-host", name="Workflow",
+                  text="dispatched")
+            self._reply()
+
         elif "promote" in text:
             # Delegation that is never *declared* — the shape every delegating tool
             # outside claude's built-in `Task` actually has, and the one no fixture
@@ -314,6 +328,22 @@ class Fixture:
                   text=json.dumps({"script": "phase('Stage A')"}))
             event("subagent", "started", streamId="pr-task-3",
                   span="pr-host-c", name="Stage A: A:item-1")
+
+            # Host 4: the shape a real backgrounded workflow has, and the one that
+            # produced two wrong readings at once. Its own call *succeeded* — the tool
+            # dispatched and returned — while its delegate was still running when the
+            # turn ended, so only the server closes that. The host must therefore read
+            # `done`, not `failed`: the server marks its closing event `isError` so the
+            # row reads as unresolved, and counting that as a descendant failure badged
+            # a workflow red for finishing exactly as designed. And the delegate must
+            # not claim "no interior", because nobody looked — that is a different fact
+            # from a host that finished and forwarded nothing.
+            event("tool_call", "completed", streamId="pr-host-d", name="Workflow",
+                  text=json.dumps({"script": "parallel([sleep20, sleep15])"}))
+            event("subagent", "started", streamId="pr-task-4",
+                  span="pr-host-d", name="Barrier: worker-1")
+            event("tool_result", "completed", streamId="pr-host-d",
+                  name="Workflow", text="dispatched; running in background")
             self._reply()
 
         elif "paced" in text:
@@ -344,6 +374,34 @@ class Fixture:
             self._reply(stream=True)
 
         self.settle()
+
+        # Everything below happens with the turn already settled, which is the point.
+        #
+        # Measured on claude 2.x: a session with backgrounded work emits the delegate's
+        # completion after its turn's `result`, then opens an entire exchange of its own
+        # to report it, with stdout still open. Those events used to be dropped for
+        # arriving outside a turn — so the completion a user was promised was discarded
+        # by the transport, and no fixture could observe it because none emitted after
+        # settling.
+        if "unprompted" in text:
+            time.sleep(0.5)
+            # The delegate this turn dispatched, finishing late. Its span names the host
+            # from the turn that has already ended, which is what makes this a report
+            # about earlier work rather than something new.
+            event("subagent", "completed", streamId="up-task", span="up-host",
+                  text="the background worker finished")
+            # And the agent's own turn, describing it. `turn`/`started` arrives *after*
+            # the first out-of-turn event on purpose: that ordering is what the vendor
+            # does, and a server that opened a turn only on this bracket would drop the
+            # payload above and keep the announcement.
+            event("turn", "started")
+            event("assistant", "completed", streamId="up-late",
+                  text="The background worker finished while you were away.")
+            event("usage", "completed", streamId="up-usage",
+                  data={"inputTokens": 3, "outputTokens": 9})
+            event("turn", "completed",
+                  text="The background worker finished while you were away.",
+                  data={"stopReason": "end_turn"})
 
     def _tool(self, stream_id, name, tool_input, result, is_error=False, data=None,
               span=None):

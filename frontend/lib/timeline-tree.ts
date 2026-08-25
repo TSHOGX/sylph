@@ -600,8 +600,7 @@ function trajectoryStatus(node: TimelineNode, failures: number): TrajectoryStatu
   if (event.kind !== "subagent") {
     const close = node.row.trajectoryClose;
     if (close) {
-      const closedBy = (close.data as { closedBy?: string } | undefined)?.closedBy;
-      if (closedBy === "server") return "abandoned";
+      if (closedByServer(close)) return "abandoned";
       return close.isError || failures > 0 ? "failed" : "done";
     }
     const result = node.row.result;
@@ -610,8 +609,7 @@ function trajectoryStatus(node: TimelineNode, failures: number): TrajectoryStatu
   }
 
   if (event.phase !== "completed") return "running";
-  const closedBy = (event.data as { closedBy?: string } | undefined)?.closedBy;
-  if (closedBy === "server") return "abandoned";
+  if (closedByServer(event)) return "abandoned";
   if (event.isError) return "failed";
   return failures > 0 ? "failed" : "done";
 }
@@ -621,8 +619,23 @@ function isCompletedTool(row: TimelineRow): boolean {
 }
 
 function rowFailed(row: TimelineRow): boolean {
+  // A trajectory the *server* closed is `abandoned`, and abandoned is not a
+  // failure: nobody reported an outcome, which is a different fact from work that
+  // reported an error. The server sets `isError` on its closing event so the row
+  // reads as unresolved rather than clean — but counting that as a descendant
+  // failure escalated every ancestor to `failed`, so a `Workflow` whose own
+  // `tool_result` succeeded was badged red because one delegate was still running
+  // when the turn ended. That reports an interrupted turn as a broken one, which is
+  // exactly the distinction `abandoned` exists to preserve.
+  if (closedByServer(row.event) || closedByServer(row.trajectoryClose)) return false;
   if (row.event.isError || row.result?.isError) return true;
   return row.event.kind === "error";
+}
+
+/** Whether an event is the server's own close of a trajectory an adapter left open. */
+function closedByServer(event: StreamEvent | undefined): boolean {
+  if (!event) return false;
+  return (event.data as { closedBy?: string } | undefined)?.closedBy === "server";
 }
 
 /** Token usage an event reports for itself. Spellings differ per agent. */
