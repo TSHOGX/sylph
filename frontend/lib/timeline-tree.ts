@@ -699,6 +699,14 @@ export function pathTo(
  * placeholder becomes the trajectory's durable name in `history.db`, indistinguishable
  * from one an agent chose.
  *
+ * The adapter's half is written — `_task_label` returns `None` — and the bound on what
+ * that fixes is worth stating exactly, because it sounds better than it is:
+ * **rows already journaled with the literal are permanently indistinguishable from a
+ * genuine name.** There is nothing to migrate not because the data is fine but because
+ * nothing can tell the two apart — the fix stops new guesses and cannot undo old ones.
+ * So a historical `"Subagent"` row is not evidence that an agent named it that, and any
+ * later analysis over archived names has to treat it as unknowable rather than as data.
+ *
  * **The order of the two fixes matters, and this half must go second.** A fallback here
  * is a presentation decision and belongs here; the adapter omitting `name` is a
  * subtraction, and the server already carries it as `Option<String>` throughout. But
@@ -709,6 +717,13 @@ export function pathTo(
  * `e2e/delegation.spec.ts`: "Subagent delegation" contains "agent delegation", so a
  * `{ name: "<tool> delegation" }` locator is ambiguous with the fallback by
  * construction).
+ *
+ * So the precondition for renaming this is not "someone should fix the adapter" but
+ * "check whether that landed". It is written; confirm `_task_label` returns `None` on
+ * whatever tree you are on before touching the string here, because the two-label state
+ * is what this ordering exists to prevent and it is invisible until a card renders.
+ * `e2e/timeline.spec.ts` covers a nameless delegation reaching the fallback, so the
+ * rename is not a blind change once the precondition holds.
  */
 export function trajectoryName(node: TimelineNode): string {
   return node.row.event.name?.trim() || "Subagent";
