@@ -59,10 +59,10 @@ landed changes enough of the system that the summary above would mislead without
 Its own section at the end of this file carries the reasoning, the measurements, and
 the open items — that section is authoritative for Phase 12, not this list.
 
-**Current test totals, measured on `main` after the four Phase 12 worktrees merged:**
-300 backend unit, 183 backend integration across three binaries (143 `integration`,
-24 `requests`, 16 `storage`, plus 3 ignored by default that parse files from real
-Office tooling), 333 frontend unit in 20 files, 134 E2E specs in 16 files.
+**Current test totals, measured on `main` after the six delegation/security worktrees
+merged:** 322 backend unit, 205 backend integration across three binaries (158
+`integration`, 24 `requests`, 23 `storage`, plus 3 ignored by default that parse files
+from real Office tooling), 366 frontend unit in 21 files, 147 E2E specs in 16 files.
 
 The per-phase counts below are what each phase measured on its own branch and are
 left as its record; they do not add up to these, because parallel tracks each

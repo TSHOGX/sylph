@@ -87,22 +87,40 @@ else
   # chunks regardless of whether the id resolves, which is what is being measured.
   probe_path="$(printf '%s' "$ROUTE" | sed -e 's/\[\.\.\..*\]/measure/' -e 's/\[[^]]*\]/measure/g')"
   port=3199
+  # Refuse a busy port rather than measure whatever is on it. A server left over from
+  # an earlier run serves its *own* build, so the HTML names chunk hashes this build
+  # never produced — which surfaces as "referenced chunk is missing from the build"
+  # and reads as a broken build rather than a stale server.
+  if lsof -ti "tcp:$port" >/dev/null 2>&1; then
+    echo "port $port is already in use, so this would measure someone else's build." >&2
+    echo "Free it first:  lsof -ti tcp:$port | xargs kill" >&2
+    exit 1
+  fi
   tmp_html="$(mktemp -t sylph-bundle)"
   server_log="$(mktemp -t sylph-bundle-log)"
 
   cleanup() {
     if [ -n "${server_pid:-}" ]; then
-      # `disown` first, or the shell prints its own "Terminated" line to stderr
-      # after the script has already reported a clean result.
-      kill "$server_pid" 2>/dev/null
+      # Kill the process *group*, not the pid. `npx next start` execs a child, and a
+      # kill aimed at the subshell leaves that child holding the port — which then
+      # serves its stale build to the next run. Learned the hard way: a survivor from
+      # an earlier invocation reported chunks this build never made.
+      kill -- "-$server_pid" 2>/dev/null || kill "$server_pid" 2>/dev/null
       disown "$server_pid" 2>/dev/null || true
       wait "$server_pid" 2>/dev/null || true
     fi
+    # Belt and braces: whatever is still on the port is ours to clean up, because the
+    # busy-port check above guarantees nothing else owned it when we started.
+    lsof -ti "tcp:${port:-0}" 2>/dev/null | xargs kill 2>/dev/null || true
     rm -f "$tmp_html" "$server_log"
   }
   trap cleanup EXIT
 
+  # `set -m` puts the background job in its own process group, which is what makes
+  # the group kill in `cleanup` able to reach `next`'s child.
+  set -m
   (cd "$frontend" && npx next start -p "$port" >"$server_log" 2>&1) &
+  set +m
   server_pid=$!
 
   ready=0
@@ -138,7 +156,17 @@ while IFS= read -r chunk; do
   [ -n "$chunk" ] || continue
   file="$frontend/.next${chunk#/_next}"
   if [ ! -f "$file" ]; then
+    # Almost always a stale serve rather than a broken build: `next start` was given
+    # one build and `.next` has since been rewritten by another `npm run build`, so
+    # the HTML names chunk hashes that no longer exist. Rebuild, then measure,
+    # without a build in between.
     echo "referenced chunk is missing from the build: $chunk" >&2
+    echo >&2
+    echo "This usually means .next was rebuilt after the page was served." >&2
+    echo "Rebuild and re-measure with nothing building in between:" >&2
+    echo >&2
+    echo "  cd frontend && SYLPH_WEB_BACKEND=http://localhost:4317 npm run build" >&2
+    echo "  ./scripts/measure-bundle.sh --route='$ROUTE'" >&2
     exit 1
   fi
   size="$(gzip -c "$file" | wc -c | tr -d ' ')"
