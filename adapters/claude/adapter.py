@@ -179,6 +179,28 @@ class Session:
         # tool_use_id -> the trajectory the spawning Task call itself ran in, so a
         # nested delegation closes back into its parent rather than at the root.
         self.subagent_parent = {}
+        # task_id -> trajectory id, for a host that multiplexes.
+        #
+        # `Workflow` fans out to N agents under one `tool_use_id`, so keying a
+        # trajectory by the host collapsed all N into one row where the last name to
+        # arrive won: a two-agent workflow rendered as a single card reading
+        # "Demo: agent-2", and the other agent was simply absent. The vendor's
+        # per-delegate identity is `task_id`, so that is what a trajectory is keyed
+        # by, with the host as its `span`. Same rule as `self.blocks` above, one
+        # level up: never key a trajectory by something the vendor multiplexes.
+        self.task_trajectories = {}
+        # Trajectory ids closed already, so a late notification cannot reopen one.
+        self.closed_trajectories = set()
+        # host tool_use_id -> the task ids running under it. A host with exactly one
+        # delegate lets forwarded output tagged with the *host* be attributed to the
+        # delegate that actually produced it; with several, claude forwards no
+        # interior at all, so there is nothing to attribute.
+        self.host_tasks = {}
+        # task id -> its host, the inverse of the above. `task_updated` carries no
+        # `tool_use_id`, so a close would otherwise land at the root while the
+        # trajectory it closes sits inside a container — leaving the container open
+        # forever, which is the same spinner one layer up.
+        self.task_hosts = {}
         self.message_id = "claude"
         self.message_seq = 0
         self.turn_open = False
@@ -737,11 +759,12 @@ class Session:
     def _stream_event(self, nested, parent=None):
         """Claude's partial-message stream, projected onto Sylph event kinds.
 
-        `parent` is the envelope's `parent_tool_use_id`: the Task call this output
-        came from, or None for the root agent's own work. It becomes the event's
-        `span`, which is what lets the timeline nest a delegation to any depth
-        (`docs/session-protocol.md` § Delegated trajectories).
+        `parent` is the envelope's `parent_tool_use_id`: the delegating call this
+        output came from, or None for the root agent's own work. It becomes the
+        event's `span`, which is what lets the timeline nest a delegation to any
+        depth (`docs/session-protocol.md` § Delegated trajectories).
         """
+        parent = self._delegate_of(parent)
         ntype = nested.get("type")
 
         if ntype == "message_start":
@@ -771,11 +794,23 @@ class Session:
 
             if name:
                 self.tool_names[stream_id] = name
-                # A Task call *is* a delegation, so it is reported as a trajectory
-                # rather than as a tool call whose output happens to be a wall of
-                # text. Its own tool_use_id becomes the trajectory id, which is
-                # exactly what claude will tag the child's output with — so no
-                # correlation table is needed to match them up.
+                # `Task` is *declared* a trajectory here, and it is the only tool
+                # that can be. claude forwards a Task delegate's own events under
+                # the spawning id, so this block and the child's output share one
+                # identity and no correlation table is needed — which also means
+                # its `tool_result` is the delegated work's outcome rather than a
+                # tool's return value, so it closes the trajectory below.
+                #
+                # Every *other* delegating tool is discovered rather than declared.
+                # This used to be the only path, and it was a guess standing in for
+                # a fact that arrives later: a tool call is known to have delegated
+                # when a child arrives carrying its id, which is always after the
+                # call was published. The name test was correct until the vendor
+                # shipped `Agent` and `Workflow`, and an MCP server can add another
+                # at any time — so the list could never be completed, only extended
+                # after each report. Those are now promoted by the `span` their
+                # children already carry (`docs/session-protocol.md` § Promotion),
+                # which needs no list and covers tools nobody has written yet.
                 if name == "Task":
                     self.subagent_tools.add(stream_id)
                     self.subagent_parent[stream_id] = parent
@@ -850,8 +885,10 @@ class Session:
             content = [content]
 
         # `--forward-subagent-text` tags a subagent's own output with the tool
-        # call that spawned it. That tag is what lets the timeline nest it.
-        parent = msg.get("parent_tool_use_id")
+        # call that spawned it. That tag is what lets the timeline nest it, and
+        # `_delegate_of` resolves it to the delegate when the host is only a
+        # container for one.
+        parent = self._delegate_of(msg.get("parent_tool_use_id"))
 
         for block in content:
             if not isinstance(block, dict):
@@ -922,21 +959,15 @@ class Session:
                   data=msg.get("compact_metadata"))
             return
 
-        if subtype in ("task_started", "task_progress", "task_updated"):
-            # Progress on a trajectory the Task block already opened, so it is
-            # always a `delta`: emitting `started` here would open a second
-            # trajectory under the same id and the tree would grow a duplicate
-            # node. `tool_use_id` is preferred because that is the id the block
-            # and the child's own output are keyed by; `task_id` is a fallback for
-            # a notification that carries only it.
-            stream_id = msg.get("tool_use_id") or msg.get("task_id")
-            event("subagent", "delta",
-                  streamId=stream_id,
-                  span=self.subagent_parent.get(stream_id),
-                  name=msg.get("description") or msg.get("subagent_type"),
-                  text=msg.get("summary"),
-                  data={k: v for k, v in msg.items()
-                        if k in ("task_id", "subagent_type", "tool_use_id")})
+        # Measured against claude 2.x with `--forward-subagent-text`: these four and
+        # no others. `task_completed` and `task_failed` do not exist, and an earlier
+        # version of this branch listed them — so nothing ever closed a delegate and
+        # every workflow card span forever. Names guessed from a vendor's vocabulary
+        # compile and then silently never fire; `/tmp/probe_task.py` printed one real
+        # turn's payloads to settle it.
+        if subtype in ("task_started", "task_progress", "task_updated",
+                       "task_notification"):
+            self._task_notification(subtype, msg)
             return
 
         if subtype in ("error", "api_error"):
@@ -947,6 +978,148 @@ class Session:
 
         if subtype == "notification":
             event("notice", text=str(msg.get("message") or ""))
+
+    def _delegate_of(self, host):
+        """The trajectory that forwarded output tagged with `host` belongs to.
+
+        Usually `host` itself. The exception is a host that announced a delegate by
+        `task_id` — `Agent`, and anything else that reports through `task_*` — where
+        the trajectory is the delegate and the host is only its container. claude
+        still tags the forwarded output with the *host*, so without this the work
+        lands on the container while the delegate's own node stays empty, and one
+        delegation reads as two: a node holding everything and a sibling holding
+        nothing. Measured against a real delegated turn.
+
+        Only resolved when the host has exactly one delegate. With several, claude
+        forwards no interior at all, so there is nothing to attribute and a guess
+        would put one delegate's work under another — the corruption this whole
+        change exists to prevent.
+        """
+        if not host:
+            return host
+        tasks = self.host_tasks.get(host)
+        if tasks and len(tasks) == 1:
+            return next(iter(tasks))
+        return host
+
+    def _task_notification(self, subtype, msg):
+        """A delegate's lifecycle, reported by the host tool rather than streamed.
+
+        `Task` forwards its delegate's own events, so its trajectory is opened by
+        the tool block and filled by forwarded output. Every other delegating tool
+        — `Agent`, `Workflow`, an MCP server's own — reports only these
+        notifications, and they are then the *whole* record of the delegated work.
+
+        Two things here are load-bearing.
+
+        **The trajectory is keyed by `task_id`, not by the host's `tool_use_id`.**
+        `Workflow` fans out to N agents under one tool call, so keying by the host
+        collapsed all N into a single row where the last name to arrive won:
+        measured on a real session, a two-agent workflow rendered as one card
+        reading "Demo: agent-2" and the other agent was absent entirely. The host
+        becomes the `span` instead, which promotion turns into their container
+        (`docs/session-protocol.md` § Promotion).
+
+        **A status line is a snapshot, so it goes in `data`.** These notifications
+        re-send the whole current label rather than a suffix. Appending it as delta
+        text stacked six copies of one sentence in the journal.
+
+        The four subtypes, measured rather than assumed — every field name here comes
+        from printing one real delegated turn:
+
+            task_started       task_id, tool_use_id, description, subagent_type,
+                               prompt, spawn_depth, task_type
+            task_progress      task_id, tool_use_id, description, last_tool_name,
+                               usage
+            task_updated       task_id, patch{status, end_time} — and *no*
+                               tool_use_id, which is why the host is remembered
+            task_notification  task_id, tool_use_id, status, summary, output_file
+
+        So a close arrives two ways: `task_updated` with a terminal `patch.status`,
+        and `task_notification` with a terminal `status` plus the delegate's own
+        `summary`. Whichever lands first closes the trajectory and the other is
+        ignored, because reopening a closed one is what leaves a permanently running
+        duplicate.
+        """
+        host = msg.get("tool_use_id")
+
+        # A host that already declared itself a trajectory *is* the delegation —
+        # `Task` publishes its block under this id and claude forwards the child's
+        # own events under it too. Minting a second id from `task_id` there splits
+        # one delegation into two nodes: the work lands on the declared id and the
+        # minted one stays empty, and since nothing ever closes it, it reads as
+        # running forever. Measured against a real delegated turn, which is what
+        # `verify.py` caught.
+        if host and host in self.subagent_tools:
+            trajectory = host
+        else:
+            trajectory = msg.get("task_id") or host
+        if not trajectory:
+            # Nothing addressable. Reported as a plain notice rather than dropped,
+            # because a delegation nobody can name still happened.
+            event("notice", text=str(msg.get("summary") or subtype))
+            return
+
+        # A late notification must not reopen a closed trajectory: that would leave
+        # a second, permanently running node under the same id, which is the
+        # spinner this whole change exists to remove.
+        if trajectory in self.closed_trajectories:
+            return
+
+        # Which delegates run under this host, recorded on the way in. `task_updated`
+        # carries no `tool_use_id` at all, so a close cannot be placed in the tree
+        # from its own payload — without this it would land at the root while the
+        # trajectory it closes sits inside a container, and the container would then
+        # never resolve.
+        if host and host != trajectory:
+            self.host_tasks.setdefault(host, set()).add(trajectory)
+            self.task_hosts[trajectory] = host
+
+        # The host's own trajectory, so a delegation inside a delegation closes back
+        # into its parent rather than at the root. A host that is not itself a known
+        # delegation is its own span, and promotion makes that a trajectory.
+        span = (host if host and host != trajectory
+                else self.task_hosts.get(trajectory)
+                or self.subagent_parent.get(trajectory))
+
+        # `description` is a live label, not a stable name: measured as "Read README.md
+        # first heading" at `task_started` and "Reading README.md" during progress. The
+        # later one is better informed, and the server keeps the latest a phase gave.
+        name = msg.get("description") or msg.get("subagent_type")
+
+        data = {k: v for k, v in msg.items()
+                if k in ("task_id", "subagent_type", "tool_use_id",
+                         "last_tool_name", "spawn_depth", "task_type")}
+        if name:
+            data["progress"] = str(name)
+
+        patch = msg.get("patch") if isinstance(msg.get("patch"), dict) else {}
+        status = str(patch.get("status") or msg.get("status") or "")
+        if status in ("completed", "failed", "cancelled", "error"):
+            self.closed_trajectories.add(trajectory)
+            self.task_trajectories.pop(trajectory, None)
+            event("subagent", "completed",
+                  streamId=trajectory, span=span, name=name,
+                  # `summary` is the delegate's own answer, which only
+                  # `task_notification` carries — so a close arriving via
+                  # `task_updated` has no text, and that is honest rather than empty.
+                  text=str(msg.get("summary") or ""),
+                  isError=status in ("failed", "error"),
+                  data=data)
+            return
+
+        # `started` only on first sighting. A second `started` under one id would
+        # open a duplicate node, and these notifications arrive repeatedly for one
+        # delegate — which is why progress is a `delta` however it was announced.
+        if trajectory not in self.task_trajectories:
+            self.task_trajectories[trajectory] = host
+            event("subagent", "started",
+                  streamId=trajectory, span=span,
+                  name=name or "Subagent", data=data)
+            return
+
+        event("subagent", "delta",
+              streamId=trajectory, span=span, name=name, data=data)
 
 
 def _task_label(content):

@@ -265,3 +265,185 @@ describe("flattenTrajectories", () => {
     ]);
   });
 });
+
+/**
+ * Promotion: a trajectory is defined by use, not by declaration.
+ *
+ * `docs/session-protocol.md` § Promotion. These pin the four defects that made two
+ * real delegations render as permanently-running cards with no visible interior:
+ * a host nobody declared stayed flat, N delegates under one host collapsed into
+ * one row, a promoted host's status was read off the wrong field, and nothing ever
+ * closed it.
+ */
+describe("promotion", () => {
+  function call(id: string, name: string, span?: string): StreamEvent {
+    return ev({ kind: "tool_call", phase: "completed", streamId: id, name, span });
+  }
+  function result(id: string, isError?: boolean): StreamEvent {
+    return ev({ kind: "tool_result", phase: "completed", streamId: id, isError });
+  }
+
+  it("makes a tool call its children name into their container", () => {
+    // The root defect. `Agent` and `Workflow` are delegating tools the adapter
+    // never whitelisted, so their children were rooted beside the call instead of
+    // inside it — the delegation read as flat and its work looked like the root
+    // agent's own.
+    const nodes = tree([
+      call("h1", "Workflow"),
+      ev({ kind: "assistant", phase: "completed", streamId: "b1", span: "h1", text: "x" }),
+    ]);
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].trajectory).toBe("h1");
+    expect(nodes[0].children.map((c) => c.row.event.streamId)).toEqual(["b1"]);
+  });
+
+  it("keeps a promoted host a tool call rather than rewriting it", () => {
+    // Its name, arguments, and card are the tool's. Folding a trajectory identity
+    // onto it would discard all three.
+    const nodes = tree([
+      call("h1", "Workflow"),
+      ev({ kind: "assistant", phase: "completed", streamId: "b1", span: "h1", text: "x" }),
+    ]);
+
+    expect(nodes[0].row.event.kind).toBe("tool_call");
+    expect(nodes[0].row.event.name).toBe("Workflow");
+  });
+
+  it("gives every delegate under one host its own row", () => {
+    // Measured on a real session: a two-agent workflow rendered as a single card
+    // reading "Demo: agent-2" because both delegates were keyed by the host's id,
+    // and the last name to arrive won. The other agent was simply absent.
+    const nodes = tree([
+      call("h1", "Workflow"),
+      opens("t1", "Demo: agent-1", "h1"),
+      opens("t2", "Demo: agent-2", "h1"),
+    ]);
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].children.map((c) => c.row.event.name)).toEqual([
+      "Demo: agent-1",
+      "Demo: agent-2",
+    ]);
+  });
+
+  it("reports a promoted host as running until its result arrives", () => {
+    // A tool call's `completed` phase means its arguments finished streaming. Read
+    // as the trajectory's lifecycle it reports every delegation as finished the
+    // instant its input parsed.
+    const nodes = tree([
+      call("h1", "Workflow"),
+      ev({ kind: "assistant", phase: "completed", streamId: "b1", span: "h1", text: "x" }),
+    ]);
+
+    expect(nodes[0].status).toBe("running");
+  });
+
+  it("closes a promoted host with its own tool result", () => {
+    const nodes = tree([
+      call("h1", "Workflow"),
+      ev({ kind: "assistant", phase: "completed", streamId: "b1", span: "h1", text: "x" }),
+      result("h1"),
+    ]);
+
+    expect(nodes[0].status).toBe("done");
+  });
+
+  it("fails a promoted host whose result reports an error", () => {
+    const nodes = tree([
+      call("h1", "Workflow"),
+      ev({ kind: "assistant", phase: "completed", streamId: "b1", span: "h1", text: "x" }),
+      result("h1", true),
+    ]);
+
+    expect(nodes[0].status).toBe("failed");
+  });
+
+  it("reports a promoted host the server closed as abandoned, not failed", () => {
+    // The server closes what an adapter left open. Nobody reported an outcome, so
+    // colouring it red would report an interrupted turn as a broken one.
+    const nodes = tree([
+      call("h1", "Workflow"),
+      ev({ kind: "assistant", phase: "completed", streamId: "b1", span: "h1", text: "x" }),
+      ev({
+        kind: "subagent",
+        phase: "completed",
+        streamId: "h1",
+        isError: true,
+        data: { closedBy: "server", reason: "abandoned" },
+      }),
+    ]);
+
+    expect(nodes[0].status).toBe("abandoned");
+    expect(nodes[0].row.event.kind).toBe("tool_call");
+  });
+
+  it("does not grow a second row when a promoted host is closed late", () => {
+    // The close arrives after the `tool_call` left `openBlocks`, so without a
+    // durable index it became a second root row and the delegation showed twice.
+    const nodes = tree([
+      call("h1", "Workflow"),
+      ev({ kind: "assistant", phase: "completed", streamId: "b1", span: "h1", text: "x" }),
+      ev({
+        kind: "subagent",
+        phase: "completed",
+        streamId: "h1",
+        data: { closedBy: "server" },
+      }),
+    ]);
+
+    expect(nodes).toHaveLength(1);
+  });
+
+  it("replaces a progress snapshot instead of appending it", () => {
+    // These notifications re-send the whole summary rather than a suffix. Appended
+    // as delta text, one sentence was stored six times.
+    const nodes = tree([
+      call("h1", "Workflow"),
+      ev({ kind: "subagent", phase: "delta", streamId: "h1", data: { progress: "step 1" } }),
+      ev({ kind: "subagent", phase: "delta", streamId: "h1", data: { progress: "step 2" } }),
+      ev({ kind: "assistant", phase: "completed", streamId: "b1", span: "h1", text: "x" }),
+    ]);
+
+    expect(nodes).toHaveLength(1);
+    expect((nodes[0].row.event.data as { progress?: string }).progress).toBe("step 2");
+  });
+
+  it("roots a row that names itself rather than parenting it", () => {
+    // A node held as its own child is unreachable from the root, and the rollup
+    // would recurse on it forever.
+    const nodes = tree([
+      ev({ kind: "subagent", phase: "started", streamId: "s1", span: "s1" }),
+    ]);
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].trajectory).toBe("s1");
+  });
+
+  it("survives two trajectories naming each other", () => {
+    // No single-pass attachment can detect this: the first waits as an orphan for
+    // the second, which then adopts it and is adopted by it. Unbounded recursion in
+    // a render path is a frozen tab.
+    const nodes = tree([
+      ev({ kind: "subagent", phase: "started", streamId: "s1", span: "s2" }),
+      ev({ kind: "subagent", phase: "started", streamId: "s2", span: "s1" }),
+    ]);
+
+    expect(nodes.length).toBeGreaterThan(0);
+    expect(nodes[0].rollup.events).toBeLessThan(10);
+  });
+
+  it("reuses the node for a row that did not change", () => {
+    // What lets the memoized renderer skip settled history while a turn streams. A
+    // fresh node per build fails every memo comparison, so a fan-out re-renders its
+    // whole subtree at token rate.
+    const settled = [opens("s1", "Explore"), closes("s1")];
+    const rows = buildRows(settled);
+    const first = buildTree(rows);
+    const second = buildTree(buildRows(settled.concat(
+      ev({ kind: "assistant", phase: "completed", streamId: "late", text: "tail" }),
+    )));
+
+    expect(second[0]).toBe(first[0]);
+  });
+});

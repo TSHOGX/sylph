@@ -255,6 +255,67 @@ class Fixture:
             event("subagent", "started", streamId="sub-stranded", name="Stranded")
             self._reply()
 
+        elif "promote" in text:
+            # Delegation that is never *declared* — the shape every delegating tool
+            # outside claude's built-in `Task` actually has, and the one no fixture
+            # covered. A host is discovered to be a container only because its
+            # children name it (`docs/session-protocol.md` § Promotion), so nothing
+            # here emits a `subagent` event for the hosts themselves.
+            #
+            # Sized deliberately. A host with *one* delegate cannot exhibit the
+            # collapse this exists to catch: keyed by the host, N delegates become one
+            # row where the last name wins, and with N=1 that is indistinguishable
+            # from correct. Measured on a real session as a two-agent workflow
+            # rendering as a single card, so the fixture runs two.
+            event("assistant", "completed", streamId="pr-intro",
+                  text="Running a workflow.")
+
+            # Host 1: multiplexes two delegates, and forwards no interior of its own.
+            # Its own close is its `tool_result`, not its call's `completed` phase —
+            # a call completes when its arguments finish streaming, which says
+            # nothing about the delegated work.
+            event("tool_call", "completed", streamId="pr-host-a", name="Workflow",
+                  text=json.dumps({"script": "parallel([agentOne, agentTwo])"}))
+            event("subagent", "started", streamId="pr-task-1",
+                  span="pr-host-a", name="Demo: agent-1")
+            event("subagent", "started", streamId="pr-task-2",
+                  span="pr-host-a", name="Demo: agent-2")
+            # Progress as a *snapshot*: repeated, and identical each time. Appended as
+            # delta text this is what stored one sentence six times.
+            for _ in range(3):
+                event("subagent", "delta", streamId="pr-task-1", span="pr-host-a",
+                      data={"progress": "Working on the demo"})
+            event("thinking", "completed", streamId="pr-t1-think",
+                  span="pr-task-1", text="Reading the brief.")
+            event("subagent", "completed", streamId="pr-task-1", span="pr-host-a",
+                  text="agent-1 done")
+            # A failure inside the second delegate, so a spec can assert the promoted
+            # host reports it while collapsed.
+            self._tool("pr-t2-bash", "Bash", {"command": "cargo test"},
+                       "error: test failed", is_error=True,
+                       data={"exitCode": 101}, span="pr-task-2")
+            event("subagent", "completed", streamId="pr-task-2", span="pr-host-a",
+                  text="agent-2 failed", is_error=True)
+            event("tool_result", "completed", streamId="pr-host-a",
+                  name="Workflow", text="workflow finished")
+
+            # Host 2: reports that delegated work ran and forwards none of it. A
+            # closed trajectory with no children is a terminal state, not a loading
+            # one, and must not present as an expandable card that never fills.
+            event("tool_call", "completed", streamId="pr-host-b", name="Agent",
+                  text=json.dumps({"task": "summarize"}))
+            event("subagent", "completed", streamId="pr-host-b",
+                  text="reported nothing")
+
+            # Host 3: promoted, and left open. Only the server closes this, so a spec
+            # can assert a promoted host does not spin forever either — the path that
+            # `phase = 'started'` used to miss entirely.
+            event("tool_call", "completed", streamId="pr-host-c", name="Workflow",
+                  text=json.dumps({"script": "phase('Stage A')"}))
+            event("subagent", "started", streamId="pr-task-3",
+                  span="pr-host-c", name="Stage A: A:item-1")
+            self._reply()
+
         elif "paced" in text:
             # Deliberately slow, so "did the UI paint mid-turn" is observable rather
             # than inferred. Each stage is separated by far longer than a frame, so a

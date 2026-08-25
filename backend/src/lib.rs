@@ -126,6 +126,18 @@ impl AppState {
             );
         }
 
+        // Before the consolidator can move those turns. A crash skips `settle`, so
+        // a delegation open at crash time has no closing event — and consolidation
+        // folds a trajectory with no close into no block at all, which loses the
+        // delegation while keeping its children, reattaching them to the root.
+        let closed = store.close_stale_trajectories().await?;
+        if closed > 0 {
+            tracing::warn!(
+                "Closed {} delegated trajectory(ies) left open by a previous backend session",
+                closed
+            );
+        }
+
         // No link survives a restart, so a request still marked pending is
         // waiting on a process that no longer exists. Left alone it would show a
         // session forever blocked on a question nobody can answer.

@@ -1308,12 +1308,72 @@ Each was found by a test, and each presented somewhere other than where it lived
   at the bottom, and one left open — because grouping by arrival order, flattening at
   depth 2, and a permanently spinning card each pass a shallower fixture.
 
+### Promotion: a trajectory is defined by use, not by declaration
+
+The tree above worked for `Task` and for nothing else. `claude` has since shipped
+`Agent` and `Workflow`, and an MCP server can add a delegating tool whenever it
+likes — so an adapter deciding at open time whether a call delegates is guessing at
+a fact that arrives later, since delegation is only knowable when a child turns up
+carrying the call's id. Measured on a real session: two `Workflow` cards read
+*running* permanently with no interior, and four `Agent` calls had their children
+rooted beside the call rather than inside it.
+
+**Any `streamId` another event names as its `span` is a trajectory**, whatever kind
+of event opened it, and a `tool_call` so named is *promoted* in place — it stays a
+tool card and becomes the container its children already claim it is. `subagent`
+remains the richer declaration path (it names a delegation before any child exists
+and states an outcome independent of its host), but is no longer required. An agent
+nobody has written yet nests correctly by tagging its children, which is the same
+`span` it must already set for its output to be attributed at all. That is what
+makes `pi`'s future delegation need no adapter-specific path.
+
+Five things follow, each fixing a defect this surfaced:
+
+- **A trajectory's id is the delegate's, never the host's.** `Workflow` fans out to
+  N agents under one `tool_use_id`; keyed by the host, a two-agent workflow rendered
+  as *one* card reading `Demo: agent-2` and `agent-1` was absent from the timeline.
+  Keyed by `task_id` with the host as `span`, the tree is
+  `Workflow → agent-1, agent-2 → each one's work`.
+- **A promoted host's lifecycle is its `tool_result`.** A `tool_call`'s `completed`
+  phase means its *arguments* finished streaming, so reading the phase reports every
+  delegation as finished the instant its input parsed.
+- **Closing is phase-agnostic.** `open_trajectories` matched `phase = 'started'`,
+  which every workflow delegate fails — its first notification is progress, not a
+  start — so the turn-settle sweep never closed them. It now sweeps every id
+  declared or referenced, minus those closed by a `subagent` or a `tool_result`.
+- **Startup closes what a crash left open.** `interrupt_stale_turns` skips `settle`,
+  and consolidation folds a trajectory with no close into *no block at all* — losing
+  the delegation while keeping its children, which then reattach to the root.
+- **A trajectory with no interior says so on the card.** `--forward-subagent-text`
+  forwards only for built-in `Task`: measured, an `Agent` delegation produced zero
+  tagged envelopes. A closed trajectory with no children is a terminal state, so it
+  reports "no interior" and drops its disclosure rather than inviting the user to
+  open a branch that can never fill.
+
+Two hazards found while building it, both silent. A cycle in `span` pointers does
+not merely risk recursion — attachment holds one node as the other's orphan and
+each adopts the other, so neither is reachable and *both vanish*; `buildTree` now
+repairs by reachability and the rollup carries a visited guard. And `NODE_CACHE` was
+keyed on `TimelineRow` while `buildRows` reuses only the *event*, so the memo could
+never hit once; a trajectory row's event is re-folded every build, so the rows most
+worth skipping were the only ones that could not be.
+
+`verify.py` measures all of it against the real CLI, and its own delegated turn now
+answers the approvals the delegate raises — unanswered, the turn never completed and
+every assertion after it read mid-flight state, which is what made a script problem
+present as an adapter fault.
+
 ### Open items
 
-- **`pi` reports no child trajectories,** so its adapter declares no `subagent`
-  capability and its sessions render exactly as before. Nothing to fix; worth
-  stating, because it means the tree is currently exercised by one real agent plus
-  the fixture.
+- **`pi` reports no child trajectories yet,** so its sessions render as before.
+  Promotion is what makes adding them an adapter change alone: emitting a `subagent`
+  per delegate, or merely tagging child events with a `span`, is enough for its own
+  subagents and dynamic workflows to render as a tree with no server or UI work.
+- **A multiplexed host with several delegates cannot attribute forwarded interior.**
+  `_delegate_of` re-tags forwarded output to the delegate only when a host has
+  exactly one; with several, `claude` forwards nothing, so there is nothing to
+  attribute. If a future vendor forwards interior *and* multiplexes, it will need a
+  correlation the envelope does not currently carry.
 - **TraceDB's archived sessions stay flat.** It records a delegation as a separate
   session with its own lineage, not as a trajectory inside one stream, so an
   archived transcript has no `span` and the sidebar's rolled-up count is still how
