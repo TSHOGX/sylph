@@ -2,6 +2,16 @@
 
 Sylph Web exposes a versioned REST API with SSE streaming for real-time updates.
 
+> **On this file's length, which is deliberate.** It is ~1580 lines and 1480 of those
+> are one section, `Core Endpoints`. That concentration was checked and left alone:
+> unlike a prose spec, this is a reference organized by resource — ten subsections, one
+> per resource, each scoped to its own endpoints — and it is searched rather than read
+> end to end. The length is the size of the endpoint surface, so splitting it would
+> fragment a lookup without removing anything. `docs/frontend-architecture.md` was split
+> because 40% of it sat under one heading that answered a *different question* from the
+> rest; no such seam exists here. `docs/api-v1.openapi.json` is the machine-readable
+> form and is authoritative for schemas.
+
 ## Design Principles
 
 1. **Versioned endpoints** — `/api/v1/*` for stability; breaking changes increment version
