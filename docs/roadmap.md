@@ -70,15 +70,21 @@ counted only their own suite. Re-measure by running the suites, not by adding th
 sections — `cargo test`, `npm test`, and `npx playwright test --list` report all
 four numbers directly.
 
-**Current first-load JS: 221.1 KB gzipped**, measured on `main` after the Phase 12
-merges by summing the gzipped size of the 13 scripts `/` references — the same recipe
-each phase used:
+**Current first-load JS: 221.1 KB gzipped** across 13 chunks, measured on `main`
+after the Phase 12 merges. The recipe each phase ran by hand is now
+`scripts/measure-bundle.sh`, which prints the per-chunk breakdown as well as the
+total:
 
 ```sh
 cd frontend && SYLPH_WEB_BACKEND=http://localhost:4317 npm run build
-grep -o '/_next/static/chunks/[^"]*\.js' .next/server/app/index.html | sort -u
-# then sum `gzip -c` over each
+./scripts/measure-bundle.sh
 ```
+
+It reads `.next/server/app/index.html`, which is the only place that lists the
+scripts `/` actually references — summing the chunk directory instead counts
+chunks belonging to other routes. Note that Next 16's Turbopack build no longer
+prints a first-load column of its own, so there is no build output to read this
+off; the script is the measurement.
 
 This is **past the 200 KB budget Phase 4 set**, and knowingly so: Phase 9 already
 recorded the crossing at 203.9 KB and Phase 12 added the delegation tree, the choice-list
