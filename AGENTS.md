@@ -1065,6 +1065,22 @@ one-command answer, and worth reaching for early whenever output describes a tre
 that does not match what is on disk — it is the network-facing sibling of the
 mid-write phantom-error pitfall below.
 
+**This bit twice in one session, the second time as an unrunnable E2E suite.** A
+backend surviving on 4318 from an interrupted run makes `npm run e2e` fail before any
+spec, because `reuseExistingServer: false` — correctly — refuses to trust it. Playwright
+names the cause plainly (`is already used`), so the cost there is only that a run
+looks like a product failure until the message is read; the expensive version is the
+one that *succeeds* against the wrong server. Before diagnosing either, clear the
+suite's ports:
+
+```sh
+for p in 4318 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done
+```
+
+Any script in this repo that starts a server to measure or test something needs the
+process-group kill, the busy-port refusal, and an error that names the survivor. Two
+of the three are only discoverable after the fact.
+
 Three things together fix it, and any one alone still fails silently: run the job in
 its own process group (`set -m`) and kill the group; refuse a busy port instead of
 measuring whatever is on it; and make a missing artifact explain the likely cause
