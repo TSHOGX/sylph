@@ -77,6 +77,15 @@ export interface StreamEvent {
   kind: string;
   phase?: string;
   streamId?: string;
+  /**
+   * The delegated trajectory this event happened in; absent is the root turn.
+   *
+   * `docs/session-protocol.md` § Delegated trajectories. A `subagent` event's
+   * `streamId` *is* a trajectory id, so a nested delegation is one whose `span`
+   * names another — which is how arbitrary depth and a dynamic workflow's
+   * parallel phases are carried by a single field.
+   */
+  span?: string;
   name?: string;
   text?: string;
   data?: unknown;

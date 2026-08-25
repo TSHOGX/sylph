@@ -282,10 +282,10 @@ impl LiveStore {
         sqlx::query_as::<_, Event>(
             r#"
             INSERT INTO events (
-                session_id, turn_id, seq, kind, phase, stream_id, name,
+                session_id, turn_id, seq, kind, phase, stream_id, span, name,
                 text, data_json, is_error, stability, source, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
@@ -295,6 +295,7 @@ impl LiveStore {
         .bind(&event.kind)
         .bind(&event.phase)
         .bind(&event.stream_id)
+        .bind(&event.span)
         .bind(&event.name)
         .bind(&event.text)
         .bind(&event.data_json)
@@ -702,10 +703,10 @@ impl LiveStore {
         sqlx::query(
             r#"
             INSERT INTO events (
-                session_id, turn_id, seq, kind, phase, stream_id, name,
+                session_id, turn_id, seq, kind, phase, stream_id, span, name,
                 text, data_json, is_error, stability, source, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&event.session_id)
@@ -714,6 +715,7 @@ impl LiveStore {
         .bind(&event.kind)
         .bind(&event.phase)
         .bind(&event.stream_id)
+        .bind(&event.span)
         .bind(&event.name)
         .bind(&event.text)
         .bind(&event.data_json)
@@ -744,6 +746,48 @@ impl LiveStore {
     /// Deltas are journaled too — consolidation needs them to fold — but they are
     /// excluded here, because a `completed` event already carries its block's whole
     /// text. Including both would render every token twice.
+    /// Delegated trajectories this turn opened and never closed, oldest first.
+    ///
+    /// A trajectory is a `subagent` block, so it closes the way any block does: a
+    /// `completed` phase sharing its `stream_id`. One left open means the adapter
+    /// stopped reporting it — its link died, its vendor went quiet, the turn was
+    /// interrupted mid-delegation — and the server closes it on the turn's behalf.
+    ///
+    /// The alternative is a spinner that never resolves, and worse, a subtree the
+    /// UI must report as *running* forever because nothing ever said otherwise.
+    /// That is the same reasoning that makes a pending request `abandoned` rather
+    /// than left pending: a recorded failure explains a gap, and silence does not.
+    ///
+    /// Returns `(stream_id, span, name)` — the parent and name are needed to emit a
+    /// closing event that lands in the right place in the tree.
+    pub async fn open_trajectories(
+        &self,
+        turn_id: &str,
+    ) -> Result<Vec<(String, Option<String>, Option<String>)>> {
+        let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            "SELECT started.stream_id, started.span, started.name
+               FROM events started
+              WHERE started.turn_id = ?
+                AND started.kind = 'subagent'
+                AND started.phase = 'started'
+                AND started.stream_id IS NOT NULL
+                AND NOT EXISTS (
+                      SELECT 1 FROM events done
+                       WHERE done.turn_id = started.turn_id
+                         AND done.kind = 'subagent'
+                         AND done.phase = 'completed'
+                         AND done.stream_id = started.stream_id
+                )
+              ORDER BY started.seq",
+        )
+        .bind(turn_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::Database)?;
+
+        Ok(rows)
+    }
+
     pub async fn turn_events_after(&self, turn_id: &str, after_seq: i32) -> Result<Vec<Event>> {
         sqlx::query_as::<_, Event>(
             "SELECT * FROM events
@@ -987,6 +1031,148 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session and turn to hang events on. Both are foreign keys, so an event
+    /// cannot be journaled without them.
+    async fn seeded(dir: &std::path::Path) -> LiveStore {
+        let store = LiveStore::new(dir.join("live.db").to_str().unwrap())
+            .await
+            .expect("store");
+        store
+            .create_session(&Session {
+                id: "web-1".to_string(),
+                origin: "sylph".to_string(),
+                identity_mode: "sylph".to_string(),
+                lifecycle_mode: "sylph".to_string(),
+                agent: "claude".to_string(),
+                backend_session_id: None,
+                trace_session_id: None,
+                workdir: "/tmp/project".to_string(),
+                title: None,
+                flags_json: "{}".to_string(),
+                status: "idle".to_string(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            })
+            .await
+            .expect("session");
+        store
+            .create_turn(&crate::models::Turn {
+                id: "turn-1".to_string(),
+                session_id: "web-1".to_string(),
+                incarnation_id: None,
+                status: "running".to_string(),
+                request_text: "go".to_string(),
+                command_invocation_id: None,
+                idempotency_key: None,
+                error_code: None,
+                error_message: None,
+                runner_exit_code: None,
+                created_at_ms: 1,
+                started_at_ms: Some(1),
+                completed_at_ms: None,
+                stopped_at_ms: None,
+            })
+            .await
+            .expect("turn");
+        store
+    }
+
+    fn span_event(seq: i32, kind: &str, phase: &str, stream: &str, span: Option<&str>) -> Event {
+        Event {
+            id: None,
+            session_id: "web-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            seq,
+            kind: kind.to_string(),
+            phase: Some(phase.to_string()),
+            stream_id: Some(stream.to_string()),
+            span: span.map(str::to_string),
+            name: None,
+            text: String::new(),
+            data_json: "{}".to_string(),
+            is_error: false,
+            stability: "stable".to_string(),
+            source: "agent".to_string(),
+            created_at_ms: seq as i64,
+            reconciled_at_ms: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_events_trajectory_survives_the_journal() {
+        // The point of the column: without it a reload reparents every delegated
+        // event onto the root, which is the flattening the tree exists to prevent.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        store
+            .append_event(&span_event(1, "subagent", "started", "s1", None))
+            .await
+            .expect("open trajectory");
+        store
+            .append_event(&span_event(2, "thinking", "completed", "b1", Some("s1")))
+            .await
+            .expect("child event");
+
+        let events = store
+            .turn_events_after("turn-1", 0)
+            .await
+            .expect("read back");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].span, None, "a root trajectory names no parent");
+        assert_eq!(events[1].span.as_deref(), Some("s1"));
+    }
+
+    #[tokio::test]
+    async fn a_trajectory_left_open_is_reported_so_the_server_can_close_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        // s1 closes; s2 is nested inside it and never does. A UI given only this
+        // stream must report s2 as running forever.
+        store
+            .append_event(&span_event(1, "subagent", "started", "s1", None))
+            .await
+            .expect("s1 open");
+        store
+            .append_event(&span_event(2, "subagent", "started", "s2", Some("s1")))
+            .await
+            .expect("s2 open");
+        store
+            .append_event(&span_event(3, "subagent", "completed", "s1", None))
+            .await
+            .expect("s1 close");
+
+        let open = store.open_trajectories("turn-1").await.expect("query");
+        assert_eq!(open.len(), 1, "only the unclosed trajectory");
+        assert_eq!(open[0].0, "s2");
+        assert_eq!(
+            open[0].1.as_deref(),
+            Some("s1"),
+            "its parent travels with it, so the closing event lands in the tree"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delta_does_not_count_as_closing_a_trajectory() {
+        // `delta` is progress, not an outcome. Treating it as a close would leave
+        // a failed delegation looking like a finished one.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        store
+            .append_event(&span_event(1, "subagent", "started", "s1", None))
+            .await
+            .expect("open");
+        store
+            .append_event(&span_event(2, "subagent", "delta", "s1", None))
+            .await
+            .expect("progress");
+
+        let open = store.open_trajectories("turn-1").await.expect("query");
+        assert_eq!(open.len(), 1);
+    }
 
     #[tokio::test]
     async fn archive_identity_matches_native_root_but_not_subagent_prefix() {

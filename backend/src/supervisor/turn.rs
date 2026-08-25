@@ -350,6 +350,55 @@ impl LinkedSupervisor {
             return;
         }
 
+        // Close delegated trajectories the adapter left open, before the turn's
+        // own terminal events. A subtree with no closing event is one the UI must
+        // keep reporting as running, because nothing ever said otherwise — so an
+        // interrupted turn would leave a permanently spinning subagent card.
+        //
+        // Ordering matters: these are emitted first so a client applying the
+        // stream in order sees every trajectory resolved by the time the turn's
+        // status arrives, rather than briefly holding a finished turn that still
+        // contains running work.
+        match self.store.open_trajectories(turn_id).await {
+            Ok(open) => {
+                for (stream_id, span, name) in open {
+                    let reason = match &outcome {
+                        Outcome::Interrupted => "interrupted",
+                        Outcome::Completed { .. } => "abandoned",
+                        _ => "failed",
+                    };
+                    let _ = self
+                        .emit(
+                            session_id,
+                            turn_id,
+                            StreamEvent {
+                                phase: Some("completed".to_string()),
+                                stream_id: Some(stream_id),
+                                span,
+                                name,
+                                is_error: true,
+                                source: "server".to_string(),
+                                ..server_event(
+                                    "subagent",
+                                    String::new(),
+                                    Some(serde_json::json!({"closedBy": "server",
+                                                            "reason": reason})),
+                                )
+                            },
+                        )
+                        .await;
+                }
+            }
+            Err(error) => {
+                // Not fatal: the turn still settles. The cost is a card that reads
+                // as running until the page is reloaded, so it is worth logging.
+                error!(
+                    "Could not close open trajectories for turn {}: {}",
+                    turn_id, error
+                );
+            }
+        }
+
         if !message.is_empty() {
             let _ = self
                 .emit(
@@ -421,6 +470,8 @@ fn server_event(kind: &str, text: String, data: Option<serde_json::Value>) -> St
         kind: kind.to_string(),
         phase: None,
         stream_id: None,
+        // The server speaks about the turn, not from inside a delegation.
+        span: None,
         name: None,
         text,
         data,

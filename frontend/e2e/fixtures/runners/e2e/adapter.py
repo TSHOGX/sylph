@@ -212,6 +212,49 @@ class Fixture:
             })
             return
 
+        elif "delegate" in text:
+            # A real delegation tree, because a shallow one cannot exhibit the
+            # defects this shape exists to prevent. Concretely it needs: two
+            # trajectories running *concurrently* (interleaved on one wire, which is
+            # the only way to catch grouping by arrival order instead of by `span`),
+            # one nested three deep (a flat subagent list passes at depth 1 and
+            # breaks at depth 2), a failure buried at the bottom (a collapsed card
+            # showing green over it is the worst outcome of collapsing), and one left
+            # open (the server closes it, and nothing else tests that path).
+            event("assistant", "completed", streamId="blk-dispatch",
+                  text="Fanning out to two agents.")
+
+            # Two open before either emits: their events then interleave.
+            event("subagent", "started", streamId="sub-explore", name="Explore")
+            event("subagent", "started", streamId="sub-verify", name="Verify")
+
+            event("thinking", "completed", streamId="blk-ex-think",
+                  span="sub-explore", text="Searching for the call sites.")
+            event("thinking", "completed", streamId="blk-vf-think",
+                  span="sub-verify", text="Planning the verification.")
+            self._tool("blk-ex-grep", "Grep", {"pattern": "fn handler"},
+                       "src/api.rs:42: fn handler()", span="sub-explore")
+
+            # Depth 3: a trajectory inside a trajectory inside the turn. This is the
+            # dynamic-workflow shape — a phase that itself delegates.
+            event("subagent", "started", streamId="sub-worker",
+                  span="sub-verify", name="Worker")
+            self._tool("blk-wk-bash", "Bash", {"command": "cargo test --lib"},
+                       "error[E0425]: cannot find value `after`",
+                       is_error=True, data={"exitCode": 101}, span="sub-worker")
+            event("subagent", "completed", streamId="sub-worker", span="sub-verify")
+
+            # Closes clean, but its descendant failed: the card must still report a
+            # failure, or collapsing hides it.
+            event("subagent", "completed", streamId="sub-verify")
+            event("subagent", "completed", streamId="sub-explore",
+                  text="Found 3 call sites.")
+
+            # Opened and never closed. The turn settling is what resolves it, so a
+            # spec can assert it does not spin forever.
+            event("subagent", "started", streamId="sub-stranded", name="Stranded")
+            self._reply()
+
         elif "paced" in text:
             # Deliberately slow, so "did the UI paint mid-turn" is observable rather
             # than inferred. Each stage is separated by far longer than a frame, so a
@@ -241,12 +284,17 @@ class Fixture:
 
         self.settle()
 
-    def _tool(self, stream_id, name, tool_input, result, is_error=False, data=None):
-        event("tool_call", "completed", streamId=stream_id, name=name,
+    def _tool(self, stream_id, name, tool_input, result, is_error=False, data=None,
+              span=None):
+        event("tool_call", "completed", streamId=stream_id, name=name, span=span,
               text=json.dumps(tool_input), data={"input": tool_input})
         # The exit code rides on the *result*, which is where the timeline reads it:
         # "failed" alone is not what anyone wants from a failed command.
-        event("tool_result", "completed", streamId=stream_id, name=name,
+        #
+        # The result carries the same `span` as its call: a delegate's tool output
+        # belongs to the delegate, and rooting it would show a subagent's failure as
+        # the parent's own.
+        event("tool_result", "completed", streamId=stream_id, name=name, span=span,
               text=result, isError=is_error or None, data=data)
 
     def _reply(self, stream=False):

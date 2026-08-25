@@ -189,6 +189,45 @@ test("the conversation canvas has no automated accessibility violations", async 
 });
 
 /**
+ * A delegation tree, audited with real nesting rather than one card.
+ *
+ * Nested landmarks are the risk here: each delegation is a `region`, so a depth-3
+ * tree nests three of them, and a `region` with no accessible name is a landmark a
+ * screen reader announces as nothing. The failed branch also auto-expands, which
+ * puts the danger colours inside a `bg-raised` card — a contrast pairing that does
+ * not occur anywhere else in the timeline.
+ */
+test("a nested delegation tree has no automated accessibility violations", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  await page.getByLabel("Message").fill("delegate this please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Verify delegation" })).toBeVisible({
+    timeout: 15000,
+  });
+
+  // Open a clean branch too, so both tones are in scope: the failed branch opened
+  // itself, and a card's own colours differ by status.
+  await page
+    .getByRole("region", { name: "Explore delegation" })
+    .getByRole("button", { name: "Explore", exact: true })
+    .click();
+
+  await audit(page, "delegation tree");
+
+  // Focus mode is a different tree: a breadcrumb `nav` plus re-rooted cards.
+  await page
+    .getByRole("region", { name: "Verify delegation" })
+    .getByRole("button", { name: "Focus Verify" })
+    .click();
+  await expect(page.getByRole("navigation", { name: "Delegation path" })).toBeVisible();
+
+  await audit(page, "delegation tree in focus mode");
+});
+
+/**
  * The composer *while a turn runs*, which is a different colour state.
  *
  * The composer is disabled mid-turn, and it used to express that with

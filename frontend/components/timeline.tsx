@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * The conversation canvas: a flat, left-aligned work log.
+ * The conversation canvas: a left-aligned work log, nested where work was delegated.
  *
  * # Why this shape
  *
@@ -21,17 +21,38 @@
  *   whole point.
  * - Every file path is a button that opens the file in the Artifacts pane.
  *
+ * The one departure from flatness is delegation, and it is not a departure from
+ * the principle above: a delegated trajectory is a *unit of work*, so giving it
+ * one row that expands is the same call as collapsing a read. `lib/timeline-tree.ts`
+ * owns the structure and explains why the tree is navigated rather than displayed;
+ * this file owns how a node looks.
+ *
  * # Performance
  *
- * Streaming deltas arrive at token rate, so the render path is memoized per row
+ * Streaming deltas arrive at token rate, so the render path is memoized per node
  * by object identity: only the streaming tail changes identity, leaving settled
- * history untouched. This is still not windowed — see the note on
- * `MemoizedRow` for the measurement that would reverse that call.
+ * history untouched. A collapsed trajectory mounts none of its subtree, which
+ * bounds DOM size by what the user opened rather than by what the agent did.
+ *
+ * This is still not windowed. A virtualization library would cost most of the
+ * remaining first-load budget, and profiling has not shown DOM node count to be
+ * the bottleneck — re-render count was, and collapsing now caps the node count a
+ * fan-out can produce. Revisit if a session with thousands of *root-level* events
+ * shows scroll jank while idle, which is the signature of a DOM-size problem
+ * rather than a render-count one.
  */
 
 import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
 import type { StreamEvent } from "@/lib/api";
 import { formatTime } from "@/lib/format";
+import {
+  buildRows,
+  buildTree,
+  pathTo,
+  type TimelineNode,
+  type TimelineRow,
+  type TrajectoryStatus,
+} from "@/lib/timeline-tree";
 import {
   basename,
   describeTool,
@@ -77,100 +98,12 @@ const TOOL_ICONS: Record<ToolKind, (props: IconProps) => ReactElement> = {
 };
 
 /**
- * Collapse a raw event stream into displayable rows.
- *
- * Two transformations happen here, and both are about not showing the same thing
- * twice:
- *
- * 1. **Delta accumulation.** A `delta` carries only the newly arrived suffix, and
- *    the matching `completed` carries the whole value. Rendering both shows every
- *    token twice, so deltas accumulate under their `streamId` and are replaced
- *    when `completed` arrives.
- * 2. **Result pairing.** A `tool_result` belongs to the `tool_call` that produced
- *    it — the protocol says they SHOULD share an id — so the result is attached
- *    to its call rather than drawn as a separate row. That is what makes a call
- *    and its output read as one operation instead of two log lines.
+ * Row and tree construction live in `lib/timeline-tree.ts`, which has no React
+ * import so it can be unit-tested in a `node` environment. Re-exported here
+ * because that is where consumers have always imported them from.
  */
-export interface TimelineRow {
-  event: StreamEvent;
-  /** Result paired to this row, when it is a tool call. */
-  result?: StreamEvent;
-  key: string;
-}
-
-export function buildRows(events: StreamEvent[]): TimelineRow[] {
-  const rows: TimelineRow[] = [];
-  const openBlocks = new Map<string, number>();
-  /** streamId -> index in `rows` of the tool call awaiting its result. */
-  const callIndex = new Map<string, number>();
-
-  for (const event of events) {
-    const id = event.streamId;
-
-    if (event.kind === "tool_result") {
-      // Attach to the call sharing this id. Runners that do not reuse the id
-      // fall through and the result renders as its own row, which is still
-      // correct, just less tightly grouped.
-      const at = id ? callIndex.get(id) : undefined;
-      if (at !== undefined) {
-        const existing = rows[at].result;
-        rows[at] = {
-          ...rows[at],
-          // Deltas on a result append; a completed result replaces.
-          result:
-            event.phase === "delta" && existing
-              ? { ...event, text: (existing.text ?? "") + (event.text ?? "") }
-              : event,
-        };
-        continue;
-      }
-    }
-
-    if (event.phase === "delta" && id) {
-      const at = openBlocks.get(id);
-      if (at !== undefined) {
-        const existing = rows[at].event;
-        rows[at] = {
-          ...rows[at],
-          event: { ...existing, text: (existing.text ?? "") + (event.text ?? "") },
-        };
-      } else {
-        openBlocks.set(id, rows.length);
-        if (event.kind === "tool_call") callIndex.set(id, rows.length);
-        rows.push({ event: { ...event }, key: rowKey(event, rows.length) });
-      }
-      continue;
-    }
-
-    if (event.phase === "completed" && id && openBlocks.has(id)) {
-      const at = openBlocks.get(id)!;
-      // The completed payload is authoritative; the accumulated text is dropped.
-      rows[at] = { ...rows[at], event: { ...event } };
-      openBlocks.delete(id);
-      continue;
-    }
-
-    // `started` with no text would render an empty row; the first delta or the
-    // completed event creates it instead. Tool calls are the exception: a call
-    // that has started is worth showing immediately, since the user wants to
-    // see that the agent is doing something.
-    if (event.phase === "started" && !event.text && event.kind !== "tool_call") {
-      continue;
-    }
-
-    if (id) {
-      openBlocks.set(id, rows.length);
-      if (event.kind === "tool_call") callIndex.set(id, rows.length);
-    }
-    rows.push({ event, key: rowKey(event, rows.length) });
-  }
-
-  return rows;
-}
-
-function rowKey(event: StreamEvent, index: number): string {
-  return `${event.seq}-${event.streamId ?? index}`;
-}
+export { buildRows, buildTree };
+export type { TimelineRow, TimelineNode };
 
 export function Timeline({
   events,
@@ -182,14 +115,104 @@ export function Timeline({
   onOpenFile?: (path: string, line?: number) => void;
   expandAll?: boolean | null;
 }) {
-  const rows = useMemo(() => buildRows(events), [events]);
+  const roots = useMemo(() => buildTree(buildRows(events)), [events]);
+
+  /**
+   * The trajectory the view is rooted at, or null for the whole turn.
+   *
+   * Focus is what makes unbounded depth navigable: at four levels of nesting
+   * there is no indentation budget left, so instead of shrinking the content the
+   * view re-roots and a breadcrumb carries the way back. This is the same move a
+   * file manager makes, and the reason it works is that a user drilling into a
+   * delegation has stopped caring about its siblings.
+   */
+  const [focus, setFocus] = useState<string | null>(null);
+
+  // Resolved every render rather than stored: the tree is rebuilt as events
+  // arrive, so a held node would go stale within a token. `null` means the
+  // trajectory is gone — a cleared turn, a switched session — and the view falls
+  // back to the root instead of rendering an empty pane.
+  const trail = focus ? pathTo(roots, focus) : null;
+  const shown = trail ? trail[trail.length - 1].children : roots;
 
   return (
     <div className="space-y-1.5">
-      {rows.map((row) => (
-        <MemoizedRow key={row.key} row={row} onOpenFile={onOpenFile} expandAll={expandAll} />
+      {trail && (
+        <FocusTrail
+          trail={trail}
+          onFocus={setFocus}
+          onClear={() => setFocus(null)}
+        />
+      )}
+      {shown.map((node) => (
+        <MemoizedNode
+          key={node.key}
+          node={node}
+          depth={0}
+          onOpenFile={onOpenFile}
+          expandAll={expandAll}
+          onFocus={setFocus}
+        />
       ))}
     </div>
+  );
+}
+
+/**
+ * Where focus is, and every level back to the turn.
+ *
+ * A real `<nav>` with an ordered list, because that is what a screen reader needs
+ * to announce this as navigation rather than as a row of buttons. The current node
+ * is not a link: it is where you already are.
+ */
+function FocusTrail({
+  trail,
+  onFocus,
+  onClear,
+}: {
+  trail: TimelineNode[];
+  onFocus: (id: string) => void;
+  onClear: () => void;
+}) {
+  const here = trail[trail.length - 1];
+  return (
+    <nav aria-label="Delegation path" className="sticky top-0 z-10 bg-canvas/95 py-1.5 backdrop-blur">
+      <ol className="flex flex-wrap items-center gap-1 text-2xs">
+        <li>
+          <button
+            type="button"
+            onClick={onClear}
+            className="rounded px-1 py-0.5 text-ink-muted hover:bg-hover hover:text-ink focus-ring"
+          >
+            Turn
+          </button>
+        </li>
+        {trail.map((node, index) => {
+          const last = index === trail.length - 1;
+          return (
+            <li key={node.key} className="flex items-center gap-1">
+              <ChevronRightIcon size={10} className="text-ink-faint" aria-hidden="true" />
+              {last ? (
+                <span aria-current="page" className="px-1 py-0.5 font-medium text-ink">
+                  {trajectoryName(node)}
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onFocus(node.trajectory!)}
+                  className="rounded px-1 py-0.5 text-ink-muted hover:bg-hover hover:text-ink focus-ring"
+                >
+                  {trajectoryName(node)}
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+      <p className="px-1 pt-0.5 text-3xs text-ink-muted">
+        <RollupSummary node={here} />
+      </p>
+    </nav>
   );
 }
 
@@ -207,13 +230,252 @@ export function Timeline({
  * events shows scroll jank while idle, which is the signature of a DOM-size
  * problem rather than a render-count one.
  */
-const MemoizedRow = memo(
-  TimelineRowView,
+const MemoizedNode = memo(
+  TimelineNodeView,
   (prev, next) =>
-    prev.row === next.row &&
+    prev.node === next.node &&
+    prev.depth === next.depth &&
     prev.expandAll === next.expandAll &&
-    prev.onOpenFile === next.onOpenFile,
+    prev.onOpenFile === next.onOpenFile &&
+    prev.onFocus === next.onFocus,
 );
+
+/**
+ * One node: a plain row, or a trajectory with its subtree behind a disclosure.
+ *
+ * `depth` is the *rendered* depth, not the tree's. It resets when focus re-roots,
+ * because the indentation budget is a property of the viewport and not of what
+ * the agent did.
+ */
+function TimelineNodeView({
+  node,
+  depth,
+  onOpenFile,
+  expandAll,
+  onFocus,
+}: {
+  node: TimelineNode;
+  depth: number;
+  onOpenFile?: (path: string, line?: number) => void;
+  expandAll?: boolean | null;
+  onFocus: (id: string) => void;
+}) {
+  if (node.trajectory) {
+    return (
+      <TrajectoryCard
+        node={node}
+        depth={depth}
+        onOpenFile={onOpenFile}
+        expandAll={expandAll}
+        onFocus={onFocus}
+      />
+    );
+  }
+  return <TimelineRowView row={node.row} onOpenFile={onOpenFile} expandAll={expandAll} />;
+}
+
+/**
+ * How deep the timeline will indent before it stops.
+ *
+ * Two levels, then depth is carried by a badge instead. Past that the content
+ * column on a phone is narrower than a line of code, and a tool call's path
+ * truncates to nothing — so the indent stops conveying structure and starts
+ * destroying content. Focus mode is the way further down, which is also the point
+ * where a user has told us they want the whole width for this branch.
+ */
+const MAX_INDENT = 2;
+
+/**
+ * A delegated trajectory: one row until opened.
+ *
+ * Collapsed by default, and that default is the performance design as much as the
+ * visual one — a closed card mounts none of its descendants, so a turn that fanned
+ * out to twenty agents costs twenty rows until someone asks for more. The rollup
+ * in the header is what makes that deferral honest: every failure, tool, and token
+ * beneath it is counted at the top, so nothing hidden is unreported.
+ */
+function TrajectoryCard({
+  node,
+  depth,
+  onOpenFile,
+  expandAll,
+  onFocus,
+}: {
+  node: TimelineNode;
+  depth: number;
+  onOpenFile?: (path: string, line?: number) => void;
+  expandAll?: boolean | null;
+  onFocus: (id: string) => void;
+}) {
+  // Opens on failure, like a failed shell command: that is the case where the
+  // contents are the answer rather than detail.
+  const [open, setOpen] = useState(node.status === "failed");
+  const isOpen = expandAll ?? open;
+  const name = trajectoryName(node);
+  const tone = STATUS_TONE[node.status ?? "running"];
+
+  return (
+    <section
+      aria-label={`${name} delegation`}
+      className={`rounded border-l-2 ${tone.border} bg-raised/40 pl-2.5`}
+    >
+      <div className="flex items-baseline gap-1.5 py-1 text-xs">
+        <span className={`shrink-0 ${tone.icon}`}>
+          <BranchIcon size={13} />
+        </span>
+
+        <button
+          type="button"
+          onClick={() => setOpen(!isOpen)}
+          aria-expanded={isOpen}
+          className="min-w-0 shrink truncate rounded px-0.5 font-medium text-ink hover:bg-hover focus-ring"
+        >
+          {name}
+        </button>
+
+        {node.rollup.depth > 0 && (
+          <span
+            className="shrink-0 rounded bg-hover px-1 text-3xs text-ink-muted"
+            title={`${node.rollup.trajectories} nested delegations, ${node.rollup.depth} levels deep`}
+          >
+            {node.rollup.trajectories}▾
+          </span>
+        )}
+
+        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+          <TrajectoryMark status={node.status ?? "running"} failures={node.rollup.failures} />
+          {/* Focus, not expand: the way *into* a branch rather than a peek at it.
+              Separate control because they are different intentions and one
+              button cannot mean both. */}
+          {/* `aria-label` rather than `title`: visible text wins over `title` for
+              the accessible name, so twenty delegations would present twenty
+              controls all named "focus" — indistinguishable to a screen reader,
+              and the same accessible-name collision that once broke 40 specs at
+              once. The label names the delegation; the glyph stays short. */}
+          <button
+            type="button"
+            onClick={() => onFocus(node.trajectory!)}
+            aria-label={`Focus ${name}`}
+            className="rounded px-1 text-3xs text-ink-muted hover:bg-hover hover:text-ink-soft focus-ring"
+          >
+            focus
+          </button>
+        </span>
+      </div>
+
+      <p className="pb-1 pr-2 text-3xs text-ink-muted">
+        <RollupSummary node={node} />
+      </p>
+
+      {isOpen && (
+        <div
+          className={`space-y-1.5 pb-1.5 ${
+            depth < MAX_INDENT ? "border-l border-line pl-2" : ""
+          }`}
+        >
+          {node.children.length === 0 ? (
+            <p className="py-1 text-2xs text-ink-muted">
+              {node.status === "running"
+                ? "Waiting for the delegate's first output…"
+                : "This delegation reported no events of its own."}
+            </p>
+          ) : (
+            node.children.map((child) => (
+              <MemoizedNode
+                key={child.key}
+                node={child}
+                depth={depth + 1}
+                onOpenFile={onOpenFile}
+                expandAll={expandAll}
+                onFocus={onFocus}
+              />
+            ))
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Border and icon colour per trajectory status. */
+const STATUS_TONE: Record<TrajectoryStatus, { border: string; icon: string }> = {
+  running: { border: "border-info-line", icon: "text-info" },
+  done: { border: "border-line", icon: "text-ink-muted" },
+  failed: { border: "border-danger-line", icon: "text-danger" },
+  // Not danger: nobody said it failed, only that nobody said. Colouring it red
+  // would report an interrupted turn as a broken one.
+  abandoned: { border: "border-line", icon: "text-warn" },
+};
+
+function TrajectoryMark({
+  status,
+  failures,
+}: {
+  status: TrajectoryStatus;
+  failures: number;
+}) {
+  if (status === "running") {
+    return (
+      <span className="flex items-center gap-1 text-3xs text-info">
+        <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-info-solid" />
+        running
+      </span>
+    );
+  }
+  if (status === "abandoned") {
+    return <span className="text-3xs font-medium text-warn">never finished</span>;
+  }
+  if (status === "failed") {
+    return (
+      <span className="flex items-center gap-0.5 text-3xs font-medium text-danger">
+        <XIcon size={11} />
+        {failures > 1 ? `${failures} failures` : "failed"}
+      </span>
+    );
+  }
+  return (
+    <span className="text-success">
+      <CheckIcon size={12} />
+      <span className="sr-only">finished</span>
+    </span>
+  );
+}
+
+/**
+ * What a collapsed subtree adds up to, in one line.
+ *
+ * This is the whole justification for collapsing by default: the counts make the
+ * hidden work legible enough to decide whether to open it. Rendered as text rather
+ * than chips because it is read once and scanned past.
+ */
+function RollupSummary({ node }: { node: TimelineNode }) {
+  const { rollup } = node;
+  const parts: string[] = [];
+
+  if (rollup.trajectories > 0) parts.push(`${rollup.trajectories} nested`);
+  if (rollup.tools > 0) parts.push(`${rollup.tools} tool${rollup.tools === 1 ? "" : "s"}`);
+  if (rollup.events > 0) parts.push(`${rollup.events} events`);
+  if (rollup.tokens) {
+    parts.push(`${compact(rollup.tokens.input)} in / ${compact(rollup.tokens.output)} out`);
+  }
+  if (rollup.durationMs !== undefined) parts.push(formatDuration(rollup.durationMs));
+
+  if (parts.length === 0) return null;
+  return <>{parts.join(" · ")}</>;
+}
+
+/** A trajectory's display name, never the vendor's tool name. */
+function trajectoryName(node: TimelineNode): string {
+  return node.row.event.name?.trim() || "Subagent";
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  return `${minutes}m ${Math.round((ms % 60_000) / 1000)}s`;
+}
+
 
 function TimelineRowView({
   row,
@@ -251,6 +513,13 @@ function TimelineRowView({
       return <UsageLine event={event} />;
     case "status":
       return <StatusLine event={event} />;
+    case "subagent":
+      // A trajectory reaching here is one `buildTree` did not turn into a node,
+      // which means it carried no `streamId` — so it has no identity to nest
+      // anything under and nothing to show beyond that it happened. Rendering it
+      // as a status line would put a bare "Subagent" row in the timeline; the
+      // node path is the only place a delegation is legible.
+      return null;
     case "turn":
       // A turn boundary, not transcript content. Its `text` is the turn's final
       // result, which the `assistant` block already rendered — so drawing it here

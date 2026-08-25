@@ -493,6 +493,56 @@ matches both, which is how 40 E2E specs failed at once. When a trigger needs a
 short name and its panel needs a phrase, pass them separately rather than
 reusing one string.
 
+**A nested payload cannot describe a stream.** The v3 event table said a subagent
+carried "the child's own events nested" inside it, and that was unimplementable
+rather than merely unimplemented: an envelope has to be closed before it is sent,
+and a trajectory streams for minutes. It also contradicts the journal, where an
+event is a row — a nested payload makes one row hold a subtree, so a delta inside
+it cannot be addressed, folded, or pruned. Structure travels as a flat stream with
+a parent pointer (`span`), which is what distributed tracing settled on and what
+the vendor already does with `parent_tool_use_id`. A spec sentence describing a
+shape nobody built is worth checking against the storage model before implementing.
+
+**One fact with two derivations diverges the moment either grows a case.**
+`StreamEvent::is_stable()` re-computed stability from the phase while the struct
+carried a `stability` field computed from the same input. Equivalent, until
+`subagent` became stable at *every* phase for structural reasons — after which a
+trajectory's `started` was classified stable, published as stable, and silently not
+journaled, because the method disagreed with the field beside it. The reload then
+flattened every delegated subtree onto the root, which is the exact bug the field
+was added to prevent, reappearing one layer down. Read the field.
+
+**Consolidation keeps the closing event's fields, so a name given at open is
+lost.** `history::consolidate` folds a block's phases into one row keyed by the
+`completed` event. That is right for text and wrong for identity: a delegated
+trajectory is named on `started` and renamed by the `delta` carrying its parsed
+brief, and its close reports an outcome. Every subagent card therefore read
+"Subagent" once a turn consolidated — a symptom that looks exactly like a frontend
+fallback firing, two layers above where the name was dropped. Any per-block
+attribute that only an early phase carries needs the same treatment.
+
+**Vendor block state keyed by the vendor's own index corrupts concurrent
+trajectories.** `claude` numbers content blocks per message, so two subagents
+running at once both open index 0. One index-keyed map made each one's deltas
+append to the other's text — data corruption, not a display fault, and invisible
+until two delegates run simultaneously. Key such state by `(trajectory, index)`.
+
+**Visible text beats `title` for a control's accessible name.** A per-card "focus"
+button with `title="Focus Explore"` is announced as "focus" — so twenty delegations
+present twenty controls a screen reader cannot tell apart. Use `aria-label`. And
+note the converse when testing: Playwright's `getByRole` name matching is a
+substring match, so `{ name: "Explore" }` also matches "Focus Explore"; distinct
+names still need `exact: true`.
+
+**A collapsed subtree must report what it hides, or collapsing is lossy.** Hiding
+a delegation's work by default is only defensible if a failure three levels down is
+still visible at the top: otherwise the user must open every branch to learn
+something broke, which is the work collapsing was supposed to save. A descendant
+failure escalates its ancestors' status, and a failed branch expands itself to the
+tool that failed. Keep `abandoned` distinct from `failed` — the server closing a
+trajectory an adapter left open means nobody reported an outcome, and colouring that
+red reports an interrupted turn as a broken one.
+
 **A layout bug below a breakpoint is invisible to a suite that runs above it.**
 Three mobile failures survived 41 green specs because every one of them ran at
 1280px, where the same code is merely cramped. A viewport is an instrument, not

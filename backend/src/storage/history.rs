@@ -34,6 +34,8 @@ pub struct Block {
     pub kind: String,
     pub phase: Option<String>,
     pub stream_id: Option<String>,
+    /// The delegated trajectory this block ran in; `None` is the root turn.
+    pub span: Option<String>,
     pub name: Option<String>,
     pub text: String,
     pub folded: Option<Folded>,
@@ -124,13 +126,13 @@ impl HistoryStore {
             sqlx::query(
                 r#"
                 INSERT OR REPLACE INTO blocks (
-                    session_id, seq, turn_id, kind, phase, stream_id, name,
+                    session_id, seq, turn_id, kind, phase, stream_id, span, name,
                     text_inline, text_hash, text_len, text_encoding,
                     delta_offsets, delta_timings,
                     data_json, data_hash, is_error, source,
                     started_at_ms, created_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&block.session_id)
@@ -139,6 +141,7 @@ impl HistoryStore {
             .bind(&block.kind)
             .bind(&block.phase)
             .bind(&block.stream_id)
+            .bind(&block.span)
             .bind(&block.name)
             .bind(text_inline)
             .bind(&text_hash)
@@ -267,6 +270,7 @@ impl HistoryStore {
             kind: row.try_get("kind")?,
             phase: row.try_get("phase")?,
             stream_id: row.try_get("stream_id")?,
+            span: row.try_get("span")?,
             name: row.try_get("name")?,
             text,
             folded,
@@ -442,6 +446,8 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
     // matched as each `completed` event is reached.
     let mut pending: HashMap<String, Vec<Delta>> = HashMap::new();
     let mut first_arrival: HashMap<String, i64> = HashMap::new();
+    // The best name any phase gave a block, since not every phase carries one.
+    let mut names: HashMap<String, String> = HashMap::new();
     let mut blocks = Vec::new();
 
     for event in events {
@@ -451,6 +457,18 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
             Some("started") | Some("delta") => {
                 let Some(id) = stream_id else { continue };
                 first_arrival.entry(id.clone()).or_insert(event.created_at_ms);
+                // A name given by an earlier phase is kept, because for some blocks
+                // that is the *only* phase that has it. A delegated trajectory is
+                // named on `started` — or renamed by the `delta` that carries its
+                // parsed brief — and its `completed` phase reports an outcome, not
+                // an identity. Folding only the completed event's fields therefore
+                // erased every subagent's name, and every card in the timeline read
+                // "Subagent" after the turn consolidated. The symptom looked like a
+                // frontend fallback firing; the name had been dropped two layers
+                // below it.
+                if let Some(name) = event.name.clone() {
+                    names.insert(id.clone(), name);
+                }
                 if !event.text.is_empty() {
                     pending.entry(id).or_default().push(Delta {
                         text: event.text.clone(),
@@ -469,6 +487,11 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     .as_ref()
                     .and_then(|id| first_arrival.remove(id))
                     .unwrap_or(event.created_at_ms);
+
+                // Resolved before the id is moved into the block below.
+                let name = event.name.clone().or_else(|| {
+                    stream_id.as_ref().and_then(|id| names.remove(id))
+                });
 
                 let folded = fold::fold(&deltas, &event.text, started_at_ms);
                 if folded.is_none() && !deltas.is_empty() {
@@ -489,7 +512,10 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     kind: event.kind.clone(),
                     phase: event.phase.clone(),
                     stream_id,
-                    name: event.name.clone(),
+                    span: event.span.clone(),
+                    // The completed event's own name wins when it has one; a name
+                    // from an earlier phase fills in when it does not.
+                    name,
                     text: event.text.clone(),
                     folded,
                     data: match event.data_json.as_str() {
@@ -545,8 +571,19 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 .map(|e| e.kind.clone())
                 .unwrap_or_else(|| "assistant".to_string()),
             phase: Some("incomplete".to_string()),
+            // Read from the event that opened it, like `kind` above: an interrupted
+            // block still belongs to the trajectory it ran in, and dropping that
+            // would reparent the tail of an abandoned delegation onto the root.
+            span: events
+                .iter()
+                .find(|e| e.stream_id.as_deref() == Some(stream_id.as_str()))
+                .and_then(|e| e.span.clone()),
+            // Same reason as the folded path: for a block whose only phases were
+            // `started` and `delta`, that is the only place a name ever appeared.
+            // A trajectory the agent abandoned is exactly this case, so leaving it
+            // None would make the one delegation that needs explaining anonymous.
+            name: names.remove(&stream_id),
             stream_id: Some(stream_id),
-            name: None,
             text,
             folded,
             data: None,

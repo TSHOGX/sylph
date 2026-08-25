@@ -470,6 +470,34 @@ event: usage
 data: {"seq":7,"data":{"inputTokens":1234,"outputTokens":567}}
 ```
 
+Delegated work carries `span`, naming the trajectory an event happened in; absent
+means the root turn. A `subagent` event's `streamId` *is* a trajectory id, so a
+nested delegation is one whose `span` names another — which is how a subagent, a
+subagent's subagent, and a dynamic workflow's parallel phases all travel in one
+flat stream. See `docs/session-protocol.md` § Delegated trajectories.
+
+```
+event: subagent
+data: {"seq":8,"phase":"started","streamId":"s1","name":"Explore"}
+
+event: tool_call
+data: {"seq":9,"phase":"completed","streamId":"t7","span":"s1","name":"Grep"}
+
+event: subagent
+data: {"seq":10,"phase":"started","streamId":"s2","span":"s1","name":"Worker"}
+
+event: subagent
+data: {"seq":11,"phase":"completed","streamId":"s1"}
+```
+
+Unlike other kinds, a `subagent` event is `stable` at every phase: its `started`
+phase is where a trajectory's identity, name, and parent live, so dropping it as an
+ephemeral projection would leave the journal holding children that point at a parent
+it never recorded. A trajectory an adapter never closes is closed by the server when
+the turn terminates, carrying `data.closedBy = "server"` — which a client reports as
+*abandoned* rather than *failed*, because nobody said it failed, only that nobody
+said.
+
 SSE reconnection:
 - Client sends `Last-Event-ID: {seq}`
 - Server replays from `seq+1`

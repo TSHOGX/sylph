@@ -357,3 +357,41 @@ test("a long catalogue is a filterable sheet that does not grab focus", async ({
   await expect(page.getByRole("button", { name: /^Provider model:/ })).toHaveText(/Qwen 3 Max/);
   expect(await overflowingElements(page)).toEqual([]);
 });
+
+/**
+ * A nested delegation tree on a phone.
+ *
+ * This is where an indented tree fails, and the failure is invisible at 1280px
+ * where the same markup is merely cramped. Each level of nesting spends horizontal
+ * space that a 412px viewport does not have, so a depth-3 tree either overflows or
+ * truncates a tool call's path to nothing — which is why indentation stops at two
+ * levels and focus mode carries the rest. The assertion is the same overflow probe
+ * the composer uses, because "does it fit" is the whole question.
+ */
+test("a delegation tree three levels deep still fits the viewport", async ({ page }) => {
+  await createSession(page);
+
+  await page.getByLabel("Message").fill("delegate this please");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+
+  // The failed branch expands itself to the tool that failed, so this is already
+  // the deepest state the tree reaches without any interaction.
+  const verify = page.getByRole("region", { name: "Verify delegation" });
+  await expect(verify).toBeVisible({ timeout: 15000 });
+  await expect(verify.getByRole("region", { name: "Worker delegation" })).toBeVisible();
+
+  expect(await overflowingElements(page)).toEqual([]);
+
+  // Open the sibling too: two expanded branches plus the stranded card is the
+  // widest and tallest the timeline gets on this fixture.
+  await page
+    .getByRole("region", { name: "Explore delegation" })
+    .getByRole("button", { name: "Explore", exact: true })
+    .tap();
+  expect(await overflowingElements(page)).toEqual([]);
+
+  // Focus mode re-roots and resets the indent budget, which is the point of it.
+  await verify.getByRole("button", { name: "Focus Verify" }).tap();
+  await expect(page.getByRole("navigation", { name: "Delegation path" })).toBeVisible();
+  expect(await overflowingElements(page)).toEqual([]);
+});
