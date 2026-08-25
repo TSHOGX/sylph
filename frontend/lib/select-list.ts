@@ -54,6 +54,35 @@ export interface SelectOption {
   /** Trailing hint — a shortcut, or the agent's own description of a choice. */
   hint?: string;
   /**
+   * Words the filter matches but the row never shows.
+   *
+   * The command palette is why this exists: "Stop the running turn" has to be
+   * reachable by `cancel` and `interrupt`, and "Quick Start session" by `scratch`.
+   * Rendering those would double the width of every row to serve the one query that
+   * used them, and every palette worth copying keeps its aliases hidden.
+   *
+   * It is the *last* field ranked, below the trailing hint, because a row that
+   * matched here shows the user nothing explaining why — so it must never outrank a
+   * row whose visible text matched. Keep it to synonyms of what the row already
+   * says: a word here that is not a paraphrase of the label produces a result the
+   * user cannot account for, which is the mirror image of the unsearchable `detail`
+   * this model was built to prevent.
+   */
+  keywords?: string;
+  /**
+   * A third line: why this row matched, when that is not visible in the row itself.
+   *
+   * Only the archive search has one. Its hits are ranked server-side by full-text
+   * search over the transcript, so the matched words are in event bodies the browser
+   * never loaded — and without the snippet an archive row is a title and a path with
+   * nothing saying why a query about a bug reached a session called "notes".
+   *
+   * Deliberately not matched, and not for `meta`'s reason. This text *is* the product
+   * of a match; re-ranking a caller-ranked row by the excerpt the caller derived from
+   * its own ranking would just launder that ranking through a weaker one.
+   */
+  excerpt?: string;
+  /**
    * Trailing metadata: counts, a badge, a timestamp.
    *
    * Deliberately *not* matched. It is derived from the candidate rather than
@@ -187,12 +216,13 @@ function withOneChecked<T extends SelectOption>(items: readonly T[]): readonly T
  * a heading introduces choices that are no longer beneath it, so keeping one in a
  * filtered result labels the wrong thing.
  *
- * Label, detail, and hint are all matched, because each carries words a user
- * actually remembers: a model catalogue's hint is the agent's own description (a
- * provider name, a price), and a workspace's detail is the path whose middle
+ * Label, detail, hint, and keywords are all matched, because each carries words a
+ * user actually remembers: a model catalogue's hint is the agent's own description
+ * (a provider name, a price), and a workspace's detail is the path whose middle
  * segment is how the project is known. Field order is the ranking, so a label
- * match wins, then the detail line, then the trailing hint — which is the right
- * order because it runs from what names the row to what merely annotates it.
+ * match wins, then the detail line, then the trailing hint, then the invisible
+ * keywords — which is the right order because it runs from what names the row, to
+ * what annotates it, to what only aliases it.
  */
 export function buildRows<T extends SelectOption>(
   items: readonly T[],
@@ -216,7 +246,7 @@ export function buildRows<T extends SelectOption>(
   return fuzzyRank(
     source.filter((item) => !item.disabled),
     trimmed,
-    (item) => [item.label, item.detail ?? "", item.hint ?? ""],
+    (item) => [item.label, item.detail ?? "", item.hint ?? "", item.keywords ?? ""],
   ).map((result, index) => ({ item: result.item, index }));
 }
 

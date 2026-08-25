@@ -135,45 +135,22 @@ export function Overlay({
 }
 
 /**
- * The list behaviour every picker needs: arrow keys move a virtual cursor, Enter
- * commits, and the input keeps focus throughout.
+ * Scroll the active row into view without yanking the whole page.
  *
- * Focus stays on the input rather than moving to the active row, which is why
- * rows are marked with `aria-selected` and the input carries
- * `aria-activedescendant` — the pattern ARIA prescribes for a combobox, and the
- * only one where typing and navigating do not fight over focus.
+ * All that remains here of list behaviour. `useListNavigation` used to sit beside it
+ * — arrow keys, Home/End, Enter over a count the caller supplied — and it was a
+ * second answer to the question `useSelectList` answers. It could not be anything
+ * else: it took a count, so the caller had to number the rows itself, and a caller
+ * numbering rendered rows while the hook counted choosable ones is precisely the
+ * dual-index bug `lib/select-list.ts` was written to make unrepresentable. It was
+ * also structurally unable to draw a heading, which is why the palette hand-rolled
+ * grouping, and unable to host a filter field without each caller re-deriving the
+ * combobox ARIA — four call sites did, and they drifted.
+ *
+ * It is deleted rather than deprecated. A hook that still compiles is a pattern the
+ * next picker can copy, and this one's failure mode is invisible until a list grows
+ * a non-selectable row.
  */
-export function useListNavigation(count: number, onCommit: (index: number) => void) {
-  // Stateless on purpose: the caller owns `active`, because in all four pickers it
-  // is one field of a state object that also holds the query — which is what makes
-  // "a query edit resets the cursor" a single update rather than an effect. This
-  // hook previously also kept an `activeRef` and exported a `reset`, neither of
-  // which any caller used, so the cursor existed in two places and only one of them
-  // was read.
-  function onKeyDown(event: React.KeyboardEvent, active: number, setActive: (n: number) => void) {
-    if (count === 0) return;
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setActive((active + 1) % count);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActive((active - 1 + count) % count);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      setActive(0);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      setActive(count - 1);
-    } else if (event.key === "Enter") {
-      event.preventDefault();
-      onCommit(active);
-    }
-  }
-
-  return { onKeyDown };
-}
-
-/** Scroll the active row into view without yanking the whole page. */
 export function scrollActiveIntoView(container: HTMLElement | null, index: number) {
   const row = container?.querySelector<HTMLElement>(`[data-index="${index}"]`);
   row?.scrollIntoView({ block: "nearest" });

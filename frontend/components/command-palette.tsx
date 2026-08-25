@@ -9,19 +9,29 @@
  *
  * Commands are grouped for scanning when the query is empty, and flattened into
  * one ranked list once the user types — a grouped fuzzy list forces the eye to
- * search several places for the best match.
+ * search several places for the best match. Both halves are `lib/select-list.ts`'s
+ * doing rather than this file's: a heading is a `disabled` row, which is the same
+ * flag that makes it take no cursor position and makes a query elide it. The version
+ * this replaced re-derived all three from a `grouped` boolean at render time, in an
+ * index space that was not the cursor's.
  */
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useSettings, type ShortcutAction } from "@/lib/settings";
 import { formatCombo, useIsMac } from "@/lib/shortcuts";
-import { fuzzyRank } from "@/lib/fuzzy";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useT } from "@/lib/i18n";
-import { Overlay, scrollActiveIntoView, useListNavigation } from "@/components/overlay";
+import { Overlay } from "@/components/overlay";
+import {
+  SelectFilter,
+  SelectRows,
+  SelectScroll,
+  useSelectList,
+} from "@/components/ui/select-list";
+import type { SelectChoice } from "@/lib/select-list";
 import { Kbd } from "@/components/ui/button";
 import { CommandIcon } from "@/components/icons";
 
@@ -35,6 +45,25 @@ interface Command {
   /** Extra words to match on that are not in the label. */
   keywords?: string;
 }
+
+/**
+ * A group heading: a row that is rendered, introduces the rows under it, and cannot
+ * be chosen.
+ *
+ * `disabled` is what makes it inert, and `buildRows` reads the same flag to decide
+ * that it takes no cursor position and that a query elides it. That is exactly the
+ * behaviour the palette hand-rolled — headings drawn only while unfiltered, and the
+ * cursor numbered over commands rather than over rendered rows — except that here the
+ * two facts are one fact. The version this replaced computed them in two places, in
+ * two index spaces, which is the dual-index bug the shared engine exists to make
+ * unrepresentable.
+ */
+const heading = (label: string): SelectChoice => ({
+  label,
+  disabled: true,
+  separated: true,
+  onSelect: () => {},
+});
 
 /** Recently used command ids, most recent first. */
 const RECENT_KEY = "sylph-web.recent-commands.v1";
@@ -58,12 +87,7 @@ export function CommandPalette() {
   const { closeOverlay, runAction, leftOpen, rightOpen } = useWorkspaceUI();
   const { settings, update } = useSettings();
 
-  // Query and cursor move together: every query change resets the cursor, and
-  // holding them in one state object makes that a single update rather than an
-  // effect that reacts to the query and sets more state.
-  const [{ query, active }, setPicker] = useState({ query: "", active: 0 });
   const isMac = useIsMac();
-  const listRef = useRef<HTMLDivElement>(null);
 
   // Read once, at first render, rather than in an effect: the palette is mounted
   // by the keypress that opens it, so there is no server render to mismatch, and
@@ -269,119 +293,95 @@ export function CommandPalette() {
     return map;
   }, [settings.shortcuts]);
 
-  const ranked = useMemo(() => {
-    if (!query.trim()) {
-      // Recents float to the top of an unfiltered palette; that is the whole
-      // reason to track them, and it makes repeated actions one keystroke away.
-      const byId = new Map(commands.map((command) => [command.id, command]));
-      const recents = recent.map((id) => byId.get(id)).filter((c): c is Command => Boolean(c));
-      const rest = commands.filter((command) => !recent.includes(command.id));
-      return [...recents, ...rest];
-    }
-    return fuzzyRank(commands, query, (command) => [
-      command.label,
-      command.group,
-      command.keywords ?? "",
-    ]).map((result) => result.item);
-  }, [commands, query, recent]);
-
-  // Clamp rather than reset-on-change: the cursor already returns to 0 with every
-  // query edit, and this covers the remaining case where the list shrinks under
-  // it (a command's label changed and it no longer matches).
-  const activeIndex = Math.min(active, Math.max(0, ranked.length - 1));
-
-  // A DOM side effect, which is what effects are for. It reads no state it also
-  // writes, so nothing cascades.
-  useEffect(() => scrollActiveIntoView(listRef.current, activeIndex), [activeIndex]);
-
-  const setActive = useCallback(
-    (index: number) => setPicker((current) => ({ ...current, active: index })),
-    [],
+  const run = useCallback(
+    (command: Command) => {
+      const next = [command.id, ...recent.filter((id) => id !== command.id)].slice(0, RECENT_LIMIT);
+      setRecent(next);
+      try {
+        window.localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+      } catch {
+        /* recency is best-effort */
+      }
+      command.run();
+    },
+    [recent],
   );
 
-  function commit(index: number) {
-    const command = ranked[index];
-    if (!command) return;
-    const next = [command.id, ...recent.filter((id) => id !== command.id)].slice(0, RECENT_LIMIT);
-    setRecent(next);
-    try {
-      window.localStorage.setItem(RECENT_KEY, JSON.stringify(next));
-    } catch {
-      /* recency is best-effort */
-    }
-    command.run();
-  }
+  const items = useMemo<SelectChoice[]>(() => {
+    const rows: SelectChoice[] = [];
+    const row = (command: Command): SelectChoice => ({
+      label: command.label,
+      // `meta`, not `hint`: the shortcut renders as a `<Kbd>`, and `hint` is a string
+      // the filter matches — `mod` and `shift` would then be query terms that hit
+      // every bound command at once.
+      meta: command.action
+        ? shortcutFor.has(command.action)
+          ? <Kbd>{formatCombo(shortcutFor.get(command.action)!, isMac)}</Kbd>
+          : undefined
+        : undefined,
+      // The group joins the searchable text here because a query elides the heading
+      // that would otherwise carry it: `view` has to keep reaching the view commands
+      // once their heading is gone. `keywords` rather than `hint` for the same reason
+      // as above — these are aliases, not something the row shows.
+      keywords: [command.group, command.keywords ?? ""].join(" "),
+      onSelect: () => run(command),
+    });
 
-  const { onKeyDown } = useListNavigation(ranked.length, commit);
-  const grouped = !query.trim();
+    // Recents float to the top of an unfiltered palette; that is the whole reason to
+    // track them, and it makes repeated actions one keystroke away. They are excluded
+    // from their own groups below, so no command is offered twice.
+    const byId = new Map(commands.map((command) => [command.id, command]));
+    const recents = recent.map((id) => byId.get(id)).filter((c): c is Command => Boolean(c));
+    if (recents.length > 0) {
+      rows.push(heading(t("palette.group.recent")));
+      rows.push(...recents.map(row));
+    }
+
+    let group: string | undefined;
+    for (const command of commands) {
+      if (recent.includes(command.id)) continue;
+      if (command.group !== group) {
+        group = command.group;
+        rows.push(heading(group));
+      }
+      rows.push(row(command));
+    }
+    return rows;
+  }, [commands, recent, shortcutFor, isMac, run, t]);
+
+  // `searchable: true`, never `auto`: the threshold counts single-select rows and a
+  // palette marks none of them current, so the heuristic would answer "no filter" for
+  // the one surface whose entire purpose is a query.
+  //
+  // No `onClose` — the list does not own the surface. Every command either closes the
+  // overlay itself or dispatches an action that does, and two of them deliberately do
+  // not (density, thinking) because their effect is visible behind the palette.
+  // Escape belongs to `Overlay`.
+  const list = useSelectList(items, { searchable: true });
 
   return (
     <Overlay title={t("palette.title")} onClose={closeOverlay} describedBy="palette-hint">
-      <div className="flex items-center gap-2 border-b border-line px-3 py-2.5">
-        <span className="text-ink-muted">
-          <CommandIcon size={15} />
-        </span>
-        <input
-          type="text"
-          role="combobox"
-          aria-expanded
-          aria-controls="palette-results"
-          aria-activedescendant={ranked.length > 0 ? `palette-row-${activeIndex}` : undefined}
-          aria-label={t("palette.field")}
-          autoFocus
-          value={query}
-          onChange={(event) => setPicker({ query: event.target.value, active: 0 })}
-          onKeyDown={(event) => onKeyDown(event, activeIndex, setActive)}
-          placeholder={t("palette.placeholder")}
-          className="flex-1 bg-transparent text-sm outline-none placeholder:text-ink-muted"
-        />
-      </div>
+      <SelectFilter
+        list={list}
+        name={t("palette.list")}
+        // Not "Filter commands": the field runs one, which is a different promise to
+        // make to a screen reader than narrowing a set.
+        label={t("palette.field")}
+        placeholder={t("palette.placeholder")}
+        icon={<CommandIcon size={15} />}
+        size="roomy"
+      />
 
-      <div
-        ref={listRef}
-        id="palette-results"
-        role="listbox"
-        aria-label={t("palette.list")}
-        className="min-h-0 flex-1 pane py-1"
-      >
-        {ranked.length === 0 ? (
+      <SelectScroll list={list} label={t("palette.list")} fill>
+        {/* The palette's own wording, not the shared "No matches": this surface is
+            reached by muscle memory, and naming what was searched is the difference
+            between "you typed something unknown" and "the palette is broken". */}
+        {list.rows.length === 0 ? (
           <p className="px-3 py-6 text-center text-xs text-ink-muted">{t("palette.none")}</p>
         ) : (
-          ranked.map((command, index) => {
-            const previous = index > 0 ? ranked[index - 1] : undefined;
-            const isRecent = grouped && recent.includes(command.id);
-            const wasRecent = previous ? grouped && recent.includes(previous.id) : false;
-            const showHeading =
-              grouped && (index === 0 || (isRecent !== wasRecent) || (!isRecent && command.group !== previous?.group));
-            const heading = isRecent ? t("palette.group.recent") : command.group;
-            const combo = command.action ? shortcutFor.get(command.action) : undefined;
-
-            return (
-              <div key={command.id}>
-                {showHeading && (
-                  <p className="px-3 pb-0.5 pt-2 text-3xs font-semibold uppercase tracking-wider text-ink-muted">
-                    {heading}
-                  </p>
-                )}
-                <div
-                  id={`palette-row-${index}`}
-                  data-index={index}
-                  role="option"
-                  aria-selected={index === activeIndex}
-                  onMouseEnter={() => setActive(index)}
-                  onClick={() => commit(index)}
-                  className={`flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs ${
-                    index === activeIndex ? "bg-hover" : ""
-                  }`}
-                >
-                  <span className="min-w-0 flex-1 truncate text-ink">{command.label}</span>
-                  {combo && <Kbd>{formatCombo(combo, isMac)}</Kbd>}
-                </div>
-              </div>
-            );
-          })
+          <SelectRows list={list} />
         )}
-      </div>
+      </SelectScroll>
 
       <footer
         id="palette-hint"

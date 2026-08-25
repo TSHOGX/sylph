@@ -431,3 +431,50 @@ test("a delegation tree three levels deep still fits the viewport", async ({ pag
   await expect(page.getByRole("navigation", { name: "Delegation path" })).toBeVisible();
   expect(await overflowingElements(page)).toEqual([]);
 });
+
+/**
+ * The three shortcut overlays, on a phone.
+ *
+ * They were the last surfaces still rendering their own field, rows, and cursor, and
+ * they migrated onto the shared choice list — which changed the markup of every row on
+ * a viewport no spec exercised them at. Two of the pitfalls this repo records about
+ * lists are only observable below the breakpoint: a focused field under 16px zooms
+ * mobile Safari and does not zoom back, and a row wide enough to overflow reads as a
+ * broken app rather than a cramped one.
+ *
+ * The history browser earns the widest coverage here, because its paging control moved
+ * out of the list and into the footer — which is where the safe-area inset lives, and
+ * where a control placed wrongly is simply unreachable on a notched device.
+ */
+test("the shortcut overlays fit the viewport and their fields do not trigger zoom", async ({
+  page,
+}) => {
+  await createSession(page);
+
+  for (const [combo, name] of [
+    ["ControlOrMeta+p", /command query/i],
+    ["ControlOrMeta+k", /search query/i],
+    ["ControlOrMeta+Shift+k", /filter this workspace/i],
+  ] as const) {
+    await page.keyboard.press(combo);
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+
+    const field = dialog.getByRole("combobox", { name });
+    await expect(field).toBeVisible();
+
+    // 16px is the threshold: mobile Safari zooms a focused field below it and does not
+    // zoom back out, which presents as "the whole screen moved". Read as a computed
+    // value rather than asserted as a class — the class is an implementation detail
+    // and the pixel size is the contract.
+    const size = await field.evaluate((node) =>
+      Number.parseFloat(window.getComputedStyle(node).fontSize),
+    );
+    expect(size, `filter font size with ${combo} open`).toBeGreaterThanOrEqual(16);
+
+    expect(await overflowingElements(page), `overflow with ${combo} open`).toEqual([]);
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+  }
+});

@@ -163,6 +163,8 @@ export const zh: Dictionary = {
   "history.none": "没有匹配的已加载会话。",
   "history.empty": "这里还没有归档会话。",
   "history.archiveUnavailable": "TraceDB 归档不可用，因此无法列出过往会话。",
+  "history.keys": "↑↓ 导航 · ↵ 以只读方式打开 · Esc 关闭",
+  "history.filterScope": "筛选仅覆盖已加载的会话",
 
   "directoryPicker.title": "选择文件夹",
   "directoryPicker.confirm": "使用此文件夹",
