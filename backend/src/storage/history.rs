@@ -21,6 +21,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePo
 use sqlx::Row;
 use tracing::{debug, info, warn};
 
+use crate::events::data_from_column;
 use crate::models::Event;
 use crate::supervisor::TrajectoryOutcome;
 use crate::storage::cas::{self, BlobStore, Payload};
@@ -885,10 +886,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     name,
                     text: event.text.clone(),
                     folded,
-                    data: match event.data_json.as_str() {
-                        "" | "{}" => None,
-                        raw => serde_json::from_str(raw).ok(),
-                    },
+                    data: data_from_column(&event.data_json),
                     is_error: event.is_error,
                     source: event.source.clone(),
                     started_at_ms,
@@ -931,10 +929,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
             // Carried forward because it is what says this was expected to outlive
             // its turn — the one durable record of that, once the journal rows are
             // gone.
-            data: match declaring.data_json.as_str() {
-                "" | "{}" => None,
-                raw => serde_json::from_str(raw).ok(),
-            },
+            data: data_from_column(&declaring.data_json),
             is_error: false,
             source: declaring.source.clone(),
             started_at_ms,

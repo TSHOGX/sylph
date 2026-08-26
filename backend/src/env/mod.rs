@@ -33,13 +33,6 @@ pub struct ProcessSpec {
     /// Working directory, interpreted inside the environment.
     pub cwd: String,
     pub env: HashMap<String, String>,
-    /// Whether stdin stays open for the process's lifetime.
-    ///
-    /// This is the whole difference between the v1 and v2 adapter protocols, so
-    /// it is explicit at the spawn boundary rather than implied by how the
-    /// caller happens to use the handle. A v1 runner gets its prompt and an EOF;
-    /// a v2 adapter gets a channel it can be asked questions on.
-    pub duplex_stdin: bool,
 }
 
 /// Signals a caller may send. A closed set rather than a raw integer, because

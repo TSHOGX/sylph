@@ -306,8 +306,8 @@ async fn a_capability_change_updates_the_cached_surface_and_is_published() {
     elif t == "send":
         out({"t": "ok", "id": mid})
         out({"t": "event", "kind": "capabilities",
-             "capabilities": {"commands": [{"name": "newly-added"}],
-                              "permissionMode": "plan"}})
+             "facets": {"commands": [{"name": "newly-added"}],
+                        "permissionMode": "plan"}})
 "#,
         ),
     );

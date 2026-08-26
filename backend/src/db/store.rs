@@ -3,6 +3,7 @@ use sqlx::sqlite::{
 };
 use std::path::Path;
 use crate::error::{Error, Result};
+use crate::events::data_from_column;
 use crate::models::{Event, Incarnation, PendingRequest, Session, Turn};
 use crate::tracedb::summarize_line;
 
@@ -1225,10 +1226,7 @@ impl JournalStore {
             return Ok(false);
         };
 
-        let mut data: Option<serde_json::Value> = match row.data_json.as_str() {
-            "" | "{}" => None,
-            raw => serde_json::from_str(raw).ok(),
-        };
+        let mut data: Option<serde_json::Value> = data_from_column(&row.data_json);
         if !outcome.supersedes(row.phase.as_deref(), data.as_ref()) {
             return Ok(false);
         }

@@ -357,6 +357,13 @@ left the hazard: a message about one part of the surface would still be *able* t
 speak for the whole of it, and the next adapter would rediscover that. Naming the
 facet makes silence mean silence.
 
+`facets` is the only member the server reads. v2's whole-surface `capabilities`
+member was accepted alongside it for a while, and that was the wrong shape to
+tolerate: the two carry the same field names, so a *partial* update sent under the
+old key parsed as facets and was applied as the whole surface — reinstating the
+erasure above from the branch that existed to soften it. An update naming no
+recognized facet is ignored rather than treated as a clear.
+
 Capability changes are pushed, not polled — a skill edited on disk or a plugin
 loading changes what the composer should offer, and a list a client refreshes on
 its own schedule is wrong for however long that schedule is.

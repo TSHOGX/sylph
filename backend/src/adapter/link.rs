@@ -146,8 +146,6 @@ impl Link {
                 args: vec!["--serve".into()],
                 cwd: config.workdir.clone(),
                 env,
-                // The whole point: stdin stays open for the session's life.
-                duplex_stdin: true,
             })
             .await
             .with_context(|| format!("Failed to spawn adapter {:?}", config.adapter_path))?;
@@ -264,16 +262,20 @@ impl Link {
                             // adapter reported only a permission-mode change, and
                             // the symptom appeared two layers away as a menu that
                             // would not open.
+                            //
+                            // `facets` is the only key read. A v2 whole-surface
+                            // `capabilities` member used to be accepted as a
+                            // fallback, and that was the wrong shape to tolerate:
+                            // its field names parse as facets, so a partial update
+                            // arriving under the old key would have been applied as
+                            // the whole surface — reintroducing the exact erasure
+                            // above, silently, from the branch meant to soften it.
+                            // No adapter has emitted it since v3.
                             let is_capabilities =
                                 body.get("kind").and_then(|k| k.as_str()) == Some("capabilities");
                             if is_capabilities {
                                 let facets = body
                                     .get("facets")
-                                    // A whole-surface payload is still accepted, so
-                                    // an adapter written against v2 degrades rather
-                                    // than reporting nothing. Its field names are the
-                                    // same, so it parses as facets.
-                                    .or_else(|| body.get("capabilities"))
                                     .cloned()
                                     .and_then(|c| {
                                         serde_json::from_value::<CapabilityFacets>(c).ok()

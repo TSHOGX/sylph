@@ -1,10 +1,10 @@
-//! Normalized event plumbing between runner processes and SSE clients.
+//! Normalized event plumbing between adapter links and SSE clients.
 //!
 //! Two storage tiers back a turn's event stream, mirroring the split described
 //! in `docs/architecture.md`:
 //!
 //! * **Stable events** (`phase == "completed"`, plus server-authored status and
-//!   error events) are persisted to `live.db` and replayed on reconnect.
+//!   error events) are persisted to `journal.db` and replayed on reconnect.
 //! * **Ephemeral events** (`started` / `delta`) are transient projections. They
 //!   are broadcast to attached clients and kept in a bounded in-memory ring so
 //!   a client that reconnects mid-stream can still catch the tail, but they are
@@ -37,6 +37,37 @@ const PROJECTION_CAPACITY: usize = 512;
 /// Broadcast capacity per turn. Slow SSE consumers that fall behind receive a
 /// lag error and resubscribe from the journal rather than blocking the runner.
 const BROADCAST_CAPACITY: usize = 1024;
+
+/// Whether a stored `data_json` column carries anything, and what.
+///
+/// `None` means absent. Absence has no `NULL` to spell it with — the column is
+/// `TEXT NOT NULL DEFAULT '{}'` in both tiers — so `"{}"` is what
+/// [`StreamEvent::to_row`] writes for an event with no data, and it has to read
+/// back as absent rather than as `Some({})`. An empty object is a payload that
+/// says nothing while claiming to say something, which leaves every consumer
+/// downstream re-deciding whether it counts as data.
+///
+/// `""` is matched for legibility, not for behaviour: it is what a row carries
+/// when nothing ever wrote the field, and it would reach `None` through the
+/// malformed arm below anyway since it is not valid JSON. Naming it says that
+/// case was considered.
+///
+/// Malformed JSON is absent too, deliberately rather than as an error: a corrupt
+/// data column must not make an otherwise readable event unrenderable, since its
+/// kind and text still carry the useful content. `"null"` is *not* absent — it
+/// parses to `Some(Value::Null)`, which is an adapter having explicitly sent
+/// null, and flattening that into "no data" would discard the distinction.
+///
+/// One function because this is one decision. It was written out four times —
+/// here, in `storage::history::consolidate` twice, and in
+/// `db::store::reconcile_trajectory` — and four copies of a rule is a rule that
+/// diverges on the first case anyone adds to only one of them.
+pub fn data_from_column(data_json: &str) -> Option<serde_json::Value> {
+    match data_json {
+        "" | "{}" => None,
+        raw => serde_json::from_str(raw).ok(),
+    }
+}
 
 /// A normalized event as it appears on the wire, both from adapters
 /// (`sylph.agent.v3` event messages) and to browsers (SSE `data:` payloads).
@@ -212,10 +243,7 @@ impl StreamEvent {
             span: row.span.clone(),
             name: row.name.clone(),
             text: row.text.clone(),
-            data: match row.data_json.as_str() {
-                "" | "{}" => None,
-                raw => serde_json::from_str(raw).ok(),
-            },
+            data: data_from_column(&row.data_json),
             is_error: row.is_error,
             stability: row.stability.clone(),
             source: row.source.clone(),

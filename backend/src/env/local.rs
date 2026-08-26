@@ -48,10 +48,12 @@ impl Environment for LocalEnvironment {
 
     async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>> {
         let mut cmd = Command::new(&spec.program);
-        // Piped either way. `duplex_stdin` is not a spawn-time difference: it
-        // tells the *caller* whether to keep the handle or drop it after one
-        // write, which is the v2/v1 distinction. Branching here would suggest
-        // the environment enforces it, and it does not.
+        // stdin is always piped, and how long it stays open is the caller's
+        // business rather than the environment's. A spawn flag once described
+        // that lifetime — held open for a session, or closed after one prompt —
+        // and no environment ever branched on it, because none can enforce it:
+        // whoever holds the handle decides. Reintroducing it here would claim
+        // an enforcement point that does not exist.
         cmd.args(&spec.args)
             .current_dir(&spec.cwd)
             .stdin(Stdio::piped())
@@ -178,7 +180,6 @@ mod tests {
             args: args.iter().map(|a| a.to_string()).collect(),
             cwd: cwd.to_string(),
             env: HashMap::new(),
-            duplex_stdin: true,
         }
     }
 
