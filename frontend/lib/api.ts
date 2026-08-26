@@ -68,9 +68,10 @@ export interface Turn {
    * from a user who sent nothing — and without the distinction it reads as a reply to
    * a message the user never wrote.
    *
-   * Optional so a response from an older backend still parses.
+   * Required: `backend/src/models/turn.rs:20` has this as a non-`Option` `String`
+   * with no `skip_serializing_if`, so it is on every row the backend serializes.
    */
-  origin?: "user" | "agent";
+  origin: "user" | "agent";
   requestText: string;
   commandInvocationId: string | null;
   idempotencyKey: string | null;
@@ -247,10 +248,15 @@ export interface LinkFailure {
    * `no_adapter` — the session's agent was not discovered; a retry cannot fix it.
    * `handshake_failed` — the adapter would not come up; a retry may.
    *
-   * Typed as an open union so an unknown code from a newer server still renders
-   * through `message` instead of throwing away the whole reason.
+   * Closed, mirroring `LinkFailureCode` in `backend/src/links/mod.rs:108` exactly.
+   * The union was previously left open with `(string & {})` for "a newer server",
+   * which there is no such thing as here — and it cost the two callers that branch
+   * on the code (`components/composer.tsx:1119` decides retryability,
+   * `lib/use-agent-session.ts:108` decides cache lifetime) their exhaustiveness: a
+   * third variant added to the backend enum should fail the type check rather than
+   * silently fall to whichever arm handles the unknown.
    */
-  code: "no_adapter" | "handshake_failed" | (string & {});
+  code: "no_adapter" | "handshake_failed";
   message: string;
 }
 

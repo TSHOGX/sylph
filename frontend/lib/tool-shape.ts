@@ -1,22 +1,28 @@
 /**
  * Interpreting a `tool_call` event well enough to render it as work.
  *
- * The runner protocol deliberately does not standardize tool payloads: `data`
- * is "compact structured metadata", and each agent fills it with whatever its
- * own backend produced. So this module normalizes what the four shipped runners
- * actually emit, verified against their source:
+ * The session protocol deliberately does not standardize tool payloads: `data`
+ * is an open object, and each adapter fills it with whatever its own vendor
+ * produced. So this module normalizes what the shipped adapters actually emit,
+ * verified against their source:
  *
- * - **claude** (`runner.py`): `data.input` is the parsed tool input object, or
- *   the raw string when it did not parse as JSON. `text` is the raw JSON.
- * - **codex** (`runner.sh`): `data.input`, plus `data.command` and `data.status`.
- * - **opencode** (`runner.sh`): `data.input`, `data.status`, `data.title`.
- * - **pi** (`runner.sh`): `data.input` from the tool-call arguments.
+ * - **claude** (`adapters/claude/adapter.py:1108`): `data.input` is the parsed
+ *   tool input object, or the raw string when the streamed partial JSON did not
+ *   parse. `text` is that raw JSON.
+ * - **pi** (`adapters/pi/adapter.py:493` and `:562`): `data.input` is the
+ *   tool-call arguments object, from `args` on `tool_execution_start` and from
+ *   `toolCall.arguments` on a delta.
  *
- * The shared shape is therefore `data.input` holding the tool's arguments, with
- * `text` as a stringified fallback. Everything here degrades to "unknown tool
- * with some arguments" rather than throwing, because a fifth runner will spell
- * something differently and a timeline that crashes on it is worse than one that
- * renders it plainly.
+ * The single shape is therefore `data.input` holding the tool's arguments, with
+ * `text` as a stringified fallback. Nothing else is read off `data`: a spelling
+ * no adapter produces is not tolerated here, per AGENTS.md § Compatibility.
+ *
+ * What *is* open is the argument vocabulary *inside* `input`. Tool names and
+ * their argument keys come from whichever MCP servers, plugins, and user
+ * adapters (`SYLPH_AGENTS_DIR`) are installed, which no list in this repo can
+ * close. So key matching below is generous, and everything degrades to "unknown
+ * tool with some arguments" rather than throwing — a timeline that crashes on an
+ * unfamiliar tool is worse than one that renders it plainly.
  *
  * # No icon here
  *
@@ -76,7 +82,19 @@ const KIND_RULES: Array<{ kind: ToolKind; patterns: string[] }> = [
   { kind: "task", patterns: ["task", "agent", "todo", "plan", "delegate"] },
 ];
 
-/** Argument keys that name a file, in the order agents prefer them. */
+/**
+ * Argument keys that name a file, in the order agents prefer them.
+ *
+ * The camelCase entries (`filePath`, `notebookPath`, `targetFile`) are **not**
+ * dead second spellings of the snake_case ones, and an audit for compatibility
+ * code should leave them alone. No adapter in this repo decides this vocabulary:
+ * tool names and their argument keys come from whatever MCP servers, plugins,
+ * and user adapters (`SYLPH_AGENTS_DIR`) a user has installed, and those are
+ * written by other people in whatever style they like. Matching a key an
+ * installed tool may plausibly use is live vendor adaptation, which
+ * AGENTS.md § Compatibility explicitly still permits — unlike tolerating a
+ * spelling one of *our* producers used to emit.
+ */
 const PATH_KEYS = [
   "file_path",
   "filePath",
@@ -119,14 +137,15 @@ export function describeTool(event: StreamEvent): ToolShape {
       ...PATH_KEYS,
       ...COMMAND_KEYS,
       ...PATTERN_KEYS,
+      // The keys `extractHunks` consumes, so a diff is not repeated verbatim
+      // under "Arguments". snake_case only: these are `claude`'s own Edit,
+      // MultiEdit, and Write inputs, forwarded unchanged by
+      // `adapters/claude/adapter.py:1108`.
       "old_string",
-      "oldString",
       "new_string",
-      "newString",
       "edits",
       "content",
       "replace_all",
-      "replaceAll",
     ]),
   };
 }
@@ -134,11 +153,12 @@ export function describeTool(event: StreamEvent): ToolShape {
 /**
  * Recover the argument object from an event.
  *
- * Three shapes are accepted because three exist in the wild: `data.input` as an
- * object (every runner's happy path), `data.input` as a JSON string (claude when
- * the tool input arrived as text), and `text` as raw JSON (claude's `text` field
- * always holds it, and is the only source when `data` is absent — which is the
- * case for `started` and `delta` phases).
+ * Three shapes are accepted because the shipped adapters produce three:
+ * `data.input` as an object (both adapters' happy path), `data.input` as a string
+ * (`adapters/claude/adapter.py:1110`, when the streamed partial JSON did not
+ * parse), and `text` as raw JSON (`claude`'s `text` always holds it, and is the
+ * only source when `data` is absent — which is the case for the `started` and
+ * `delta` phases).
  */
 function extractArgs(event: StreamEvent): Record<string, unknown> {
   const data = event.data;
@@ -154,10 +174,10 @@ function extractArgs(event: StreamEvent): Record<string, unknown> {
       // shell command, so naming it `command` renders correctly.
       return { command: input };
     }
-    // Some runners put `command` at the top level of `data` rather than inside
-    // `input`, so the outer object is worth reading before giving up on it.
-    const outer = data as Record<string, unknown>;
-    if (typeof outer.command === "string") return { command: outer.command };
+    // Nothing else on `data` is read. Every shipped adapter nests a tool's
+    // arguments under `input` (`adapters/claude/adapter.py:1108`,
+    // `adapters/pi/adapter.py:493`), so a top-level `data.command` read would be
+    // tolerance for a producer that does not exist.
   }
 
   if (event.text) {
@@ -215,8 +235,11 @@ function extractHunks(args: Record<string, unknown>, path?: string): EditHunk[] 
 }
 
 function pair(source: Record<string, unknown>): { before: string; after: string } | null {
-  const before = source.old_string ?? source.oldString;
-  const after = source.new_string ?? source.newString;
+  // snake_case only: `claude` forwards its Edit/MultiEdit input verbatim
+  // (`adapters/claude/adapter.py:1108`), and that vendor spells these
+  // `old_string`/`new_string`.
+  const before = source.old_string;
+  const after = source.new_string;
   if (typeof after !== "string") return null;
   return { before: typeof before === "string" ? before : "", after };
 }
@@ -281,22 +304,35 @@ export function basename(path: string): string {
 }
 
 /**
- * Exit code from a tool result, when the runner reported one.
+ * Whether a tool result reports failure, and the exit code if it named one.
  *
- * codex reports `exitCode`; opencode reports a `status` string. Both are read
- * because "did this command fail" is the single most useful fact in a shell
- * result, and it decides whether the output opens expanded.
+ * `isError` is the declared outcome of a `tool_result`
+ * (`docs/session-protocol.md:663`), and both shipped adapters set it: from
+ * `is_error` on the vendor block at `adapters/claude/adapter.py:1167`, and from
+ * the tool-execution result at `adapters/pi/adapter.py:497`. No `status` string
+ * is read off `data` — no producer writes one, so a branch on it was tolerance
+ * for a producer that does not exist.
+ *
+ * `data.exitCode` is a different case, and is deliberately still read even though
+ * the protocol does not declare it. `components/timeline.tsx:942` renders
+ * "failed (exit N)" from it, which is the most useful single fact about a failed
+ * shell call, but today the only producer is the E2E fixture
+ * (`e2e/fixtures/adapters/e2e/adapter.py:176`) — the adapters put `exitCode` on a
+ * `status` event at process exit, which is a different event kind entirely. So
+ * this read is ahead of its spec: it stays pending a `docs/session-protocol.md`
+ * change declaring `data.exitCode` as an optional refinement of `isError`, and
+ * if that change is rejected instead, this and the fixture's shape both go.
+ * `exit_code` was never emitted by anything and is gone.
  */
 export function resultStatus(event: StreamEvent): { exitCode?: number; failed: boolean } {
   const failed = event.isError === true;
   const data = event.data;
   if (!data || typeof data !== "object") return { failed };
   const record = data as Record<string, unknown>;
-  const raw = record.exitCode ?? record.exit_code;
+  const raw = record.exitCode;
   const exitCode = typeof raw === "number" ? raw : undefined;
-  const status = typeof record.status === "string" ? record.status : undefined;
   return {
     exitCode,
-    failed: failed || exitCode !== undefined && exitCode !== 0 || status === "failed" || status === "error",
+    failed: failed || (exitCode !== undefined && exitCode !== 0),
   };
 }

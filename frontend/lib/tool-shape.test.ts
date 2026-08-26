@@ -5,11 +5,12 @@ import type { StreamEvent } from "@/lib/api";
 /**
  * Tool interpretation across agent vocabularies.
  *
- * The payloads here are the shapes the four shipped runners actually emit,
- * transcribed from their source. That is the point of these tests: the runner
- * protocol leaves `data` unspecified, so the only guarantee is what the runners
- * do, and a change in one of them should fail here rather than silently render a
- * tool call as "unknown".
+ * The payloads here are the shapes the shipped adapters actually emit —
+ * `adapters/claude/adapter.py` and `adapters/pi/adapter.py` — transcribed from
+ * their source. That is the point of these tests: the session protocol leaves
+ * `data` unspecified beyond `input`, so the only guarantee is what those two
+ * adapters do, and a change in either should fail here rather than silently
+ * render a tool call as "unknown". Nothing here pins a shape no producer emits.
  */
 function event(partial: Partial<StreamEvent>): StreamEvent {
   return {
@@ -24,7 +25,7 @@ function event(partial: Partial<StreamEvent>): StreamEvent {
 
 describe("describeTool", () => {
   it("reads claude's parsed tool input", () => {
-    // runners/claude/runner.py: `fields["data"] = {"input": json.loads(text)}`
+    // adapters/claude/adapter.py:1108: `data = {"input": json.loads(block["text"])}`
     const shape = describeTool(
       event({
         name: "Read",
@@ -56,21 +57,10 @@ describe("describeTool", () => {
     expect(shape.summary).toBe("Edit");
   });
 
-  it("reads codex's command field", () => {
-    // runners/codex/runner.sh puts the command in both `input` and `command`.
-    const shape = describeTool(
-      event({
-        name: "shell",
-        text: "cargo test --lib",
-        data: { status: "completed", command: "cargo test --lib" },
-      }),
-    );
-    expect(shape.kind).toBe("shell");
-    expect(shape.command).toBe("cargo test --lib");
-    expect(shape.summary).toBe("cargo test --lib");
-  });
-
   it("treats a non-JSON string input as a command", () => {
+    // adapters/claude/adapter.py:1110 falls back to the raw block text when the
+    // streamed partial JSON did not parse, and a shell command is the commonest
+    // thing that leaves behind.
     const shape = describeTool(
       event({ name: "bash", data: { input: "ls -la /tmp" } }),
     );
@@ -163,8 +153,9 @@ describe("describeTool", () => {
   });
 
   it("never throws on a malformed or hostile payload", () => {
-    // A fifth runner will spell something differently, and a timeline that
-    // crashes on it is worse than one that renders it plainly.
+    // Tool argument keys come from whatever MCP servers, plugins, and user
+    // adapters are installed, so an unfamiliar shape is expected. A timeline that
+    // crashes on one is worse than one that renders it plainly.
     const payloads: unknown[] = [
       null,
       "a string",
@@ -183,28 +174,33 @@ describe("describeTool", () => {
 
 describe("resultStatus", () => {
   it("treats isError as failure", () => {
+    // The declared outcome of a `tool_result` (docs/session-protocol.md:663), set
+    // by adapters/claude/adapter.py:1167 and adapters/pi/adapter.py:497.
     expect(resultStatus(event({ kind: "tool_result", isError: true })).failed).toBe(true);
   });
 
-  it("reads codex's exit code", () => {
+  it("reports a non-zero data.exitCode as failure", () => {
+    // The only producer is the E2E fixture
+    // (`e2e/fixtures/adapters/e2e/adapter.py:176`); `components/timeline.tsx:942`
+    // renders "failed (exit N)" from it. Pending a protocol change declaring the
+    // field, this pins the read that surface depends on.
     const status = resultStatus(event({ kind: "tool_result", data: { exitCode: 101 } }));
     expect(status.exitCode).toBe(101);
     expect(status.failed).toBe(true);
   });
 
-  it("treats exit code zero as success", () => {
+  it("reports data.exitCode zero as success", () => {
     const status = resultStatus(event({ kind: "tool_result", data: { exitCode: 0 } }));
     expect(status.exitCode).toBe(0);
     expect(status.failed).toBe(false);
   });
 
-  it("reads opencode's status string", () => {
+  it("ignores a status string on a tool result", () => {
+    // No adapter writes one, so a `status` on `data` must not decide the outcome:
+    // `isError` is what `docs/session-protocol.md:663` declares.
     expect(resultStatus(event({ kind: "tool_result", data: { status: "error" } })).failed).toBe(
-      true,
+      false,
     );
-    expect(
-      resultStatus(event({ kind: "tool_result", data: { status: "completed" } })).failed,
-    ).toBe(false);
   });
 
   it("defaults to success when nothing is reported", () => {
