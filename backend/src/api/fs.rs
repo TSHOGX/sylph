@@ -14,7 +14,7 @@
 //! This is the only endpoint that lists directories the *client* names rather
 //! than ones derived from a session, so the bound cannot come from the request.
 //! It comes from configuration: [`crate::config::Config::browse_roots`], which
-//! is `$HOME` plus anything in `SYLPH_WEB_BROWSE_ROOTS`. Every request must
+//! is `$HOME` plus anything in `SYLPH_BROWSE_ROOTS`. Every request must
 //! resolve inside one of those roots, checked on the canonical path by
 //! [`crate::paths::contain`] — the same primitive the session-scoped file API
 //! uses, deliberately shared rather than reimplemented.
@@ -73,7 +73,7 @@ pub struct RootsResponse {
 /// GET /api/v1/fs/roots
 ///
 /// The set of directories browsing may start from. A root that no longer exists
-/// is filtered out rather than reported: a stale `SYLPH_WEB_BROWSE_ROOTS` entry
+/// is filtered out rather than reported: a stale `SYLPH_BROWSE_ROOTS` entry
 /// should not present the user an unopenable node.
 pub async fn roots(State(state): State<AppState>) -> Result<Json<RootsResponse>> {
     let home = std::env::var("HOME").unwrap_or_default();

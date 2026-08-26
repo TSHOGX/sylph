@@ -59,10 +59,11 @@ landed changes enough of the system that the summary above would mislead without
 Its own section at the end of this file carries the reasoning, the measurements, and
 the open items — that section is authoritative for Phase 12, not this list.
 
-**Current test totals, measured on `main` after the six delegation/security worktrees
-merged:** 322 backend unit, 205 backend integration across three binaries (158
-`integration`, 24 `requests`, 23 `storage`, plus 3 ignored by default that parse files
-from real Office tooling), 366 frontend unit in 21 files, 147 E2E specs in 16 files.
+**Current test totals, measured on `main` on 2026-08-26:** 322 backend unit, 207
+backend integration across three binaries (158 `integration`, 26 `requests`, 23
+`storage`, plus 3 ignored by default that parse files from real Office tooling), 381
+frontend unit in 22 files, 149 E2E specs in 16 files across two projects (138
+`chromium`, 11 `mobile`).
 
 The per-phase counts below are what each phase measured on its own branch and are
 left as its record; they do not add up to these, because parallel tracks each
@@ -557,7 +558,7 @@ the UI never showed.
 ### Delivered
 
 **7.1 — machine-level directory browsing**
-- ✅ `GET /api/v1/fs/{roots,tree}`, bounded by `$HOME` plus `SYLPH_WEB_BROWSE_ROOTS`
+- ✅ `GET /api/v1/fs/{roots,tree}`, bounded by `$HOME` plus `SYLPH_BROWSE_ROOTS`
 - ✅ Containment extracted to `backend/src/paths.rs` and shared with the
   session file API, so the rule exists once rather than in two divergent copies
 - ✅ Directories only, no content endpoint, escaping symlinks omitted from

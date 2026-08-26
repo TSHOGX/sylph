@@ -56,9 +56,11 @@ development practices.
 
 When a choice involves trade-offs, the rationale lives **in code comments** next to
 what it governs, not in separate decision logs. Examples:
-- `frontend/components/event-list.tsx` explains why memoization was chosen over virtualization
+- `frontend/components/timeline.tsx` explains why memoization was chosen over
+  virtualization, and what evidence would reverse that call
 - `frontend/lib/use-sse.ts` documents why `fetch` replaced `EventSource`
 - `backend/src/tracedb/mod.rs` pins TraceDB API spellings and why
+- `backend/src/paths.rs` states the containment invariant every write endpoint shares
 
 This keeps decisions close to their consequences, where future maintainers encounter
 them.
@@ -134,8 +136,9 @@ cd frontend && npm run build && npx eslint .
 cd frontend && npm run e2e           # Playwright E2E tests
 ```
 
-E2E starts both servers on offset ports with throwaway data and a mock runner, so
-it never touches your real journal or archive.
+E2E starts both servers on offset ports with throwaway data and a mock adapter, so
+it never touches your real journal or archive. It wipes its own home first, so do not
+start servers by hand for it.
 
 ### Before Committing
 1. Run tests for every part of the repo you touched
@@ -171,7 +174,7 @@ instead of only in the closing errata — the shortcuts document's reserved bind
 (`Mod+Shift+O` and `Mod+J`, not the `Cmd+N` a browser takes first) and its Quick
 Start path are both fixed inline for that reason.
 
-When they disagree with `frontend-architecture.md` or `roadmap.md`, those win. A
-design document records what was intended; the architecture spec records what is
-true. Do not update one to match the other without deciding which should move, per
-"Document Evolution" below.
+When they disagree with `frontend-architecture.md`, `ui-layout.md`, or `roadmap.md`,
+those win. A design document records what was intended; the architecture spec records
+what is true. Do not update one to match the other without deciding which should move,
+per "Document Evolution" above.

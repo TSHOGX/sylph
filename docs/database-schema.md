@@ -1,6 +1,16 @@
 # Database Schema
 
-Sylph Web uses SQLite for the live session journal and TraceDB for stable cross-agent history.
+Sylph Web uses SQLite for the live session journal and TraceDB for stable cross-agent
+history.
+
+**This file covers `journal.db` only.** The data directory holds three stores, not
+one: `journal.db` (hot, unconsolidated turns — below), `history.db` (warm,
+consolidated blocks) and `blobs/` beside them. `history.db`'s tables, its migrations
+under `backend/migrations/history/`, and the watermark and byte-accounting rows live in
+**`docs/storage.md` § Schema**, because they only make sense alongside the
+consolidation and retention rules that write them. Splitting one store into three is
+SQLite's requirement rather than a data-model choice; `docs/storage.md` § Three tiers
+says why.
 
 ## Journal (journal.db)
 
@@ -54,7 +64,8 @@ Fields:
 - `origin` — `sylph` (created by WebApp) or `native` (imported from TUI/CLI)
 - `identity_mode` — `sylph` (inject SOUL.md) or `preserve` (original agent context)
 - `lifecycle_mode` — `sylph` (24h timeout, 04:00 reset) or `preserve` (no implicit lifecycle)
-- `agent` — runner name from discovery (e.g., `claude`, `codex`)
+- `agent` — agent name from discovery (e.g., `claude`, `pi`), which is the directory
+  name holding its `adapter.sh`
 - `backend_session_id` — opaque agent-native session ID
 - `trace_session_id` — TraceDB session ID after ingestion
 - `workdir` — absolute path to working directory
@@ -86,7 +97,7 @@ CREATE INDEX incarnations_session_idx
 
 An incarnation is a row rather than a mutated field, so a reset is recorded
 instead of overwritten. `backend_session_id` is nullable because the row is
-created before the runner reports the id it chose; `ended_at_ms` and
+created before the agent reports the id it chose; `ended_at_ms` and
 `reset_reason` are written when it is retired, and the two trace columns record
 which archived session it continued from and which one it became. There is no
 unique index on `backend_session_id`: an agent may reuse an id across
@@ -123,6 +134,10 @@ CREATE TABLE turns (
   UNIQUE(session_id, idempotency_key)
 );
 
+-- Added by 006_turn_origin.sql
+ALTER TABLE turns ADD COLUMN origin TEXT NOT NULL DEFAULT 'user'
+  CHECK (origin IN ('user', 'agent'));
+
 CREATE INDEX turns_session_idx ON turns(session_id, created_at_ms DESC);
 CREATE INDEX turns_status_idx ON turns(status)
   WHERE status IN ('queued', 'starting', 'running', 'stopping');
@@ -134,6 +149,21 @@ client retry. `command_invocation_id` links a turn to an agent command rather th
 to typed text. The partial `turns_status_idx` covers exactly the in-flight states,
 which is the query restart reconciliation runs.
 
+`origin` distinguishes a turn a user dispatched from one **the agent started itself**,
+which is a real turn rather than a special case — it consolidates, orders by sequence,
+and appears in the transcript where it happened. The column exists because a turn
+nobody asked for has to be able to say so, and because an agent turn's `request_text`
+is empty, which would otherwise be indistinguishable from a user sending nothing. It
+is also load-bearing in the supervisor: an agent turn never had a waiter, so
+`settle_turn` uses `origin` to tell "no waiter, because there never was one" from "no
+waiter, because a deliberate stop already claimed it" — conflating them reported a
+user's stop as `LINK_LOST`. `docs/session-protocol.md` § An agent may start a turn.
+
+`runner_exit_code` is a **legacy spelling kept for compatibility**, not evidence the
+v1 runner protocol still exists. Under `sylph.agent.v3` the adapter is a long-lived
+process and a turn is a message on its link, so there is no per-turn exit code to
+record; the column is written `NULL` on every current path.
+
 Status transitions:
 - `queued` → `starting` → `running` → `completed` / `failed` / `cancelled`
 - `running` → `stopping` → `cancelled`
@@ -144,15 +174,15 @@ Status transitions:
 Event stream journal (bounded live storage).
 
 ```sql
+-- As rebuilt by 003_agent_event_vocabulary.sql. 001's shape is not what is on disk:
+-- it constrained `kind` to a closed list and spelled the adapter source 'runner'.
 CREATE TABLE events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   turn_id TEXT REFERENCES turns(id) ON DELETE CASCADE,
   seq INTEGER NOT NULL,
-  kind TEXT NOT NULL 
-    CHECK (kind IN ('status', 'system', 'user', 'thinking', 'assistant',
-                    'tool_call', 'tool_result', 'usage', 'error', 'approval')),
-  phase TEXT CHECK (phase IN ('started', 'delta', 'completed')),
+  kind TEXT NOT NULL,                      -- deliberately unconstrained; see below
+  phase TEXT,
   stream_id TEXT,
   name TEXT,
   text TEXT NOT NULL DEFAULT '',
@@ -161,22 +191,53 @@ CREATE TABLE events (
   stability TEXT NOT NULL DEFAULT 'stable'
     CHECK (stability IN ('ephemeral', 'stable')),
   source TEXT NOT NULL DEFAULT 'server'
-    CHECK (source IN ('runner', 'server', 'tracedb')),
+    CHECK (source IN ('agent', 'server', 'tracedb')),
   created_at_ms INTEGER NOT NULL,
   reconciled_at_ms INTEGER,
   UNIQUE(session_id, seq)
 );
 
+-- Added by 005_event_span.sql
+ALTER TABLE events ADD COLUMN span TEXT;
+
 CREATE INDEX events_session_idx ON events(session_id, seq);
 CREATE INDEX events_turn_idx ON events(turn_id, seq) WHERE turn_id IS NOT NULL;
+CREATE INDEX idx_events_span ON events(session_id, span, seq);
 ```
+
+**`kind` carries no CHECK, and that is the fix rather than an omission.** 001
+constrained it to ten values, which is a promise to break on the next adapter that
+adds one — and it broke exactly that way: `append_event` logged and continued, so a
+sequence number was consumed and the event reached live clients while nothing reached
+the journal. A turn streamed correctly and came back empty on reload. The protocol says
+kinds are additive, so validation belongs at the wire boundary where an unknown kind
+can be *reported*, not at the storage layer where it can only be dropped.
+`docs/session-protocol.md` owns the vocabulary.
+
+**`source` is `agent`, not `runner`.** 003 renamed it with the v1 protocol and migrated
+existing rows. It stays a closed set because it has exactly three producers and a
+fourth would be a design change rather than an adapter's choice.
+
+`span` is which delegated trajectory an event ran in; NULL means the root turn. It is
+nullable rather than `''` because absent and "the root" are the same fact. That one
+pointer expresses a subagent, a nested subagent, and a workflow's parallel phases,
+since those differ only in the shape of the resulting tree — and `idx_events_span` is
+what keeps focus mode and single-subtree replay from scanning the session.
+`docs/session-protocol.md` § Delegated trajectories is authoritative.
 
 Event lifecycle:
 - `ephemeral` events (`started`, `delta`) exist only in live projection
 - `stable` events (`completed`) are persisted to journal
-- `reconciled_at_ms` is where an ingestion watermark would be recorded; nothing
-  writes it yet, which is why pruning is still future work
-- Once TraceDB ingests a turn, stable events can be pruned after retention window
+- `reconciled_at_ms` is a per-row column that **nothing writes**. Retention is gated on
+  a per-session watermark in `history.db` instead (`docs/storage.md` § Retention is
+  watermark-driven), so pruning is built and this column is vestigial rather than a
+  placeholder for future work
+
+Note that `stability` has one derivation, in the `stability` column — not two.
+`StreamEvent::is_stable()` reads the field rather than re-computing it from `phase`.
+They were equivalent until `subagent` became stable at *every* phase for structural
+reasons, after which the method disagreed with the field beside it and a trajectory's
+`started` was silently not journaled, flattening every delegated subtree on reload.
 
 `UNIQUE(session_id, seq)` is what makes SSE resume-by-sequence safe: a replayed
 frame cannot be journalled twice. `seq` is per session, not per turn, so
@@ -272,8 +333,17 @@ startup:
 
 Attachments and commands need no migration of their own: attachments are staged on
 disk under the data directory rather than in a table, and a command invocation is a
-column on `turns`. `app_meta.schema_version` is reported by `/api/v1/health` so a
-packaged install can be checked against the binary running it.
+column on `turns`.
+
+**`app_meta.schema_version` stopped tracking at 3, and `/api/v1/health` reports it
+anyway.** `001` inserts `1` and `003` updates it to `3`; `004` through `007` add
+columns and leave it alone. So a fully-migrated journal reports `schemaVersion: 3`
+while seven migrations have run, and the value cannot answer the question it exists
+for — checking a packaged install against the binary running it. `sqlx` maintains its
+own `_sqlx_migrations` table, which is the real answer and is not exposed; this key is
+a second, hand-maintained copy that drifted the moment someone forgot the `UPDATE`.
+Either every migration bumps it, or the field reports `_sqlx_migrations` instead and
+the key goes away. Do not read the current value as a schema generation.
 
 Migration rules:
 - Each migration is idempotent (use `IF NOT EXISTS`)

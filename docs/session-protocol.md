@@ -191,13 +191,28 @@ rather than decorative.
 ```json
 {"t":"open","id":"o1","workdir":"/Users/x/p","sessionId":"<native-id|null>",
  "soul":"/path/to/SOUL.md","flags":{"model":"opus-5"},
- "permissionMode":"ask","env":{"SYLPH_SESSION":"<web-uuid>"}}
+ "permissionMode":null,"env":{}}
 ```
 
 `sessionId` is the agent-native id to resume, or `null` for a fresh session.
 `soul` is a path, or `""` to inject nothing — the empty string is meaningful,
 exactly as in v1, and it is how the native-session invariant is enforced from the
 server side.
+
+**`permissionMode` and `env` are in the frame and the server never populates either.**
+`links/mod.rs:481` passes `permission_mode: None`, and `link.rs:378` sends
+`env: HashMap::new()` regardless of what `LinkConfig.env` holds. An adapter must
+therefore treat both as absent rather than as a configuration channel. This example
+previously showed `"permissionMode":"ask"` and `"env":{"SYLPH_SESSION":"<web-uuid>"}`;
+**`SYLPH_SESSION` does not exist anywhere in this codebase** and never reached an
+adapter. The one variable that does is `SYLPH_SOUL`, injected into the adapter's
+*process* environment at spawn (`link.rs:119`) rather than carried in this frame — so
+an adapter reading `env` for its identity path finds nothing.
+
+They are kept in the shape rather than deleted because permission mode is a real
+per-session concept the server may yet resolve, and removing a field from a frame
+adapters already parse is a breaking change for no gain. Populating them is the change
+to make; until then the honest documentation is that they arrive empty.
 
 The reply is the session's real capability surface, which is only knowable once
 the CLI has loaded the project:
@@ -320,8 +335,20 @@ its own schedule is wrong for however long that schedule is.
 | `steer` | Inject text mid-turn without ending it; carries `expectedTurnId` |
 | `set_config` | Set one config option by id; `ok` carries the refreshed `config` |
 | `resolve` | Answer an adapter request, echoing its `id` |
-| `query` | Ask for `context`, `cost`, `diff`, or `plan` |
+| `query` | Ask for `context` or `cost`. **No server code calls it** — see below |
 | `close` | End the session cleanly; adapter flushes and exits |
+
+**`query` is defined and unused.** `Link::query` (`backend/src/adapter/link.rs:542`) has
+no callers anywhere in the server, so an adapter's handler for it will never run.
+It is also narrower than this table claimed: `diff` and `plan` were listed as askable
+and neither adapter answers them — `claude` handles `context`, `cost`, and `plan` and
+errors `UNSUPPORTED_QUERY` otherwise, `pi` handles only `context` and `cost`.
+
+Kept in the protocol rather than deleted because context and cost are genuinely
+pull-shaped facts: they are worth reading when a user looks at them, not streamed on
+every change. But an adapter author should know that implementing `query` today
+satisfies nothing, and a client cannot request one — there is no endpoint that reaches
+it. If a "context remaining" indicator is built, wiring this is part of that work.
 
 `send` returns `ok` as soon as the turn is accepted, not when it finishes. Turn
 completion is an event, because a turn outlives any request that started it —
@@ -418,9 +445,12 @@ optional `form`:
 
 Field types are `select` (with `mode` `one` or `many`, and `choices` carrying the
 agent's own `description` — on a question the description is most of what makes the
-options readable) and `text` (with `multiline`, `prefill`, `placeholder`). A field
+options readable) and `text` (with `multiline`, `prefill`, `placeholder`). A choice may
+also carry a `label`, which is display text used when it differs from the `value`; an
+absent `label` means render the value itself. A field
 may declare `required`, `allowOther` — permitting a value outside `choices`, which is
-a real answer rather than a note — and `notes`, a free-text annotation attached to
+a real answer rather than a note — an `otherLabel` naming that free-text input, and
+`notes`, a free-text annotation attached to
 the pick rather than replacing it.
 
 **A form is declared, never inferred.** Before this existed, a client guessed what
@@ -460,12 +490,24 @@ The event kinds are `thinking`, `assistant`, `tool_call`, `tool_result`, `usage`
 | `kind` | Carries |
 | --- | --- |
 | `subagent` | Declares a delegated trajectory; its `streamId` is that trajectory's id. Any event's `span` may also promote its referent to one (§ Delegated trajectories) |
-| `plan` | A proposed plan, so plan mode is reviewable rather than prose |
-| `diff` | A structured patch, so a file change renders as a diff not a tool log |
 | `compact` | A compaction boundary, so the timeline shows where context was condensed |
 | `turn` | `started` / `completed` with usage, cost, duration, stop reason |
 | `capabilities` | `facets`, applied per facet (§ Capability facets) |
 | `notice` | Agent-originated notification worth surfacing |
+
+**Reserved, not implemented: `plan` and `diff`.** No shipped adapter emits either
+(`claude` emits `subagent`, `turn`, `status`, `notice`, `capabilities`, `usage`,
+`tool_result`, `compact`, plus `assistant`/`thinking`/`tool_call`; `pi` a subset), and
+no timeline branch handles them. They are recorded here as the intended shape for
+making plan mode reviewable and a file change render as a diff rather than a tool log —
+which is worth keeping, because a plan currently arrives as an `approval` request whose
+`detail.plan` is prose, and a diff is reconstructed client-side from a tool payload by
+`lib/tool-shape.ts`. Do not write a client branch expecting them; do not treat their
+presence in this table as a contract an adapter can rely on being consumed.
+
+`kind` is deliberately unconstrained at the storage layer for exactly this reason — a
+new kind is additive, and a `CHECK` listing them is a promise to break on the next
+adapter that adds one (`docs/database-schema.md` § events).
 
 `subagent` is the one that changes what the UI can be, and it needs its own
 section because it is the only event kind that describes *structure* rather than
@@ -498,6 +540,11 @@ Everything else follows:
 {"t":"event","kind":"subagent","phase":"completed","streamId":"s2","span":"s1"}
 {"t":"event","kind":"subagent","phase":"completed","streamId":"s1"}
 ```
+
+Both `started` frames above carry a `name`, which is the *lucky* case rather than the
+contract: a real adapter usually does not know the name yet at `started` and must omit
+the field. See § `name` is absent when unknown below — a client that assumes a name is
+present at open time renders a blank card.
 
 `s2` is a child of `s1` because it carries `span:"s1"`, by exactly the same rule
 that puts the `thinking` block there. Depth is unbounded, siblings may run
@@ -536,10 +583,45 @@ nobody has written yet nests correctly by tagging its children, which is the sam
 `span` it must already set for its output to be attributed at all.
 
 Declaration keeps a purpose it does not share with promotion. A `subagent` event
-carries a *name* before any child exists, and states an *outcome* independent of
+*can* name a trajectory before any child exists, and states an *outcome* independent of
 its host's — so an adapter that knows it is delegating should still declare, and
 one that only discovers it in hindsight is no longer silently wrong. Both produce
 the same tree.
+
+#### `name` is absent when unknown, and a client must supply its own default
+
+**`name` is optional on every phase, including `started`.** An adapter that does not
+yet know what a delegation is called must **omit the field** rather than send a
+placeholder. `claude`'s `_task_label` returns `None` until either `subagent_type` or
+`description` has arrived — which at `started` is the usual case, because the brief is
+still streaming — and its `event()` drops `None` fields entirely, so the frame carries no
+`name` key at all.
+
+This is not a tidiness rule. **A guess written here becomes permanent.**
+`history::consolidate` keeps the best name any phase gave a block, so a later `delta`
+carrying the real brief normally wins — but when the brief never finishes, because the
+delegation fails early or the link dies mid-input, the placeholder becomes that
+trajectory's durable name in `history.db`, indistinguishable from one an agent actually
+chose. Rows already journaled that way cannot be repaired: nothing can tell a guessed
+name from a real one after the fact. So a field meaning "what this is called" must be
+absent when unknown, because `null` is the only value that stays honest in a journal.
+
+Two consequences:
+
+- **A client must render its own fallback.** `frontend/lib/timeline-tree.ts`'s
+  `trajectoryName` answers `"Unnamed"` for a nameless node — deliberately not a word
+  like "Subagent", which restates a category the surrounding chrome already carries and
+  which was a substring-superset of a tool name `claude` ships.
+- **The server keeps the best name any phase gave a block.** `db/store.rs:1029` prefers
+  a declaring `subagent` row's name, with `MAX` ignoring NULLs so a phase that carried
+  one wins over a phase that did not. That is what makes omitting the name at `started`
+  safe: a later phase can still supply it.
+
+Landing this has an order, and it is worth stating because getting it backwards is
+worse than doing nothing. The **producer** stops sending a placeholder first; the
+**presentation** layer renames its fallback second. Reversed, one condition acquires two
+labels — the adapter's word for trajectories it named and the client's for those it did
+not — which is worse than one imprecise label.
 
 **A promoted trajectory closes with its host.** A `tool_call`'s `completed` phase
 means its input finished streaming, not that the delegated work finished — the
@@ -651,6 +733,37 @@ such. It is also what makes skipping the sweep for backgrounded work safe: on it
 that leaves no record on the dispatching turn at all, which trades a wrong answer for
 no answer.
 
+#### `data.is_backgrounded` — the field that inverts the sweep
+
+**An adapter that knows a delegation runs in the background must set
+`data.is_backgrounded = true`, and must re-attach it to every later phase.** It is a
+boolean inside the event's `data` object, not a top-level envelope field.
+
+The sweep closes trajectories an adapter left open, so that silence never has to explain
+a gap. That is right in general and wrong for work the agent itself says is
+backgrounded, which is *expected* to outlive its turn and report on a later
+agent-initiated turn: closing it writes a contradiction the real completion cannot
+undo, and both records then exist on different turns with the earlier card still saying
+the work never finished. The server reads this flag from whichever row it finds
+(`db/store.rs:1066`, `json_extract(data_json, '$.is_backgrounded')`) and excludes those
+trajectories from the sweep.
+
+**Re-attaching is the part an adapter author will otherwise get wrong.** `claude` reports
+`is_backgrounded` on `task_started` and on **no later notification**, so the adapter
+remembers it and stamps it onto every subsequent phase (`adapters/claude/adapter.py:1406`);
+`adapters/claude/adapter_test.py` exists partly to pin that. An adapter that sets it only
+at open has every backgrounded delegation closed as `abandoned`.
+
+Keep the exclusion narrow, and note what it does *not* apply to. An ordinary delegation
+left open is the permanent spinner the sweep exists to prevent — so do not set the flag
+speculatively. And **startup recovery deliberately ignores it, in both tiers**, because a
+dead process cannot report: "abandoned after a restart" is a truthful terminal state and
+must stay distinguishable from "still running in the background".
+
+An adapter that reports no flag is not broken; it gets the sweep's ordinary behaviour.
+The flag is the difference between a card reading *running* until the report arrives and
+one reading *never finished* until then.
+
 **What the adapter must keep separate.** Vendor block state has to be keyed by
 trajectory, not by the vendor's own block index. `claude` numbers content blocks
 per message, and two concurrent subagents both start at index 0 — an adapter with
@@ -675,6 +788,13 @@ init                            …and then an entire exchange of its own
 assistant                       "the background worker finished"
 result
 ```
+
+That is the measured vendor sequence, not the sequence Sylph acts on:
+`background_tasks_changed` is **not handled by `claude`'s adapter at all** and is
+silently ignored, so in practice the turn is opened by whichever of `task_updated` or
+`task_notification` arrives first. It is shown here because it is what the vendor emits
+and an adapter author reading a live stream will see it — not because anything depends
+on it.
 
 Its stdout stays open and the process does not exit. So the agent reports late work,
 and reports it twice over: the delegate's outcome, then its own account of it.
@@ -750,9 +870,11 @@ that duality does not stay contained. It shows up in the supervisor, in the API'
 capability reporting, in the UI's decision about whether to offer interrupt, and
 in every test that has to cover both.
 
-The Discord daemon does run on v1 today. It is migrated to this server rather
-than kept on the old contract — see `docs/control-plane.md`. That is more work
-than a shim and it is the work that leaves one control plane instead of two.
+The Discord daemon still ran on v1 as of 2026-08-26 (`discord_chat_daemon.py` references
+the `harness/` runner contract). It is to be migrated to this server rather
+than kept on the old contract — see `docs/control-plane.md`, which owns that migration's
+status. That is more work than a shim and it is the work that leaves one control plane
+instead of two.
 
 An agent whose CLI genuinely has no duplex mode is still supportable: its adapter
 holds the session and spawns a one-shot CLI invocation per turn internally. The
@@ -762,7 +884,7 @@ protocol does not need to know.
 
 ## What the adapter owns, and what it must not
 
-Unchanged from v1 in principle, and worth restating because v2 gives the adapter
+Unchanged from v1 in principle, and worth restating because v3 gives the adapter
 more rope:
 
 The adapter owns vendor translation: how its CLI accepts a system prompt, spells

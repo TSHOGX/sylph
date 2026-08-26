@@ -40,66 +40,15 @@ measurement, so it is recorded as history rather than followed:
 What still transfers: layout structure, streaming-text handling, and the general
 lesson that reading a production implementation beats guessing.
 
----
-
-**GENERAL PRINCIPLE: Research Before Designing**
-
-As Sylph Web enters continuous development, **any uncertain design decision requires a research phase**:
-
-1. **Identify the problem domain** — What are you trying to solve? (e.g., "efficient virtual scrolling", "SSE reconnection strategy", "toast notification UX")
-
-2. **Search for established patterns:**
-   - GitHub: search repos with high stars in the relevant domain
-   - NPM/npm trends: find popular, actively-maintained libraries
-   - Articles: Dev.to, Medium, official docs for best practices
-   - Real implementations: read source code of production apps
-
-3. **Study mature open-source practices:**
-   - How does TanStack Query handle cache invalidation?
-   - How does Radix UI implement accessible dialogs?
-   - How does Vercel's Next.js app structure its API routes?
-   - How does Linear/GitHub handle optimistic updates?
-
-4. **Document your findings:**
-   - What patterns did you find?
-   - Which libraries/approaches are production-proven?
-   - What are the tradeoffs?
-
-5. **Refine your design** based on research:
-   - Adopt proven patterns unless you have strong evidence for deviation
-   - Prefer libraries over custom implementations when quality is equal
-   - Document why you chose approach X over Y
-
-**Example research workflow:**
-
-```
-Problem: "How should we handle SSE reconnection with exponential backoff?"
-
-Research:
-1. Search: "SSE reconnection pattern" + "EventSource reconnection"
-2. Find: eventsource library on npm (3M weekly downloads)
-3. Read: source code shows exponential backoff with jitter
-4. Find: Mozilla MDN docs on EventSource best practices
-5. Check: How does DSH handle reconnection? (read their code)
-
-Conclusion: Use exponential backoff (1s, 2s, 4s, 8s, max 30s) with
-UI feedback after 3s. Pattern proven in both eventsource lib and DSH.
-```
-
-**When to research:**
-- ❌ Don't research: "How to create a React component" (too basic)
-- ✅ Do research: "How to virtualize 10K+ items efficiently"
-- ✅ Do research: "Best pattern for optimistic mutations with rollback"
-- ✅ Do research: "How to handle file upload progress with SSE"
-- ✅ Do research: "Accessible keyboard navigation in complex lists"
-
-**Why this matters:**
-- Saves time by avoiding reinventing solved problems
-- Reduces bugs by using battle-tested patterns
-- Improves quality by learning from mature implementations
-- Builds team knowledge through documented research
-
----
+**On researching before designing**, the rule is `AGENTS.md` § Design Decisions and it
+is not repeated here. A generic five-step research workflow used to occupy this spot,
+with a worked example concluding that SSE reconnection should use exponential backoff
+"proven in both eventsource lib and DSH" — advice this codebase does not take, because
+`lib/use-sse.ts` resumes from `after_seq` with its own reader rather than delegating
+reconnection to `EventSource` at all. A section teaching a method by an example the code
+contradicts teaches the wrong thing twice. The findings that method produced are in
+this file, next to what they govern: **Why not EventSource**, the dependency costs in
+**Technology Stack**, and the measurements in **Performance Optimization**.
 
 ## Design Philosophy
 
@@ -144,7 +93,10 @@ nowhere in the UI yet.
   preferences. **No Zustand:** two contexts and one external store cover every
   case here, and a state library would add a dependency for a store that holds
   about a dozen fields.
-- EventSource API (SSE streaming)
+- **Not the `EventSource` API.** SSE is read with `fetch` and a hand-written frame
+  parser (`lib/use-sse.ts`, `lib/sse-parse.ts`). `EventSource` dispatches by frame
+  name, so `onmessage` receives almost nothing; it also cannot carry a resume cursor
+  or be unit-tested. See **Why not EventSource** below.
 
 **UI components:**
 - Tailwind CSS 4 (utility-first styling)
@@ -187,9 +139,13 @@ nowhere in the UI yet.
   paths, and render cost.
 
 **Development:**
-- Turbopack (dev server)
-- ESLint + Prettier (linting, formatting)
-- TypeScript strict mode
+- Turbopack (dev server and build)
+- ESLint, invoked directly (`npx eslint .`). **Not `next lint`**, removed in Next 16 —
+  it fails with a misleading `Invalid project directory` error naming a `lint`
+  directory. No Prettier: there is no config for it and it is not a dependency;
+  formatting is whatever the editor does.
+- TypeScript strict mode. `npm run build` type-checks, so it is the TypeScript gate and
+  there is no separate `tsc` step
 
 ## Application Structure
 
@@ -1493,20 +1449,34 @@ cd frontend && npm test          # once
 cd frontend && npm run test:watch
 ```
 
-**140 tests over the pure logic that replaced a dependency, plus the state
-decisions that are one line of JSX away from being wrong.** That is the selection
-rule: hand-rolling a diff, a Markdown parser, and a fuzzy ranker means taking on
-the test burden those libraries carried, and this is where that debt is paid.
+**Pure logic that replaced a dependency, plus the state decisions that are one line of
+JSX away from being wrong.** That is the selection rule: hand-rolling a diff, a
+Markdown parser, and a fuzzy ranker means taking on the test burden those libraries
+carried, and this is where that debt is paid.
+
+Counts are not quoted here. This section carried "140 tests" across three phases that
+each added files, and a stale number in a table of *what is covered* is worse than
+none — it invites a reader to conclude coverage shrank. `npm test` prints the total per
+file; `docs/roadmap.md` § Current State carries the figure that is maintained
+deliberately.
 
 | File | Covers |
 | --- | --- |
 | `lib/diff.test.ts` | LCS alignment, line numbering against the original files, `-` before `+`, no phantom trailing line, prefix/suffix stripping speed, degradation above the size cap |
-| `lib/markdown-parse.test.ts` | Block and inline parsing, code not re-scanned, `javascript:`/`data:` links refused, termination on pathological input |
-| `lib/tool-shape.test.ts` | Each shipped runner's payload shape, name classification, hunk extraction, never throwing on malformed `data` |
+| `lib/markdown-parse.test.ts`, `components/markdown-render.test.ts` | Block and inline parsing, code not re-scanned, `javascript:`/`data:` links refused, termination on pathological input, and the rendered output |
+| `lib/tool-shape.test.ts` | Each shipped agent's payload shape, name classification, hunk extraction, never throwing on malformed `data` |
 | `lib/fuzzy.test.ts` | Subsequence matching and *relative ranking* — boundary and adjacency bonuses, field weighting |
 | `lib/shortcuts.test.ts` | Canonical combo spelling, Cmd/Ctrl unification, recorder and dispatcher agreeing |
+| `lib/sse-parse.test.ts` | Frame decoding across chunk boundaries — the bug `EventSource` shipped untested |
 | `lib/timeline-rows.test.ts` | Delta accumulation, tool-result pairing, interleaved streams, referential stability of settled rows |
-| `lib/welcome.test.ts` | The start screen's three states — that a pending or failed listing is never mistaken for an empty app — and the directory grouping behind recents: one row per path however many sessions it holds, ranked by newest rather than by count, trailing slashes normalized, the cap applying to directories, and the shared query cache never reordered |
+| `lib/timeline-tree.test.ts` | Delegation tree building: `span` attachment, orphans, cycles, promotion by use, status rollup, and `trajectoryName` including the nameless fallback |
+| `lib/timeline-waterfall.test.ts` | The sibling comparison: shared time axis, exact extent vs lower bound, and which rows may be ranked |
+| `lib/select-list.test.ts` | The one choice-list engine: one cursor per list, non-selectable rows, one current row per single-select group |
+| `lib/request-form.test.ts`, `lib/request-parse.test.ts` | A declared request form's fields and the answer shape sent back |
+| `lib/i18n/i18n.test.ts` | Message coverage across locales, so a translated surface cannot silently fall back |
+| `lib/file-kind.test.ts`, `lib/grid-format.test.ts`, `lib/sandbox-html.test.ts` | Extension→viewer mapping, column/paging arithmetic, CSP injection for previewed HTML |
+| `lib/welcome.test.ts` | The start screen's three states — that a pending or failed listing is never mistaken for an empty app — and the directory grouping behind recents |
+| `lib/create-session.test.ts`, `lib/directory-picker.test.ts` | Dialog-free creation and default resolution; the folder chooser's filtering and typed-path path |
 
 Tests live beside the code they cover, not in a parallel `tests/` tree, so a
 reader of `lib/diff.ts` can see its tests without going looking.
@@ -1522,25 +1492,30 @@ that a passing test would not mean much. Those live in Playwright.
 
 ### E2E — Playwright (`npm run e2e`)
 
-**99 specs across two projects** — 91 at desktop width, 8 on a phone. Both
-servers start automatically on offset ports with a throwaway data directory and a
-mock runner, so a run never touches the real journal, archive, or agents.
+**Two projects: `chromium` at desktop width, `mobile` on a phone profile.** Both
+servers start automatically on offset ports with a throwaway data directory and a mock
+adapter, so a run never touches the real journal, archive, or agents. `npx playwright
+test --list` reports the totals; they are not quoted here for the same reason the unit
+counts are not.
 
 | File | Covers |
 | --- | --- |
 | `session-lifecycle.spec.ts` | Create, send, stream, reload-replay, sidebar grouping, resuming from `/` |
 | `start-screen.spec.ts` | Usable before the listing settles, first-run guide vs recents, create button matching its shortcut, key hints reflecting a rebind |
 | `timeline.spec.ts` | Tool calls as regions, inline diff, failure auto-expansion, Markdown, 1000-event render budget |
+| `delegation.spec.ts` | The delegation tree: one card per delegate, nesting to the agent's own depth, a failure three levels down surfacing on the collapsed card above, focus mode and the way back, structure surviving reload, promotion of an undeclared delegating tool, a host that forwarded no interior saying so, the turn-settle sweep closing what an adapter left open without failing a host that succeeded, work reported on a later agent-initiated turn, and a backgrounded shell command staying a tool call |
+| `requests.spec.ts` | A declared request form: pick, note, and multi-select reaching the agent; an answer outside the offered list; declining while a required field is empty; prefill; dismissal saying the agent still waits; keyboard-only answering |
 | `workspace-shell.spec.ts` | Pane toggles and persistence, palette including grouping and a cursor that skips headings, search including an archive hit's match snippet, focus restoration, settings round-trip, Artifacts tree, history browser, dialog-free creation |
 | `file-viewer.spec.ts` | Tree/viewer swap preserving expansion, fullscreen and focus return, dialog sizing to content vs filling for a page, single-modal invariant, CSV table, sandboxed HTML refusing script and cookie access, image zoom, axe over both scales |
-| `streaming.spec.ts` | Mid-turn painting against a deliberately paced runner |
+| `streaming.spec.ts` | Mid-turn painting against a deliberately paced adapter |
 | `workspace-picking.spec.ts` | The three "which directory" flows: filter focused on open, folder browsing filterable inside one focus trap, a typed path reaching an unlisted folder, Enter-opens vs `Mod+Enter`-chooses |
 | `select-list.spec.ts` | The shared choice list itself: filter appearing only past the threshold, cursor opening on the current value, one checkmark per group, a refused write surfacing |
 | `commands.spec.ts` | The slash menu after a completed turn, and a control command opening a picker rather than sending a message |
+| `settings-config.spec.ts` | The Configuration panel reporting what *this* backend resolved, a missing path called out, the adapter directory actually in use marked among those tried, and the panel offering no way to edit a path from the browser |
 | `file-operations.spec.ts` | Folder creation and its in-place errors, deletes that ask first, uploads including drop and overwrite, context menus, the raw route, and axe over both dialogs |
-| `settings-identity-i18n.spec.ts` | Identity reporting when no `SOUL.md` resolves, language switching repainting and retagging, and a shortcut recorder refusing combos the browser keeps |
+| `settings-identity-i18n.spec.ts` | Identity reporting when no `SOUL.md` resolves, language switching repainting and retagging (composer, skip link, file pane accessible names), a shortcut recorder refusing combos the browser keeps, and no *default* binding being one the browser would swallow |
 | `accessibility.spec.ts` | Skip link, focus trapping and restoration including a picker's own field not becoming the node focus returns to, axe-core audit of every surface including both start-screen states and every overlay's list open |
-| `mobile.spec.ts` | Phone-only: composer fits the viewport, sidebars out of flow, drawer and sheet behaviour, document cannot scroll, PWA installability, dark mode before paint, the shortcut overlays' fields at or above 16px |
+| `mobile.spec.ts` | Phone-only: composer fits the viewport, sidebars out of flow, drawer and sheet behaviour, document cannot scroll, PWA installability, dark mode before paint, a long catalogue as a filterable sheet, a request form answerable by tapping, a three-deep delegation tree still fitting, the shortcut overlays' fields at or above 16px |
 
 #### Why a second project exists
 
@@ -1572,15 +1547,43 @@ usable. `overflowingElements()` instead reports every element whose box extends
 past the right edge, which is both the actual defect and actionable when it
 regresses.
 
-**Wipe `.e2e-home/` before trusting a timing result.** The journal is never
-cleared, and each spec's `mkdtemp` workdir becomes a permanent sidebar group —
-grouping is by workdir, so a directory used once and deleted still renders a
-group forever. At 151 groups (148 of them dead single-session directories) the
-suite ran 35 minutes instead of 1.5, and two or three specs failed per run on
-the 30s timeout: a different two or three each time, which reads as flakiness
-rather than as accumulated fixture state. `rm -rf frontend/.e2e-home` is free —
-it is gitignored and the backend recreates it. Raising the timeout does not
-help, because the cost grows without bound.
+**`npm run e2e` wipes `.e2e-home/` before the run**, and the script is the only place
+that can. The journal was never cleared, and each spec's `mkdtemp` workdir becomes a
+permanent sidebar group — grouping is by workdir, so a directory used once and deleted
+still renders a group forever. At 151 groups (148 of them dead single-session
+directories) the suite ran 35 minutes instead of 1.5, and two or three specs failed per
+run on the 30s timeout: a different two or three each time, which reads as flakiness
+rather than as accumulated fixture state. Raising the timeout does not help, because the
+cost grows without bound. `SYLPH_E2E_KEEP_HOME=1` opts out to inspect a journal after a
+failure; leaving it on brings both symptoms back.
+
+**Neither Playwright hook can do the wipe, and both fail the same way.** A `globalSetup`
+runs *after* `webServer`, because `webServer` is a plugin and plugin setup is ordered
+first; module scope in `playwright.config.ts` runs again in every worker process. Both
+therefore delete `journal.db` out from under a backend that has already opened it, and
+the suite answers `unable to open database file` and 500s — the module-scope variant
+eight seconds in, which reads as a mid-run database failure rather than as a fixture
+wiping itself. `e2e/reset-home.mjs` runs from the npm script: one process, once, before
+Playwright starts anything. A genuinely fresh home starts clean, so a first-run database
+error is this bug and not a product one.
+
+**The wipe removes the trigger, not the hazard.** A single run creates over a hundred
+sessions of its own and the sidebar caps its listing at 200, so a spec late in the order
+can still meet the cap — past which a new session *displaces* an older row instead of
+adding one, and a "the group grew by one" assertion stays flat. Assert on identity
+("the session I just created is listed here", matched by id), or count against a
+`mkdtemp` directory of the spec's own.
+
+**Clear the suite's ports before diagnosing a failure that happened before any spec
+ran.** A backend surviving on 4318 from an interrupted run makes the suite fail at
+startup, because `reuseExistingServer: false` correctly refuses to trust it. Playwright
+names the cause (`is already used`), so the cost is only the time it takes to read the
+message — but the same leftover-server class silently *measured* the wrong build in
+`scripts/measure-bundle.sh`, which is the expensive shape.
+
+```sh
+for p in 4318 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done
+```
 
 **`scripts/e2e-repeat.sh` separates a flake from a defect**, since a single red run
 cannot. It runs the suite N times and reports each failing spec's frequency: every
@@ -1599,20 +1602,34 @@ other sessions exist. `page.route` is how the empty-app and slow-listing branche
 become deterministic, and it is the *client's* branch under test either way.
 
 The mock adapter (`e2e/fixtures/adapters/e2e/adapter.sh`, which execs `adapter.py`)
-branches on its prompt to emit ten scenarios: a plain streamed reply, a tool
-sequence with a real diff and a failing command, a 1000-event bulk transcript, an
-approval, a question, an elicitation, a delegation, a promoted host, an
-agent-initiated turn (`unprompted`), and `paced`. Its payloads mirror what the
+branches on its prompt to emit twelve scenarios: a plain streamed reply, a tool
+sequence with a real diff and a failing command (`tools`), a 1000-event bulk
+transcript (`bulk`), an approval, a `narrow` approval that forbids a lasting grant, a
+question, an elicitation, a delegation, a promoted host (`promote`), an
+agent-initiated turn (`unprompted`), `paced`, and `fanout`. Its payloads mirror what the
 shipped adapters emit, transcribed from their source — a fixture that emitted a
-tidier shape would test a protocol nothing speaks. Two properties of this fixture
-are load-bearing rather than incidental. `paced` spaces its stages a second apart,
-because a runner that finishes inside one render cannot distinguish streaming from
-batching. And it declares *two* select options in the same `model` category, one
-with two choices and one with the long `CATALOGUE`: below the filter threshold a
-config option is a `menu` of `menuitemradio`s and above it a combobox over a
-`listbox`, which is a different ARIA contract rather than a different width. Both
-land on the composer's control row together, so one screen asserts both patterns —
-a fixture offering only the short shape cannot observe a list-length bug at all.
+tidier shape would test a protocol nothing speaks.
+
+Four properties of this fixture are load-bearing rather than incidental, and each was
+added because a green suite could not see a real defect without it.
+
+- **`paced` spaces its stages a second apart**, because an adapter that finishes inside
+  one render cannot distinguish streaming from batching.
+- **`fanout` is wide and genuinely slow.** Six delegates with real sleeps, ~2.6s total.
+  Width matters because the question the delegation overview answers is "which of these
+  was slow", and with two delegates that is visible without any overview. Duration
+  matters more: every other scenario emits its whole tree inside one millisecond, so
+  the server stamps one `createdAtMs` on all of it and every bar is the same length —
+  a client computing durations from the wrong field passed the whole suite.
+- **It declares two select options in the same `model` category**, one with two choices
+  and one with a long `CATALOGUE`. Below the filter threshold a config option is a
+  `menu` of `menuitemradio`s and above it a combobox over a `listbox` — a different
+  ARIA contract, not a different width. Both land on the composer's control row
+  together, so one screen asserts both. A fixture offering only the short shape cannot
+  observe a list-length bug at all.
+- **`set_config` refuses one value on purpose**, so the rejected-write path stays
+  covered. A mutation with no error path turns any backend refusal into a phantom UI
+  bug: the sole observable outcome is that clicking a model does nothing.
 
 **A note on shortcut tests.** Pressing a shortcut immediately after `page.goto`
 races hydration: the listener is attached by an effect, so the key can land on
@@ -1624,130 +1641,85 @@ on a cold load, not a test artifact.
 ### Setup
 
 ```sh
-# Create frontend directory
-cd /Users/hsw/Workspace/sylph-web
-mkdir -p frontend
-cd frontend
-
-# Initialize Next.js
-npx create-next-app@latest . --typescript --tailwind --app --no-src-dir
-
-# Install dependencies
-npm install @tanstack/react-query zustand
-npm install @radix-ui/react-dialog @radix-ui/react-dropdown-menu
-npm install framer-motion lucide-react
-npm install shiki react-markdown
-npm install -D @types/node vitest playwright
+cd frontend && npm install
 ```
+
+That is the whole setup. The scaffolding recipe that used to sit here —
+`create-next-app`, then `npm install zustand @radix-ui/* framer-motion lucide-react
+shiki react-markdown` — is deleted rather than corrected: **none of those seven
+packages is a dependency**, and every one of them was rejected by name and with a
+measured cost in **Technology Stack** above. A setup block installing them contradicted
+the document it was in. `package.json` is the authority; today it is four runtime
+dependencies (`next`, `react`, `react-dom`, `@tanstack/react-query`) and the toolchain.
 
 ### Development Server
 
 ```sh
 # Terminal 1: Backend
-cd backend
-cargo run
+cd backend && cargo run
 
 # Terminal 2: Frontend
-cd frontend
-npm run dev
+cd frontend && npm run dev
 ```
 
 Frontend: `http://localhost:3000`  
 Backend: `http://localhost:4317`
 
-### Implementation Checklist
+`cargo` is not on the default `PATH` here; use `~/.cargo/bin/cargo` or export it
+first. For LAN or tunnel access, see `docs/development.md` — reaching `next dev` from a
+non-localhost hostname needs `SYLPH_WEB_DEV_ORIGINS`, and without it every `/_next/*`
+chunk 403s and the page freezes before React hydrates, which reads as a backend failure.
 
-Before implementing any UI component or feature:
+### Reading reference implementations
 
-1. **[ ] Read DSH source code first**
-   - Locate equivalent component in `/Users/hsw/Workspace/oss/deepseek-harness/repo/apps/web/`
-   - Study its structure, props, state management
-   - Note styling patterns and interaction handlers
-
-2. **[ ] Implement following DSH patterns**
-   - Copy component hierarchy if applicable
-   - Use similar state management approach
-   - Match animation/transition timing
-   - Mirror accessibility attributes
-
-3. **[ ] After implementation, compare with DSH**
-   - Open DSH source side-by-side
-   - Verify you haven't missed key patterns
-   - Check if DSH handles edge cases you missed
-   - Confirm styling consistency
-
-4. **[ ] Only deviate with justification**
-   - Document why your approach is better
-   - Verify Sylph-specific requirement (e.g., origin badges)
-   - Ensure no regression in UX quality
-
-**Example: Implementing ThinkingBlock**
-
-```sh
-# 1. Read DSH implementation
-code /Users/hsw/Workspace/oss/deepseek-harness/repo/apps/web/
-# Find thinking block component
-
-# 2. Note patterns:
-# - Collapse/expand with smooth animation
-# - Icon rotation on toggle
-# - Fade-in for content
-# - Keyboard accessibility (Space/Enter to toggle)
-
-# 3. Implement with same patterns in Sylph Web
-
-# 4. Compare after completion
-# - DSH uses framer-motion for animation
-# - Keyboard handler matches
-# - ARIA attributes present
-```
+A per-component "read DSH first, then compare" checklist used to sit here, and it is
+recorded in **Reference Implementations and Research** at the top of this file instead,
+where it belongs: as a reference worth consulting, not a directive to follow. Three of
+its instructions have since been overtaken by measurement — the canvas, the transport,
+and the dependency choices — so a checklist telling a reader to mirror DSH's patterns
+would send them at all three.
 
 ### API Proxy
 
-Next.js proxy routes to avoid CORS:
+`next.config.ts` rewrites `/api/v1/*` to the backend. **Not a route handler** — the
+hand-written `app/api/[...proxy]/route.ts` this section used to show does not exist and
+should not be added: a handler buffers, and buffering an SSE stream delivers a whole
+turn at once.
 
-```ts
-// app/api/[...proxy]/route.ts
-export async function GET(req: Request) {
-  const url = new URL(req.url)
-  const path = url.pathname.replace(/^\/api/, '')
-  
-  const backendUrl = `http://127.0.0.1:4317${path}${url.search}`
-  const response = await fetch(backendUrl, {
-    headers: {
-      'Content-Type': 'application/json',
-      'Cookie': req.headers.get('cookie') || ''
-    }
-  })
-  
-  return response
-}
+Two properties are load-bearing, both documented at the rewrite itself:
 
-export { GET as POST, GET as DELETE }
-```
+- **Same-origin is required, not a convenience.** Auth is a `SameSite=Strict` cookie,
+  which a browser will not send cross-origin to another port.
+- **`SYLPH_WEB_BACKEND` is read at build time.** Next compiles rewrites into the route
+  manifest, so it must be set for `next build` and not only for `next start`.
 
-### Type Generation
+### Types
 
-Generate TypeScript types from OpenAPI spec:
+There is no code generation step. `lib/api.ts` is hand-written and mirrors the wire
+shape exactly; `docs/api-v1.openapi.json` is the contract both sides are checked
+against, and the backend has a test (`error::tests::codes_match_the_openapi_enum`)
+pinning its error enum to it.
 
-```sh
-npx openapi-typescript ../docs/api-v1.openapi.json \
-  -o src/types/api.ts
-```
+An `openapi-typescript` recipe used to sit here. It was never run: `openapi-typescript`
+is not a dependency, there is no `src/types/api.ts`, and generating one would produce a
+second definition of every shape that `lib/api.ts` already defines — two sources to
+keep in step rather than one. The trade is deliberate: hand-writing means a wire change
+surfaces as a type error in the client where it is consumed, and `npm run build` is the
+gate.
 
-Re-run after backend API changes.
-
-### Build & Deploy
+### Build
 
 ```sh
-# Production build
-npm run build
-
-# Serve static export (optional)
-npm run start
-
-# Or let Rust backend serve dist/
+cd frontend && npm run build        # also the TypeScript gate; no separate tsc step
+npx eslint .                        # not `next lint`, removed in Next 16
+npm test                            # Vitest
+npm run e2e                         # Playwright, starts its own servers
 ```
+
+`npm run build` emits `output: "standalone"`. That bundle omits `.next/static` and
+`public`, so an install must copy both or the server starts cleanly and every asset
+404s; `scripts/install.sh` does it and fails the install if `static` is missing. The
+backend does not serve the frontend — there is no `dist/` to hand it.
 
 <!--
   A per-week deliverables checklist used to live here. It has been removed rather
@@ -1762,7 +1734,8 @@ This list was written when most of it was unbuilt. What remains genuinely absent
 
 **Session management** — delete, move, and export have no endpoint behind them. Rename
 has one (`PATCH /api/v1/sessions/{id}` accepts `title`) but no menu item calls it.
-Forking at a turn would need the runner protocol to support resuming from a prefix.
+Forking at a turn would need an adapter able to resume from a prefix, which
+`sylph.agent.v3` does not currently ask for.
 
 **Search** — `Cmd+F` filters turns rather than highlighting matches inside them.
 Highlighting means reaching into the Markdown, diff, and code renderers to rewrite
@@ -1776,8 +1749,7 @@ in the backend and surfaced nowhere.
 **Performance** — virtualization stays deferred, now with measurement behind it rather
 than as an aspiration: a 1000-event conversation renders inside budget through
 memoization. The evidence that would reverse it is scroll jank while *idle* on a large
-session, which indicates DOM size rather than render count. A service worker has no
-use case here — the app is already local-first and its data is a localhost backend.
+session, which indicates DOM size rather than render count.
 
 **Collaboration** — sharing, comments, and session-to-session diff remain out of
 scope, and each would need a story for a surface that is currently loopback-only.
@@ -1785,11 +1757,10 @@ scope, and each would need a story for a surface that is currently loopback-only
 Already shipped, and listed here only because the original list predates them:
 attachments with drag-and-drop and paste, image and PDF viewers, code rendering,
 per-route code splitting, `Cmd+K` full-text search across live sessions and the
-archive, and inline diffs within a turn.
-
-**Dark theme** is deliberately absent rather than half-built: it needs a `dark:` pass
-over every component plus a resolved `prefers-color-scheme` fallback, and a settings
-toggle storing a preference nothing reads would misrepresent that.
+archive, inline diffs within a turn, **dark mode** (Phase 9, with a pre-paint bootstrap
+— `docs/ui-layout.md` § Dark mode), **the mobile layout and PWA installability** (also
+Phase 9, which is what makes the service worker a shipped thing rather than a
+speculative one), and **the delegation tree with its sibling comparison** (Phase 12).
 
 ## Decision Log
 

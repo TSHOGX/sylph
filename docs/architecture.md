@@ -267,7 +267,7 @@ escape lives on disk rather than in the request.
 | `GET /sessions/{id}/files/document` | same | parsed structure for Office, CSV, PDF |
 | `GET /sessions/{id}/files/raw` | same | raw bytes the browser renders itself |
 | `POST /sessions/{id}/files` | same | create files, no overwrite by default |
-| `GET /fs/{roots,tree}` | `Config::browse_roots` (`$HOME` + `SYLPH_WEB_BROWSE_ROOTS`) | list directories only |
+| `GET /fs/{roots,tree}` | `Config::browse_roots` (`$HOME` + `SYLPH_BROWSE_ROOTS`) | list directories only |
 
 Containment is asserted per route rather than assumed inherited, because a new
 route added beside a safe one is exactly where the check goes missing. `/files/raw`
@@ -332,7 +332,7 @@ to rather than an ordinary folder, and skipping it silently is what once made a
 stale tree report zero usable *and* zero broken — so nothing anywhere said the
 directory had been seen and rejected.
 
-**Descriptor schema** (`AgentDescriptor` in `backend/src/runners/mod.rs`):
+**Descriptor schema** (`AgentDescriptor` in `backend/src/agents/mod.rs`):
 ```json
 {
   "name": "claude",

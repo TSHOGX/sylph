@@ -76,18 +76,18 @@
       "get": {
         "responses": {
           "200": {
-            "description": "Discovered runner capabilities"
+            "description": "Discovered agent descriptors"
           }
         }
-      }
-    },
-    "/api/v1/agents/refresh": {
+      },
       "post": {
         "responses": {
           "200": {
-            "description": "Refreshed capabilities"
+            "description": "Discovered agent descriptors"
           }
-        }
+        },
+        "summary": "Re-run agent discovery",
+        "description": "Re-scan both adapter roots and re-handshake each one. This is the POST method on the collection, not a separate /agents/refresh path: this schema published that path for a release and it answers NOT_FOUND. See backend/src/lib.rs:303."
       }
     },
     "/api/v1/sessions": {
@@ -883,7 +883,7 @@
     "/api/v1/fs/roots": {
       "get": {
         "summary": "List the directories that may be browsed",
-        "description": "`$HOME` plus `SYLPH_WEB_BROWSE_ROOTS`. This is the only endpoint that tells a client what it is allowed to enumerate, which is why widening the variable widens what any client of this backend can see. `home` is reported separately because a browser cannot expand `~` for itself.",
+        "description": "`$HOME` plus `SYLPH_BROWSE_ROOTS`. This is the only endpoint that tells a client what it is allowed to enumerate, which is why widening the variable widens what any client of this backend can see. `home` is reported separately because a browser cannot expand `~` for itself.",
         "responses": {
           "200": {
             "description": "Browsable roots",
@@ -1226,7 +1226,13 @@
                   "INTERNAL_ERROR",
                   "TRACE_SESSION_NOT_RESUMABLE",
                   "TURN_NOT_FOUND",
-                  "UNAUTHORIZED"
+                  "UNAUTHORIZED",
+                  "REQUEST_NOT_FOUND",
+                  "REQUEST_ALREADY_RESOLVED",
+                  "LINK_GONE",
+                  "LINK_FAILED",
+                  "TURN_MOVED",
+                  "AGENT_UNSUPPORTED"
                 ]
               },
               "message": {

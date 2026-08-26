@@ -50,7 +50,7 @@ Health check with version information.
 
 #### `GET /api/v1/diagnostics`
 
-Detailed system state (sessions, turns, runners, retention).
+Detailed system state (sessions, turns, agents, retention).
 
 **Response 200:**
 ```json
@@ -87,7 +87,7 @@ Detailed system state (sessions, turns, runners, retention).
 ```
 
 Authenticated, unlike `/health`: it carries counts, local filesystem paths, and
-runner failure messages.
+agent failure messages.
 
 `retention` is the last completed pass, or `null` before the first one. Two things
 about its shape are load-bearing, both covered in `docs/storage.md`:
@@ -240,7 +240,8 @@ See `docs/configuration.md` for the settings themselves.
 
 #### `GET /api/v1/agents`
 
-List discovered agents from `--describe`.
+List discovered agents. Each descriptor is what the adapter returned from its
+`hello`/`ok` handshake, not a static file read (`docs/session-protocol.md` § Handshake).
 
 **Response 200:**
 ```json
@@ -248,23 +249,52 @@ List discovered agents from `--describe`.
   "agents": [
     {
       "name": "claude",
-      "version": "3.1.0",
-      "models": ["opus-5", "sonnet-5"],
-      "efforts": ["low", "medium", "high"],
-      "commands": [
-        { "name": "compact", "description": "Compact context" }
-      ]
+      "description": "Claude Code",
+      "version": "2.1.238",
+      "session_key": "…",
+      "flags": {
+        "model": {
+          "choices": ["opus-5", "sonnet-5"],
+          "description": "Model to use"
+        },
+        "effort": { "choices": ["low", "medium", "high", "xhigh", "max"] }
+      },
+      "commands": {},
+      "supports": ["interrupt", "steer", "approval", "subagent", "slash"]
     }
   ],
   "broken": {
-    "invalid-runner": "exit code 127: --describe failed"
+    "stale-agent": "no adapter.sh"
   }
 }
 ```
 
-#### `POST /api/v1/agents/refresh`
+Three things about this shape catch clients out, and all three are deliberate:
 
-Refresh runner discovery.
+- **`flags` and `commands` are maps keyed by name, not arrays.** The shape is unchanged
+  from the v1 descriptor so that no client had to be rewritten.
+- **The descriptor keeps snake_case** (`session_key`, `supports`), unlike every other
+  response on this API. It passes through from the adapter's own handshake verbatim
+  rather than being re-serialized, and rewriting keys in transit would mean the server
+  had to know every field an adapter might add. `frontend/lib/api.ts` notes this at the
+  type.
+- **There is no `models` or `efforts` field.** Model and effort lists live inside `flags`
+  as a `FlagSpec.choices`, which is what lets an agent offer effort and no model list
+  without anything in the UI hardcoding either. `broken` is omitted entirely when empty.
+
+`flags` is the **spawn-time** option schema — what can be chosen before a session
+exists. Anything adjustable on a *live* session is a config facet instead, reported by
+`GET /sessions/{id}/capabilities`. `commands` here is usually empty for the same
+reason: a project's real command list depends on files the CLI reads at startup, so it
+belongs to a session rather than to an agent.
+
+#### `POST /api/v1/agents`
+
+Re-run agent discovery: re-scan both adapter roots and re-handshake each one.
+
+**Not `POST /api/v1/agents/refresh`**, which this document and the OpenAPI schema both
+claimed for a release and which answers `NOT_FOUND`. Refresh is the `POST` method on the
+collection, registered on the same route as the `GET` (`backend/src/lib.rs:303`).
 
 **Response 200:** Same as `GET /api/v1/agents`
 
@@ -292,7 +322,7 @@ List sessions (live + TraceDB, deduplicated).
       "nativeSessionId": "native-agent-id",
       "workdir": "/Users/hsw/Workspace/project",
       "title": "Feature implementation",
-      "flags": { "model": "opus-5", "effort": "high" },
+      "flagsJson": "{\"model\":\"opus-5\",\"effort\":\"high\"}",
       "status": "idle",
       "createdAtMs": 1724054400000,
       "updatedAtMs": 1724058000000
@@ -300,6 +330,16 @@ List sessions (live + TraceDB, deduplicated).
   ]
 }
 ```
+
+**A session response carries `flagsJson`, a JSON *string* — not a `flags` object.**
+Requests take `flags` as an object (`POST` and `PATCH`, below); responses report the
+stored column and the client parses it (`models/session.rs:25`,
+`frontend/lib/api.ts:42`). This document showed `flags` here for a release, so a client
+written from it read `undefined`.
+
+`nativeSessionId` and `traceSessionId` are **omitted when absent**, not `null`
+(`skip_serializing_if`). A live Sylph session has neither until its first turn and
+ingestion respectively.
 
 #### `POST /api/v1/sessions`
 
@@ -404,8 +444,8 @@ the opening user turn.
 }
 ```
 
-Live sessions expose `nativeSessionId` after the first runner turn. It is the
-agent-native id returned by the runner, and is the id users should copy into
+Live sessions expose `nativeSessionId` after the first turn. It is the
+agent-native id the agent reported, and is the id users should copy into
 the originating agent or TraceDB. `id` remains the Sylph Web route key. Native
 imports also expose `traceSessionId`, the complete TraceDB id. The backend uses
 both forms when reconciling a live row with an archive row.
@@ -423,7 +463,7 @@ error says so, and says what importing would enable, so the refusal reads as a
 policy decision rather than as a broken archive.
 
 **Errors:**
-- `400` — malformed `traceSessionId`, no runner for the originating agent, or
+- `400` — malformed `traceSessionId`, no adapter for the originating agent, or
   the archived working directory no longer exists
 - `403` — `POLICY_VIOLATION`: the archived working directory exists but is outside
   the directories this install permits sessions to run in
@@ -438,31 +478,32 @@ agent. Collapsing any pair would send a reader to the wrong layer.
 
 #### `GET /api/v1/sessions/{id}`
 
-Get session detail with incarnations and turn summary.
+Get one session.
 
 **Response 200:**
 ```json
-{
-  "session": { /* full session */ },
-  "incarnations": [
-    {
-      "id": "i_def456",
-      "nativeSessionId": "opaque_id",
-      "createdAtMs": 1724054400000,
-      "lastUsedAtMs": 1724058000000
-    }
-  ],
-  "turns": {
-    "total": 5,
-    "completed": 4,
-    "running": 1
-  }
-}
+{ "session": { /* the same shape a listing row has, below */ } }
 ```
+
+**That is the whole response.** This section documented an `incarnations` array and a
+`turns` summary for a release; neither exists — `api::sessions::get` returns
+`SessionResponse { session }` and nothing else, and no endpoint anywhere reports turn
+counts. Incarnations are journalled (`backend_incarnations`, `docs/database-schema.md`)
+but are not published on any route; a client that needs the turn list asks
+`GET /sessions/{id}/turns`.
+
+Two field names in that removed example were wrong in a way worth keeping visible,
+because both are easy to re-invent:
+
+- **`nativeSessionId` is never serialized on an incarnation.** `models/incarnation.rs`
+  marks `backend_session_id` `#[serde(skip_serializing)]` — agent-native ids are not
+  exposed at the incarnation level on purpose. The *session* does expose
+  `nativeSessionId`, which is where it belongs.
+- The timestamps are `startedAtMs` / `endedAtMs`, not `createdAtMs` / `lastUsedAtMs`.
 
 #### `PATCH /api/v1/sessions/{id}`
 
-Change runner flags or the title of an existing session.
+Change agent flags or the title of an existing session.
 
 ```json
 { "flags": { "model": "opus", "effort": "high" }, "title": "Auth refactor" }
@@ -473,17 +514,22 @@ Both fields are optional; an omitted field is left untouched. `flags` is a
 whole set, and merging would let a stale key survive a change the user believed
 was total. An empty object clears them.
 
+Note the asymmetry: `flags` is what a *request* carries, while a session
+*response* reports `flagsJson`, a JSON string the client parses
+(`models/session.rs`, `frontend/lib/api.ts:42`). Reading a session and echoing its
+`flags` back is therefore not a round trip.
+
 **Why flags are validated here rather than at turn time.** `POST .../turns` filters
-the stored set against the runner's `--describe` schema and silently drops what it
+the stored set against the agent's declared flag schema and silently drops what it
 does not recognize. That is right there: a descriptor can change under a session
 created before it, and the turn should still run. It is wrong for a user action —
-a model chosen in the composer that the runner never declared would be accepted,
+a model chosen in the composer that the agent never declared would be accepted,
 stored, dropped at turn time, and the turn would run on the default with nothing
 anywhere saying why. Validating on write turns that silent no-op into an error the
 UI can show against the control that caused it.
 
 Identity is deliberately not patchable. `agent`, `origin`, `identityMode`, and
-`lifecycleMode` decide which runner owns the conversation and whether `SOUL.md`
+`lifecycleMode` decide which agent owns the conversation and whether `SOUL.md`
 may be injected; changing them on a session with history would rewrite what that
 history was produced by. Native→Sylph conversion is a separate, explicit
 operation for the same reason.
@@ -571,15 +617,33 @@ Get turn detail.
   "turn": {
     "id": "t_ghi789",
     "sessionId": "s_abc123",
+    "incarnationId": "i_def456",
     "status": "completed",
+    "origin": "user",
     "requestText": "Implement feature X",
-    "runnerExitCode": 0,
+    "commandInvocationId": null,
+    "idempotencyKey": "…",
+    "errorCode": null,
+    "errorMessage": null,
+    "runnerExitCode": null,
     "createdAtMs": 1724059200000,
     "startedAtMs": 1724059205000,
-    "completedAtMs": 1724059312000
+    "completedAtMs": 1724059312000,
+    "stoppedAtMs": null
   }
 }
 ```
+
+**`origin` is `user` or `agent`, and a client that ignores it renders an answer to a
+message the user never wrote.** An agent may start a turn of its own to report work that
+outlived the turn which dispatched it, and such a turn's `requestText` is empty — which
+is otherwise indistinguishable from a user sending nothing. `docs/session-protocol.md`
+§ An agent may start a turn.
+
+**`runnerExitCode` is a legacy spelling, and it is `null` on every current path.** Under
+`sylph.agent.v3` the adapter is a long-lived process and a turn is a message on its
+link, so there is no per-turn exit code to report. The field is retained so no client
+had to change; do not read its presence as evidence the v1 runner protocol still exists.
 
 #### `GET /api/v1/turns/{id}/events`
 
@@ -818,7 +882,7 @@ who already knows what to ask. These endpoints answer what the sidebar asks:
 renders as empty while the archive holds hundreds of sessions for that same path.
 
 **Reading is not importing.** `POST /sessions/import` adopts a session so it can
-be *continued*: it writes a row, requires a runner for the originating agent, and
+be *continued*: it writes a row, requires an adapter for the originating agent, and
 requires the recorded `cwd` to still exist. None of that is needed to read a
 transcript, and all of it fails for exactly the old sessions a user most wants to
 look back at. So these endpoints mutate nothing, and import stays an explicit
@@ -1449,8 +1513,11 @@ contents go too. Confirm-fail-confirm would be two dialogs for one decision, and
 Finder does not ask twice either; the backend guard stays as protection against a
 client bug rather than as a step in the flow.
 
-Errors: `FILE_NOT_FOUND` (404), `FORBIDDEN` (403) for the root or an escape,
-`INVALID_REQUEST` (400) for a non-empty directory without `recursive`.
+Errors: `FILE_NOT_FOUND` (404), `POLICY_VIOLATION` (403) for the root or an escape,
+`INVALID_REQUEST` (400) for a non-empty directory without `recursive`. Note the code is
+`POLICY_VIOLATION`, not `FORBIDDEN` — that is the HTTP status name, and a client
+branching on it never matches (`Error::Forbidden` → `POLICY_VIOLATION`,
+`backend/src/error.rs:229`).
 
 ### Machine-level browsing
 
@@ -1466,7 +1533,7 @@ be the one running the browser. Without these endpoints, binding a new project
 directory is impossible from the UI.
 
 **Bound.** This is the only endpoint that lists directories the client names, so
-the bound cannot come from the request. It comes from `SYLPH_WEB_BROWSE_ROOTS`
+the bound cannot come from the request. It comes from `SYLPH_BROWSE_ROOTS`
 (colon-separated) plus `$HOME`, checked on the canonical path by the same
 containment primitive the session file API uses (`backend/src/paths.rs`).
 
@@ -1580,15 +1647,43 @@ loopback. See `docs/development.md`.
 
 ## OpenAPI Specification
 
-Full machine-readable spec: `docs/api-v1.openapi.json` — 22 paths, covering every
-route the router registers.
+Full machine-readable spec: `docs/api-v1.openapi.json` — **24 paths, 31 method-path
+pairs. The router registers 41**, so the schema is incomplete and knowing which way is
+the point of this section.
 
-Generate TypeScript types:
-```sh
-npx openapi-typescript docs/api-v1.openapi.json -o frontend/src/types/api.ts
-```
+Measured on 2026-08-26 by normalizing path parameters and diffing
+`docs/api-v1.openapi.json` against the `.route(...)` calls in `backend/src/lib.rs`.
+Nothing in the schema is stale — every documented pair exists. What is missing is the
+whole Phase-12 control plane:
 
-The frontend does not currently consume generated types; `frontend/lib/api.ts`
-declares its own. Keep the spec authoritative for the wire contract regardless — a
-route added to `backend/src/lib.rs` without a matching path here is the gap that let
-`DELETE /sessions/{id}` and `/fs/*` go undocumented.
+| Missing from the schema | `lib.rs` |
+| --- | --- |
+| `GET /sessions/{id}/capabilities` | 371 |
+| `POST` / `DELETE /sessions/{id}/link` | 375, 379 |
+| `POST /sessions/{id}/interrupt` | 387 |
+| `POST /sessions/{id}/steer` | 391 |
+| `POST /sessions/{id}/config` | 394 |
+| `GET /sessions/{id}/replay` | 397 |
+| `GET /sessions/{id}/events` | 401 |
+| `GET /sessions/{id}/requests` | 380 |
+| `POST /requests/{id}/resolve` | 383 |
+| `GET /search` | 362 |
+
+The request/resolve pair and `/search` are documented in *this* file, in prose above —
+so the gap is schema-only for those, and both-files for the rest. This section
+previously claimed "22 paths, covering every route the router registers", which was
+wrong in both directions and self-congratulating about it: it named
+`DELETE /sessions/{id}` and `/fs/*` as the gap the process let through while a
+ten-endpoint gap was live.
+
+Keep the spec authoritative for the wire contract. A route added to
+`backend/src/lib.rs` without a matching path here is the recurring failure, and the
+check is mechanical — the diff above is a ten-line script, worth re-running rather than
+trusting a count in prose.
+
+The frontend does not consume generated types: `frontend/lib/api.ts` is hand-written
+and mirrors the wire shape directly. Generating a second definition of every shape
+would mean two sources to keep in step; see `docs/frontend-architecture.md` § Types. The
+backend does pin one thing to this file automatically —
+`error::tests::codes_match_the_openapi_enum` fails if an error code is emitted that the
+schema's enum does not publish.

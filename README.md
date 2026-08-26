@@ -2,7 +2,15 @@
 
 Local-first native UI for Sylph and coding-agent sessions archived by TraceDB.
 
-Sylph Web can create Sylph-managed sessions, stream live tool/reasoning events, send local attachments, search stable cross-agent history, and resume sessions originally created in Claude Code, Codex, OpenCode, or Pi without changing their identity policy.
+Sylph Web can create Sylph-managed sessions, stream live tool/reasoning events, send
+local attachments, search stable cross-agent history, and resume sessions originally
+created in another agent without changing their identity policy.
+
+Two adapters ship in the repo, `claude` and `pi` (`adapters/`). Reading and importing
+archived history is not limited to those: TraceDB archives Claude Code, Codex,
+OpenCode, Gemini, and Pi, and any of them can be browsed and searched. *Continuing* an
+imported session needs an adapter for its originating agent, so today that means
+`claude` or `pi`; the rest open read-only.
 
 ## Architecture
 
@@ -51,8 +59,14 @@ Confirm it is up, and whether it found your archive:
 
 ```sh
 curl -s http://127.0.0.1:4317/api/v1/health
-# {"ok":true,"apiVersion":"1","schemaVersion":1,"tracedb":{"available":true}}
+# {"ok":true,"apiVersion":"1","schemaVersion":3,
+#  "tracedb":{"available":true},"agents":{"available":true}}
 ```
+
+`agents.available: false` *is* a failure, and the one worth checking first: with no
+adapter discovered, every other probe answers successfully while no session can be
+created. `/api/v1/diagnostics` names the directories searched and any adapter that
+failed its handshake.
 
 `tracedb.available: false` is not a failure. Live sessions work; only archive
 search and native import are unavailable. Put `trace-db` on your `PATH`, or set
@@ -74,14 +88,18 @@ The start screen walks a first run itself. In short:
 
 **Create a session and send one turn:**
 
-1. Click **New session** (or press `Cmd+N` / `Ctrl+N`) and choose a directory. That
-   is the only thing a session needs — the agent runs there and can read and write
-   nothing outside it.
+1. Click **New session** (or press `Cmd+Shift+O` / `Ctrl+Shift+O`) and choose a
+   directory. That is the only thing a session needs — the agent runs there and can
+   read and write nothing outside it. Not `Cmd+N`: a browser answers that itself,
+   above the page's handlers and beyond `preventDefault`
+   (`docs/keyboard-shortcuts-default-sessions-settings.md` § 1).
 2. Type a message and send. The agent is switchable until that first message; model
    and reasoning effort are per-turn controls in the composer.
 
-If the agent list is empty, none were discovered — run `cargo run -- doctor`,
-which names every directory it searched.
+If the agent list is empty, none were discovered. The backend logs
+`Agent discovery: N usable, M broken` at startup and names every directory it
+searched; `curl -s http://127.0.0.1:4317/api/v1/diagnostics` reports the same, plus
+any adapter that failed its handshake and why.
 
 Events stream in as the agent works: thinking, tool calls, then the reply.
 Closing the tab mid-turn is safe — reopening resumes the stream from where it
@@ -104,7 +122,10 @@ cd frontend && npm test && npm run build && npx eslint .
 cd frontend && npm run e2e
 ```
 
-That is 132 backend unit + 116 backend integration + 193 frontend unit + 49 E2E.
+That is 322 backend unit + 207 backend integration + 381 frontend unit + 149 E2E,
+measured on `main` on 2026-08-26. These grow with every phase, so treat them as a
+sanity check rather than a target: the suites report their own totals, and
+`docs/roadmap.md` § Current State carries the figure that is maintained.
 `npm run build` type-checks, so it is the TypeScript gate — there is no separate
 `tsc` step. `cargo` is not on the default `PATH`; use `~/.cargo/bin/cargo` or export
 it first.
@@ -115,9 +136,12 @@ your archive, or your real agents. It needs no servers running beforehand.
 
 ### Troubleshooting
 
-- **Agent dropdown empty** — none discovered. Run `cargo run -- doctor` to see
-  every directory searched and how many adapters were found; `/api/v1/diagnostics`
-  adds any that failed their handshake, with the error.
+- **Agent dropdown empty** — none discovered. The startup log says
+  `Agent discovery: N usable, M broken` and names every directory searched;
+  `/api/v1/diagnostics` reports the same list plus any adapter that failed its
+  handshake, with the error. `cargo run -- doctor` answers a different question —
+  what *configuration* resolved to — and deliberately runs no handshake, so it
+  counts adapters in your own agents directory rather than discovering them.
 - **Browser 401s after a backend restart** — the auth token is regenerated on
   every start. Reload the page to pick up a fresh one.
 - **Import fails with `TRACE_SESSION_NOT_RESUMABLE`** — the archive recorded no
@@ -163,22 +187,30 @@ cd backend && cargo run -- migrate --from ~/.agents/data/sylph/web
 
 ## Documentation
 
-Comprehensive documentation lives in `docs/`:
+Comprehensive documentation lives in `docs/`. [**docs/README.md**](docs/README.md) is
+the full index and says what belongs where; the entries below are the ones a first
+reader wants.
 
-- [**Documentation Index**](docs/README.md) — Start here for navigation and principles
+- [**Documentation Index**](docs/README.md) — every document, and which one owns a
+  given question
 - [**Configuration**](docs/configuration.md) — `~/.sylph`, `config.toml`, and migration
 - [**Development**](docs/development.md) — herdr deployment, health checks, troubleshooting
 - [**Installation**](docs/installation.md) — Packaged install, upgrade, rollback
 - [**Architecture**](docs/architecture.md) — System design and data flow
-- [**Frontend Architecture**](docs/frontend-architecture.md) — UI design and implementation
+- [**Session Protocol**](docs/session-protocol.md) — `sylph.agent.v3`, the contract an
+  adapter speaks
+- [**Storage**](docs/storage.md) — Tiered history, replay, watermark-gated retention
+- [**Frontend Architecture**](docs/frontend-architecture.md) — How the frontend is built
+- [**UI Layout**](docs/ui-layout.md) — What the interface is: panes, surfaces, tokens
 - [**Roadmap**](docs/roadmap.md) — Project status and future enhancements
 - [**API Design**](docs/api-design.md) — REST endpoints and SSE streaming
 - [**Database Schema**](docs/database-schema.md) — SQLite schema and migrations
-- [**Agent UI Design Analysis**](docs/agent-ui-design-analysis.md) — Why agent workspaces differ from chat UIs
-- [**Keyboard Shortcuts**](docs/keyboard-shortcuts-default-sessions-settings.md) — Shortcuts, Quick Start, Settings
 
-The last two are pre-implementation design arguments, kept for *why*. Where they
-differ from what shipped, `frontend-architecture.md` and `roadmap.md` win.
+Two further files — [agent-ui-design-analysis.md](docs/agent-ui-design-analysis.md)
+and
+[keyboard-shortcuts-default-sessions-settings.md](docs/keyboard-shortcuts-default-sessions-settings.md)
+— are pre-implementation design arguments, kept for *why*. Where they differ from what
+shipped, `frontend-architecture.md`, `ui-layout.md`, and `roadmap.md` win.
 
 See [**AGENTS.md**](AGENTS.md) for the project's development rules and conventions.
 
@@ -186,8 +218,9 @@ See [**AGENTS.md**](AGENTS.md) for the project's development rules and conventio
 
 **Runs sessions.** A session is a directory plus an agent. Creating one means naming
 a directory — from the sidebar, the start screen, or a picker — not filling a form.
-The composer exposes the model and reasoning effort each runner declares for itself,
-so `codex` shows effort with no model selector and nothing is hardcoded.
+The composer exposes the model and reasoning effort each agent declares for itself,
+so an agent that offers effort and no model list shows exactly that, and nothing is
+hardcoded.
 
 **Streams work as it happens.** Turns are server-side resources, not request
 lifetimes: closing the tab mid-turn and reopening resumes the stream from where it
@@ -209,11 +242,13 @@ read-only and can be continued explicitly.
 
 **Keeps native sessions native.** A session imported from another agent preserves
 that agent's identity and lifecycle. Sylph never injects `SOUL.md`, resets, or
-rewrites prompts for one — the backend sends the empty `SYLPH_SOUL` that the runner
-protocol reserves for exactly that.
+rewrites prompts for one — the backend sends the empty `SYLPH_SOUL` that
+`sylph.agent.v3` reserves for exactly that.
 
-Deliberately absent, with reasons in [roadmap](docs/roadmap.md): dark theme, session
-delete/move/export, "Open in Default App", and any non-loopback access story.
+Deliberately absent, with reasons in [roadmap](docs/roadmap.md): session
+delete/move/export, native→Sylph conversion, "Open in Default App" / "Reveal in
+Finder", and any non-loopback access story. Dark mode shipped in Phase 9 and is no
+longer on this list.
 
 ## Contributing
 

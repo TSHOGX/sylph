@@ -384,10 +384,25 @@ mod tests {
     /// were missing from it entirely, for as long as the mirror was maintained
     /// by hand. Reading the file is what makes the test able to notice.
     ///
-    /// One direction only: the schema may list codes no variant emits (turn
+    /// **The variant list must be exhaustive by compiler, not by care.** This
+    /// test read the schema from disk and still failed to notice six codes,
+    /// because the list of variants it checked was itself hand-maintained: it
+    /// covered 18 of 24, and the six it omitted (`LINK_GONE`, `LINK_FAILED`,
+    /// `TURN_MOVED`, `AGENT_UNSUPPORTED`, `REQUEST_NOT_FOUND`,
+    /// `REQUEST_ALREADY_RESOLVED`) were precisely the ones missing from the
+    /// enum. Fixing one hand-maintained mirror by adding a second one is no fix
+    /// at all — so the body now also `match`es every variant with no wildcard
+    /// arm, which makes a new variant a compile error until it is listed.
+    ///
+    /// One direction only: the schema may list codes no variant emits. Turn
     /// failure codes such as `TURN_INTERRUPTED` are recorded on turn rows rather
-    /// than raised here, and a few are reserved for planned endpoints). The
-    /// reverse — emitting a code no client is told about — is the bug.
+    /// than raised here. Note that the schema *also* still carries `RUNNER_BROKEN`,
+    /// `RUNNER_PROTOCOL_ERROR`, `RUNNER_START_FAILED`, `APPROVAL_NOT_AVAILABLE`,
+    /// `COMMAND_NOT_SUPPORTED`, and `TRACE_NOT_RESUMABLE`, which are v1 casualties
+    /// and a superseded spelling rather than reservations — this direction is
+    /// permitted so the test cannot block a schema cleanup, not because those
+    /// entries are correct. The reverse — emitting a code no client is told about
+    /// — is the bug.
     #[test]
     fn every_emitted_code_is_published_in_the_openapi_enum() {
         let schema = std::fs::read_to_string(
@@ -406,30 +421,78 @@ mod tests {
             .map(|value| value.as_str().expect("enum members are strings").to_string())
             .collect::<Vec<_>>();
 
-        // Every variant, constructed so the match in `code()` is exercised. A
-        // new variant added without a schema entry fails here.
-        let emitted = [
-            Error::Database(sqlx::Error::RowNotFound).code(),
-            Error::SessionNotFound.code(),
-            Error::TurnNotFound.code(),
-            Error::RunnerNotFound.code(),
-            Error::FileNotFound.code(),
-            Error::SessionAlreadyRunning.code(),
-            Error::StopAlreadyCompleted.code(),
-            Error::Unauthorized.code(),
-            Error::Forbidden("x".into()).code(),
-            Error::AttachmentInvalid("x".into()).code(),
-            Error::TraceDbUnavailable("x".into()).code(),
-            Error::TraceSessionNotFound("x".into()).code(),
-            Error::SessionAlreadyImported.code(),
-            Error::TraceSessionNotResumable("x".into()).code(),
-            Error::InvalidRequest("x".into()).code(),
-            Error::RouteNotFound.code(),
-            Error::MethodNotAllowed.code(),
-            Error::Internal("x".into()).code(),
+        // Every variant, constructed so the match in `code()` is exercised.
+        //
+        // Exhaustive by construction rather than by diligence: the `match` below
+        // has no wildcard arm, so adding a variant to `Error` fails to *compile*
+        // until it is listed here. That is the whole mechanism. This array was
+        // previously hand-maintained and had drifted to 18 of 24 variants, and
+        // the six it omitted — `LINK_GONE`, `LINK_FAILED`, `TURN_MOVED`,
+        // `AGENT_UNSUPPORTED`, `REQUEST_NOT_FOUND`,
+        // `REQUEST_ALREADY_RESOLVED` — were exactly the ones missing from the
+        // schema. So the test passed while failing to deliver the guarantee its
+        // own docstring claims, which is the worst state for a test whose
+        // subject is a hand-maintained mirror.
+        let all = [
+            Error::Database(sqlx::Error::RowNotFound),
+            Error::SessionNotFound,
+            Error::TurnNotFound,
+            Error::RunnerNotFound,
+            Error::FileNotFound,
+            Error::SessionAlreadyRunning,
+            Error::StopAlreadyCompleted,
+            Error::Unauthorized,
+            Error::Forbidden("x".into()),
+            Error::AttachmentInvalid("x".into()),
+            Error::TraceDbUnavailable("x".into()),
+            Error::TraceSessionNotFound("x".into()),
+            Error::SessionAlreadyImported,
+            Error::TraceSessionNotResumable("x".into()),
+            Error::InvalidRequest("x".into()),
+            Error::RouteNotFound,
+            Error::MethodNotAllowed,
+            Error::RequestNotFound,
+            Error::RequestAlreadyResolved,
+            Error::LinkGone,
+            Error::TurnMoved { expected: "t".into(), running: None },
+            Error::LinkFailed("x".into()),
+            Error::Unsupported("x".into()),
+            Error::Internal("x".into()),
         ];
 
-        for code in emitted {
+        // The compile-time half. Every variant must appear here, and the
+        // compiler enforces it because there is no `_` arm.
+        for error in &all {
+            match error {
+                Error::Database(_)
+                | Error::SessionNotFound
+                | Error::TurnNotFound
+                | Error::RunnerNotFound
+                | Error::FileNotFound
+                | Error::SessionAlreadyRunning
+                | Error::StopAlreadyCompleted
+                | Error::Unauthorized
+                | Error::Forbidden(_)
+                | Error::AttachmentInvalid(_)
+                | Error::TraceDbUnavailable(_)
+                | Error::TraceSessionNotFound(_)
+                | Error::SessionAlreadyImported
+                | Error::TraceSessionNotResumable(_)
+                | Error::InvalidRequest(_)
+                | Error::RouteNotFound
+                | Error::MethodNotAllowed
+                | Error::RequestNotFound
+                | Error::RequestAlreadyResolved
+                | Error::LinkGone
+                | Error::TurnMoved { .. }
+                | Error::LinkFailed(_)
+                | Error::Unsupported(_)
+                | Error::Internal(_) => {}
+            }
+        }
+
+        for error in &all {
+            let code = error.code();
             assert!(
                 published.iter().any(|member| member == code),
                 "`{code}` is emitted by the API but absent from the OpenAPI \

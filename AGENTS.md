@@ -1236,7 +1236,7 @@ the deviation and its evidence where the code lives.
 
 Record decisions as comments next to the code they govern, including what was
 rejected and why. A future reader needs the reasoning, not just the result.
-`frontend/components/event-list.tsx` shows the intended density: it explains why
+`frontend/components/timeline.tsx` shows the intended density: it explains why
 memoization was chosen over virtualization, and what evidence would reverse that
 call.
 
