@@ -16,9 +16,6 @@ pub enum Error {
     #[error("Turn not found")]
     TurnNotFound,
 
-    #[error("Runner not found")]
-    RunnerNotFound,
-
     /// A path inside a session's working directory does not exist. Carries no
     /// path: the client already knows what it asked for, and echoing a resolved
     /// absolute path would confirm filesystem layout to a probing caller.
@@ -157,11 +154,6 @@ impl Error {
                 StatusCode::NOT_FOUND,
                 "TURN_NOT_FOUND",
                 "Turn not found".to_string(),
-            ),
-            Error::RunnerNotFound => (
-                StatusCode::NOT_FOUND,
-                "RUNNER_NOT_FOUND",
-                "Runner not found".to_string(),
             ),
             Error::FileNotFound => (
                 StatusCode::NOT_FOUND,
@@ -324,11 +316,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
 
+    use crate::supervisor::Outcome;
+
     #[test]
     fn not_found_variants_map_to_404() {
         assert_eq!(Error::SessionNotFound.status(), StatusCode::NOT_FOUND);
         assert_eq!(Error::TurnNotFound.status(), StatusCode::NOT_FOUND);
-        assert_eq!(Error::RunnerNotFound.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
@@ -394,15 +387,18 @@ mod tests {
     /// at all — so the body now also `match`es every variant with no wildcard
     /// arm, which makes a new variant a compile error until it is listed.
     ///
-    /// One direction only: the schema may list codes no variant emits. Turn
-    /// failure codes such as `TURN_INTERRUPTED` are recorded on turn rows rather
-    /// than raised here. Note that the schema *also* still carries `RUNNER_BROKEN`,
-    /// `RUNNER_PROTOCOL_ERROR`, `RUNNER_START_FAILED`, `APPROVAL_NOT_AVAILABLE`,
-    /// `COMMAND_NOT_SUPPORTED`, and `TRACE_NOT_RESUMABLE`, which are v1 casualties
-    /// and a superseded spelling rather than reservations — this direction is
-    /// permitted so the test cannot block a schema cleanup, not because those
-    /// entries are correct. The reverse — emitting a code no client is told about
-    /// — is the bug.
+    /// One direction only: the schema may list codes no variant emits, because
+    /// turn failure codes such as `TURN_INTERRUPTED` are recorded on turn rows
+    /// rather than raised here, and this test must not stand in the way of a
+    /// schema cleanup. That slack is not a licence to keep entries no producer
+    /// exists for. The schema previously carried `RUNNER_NOT_FOUND`,
+    /// `RUNNER_BROKEN`, `RUNNER_PROTOCOL_ERROR`, `RUNNER_START_FAILED`,
+    /// `APPROVAL_NOT_AVAILABLE`, `COMMAND_NOT_SUPPORTED`, and
+    /// `TRACE_NOT_RESUMABLE` — v1 casualties and one superseded spelling of
+    /// `TRACE_SESSION_NOT_RESUMABLE` — and they are now deleted, since a code no
+    /// server can emit only teaches a client to handle a case that cannot occur.
+    /// The reverse — emitting a code no client is told about — is the bug this
+    /// test exists to catch.
     #[test]
     fn every_emitted_code_is_published_in_the_openapi_enum() {
         let schema = std::fs::read_to_string(
@@ -437,7 +433,6 @@ mod tests {
             Error::Database(sqlx::Error::RowNotFound),
             Error::SessionNotFound,
             Error::TurnNotFound,
-            Error::RunnerNotFound,
             Error::FileNotFound,
             Error::SessionAlreadyRunning,
             Error::StopAlreadyCompleted,
@@ -467,7 +462,6 @@ mod tests {
                 Error::Database(_)
                 | Error::SessionNotFound
                 | Error::TurnNotFound
-                | Error::RunnerNotFound
                 | Error::FileNotFound
                 | Error::SessionAlreadyRunning
                 | Error::StopAlreadyCompleted
@@ -498,6 +492,40 @@ mod tests {
                 "`{code}` is emitted by the API but absent from the OpenAPI \
                  error enum, so a client cannot know to handle it",
             );
+        }
+
+        // `Error` is not the only producer of a published code. A turn that ends
+        // badly records one on its journal row, and those never pass through
+        // this type at all — so the loop above cannot see them, and `LINK_LOST`
+        // was emitted by `supervisor::turn` while absent from the enum for as
+        // long as the outcome existed. Its two siblings were published, which is
+        // what makes the omission a slip rather than a policy.
+        //
+        // Same mechanism as above, for the same reason: the match has no
+        // wildcard arm, so a new `Outcome` fails to compile until it is listed.
+        let outcomes = [
+            Outcome::Completed { stop_reason: None },
+            Outcome::Failed { message: "x".into() },
+            Outcome::Interrupted,
+            Outcome::LinkLost { stderr_tail: String::new() },
+        ];
+        for outcome in &outcomes {
+            match outcome {
+                Outcome::Completed { .. }
+                | Outcome::Failed { .. }
+                | Outcome::Interrupted
+                | Outcome::LinkLost { .. } => {}
+            }
+            // `Completed` records no code, which is not an omission: a turn that
+            // succeeded has nothing for a client to branch on.
+            let (_, code, _) = outcome.as_status();
+            if let Some(code) = code {
+                assert!(
+                    published.iter().any(|member| member == code),
+                    "`{code}` is recorded on a turn row but absent from the \
+                     OpenAPI error enum, so a client cannot know to handle it",
+                );
+            }
         }
     }
 

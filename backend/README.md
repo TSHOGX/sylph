@@ -106,19 +106,36 @@ Migrations are in `migrations/` and run automatically on startup.
 ```
 backend/
 ├── Cargo.toml              # Dependencies
-├── migrations/             # SQL migrations
+├── migrations/             # SQL migrations, plus migrations/history for history.db
 ├── src/
-│   ├── main.rs            # Server entry point
-│   ├── config.rs          # Configuration
-│   ├── error.rs           # Error types
+│   ├── main.rs            # Server entry point and subcommands
+│   ├── lib.rs             # Router, AppState, module tree
+│   ├── config/            # Resolution, the value object, and what to report
+│   ├── error.rs           # Error types and their published codes
+│   ├── paths.rs           # Path containment, shared by every fs endpoint
+│   ├── attachments.rs     # Staging uploaded files for adapters to read
 │   ├── api/               # HTTP handlers
 │   ├── models/            # Domain models
-│   ├── db/                # Database layer
-│   ├── runners/           # Runner management
+│   ├── db/                # The journal: unsettled turns and their sessions
+│   ├── storage/           # Durable history: folds, blobs, retention
+│   ├── adapter/           # The sylph.agent.v3 wire protocol
+│   ├── agents/            # Adapter discovery and handshake
+│   ├── links/             # The pool of live adapter processes
+│   ├── supervisor/        # Turn supervision
+│   ├── events/            # Event normalization and the SSE hub
+│   ├── env/               # Where a session's work runs
+│   ├── documents/         # Spreadsheet, document, and slide parsing
 │   ├── tracedb/           # TraceDB client
 │   └── middleware/        # Auth middleware
 └── tests/                 # Integration tests
 ```
+
+There is no `runners/`. What the v1 runner protocol did in one module is now four,
+because a long-lived adapter process has a lifecycle a one-shot subprocess did not:
+`adapter/` speaks the wire format, `agents/` finds installed adapters and learns what
+each one can do by handshaking with it, `links/` owns the live processes, and
+`supervisor/` drives a turn across one. `docs/session-protocol.md` is authoritative
+for the protocol itself.
 
 ## Testing
 

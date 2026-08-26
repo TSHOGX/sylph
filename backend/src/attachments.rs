@@ -1,9 +1,19 @@
-//! Staging uploaded attachments to disk for runners to read.
+//! Staging uploaded attachments to disk for adapters to read.
 //!
-//! The runner protocol passes attachments as absolute paths
-//! (`--attachment ABS_PATH`), not inline bytes, so base64 payloads from the
-//! browser are decoded and written under
-//! `{data_dir}/attachments/{session}/{turn}/` before the runner is spawned.
+//! A browser sends attachments as base64. `sylph.agent.v3` carries them as
+//! absolute paths in the `send` frame's `attachments[]`, so they are decoded and
+//! written under `{data_dir}/attachments/{session}/{staging-id}/` before the
+//! frame goes out.
+//!
+//! Paths rather than bytes because the adapter is a separate process and each one
+//! wants the file in a different shape: `claude` inlines images as base64 content
+//! blocks — the Read tool is unreliable on binary image data — and names PDFs and
+//! text by path so the CLI's own tools handle them. Bytes on the wire would make
+//! every adapter write the file back out to get a path anyway, on a protocol whose
+//! frame is one JSON line.
+//!
+//! They are staged under the data dir rather than a temporary directory because a
+//! turn is durable and its input has to outlive the request that posted it.
 
 use std::path::{Path, PathBuf};
 
