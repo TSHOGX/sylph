@@ -20,13 +20,13 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<AgentsResponse>>
     Ok(Json(AgentsResponse { agents, broken }))
 }
 
-/// POST /api/v1/agents/refresh - Refresh runner discovery
+/// POST /api/v1/agents/refresh - Refresh adapter discovery
 pub async fn refresh(State(state): State<AppState>) -> Result<(StatusCode, Json<AgentsResponse>)> {
     let mut registry = state.registry.lock().await;
     registry
         .refresh()
         .await
-        .map_err(|e| crate::error::Error::Internal(format!("Runner refresh failed: {}", e)))?;
+        .map_err(|e| crate::error::Error::Internal(format!("Agent refresh failed: {}", e)))?;
 
     let agents = registry.list_agents();
     let broken = registry.broken_adapters().clone();
