@@ -529,43 +529,74 @@ class NestedTrajectoriesCarrySpanOnEveryPhase(Emitted):
             self.assertEqual(phase.get("span"), "toolu_wf", phase["phase"])
 
 
-class AnUnknownNameIsOmittedRatherThanGuessed(Emitted):
-    """A delegation whose brief has not streamed yet carries no `name`.
+class AnUnnamedTrajectoryStaysUnnamed(Emitted):
+    """`name` is what the agent called this, so a guess must not be sent as one.
 
-    `name` means "what this delegation is called", so a placeholder asserts a name
-    the adapter cannot support — and the guess is *journaled*, not merely displayed.
-    `history::consolidate` keeps the best name any phase gave a block, so a later
-    `delta` with the real brief normally wins; when the brief never finishes streaming
-    (early failure, or the link dying mid-input) a placeholder would become the
-    trajectory's durable name in `history.db`, indistinguishable from a real one.
-
-    Display is unaffected either way: the client's `trajectoryName` falls back to the
-    same word. That is what makes this subtraction safe to make on its own.
+    `None` says nobody knows yet; a literal asserts the agent chose it. The assertion is
+    journaled, and `history::consolidate` keeps the best name any phase gave a block
+    (`event.name.or(names.remove(id))`) — so a later phase carrying the real brief
+    normally overwrites a placeholder and the difference never shows. It shows exactly
+    when the brief never finishes streaming: a delegation that fails early, or a link
+    that dies mid-input, leaves the placeholder as the trajectory's durable name in
+    `history.db`, indistinguishable from one an agent chose. A presentation default
+    belongs at render time, where the client already has one.
     """
 
-    def test_a_task_open_with_no_input_yet_sends_no_name(self):
-        self.session._stream_event(
-            {"type": "content_block_start", "index": 0,
-             "content_block": {"type": "tool_use", "id": "toolu_a", "name": "Task"}},
-            None)
-        opened = [e for e in self.trajectories() if e.get("phase") == "started"]
-        self.assertTrue(opened, "the delegation opened")
-        self.assertIsNone(
-            opened[0].get("name"),
-            "an unknown name is absent, not the literal 'Subagent'")
+    def test_a_notified_delegation_with_no_description_sends_no_name(self):
+        self.session._task_notification("task_started", {
+            "type": "system", "subtype": "task_started",
+            "task_id": "t1", "tool_use_id": "toolu_wf",
+            "task_type": "local_agent",
+        })
+        opened = [e for e in self.trajectories() if e["phase"] == "started"]
+        self.assertEqual(len(opened), 1)
+        self.assertNotIn("name", opened[0])
 
-    def test_the_brief_still_names_it_once_it_arrives(self):
+    def test_a_declared_task_whose_brief_never_parses_sends_no_name(self):
+        # The realistic failure: the input is streamed partial JSON, so a delegation
+        # that dies mid-brief has nothing to be named from at any phase. Nothing here
+        # may fill that in — least of all the vendor's tool name, which this field
+        # exists to keep off the card.
         self.session._stream_event(
             {"type": "content_block_start", "index": 0,
-             "content_block": {"type": "tool_use", "id": "toolu_b", "name": "Task"}},
-            None)
+             "content_block": {"type": "tool_use", "id": "toolu_x",
+                               "name": "Task"}}, None)
+        self.session._stream_event(
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"partial_json": '{"subagent_ty'}}, None)
+        self.session._stream_event({"type": "content_block_stop", "index": 0}, None)
+        self.session._tool_results({
+            "message": {"content": [{"type": "tool_result",
+                                     "tool_use_id": "toolu_x",
+                                     "content": "died", "is_error": True}]},
+        })
+
+        phases = [e for e in self.trajectories() if e["streamId"] == "toolu_x"]
+        self.assertEqual([e["phase"] for e in phases],
+                         ["started", "delta", "completed"])
+        for phase in phases:
+            self.assertNotIn("name", phase)
+        self.assertTrue(phases[-1]["isError"])
+
+    def test_a_real_name_is_still_reported_on_every_phase_that_has_one(self):
+        # The subtraction must not cost the names that do arrive.
+        self.session._stream_event(
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "toolu_y",
+                               "name": "Task"}}, None)
         self.session._stream_event(
             {"type": "content_block_delta", "index": 0,
              "delta": {"partial_json": '{"subagent_type":"Explore"}'}}, None)
         self.session._stream_event({"type": "content_block_stop", "index": 0}, None)
-        named = [e.get("name") for e in self.trajectories()]
-        self.assertIn("Explore", named,
-                      "omitting the placeholder does not cost the real name")
+        self.session._tool_results({
+            "message": {"content": [{"type": "tool_result",
+                                     "tool_use_id": "toolu_y",
+                                     "content": "found it"}]},
+        })
+
+        phases = [e for e in self.trajectories() if e["streamId"] == "toolu_y"]
+        self.assertEqual([e.get("name") for e in phases],
+                         [None, "Explore", "Explore"])
 
 
 class UnaddressableNotification(Emitted):

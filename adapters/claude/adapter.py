@@ -1008,6 +1008,12 @@ class Session:
                 # JSON, so at `started` there was nothing to read it from, and this
                 # is the first point where the agent's own type is known.
                 label = _task_label(data or {})
+                # Overwritten even when the brief yielded nothing, deliberately: this
+                # entry currently holds the vendor's tool name ("Task"), recorded for
+                # ordinary tool results, and the `tool_result` closing this trajectory
+                # reads it for the close's `name`. Leaving it would put "Task" on the
+                # card as though the agent had chosen it, which is the one label this
+                # field exists to avoid; `None` correctly says nobody named it.
                 self.tool_names[block["id"]] = label
                 event("subagent", "delta", streamId=block["id"],
                       span=block["span"], name=label, data=data)
@@ -1311,12 +1317,13 @@ class Session:
         # delegate — which is why progress is a `delta` however it was announced.
         if trajectory not in self.task_trajectories:
             self.task_trajectories[trajectory] = host
-            # `name or None`, not a placeholder: same reasoning as `_task_label`. An
-            # unnamed delegation is journaled, and a guess written into `name` is
-            # indistinguishable later from a name the agent chose.
+            # No placeholder name: `description`/`subagent_type` is what the agent
+            # called this, and when neither has arrived yet the honest report is
+            # silence. A literal here is journaled and, if no later phase carries a
+            # real name, becomes the trajectory's durable name — see `_task_label`.
             event("subagent", "started",
                   streamId=trajectory, span=span,
-                  name=name or None, data=data)
+                  name=name, data=data)
             return
 
         event("subagent", "delta",
@@ -1324,26 +1331,24 @@ class Session:
 
 
 def _task_label(content):
-    """What to call a delegation on screen.
+    """What the agent called this delegation, or `None` when it has not said yet.
 
     "Task" is the tool's name, not the work's: a timeline of six identical rows
-    reading "Task" is unreadable. The input carries better, but it only arrives as
-    streamed partial JSON, so at `started` there is usually nothing yet — the
-    trajectory is renamed by the `delta` that carries its parsed brief.
+    reading "Task" is unreadable, so the vendor's tool name is deliberately kept out
+    of this field. The brief carries the real name, but it arrives as streamed partial
+    JSON, so at `started` there is usually nothing to read it from and the trajectory
+    is renamed by the `delta` that carries the parsed brief.
 
-    Returns `None` rather than a placeholder when nothing is known yet, and that
-    distinction is the point. `name` means "what this delegation is called", so
-    `None` says nobody knows while a literal asserts a name the adapter cannot
-    support — and the guess does not stay in the UI, it is *journaled*.
-    `history::consolidate` keeps the best name any phase gave a block, so a later
-    `delta` carrying the real brief normally wins; but when the brief never finishes
-    streaming — the delegation fails early, or the link dies mid-input — the
-    placeholder becomes the trajectory's durable name in `history.db`,
-    indistinguishable from one an agent actually chose.
-
-    Display is unaffected: the client's `trajectoryName` already falls back to the
-    same word, so omitting the field renders the identical string. Keeping the
-    vendor's tool name out of the UI is the client's job, and it is doing it.
+    **Returning `None` rather than a placeholder is the point.** `name` means "what
+    this delegation is called", so `None` says nobody knows yet while any string
+    asserts the agent chose it — and that assertion is journaled. `history::consolidate`
+    keeps the best name any phase gave a block (`event.name.or(names.remove(id))`), so
+    the later `delta` normally overwrites a placeholder and the difference is invisible.
+    It stops being invisible exactly when the brief never finishes streaming: a
+    delegation that fails early, or a link that dies mid-input, leaves the placeholder
+    as the trajectory's durable name in `history.db`, indistinguishable from a name an
+    agent actually chose. A presentation default belongs at render time, where the
+    client already has one, not in stored data.
     """
     payload = content.get("input")
     if isinstance(payload, dict):
