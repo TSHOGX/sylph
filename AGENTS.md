@@ -309,13 +309,13 @@ opened, presenting as a UI bug in the composer's model control. When adapting a 
 shape, print one real payload rather than inferring field names — two of three guesses
 about this CLI's shapes were wrong, and each one compiled.
 
-This is the most-repeated defect in this file: **six instances so far**, each one
+This is the most-repeated defect in this file: **seven instances so far**, each one
 compiling, each surfacing one or two layers from the cause. They are catalogued
 individually below (`pi`'s `set_model`, the invented `task_*` subtypes,
 `AskUserQuestion`'s `selectedOptions`, `requestedSchema` versus `requested_schema`,
-and `pi`'s never-emitted `agent_start`) because the *specific* keys are what a reader
-needs. The general rule is the one above, plus three shapes worth knowing before
-writing any adapter:
+`pi`'s never-emitted `agent_start`, and reading `response` off an *error* envelope)
+because the *specific* keys are what a reader needs. The general rule is the one above,
+plus three shapes worth knowing before writing any adapter:
 
 - **A type in a vendor's event union is not a promise that anything emits it.** `pi`
   0.84.4 declares `agent_start` and `agent_end`, documents them, and has **zero emit
@@ -332,6 +332,48 @@ writing any adapter:
 - **Ask the binary.** Grepping the 321 MB `claude` binary for a key is cheap and
   decisive: `selectedOptions` occurs nowhere in it, which would have caught that
   instance before it shipped.
+- **A success and a refusal are different shapes, so a reader for one silently
+  swallows the other.** `claude` answers a refused control with `subtype: "error"` and
+  **no** `response` member, and the adapter read `response.get("response") or {}` — so
+  every refusal became the same empty value a successful no-payload control returns.
+  Selecting `bypassPermissions` was refused by the CLI, recorded as applied, answered
+  200, and rendered as the current mode while every tool call went on prompting. Read
+  the discriminant before the payload; `{}` must never be reachable from two opposite
+  outcomes.
+
+**A vendor's `success` is not a promise it did what you asked.** Two facts, both
+measured on `claude` 2.1.246, and neither visible to a caller that only checks for an
+error. `set_permission_mode` to `bypassPermissions` is **refused outright** unless the
+process was launched with `--dangerously-skip-permissions` or
+`--allow-dangerously-skip-permissions` — the latter marks the mode *available* without
+starting in it, which is what a user selecting it later actually asked for. And
+`manual` answers **success** while confirming `default`: the vendor normalizes it
+silently, so a picker offering it lands on a different row. So an adapter records
+`currentValue` from the vendor's *confirmation*, never from the request, and offers
+only values it has watched the vendor apply as given. Writing the requested value made
+the adapter the authority on a fact only the vendor holds, and the surface then
+reported a policy the session was not running under.
+
+**A launch flag gating a runtime-mutable value bets the user never changes it.**
+`--permission-prompt-tool stdio` can only be asked for on the command line, while the
+mode it serves changes through `set_permission_mode` — so gating it on the *launch*
+mode lost the approval channel permanently to anyone who switched. Measured: launch in
+`bypassPermissions`, switch to `default`, and every tool call returns `Claude requested
+permissions to use Bash, but you haven't granted it yet`. A session started in a
+bypassing mode could never return to an interactive one, which is worse than the bug
+that led here. Register such a channel unconditionally; a mode that decides alone
+simply never consults it.
+
+**One refusal code is not enough, and the server was erasing the difference.**
+`UNSUPPORTED_FIELD` means "no such option" and justifies disabling a control;
+`INVALID_VALUE` means "this value, right now" and must leave it usable. Both adapters
+already drew that line and `api::links` flattened every adapter error into
+`Error::Unsupported` — whose own doc comment says a client may disable the control over
+it. So one refused permission mode would have retired a picker whose other five values
+work. The code now travels as a typed `AdapterError` through `anyhow`, recovered with
+`downcast_ref`, deliberately **not** by parsing it back out of the message: the text is
+the adapter's and may be reworded, while the code is declared protocol. Same reasoning
+as `tracedb::Client::unavailability_reported`.
 
 **serde's `rename_all` does not rename fields inside enum variants.** An internally
 tagged enum needs `rename_all_fields` as well, or camelCase wire fields inside a
@@ -968,6 +1010,34 @@ every time another descendant fails. And note the second bug hiding in the same
 expression: `expandAll ?? open` silently outranked the per-row toggle. **Three inputs
 to one boolean need a stated precedence, or two of them are latent bugs** — here
 expand-all, then the user's toggle, then the derived default.
+
+**Announcing a thing's arrival and not its departure lets a client's view only ever
+grow.** A pending request was published when raised and on no path when it left
+`pending` — not on `resolve`, not when a dying link abandoned it. So the set a client
+believed it was blocked on was monotonic, and it shrank only when the 20-second
+backstop poll happened to fire. That poll is the part that makes this severe rather
+than merely late: `refetchIntervalInBackground` is false by default, so a backgrounded
+tab was not polling at all, and `refetchOnWindowFocus` is off here, so returning to it
+did not refetch either. A question answered on a phone therefore sat on the desktop
+until the page was reloaded — reported exactly as "要刷新才会消失", and reloading
+genuinely was the only reliable cure.
+
+Three things make the fix hold rather than patching the one path. The publisher is
+**one** method every transition calls (`LinkManager::announce_request`), because three
+call sites each remembering to announce is three chances to forget — which is how this
+arose. The payload is the **row**, not the transition, so a client reconciles against a
+state (`status`) instead of replaying a vocabulary of verbs, and a status added later
+needs no client change. And it is published **before** the forward to the adapter: the
+claim is what makes the answer final, so a request answered against a *dead* link must
+still retire everywhere — announcing afterwards would tie a display concern to a
+delivery one and skip the case where the user most needs telling.
+
+The related trap when testing this: re-reading `GET /requests` proves nothing, because
+the *row* was always correct and only the notification was missing. Assert on the
+session stream, and end-to-end use two browser **contexts** rather than two tabs — two
+tabs share a cookie jar and can pass while a genuinely separate client still hangs.
+Keep such a spec's timeout well under the poll interval, or it passes on a foregrounded
+tab against the bug it exists to catch.
 
 **A publishing gap is indistinguishable from a missing measurement.**
 `history::consolidate` computed and stored `started_at_ms`; `block_to_event` did not
