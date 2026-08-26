@@ -5,12 +5,24 @@ import { OriginNativeIcon, OriginSylphIcon } from "@/components/icons";
  * Session origin badge.
  *
  * Origin is durable product data, not decoration: a `sylph` session runs under
- * Sylph identity and lifecycle policy, while a `native` session preserves the
- * originating agent's identity and must never be given SOUL.md, reset, or
- * compacted. Green vs violet is the spec's convention (docs/roadmap.md, UX).
+ * Sylph identity policy, while a `native` session preserves the originating
+ * agent's identity and must never be given SOUL.md, reset, or compacted. Green
+ * vs violet is the spec's convention (docs/roadmap.md, UX).
  *
  * The colour is paired with text because colour alone is not an accessible
  * distinction (WCAG 1.4.1 Use of Color).
+ *
+ * **The tooltip says "identity", not "identity and lifecycle", and that is a
+ * correction rather than brevity.** Of the two axes origin governs, only identity
+ * is enforced: the backend resolves `SYLPH_SOUL` from `identity_mode`, while
+ * `lifecycle_mode` is written to the journal and read by nothing — no timer
+ * retires an incarnation, so the documented 24h-idle and 04:00 resets do not
+ * happen (docs/roadmap.md § Audit, 2026-08-26). Claiming a policy "applies" when
+ * nothing implements it is the surface promising more than it has. Restore the
+ * fuller wording when a reset actually fires, not before.
+ *
+ * The `native` tooltip is unaffected and stays as it was: preservation is the
+ * absence of a reset, and no reset is exactly what happens.
  */
 export function OriginBadge({ origin }: { origin: SessionOrigin }) {
   const native = origin === "native";
@@ -24,7 +36,7 @@ export function OriginBadge({ origin }: { origin: SessionOrigin }) {
       title={
         native
           ? "Native session: the originating agent's identity and lifecycle are preserved."
-          : "Sylph session: Sylph identity is injected and Sylph lifecycle policy applies."
+          : "Sylph session: Sylph identity is injected."
       }
     >
       {native ? <OriginNativeIcon size={9} /> : <OriginSylphIcon size={9} />}

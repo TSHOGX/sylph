@@ -63,7 +63,10 @@ Fields:
 - `id` — UUID v4, generated server-side
 - `origin` — `sylph` (created by WebApp) or `native` (imported from TUI/CLI)
 - `identity_mode` — `sylph` (inject SOUL.md) or `preserve` (original agent context)
-- `lifecycle_mode` — `sylph` (24h timeout, 04:00 reset) or `preserve` (no implicit lifecycle)
+- `lifecycle_mode` — `sylph` (24h timeout, 04:00 reset) or `preserve` (no implicit
+  lifecycle). **Written and read by nothing:** no code branches on this value, and
+  `end_incarnation` below has no callers, so neither reset fires. `docs/architecture.md`
+  § Session Model states the policy and marks it unimplemented
 - `agent` — agent name from discovery (e.g., `claude`, `pi`), which is the directory
   name holding its `adapter.sh`
 - `backend_session_id` — opaque agent-native session ID
@@ -103,10 +106,19 @@ which archived session it continued from and which one it became. There is no
 unique index on `backend_session_id`: an agent may reuse an id across
 incarnations, and failing an insert on that is worse than recording it twice.
 
-An incarnation is created on first turn and discarded after:
+An incarnation is created on first turn and, **by design**, discarded after:
 - 24 hours idle (for Sylph sessions)
 - Local time crosses 04:00 (for Sylph sessions)
 - Never for native sessions (single incarnation, never expires)
+
+**None of the discarding is implemented.** `end_incarnation` — the only writer of
+`status`, `ended_at_ms`, and `reset_reason` — has no callers, so those three columns are
+never written and every incarnation stays `active` forever. `resulting_trace_session_id`
+is worse than unused: it is read in the `SELECT` at `store.rs:400` but is not in the
+`INSERT` column list and is only ever bound `None`, so that read can never match. The
+practical consequence is that a session has exactly one incarnation whatever its origin.
+`docs/architecture.md` § Backend Incarnations carries the policy and what would call
+this; `docs/roadmap.md` § Audit, 2026-08-26 carries the measurement.
 
 #### turns
 

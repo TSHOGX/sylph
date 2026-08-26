@@ -48,13 +48,29 @@ Rust Backend (127.0.0.1:4317)
 
 | Origin | Created by | Lifecycle | SOUL.md injection |
 |--------|-----------|-----------|-------------------|
-| `sylph` | WebApp | 24h idle / 04:00 reset | Per `identityMode`, default yes |
+| `sylph` | WebApp | 24h idle / 04:00 reset — **policy, not yet implemented** | Per `identityMode`, default yes |
 | `native` | CLI/TUI import | No implicit reset | Never |
 
 **Invariants:**
 - Origin is immutable after creation
 - Native sessions never receive SOUL.md or lifecycle resets
-- Sylph sessions follow managed lifecycle (24h idle, 04:00 cutoff)
+- Sylph sessions are *intended* to follow a managed lifecycle (24h idle, 04:00 cutoff)
+
+> **The lifecycle half of this model is not enforced by the running system.**
+> `identity_mode` is read and acted on (`links/mod.rs:444` resolves `SYLPH_SOUL` from
+> it), so the native-session identity invariant holds and is tested. `lifecycle_mode` is
+> written to the journal and **read by nothing**: `end_incarnation` has no callers, no
+> timer or scheduler pass retires an incarnation, and neither the 24-hour idle reset nor
+> the 04:00 cutoff fires. Read this section as the policy the data model was built for.
+>
+> Note what the exposure is and is not. A native session is not at risk — the reset that
+> would violate its invariant happens to nobody. The consequence is the reverse: a Sylph
+> session keeps one agent context indefinitely. Do not conflate this with the **link**
+> idle timeout, which *is* implemented (30 minutes, `links/mod.rs:211`) and is a
+> different thing: a link is a live adapter process, an incarnation is the agent's
+> conversational context. `docs/roadmap.md` § Audit, 2026-08-26 carries the measurement
+> and the open question about whether an automatic reset is even the right thing to
+> build.
 
 ### Identity is a second axis, not a synonym for origin
 
@@ -64,14 +80,19 @@ refuses it — identity describes what a stored transcript was *produced by*, so
 changing it on a session with history would rewrite what that history means.
 
 **A Sylph session that declines injection is still a Sylph session.** Origin stays
-`sylph`, and managed lifecycle still applies. Collapsing the two axes would make
-"run this agent as itself" indistinguishable from an imported session that must
+`sylph`, and managed lifecycle still governs it in policy. Collapsing the two axes would
+make "run this agent as itself" indistinguishable from an imported session that must
 never be reset or compacted — the invariant above. So:
 
 | | `identityMode: sylph` | `identityMode: preserve` |
 | --- | --- | --- |
-| `origin: sylph` | The default. Injects, resets. | Agent's own identity, still resets. |
+| `origin: sylph` | The default. Injects; resets when reset is built. | Agent's own identity, same lifecycle class. |
 | `origin: native` | Never produced. | Every imported session. |
+
+The two axes remain worth separating even while one is unenforced — arguably
+*especially* then. If they were one field, building the reset later would mean deriving
+"may I reset this" from a value that also decides injection, and the first session to
+decline injection would silently become unresettable.
 
 An import sets both `identityMode` and `lifecycleMode` to `preserve`, derived from
 the archive rather than the request. `GET /api/v1/soul` serves the text this
@@ -81,17 +102,23 @@ governs, so the toggle is not consent to something invisible.
 
 An **incarnation** is an opaque agent-native session ID. Sylph sessions may have multiple incarnations (after lifecycle resets); native sessions have exactly one.
 
-Lifecycle triggers (Sylph only):
-- 24 hours since last turn
-- Local time crosses 04:00
-- User-initiated reset
+Lifecycle triggers (Sylph only), as designed:
+- 24 hours since last turn — *unimplemented*
+- Local time crosses 04:00 — *unimplemented*
+- User-initiated reset — *unimplemented; no endpoint*
 
-On reset:
+So in practice a session has exactly one incarnation today, whatever its origin, because
+nothing creates a second. The table and the columns exist and are correct for the design;
+`db/store.rs:518` (`end_incarnation`) is the function a reset would call, and it is
+uncalled.
+
+On reset, when built:
 1. Discard old `backend_session_id`
 2. Create new incarnation
 3. Next turn starts fresh agent context
 
-Native sessions skip this entirely — one incarnation, never expires.
+Native sessions skip this entirely — one incarnation, never expires. That part is true
+today by construction rather than by policy.
 
 ## Turn Execution Model
 

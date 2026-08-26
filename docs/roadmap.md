@@ -1766,3 +1766,124 @@ spends real tokens and only observes whatever shapes one live turn produces, so 
   Do not raise the timeout: the fix is for the specs to assert on the settled record
   rather than on a rendered card appearing within a deadline. Note this is *not* the
   `.e2e-home` accumulation pitfall — it reproduces on a freshly wiped fixture.
+
+## Audit, 2026-08-26: what the specs claimed and the code did not do
+
+A pass over every document against the implementation, prompted by the Phase 12
+renames having left claims behind. The doc corrections landed with it; what follows is
+the **implementation** gaps that audit turned up, which are real work rather than
+wording. Ordered by how much a user could rely on something that is not there.
+
+### The Sylph session lifecycle is modelled and never fires
+
+**`lifecycle_mode` is written on every session and read by nothing.** Grep it: the
+column is bound on insert (`db/store.rs:91`) and set to `"sylph"` or `"preserve"` at
+the two creation sites, and no code anywhere branches on its value. `end_incarnation`
+(`db/store.rs:518`) has **zero callers**. No timer, no scheduler pass, and no request
+path retires an incarnation, so the 24-hour idle reset and the 04:00 cutoff exist as
+prose in `models/incarnation.rs:7` and as table columns, and nothing else.
+
+This is the product's headline invariant half-implemented, and the halves are not
+symmetric — which is what makes it worth stating precisely rather than filing as
+"lifecycle UI missing":
+
+| Axis | Written | Enforced |
+| --- | --- | --- |
+| `identity_mode` | yes | **yes** — `links/mod.rs:444` resolves `soul` from it, so a `preserve` session genuinely receives the empty `SYLPH_SOUL` |
+| `lifecycle_mode` | yes | **no** — nothing reads it |
+
+So "never inject `SOUL.md` into a native session" holds and is tested. "Sylph sessions
+follow managed lifecycle (24h idle, 04:00 cutoff)" — stated as an invariant in
+`AGENTS.md`, `docs/architecture.md` § Session Model, and `docs/database-schema.md` — is
+not true of the running system. A native session is not at risk: the reset that would
+violate its invariant does not happen to anyone. The exposure is the opposite one, that
+a Sylph session accumulates one unbounded agent context forever.
+
+**The UI already promises it.** `components/badges.tsx:27` renders "Sylph session: Sylph
+identity is injected and Sylph lifecycle policy applies" — half of which is a claim
+about behaviour that does not exist. That tooltip is the cheapest thing to correct and
+should not wait on the feature; a surface may not claim more than it has.
+
+Note the distinction from the two schedulers that *are* wired, because their existence
+is what made this easy to miss: `RetentionScheduler::spawn` runs from `lib.rs:259`, and
+the link reaper from `links/mod.rs:211`. A **link** idling out after 30 minutes is
+implemented and tested. A **session's agent context** being reset after 24 hours is not,
+and the two are easy to conflate because both are described as "idle timeout".
+
+Deciding what to build is not obvious and is deliberately left open: a reset is
+destructive to conversational continuity, so a timer that silently discards context a
+user was relying on may be worse than unbounded growth. The honest intermediate is to
+implement the *explicit* reset first — the one lifecycle trigger the architecture doc
+lists that a user asks for — and leave the two automatic ones unbuilt with the docs
+saying so.
+
+### `Link::query` is dead, and so is the command it implements
+
+`Link::query` (`adapter/link.rs:542`) has no callers. No route reaches it, so the `query`
+command in `sylph.agent.v3` — `context` and `cost` — cannot be issued by any client, and
+an adapter's handler for it never runs. Both shipped adapters implement one anyway.
+
+This is the missing half of a feature rather than surplus code: context usage is a real
+thing a user wants (`docs/session-protocol.md` lists `get_context_usage` as a native
+capability v1 could not reach), and the adapter side is done. What is absent is an
+endpoint and a place to render it. Recorded in the protocol doc as defined-and-unused so
+an adapter author is not misled into thinking it is consumed.
+
+### `turns.command_invocation_id` is written, typed, and never read
+
+Set from `req.command` (`api/turns.rs:120`), stored, and published as
+`commandInvocationId` in `frontend/lib/api.ts:75` — where nothing reads it. Its stated
+purpose is to link a turn to an agent command rather than to typed text, which is a
+transcript question ("this turn was `/verify`, not a message"), and the timeline does not
+distinguish them. Either the timeline should say so, or the column and the field are
+carrying an intention nobody acts on.
+
+### `events.reconciled_at_ms` is vestigial
+
+Every write passes `None`. Retention is gated on a per-session watermark in `history.db`
+instead, so the column is a leftover from a design that was replaced rather than a
+placeholder for future work — `docs/database-schema.md` previously described it as the
+latter, which read as "pruning is unbuilt" when pruning is built and shipped.
+
+### `app_meta.schema_version` stopped tracking at 3
+
+`001` inserts `1`, `003` updates to `3`, and `004`–`007` add columns without touching it.
+So a fully-migrated journal reports `schemaVersion: 3` through `/api/v1/health` while
+seven migrations have run, and the value cannot answer the question it exists for —
+checking a packaged install against the binary running it. `sqlx` maintains
+`_sqlx_migrations`, which is the real answer and is not exposed. Either every migration
+bumps this key, or `/health` reports the `sqlx` table and the key is deleted; a
+hand-maintained second copy of a number the library already tracks will drift again.
+
+### The OpenAPI schema is missing the whole Phase-12 control plane
+
+24 paths / 31 method-path pairs documented against **41 registered** (measured by
+normalizing path parameters and diffing `lib.rs`). Nothing documented is stale — the gap
+is one-directional and is `capabilities`, `link`, `interrupt`, `steer`, `config`,
+`replay`, `sessions/{id}/events`, `sessions/{id}/requests`, `requests/{id}/resolve`, and
+`/search`. `docs/api-design.md` § OpenAPI Specification carries the table with line
+numbers. The check is a ten-line script and is worth automating into a test, exactly as
+`error::tests::every_emitted_code_is_published_in_the_openapi_enum` pins the error enum —
+that test is the precedent, and it is the reason the error gap was catchable at all.
+
+### A hand-maintained list inside a test defeated the test
+
+Worth its own entry because the shape recurs and is invisible.
+`every_emitted_code_is_published_in_the_openapi_enum` reads the schema from disk rather
+than mirroring it, which is right, and still failed to notice six emitted codes — because
+the list of *variants* it checked was itself hand-maintained, at 18 of 24. The six it
+omitted were precisely the six missing from the schema. A test whose subject is a
+hand-maintained mirror must not itself contain one; the fix is a `match` with no wildcard
+arm, so the compiler refuses a new variant until it is listed. Any test asserting "every
+X is Y" should be read for how it enumerates X.
+
+### Dead v1 codes still published
+
+The OpenAPI error enum carries `RUNNER_BROKEN`, `RUNNER_PROTOCOL_ERROR`,
+`RUNNER_START_FAILED`, `APPROVAL_NOT_AVAILABLE`, `COMMAND_NOT_SUPPORTED`, and
+`TRACE_NOT_RESUMABLE` (a superseded spelling of `TRACE_SESSION_NOT_RESUMABLE`). No
+variant emits any of them. Permitted one-directionally by the test so it cannot block a
+cleanup, which is not the same as being correct. `Error::RunnerNotFound` →
+`RUNNER_NOT_FOUND` is also still live in `error.rs:19`, and `api/agents.rs:23,29` still
+say "runner" in a doc comment and a user-visible error message — so the rename is not
+finished in the backend either.
