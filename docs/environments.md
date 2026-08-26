@@ -148,8 +148,8 @@ one component present for all work regardless of environment. It journals the
 normalized stream as the durable record and feeds TraceDB from there.
 
 This makes the journal real history rather than a bounded projection — a change
-this repo has to make deliberately, since the journal (then named `live.db`) was
-explicitly not a second transcript archive. The trade is accepted because the alternative is
+this repo has to make deliberately, since the journal was explicitly not a second
+transcript archive. The trade is accepted because the alternative is
 per-environment sync paths that each lose the tail on a crash, and because it is
 the only option that gives local, sandbox, and SSH identical fidelity.
 
@@ -157,6 +157,14 @@ Vendor-native stores remain valuable where they exist: a local session's
 `~/.claude` store keeps its own fidelity and TraceDB keeps ingesting it. The two
 are reconciled by native session id, which is how a session already deduplicates
 against the archive.
+
+`docs/data-architecture.md` is authoritative for what follows from this, and two
+of its consequences bind an environment directly. What a remote environment sends
+is **native source bytes, not projected rows**, because projection is the part most
+likely to change and the part an environment should never own — upload rows and
+every environment must be upgraded in lockstep with the schema. And the direction
+is upload only: an environment sends to the server, and the server never writes
+session data anywhere outside `~/.sylph`.
 
 ## Health is per environment
 

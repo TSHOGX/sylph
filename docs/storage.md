@@ -238,6 +238,15 @@ A terminal session's record exists *only* here. There is no watermark to wait
 for, and pruning would destroy the sole copy. Such a session is still compacted —
 deltas folded, blobs externalized, text compressed — but never deleted.
 
+Note what the class boundary rests on: whether a native store exists *and is
+reachable*. `docs/data-architecture.md` makes the server's event stream the
+authority and has remote environments upload native source bytes, which moves
+sessions between these two classes rather than changing either rule. It also draws
+the harder line — once the archive holds a row whose source is gone, the archive is
+the sole copy, so "delete and re-ingest" stops being a recovery and the free-breaking-change
+policy stops applying to that data. The rules in this table are unchanged by any of
+that; which class a given session falls into is not.
+
 This is why the watermark is an interface with one question rather than a TraceDB
 call:
 

@@ -35,9 +35,17 @@ Rust Backend (127.0.0.1:4317)
 
 ## Design Principles
 
-1. **Local-first** — All data stored locally, no cloud dependencies
+1. **Local-first** — Data lives with the server that owns it, and no third-party service
+   is in the path. "Local" is a statement about dependencies rather than about geography:
+   a Sylph server deployed on a remote host is still local-first, because the authority is
+   the server's own store and not somebody else's API.
 2. **Origin as policy** — Session origin (`sylph` or `native`) determines identity and lifecycle
-3. **Runners own storage** — Agents write their native format; TraceDB ingests asynchronously
+3. **The server owns the record** — An agent still writes its native format, and TraceDB
+   still ingests it where it can be reached. But the server's normalized event stream is
+   the authority, because the server is the one component present for all work regardless
+   of where it runs — a sandbox's native store dies with the sandbox, and an archive
+   derived only from native stores acquires a hole exactly there. See
+   `docs/data-architecture.md`.
 4. **Bounded journal, durable history** — Unsettled turns in journal.db, consolidated
    into history.db and pruned only when a downstream authority confirms the data
 5. **Durable turn supervision** — Turn execution independent of HTTP request lifecycle
@@ -515,7 +523,14 @@ answers "what happened here" when the user has no search term.
 Future features should preserve these boundaries:
 
 1. **Runner protocol** — NDJSON events are additive; new kinds/phases OK
-2. **API versioning** — breaking changes increment `/api/v2/`
+2. **API versioning** — there is none, and adding one would be the mistake. The
+   `/api/v1/` prefix is a path segment, not a compatibility promise: this backend's
+   only client is the frontend in this repo, both are built from one commit, and a
+   token that rotates on restart means no third party is holding a session across a
+   deploy. So a breaking change edits the endpoint, the schema, and the client in
+   place. Standing up `/api/v2/` beside a live `/api/v1/` would double the surface
+   under test to serve a caller that does not exist — and, worse, make the old shape
+   survivable, so nobody would finish the migration. See `AGENTS.md` § Compatibility
 3. **Database migrations** — numbered, transactional, append-only
 4. **TraceDB interface** — always via JSON protocol, never direct schema access
 5. **Session origin** — immutable policy decision, never silently changed

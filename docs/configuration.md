@@ -190,6 +190,18 @@ An unreachable TraceDB is not a failure. Live sessions work; archive search and
 native import report themselves unavailable, and `/api/v1/health` says
 `tracedb.available: false`.
 
+**The archive is moving inside this root.** `docs/data-architecture.md` makes the
+Sylph server the sole authority and gives it a **private** archive under `data/`,
+rather than reading TraceDB's default path. Two consequences for configuration, both
+worth knowing before that lands: no external `trace-db` daemon is assumed to exist,
+and on a machine that has one Sylph neither reads nor writes its archive. A private
+archive has one writer, which is what removes the busy timeout, the per-agent commit
+transaction, and the exclusive reindex lock that a shared file would need — and every
+failure mode those guard against is a silent interleaving.
+
+`tracedb.bin` above is therefore about which *code* projects the archive, not which
+file holds it.
+
 ## Inspecting what resolved
 
 ```sh

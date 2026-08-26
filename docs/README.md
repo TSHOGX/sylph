@@ -22,6 +22,7 @@ development practices.
 ### Contracts & Subsystems
 - **[Session Protocol](session-protocol.md)** — `sylph.agent.v3`: the contract between the server and a pluggable agent
 - **[Storage](storage.md)** — Lossless tiered history, replay, and watermark-gated retention
+- **[Data Architecture](data-architecture.md)** — Which copy is the truth, and which way data travels
 - **[Control Plane](control-plane.md)** — Why one server owns session policy and frontends are transports
 - **[Environments](environments.md)** — Where a session's work actually happens
 
@@ -49,6 +50,7 @@ development practices.
 | Which shortcuts a browser reserves | [ui-layout.md](ui-layout.md#keyboard-model) |
 | What an adapter may send, and when | [session-protocol.md](session-protocol.md) |
 | How history is kept, replayed, pruned | [storage.md](storage.md) |
+| Who owns a fact, and which way it travels | [data-architecture.md](data-architecture.md) |
 | Why the server owns session policy | [control-plane.md](control-plane.md) |
 | Where a session's work runs | [environments.md](environments.md) |
 
