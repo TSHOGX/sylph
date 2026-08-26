@@ -3,6 +3,14 @@
 The record is lossless, replayable from any frontend, and pruned only when a
 downstream authority has confirmed the data — never because time passed.
 
+> **This describes what is built, not a proposal.** The tier split, delta folding,
+> replay over HTTP, and watermark-gated retention with its scheduler all shipped in
+> Phase 12. Several sections below open in the present tense about the *pre-split*
+> state — "today only `completed` is durable", "one `events` table currently serves
+> three access patterns" — because they were written as the argument for building this
+> and kept for the reasoning. Where a paragraph says "today", read it as "before this
+> design"; the code is `backend/src/storage/`.
+
 ## What "lossless" has to mean here
 
 A turn's event stream is not a log of text. It is a log of text *arriving*: a
@@ -75,7 +83,7 @@ So:
 data_dir/
   journal.db      hot   unconsolidated turns only; stays a few MB
   history.db      warm  consolidated blocks; grows without bound, read-mostly
-  cas/            cold  content-addressed blobs, sharded aa/bb/<hash>
+  blobs/          cold  content-addressed blobs, sharded aa/bb/<hash>
 ```
 
 `journal.db` staying small is the whole point of the split, and it is what
@@ -124,8 +132,12 @@ When a turn reaches a terminal state, its rows move from `journal.db` to
 1. Group journal rows by `stream_id` into blocks.
 2. For each block, keep the `completed` text; encode its deltas as offset and
    timing arrays.
-3. Externalize any payload over 4 KB to `cas/`, leaving a hash reference.
-4. Compress remaining inline text over 512 bytes with zstd.
+3. Externalize any payload of 4 KB or more to `blobs/`, leaving a hash reference.
+4. Compress remaining inline text of 512 bytes or more with zstd — but keep the
+   compressed form **only if it is actually smaller**. Incompressible text (base64,
+   random ids) otherwise grows by the frame header and costs a decode on every read, so
+   such a row stays `raw` despite being over the threshold. Encoding is recorded per
+   row rather than inferred from length, which is what makes that safe.
 5. Insert the blocks into `history.db`, then delete the turn's journal rows —
    in that order, and never the reverse.
 
@@ -178,7 +190,7 @@ cannot be tuned without a migration.
 
 ## Content addressing
 
-Blobs are keyed by `blake3(content)`, sharded two levels (`cas/a1/b2/<hash>`) to
+Blobs are keyed by `blake3(content)`, sharded two levels (`blobs/a1/b2/<hash>`) to
 keep directory sizes sane, and refcounted.
 
 Dedup is not incidental here — it is large. An agent reads the same file across
@@ -232,16 +244,36 @@ call:
 ```rust
 #[async_trait]
 pub trait RetentionAuthority: Send + Sync {
-    /// The highest seq that is safe to drop for this session.
-    /// `None` means drop nothing.
-    async fn safe_to_drop(&self, session_id: &str) -> Result<Option<i32>>;
+    /// A name for the journal, so a stored watermark records what produced it.
+    fn name(&self) -> &'static str;
+
+    /// How far a downstream copy is confirmed to extend.
+    async fn confirm(&self, session_id: &str) -> Result<Confirmation>;
+}
+
+pub struct Confirmation {
+    /// Highest sequence number safe to drop. `None` means drop nothing.
+    pub safe_to_drop: Option<i32>,
+    /// The archived session consulted, in the archive's own id space.
+    pub archive_id: Option<String>,
+    /// Which version of the agent-native source the archive held.
+    pub source_fingerprint: Option<String>,
 }
 ```
 
-`TerminalAuthority` always answers `None`. A TraceDB-backed authority answers by
-confirming what the archive holds. Whether that confirmation is cheap to derive is
-a property of one implementation, not an assumption the storage design rests on —
-and it is the open question below.
+The signature grew from the bare `safe_to_drop(&self, session_id) -> Option<i32>` this
+section used to show, and both additions are load-bearing rather than convenience.
+`name()` is what lets a stored watermark record *what produced it*, so a row is
+evidence rather than a number. And the provenance travels **with** the sequence number
+rather than being fetched separately, because the two are one observation: a
+`confirmed_seq` derived from one version of a source, recorded beside a fingerprint read
+at another moment, would be a watermark that cannot be checked against anything.
+
+`TerminalAuthority` always answers `Confirmation::nothing()`. A TraceDB-backed authority
+answers by confirming what the archive holds. Whether that confirmation is cheap to
+derive was once the open question here, and it is **answered**: `ingest_state`
+(`tracedb/mod.rs:811`) is one targeted `show` requesting `from: 0, to: 0`, so it reads a
+session's ingestion facts without fetching its events.
 
 CAS objects are refcounted separately: an object is removed when no live block
 references it, which is independent of any watermark. A blob shared by a pruned
@@ -256,6 +288,17 @@ stream and receives events in original order with original relative timing:
 ```
 GET /api/v1/sessions/{id}/replay?from_seq=0&speed=1
 ```
+
+**Both parameters are optional and neither default is the value shown above.**
+`from_seq` defaults to `-1` (from the beginning) and `speed` to `0.0` (emit
+everything immediately, unpaced) — so a bare `GET …/replay` is the timeline-render
+case, which is what almost every caller wants. Pass `speed=1` explicitly for
+original-timing playback.
+
+Paced replay is also deliberately not faithful to long gaps: `MAX_GAP` clamps any
+inter-event sleep to 2 seconds. A user who steps away mid-session leaves a
+minutes-long hole in the record, and reproducing it would hold a connection open
+doing nothing — the pacing conveys how the work unfolded, not the coffee break.
 
 The server merges `history.db` blocks with any live `journal.db` tail, expands
 delta arrays back into individual events, resolves CAS references, and emits the
@@ -280,20 +323,22 @@ CREATE TABLE blocks (
   seq          INTEGER NOT NULL,      -- the completed event's seq
   turn_id      TEXT NOT NULL,
   kind         TEXT NOT NULL,
+  phase        TEXT,                  -- an open trajectory keeps 'started'
   stream_id    TEXT,
+  span         TEXT,                  -- delegated trajectory; NULL is the root
   name         TEXT,
   -- Exactly one of these carries the text.
   text_inline  BLOB,                  -- possibly zstd, see text_encoding
   text_hash    TEXT,                  -- CAS reference when externalized
-  text_len     INTEGER NOT NULL,      -- uncompressed length, always
-  text_encoding TEXT NOT NULL,        -- 'raw' | 'zstd'
+  text_len     INTEGER NOT NULL DEFAULT 0,   -- uncompressed length, always
+  text_encoding TEXT NOT NULL DEFAULT 'raw', -- 'raw' | 'zstd' | 'external'
   -- Delta reconstruction. NULL when the block never streamed.
   delta_offsets BLOB,                 -- packed u32 LE
   delta_timings BLOB,                 -- packed u32 LE, ms deltas
   data_json    BLOB,
   data_hash    TEXT,
   is_error     INTEGER NOT NULL DEFAULT 0,
-  source       TEXT NOT NULL,
+  source       TEXT NOT NULL DEFAULT 'agent',
   started_at_ms INTEGER NOT NULL,     -- first delta, or the event itself
   created_at_ms INTEGER NOT NULL,     -- completion
   PRIMARY KEY (session_id, seq)
@@ -307,6 +352,8 @@ CREATE TABLE cas_refs (
   seq        INTEGER NOT NULL,
   PRIMARY KEY (hash, session_id, seq)
 ) WITHOUT ROWID;
+
+CREATE INDEX cas_refs_by_block ON cas_refs(session_id, seq);
 
 CREATE TABLE watermarks (
   session_id    TEXT PRIMARY KEY,
@@ -381,14 +428,28 @@ Because the event-identity question never arises, the earlier worry about matchi
 journal rows to archived events is moot: atomicity makes a timestamp bound
 sufficient.
 
-Two safeguards remain, because a derived watermark should be conservative:
+One safeguard is real, and one this section used to claim is not:
 
-* The `events` count is a cross-check. A count far below the journal's block count
-  for the same span means the two disagree about what the session contains, and a
-  disagreement is a reason to withhold the watermark rather than to reconcile it
-  silently.
-* A session TraceDB has never seen has no row, which yields no watermark and
-  therefore no pruning. The absent case is safe by construction.
+* **A session TraceDB has never seen has no row**, which yields no watermark and
+  therefore no pruning. The absent case is safe by construction
+  (`retention.rs:131-138`), and it is the one that matters most, because it is what
+  makes "cannot ask" fail closed.
+* **There is no `events`-count cross-check.** This section previously described one as
+  a second safeguard: a count far below the journal's block count meaning the two
+  disagree, and a disagreement being a reason to withhold. Nothing implements it.
+  `IngestState` carries only `ended_at_ms`, `mode`, and `source_fingerprint`, and
+  `ingest_state` deliberately requests `from: 0, to: 0` so that no events are fetched
+  at all — the whole point of that shape being that it is one cheap targeted `show`.
+  Retention never reads a count.
+
+The removed claim is worth keeping visible rather than deleting, because it described
+*conservatism that a reader would otherwise assume is protecting them*. What actually
+bounds the watermark is narrower and should be relied on as such: `endedAtMs` converted
+to a sequence via `max_seq_at_or_before`, admitted only when `mode == "full"`
+(`retention.rs:152`), plus the absent-row case above. Whether the count check is worth
+adding is open: it would cost a second request per session per pass, against a failure
+mode nobody has observed, and `source_fingerprint` already answers the related and more
+useful question of whether the archive's copy has advanced at all.
 
 ### What the explicit ack turned out to be
 

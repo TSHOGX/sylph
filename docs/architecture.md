@@ -16,7 +16,7 @@ Rust Backend (127.0.0.1:4317)
     │
     ├─► journal.db (SQLite) ─────┐
     │   Unsettled turns          │
-    ├─► history.db + cas/        │
+    ├─► history.db + blobs/      │
     │   The durable record       ├─► Query & Search
     ├─► TraceDB ─────────────────┘
     │   Stable cross-agent history
@@ -29,7 +29,7 @@ Rust Backend (127.0.0.1:4317)
 - **Frontend** — Next.js 16 + React 19, handles UI and real-time updates
 - **Backend** — Rust + Axum, REST API + SSE streaming, process supervision
 - **Journal** — SQLite (journal.db), sessions and turns that have not settled
-- **History** — SQLite (history.db) plus `cas/`, the durable replayable record
+- **History** — SQLite (history.db) plus `blobs/`, the durable replayable record
 - **TraceDB** — External durable store, cross-agent searchable history
 - **Runners** — Agent binaries discovered via `--describe`, managed as child processes
 
@@ -171,7 +171,7 @@ the journal and ephemeral ones from the hub's in-memory ring.
 
 The warm and cold tiers. `synchronous = FULL`, because it is the record. Holds one
 row per block with its deltas folded into packed offset and timing arrays, plus
-content-addressed blobs in `cas/` for payloads over 4 KB. Grows without bound and
+content-addressed blobs in `blobs/` for payloads of 4 KB or more. Grows without bound and
 is read-mostly; pruned only by watermark.
 
 ### TraceDB
