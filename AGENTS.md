@@ -313,16 +313,31 @@ This is the most-repeated defect in this file: **seven instances so far**, each 
 compiling, each surfacing one or two layers from the cause. They are catalogued
 individually below (`pi`'s `set_model`, the invented `task_*` subtypes,
 `AskUserQuestion`'s `selectedOptions`, `requestedSchema` versus `requested_schema`,
-`pi`'s never-emitted `agent_start`, and reading `response` off an *error* envelope)
+`pi`'s `agent_start` versus `agent_settled`, and reading `response` off an *error* envelope)
 because the *specific* keys are what a reader needs. The general rule is the one above,
 plus three shapes worth knowing before writing any adapter:
 
-- **A type in a vendor's event union is not a promise that anything emits it.** `pi`
-  0.84.4 declares `agent_start` and `agent_end`, documents them, and has **zero emit
-  sites** in its shipped bundle — its `Task` tool builds a nested agent whose events
-  reach an internal callback that never touches the transport. An adapter written
-  from the type definitions ships a tree that never populates. Grep the
-  implementation for emit sites, not the types for declarations.
+- **A type in a vendor's event union is not a promise that anything emits it.** Grep
+  the implementation for emit sites, not the types for declarations — a declared-only
+  event ships an adapter branch that never fires, and a branch that never fires is
+  indistinguishable from one whose condition is simply rare.
+
+  This file previously claimed `pi`'s `agent_start`/`agent_end` were such a case, with
+  zero emit sites. **That was wrong**, re-measured against pi 0.84.3 from its
+  unbundled `dist/` tree: `agent_start` is emitted at `pi-agent-core/dist/agent-loop.js:49,67`
+  and `agent_end` at `:110,157,172`, and both reach the RPC wire, because
+  `dist/modes/rpc/rpc-mode.js:265` funnels every `session.subscribe` event through
+  `output(toJsonEvent(event))`. A measured turn emits `agent_start, turn_start,
+  message_start, message_update×N, message_end, turn_end, agent_end, agent_settled`.
+  The original investigation read a minified bundle; an unbundled source-mapped
+  install is available at `~/.local/lib/node_modules/@earendil-works/pi-coding-agent`
+  and is far better evidence. Prefer it, and note that "I grepped and found nothing"
+  is a claim about your grep as much as about the vendor.
+
+  What remains true is the *adapter's* choice: it closes a turn on `agent_settled`
+  rather than `agent_end`, because pi can emit `agent_end` and then continue (see
+  `adapters/pi/adapter.py:509`). That is a real distinction between two events that
+  both exist, not evidence that one of them does not.
 - **An SDK object's attribute names and its JSON wire names are different
   namespaces.** The MCP spec says `requestedSchema`; the Python SDK's dataclass field
   is `requested_schema` with the camelCase form as a Pydantic *alias*, and `claude`
@@ -1315,13 +1330,33 @@ implementation details.
 
 ## Compatibility
 
-Before a live deployment, databases and local provider state are disposable:
-change schemas and internal APIs in place, and do not add migrations or
-compatibility branches for imagined users.
+**Neither this project nor TraceDB has any other consumer, so breaking changes are
+free and compatibility code is forbidden.** Design for the best end state and change
+the schema, the wire format, or the internal API in place. Do not write a migration,
+a dual-spelling alias, a version branch, or a fallback for a caller that does not
+exist. This holds for `sylph-web` and for `trace-db` equally: Sylph is TraceDB's only
+consumer, and TraceDB may break Sylph whenever the result is better.
 
-Once the project is deployed and carrying real data, migrations become mandatory
-for schema changes. Treat the presence of installed state, not a date, as the
-signal that this has flipped.
+The cost of a compatibility branch is not the branch. It is that the branch makes the
+defect it papers over survivable, so nobody removes it — and a fallback that silently
+absorbs a rename is exactly how a vendor-key defect becomes permanent (see the
+vendor-key family above, and `tracedb-casing-break` in memory for the instance that
+prompted this rule). A hard break fails loudly at the one moment someone is looking.
+
+So when a change would be improved by restructuring something older, restructure it.
+When existing code exists only to tolerate a shape no longer produced, delete it
+rather than extending it. A refactor that leaves the old path in place "just in case"
+has not landed.
+
+Two things this does **not** license. It is not permission to break a *vendor's*
+contract — an agent CLI is a real external dependency with real users, and an adapter
+still adapts. And it is not permission to lose a user's data: local provider state and
+archives are disposable because they are re-derivable from agent-native logs, so
+verify the source still exists before discarding a projection. Once Sylph is deployed
+and holding data with no other copy — which multi-host upload makes true, since a
+remote host's native store may be unreachable — this section's first paragraph stops
+applying to *that* data specifically. Treat the presence of irreplaceable installed
+state, not a date, as the signal.
 
 ## Testing
 
