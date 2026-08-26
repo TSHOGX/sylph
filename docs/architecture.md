@@ -126,9 +126,10 @@ A **turn** is a durable execution resource:
 
 1. Client calls `POST /api/v1/sessions/{id}/turns` with idempotency key
 2. Backend returns `202 Accepted` with turn ID immediately
-3. `TurnSupervisor` spawns runner as detached process
+3. `TurnSupervisor` establishes a link if the session is detached, then sends the
+   turn as a `send` frame on it
 4. Client streams events via `GET /api/v1/turns/{id}/events` (SSE)
-5. Turn completes (or fails); exit code and status recorded
+5. Turn completes (or fails); status recorded when the `turn` event lands
 
 **Properties:**
 - Turn creation is idempotent (via client-provided key)
@@ -138,15 +139,28 @@ A **turn** is a durable execution resource:
 
 ### Process Supervision
 
-`TurnSupervisor` manages runner child processes:
+**A turn has no process of its own.** This is the largest change v3 made to this
+subsystem, and the reason the section below is short. The v1 supervisor spawned a
+process per turn and read its exit code to learn the outcome; under `sylph.agent.v3`
+the adapter is a long-lived **link** and a turn is a message on it, so the supervisor
+no longer *drives* a turn to completion — it marks running, sends, and waits to be
+told. The link's drain task journals the events. `backend/src/supervisor/turn.rs`
+states this at the top of the module, and `docs/session-protocol.md` § The unit is a
+session, not a turn is the reasoning.
 
-- Spawns in new process group
-- Streams stdout/stderr (NDJSON protocol)
-- Forwards SIGTERM on stop request
-- Escalates to SIGKILL after 2 seconds
-- Reaps zombies on exit
+Process supervision is therefore a property of the **link**, not the turn.
+`LinkManager` owns it:
 
-Concurrency: one turn per session at a time; queued turns wait.
+- Spawns the adapter in a new process group, so a stop signal reaches the CLI the
+  adapter exec'd rather than only the wrapper script
+- Reads NDJSON from its stdout incrementally, one frame per line
+- Forwards SIGTERM on teardown, escalating to SIGKILL after a grace period
+- Tears down links idle for 30 minutes (`IDLE_TIMEOUT`), which is what keeps a live
+  process from outliving its usefulness — history is unaffected and the next turn
+  re-establishes
+
+Concurrency: one turn per session at a time; a second is refused rather than queued
+(`SESSION_ALREADY_RUNNING`), because the link holds one conversation.
 
 ## Storage Architecture
 
@@ -185,7 +199,7 @@ Operations:
 
 Sylph Web reads from TraceDB for:
 - Session list and archive browser (deduplicated by imported TraceDB id or by
-  the runner's native session id once ingestion is observed)
+  the agent's native session id once ingestion is observed)
 - Native session import (creates lightweight continuation)
 - Cross-agent search
 
@@ -441,9 +455,10 @@ session carrying a turn.
 2. Backend: check idempotency, insert turn (status=queued)
 3. Backend: return `202` with turn ID
 4. Client: open SSE stream `GET /api/v1/turns/{id}/events`
-5. TurnSupervisor: spawn runner, set status=running
-6. Backend: stream NDJSON → SSE → client
-7. Runner exits: set status=completed, record exit code
+5. TurnSupervisor: establish a link if detached, `send` the turn, set status=running
+6. Backend: adapter NDJSON → journal → SSE → client
+7. The adapter's `turn`/`completed` event arrives: set status=completed. There is no
+   process exit to read, which is why the outcome is an event rather than an exit code
 8. SSE stream closes
 
 ### Import Native Session
@@ -462,7 +477,7 @@ session carrying a turn.
    queries the archive via `/api/v1/search?q=...`
 3. Backend: forward to TraceDB JSON API
 4. Backend/frontend: deduplicate an archived hit that is already imported, by
-   `trace_session_id` or by the runner's `<agent>:<native-session-id>` identity
+   `trace_session_id` or by the agent's `<agent>:<native-session-id>` identity
 5. Frontend: render live and archived results together, archived marked `⌗`
 
 Browsing by *directory* rather than by query is a different path:

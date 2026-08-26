@@ -174,7 +174,7 @@ curl -s localhost:4317/api/v1/diagnostics   # counts and uptime, needs a cookie
 `/health` reports schema version and whether TraceDB is reachable. It stays
 unauthenticated so a supervisor can probe it, and therefore reports no counts or
 paths. `/diagnostics` adds session and turn counts, uptime, discovered agents,
-and any runner that failed to describe itself.
+and any adapter that failed its handshake.
 
 Check the agent itself with:
 

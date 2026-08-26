@@ -1213,7 +1213,7 @@ Governing specs, written before the code:
   sessions are `attached` or `detached`. Links are disposable — they idle out, die
   with a restart, and a turn on a detached session establishes one first. That
   path is v1's behaviour, which makes it the floor rather than an error case.
-- **v1 is removed, not kept beside v2.** There are no external consumers, so a
+- **v1 is removed, not kept beside v3.** There are no external consumers, so a
   compatibility shim would buy nothing and cost a single shape for what an agent
   is. Keeping it would have put two notions of a session — a turn as a process,
   and a turn as a message — into the supervisor, the capability API, the UI's
@@ -1766,6 +1766,64 @@ spends real tokens and only observes whatever shapes one live turn produces, so 
   Do not raise the timeout: the fix is for the specs to assert on the settled record
   rather than on a rendered card appearing within a deadline. Note this is *not* the
   `.e2e-home` accumulation pitfall — it reproduces on a freshly wiped fixture.
+
+### Two user-reported bugs: a permission mode that did nothing, and a dialog that would not leave
+
+Both reported together, and they turned out to share nothing except that every layer
+looked correct while each failed. Fixed, with each fix verified by reverting it and
+watching the new test fail.
+
+**`bypassPermissions` was selectable and inert** — four stacked defects, all measured
+against `claude` 2.1.246 rather than reasoned about:
+
+1. The vendor **refuses** `set_permission_mode → bypassPermissions` unless the process
+   was launched with a flag marking the mode available. The adapter passed none, so this
+   one value of six could never be applied.
+2. `control()` read `response.get("response") or {}` — and an error envelope has no
+   `response` — so every refused vendor control returned the same empty value a
+   successful no-payload control does. The seventh instance of the vendor-payload family
+   in AGENTS.md.
+3. `apply_config` recorded the **requested** mode rather than the confirmed one, so the
+   chip read `bypassPermissions` while the session ran under `default`. That is the
+   reported symptom exactly: 200 OK, UI updates, prompts keep arriving.
+4. The mirror bug, worse than the reported one: `--permission-prompt-tool stdio` was
+   gated on the *launch* mode, which is a spawn-time bet about a runtime-mutable value.
+   Launch in `bypassPermissions`, switch to `default`, and every tool call returns
+   `Claude requested permissions to use Bash, but you haven't granted it yet` — a
+   session started in a bypassing mode could never return to an interactive one.
+
+Reading the confirmed value back paid for itself immediately by finding a fifth thing
+nobody was looking for: **`manual` answers `success` and confirms `default`**. The
+vendor normalizes it silently, so that row landed on a different row — the same lie by a
+different route, invisible to any check for an error. It is no longer offered, and
+`auto`, which *is* applied as given, was missing and now is. `--allow-dangerously-skip-permissions`
+is what makes bypass reachable without starting in it; it grants nothing by itself,
+widening only the set of modes a user may then choose, and the vendor's own consent gate
+still governs whether the choice takes.
+
+**An answer on one client left the panel standing on another.** A request was published
+when raised and on no path when it left `pending`, so a client's set could only grow —
+it shrank on a 20-second poll that a backgrounded tab does not run, with focus refetch
+off. Reloading really was the only cure. Now one publisher serves every departure, the
+payload is the row so clients reconcile on `status` rather than on a verb, and it fires
+before the adapter forward so a request answered against a dead link still retires
+everywhere.
+
+One thing found while fixing it, one layer up: the server flattened every adapter error
+into `Error::Unsupported`, whose contract is "disable the control". Both adapters
+already distinguished `UNSUPPORTED_FIELD` from `INVALID_VALUE` and the server erased it,
+so a single refused value would have retired a picker whose others work. The code now
+travels as a typed `AdapterError` recovered by `downcast_ref` — not parsed back out of
+the message, since the text is the adapter's and the code is declared protocol.
+`docs/session-protocol.md` § A refused set now governs this, and the E2E fixture was
+using the wrong one of the two codes, so the branch that keeps a control usable had no
+coverage at all.
+
+Also worth keeping: the E2E spec for this uses two browser **contexts**, not two tabs.
+Two tabs share a cookie jar and can pass while a genuinely separate client still hangs.
+Its timeout is 10s against a 20s poll, so it cannot pass on a foregrounded tab against
+the bug it exists to catch — reverting the announcement fails it in 12.1s with the
+user's exact symptom.
 
 ## Audit, 2026-08-26: what the specs claimed and the code did not do
 

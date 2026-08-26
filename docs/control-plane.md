@@ -54,13 +54,13 @@ channel↔thread model — and gives up what is not.
 | Today in the daemon | After |
 | --- | --- |
 | `chat_state.json` sessions, agents, flags | `GET/PATCH /api/v1/sessions` |
-| 24h / 04:00 reset logic | Server policy, one implementation |
+| 24h / 04:00 reset logic | Server policy, one implementation — *not yet implemented server-side; `docs/architecture.md` § Session Model* |
 | `harness/` runner dispatch | `POST /api/v1/sessions/{id}/turns` |
 | `ProcessSupervisor` for `/stop` | `POST /api/v1/turns/{id}/stop` |
-| Runner discovery + hot reload | `GET /api/v1/agents` |
+| Runner discovery + hot reload | `GET /api/v1/agents`, refreshed by `POST /api/v1/agents` |
 
 This migration is not optional, because v1 is being removed rather than kept
-beside v2 (`docs/session-protocol.md`). The daemon's runners stop being
+beside v3 (`docs/session-protocol.md`). The daemon's runners stop being
 discoverable, so it moves to the server or it stops working. Choosing the
 migration over a shim is what leaves one control plane; the shim would have
 preserved two.

@@ -82,7 +82,7 @@ Look for these lines in the backend tab output:
 ✓ Good:
   INFO sylph_web_backend: Sylph home /Users/you/.sylph (config /Users/you/.sylph/config.toml)
   INFO sylph_web_backend: Database initialized at /Users/you/.sylph/data/journal.db
-  INFO sylph_web_backend::runners: Discovered agent claude at "..."
+  INFO sylph_web_backend::agents: Discovered agent claude at "..."
   INFO sylph_web_backend: Agent discovery: 2 usable, 0 broken
   INFO sylph_web_backend: TraceDB available: 4705 archived sessions, 529688 events
   INFO sylph_web_backend: Listening on http://127.0.0.1:4317
@@ -350,7 +350,7 @@ npm run e2e             # End-to-end tests (spawns own servers)
 
 ### Why two separate processes?
 
-- **Backend** (Rust): Handles sessions, runners, database, TraceDB client
+- **Backend** (Rust): Handles sessions, agents and their links, storage, TraceDB client
 - **Frontend** (Next.js): UI, routing, SSE client, proxies API requests
 
 The frontend's rewrite in `next.config.ts` makes the browser see one origin,
