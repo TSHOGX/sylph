@@ -700,7 +700,8 @@ export function pathTo(
  * streaming (the delegation fails early, or the link dies mid-input) the placeholder
  * becomes the trajectory's durable name in `history.db`.
  *
- * `_task_label` returns `None` as of `c8783b3`, which is what makes this the sole
+ * `_task_label` returns `None` as of `c8783b3` (its tests widened in `438a808`), which
+ * is what makes this the sole
  * producer and the rename above safe. **That is a dependency of this code, not a
  * historical note**: move the rename to a tree without that commit — a cherry-pick, an
  * older branch — and the two-label state returns, silently, until a card renders. The
