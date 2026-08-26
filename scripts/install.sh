@@ -70,8 +70,7 @@ if [ "$DO_ROLLBACK" -eq 1 ]; then
   mv "$PREFIX.old" "$PREFIX"
   [ -d "$PREFIX.rollback-tmp" ] && mv "$PREFIX.rollback-tmp" "$PREFIX.old"
 
-  if [ -d "$PREFIX/journal-backup" ] &&
-     { [ -f "$PREFIX/journal-backup/journal.db" ] || [ -f "$PREFIX/journal-backup/live.db" ]; }; then
+  if [ -d "$PREFIX/journal-backup" ] && [ -f "$PREFIX/journal-backup/journal.db" ]; then
     # The version being left may have migrated the schema past what this binary
     # accepts, so restore the journal as it was when this version last ran.
     # Its journal is set aside as the backup for the tree we just moved to
@@ -79,13 +78,12 @@ if [ "$DO_ROLLBACK" -eq 1 ]; then
     say "Restoring the journal from this version's backup"
     rm -rf "$PREFIX.old/journal-backup"
     mkdir -p "$PREFIX.old/journal-backup"
-    for f in "$DATA_DIR"/journal.db "$DATA_DIR"/journal.db-wal "$DATA_DIR"/journal.db-shm \
-             "$DATA_DIR"/live.db "$DATA_DIR"/live.db-wal "$DATA_DIR"/live.db-shm; do
+    for f in "$DATA_DIR"/journal.db "$DATA_DIR"/journal.db-wal "$DATA_DIR"/journal.db-shm; do
       [ -f "$f" ] && mv "$f" "$PREFIX.old/journal-backup/"
     done
-    # Whichever name that version used. Only one of the two globs matches, and a
-    # `cp` of a non-match would otherwise abort the restore under `set -e`.
-    for f in "$PREFIX/journal-backup"/journal.db* "$PREFIX/journal-backup"/live.db*; do
+    # Guarded because a glob that matches nothing expands to itself, and a `cp`
+    # of that non-match would abort the restore under `set -e`.
+    for f in "$PREFIX/journal-backup"/journal.db*; do
       [ -f "$f" ] && cp "$f" "$DATA_DIR/"
     done
     say "The other version's journal is kept at $PREFIX.old/journal-backup"
@@ -238,16 +236,11 @@ if [ -d "$PREFIX" ]; then
   # whose schema is ahead of the binary. So a rollback needs the journal as it
   # was, not just the old binaries. Safe to copy directly: the agent is stopped
   # and the WAL files come with it.
-  # Both names, because the journal was renamed from live.db to journal.db and a
-  # rollback moves *backwards* to a binary that expects the old name. Backing up
-  # whichever name is present means the restore hands each version the file it
-  # knows, without this script having to know which pair of versions it is between.
-  if [ -f "$DATA_DIR/journal.db" ] || [ -f "$DATA_DIR/live.db" ]; then
+  if [ -f "$DATA_DIR/journal.db" ]; then
     say "Backing up the journal for rollback"
     rm -rf "$PREFIX.old/journal-backup"
     mkdir -p "$PREFIX.old/journal-backup"
-    for f in "$DATA_DIR"/journal.db "$DATA_DIR"/journal.db-wal "$DATA_DIR"/journal.db-shm \
-             "$DATA_DIR"/live.db "$DATA_DIR"/live.db-wal "$DATA_DIR"/live.db-shm; do
+    for f in "$DATA_DIR"/journal.db "$DATA_DIR"/journal.db-wal "$DATA_DIR"/journal.db-shm; do
       [ -f "$f" ] && cp "$f" "$PREFIX.old/journal-backup/"
     done
   fi

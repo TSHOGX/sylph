@@ -85,9 +85,6 @@ impl AppState {
     /// adapters directory or a misconfigured TraceDB binary leaves the backend
     /// serving what it can, with the failure visible in `/diagnostics`.
     pub async fn build(config: Config) -> anyhow::Result<Self> {
-        // Before the store opens the path, so an install predating the rename
-        // carries its history forward instead of starting empty beside it.
-        crate::db::migrate::rename_legacy_journal(&config.journal_path).await;
         let store = JournalStore::new(&config.journal_path).await?;
         tracing::info!("Journal initialized at {}", config.journal_path);
 

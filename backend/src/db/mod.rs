@@ -6,7 +6,6 @@
 //! product invariant that this tier is authoritative only while a turn is active:
 //! the old filename claimed exactly the property the invariant limits.
 
-pub mod migrate;
 pub mod store;
 /// Batching the journal's hot path. Separate from [`store`] because *when* a write
 /// commits is a different decision from *what* it writes, and only the first one

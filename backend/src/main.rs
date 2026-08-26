@@ -189,11 +189,7 @@ fn migrate(args: &[String]) -> anyhow::Result<()> {
     // Refuse rather than merge. Two journals cannot be combined — session ids are
     // unique per store and the blob index would reference rows that are not there
     // — so a silent overwrite would destroy whichever one the user cared about.
-    // Both journal names, because this subcommand can run before the server has
-    // ever started and performed the `live.db` → `journal.db` rename that
-    // [`db::migrate`] owns — so an untouched data directory still holds the old
-    // name, and refusing on only the new one would overwrite it.
-    if (to.join("journal.db").exists() || to.join("live.db").exists()) && !force {
+    if to.join("journal.db").exists() && !force {
         anyhow::bail!(
             "{} already holds a journal. Move it aside, or pass --force to replace it.",
             to.display()
@@ -209,9 +205,6 @@ fn migrate(args: &[String]) -> anyhow::Result<()> {
         "journal.db",
         "journal.db-wal",
         "journal.db-shm",
-        "live.db",
-        "live.db-wal",
-        "live.db-shm",
         "history.db",
         "history.db-wal",
         "history.db-shm",
@@ -223,16 +216,10 @@ fn migrate(args: &[String]) -> anyhow::Result<()> {
         }
     }
 
-    // `cas` was the blob directory's earlier name. Accepted on the way in and
-    // written under the current name, so a migrated install matches a fresh one
-    // rather than carrying a second spelling forward.
-    for source_name in ["blobs", "cas"] {
-        let source = from.join(source_name);
-        if source.is_dir() {
-            let count = copy_tree(&source, &to.join("blobs"))?;
-            copied.push(format!("{source_name}/ ({count} blobs)"));
-            break;
-        }
+    let blobs = from.join("blobs");
+    if blobs.is_dir() {
+        let count = copy_tree(&blobs, &to.join("blobs"))?;
+        copied.push(format!("blobs/ ({count} blobs)"));
     }
 
     let attachments = from.join("attachments");
