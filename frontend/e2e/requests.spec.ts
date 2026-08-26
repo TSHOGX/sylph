@@ -154,6 +154,70 @@ test("dismissing a request says the agent is still waiting", async ({ page }) =>
   await expect(page.getByText("The agent is waiting on you.")).toBeHidden();
 });
 
+/**
+ * Answering on one device retires the panel on another, with no reload.
+ *
+ * The reported bug, in the setup that produced it: a question answered on a phone
+ * left the dialog standing on the desktop until the page was refreshed. The cause was
+ * an omission — the server announced a request's *arrival* on the session stream and
+ * announced its *departure* nowhere — so a second client only learned of the answer
+ * when its 20-second backstop poll happened to fire. And that poll does not run in a
+ * backgrounded tab (`refetchIntervalInBackground` is false by default) while
+ * `refetchOnWindowFocus` is off, so returning to the tab did not refetch either:
+ * reloading really was the only reliable way.
+ *
+ * Two browser *contexts*, not two tabs, because that is the honest model of a phone
+ * and a laptop — separate cookie jars, separate streams, each bootstrapping its own
+ * auth. Two tabs in one context would share a jar and could pass while a genuinely
+ * separate client still hung.
+ *
+ * This is the assertion no unit test can make. The backend test proves the event is
+ * published and the frontend test proves the merge rule retires the row; only a
+ * second real browser proves the two are connected end to end.
+ */
+test("answering on one client retires the panel on another", async ({ browser }) => {
+  const phone = await browser.newContext();
+  const laptop = await browser.newContext();
+  try {
+    const phonePage = await phone.newPage();
+    const sessionId = await createSession(phonePage);
+
+    // The laptop opens the same session and is left sitting on it, exactly as a user
+    // leaves a tab open before picking up their phone.
+    const laptopPage = await laptop.newPage();
+    await laptopPage.request.get("/api/v1/auth/token");
+    await laptopPage.goto(`/sessions/${sessionId}`);
+    await expect(laptopPage.getByLabel("Message")).toBeVisible();
+
+    // Raised from the phone. Both clients are attached, so both must show it — the
+    // arrival half, which already worked and is asserted so a failure below is
+    // unambiguously about departure.
+    const phonePanel = await ask(phonePage, "approval please");
+    const laptopPanel = laptopPage.getByTestId("approval-dialog");
+    await expect(laptopPanel).toBeVisible({ timeout: 15000 });
+
+    await phonePanel.getByRole("button", { name: "Allow once", exact: true }).click();
+    await expect(phonePanel).toBeHidden({ timeout: 15000 });
+
+    // The assertion the bug fails. A generous timeout that is still far under the
+    // 20-second poll: passing here means the stream delivered it, not that a
+    // backstop refetch eventually did. Were this allowed 20s+ it would pass against
+    // the bug on a foregrounded tab, which is the version of this test worth not
+    // writing.
+    await expect(laptopPanel).toBeHidden({ timeout: 10000 });
+
+    // And the laptop is not left claiming the agent is still waiting, which is the
+    // composer's own summary of the same state — one surface retiring while the other
+    // insists would be a half fix.
+    await expect(
+      laptopPage.getByText("The agent is waiting on you."),
+    ).toBeHidden({ timeout: 10000 });
+  } finally {
+    await phone.close();
+    await laptop.close();
+  }
+});
+
 test("a form is answerable by keyboard alone", async ({ page }) => {
   await createSession(page);
   const panel = await ask(page, "question please");

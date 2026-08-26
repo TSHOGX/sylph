@@ -299,6 +299,41 @@ v2's flat `flags.choices` was.
 `select` and `boolean` are enough for every knob the four surveyed agents expose. A
 numeric or free-text type is a later addition, not a placeholder now.
 
+### A refused set: two codes, and why the difference is load-bearing
+
+An adapter that will not apply a set answers `err` with one of two codes, and they
+are **not interchangeable**:
+
+| code | Means | What a client may do |
+| --- | --- | --- |
+| `UNSUPPORTED_FIELD` | This agent has no such option | Disable the control |
+| `INVALID_VALUE` | The option is real; *this value* was rejected | Report it, leave the control usable |
+
+The server classifies on this code — `INVALID_VALUE` becomes `INVALID_REQUEST`
+(400), `UNSUPPORTED_FIELD` becomes `AGENT_UNSUPPORTED` (409) — so answering with the
+wrong one is not a cosmetic difference: it tells a user their agent cannot do
+something it does perfectly well, and invites disabling a picker because one of its
+values was refused for a reason the session could change.
+
+Both adapters already made this distinction and the server used to destroy it,
+flattening every adapter error into one status. `claude` is the case that showed why
+it matters: `set_permission_mode` to `bypassPermissions` is refused outright unless
+the process was launched with a flag marking that mode available, so five of the six
+offered modes were settable and one was not — a refusal about a *precondition*,
+reported as a missing capability, three layers from the picker it sent people to.
+
+An adapter must also not report a refusal as success. `claude` answers a refused
+control with `subtype: "error"` and **no** `response` member, so a reader that reaches
+straight for `response` maps a refusal onto the same empty value a successful
+no-payload control returns — after which the setting is reported as applied, the
+server answers 200, the UI renders the new value as current, and the session goes on
+behaving as it did. Nothing errors anywhere. See AGENTS.md § Pitfalls.
+
+Relatedly, an adapter reports `currentValue` from **what the vendor confirmed**, never
+from what was requested. A vendor may apply something other than what it was asked:
+`claude` accepts `manual` and confirms `default`, normalizing it silently. A `success`
+check cannot see that — only reading the confirmed value back can.
+
 ## Capability facets
 
 A capability update names the facets it speaks about. **A facet that is not

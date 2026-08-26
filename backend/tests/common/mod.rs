@@ -785,7 +785,8 @@ for raw in sys.stdin:
            config=[{{"type": "select", "id": "model", "name": "Model",
                      "category": "model", "currentValue": "fast",
                      "options": [{{"value": "fast", "name": "Fast"}},
-                                 {{"value": "slow", "name": "Slow"}}]}}],
+                                 {{"value": "slow", "name": "Slow"}},
+                                 {{"value": "refused", "name": "Refused"}}]}}],
            subagents=[{{"name": "Explore", "description": "Search"}}],
            permissionMode="default")
     elif t == "set_config":
@@ -793,11 +794,26 @@ for raw in sys.stdin:
             emit({{"t": "err", "id": mid, "code": "UNSUPPORTED_FIELD",
                    "message": "no such option"}})
             continue
+        # A real option refusing one real value, which is a different fact from an
+        # option that does not exist -- and the server classifies on the code, so both
+        # need a mock that can produce them. `refused` is *enumerated* below on purpose:
+        # the server validates a value against what the agent offered before forwarding
+        # it, so an unlisted value never reaches the adapter and could not exercise this.
+        if msg.get("value") == "refused":
+            emit({{"t": "err", "id": mid, "code": "INVALID_VALUE",
+                   "message": "that model is not available on this account"}})
+            continue
+        # The same three options as the handshake declared. A narrower list here would
+        # retract `refused` on the first successful set, so a test that set a value and
+        # then tried the refusable one would be refused by the *server* for offering an
+        # unknown value -- a refusal from the wrong layer, and one that would read as
+        # this classification working when it had not been reached.
         ok(mid, facets={{"config": [
             {{"type": "select", "id": "model", "name": "Model", "category": "model",
               "currentValue": msg.get("value"),
               "options": [{{"value": "fast", "name": "Fast"}},
-                          {{"value": "slow", "name": "Slow"}}]}}]}})
+                          {{"value": "slow", "name": "Slow"}},
+                          {{"value": "refused", "name": "Refused"}}]}}]}})
     elif t == "send":{on_send}
     elif t == "interrupt":
         ok(mid)

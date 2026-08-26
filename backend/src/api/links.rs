@@ -150,6 +150,25 @@ pub async fn resolve(
         .await?
         .ok_or(Error::RequestAlreadyResolved)?;
 
+    // Announced before the forward, and deliberately so. The claim above is what makes
+    // this request answered — the row is committed and no second answer can win — so
+    // every other client may stop showing it from this moment, whether or not the
+    // adapter is still there to hear the answer. Announcing after the forward would
+    // tie a *display* concern to a *delivery* one, and the `LinkGone` path below
+    // returns early: a request answered on a phone against a dead link would then stay
+    // on screen on every other client, which is the bug this fixes, surviving in the
+    // one case where the user most needs to be told what happened.
+    //
+    // This is the counterpart of `absorb_request`'s announcement. Arrival was published
+    // and departure was not, so a client's view of what a session is blocked on could
+    // only ever grow; it shrank on a 20-second poll that a backgrounded tab does not
+    // run, which is why answering on one device left the dialog standing on another
+    // until a manual reload.
+    state
+        .links
+        .announce_request(&request.session_id, &resolved)
+        .await;
+
     // Forwarded only after the claim succeeds. Sending first would let the loser
     // of a race also reach the adapter, and for an approval the second answer
     // would overwrite the first's decision.
@@ -291,9 +310,21 @@ pub async fn set_config(
         )));
     }
 
+    // A refusal is classified by the adapter's own code rather than flattened to one
+    // status. The distinction is the difference between "this agent cannot do that"
+    // and "that value is not allowed right now": the first justifies disabling the
+    // control, the second must leave it usable, since the other five values may well
+    // be fine. `claude` reports exactly this shape when a permission mode is refused
+    // for a reason the session cannot change, and reporting it as unsupported sent the
+    // last investigation to the picker.
     link.set_config(&body.config_id, body.value)
         .await
-        .map_err(|error| Error::Unsupported(format!("{:#}", error)))?;
+        .map_err(|error| match error.downcast_ref::<crate::adapter::link::AdapterError>() {
+            Some(refusal) if refusal.code == "INVALID_VALUE" => {
+                Error::InvalidRequest(refusal.message.clone())
+            }
+            _ => Error::Unsupported(format!("{:#}", error)),
+        })?;
 
     // Published so every other attached client sees the change rather than only the
     // one that made it — the same reason a capability update is pushed at all.

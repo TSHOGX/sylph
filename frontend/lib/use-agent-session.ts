@@ -26,6 +26,8 @@ import {
   type LinkState,
   type PendingRequest,
 } from "@/lib/api";
+import { createSSEDecoder } from "@/lib/sse-parse";
+import { mergeRequestRow, parseRequestFrame } from "@/lib/pending-requests";
 
 /**
  * How often to re-read pending requests as a backstop.
@@ -150,25 +152,42 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        let carry = "";
+        // The same parser the turn stream uses, rather than `split("\n\n")` and
+        // `frame.includes("event: request")`. Two reasons, and the second is why the
+        // payload can now be trusted at all: a substring test matches the *body* as
+        // readily as the name, so any request whose title quoted the text `event:
+        // request` triggered its own branch — and matching `"event: request"` as a
+        // prefix cannot distinguish a kind added later that merely starts the same way.
+        // Reading the name as a field settles both, and having a parsed frame is what
+        // makes `data` available as a value instead of as text inside a haystack.
+        const frames = createSSEDecoder();
 
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
-          carry += decoder.decode(value, { stream: true });
 
-          // Frames are separated by a blank line. Only the event name matters
-          // here — the payload is a hint that something changed, and the queries
-          // above are what actually hold the state.
-          const frames = carry.split("\n\n");
-          carry = frames.pop() ?? "";
-          for (const frame of frames) {
-            if (frame.includes("event: request")) {
+          for (const frame of frames.push(decoder.decode(value, { stream: true }))) {
+            if (frame.event === "request") {
+              // Applied, not merely invalidated. The frame carries the whole row, so
+              // the set this client is blocked on is recomputed from it with no round
+              // trip — which matters most in the case that motivated it: an answer
+              // given on a phone should retire the panel on a laptop as fast as the
+              // frame arrives, and a refetch adds a request the server has already
+              // answered. The invalidate still follows as the reconciler, so a frame
+              // that is somehow stale or unparseable degrades to the old behaviour
+              // rather than to a wrong list.
+              const row = parseRequestFrame(frame.data);
+              if (row) {
+                queryClient.setQueryData<PendingRequest[]>(
+                  ["session", sessionId, "requests"],
+                  (current) => mergeRequestRow(current, row),
+                );
+              }
               void queryClient.invalidateQueries({
                 queryKey: ["session", sessionId, "requests"],
               });
             }
-            if (frame.includes("event: capabilities") || frame.includes("event: link")) {
+            if (frame.event === "capabilities" || frame.event === "link") {
               void queryClient.invalidateQueries({
                 queryKey: ["session", sessionId, "capabilities"],
               });
@@ -180,7 +199,7 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
             // makes the page adopt it and start streaming. Without this the turn is
             // real and journaled but invisible until a reload, which reads to the user
             // as the notification never having arrived.
-            if (frame.includes("event: turn-opened")) {
+            if (frame.event === "turn-opened") {
               void queryClient.invalidateQueries({
                 queryKey: ["session", sessionId, "history"],
               });

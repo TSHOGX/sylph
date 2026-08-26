@@ -211,6 +211,103 @@ async fn a_second_answer_to_one_request_is_a_conflict() {
     assert_eq!(final_row.chosen_option.as_deref(), Some("allow"));
 }
 
+/// Answering on one client retires the question on every other one.
+///
+/// The defect this pins was an omission rather than a mistake: a request's *arrival*
+/// was announced on the session stream and its *departure* was announced nowhere, so
+/// a client's set of open questions could only grow. It shrank when a 20-second poll
+/// happened to fire — and a backgrounded tab does not run that poll at all — so a
+/// user who answered on their phone found the dialog still standing on their laptop
+/// until they reloaded the page.
+///
+/// Asserted on the session stream rather than through a second HTTP client, because
+/// the stream is what a browser is actually holding: a test that re-read
+/// `GET /requests` would pass against the bug, since the *row* was always correct and
+/// only the notification was missing.
+#[tokio::test]
+async fn answering_a_request_announces_it_so_other_clients_stop_showing_it() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    let request = raise_request(&server, &session_id, "Bash").await;
+
+    // Subscribed before the answer, standing in for the laptop that is already
+    // displaying the panel.
+    let mut other_client = server.state.hub.attach_session(&session_id).await;
+
+    // `LINK_GONE` here: this harness has no adapter, and the claim still happened.
+    // That combination is deliberate in the assertion below — the announcement must
+    // not be conditional on the forward succeeding, or a request answered against a
+    // dead link would stay on screen everywhere, which is precisely the case where a
+    // user most needs to see the outcome.
+    server
+        .post_authed(
+            &format!("/api/v1/requests/{}/resolve", request.id),
+            json!({"option": "allow"}),
+        )
+        .await;
+
+    let event = other_client
+        .try_recv()
+        .expect("answering a request must reach every attached client");
+    assert_eq!(event.kind, "request");
+
+    // The payload is the row, so a client reconciles against a state rather than
+    // replaying a vocabulary of verbs — that is what lets a status added later need no
+    // client change. Both fields matter: the id says which panel to retire, and the
+    // status is what says to retire it.
+    let data = event.data.expect("the row itself travels, not a bare id");
+    assert_eq!(data["id"], request.id);
+    assert_eq!(data["status"], "resolved");
+    assert_eq!(data["chosenOption"], "allow");
+
+    // And the adapter's own id stays off the wire, as everywhere else: a
+    // client-supplied adapter id is a way to answer a request that was never raised.
+    assert!(
+        data.get("adapterRequestId").is_none(),
+        "the adapter's request id is link-scoped and must never be published"
+    );
+}
+
+/// A question that died with its agent is retired too, by the same announcement.
+///
+/// The link-death path had the same hole as `resolve`, and the `link` event it did
+/// publish does not carry it: a client would have to infer "so my dialog is dead"
+/// from "the link closed", which is the inference the request's own status states
+/// outright. Left unannounced, the panel kept offering to answer a question with
+/// nobody at the other end.
+#[tokio::test]
+async fn a_request_abandoned_with_its_agent_is_announced_too() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    let request = raise_request(&server, &session_id, "Bash").await;
+
+    // A real link, so this exercises the path a dying agent takes rather than an
+    // artificial one. `detach` returns early when there is nothing attached — correct,
+    // and it means a test that skipped this would pass while asserting nothing.
+    server
+        .state
+        .links
+        .ensure(&session_id)
+        .await
+        .expect("the mock adapter must link");
+
+    // Subscribed after the link so the handshake's own capability announcement is not
+    // in the buffer ahead of what this test is about.
+    let mut other_client = server.state.hub.attach_session(&session_id).await;
+
+    server.state.links.detach(&session_id, "test").await;
+
+    // The request's own announcement, ahead of the `link` event: a client learns what
+    // happened to the thing it is displaying, not only that something happened.
+    let event = other_client
+        .try_recv()
+        .expect("abandoning a request must reach every attached client");
+    assert_eq!(event.kind, "request");
+    let data = event.data.expect("the row itself travels");
+    assert_eq!(data["id"], request.id);
+    assert_eq!(data["status"], "abandoned");
+}
+
 /// Edited input is recorded, because "allow, but change the command" is the
 /// affordance a yes/no dialog drops.
 #[tokio::test]
@@ -380,6 +477,73 @@ async fn a_config_option_the_agent_never_offered_is_refused() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = json_body(response).await;
     assert_eq!(body["error"]["code"], "INVALID_REQUEST");
+}
+
+/// A value the agent rejects is a bad request, not a missing capability.
+///
+/// The two refusals an adapter can send mean different things to a client:
+/// `UNSUPPORTED_FIELD` says the control should not be offered, while `INVALID_VALUE`
+/// says the control is fine and this one value is not. The server used to flatten
+/// every adapter error into `AGENT_UNSUPPORTED`, whose documented contract is "disable
+/// the control" — so one refused value would have retired a picker whose other values
+/// work. Both shipped adapters already drew this line and only the server erased it.
+///
+/// `claude` is the case that made it matter: `set_permission_mode` to
+/// `bypassPermissions` is refused unless the process was launched with a flag marking
+/// that mode available, so five of six offered modes were settable and one was not.
+#[tokio::test]
+async fn a_value_the_agent_rejects_is_a_bad_request_rather_than_an_unsupported_agent() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    let response = server
+        .post_authed(
+            &format!("/api/v1/sessions/{}/config", session_id),
+            json!({"configId": "model", "value": "refused"}),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "INVALID_REQUEST");
+    // The agent's own words survive the classification. It knows why it declined, and
+    // that sentence is what tells a user to pick something else — restating it here
+    // would lose the only diagnosis there is.
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not available on this account"),
+        "the adapter's reason must reach the client: {}",
+        body["error"]["message"]
+    );
+}
+
+/// An option the agent does not have stays a capability failure.
+///
+/// The other half of the pair above, and the reason the classification is on the code
+/// rather than on "did the adapter refuse": this one *should* let a client disable the
+/// control, and collapsing the two in either direction loses that.
+#[tokio::test]
+async fn an_option_the_agent_does_not_have_is_reported_as_unsupported() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+
+    // Past the server's own id validation by naming an option the handshake declared,
+    // then refused by the adapter as absent. Contrived on the mock, and the shape a
+    // real agent produces when its surface has moved since the client read it.
+    let response = server
+        .post_authed(
+            &format!("/api/v1/sessions/{}/config", session_id),
+            json!({"configId": "nonesuch", "value": "x"}),
+        )
+        .await;
+
+    // Refused by the server before reaching the adapter at all, which is the stricter
+    // and cheaper answer. Pinned so that if that validation is ever relaxed, the
+    // adapter's `UNSUPPORTED_FIELD` has to be classified rather than silently
+    // becoming a 400 alongside a genuinely bad value.
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 /// A control command is answered from typed state and must never create a turn.

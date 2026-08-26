@@ -729,7 +729,14 @@ def serve():
             # the client the rejection was invisible — the value simply did not
             # change, which is indistinguishable from a broken control.
             if msg.get("value") == "refused":
-                emit({"t": "err", "id": mid, "code": "UNSUPPORTED_FIELD",
+                # `INVALID_VALUE`, not `UNSUPPORTED_FIELD`: the option exists and this
+                # one value was rejected. The fixture used the other code, which meant
+                # the suite exercised "no such option" while claiming to cover a refused
+                # *value* — and the server classifies on this code, so the branch that
+                # keeps the control usable had no end-to-end coverage at all. Both
+                # shipped adapters already draw this line (`docs/session-protocol.md`
+                # § A refused set).
+                emit({"t": "err", "id": mid, "code": "INVALID_VALUE",
                       "message": "this agent refuses that value"})
                 continue
             option["currentValue"] = msg.get("value")

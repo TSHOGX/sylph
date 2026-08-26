@@ -1269,18 +1269,24 @@ impl JournalStore {
     /// would show a session forever waiting on a question nobody can act on. The
     /// timeline needs to say the turn stopped because its agent died, rather than
     /// leaving an unexplained gap.
-    pub async fn abandon_open_requests(&self, session_id: &str) -> Result<u64> {
-        let result = sqlx::query(
+    /// Returns the rows it abandoned, not merely how many.
+    ///
+    /// The caller has to *announce* each one — a client showing an approval panel has
+    /// no other way to learn the question died with its agent — and a count cannot be
+    /// announced. Returning the rows is what lets one publisher serve every departure
+    /// from `pending`; callers wanting the old number take `.len()`.
+    pub async fn abandon_open_requests(&self, session_id: &str) -> Result<Vec<PendingRequest>> {
+        sqlx::query_as::<_, PendingRequest>(
             "UPDATE pending_requests
                 SET status = 'abandoned', resolved_at_ms = ?
-              WHERE session_id = ? AND status = 'pending'",
+              WHERE session_id = ? AND status = 'pending'
+            RETURNING *",
         )
         .bind(now_ms())
         .bind(session_id)
-        .execute(&self.pool)
+        .fetch_all(&self.pool)
         .await
-        .map_err(Error::Database)?;
-        Ok(result.rows_affected())
+        .map_err(Error::Database)
     }
 
     /// A session's status, without loading the whole row.

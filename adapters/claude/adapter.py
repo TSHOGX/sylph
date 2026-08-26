@@ -64,10 +64,32 @@ FLAGS = {
         "description": "Reasoning effort.",
     },
     "mode": {
-        "choices": ["default", "acceptEdits", "plan", "manual", "dontAsk", "bypassPermissions"],
+        "choices": ["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"],
         "description": "Permission mode.",
     },
 }
+
+# The modes `set_permission_mode` accepts *and applies as given*, which is what the
+# live config surface may offer. Enumerated by sending every candidate to claude
+# 2.1.246 and reading back the confirmed `mode`, because `initialize` reports only
+# `current_permission_mode` and never the set — so this list cannot be discovered and
+# has to be measured.
+#
+# Two results worth keeping, both invisible to a caller that only checks for an error:
+#
+#   * `manual` answers **success** and confirms `default`. The vendor normalizes it,
+#     so offering it would be a picker row that lands on a different row — the same
+#     lie as the bypass bug arriving by a different route, and the reason it is absent
+#     from `FLAGS["mode"]["choices"]` above.
+#   * `auto` is settable and was missing from the offered list, so a real mode was
+#     unreachable through the UI.
+#
+# `ask` is the one outright refusal (`must be one of …`), and it is the value
+# `docs/session-protocol.md`'s own examples use — see `PERMISSION_MODES` below for
+# what that costs at spawn time.
+SETTABLE_PERMISSION_MODES = [
+    "default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions",
+]
 
 # Dialog kinds this adapter can render, declared at `initialize`.
 #
@@ -119,13 +141,38 @@ PERMISSION_MODES = {
 }
 
 # Claude permission modes that route decisions to us rather than deciding alone.
-# `bypassPermissions` auto-approves before any callback runs, so an approval
-# prompt under it would never fire — worth knowing rather than discovering.
 #
-# `auto` and `dontAsk` are absent because both decide without consulting a callback;
-# asking for the channel under them would promise a prompt that never arrives, which
-# is the same mistake as declaring a capability the vendor lacks.
+# Descriptive only. This once *gated* `--permission-prompt-tool stdio` at spawn, and
+# that was a spawn-time guess about a runtime-mutable value: the mode changes through
+# `set_permission_mode` while the process lives, and the callback can only be
+# registered on the command line. Measured on claude 2.1.246 — launch in
+# `bypassPermissions` (so no channel), switch to `default`, and every tool call comes
+# back `Claude requested permissions to use Bash, but you haven't granted it yet`.
+# No prompt can be raised, so a session started in a bypassing mode could never
+# return to an interactive one. The channel is now always registered; a mode that
+# decides alone simply never consults it, which costs nothing.
+#
+# Kept because it still records which modes *would* consult the channel, and that is
+# what makes the paragraph above checkable rather than folklore.
 INTERACTIVE_MODES = {"default", "acceptEdits", "plan", "manual"}
+
+class VendorRefused(Exception):
+    """claude answered a control request with `subtype: "error"`.
+
+    Its own type because a refusal is an *outcome*, not a transport failure, and the
+    two need different handling: a refusal carries the vendor's own reason and is
+    worth showing a user, while a dead pipe is not.
+
+    This exists because `control` used to read `response["response"]` — which an error
+    response does not have — store `{}`, and return normally. Every refused control
+    therefore looked like a success. The cost was the reported bug: selecting
+    `bypassPermissions` was refused by the CLI, reported as applied by the adapter,
+    answered 200 by the server, rendered as the current value by the UI, and the
+    session went on asking for permission on every tool call. Nothing errored at any
+    layer, so the investigation went to the picker — three layers from the discarded
+    field. Silence about a refusal is the most expensive thing an adapter can do.
+    """
+
 
 class UnknownConfig(Exception):
     """A config id this adapter cannot set.
@@ -319,11 +366,32 @@ class Session:
                 " Accepted: {}".format(mode, ", ".join(sorted(PERMISSION_MODES))))
             mode = "default"
         argv += ["--permission-mode", mode]
-        # Routing permission decisions to us over stdio is the whole point; under
-        # a bypassing mode Claude decides before any callback, so asking for the
-        # channel there would promise a prompt that never arrives.
-        if mode in INTERACTIVE_MODES:
-            argv += ["--permission-prompt-tool", "stdio"]
+
+        # Always, regardless of the starting mode. Routing permission decisions to us
+        # over stdio is the whole point of this adapter, and the channel can *only* be
+        # asked for on the command line while the mode it serves changes at runtime —
+        # so gating it on the launch mode bets that the user will never switch, and
+        # loses the approval channel permanently when they do. See `INTERACTIVE_MODES`
+        # for the measurement. A bypassing mode never consults it, so registering it
+        # unconditionally costs one argv entry and nothing else.
+        argv += ["--permission-prompt-tool", "stdio"]
+
+        # What makes `bypassPermissions` *reachable* without starting in it.
+        #
+        # Measured on claude 2.1.246: `set_permission_mode` to `bypassPermissions` is
+        # refused outright — "because the session was not launched with
+        # --dangerously-skip-permissions" — unless one of the launch flags marked the
+        # mode available. `--dangerously-skip-permissions` would also *start* the
+        # session in bypass, which is not what a user selecting it later asked for;
+        # this flag only marks it available, leaving the launch mode as given.
+        #
+        # So it is passed on every session, and the reason it is safe to is that it
+        # grants nothing by itself: it widens the set of modes a *user* may then
+        # choose, and the vendor's own consent gate still governs whether the choice
+        # takes. Without it, every mode this adapter offers in `config_from` except
+        # bypass is settable and bypass is refused — an option a client can render and
+        # never apply, which is the failure the config surface exists to prevent.
+        argv += ["--allow-dangerously-skip-permissions"]
 
         # An explicit settings file, when the caller has one. Sylph itself does
         # not set this; it exists because a caller sometimes has to pin
@@ -378,7 +446,16 @@ class Session:
             self.proc.stdin.flush()
 
     def control(self, subtype, **fields):
-        """Send a control_request and wait for its response."""
+        """Send a control_request and wait for its response.
+
+        Raises `VendorRefused` when claude answers `subtype: "error"`. That branch is
+        the whole reason this is not a three-line helper: a refusal and a success take
+        *different shapes* — a success carries `response`, an error carries `error` and
+        no `response` — so a reader that only reaches for `response` cannot distinguish
+        them and silently converts every refusal into an empty success. Returning `{}`
+        from here is therefore never "the vendor said nothing useful"; it is only ever
+        a success whose payload happens to be empty.
+        """
         request_id = "sylph-{}".format(uuid.uuid4().hex[:12])
         box = {"event": threading.Event(), "response": None}
         self.pending_control[request_id] = box
@@ -390,7 +467,16 @@ class Session:
         if not box["event"].wait(timeout=30):
             self.pending_control.pop(request_id, None)
             raise RuntimeError("claude did not answer {} in time".format(subtype))
-        return box["response"] or {}
+
+        envelope = box["response"] or {}
+        if envelope.get("subtype") == "error":
+            # The vendor's own words. It names the setting and the precondition —
+            # "because the session was not launched with --dangerously-skip-permissions"
+            # — which is exactly the diagnosis a generic adapter error would destroy.
+            raise VendorRefused(
+                str(envelope.get("error") or "claude refused {}".format(subtype))
+            )
+        return envelope.get("response") or {}
 
     def apply_config(self, config_id, value):
         """Set one config option on the live session.
@@ -398,6 +484,16 @@ class Session:
         The mapping from a Sylph config id to a vendor control lives here because it
         is a vendor fact: `permissionMode` is `set_permission_mode` for claude and
         does not exist at all for pi.
+
+        Every branch records what the vendor **confirmed**, never what was asked. The
+        distinction is not pedantry: `set_permission_mode` answers `{"mode": …}` with
+        the mode that actually took, and the CLI is entitled to answer with a
+        different one — it downgrades bypass to `default` when its consent gate has
+        not been satisfied. Writing the requested value made the adapter the authority
+        on a fact only the vendor holds, so the surface reported a policy the session
+        was not running under. `VendorRefused` propagates for the same reason: the
+        server turns it into an error the client can render, instead of a success that
+        changed nothing.
         """
         if config_id == "model":
             # `default`, null and an omitted model all reset to the session default,
@@ -416,9 +512,17 @@ class Session:
         elif config_id == "fastMode":
             self.control("apply_flag_settings", settings={"fastMode": bool(value)})
         elif config_id == "permissionMode":
-            self.control("set_permission_mode", mode=value)
+            confirmed = self.control("set_permission_mode", mode=value)
+            # Measured on claude 2.1.246: the success payload is `{"mode": "<mode>"}`.
+            # Read rather than assumed, and falling back to the requested value only
+            # when the CLI names none — a control that succeeded without saying what
+            # took is still evidence the request was honoured.
+            applied = confirmed.get("mode") or value
+            if applied != value:
+                log("claude applied permission mode {!r} rather than the requested"
+                    " {!r}".format(applied, value))
             if self.initialize_response:
-                self.initialize_response["current_permission_mode"] = value
+                self.initialize_response["current_permission_mode"] = applied
         elif config_id == "cwd":
             self.control("set_cwd", cwd=value)
         else:
@@ -570,7 +674,13 @@ class Session:
             response = msg.get("response") or {}
             box = self.pending_control.pop(response.get("request_id"), None)
             if box:
-                box["response"] = response.get("response") or {}
+                # The whole envelope, not its `response` member. Unwrapping here is
+                # what discarded `subtype` and made a refusal indistinguishable from an
+                # empty success — an error envelope has no `response` at all, so
+                # `.get("response") or {}` mapped "the CLI refused, and why" onto the
+                # same `{}` a successful no-payload control returns. `control` is what
+                # unwraps now, because it is the only place that can tell the caller.
+                box["response"] = response
                 box["event"].set()
             return
 
@@ -1547,6 +1657,12 @@ def config_from(initialize_response, current_model=None, current_effort=None):
             "options": [{"value": level, "name": level.capitalize()} for level in levels],
         })
 
+    # Offered from the *settable* set rather than from the spawn-time flag's choices.
+    # The two are different questions — what `--permission-mode` parses at launch, and
+    # what `set_permission_mode` applies to a running session — and using the launch
+    # list here offered `manual`, which the vendor silently normalizes to `default`,
+    # while omitting `auto`, which it applies as given. See
+    # `SETTABLE_PERMISSION_MODES`.
     mode = initialize_response.get("current_permission_mode")
     options.append({
         "type": "select",
@@ -1556,7 +1672,7 @@ def config_from(initialize_response, current_model=None, current_effort=None):
         "currentValue": mode,
         "options": [
             {"value": choice, "name": choice}
-            for choice in FLAGS["mode"]["choices"]
+            for choice in SETTABLE_PERMISSION_MODES
         ],
     })
 
@@ -1775,6 +1891,18 @@ def serve():
                 except UnknownConfig:
                     err(mid, "UNSUPPORTED_FIELD",
                         "'{}' is not settable on a claude session".format(config_id))
+                    continue
+                except VendorRefused as refusal:
+                    # The setting exists and the value was rejected — a different fact
+                    # from `UNSUPPORTED_FIELD`, and answering with that one would send a
+                    # reader after a missing option while the real cause is a
+                    # precondition. `INVALID_VALUE` mirrors what `pi`'s adapter learned:
+                    # an error that names the wrong layer sends the investigation to the
+                    # wrong layer. The vendor's own sentence is forwarded verbatim
+                    # because it names the precondition, which nothing here can restate
+                    # as usefully.
+                    err(mid, "INVALID_VALUE",
+                        "claude refused to set '{}': {}".format(config_id, refusal))
                     continue
                 # The refreshed facet, not an acknowledgement: setting the model can
                 # change which effort levels exist, so the caller needs the new

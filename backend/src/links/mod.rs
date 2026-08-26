@@ -830,12 +830,7 @@ impl LinkManager {
             session_id, stored.kind, stored.id
         );
 
-        self.publish_session_event(
-            session_id,
-            "request",
-            serde_json::to_value(&stored).unwrap_or_default(),
-        )
-        .await;
+        self.announce_request(session_id, &stored).await;
     }
 
     /// A link died. Record why, and free anything waiting on it.
@@ -858,12 +853,23 @@ impl LinkManager {
             .await;
         }
 
+        // Announced per row, not merely counted. A client with an approval panel open
+        // is showing a question that can no longer be answered — the adapter waiting on
+        // it is gone — and the `link` event below does not carry that: a client would
+        // have to infer "so my dialog is dead" from "the link closed", which is exactly
+        // the inference the request's own status states outright.
         match self.store.abandon_open_requests(session_id).await {
-            Ok(0) => {}
-            Ok(count) => warn!(
-                "Abandoned {} unanswered request(s) on session {}: its agent exited",
-                count, session_id
-            ),
+            Ok(abandoned) if abandoned.is_empty() => {}
+            Ok(abandoned) => {
+                warn!(
+                    "Abandoned {} unanswered request(s) on session {}: its agent exited",
+                    abandoned.len(),
+                    session_id
+                );
+                for request in &abandoned {
+                    self.announce_request(session_id, request).await;
+                }
+            }
             Err(error) => error!("Failed to abandon open requests: {}", error),
         }
 
@@ -880,7 +886,14 @@ impl LinkManager {
         let Some(entry) = entry else { return };
 
         entry.link.close().await;
-        let _ = self.store.abandon_open_requests(session_id).await;
+        // Same announcement as the unexpected close above. A deliberate detach kills
+        // outstanding questions just as thoroughly, and the client that asked for the
+        // detach is not necessarily the one holding the dialog.
+        if let Ok(abandoned) = self.store.abandon_open_requests(session_id).await {
+            for request in &abandoned {
+                self.announce_request(session_id, request).await;
+            }
+        }
         self.publish_session_event(
             session_id,
             "link",
@@ -903,6 +916,34 @@ impl LinkManager {
             session_id,
             "capabilities",
             serde_json::to_value(&surface).unwrap_or_default(),
+        )
+        .await;
+    }
+
+    /// Announce one request's current state to every attached client.
+    ///
+    /// The single publisher for a request's whole life, and the reason it exists is a
+    /// bug of omission: *arrival* was announced and every *departure* was silent. So a
+    /// question answered on a phone stayed on screen on a laptop, and one killed with
+    /// its agent stayed on screen everywhere — both until a 20-second poll happened to
+    /// fire, which a backgrounded tab does not run at all. The user's report was
+    /// "要刷新才会消失", and refreshing was genuinely the only reliable way.
+    ///
+    /// The payload is the **row**, not the transition, and the row carries `status`.
+    /// That is deliberate: a client reconciles against a state rather than replaying a
+    /// vocabulary of verbs, so an `expired` status added later needs no new event kind
+    /// and no client change. It is the same reasoning as the frame parser's — read the
+    /// name, dispatch on the content — and the opposite of the mistake `capabilities`
+    /// facets exist to prevent, since a row speaks only for the request it names.
+    ///
+    /// One event per row rather than one per batch, even when a link death abandons
+    /// several. A batch would make a client diff two sets to learn what changed, which
+    /// is the work this event exists to save it.
+    pub async fn announce_request(&self, session_id: &str, request: &PendingRequest) {
+        self.publish_session_event(
+            session_id,
+            "request",
+            serde_json::to_value(request).unwrap_or_default(),
         )
         .await;
     }

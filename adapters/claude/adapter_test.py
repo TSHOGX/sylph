@@ -456,6 +456,184 @@ class PermissionModeIsValidated(unittest.TestCase):
         for mode in adapter.INTERACTIVE_MODES:
             self.assertIn(mode, adapter.PERMISSION_MODES, mode)
 
+    def test_manual_is_not_offered_because_the_vendor_normalizes_it(self):
+        # Measured on 2.1.246: `set_permission_mode` answers **success** for `manual`
+        # and confirms `default`. A row that lands on a different row is the same
+        # defect as the bypass bug by another route, and only a read-back can see it —
+        # an error check cannot, because there is no error.
+        self.assertNotIn("manual", adapter.SETTABLE_PERMISSION_MODES)
+        self.assertNotIn("manual", adapter.FLAGS["mode"]["choices"])
+
+    def test_auto_is_offered_because_the_vendor_applies_it_as_given(self):
+        # It was settable all along and absent from the offered list, so a real mode
+        # was unreachable through the UI.
+        self.assertIn("auto", adapter.SETTABLE_PERMISSION_MODES)
+
+    def test_every_settable_mode_is_one_the_cli_knows(self):
+        for mode in adapter.SETTABLE_PERMISSION_MODES:
+            self.assertIn(mode, adapter.PERMISSION_MODES, mode)
+
+    def test_the_live_picker_offers_exactly_the_settable_set(self):
+        # The spawn flag's choices and the runtime setter's are different questions,
+        # and answering the second with the first is what offered `manual` and hid
+        # `auto`. Pinned on the produced surface rather than on the constant, so the
+        # wiring is what is checked.
+        options = adapter.config_from({"current_permission_mode": "default"})
+        picker = next(o for o in options if o["id"] == "permissionMode")
+        self.assertEqual(
+            [choice["value"] for choice in picker["options"]],
+            adapter.SETTABLE_PERMISSION_MODES,
+        )
+
+
+class AVendorRefusalIsNotASuccess(unittest.TestCase):
+    """`control` must raise when claude answers `subtype: "error"`.
+
+    This is the defect behind the reported bug. An error envelope carries `error` and
+    **no** `response`, so the old `response.get("response") or {}` mapped a refusal onto
+    the same `{}` a successful no-payload control returns. Selecting
+    `bypassPermissions` was refused by the CLI ("because the session was not launched
+    with --dangerously-skip-permissions"), recorded as applied, answered 200, and
+    rendered as current — while every tool call went on asking for permission.
+
+    Driven through `_translate` rather than by setting the box directly, because the
+    unwrap that caused this lived in the dispatcher and a test that skipped it would
+    pass against the bug.
+    """
+
+    def setUp(self):
+        self.session = adapter.Session()
+        self.sent = []
+        self.session.to_claude = self.sent.append
+
+    def _answer(self, envelope):
+        """Feed one control_response for whatever request was just sent."""
+        request_id = self.sent[-1]["request_id"]
+        self.session._translate({
+            "type": "control_response",
+            "response": {"request_id": request_id, **envelope},
+        })
+
+    def _run(self, target, *args, **kwargs):
+        """Call a blocking control in a thread so this test can answer it."""
+        import threading
+        box = {}
+
+        def go():
+            try:
+                box["value"] = target(*args, **kwargs)
+            except BaseException as error:      # noqa: BLE001 - re-raised below
+                box["error"] = error
+
+        thread = threading.Thread(target=go)
+        thread.start()
+        for _ in range(200):                    # wait for the request to be written
+            if self.sent:
+                break
+            import time
+            time.sleep(0.005)
+        return thread, box
+
+    def test_an_error_envelope_raises_rather_than_returning_empty(self):
+        thread, box = self._run(self.session.control, "set_permission_mode",
+                                mode="bypassPermissions")
+        self._answer({
+            "subtype": "error",
+            "error": "Cannot set permission mode to bypassPermissions because the"
+                     " session was not launched with --dangerously-skip-permissions",
+        })
+        thread.join(timeout=5)
+        self.assertIsInstance(box.get("error"), adapter.VendorRefused)
+        # The vendor's own sentence survives: it names the precondition, which is the
+        # part a generic adapter error would destroy.
+        self.assertIn("--dangerously-skip-permissions", str(box["error"]))
+
+    def test_a_success_envelope_is_unwrapped_to_its_payload(self):
+        thread, box = self._run(self.session.control, "set_permission_mode",
+                                mode="plan")
+        self._answer({"subtype": "success", "response": {"mode": "plan"}})
+        thread.join(timeout=5)
+        self.assertEqual(box.get("value"), {"mode": "plan"})
+
+    def test_a_refused_permission_mode_does_not_become_the_reported_mode(self):
+        self.session.initialize_response = {"current_permission_mode": "default"}
+        thread, box = self._run(self.session.apply_config, "permissionMode",
+                                "bypassPermissions")
+        self._answer({"subtype": "error", "error": "refused"})
+        thread.join(timeout=5)
+        self.assertIsInstance(box.get("error"), adapter.VendorRefused)
+        # The surface still reports what the session is actually running under. This is
+        # the assertion the bug would fail: it used to read `bypassPermissions`.
+        self.assertEqual(
+            self.session.initialize_response["current_permission_mode"], "default")
+
+    def test_the_confirmed_mode_is_recorded_rather_than_the_requested_one(self):
+        # The `manual` case: success, but the vendor applied something else. Believing
+        # the request here is how a picker reports a policy the session is not under.
+        self.session.initialize_response = {"current_permission_mode": "default"}
+        thread, _ = self._run(self.session.apply_config, "permissionMode", "manual")
+        self._answer({"subtype": "success", "response": {"mode": "default"}})
+        thread.join(timeout=5)
+        self.assertEqual(
+            self.session.initialize_response["current_permission_mode"], "default")
+
+
+class TheApprovalChannelIsAlwaysRegistered(unittest.TestCase):
+    """`--permission-prompt-tool stdio` may not be gated on the launch mode.
+
+    The mode is mutable at runtime and the callback can only be asked for on the
+    command line, so gating it bets the user will never switch. Measured on 2.1.246:
+    launch in `bypassPermissions`, switch to `default`, and every tool call returns
+    `Claude requested permissions to use Bash, but you haven't granted it yet` — no
+    prompt can ever be raised, so such a session could not return to interactive use.
+
+    Asserted on the argv the spawn would use, by intercepting `Popen`, because the
+    ordering bug lived in argv construction and nothing below it could observe one.
+    """
+
+    def argv_for(self, mode):
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, argv, **kwargs):
+                captured["argv"] = argv
+                self.stdin = None
+                self.stdout = []
+
+            def poll(self):
+                return None
+
+        real_popen = adapter.subprocess.Popen
+        real_thread = adapter.threading.Thread
+        adapter.subprocess.Popen = FakePopen
+        # The reader thread would iterate a list and exit, but starting it at all makes
+        # the test depend on scheduling; stubbed for determinism.
+        adapter.threading.Thread = lambda *a, **k: type(
+            "NoThread", (), {"start": lambda self: None})()
+        try:
+            adapter.Session().start("/tmp", None, {}, mode)
+        finally:
+            adapter.subprocess.Popen = real_popen
+            adapter.threading.Thread = real_thread
+        return captured["argv"]
+
+    def test_a_bypassing_launch_still_registers_the_channel(self):
+        argv = self.argv_for("bypassPermissions")
+        self.assertIn("--permission-prompt-tool", argv)
+        self.assertEqual(argv[argv.index("--permission-prompt-tool") + 1], "stdio")
+
+    def test_an_interactive_launch_registers_it_too(self):
+        self.assertIn("--permission-prompt-tool", self.argv_for("default"))
+
+    def test_bypass_is_made_reachable_without_starting_in_it(self):
+        # Both halves matter: the flag has to be present, or `set_permission_mode` is
+        # refused; and the launch mode has to stay as asked, or selecting bypass later
+        # is indistinguishable from having started in it.
+        argv = self.argv_for("default")
+        self.assertIn("--allow-dangerously-skip-permissions", argv)
+        self.assertNotIn("--dangerously-skip-permissions", argv)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
+
 
 class NestedTrajectoriesCarrySpanOnEveryPhase(Emitted):
     """A nested `subagent` must name its parent on *every* phase, not only on open.

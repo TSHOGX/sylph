@@ -56,6 +56,26 @@ impl AdapterIdentity {
     }
 }
 
+/// An adapter refused a command, in its own words and with its own code.
+///
+/// A typed error rather than a formatted string because the two facts it carries have
+/// different audiences: `message` is for a person, and `code` decides which HTTP status
+/// and which UI affordance the refusal earns. `UNSUPPORTED_FIELD` means the control
+/// should not be offered; `INVALID_VALUE` means the control is fine and this one value
+/// is not — and answering the second with the first tells a user their agent cannot do
+/// something it does perfectly well.
+///
+/// Reached through `anyhow`'s `downcast_ref`, so the many layers between an adapter and
+/// an HTTP handler need no signature change to pass it along, and a caller that does
+/// not care keeps treating it as an opaque error.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{code}: {message}")]
+pub struct AdapterError {
+    /// The protocol's error code, as the adapter declared it.
+    pub code: String,
+    pub message: String,
+}
+
 /// Something that happened on a link, for whoever is driving the session.
 #[derive(Debug, Clone)]
 pub enum LinkEvent {
@@ -212,7 +232,21 @@ impl Link {
                         }
                         Inbound::Err { id, code, message } => {
                             if let Some(waiter) = pending.lock().await.remove(&id) {
-                                let _ = waiter.send(Err(anyhow!("{}: {}", code, message)));
+                                // Typed, so a caller can branch on the adapter's own
+                                // code. It used to be flattened into `"{code}: {msg}"`,
+                                // which left every refusal indistinguishable to
+                                // anything above — a *value* the agent rejected and a
+                                // *field* it does not have both surfaced as
+                                // `AGENT_UNSUPPORTED`, whose contract is "disable the
+                                // control". Disabling a permission picker because one
+                                // of its six values was refused is the wrong repair to
+                                // the wrong layer. Recovering the code by parsing the
+                                // message back out was the alternative and is worse:
+                                // the text is the adapter's and may be reworded, while
+                                // the code is a declared part of the protocol.
+                                let _ = waiter.send(Err(anyhow::Error::new(
+                                    AdapterError { code, message },
+                                )));
                             } else {
                                 warn!("Adapter error for unknown command id {}: {}", id, message);
                             }
