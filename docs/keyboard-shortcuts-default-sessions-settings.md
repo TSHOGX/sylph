@@ -38,7 +38,7 @@ in modern apps (VS Code, Linear, Raycast), not just search.
 - Fuzzy search against:
   - Session workdir
   - Agent name
-  - Session content (via TraceDB full-text search)
+  - Session content (full-text search over the server's history)
 - Results show:
   - Session workspace/agent
   - Last updated time
@@ -453,7 +453,7 @@ Restores all settings to defaults
 
 [Clear All Data]
 Deletes journal.db, all sessions, all attachments
-(TraceDB archive is unaffected)
+(an agent's own native files are unaffected)
 ```
 
 ---

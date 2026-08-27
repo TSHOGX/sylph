@@ -67,7 +67,7 @@ shapes:
 | --- | --- | --- | --- |
 | Live turn append | thousands/turn | tiny | tail-follow by `seq` |
 | Timeline read | once per open | one per block | full scan by session |
-| Cross-session search | rare | — | inverted index (TraceDB) |
+| Cross-session search | rare | — | FTS5 index beside `history.db` |
 
 Conflating the first two is the performance bug waiting to happen, and it is a
 property of SQLite rather than of this schema: **a long-running read transaction
@@ -225,42 +225,32 @@ consumer has not read.
 
 ### Two retention classes, because one is not honest
 
-TraceDB ingests from each agent's **native store on the host**. That gives two
-genuinely different situations, and collapsing them would silently lose the
-second:
+**The authority question changed with this rewrite, and it changed in Sylph's
+favour.** Retention used to ask a *separate* archive whether it had ingested a
+session, because that archive was a second copy fed by parsing native stores. With
+one store and one vocabulary (`docs/architecture.md` § One authority), there is no
+second Sylph-side copy to wait for — so the only remaining downstream copy is the
+**vendor's own native store**, and the only question is whether it still exists and
+still holds the session.
 
 | Class | When | Rule |
 | --- | --- | --- |
-| **Delegated** | A native store exists and TraceDB ingests it | Prune below the watermark |
-| **Terminal** | No ingestion path — a sandbox whose store dies with it | Compact, never prune |
+| **Backed** | the vendor's native store still holds this session, on a reachable environment | prune deltas below the confirmed bound |
+| **Terminal** | no reachable native source — a sandbox that is gone, an unpaired environment, a session the vendor never wrote | compact, never prune |
 
-A terminal session's record exists *only* here. There is no watermark to wait
-for, and pruning would destroy the sole copy. Such a session is still compacted —
-deltas folded, blobs externalized, text compressed — but never deleted.
+A terminal session's record exists *only* here, so there is nothing to wait for and
+pruning would destroy the sole copy. It is still compacted — deltas folded, blobs
+externalized, text compressed — but never deleted.
 
-Note what the class boundary rests on: whether a native store exists *and is
-reachable*. `docs/data-architecture.md` makes the server's event stream the
-authority and has remote environments upload native source bytes, which moves
-sessions between these two classes rather than changing either rule. It also draws
-the harder line — once the archive holds a row whose source is gone, the archive is
-the sole copy, so "delete and re-ingest" stops being a recovery and the free-breaking-change
-policy stops applying to that data. The rules in this table are unchanged by any of
-that; which class a given session falls into is not.
+Note what the boundary rests on: whether a native source exists **and is reachable**,
+never who started the session. Reading it as "sessions Sylph started are backed"
+would leave a sandbox session prunable when its store died with the sandbox, and
+reading it the other way leaves everything terminal and prunes nothing — which is
+indistinguishable from retention working correctly on a terminal-only install. That
+is the failure the reporting below exists to make visible.
 
-**One sentence in that document is easy to misread into deleting this table's first
-row.** It says Sylph's own sessions do not enter the archive, and that is about
-*direction*: Sylph never hands the archive normalized events. A Sylph-born session's
-vendor CLI still writes its own native file, and the ordinary parser path still ingests
-it with a real fingerprint — which is precisely what `TraceDbAuthority` confirms a
-watermark against. So the **delegated** class is populated by Sylph-born sessions whose
-vendor store is reachable, and the distinction that matters for retention is
-reachability of that store, never who spawned the process. Reading the rule the other
-way would leave every journal session terminal and prune nothing, which is
-indistinguishable from retention working correctly on a terminal-only install — the
-failure this document's `/diagnostics` reporting exists to make visible.
-
-This is why the watermark is an interface with one question rather than a TraceDB
-call:
+**A confirmation is a statement about a native source, so only the environment
+holding it can make one.** The envagent answers it, because the file is on its disk:
 
 ```rust
 #[async_trait]
@@ -269,37 +259,71 @@ pub trait RetentionAuthority: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// How far a downstream copy is confirmed to extend.
-    async fn confirm(&self, session_id: &str) -> Result<Confirmation>;
+    async fn confirm(&self, session: &SessionId) -> Result<Confirmation>;
 }
 
 pub struct Confirmation {
     /// Highest sequence number safe to drop. `None` means drop nothing.
     pub safe_to_drop: Option<i32>,
-    /// The archived session consulted, in the archive's own id space.
-    pub archive_id: Option<String>,
-    /// Which version of the agent-native source the archive held.
-    pub source_fingerprint: Option<String>,
+    /// What the environment reported about the native source, for the audit row.
+    pub source: Option<NativeSourceState>,
+    /// Why nothing was confirmed, when nothing was.
+    pub withheld: Option<WithheldReason>,
 }
 ```
 
-The signature grew from the bare `safe_to_drop(&self, session_id) -> Option<i32>` this
-section used to show, and both additions are load-bearing rather than convenience.
-`name()` is what lets a stored watermark record *what produced it*, so a row is
-evidence rather than a number. And the provenance travels **with** the sequence number
-rather than being fetched separately, because the two are one observation: a
-`confirmed_seq` derived from one version of a source, recorded beside a fingerprint read
-at another moment, would be a watermark that cannot be checked against anything.
+`TerminalAuthority` always answers `Confirmation::nothing()`. An
+`EnvagentAuthority` asks the environment that owns the session, and an environment
+that is not connected yields **no confirmation at all** — which is the next rule.
 
-`TerminalAuthority` always answers `Confirmation::nothing()`. A TraceDB-backed authority
-answers by confirming what the archive holds. Whether that confirmation is cheap to
-derive was once the open question here, and it is **answered**: `ingest_state`
-(`tracedb/mod.rs:811`) is one targeted `show` requesting `from: 0, to: 0`, so it reads a
-session's ingestion facts without fetching its events.
+**"Cannot ask" must never be recorded as "asked, and nothing is safe".** A watermark
+row is a claim that a check happened. An unreachable environment means the question
+was never put, and writing a zero watermark for it would let a later pass believe a
+bound was established. This distinction is why `Confirmation` carries a `withheld`
+reason rather than only an `Option`.
 
-CAS objects are refcounted separately: an object is removed when no live block
-references it, which is independent of any watermark. A blob shared by a pruned
-block and a retained one survives, because refcounts are the authority on
-reachability and sequence numbers are not.
+**A degraded dependency is one fact per pass, not one per session.** Probe an
+environment's reachability once per pass, not per session, and log an absent one
+once. This repo has paid for the other shape twice, one layer apart: per-session
+probing turned one missing dependency into a warning per session per pass, and a
+timer-driven caller then reproduced the same unbounded stream a layer down. An
+install with no environment paired is a supported configuration, not a fault.
+
+**A subsystem whose correct behaviour is "nothing happened" needs a report.**
+Keeping every block is right for a terminal session and a symptom for a backed one,
+and the observable state — no blocks pruned — is identical. It is also identical to
+never having run at all, which is what an early version was doing while looking
+impeccable. So the watermark row is written even when nothing is confirmed, and
+`/diagnostics` reports confirmed / withheld / terminal / unchanged **separately**,
+because a single `pruned: 0` answers none of the questions that matter.
+
+### What is deleted with the separate archive
+
+Three mechanisms existed only to negotiate with a second store, and they go away
+whole rather than being ported:
+
+- **Archive-id translation.** Sylph keyed a session by UUID while the archive keyed
+  the same conversation as `<agent>:<native-id>`, and comparing across the two id
+  spaces produced no error at any layer — the archive answered "no such session", the
+  caller concluded nothing was confirmed, and every component behaved impeccably
+  while the feature did nothing. That is how the first watermark implementation
+  shipped fully written and tested, pruning nothing, with an empty watermark table
+  that looked exactly like correct conservatism. With identity now
+  `(environment, agent, native_id)` (`docs/architecture.md`), there is one id space
+  and the unanswerable question cannot be asked.
+- **The archive-global ingestion ack.** It was one monotonic sequence per ingest run,
+  committed after the data transaction so it was never a false positive — but it said
+  nothing about which events of which session were covered, so it could not replace a
+  per-session bound. Its only surfaces were a gRPC response and a `doctor --json` call
+  measured at **2m34s**, because doctor walked every agent's native store.
+- **Per-operation JSON spelling pins.** The old client pinned the exact casing each
+  archive operation emitted (`show` snake_case, `list`/`search`/`stats` camelCase) so a
+  rename failed a test rather than silently yielding `None`. Correct, and no longer
+  needed: the boundary is now a Rust type, so a rename is a compile error.
+
+The rule that *survives* is the one about the shape of a bound. A per-session
+coverage question needs a per-session answer; a global "is the pipeline healthy"
+signal is a different question and must not be substituted for it.
 
 ## Replay
 
@@ -378,7 +402,7 @@ CREATE INDEX cas_refs_by_block ON cas_refs(session_id, seq);
 
 CREATE TABLE watermarks (
   session_id    TEXT PRIMARY KEY,
-  authority     TEXT NOT NULL,        -- 'tracedb' | 'terminal'
+  authority     TEXT NOT NULL,        -- 'envagent' | 'terminal'
   confirmed_seq INTEGER,              -- NULL: nothing confirmed yet
   checked_at_ms INTEGER NOT NULL,
   archive_id        TEXT,             -- which archived session confirmed it
@@ -409,129 +433,40 @@ learn it is large is the kind of read amplification that makes a list view slow.
 deltas are offsets from its start, and without the start they are relative to
 nothing.
 
-## Deriving the TraceDB watermark
+## Deriving a native-source bound
 
-TraceDB has no ingestion-status call — its API is `list`, `show`, `search`,
-`stats`. A watermark therefore has to be derived, and it is, from two facts
-confirmed in its source rather than assumed:
+An environment cannot report "I have ingested through event 400", because a vendor
+CLI has no such notion. What it *can* report is what its own store holds, and a bound
+is derived from two facts about that rather than assumed.
 
-**Ingestion is whole-session and transactional.** A pass compares a source
-fingerprint and either skips the session as unchanged or re-parses it entirely;
-there is no incremental append. So a session present in the archive is complete as
-of its ingestion, never half-delivered.
+**A native store is written whole-message, not half-delivered.** Each of the three
+supported agents appends complete records — `claude` at content-block boundaries,
+`codex` at item completion, `pi` at `message_end` (`docs/agents.md`). So the last
+record in the file is complete, and everything before it is too. What a store never
+contains is intra-message delta timing, which is why pruning drops *deltas* and never
+blocks.
 
-**Losslessness is a structural invariant, not a per-session fact.** There is no
-`mode` field to consult, and there never meaningfully was one: `retain_full` ignored
-its argument and `partial` was canonicalized to `full` on every write, so the guard
-that read it was tautologically true. TraceDB deleted the field rather than keep a
-distinction that did not exist, and `verify`'s schema contract enforces losslessness
-archive-wide. Retention must therefore **not** look for a replacement field — a
-per-session capture-quality question is not one the archive answers, because it is
-not one the archive can fail.
+**A record's identity is the vendor's own.** The bound is expressed as the last
+native record the environment can see, translated by the adapter into the sequence
+number of the Sylph event it produced. The translation belongs to the adapter for the
+same reason parsing does: only it knows the vendor's record layout.
 
-**The bound comes from the extent of what is held.** `coverage` answers a session's
-ingest bounds from one indexed row with every aggregate materialized, which is the
-cheapest shape available and the right one for a per-session check:
+Two rules make a derived bound safe:
 
-```
-watermark(session) = max seq where created_at_ms <= endedAtMs
-```
+* **Bound it by the session's own end**, not by wall-clock recency. A store flushed
+  mid-turn is at message granularity, so its last record may lag the live stream by a
+  whole tool call.
+* **Withhold rather than guess on any ambiguity.** A store whose last record does not
+  map cleanly onto an event, a file that was truncated mid-write (a real `pi` hazard,
+  `docs/agents.md`), or a session the store does not contain at all all yield
+  `Confirmation::nothing()` with a reason — never a zero bound, which would read as a
+  completed check.
 
-`endedAtMs` rather than `ingestedAtMs` is the load-bearing choice, and measurement
-has since made it more load-bearing rather than less. `ingestedAtMs` is when a pass
-*ran*; `endedAtMs` is the timestamp of the last event it actually holds. Using the
-former would assume the agent had flushed its native store completely by the moment
-the scan read it — and agents demonstrably have not: four of the five write
-*mid-turn*, so a pass routinely reads a session whose next event is already being
-composed. `endedAtMs` is a statement about data rather than about timing, so it needs
-no assumption about flush behaviour at all, which is exactly why sub-turn writers do
-not threaten it.
-
-The one thing this costs: `coverage` does not carry `ended_at_ms` today, though it is
-already a column on `sessions`. It has to be added there rather than recovered by a
-second call — the "producer already records it, only the wire drops it" shape this
-file records elsewhere. A watermark derivation must state which row it reads, because
-`SessionCoverage` and `SessionSummary` do not carry the same fields and picking the
-wrong one yields `None` rather than an error.
-
-Because the event-identity question never arises, the earlier worry about matching
-journal rows to archived events is moot: atomicity makes a timestamp bound
-sufficient.
-
-One safeguard is real, and one this section used to claim is not:
-
-* **A session TraceDB has never seen has no row**, which yields no watermark and
-  therefore no pruning. The absent case is safe by construction
-  (`retention.rs:131-138`), and it is the one that matters most, because it is what
-  makes "cannot ask" fail closed.
-* **There is no `events`-count cross-check.** This section previously described one as
-  a second safeguard: a count far below the journal's block count meaning the two
-  disagree, and a disagreement being a reason to withhold. Nothing implements it.
-  Retention never reads a count. `coverage` does carry one, so the cross-check became
-  *available* without becoming *real* — which is the more dangerous state of the two,
-  because a reader checking whether the data exists will now find that it does.
-
-The removed claim is worth keeping visible rather than deleting, because it described
-*conservatism that a reader would otherwise assume is protecting them*. What actually
-bounds the watermark is narrower and should be relied on as such: `endedAtMs` converted
-to a sequence via `max_seq_at_or_before`, admitted only when `mode == "full"`
-(`retention.rs:152`), plus the absent-row case above. Whether the count check is worth
-adding is open: it would cost a second request per session per pass, against a failure
-mode nobody has observed, and `source_fingerprint` already answers the related and more
-useful question of whether the archive's copy has advanced at all.
-
-### What the explicit ack turned out to be
-
-TraceDB now emits one, and it is not the thing this section hoped for. The
-expectation was that an ack would "remove the `endedAtMs` reasoning entirely". It
-does not, and the reason is worth recording because the mistake is easy to repeat:
-
-**The ack is archive-global, not per-session.** `store::record_ingest_status` bumps
-a single monotonic `ingest.next_ack_sequence` once per *ingest run*, and returns it
-with `committedAtMs`. It is committed *after* the data transaction, so it can never
-be a false positive — but it describes a run, not a session, and carries no
-statement about which events of which session are covered.
-
-So coverage and commitment are two facts with two sources, and neither substitutes
-for the other:
-
-| Question | Source |
-| --- | --- |
-| How far does the copy of *this session* extend? | `endedAtMs` — a statement about data |
-| Did the archive durably commit, and is ingestion healthy? | the ack — a statement about a run |
-
-The derivation above therefore stands unchanged. What the ack adds is that the
-second row stops being an assumption.
-
-**The per-session equivalent is `ingestedAtMs`, and it is better here.**
-`store::upsert_many` writes a session's row *and* its events in one transaction, so
-the `ingestedAtMs` on a `list` row is a durable per-session commit marker — exactly
-the confirmation retention wants, at session granularity the global ack cannot
-offer.
-
-**What Sylph actually reads is the fingerprint.** `show` carries
-`file-v2:<sha256>:<bytes>:<mtime_ns>` over the agent-native source, which is the
-value TraceDB itself compares to decide whether to re-ingest. Recorded beside each
-watermark, it says *which version* of the source a confirmation was derived from,
-and makes re-ingestion observable — a pass where every fingerprint is unchanged
-means the archive is not advancing, which is what a stopped ingestion daemon looks
-like and is otherwise indistinguishable from a healthy steady state. It is chosen
-over `ingestedAtMs` because it is content-addressed rather than a clock reading, and
-because it arrives on the `show` call retention already makes; `ingestedAtMs`
-appears only on `list`, which cannot filter by id.
-
-It is deliberately *not* an optimization, and should not be described as one: the
-current fingerprint arrives in the same response that carries the coverage bound,
-so it cannot gate the call that fetches it.
-
-**The ack is not cheaply readable, which is why nothing here depends on it.** Its
-only surfaces are a gRPC ingest response and `trace-db doctor --json` — measured at
-**2m34s**, because doctor walks every agent's native store and verifies the archive.
-`trace-db api` exposes `stats`, `search`, `list`, `show`, `reconstruct`, and none of
-them carry it. A retention pass polling a global epoch would therefore cost far more
-than the per-session reads it was meant to gate. An `ingest_status` op on
-`trace-db api` would fix that — it is a single `schema_meta` read that
-`store::ingest_status` already implements — and is worth asking upstream for.
+**A session with no native source is terminal, not merely unconfirmed**, and the type
+enforces it: an authority that needs a native source to be constructed cannot be asked
+about a session that has none. This is the shape that replaces the old two-id-space
+hazard — the fix is a type that cannot express the unanswerable question, not a more
+careful comparison.
 
 ### Retention runs on a schedule, and reports what it did
 
@@ -546,21 +481,22 @@ Three things make it safe to run often and safe to run at all:
   for opposite responses. An empty `watermarks` table looks exactly like a correctly
   conservative one — which is how a retention path that confirmed nothing stayed
   invisible.
-* **An unreachable archive is one fact about the pass, not N session failures.** The
-  archive is probed once per pass. Without it, delegated sessions are left entirely
-  alone: not pruned, and *not* recorded as checked, because "cannot ask" must not be
-  stored as "asked, and nothing is safe". An install without TraceDB is a supported
-  degraded state, and reporting it per session per pass forever would bury it. The
-  same discipline applies one layer down: `tracedb::Client` reports a spawn failure
-  once at `error` and at `debug` after, because a timer-driven caller would otherwise
-  reproduce the identical unbounded stream from a single missing binary.
+* **An unreachable environment is one fact about the pass, not N session failures.**
+  Each environment is probed once per pass. Without it, that environment's sessions
+  are left entirely alone: not pruned, and *not* recorded as checked, because "cannot
+  ask" must not be stored as "asked, and nothing is safe". An install with no
+  environment paired is a supported state, and reporting it per session per pass
+  forever would bury it. The same discipline applies one layer down, in whatever holds
+  the connection: report an absent peer once at `error` and at `debug` after, because a
+  timer-driven caller otherwise reproduces the identical unbounded stream from one
+  missing dependency.
 * **Blob sweeping is per pass, not per session.** Reachability spans sessions — the
   same file read in two sessions is one blob — so the sweep is a global scan over
   `cas_refs`. Calling it per session would run that scan once per session for one
   pass's worth of work.
 
 `/api/v1/diagnostics` reports the last pass: examined, confirmed, withheld,
-terminal, unchanged, blocks pruned, blobs swept, and whether the archive was
+terminal, unchanged, blocks pruned, blobs swept, and which environments were
 reachable. A subsystem whose correct behaviour is usually "nothing happened" is
 otherwise indistinguishable from one that is broken.
 
@@ -618,15 +554,15 @@ instead, so the delta stays meaningful however often passes run.
 **`grewBy` is absent, not zero, on a first measurement, and signed thereafter.**
 One observation is not a trend, and reporting it as zero would claim a session is
 stable on the strength of never having been looked at twice. Negative is a real and
-useful reading: pruning worked. A field that only reported increases would make a
-working archive indistinguishable from a stalled one.
+useful reading: pruning worked. A field that only reported increases would make
+working retention indistinguishable from stalled retention.
 
 **Measurement is independent of the watermark, and this is the property an obvious
 implementation gets wrong.** Bytes are recorded on every path a pass takes,
-including the one where a delegated session is left entirely untouched because the
-archive is unreachable. Measuring alongside the watermark write would have left the
-byte report **empty on exactly the install whose growth is unbounded** — one with
-no TraceDB, where nothing can ever be pruned. A watermark records what an authority
+including the one where a backed session is left entirely untouched because its
+environment is unreachable. Measuring alongside the watermark write would have left
+the byte report **empty on exactly the install whose growth is unbounded** — one with
+no environment paired, where nothing can ever be pruned. A watermark records what an authority
 confirmed; bytes held are a local fact needing no authority. Hence a separate table
 rather than more columns on `watermarks`.
 
@@ -654,17 +590,24 @@ session's *expected* state and a line per session would be an unbounded stream
 reporting nothing wrong.
 
 What an operator does about a session that is too large is delete the session, or
-move its environment to one TraceDB can ingest so it stops being terminal. Both are
+pair the environment holding its native source so it stops being terminal. Both are
 decisions with an owner. Neither belongs to a background timer.
 
-### The two id spaces
+### One id space, and the hazard that shaped it
 
-Sylph keys a session by UUID; the archive keys one as `<agent>:<native-id>`. The two
-are disjoint, and comparing them directly is **silently always false** — the archive
-answers "no such session", retention correctly keeps everything, and every layer
-behaves impeccably while the subsystem does nothing. That is not a hypothetical: it
-is how the first TraceDB authority shipped, written and tested, confirming nothing.
+Identity is `(environment, agent, native_id)` throughout — the same triple the
+vendor's own store keys on (`docs/architecture.md`). There is no translation layer,
+so the comparison that used to be silently always false cannot be written.
 
-The authority therefore cannot be constructed without an archive id, so the
-unanswerable question cannot be asked. A session with no native id has no archive
-identity at all, which makes it terminal rather than merely unconfirmed.
+It is recorded here because the failure is worth recognizing in a new subsystem.
+Sylph once keyed a session by UUID while its archive keyed the same conversation as
+`<agent>:<native-id>`; comparing across the two produced no error at any layer — the
+archive answered "no such session", retention correctly kept everything, and every
+component behaved impeccably while the subsystem did nothing. It shipped fully
+written and tested, confirming nothing, with an empty watermark table that looked
+exactly like correct conservatism.
+
+The generalizable fix is not a more careful comparison. It is that a type needing the
+downstream identity to be constructed cannot be asked the unanswerable question, and
+anything comparing an id against an external store needs a test with a *real*
+external id, because a wrong one passes.

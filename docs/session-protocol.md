@@ -1,979 +1,709 @@
-# Agent Session Protocol (`sylph.agent.v3`)
+# Session Protocol
 
-The contract between the Sylph server and a pluggable agent.
+The contract between the server and an agent. One event vocabulary, two ways of
+obtaining events, three ways an adapter is asked for them.
 
-## What v3 changed, and why it needed a version
+## What changed from `sylph.agent.v3`, and why it is not a new version number
 
-v2 held for one agent and broke on the second. Two of its choices were wrong in a
-way no amount of adapter code could hide.
+v3 was a wire protocol between the server and a subprocess speaking NDJSON on
+stdio. Its **vocabulary** was right and is kept almost unchanged. Its **transport**
+was a mistake this rewrite removes: an adapter is now a Rust trait linked into the
+envagent, and NDJSON survives only on `sylph.env.v1`, where bytes genuinely cross a
+machine boundary (`docs/environments.md`).
 
-**A capability surface was one value, replaced wholesale.** `claude` emits its
-`system/init` message *once per turn*, not once per process — measured, two user
-messages produce two `init`s. The adapter turned each into a `capabilities` event
-carrying only the permission mode, and the server assigned it over the cached
-surface. So the first turn of every session erased the project's 46 slash
-commands, and the composer's menu stopped opening. Merging partials would have
-patched the symptom; the defect was that a message speaking about one part of the
-surface could silently erase another. v3 makes a capability update **facet-scoped**
-(§ Capability facets), so an unmentioned facet cannot be cleared.
+So there is no `v4`. The event and request vocabulary is versioned by the envagent
+wire protocol it travels on, because that is now the only place a version can
+disagree with anything.
 
-**Every slash command was modelled as a kind of turn.** That is right for
-`/verify` and wrong for `/model`. Sent as prompt text, `/model` returns a
-paragraph listing the models — which is the CLI behaving correctly, because a
-headless client has no picker to open. The fix is not in the translation. It is
-that a control command needs typed state a client can render as a picker, so
-choosing an option sends a typed set rather than prose.
+Three things went away with the subprocess, and each had cost real debugging time:
 
-Three protocols reached the same split independently, which is what makes it a
-generalization rather than a guess:
+**Agent discovery, and its two total failures.** Discovery spawned every candidate
+adapter and exchanged a handshake. When it found none, `/agents` was empty, no
+session could be created, every existing session reported `attached: false`, so
+`commands` was `[]` and the composer's slash menu made `/` a dead keystroke — a
+symptom three layers from the cause, logged at the same level as success. The second
+instance was an E2E fixture holding only a stale `runner.sh`: the suite failed against
+an agent that did not exist, reading as broken features. With adapters linked in, "is
+this agent available" reduces to "is the vendor CLI on `PATH`", which is one question
+with one answer and an error message that can say it.
 
-| | commands | model and mode |
-| --- | --- | --- |
-| **ACP** (the Agent Client Protocol spec) | `AvailableCommand {name, description, input?}` | `SessionModelState`, `SessionModeState`, `SessionConfigOption` |
-| **codex app-server** | no command concept at all | `model/list`, `config/value/write`, `thread/settings/updated` |
-| **pi** (`--mode rpc`) | `get_commands`, which *excludes* built-in TUI commands by design | `set_model`, `set_thinking_level`, `get_available_models` |
+**Two per-vendor normalizers for one vocabulary.** Live turns went through
+`adapters/*/adapter.py`; native history went through trace-db's `parsers/`. Same
+concepts, two implementations, two stores, two query paths — and the drift was
+structural rather than incidental. They are now one module per vendor
+(`docs/agents.md`).
 
-`claude` is the outlier: `/model`, `/context`, `/compact` and `/clear` sit in the
-same list as `/verify` with no field telling them apart. Since no vendor supplies
-that discriminator, **the adapter classifies** — it owns vendor translation, and
-which of an agent's commands are control surfaces is a vendor fact. A hardcoded
-list in the server or the UI would be wrong for the next agent, which is the
-mistake v3 exists to stop repeating.
+**A protocol boundary that made vendor-key defects survivable.** The most-repeated
+defect class in `AGENTS.md` is reading the wrong key off a vendor payload: seven
+instances, each one compiling, each surfacing one or two layers from the cause. A
+typed adapter does not prevent misreading a vendor's JSON, but it removes the JSON
+round trip *behind* the adapter, so a mismatch between adapter and server is a
+compile error rather than a field that parses as `None`.
 
-## Why the old contract cannot be extended
-
-The v1 contract is: pass the prompt on stdin, **close stdin**, read NDJSON from
-stdout, trust the last line. Closing stdin is load-bearing there — it is how the
-runner knows the prompt ended — and it is also what makes a native experience
-impossible.
-
-This was measured, not assumed. Running `claude -p --input-format stream-json
---output-format stream-json --permission-prompt-tool stdio` against a project
-with an `ask` permission rule, the CLI sends a `can_use_tool` request back over
-stdin and waits. With v1's `stdin.close()` the turn dies:
-
-```
-Tool permission request failed: AbortError: Stream closed
-```
-
-Holding stdin open, the same request arrives, is answerable, and the turn
-proceeds. Every native capability follows from that one difference:
-
-| Capability | Native channel | v1 result |
-| --- | --- | --- |
-| Approval prompts | `can_use_tool` request, awaits a reply | Stream closed; tool fails |
-| Slash commands | `initialize` returns 46 real commands here | 1–2 hand-declared in `--describe` |
-| Subagents | `task_*` notifications, `parent_tool_use_id` | Flattened into opaque tool calls |
-| Interrupt | `interrupt` request, session survives | SIGTERM kills the session |
-| Mid-turn steering | Further stdin messages | stdin already closed |
-| Model / mode switch | `set_model`, `set_permission_mode` | Only at spawn |
-| Context usage | `get_context_usage` | Unavailable |
-
-The gap is not a missing feature. It is that v1 models a **turn** as the unit of
-execution, and every agent CLI models a **session**.
+What is **kept from v3** because it was right: facet-scoped capability updates, the
+session-not-turn unit, typed config options, the request/resolve inversion with
+declared forms, `span`-based delegated trajectories with promotion, and the
+distinction between `UNSUPPORTED_FIELD` and `INVALID_VALUE`. Each of those exists
+because a specific defect shipped without it, and every one is restated below rather
+than referenced, because a reader implementing an adapter needs them in one place.
 
 ## The unit is a session, not a turn
 
-A turn is an event inside a conversation. v1 spawns one process per turn, so
-anything the agent learned about *being in a conversation* — pending approvals,
-loaded skills, permission decisions, subagent state — is discarded between
-turns and rebuilt from a resume id.
+An adapter holds a session for its lifetime. A turn is a message on it.
 
-v3 keeps a live process for the session and runs turns inside it. The process is
-called a **link**, and a session is `attached` (a link is live) or `detached`.
+v1 spawned a process per turn, which made every stateful thing a vendor CLI knows —
+loaded skills, permission grants, a warmed context, an MCP connection — reachable
+only by restarting and re-resolving it. Worse, it made "the turn ended" and "the
+process exited" the same event, so an agent that speaks after its turn (see § An
+agent may start a turn) had nowhere to speak from.
 
-A link is **not** required for a session to work. Links are expensive and do not
-survive a server restart, so:
+So: `open` once, then a turn per `send`, and the outcome arrives as an event rather
+than as an exit code.
 
-* A turn on a detached **Sylph-born** session **establishes a link first**,
-  resuming the agent's native session by id. This is the ordinary path after any
-  restart, not an error path.
+## An adapter is a trait, with three modes
 
-  This does **not** generalize to an adopted session — one somebody else started
-  in a terminal. There, the process is already alive and holds the vendor's own
-  session; spawning a second one to "resume" it would fork the conversation into
-  sibling branches off one parent pointer, which no vendor CLI locks against and
-  no storage layer reports. Detached-plus-adopted means *reachable only through
-  whatever second-party channel the vendor exposes*, which is per-agent and
-  sometimes nothing. `docs/data-architecture.md` § AFK is two capabilities holds
-  the measured table; § One link state, two typed capability facets is why this is
-  not a third value of `attached`.
-* A link idles out (default 30 minutes) and is torn down. History is unaffected;
-  the next turn re-establishes.
-* Interactive capability is a property of the link, so the UI reports it as
-  live state rather than promising it unconditionally.
+```rust
+#[async_trait]
+pub trait Adapter: Send + Sync {
+    /// Which agent this speaks for, and what the local CLI reports about itself.
+    async fn probe(&self) -> Result<AgentInfo>;
 
-This is what makes the browser experience match the terminal: while attached,
-the same requests and notifications a TUI would render are available; while
-detached, the session is still complete, resumable, and searchable.
+    /// Hold a live session's stdio. The returned handle carries turns both ways.
+    async fn run(&self, spec: RunSpec) -> Result<Box<dyn Session>>;
 
-## Shape
+    /// Parse what the vendor's native store already holds, once.
+    async fn adopt(&self, id: &NativeId) -> Result<EventStream>;
 
-The server never speaks a vendor protocol. An **adapter** does, one per agent,
-living where v1's runner lived:
+    /// Parse, then follow the native store as it grows.
+    async fn watch(&self, id: &NativeId) -> Result<EventStream>;
 
-```
-server ──sylph.agent.v3 over stdio──► adapter ──vendor protocol──► agent CLI
-         (normalized, this document)             (stream-json, JSON-RPC, rpc)
+    /// Which native sessions this machine's store holds.
+    async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>>;
+}
 ```
 
-Keeping the adapter a separate process rather than a Rust module is deliberate,
-and it is the one thing v1 got unambiguously right: adding an agent means
-dropping in a directory, with no server build. It also contains a vendor's
-protocol churn in a script the user can read and patch, and it keeps a crashing
-adapter from taking the server down.
+**All three modes emit the same events.** That is the point of the shape: the
+journal, the history fold, the timeline, replay, and search see one vocabulary and
+cannot tell which mode produced a given row. The only visible difference is
+`fidelity` on the record (`docs/architecture.md`), which says how much resolution the
+source had.
 
-An agent is a directory containing an executable `adapter.sh`. Bundled adapters
-ship in the repo, because an adapter is versioned with the protocol it implements
-and a protocol change breaks it; third-party ones live in the configured agents
-directory, which is what keeps "add an agent by adding a directory" true.
+| Mode | Source | Fidelity | Control facet |
+| --- | --- | --- | --- |
+| `run` | the process's own stdio | `stream` | full |
+| `watch` | native store, followed | `blocks` or `messages`, per vendor | whatever the vendor offers a second party |
+| `adopt` | native store, one pass | `blocks` or `messages`, per vendor | none while it runs; full once resumed by `run` |
 
-## Framing
+`enumerate` is what makes adopt and watch offerable in a UI: it answers "what is on
+this machine" without parsing every session.
 
-NDJSON in both directions on the adapter's stdin and stdout. One JSON object per
-line, UTF-8, no embedded newlines. stderr is diagnostics, captured but never
-parsed.
+### What the adapter owns, and what it must not
 
-Every message carries `t` (type). Requests carry `id`, unique per direction for
-the life of the link; responses echo it. Correlation is explicit because both
-sides originate requests concurrently, and an implicit ordering would deadlock
-the first time both spoke at once.
+**Owns:** the vendor CLI's command line and native store format, translation in both
+directions, the vendor's own ids, and the decision to omit rather than guess.
 
-```json
-{"t":"send","id":"c7","text":"fix the failing test"}
-```
-
-Three classes, distinguished by who must answer:
-
-| Class | Direction | Answer |
-| --- | --- | --- |
-| **Command** | server → adapter | An `ok` or `err` echoing `id` |
-| **Request** | adapter → server | A `resolve` echoing `id` |
-| **Event** | adapter → server | None; fire and forget |
-
-An unknown `t` is ignored with a warning, never fatal. That is what lets a newer
-adapter talk to an older server: the protocol grows by adding message types, and
-a peer that does not know one behaves as though the sender had not sent it.
-
-## Handshake
-
-The server opens the link, then negotiates before anything can go wrong:
-
-```json
-{"t":"hello","id":"h1","protocol":"sylph.agent.v3","server":"sylph-web/0.1.0",
- "accepts":["approval","dialog","elicitation","choice"]}
-```
-
-`accepts` is what the *server* can handle. An adapter must not send a request
-kind absent from it — a server that cannot render approvals must never be handed
-one, because the agent would block forever on a reply that no UI will produce.
-This is the one place a capability mismatch could hang a session, so it is
-negotiated rather than discovered.
-
-The adapter replies with what it and its CLI can actually do:
-
-```json
-{"t":"ok","id":"h1","adapter":"claude/3.0.0","agent":{"name":"claude","version":"2.1.238"},
- "supports":["interrupt","steer","approval","subagent","slash","set_config","context","fork"],
- "flags":{"model":{"choices":["opus-5","sonnet-5"],"description":"..."},
-          "effort":{"choices":["low","medium","high","xhigh","max"]}}}
-```
-
-`supports` is a closed vocabulary; unknown entries are ignored. It drives the UI
-directly, which is why nothing in the frontend hardcodes an agent's abilities —
-a composer that offers interrupt to an adapter that cannot interrupt is a lie the
-handshake prevents.
-
-`flags` carries the coarse, spawn-time option schema: what can be chosen *before*
-a session exists, which is all the create-a-session screen can know. Anything
-adjustable on a live session belongs in `config` instead (§ Session config), and
-an adapter that can adjust a knob at runtime should declare it in both — `flags`
-so it can be chosen at creation, `config` so it can be changed afterwards.
-
-An adapter that declares `approval` in `supports` must be able to raise one. `pi`
-is the worked example of the other case: it has no sandbox and no tool-permission
-callback, so its adapter declares no `approval`, and the UI must not offer an
-approval affordance for a `pi` session. That is what makes `supports` load-bearing
-rather than decorative.
+**Must not:** decide identity injection (the server passes it), invent an event kind
+the vocabulary does not have, retry a turn on its own, or report a refusal as a
+success. That last one has its own paragraph in § A refused set because it shipped.
 
 ## Opening a session
 
-```json
-{"t":"open","id":"o1","workdir":"/Users/x/p","sessionId":"<native-id|null>",
- "soul":"/path/to/SOUL.md","flags":{"model":"opus-5"},
- "permissionMode":null,"env":{}}
-```
+`RunSpec` carries what a session is opened with:
 
-`sessionId` is the agent-native id to resume, or `null` for a fresh session.
-`soul` is a path, or `""` to inject nothing — the empty string is meaningful,
-exactly as in v1, and it is how the native-session invariant is enforced from the
-server side.
+| Field | Meaning |
+| --- | --- |
+| `workdir` | the agent's `current_dir`, already contained by the envagent |
+| `native_id` | dictate this id, or `None` to resume an existing one, or `New` to let the vendor assign |
+| `inject_identity` | whether to append `SOUL.md`; the server decides, not the adapter |
+| `flags` | spawn-time options: model, effort, and whatever the agent declared |
+| `permission_mode` | initial mode, if the vendor takes one at launch |
 
-**`permissionMode` and `env` are in the frame and the server never populates either.**
-`links/mod.rs:481` passes `permission_mode: None`, and `link.rs:378` sends
-`env: HashMap::new()` regardless of what `LinkConfig.env` holds. An adapter must
-therefore treat both as absent rather than as a configuration channel. This example
-previously showed `"permissionMode":"ask"` and `"env":{"SYLPH_SESSION":"<web-uuid>"}`;
-**`SYLPH_SESSION` does not exist anywhere in this codebase** and never reached an
-adapter. The one variable that does is `SYLPH_SOUL`, injected into the adapter's
-*process* environment at spawn (`link.rs:119`) rather than carried in this frame — so
-an adapter reading `env` for its identity path finds nothing.
+**Dictating the id is the preferred path and is already how it works.** *Measured
+2026-08-27:* `claude`'s adapter mints a UUID and passes `--session-id`
+(`adapters/claude/adapter.py:425`); `claude`, `pi`, and `gemini` accept the flag;
+`codex` assigns its own and reports it. Dictating means the server knows a session's
+identity before the first event, so nothing has to correlate afterwards.
 
-They are kept in the shape rather than deleted because permission mode is a real
-per-session concept the server may yet resolve, and removing a field from a frame
-adapters already parse is a breaking change for no gain. Populating them is the change
-to make; until then the honest documentation is that they arrive empty.
+An adapter that cannot dictate reports the vendor's id on `open`, and the server
+keys the session on what came back. **An `open` that reports no id at all is a
+failure**, not a degraded success: without an id the session can never be resumed,
+so every link death — the 30-minute idle reaper, a restart, an explicit detach —
+would make it permanently unlinkable. That was a real bug on the resume path.
 
-The reply is the session's real capability surface, which is only knowable once
-the CLI has loaded the project:
+### A launch flag gating a runtime-mutable value must be set unconditionally
 
-```json
-{"t":"ok","id":"o1","sessionId":"abc-123",
- "commands":[{"name":"verify","description":"Verify that a change does what it should",
-              "argHint":"[target]","source":"skill","kind":"prompt"},
-             {"name":"model","description":"Set the AI model","aliases":[],
-              "source":"builtin","kind":"control","configId":"model"}],
- "subagents":[{"name":"Explore","description":"..."}],
- "config":[{"id":"model","name":"Model","category":"model","type":"select",
-            "currentValue":"opus[1m]",
-            "options":[{"value":"opus[1m]","name":"Opus (1M context)"},
-                       {"value":"sonnet","name":"Sonnet 5"}]}],
- "permissionMode":"ask","contextWindow":1000000}
-```
+*Measured on `claude` 2.1.246.* `--permission-prompt-tool` can only be asked for on
+the command line, while the mode it serves changes at runtime through
+`set_permission_mode`. Gating it on the *launch* mode therefore lost the approval
+channel permanently for anyone who switched: launch bypassing, switch to `default`,
+and every tool call answers `Claude requested permissions to use Bash, but you
+haven't granted it yet` — a session that could never return to an interactive mode,
+which is worse than the bug that led there.
 
-`commands` is the agent's own answer to "what can I be asked to do". On a real
-project it returns dozens of entries — skills, project commands, plugins — and the
-server does not curate it.
-
-## Two kinds of command
-
-```
-A prompt command is what the agent thinks about.   →  a turn
-A control command is what the session *is*.        →  typed state
-```
-
-`kind` is `prompt` or `control`, and **absent means `prompt`** — so an adapter that
-says nothing behaves exactly as it did in v2.
-
-A `prompt` command is delivered as a turn (§ Slash commands are turns). Its output
-is durable history, it can be interrupted and steered, and it can raise approvals.
-
-A `control` command is **never** a turn. It names a `configId`, and a client
-renders the matching config option as a picker; choosing an option sends
-`set_config`. This is the difference between `/model` opening a list of models and
-`/model` returning a paragraph about them.
-
-`aliases` is carried because agents ship them and a terminal honours them: `claude`
-gives `/usage` the aliases `cost` and `stats`, and `/clear` the aliases `reset` and
-`new`. A menu that ignores them is a menu that behaves unlike the terminal it is
-modelled on.
-
-Which commands are control commands is the **adapter's** judgement. No vendor
-supplies the discriminator, and the answer differs per agent: `pi` already excludes
-its built-in TUI commands from `get_commands`, so almost everything it reports is a
-prompt; `claude` reports its builtins inline, so its adapter must classify them.
-Putting that list in the server or the UI would encode one vendor's taxonomy as
-though it were universal.
-
-## Session config
-
-Everything adjustable on a live session, in one shape:
-
-```json
-{"id":"effort","name":"Reasoning effort","category":"effort","type":"select",
- "currentValue":"medium",
- "options":[{"value":"low","name":"Low"},{"value":"max","name":"Max"}]}
-
-{"id":"autoCompaction","name":"Auto-compaction","category":"compaction",
- "type":"boolean","currentValue":true}
-```
-
-`type` is `select` or `boolean`. `category` is advisory grouping — `model`,
-`effort`, `permission_mode`, or anything an agent invents — and a client groups by
-it without needing to know the vocabulary. The shape is ACP's
-`SessionConfigOption`, adopted rather than invented because it already covers
-`claude`'s model / effort / permission mode / output style, `pi`'s model / thinking
-level / queue modes, and `codex`'s approval policy.
-
-```json
-{"t":"set_config","id":"c9","configId":"model","value":"sonnet"}
-```
-
-The `ok` reply carries the **refreshed** `config` array, not an acknowledgement,
-because setting one option can change another's choices. This is not defensive:
-`pi`'s thinking levels depend on the selected model — the current one offers only
-`off` and `high` — and `claude` carries `supportedEffortLevels` per model. A design
-where effort is one session-global enumeration is wrong for both, which is what
-v2's flat `flags.choices` was.
-
-`select` and `boolean` are enough for every knob the four surveyed agents expose. A
-numeric or free-text type is a later addition, not a placeholder now.
-
-### A refused set: two codes, and why the difference is load-bearing
-
-An adapter that will not apply a set answers `err` with one of two codes, and they
-are **not interchangeable**:
-
-| code | Means | What a client may do |
-| --- | --- | --- |
-| `UNSUPPORTED_FIELD` | This agent has no such option | Disable the control |
-| `INVALID_VALUE` | The option is real; *this value* was rejected | Report it, leave the control usable |
-
-The server classifies on this code — `INVALID_VALUE` becomes `INVALID_REQUEST`
-(400), `UNSUPPORTED_FIELD` becomes `AGENT_UNSUPPORTED` (409) — so answering with the
-wrong one is not a cosmetic difference: it tells a user their agent cannot do
-something it does perfectly well, and invites disabling a picker because one of its
-values was refused for a reason the session could change.
-
-Both adapters already made this distinction and the server used to destroy it,
-flattening every adapter error into one status. `claude` is the case that showed why
-it matters: `set_permission_mode` to `bypassPermissions` is refused outright unless
-the process was launched with a flag marking that mode available, so five of the six
-offered modes were settable and one was not — a refusal about a *precondition*,
-reported as a missing capability, three layers from the picker it sent people to.
-
-An adapter must also not report a refusal as success. `claude` answers a refused
-control with `subtype: "error"` and **no** `response` member, so a reader that reaches
-straight for `response` maps a refusal onto the same empty value a successful
-no-payload control returns — after which the setting is reported as applied, the
-server answers 200, the UI renders the new value as current, and the session goes on
-behaving as it did. Nothing errors anywhere. See AGENTS.md § Pitfalls.
-
-Relatedly, an adapter reports `currentValue` from **what the vendor confirmed**, never
-from what was requested. A vendor may apply something other than what it was asked:
-`claude` accepts `manual` and confirms `default`, normalizing it silently. A `success`
-check cannot see that — only reading the confirmed value back can.
+Register such a channel unconditionally. A mode that decides alone simply never
+consults it.
 
 ## Capability facets
 
 A capability update names the facets it speaks about. **A facet that is not
 mentioned is not changed.**
 
-```json
-{"t":"event","kind":"capabilities","facets":{"commands":[…]}}
-{"t":"event","kind":"capabilities","facets":{"config":[…],"permissionMode":"plan"}}
-```
-
 Facets: `commands`, `subagents`, `config`, `permissionMode`, `contextWindow`.
 
-This is the one shape v2 got wrong badly enough to need a version. There, a
-capability event carried the whole surface and the server assigned it, so an
-adapter reporting a permission-mode change also declared that the session had no
-commands. Nothing in the wire format said that was happening, and the symptom
-appeared two layers away as a menu that would not open.
+This is the one shape v2 got wrong badly enough to need a version, and the reasoning
+survives the transport change intact. `claude` emits `system/init` once **per turn**,
+not once per process — so an adapter answering it with a whole-surface payload
+carrying only the permission mode erased the project's 46 slash commands on the first
+exchange of every session, and the symptom appeared two layers away as a composer
+menu that would not open.
 
-Merging partials would have fixed the same bug at the same cost, and would have
-left the hazard: a message about one part of the surface would still be *able* to
-speak for the whole of it, and the next adapter would rediscover that. Naming the
-facet makes silence mean silence.
+Merging partials would have fixed that instance at the same cost and left the hazard:
+a message about one part of the surface would still be *able* to speak for the whole
+of it, and the next adapter would rediscover it. Naming the facet makes silence mean
+silence.
 
-`facets` is the only member the server reads. v2's whole-surface `capabilities`
-member was accepted alongside it for a while, and that was the wrong shape to
-tolerate: the two carry the same field names, so a *partial* update sent under the
-old key parsed as facets and was applied as the whole surface — reinstating the
-erasure above from the branch that existed to soften it. An update naming no
-recognized facet is ignored rather than treated as a clear.
+Capability changes are **pushed, not polled**. A skill edited on disk or a plugin
+loading changes what the composer should offer, and a list a client refreshes on its
+own schedule is wrong for however long that schedule is.
 
-Capability changes are pushed, not polled — a skill edited on disk or a plugin
-loading changes what the composer should offer, and a list a client refreshes on
-its own schedule is wrong for however long that schedule is.
+## Session config
 
-## Commands the server sends
+Everything adjustable on a live session, in one shape (ACP's `SessionConfigOption`,
+adopted rather than invented because it already covers `claude`'s model / effort /
+permission mode / output style, `pi`'s model / thinking level / queue modes, and
+`codex`'s approval policy):
 
-| `t` | Meaning |
-| --- | --- |
-| `send` | A user turn: `text`, optional `attachments[]`, optional `command`+`args`, optional `config` overrides |
-| `interrupt` | Stop the current turn, keep the session |
-| `steer` | Inject text mid-turn without ending it; carries `expectedTurnId` |
-| `set_config` | Set one config option by id; `ok` carries the refreshed `config` |
-| `resolve` | Answer an adapter request, echoing its `id` |
-| `query` | Ask for `context` or `cost`. **No server code calls it** — see below |
-| `close` | End the session cleanly; adapter flushes and exits |
-
-**`query` is defined and unused.** `Link::query` (`backend/src/adapter/link.rs:542`) has
-no callers anywhere in the server, so an adapter's handler for it will never run.
-It is also narrower than this table claimed: `diff` and `plan` were listed as askable
-and neither adapter answers them — `claude` handles `context`, `cost`, and `plan` and
-errors `UNSUPPORTED_QUERY` otherwise, `pi` handles only `context` and `cost`.
-
-Kept in the protocol rather than deleted because context and cost are genuinely
-pull-shaped facts: they are worth reading when a user looks at them, not streamed on
-every change. But an adapter author should know that implementing `query` today
-satisfies nothing, and a client cannot request one — there is no endpoint that reaches
-it. If a "context remaining" indicator is built, wiring this is part of that work.
-
-`send` returns `ok` as soon as the turn is accepted, not when it finishes. Turn
-completion is an event, because a turn outlives any request that started it —
-the same reason `POST /turns` returns `202`.
-
-**Per-turn config travels with the turn.** `send` carries the overrides that turn
-needs rather than the server issuing `set_config` calls before it. Those were three
-round trips with a window in between where a turn could run under a mix of old and
-new settings, and a failure partway left no single answer to "what did this turn
-run as". codex models the same thing the same way, documenting a turn-scoped
-override as applying "for this turn and subsequent turns".
-
-**`steer` names the turn it means.** Without that precondition a steer racing a
-turn boundary is delivered into the *next* turn — the message arrives, nothing
-errors, and it lands in the wrong conversation. codex requires the same field and
-fails the request "when it does not match the currently active turn". A mismatch is
-an `err`, not a silent redirect.
-
-## Requests the adapter sends
-
-The inversion that v1 could not express: the agent asks, and a human answers.
-
-```json
-{"t":"request","id":"r4","kind":"approval","toolUseId":"toolu_01",
- "tool":"Bash","title":"Run a shell command",
- "detail":{"command":"rm -rf build","description":"Clean the build directory"},
- "options":[{"id":"allow","label":"Allow once"},
-            {"id":"allow_always","label":"Allow Bash for this session","persistent":true},
-            {"id":"deny","label":"Deny"}],
- "default":"deny","risk":"destructive",
- "allowPersistent":true,"expiresAtMs":null}
+```rust
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    pub category: String,       // advisory grouping; a client groups without knowing the vocabulary
+    pub kind: ConfigKind,       // Select | Boolean
+    pub current_value: Option<String>,
+    pub options: Vec<ConfigChoice>,
+}
 ```
 
-The server journals it, publishes it to every attached client, and blocks
-nothing else. A client answers:
+Setting one option returns the **refreshed** array, not an acknowledgement, because
+setting one can change another's choices. This is not defensive: `pi`'s thinking
+levels depend on the selected model, and `claude` carries `supportedEffortLevels` per
+model. A design where effort is one session-global enumeration is wrong for both,
+which is what v2's flat `flags.choices` was.
 
-```json
-{"t":"resolve","id":"r4","option":"allow","input":{"command":"rm -rf build"}}
+`Select` and `Boolean` cover every knob the three supported agents expose. A numeric
+or free-text kind is a later addition, not a placeholder now.
+
+### A config value must be unique, and must not be delimited with `/`
+
+**`checked` is computed as a filter** — every producer writes `value ==
+current_value` — so the moment two choices share a value, both rows show a checkmark
+and neither is identifiably the real one. *Measured on `pi` 0.84.3:* of 372 offered
+models, `deepseek-v4-pro` and `glm-5.2` are each offered by two providers, and three
+display names are duplicated. A bare id also made one of each pair *unreachable*,
+since a by-id lookup can only answer with one provider.
+
+A model's identity is `(provider, id)`, never the id alone. Three layers enforce it,
+because a client renders whatever an agent it has never seen reports — including
+agents written by other people: the adapter issues provider-qualified values, the
+list component enforces one current row per single-select group, and the server
+validates a value against what was enumerated.
+
+**The delimiter is a space, not `/`.** 350 of `pi`'s 372 model ids already contain a
+slash (`anthropic/claude-opus-5`, `stealth/ox-alpha`), so splitting on the first or
+last one mis-parses the majority of the catalogue. No provider and no id contains a
+space. A `ConfigChoice.value` is **opaque to the client by contract** — a token to
+echo back, never to parse — which is what lets this encoding change without a client
+change.
+
+### A refused set: two codes, and why the difference is load-bearing
+
+| Code | Means | What a client may do |
+| --- | --- | --- |
+| `UnsupportedField` | this agent has no such option | disable the control |
+| `InvalidValue` | the option is real; *this value* was rejected | report it, leave the control usable |
+
+The server maps these to distinct statuses (`InvalidValue` → 400, `UnsupportedField`
+→ 409), so answering with the wrong one tells a user their agent cannot do something
+it does perfectly well, and invites disabling a picker because one of its six values
+was refused for a reason the session could change.
+
+Both adapters already drew this line and the server used to flatten it into one
+error type. `claude` is the case that showed why it matters: `set_permission_mode` to
+`bypassPermissions` is **refused outright** unless the process was launched with a
+flag marking that mode available — a refusal about a *precondition*, reported as a
+missing capability, three layers from the picker it sent people to.
+
+A typed error is why the code travels rather than the message: the text is the
+adapter's and may be reworded; the code is declared contract. Do not recover a code
+by parsing a message.
+
+### Three rules about reading a vendor's answer
+
+Each of these shipped, and each compiled.
+
+**A vendor's `success` is not a promise it did what you asked.** *Measured on
+`claude` 2.1.246:* `manual` answers success while confirming `default` — the vendor
+normalizes silently — so a picker offering it lands on a different row. An adapter
+therefore records `current_value` from the vendor's **confirmation**, never from the
+request, and offers only values it has watched the vendor apply as given.
+
+**A success and a refusal are different shapes, so a reader for one swallows the
+other.** `claude` answers a refused control with `subtype: "error"` and **no**
+`response` member. An adapter reading `response.get("response") or {}` mapped every
+refusal onto the same empty value a successful no-payload control returns: selecting
+`bypassPermissions` was refused by the CLI, recorded as applied, answered 200, and
+rendered as the current mode while every tool call went on prompting. Read the
+discriminant before the payload; `{}` must never be reachable from two opposite
+outcomes.
+
+**Read current values from the vendor, not from what you last set.** `pi`'s adapter
+reported `current_value` from a field only one code path populated, so any surface
+built by another path — a re-attach, a set reply — reported `None` while the session
+plainly had a model, and the chip fell back to "agent default" with the checkmark on
+no row. The vendor is also the only thing that knows whether a set was *honoured*,
+and a session can be steered by the agent's own TUI besides.
+
+## Two kinds of command
+
+A slash command is either a **turn** (`/verify`, `/review` — it does work and
+produces a transcript) or a **control** (`/model`, `/effort` — it changes state and
+produces nothing). Sent as prompt text, `/model` returns a paragraph listing models,
+which is the CLI behaving correctly, because a headless client has no picker to open.
+
+So a control command is not translated; it is **typed state** a client renders as a
+picker, and choosing sends a typed set. Three protocols reached this split
+independently, which is what makes it a generalization rather than a guess: ACP has
+`AvailableCommand` beside `SessionConfigOption`, `codex`'s app-server has no command
+concept at all but does have `model/list` and `config/value/write`, and `claude`
+exposes both.
+
+A command declared by the agent carries whether it takes input; the composer's menu
+renders from the `commands` facet, which is session state and not agent state — a
+project's real command list depends on files the CLI reads at startup.
+
+## Requests: the agent asks, a human answers
+
+The inversion v1 could not express. A request is raised by the adapter, journaled by
+the server, published to every attached client, and blocks nothing else.
+
+```rust
+pub struct Request {
+    pub id: String,
+    pub kind: RequestKind,          // Approval | Dialog | Elicitation | Choice
+    pub title: String,
+    pub detail: serde_json::Value,  // the vendor's own payload, for display
+    pub form: Option<Form>,         // what input to collect (§ Request forms)
+    pub options: Vec<RequestOption>,
+    pub default: Option<String>,
+    pub risk: Option<Risk>,
+    pub allow_persistent: bool,
+    pub expires_at_ms: Option<i64>,
+}
 ```
 
-`input` may carry an edited version of what the agent proposed, which is how
-"allow, but change the command" works — a real terminal affordance that a
-yes/no dialog would drop.
-
-Request kinds: `approval`, `dialog` (free-form question, e.g. Claude's
-`request_user_dialog`), `elicitation` (MCP-originated structured input),
-`choice`. Each is gated by `accepts` in the handshake.
-
-`allowPersistent` is `false` when a lasting grant must not be offered, and a client
-must then omit the "always allow" affordance entirely rather than merely
-discouraging it. This is not a style preference: `claude` sets it on asks where
-accepting always would write a permission rule *broader than the ask itself*, so
-offering it converts a narrow yes into a wide one the user did not read. Absent
-means it is allowed, which keeps a minimal adapter correct.
-
-`expiresAtMs` is advisory, and present when the agent will stop waiting. `pi`
-auto-resolves a dialog when its own timeout lapses, so a client with no deadline to
-show is racing a clock it cannot see — and the user experiences a dialog that
-answers itself. The server never auto-applies a default when it lapses; that would
-remove the user from the decision this channel exists to give them.
+A resolution carries the chosen option and optionally `input` — which may be an
+**edited** version of what the agent proposed. That is how "allow, but change the
+command" works, a real terminal affordance a yes/no dialog drops.
 
 **A pending request is durable state, not UI state.** It is journaled, survives a
-client disconnect, and is re-delivered on reconnect — otherwise closing a laptop
-lid strands an agent forever. If the link dies with requests outstanding, they
-are journaled as `abandoned` so the timeline explains why the turn stopped
-instead of showing an unexplained gap.
+client disconnect, and is re-delivered on reconnect — otherwise closing a laptop lid
+strands an agent forever. If the link dies with requests outstanding they are
+journaled as `abandoned`, so the timeline explains why the turn stopped rather than
+showing an unexplained gap.
+
+**`allow_persistent: false` means a client must omit the "always allow" affordance
+entirely**, not merely discourage it. `claude` sets it on asks where accepting always
+would write a permission rule *broader than the ask itself*, so offering it converts
+a narrow yes into a wide one the user did not read. Absent means allowed, which keeps
+a minimal adapter correct.
+
+**`expires_at_ms` is advisory and present when the agent will stop waiting.** `pi`
+auto-resolves a dialog when its own timeout lapses, so a client with no deadline to
+show is racing a clock it cannot see and the user experiences a dialog that answers
+itself. The server never auto-applies a default when it lapses — that would remove
+the user from the decision this channel exists to give them.
+
+**First resolution wins**; a second is refused, naming the resolver, so two people
+answering at once is a defined outcome rather than a race.
+
+### Announcing arrival without announcing departure lets a client's view only grow
+
+A request was published when raised and on no path when it left `pending` — not on
+resolve, not when a dying link abandoned it. So the set a client believed it was
+blocked on was monotonic and shrank only when a 20-second backstop poll happened to
+fire. That poll is what made it severe rather than merely late: background refetch is
+off by default, so a backgrounded tab was not polling at all, and refetch-on-focus was
+off too. A question answered on a phone therefore sat on the desktop until reload.
+
+Three things make the fix hold rather than patching one path:
+
+- **One publisher every transition calls.** Three call sites each remembering to
+  announce is three chances to forget, which is how this arose.
+- **The payload is the row, not the transition.** A client reconciles against a state
+  rather than replaying a vocabulary of verbs, so a status added later needs no client
+  change.
+- **Published before the forward to the adapter.** The claim is what makes the answer
+  final, so a request answered against a *dead* link must still retire everywhere.
+
+Testing this by re-reading the request list proves nothing — the row was always
+correct and only the notification was missing. Assert on the session stream, and
+end-to-end use two browser **contexts** rather than two tabs, since two tabs share a
+cookie jar and can pass while a genuinely separate client still hangs.
 
 ### Request forms
 
-An approval asks one thing about one proposed input, and the shape above is enough
-for it. A *question* is not that: the agent authored the choices, there may be
-several questions in one ask, and the answer can legitimately be something the agent
-did not offer. A request therefore declares the input it wants collected, in an
-optional `form`:
+An approval asks one thing about one proposed input. A *question* is not that: the
+agent authored the choices, there may be several questions in one ask, and the answer
+can legitimately be something the agent did not offer. So a request declares the input
+it wants:
 
-```json
-{"t":"request","id":"r7","kind":"choice","title":"Two questions",
- "form":{"fields":[
-   {"id":"q:0","type":"select","label":"Indentation?","mode":"one",
-    "choices":[{"value":"Tabs","description":"Tab characters"},
-               {"value":"Spaces","description":"Space characters"}],
-    "allowOther":true,"notes":{"label":"Notes (optional)"}},
-   {"id":"q:1","type":"select","label":"Linters?","mode":"many",
-    "choices":[{"value":"ESLint"},{"value":"Prettier"},{"value":"Clippy"}]}]},
- "options":[{"id":"submit","label":"Submit"},
-            {"id":"deny","label":"Don't answer"}]}
+```rust
+pub struct Form { pub fields: Vec<Field> }
+
+pub struct Field {
+    pub id: String,
+    pub kind: FieldKind,            // Select { mode: One | Many } | Text { multiline: bool }
+    pub label: String,
+    pub choices: Vec<Choice>,       // each carrying the agent's own description
+    pub required: bool,
+    pub allow_other: bool,          // a value outside `choices` is a real answer
+    pub other_label: Option<String>,
+    pub notes: Option<NotesSpec>,   // annotation attached to the pick, not replacing it
+}
 ```
 
-```json
-{"t":"resolve","id":"r7","option":"submit",
- "input":{"values":{"q:0":"Tabs","q:1":["ESLint","Prettier"]},
-          "notes":{"q:0":"only for generated files"}}}
-```
+**A form is declared, never inferred.** Before this existed a client guessed what to
+collect by sniffing `detail` for field names it recognized (`command`, `file_path`,
+`url`). That is right for an approval, whose subject *is* one proposed tool input, and
+unfixable for anything else: a question's detail carries none of those, so a `Choice`
+rendered as bare buttons with nowhere to type and an `Elicitation` — whose entire
+purpose is free text — rendered as a read-only dump of its own placeholder. Only the
+agent knows what it is asking for.
 
-Field types are `select` (with `mode` `one` or `many`, and `choices` carrying the
-agent's own `description` — on a question the description is most of what makes the
-options readable) and `text` (with `multiline`, `prefill`, `placeholder`). A choice may
-also carry a `label`, which is display text used when it differs from the `value`; an
-absent `label` means render the value itself. A field
-may declare `required`, `allowOther` — permitting a value outside `choices`, which is
-a real answer rather than a note — an `otherLabel` naming that free-text input, and
-`notes`, a free-text annotation attached to
-the pick rather than replacing it.
+**`options` are verbs; fields carry data.** A `Choice` previously overloaded `options`
+as both the answer and the submit button, which is why picking had to submit
+immediately and why a note had nowhere to live. When a surface cannot express
+something, check whether one field is carrying two meanings.
 
-**A form is declared, never inferred.** Before this existed, a client guessed what
-to collect by sniffing `detail` for field names it recognized (`command`,
-`file_path`, `url`, …). A question's detail carries none of those, so a `choice`
-rendered as buttons with nowhere to type and an `elicitation` — whose entire purpose
-is free text — rendered as a read-only dump of its own placeholder. Guessing cannot
-be made to work: only the agent knows what it is asking for. **Absent means the
-older behaviour**, which keeps a minimal adapter and every existing approval correct.
+**The server validates `input` against the stored form** before claiming the request:
+an unknown field id, a `One` field given an array, a value outside `choices` where
+`allow_other` is not set, or a missing `required` field is refused. Same reason as
+config values — the client renders whatever an agent it has never seen reported, so
+the server is what keeps a malformed answer from reaching a vendor CLI that will do
+something undefined with it.
 
-**`options` are verbs; fields carry data.** A `choice` previously overloaded
-`options` as both the answer and the submit button, which is why picking one had to
-submit immediately and why a note had nowhere to live. With a form present, an option
-is what to *do* with the answer — submit it, or decline to give one.
-
-The server validates `input` against the stored form before claiming the request:
-an unknown field id, a `one` field given an array, a value outside `choices` where
-`allowOther` is not set, or a missing `required` field is refused. This is the same
-rule that governs `options` and `set_config` values, and for the same reason — the
-client renders whatever an agent it has never seen reported, so the server is what
-keeps a malformed answer from reaching a vendor CLI that will do something undefined
-with it.
-
-**Answering completely is not cosmetic.** Measured against `claude` 2.1.238: a reply
+**Answering completely is not cosmetic.** *Measured against `claude` 2.1.238:* a reply
 carrying every question's answer is delivered to the model as *"Your questions have
-been answered … You can now continue with these answers in mind"*, while a reply
-that answers one of two arrives as the weaker *"The user answered …"*. Forwarding
-only the first question of a multi-question ask therefore degrades the answer the
-model acts on, which is why one form carries N fields rather than one question.
+been answered … you can now continue with these answers in mind"*, while a reply
+answering one of two arrives as the weaker *"The user answered …"*. Both look like
+success from outside. That is why one form carries N fields rather than one question.
 
+**Writing an answer into a field the vendor does not read is silent.** The
+`AskUserQuestion` reply set `questions[0].selectedOptions`, a key that occurs
+**nowhere** in the 321 MB `claude` binary. The CLI built its tool result from
+`answers[question]`, found nothing, and told the model *"The user did not answer the
+questions."* — so a correct pick, correctly rendered and correctly transported,
+presented as a UI that had lost the click. Grep the binary for the key, and assert on
+the tool result the model actually reads: "the panel closed" and "the answer arrived"
+are different claims and only the second is the feature.
 
-## Events the adapter sends
+## Events
 
-The event kinds are `thinking`, `assistant`, `tool_call`, `tool_result`, `usage`,
-`status`, with phases `started` / `delta` / `completed`. Beyond those:
+Kinds are `thinking`, `assistant`, `tool_call`, `tool_result`, `usage`, `status`,
+with phases `started` / `delta` / `completed`. Beyond those:
 
-| `kind` | Carries |
+| Kind | Carries |
 | --- | --- |
-| `subagent` | Declares a delegated trajectory; its `streamId` is that trajectory's id. Any event's `span` may also promote its referent to one (§ Delegated trajectories) |
-| `compact` | A compaction boundary, so the timeline shows where context was condensed |
+| `subagent` | declares a delegated trajectory; its `stream_id` is that trajectory's id |
+| `compact` | a compaction boundary, so the timeline shows where context was condensed |
 | `turn` | `started` / `completed` with usage, cost, duration, stop reason |
-| `capabilities` | `facets`, applied per facet (§ Capability facets) |
-| `notice` | Agent-originated notification worth surfacing |
+| `capabilities` | facet-scoped updates (§ Capability facets) |
+| `notice` | agent-originated notification worth surfacing |
 
-**Reserved, not implemented: `plan` and `diff`.** No shipped adapter emits either
-(`claude` emits `subagent`, `turn`, `status`, `notice`, `capabilities`, `usage`,
-`tool_result`, `compact`, plus `assistant`/`thinking`/`tool_call`; `pi` a subset), and
-no timeline branch handles them. They are recorded here as the intended shape for
-making plan mode reviewable and a file change render as a diff rather than a tool log —
-which is worth keeping, because a plan currently arrives as an `approval` request whose
-`detail.plan` is prose, and a diff is reconstructed client-side from a tool payload by
-`lib/tool-shape.ts`. Do not write a client branch expecting them; do not treat their
-presence in this table as a contract an adapter can rely on being consumed.
+`kind` is deliberately unconstrained at the storage layer: a new kind is additive, and
+a `CHECK` listing them is a promise to break on the next adapter that adds one.
 
-`kind` is deliberately unconstrained at the storage layer for exactly this reason — a
-new kind is additive, and a `CHECK` listing them is a promise to break on the next
-adapter that adds one (`docs/database-schema.md` § events).
+**Reserved, not implemented: `plan` and `diff`.** No adapter emits either and no
+timeline branch handles them. They are recorded as the intended shape for making plan
+mode reviewable and a file change render as a diff rather than a tool log — today a
+plan arrives as an `Approval` whose detail is prose, and a diff is reconstructed
+client-side from a tool payload. Do not write a client branch expecting them.
 
-`subagent` is the one that changes what the UI can be, and it needs its own
-section because it is the only event kind that describes *structure* rather than
-content.
+**A type in a vendor's event union is not a promise anything emits it.** Grep the
+implementation for emit sites, not the types for declarations. A declared-only event
+ships an adapter branch that never fires, and a branch that never fires is
+indistinguishable from one whose condition is merely rare. This file previously
+claimed `pi`'s `agent_start`/`agent_end` were such a case; **that was wrong**, and
+re-measuring against an unbundled source-mapped install found both emitted and both
+reaching the wire. "I grepped and found nothing" is a claim about your grep as much as
+about the vendor — see `docs/agents.md`.
 
 ## Delegated trajectories
 
-A turn is not a sequence. An agent delegates, its delegates delegate, and a
-dynamic workflow fans out to a dozen agents at once and then synthesizes. The
-event stream has to carry that shape, because a client cannot recover it.
-
-**One field carries all of it.** Every event may name the trajectory it belongs
-to:
+A turn is not a sequence. An agent delegates, its delegates delegate, and a workflow
+fans out to a dozen agents and then synthesizes. **One field carries all of it:**
 
 ```
-span   the trajectory this event happened in. Absent means the root turn.
+span    the trajectory this event happened in. Absent means the root turn.
 ```
 
-A `subagent` event *is* the trajectory's own record: its `streamId` is the
-trajectory id, and its `span` names the trajectory it was delegated *from*.
-A `subagent` event *declares* a trajectory, but § Promotion below is what
-*defines* one — declaration is the richer path, not the required one.
-Everything else follows:
+A `subagent` event *is* the trajectory's own record: its `stream_id` is the trajectory
+id and its `span` names the trajectory it was delegated from. A `thinking` block
+inside that trajectory carries the same `span`. Depth is unbounded, siblings may run
+concurrently, and a workflow phase is a trajectory whose children are trajectories. No
+case in the protocol distinguishes any of these, which is what makes it a
+generalization rather than three features.
 
-```json
-{"t":"event","kind":"subagent","phase":"started","streamId":"s1","name":"Explore"}
-{"t":"event","kind":"thinking","phase":"delta","streamId":"b3","span":"s1","text":"…"}
-{"t":"event","kind":"subagent","phase":"started","streamId":"s2","span":"s1","name":"Verify"}
-{"t":"event","kind":"tool_call","phase":"completed","streamId":"t9","span":"s2","name":"Bash"}
-{"t":"event","kind":"subagent","phase":"completed","streamId":"s2","span":"s1"}
-{"t":"event","kind":"subagent","phase":"completed","streamId":"s1"}
-```
+**`span` is not `stream_id`.** `stream_id` identifies one block across its phases;
+`span` identifies the trajectory a block ran in. A `subagent` event is the one place
+they meet, because opening a trajectory is itself a block with a lifecycle.
 
-Both `started` frames above carry a `name`, which is the *lucky* case rather than the
-contract: a real adapter usually does not know the name yet at `started` and must omit
-the field. See § `name` is absent when unknown below — a client that assumes a name is
-present at open time renders a blank card.
-
-`s2` is a child of `s1` because it carries `span:"s1"`, by exactly the same rule
-that puts the `thinking` block there. Depth is unbounded, siblings may run
-concurrently, and a workflow phase is simply a trajectory whose children are
-trajectories. No case in the protocol distinguishes any of these, which is what
-makes it a generalization rather than three features.
-
-**Why a pointer and not nesting.** The table above once said the child's events
-arrived *nested inside* the parent event. That cannot be implemented: an envelope
-has to be closed before it is sent, and a trajectory streams for minutes. It also
-contradicts the journal, where an event is a row — a nested payload would make one
-row hold a subtree, so a delta inside it could not be addressed, deduplicated, or
-pruned. A flat stream of events carrying a parent pointer is what distributed
-tracing settled on for the same reason, and it is already how the vendor speaks:
-`claude` tags a subagent's output with `parent_tool_use_id` on the envelope.
-
-**`span` is not `streamId`.** `streamId` identifies one block across its phases;
-`span` identifies the trajectory a block ran in. A `subagent` event is the one
-place they meet, because opening a trajectory is itself a block with a lifecycle.
+**Why a pointer and not nesting.** The v3 table once said a child's events arrived
+*nested inside* the parent event. That is unimplementable, not merely unimplemented:
+an envelope must be closed before it is sent and a trajectory streams for minutes. It
+also contradicts the journal, where an event is a row — a nested payload makes one row
+hold a subtree, so a delta inside it cannot be addressed, folded, or pruned. A flat
+stream with a parent pointer is what distributed tracing settled on, and it is already
+how the vendor speaks: `claude` tags a subagent's output with `parent_tool_use_id`.
 
 ### Promotion: a trajectory is defined by use, not by declaration
 
-**Any `streamId` that another event names as its `span` is a trajectory**,
-whatever kind of event opened it. A `tool_call` so named is *promoted*: it stays
-a tool call, and it also becomes the container its children already claim it is.
+**Any `stream_id` another event names as its `span` is a trajectory**, whatever kind
+of event opened it. A `tool_call` so named is *promoted*: it stays a tool call and also
+becomes the container its children already claim it is.
 
-This is a definition and not a fallback, because delegation is only knowable
-*retroactively*. An adapter learns that a tool call delegated when a child event
-arrives carrying its id — and by then the `tool_call` event has been sent and
-cannot be recalled. Anything that decides at open time is therefore a guess
-standing in for a fact that has not arrived. `claude`'s adapter guessed by tool
-name (`Task`), which was correct until the vendor shipped `Agent` and `Workflow`;
-an MCP server can add another at any time, so the whitelist could not have been
-completed, only extended after each report. Promotion needs no list: an agent
-nobody has written yet nests correctly by tagging its children, which is the same
-`span` it must already set for its output to be attributed at all.
+This is a definition, not a fallback, because **delegation is only knowable
+retroactively**. An adapter learns a tool call delegated when a child arrives carrying
+its id — by which time the `tool_call` event has been sent and cannot be recalled.
+Anything deciding at open time is a guess standing in for a fact that has not arrived.
+`claude`'s adapter guessed by tool name (`Task`), correct until the vendor shipped
+`Agent` and `Workflow`; an MCP server can add another at any time, so the whitelist
+could not be completed, only extended after each report. Two real `Workflow` cards
+read *running* permanently with no interior, and the four `Agent` calls beside them had
+their children rooted beside the call instead of inside it.
 
-Declaration keeps a purpose it does not share with promotion. A `subagent` event
-*can* name a trajectory before any child exists, and states an *outcome* independent of
-its host's — so an adapter that knows it is delegating should still declare, and
-one that only discovers it in hindsight is no longer silently wrong. Both produce
-the same tree.
+Promotion needs no list: an agent nobody has written yet nests correctly by tagging
+its children, which is the same `span` it must already set for its output to be
+attributed at all.
 
-#### `name` is absent when unknown, and a client must supply its own default
+Declaration keeps a purpose promotion does not share — it can name a trajectory before
+any child exists, and state an outcome independent of its host's. Both produce the
+same tree.
+
+**A promoted trajectory's lifecycle is its `tool_result`, not its phase.** A
+`tool_call`'s `completed` phase means its *arguments* finished streaming. Reading the
+phase reports every delegation as finished the instant its input parsed.
+
+### `name` is absent when unknown
 
 **`name` is optional on every phase, including `started`.** An adapter that does not
 yet know what a delegation is called must **omit the field** rather than send a
-placeholder. `claude`'s `_task_label` returns `None` until either `subagent_type` or
-`description` has arrived — which at `started` is the usual case, because the brief is
-still streaming — and its `event()` drops `None` fields entirely, so the frame carries no
-`name` key at all.
+placeholder.
 
-This is not a tidiness rule. **A guess written here becomes permanent.**
-`history::consolidate` keeps the best name any phase gave a block, so a later `delta`
-carrying the real brief normally wins — but when the brief never finishes, because the
-delegation fails early or the link dies mid-input, the placeholder becomes that
-trajectory's durable name in `history.db`, indistinguishable from one an agent actually
-chose. Rows already journaled that way cannot be repaired: nothing can tell a guessed
-name from a real one after the fact. So a field meaning "what this is called" must be
-absent when unknown, because `null` is the only value that stays honest in a journal.
+This is not a tidiness rule. **A guess written here becomes permanent.** The history
+fold keeps the best name any phase gave a block, so a later `delta` carrying the real
+brief normally wins — but when the brief never finishes, because the delegation fails
+early or the link dies mid-input, the placeholder becomes that trajectory's durable
+name, indistinguishable from one an agent actually chose. Rows already written that way
+**cannot be repaired**: nothing can tell a guessed name from a real one after the fact,
+so historical rows carrying a literal are unknowable rather than data. `Option`/`null`
+is the only value that stays honest in a journal.
 
-Two consequences:
+Two consequences: a client renders its own fallback, and the server keeps the best name
+any phase gave a block (`MAX` ignoring NULLs, so a phase that carried one wins). That
+second part is what makes omitting at `started` safe.
 
-- **A client must render its own fallback.** `frontend/lib/timeline-tree.ts`'s
-  `trajectoryName` answers `"Unnamed"` for a nameless node — deliberately not a word
-  like "Subagent", which restates a category the surrounding chrome already carries and
-  which was a substring-superset of a tool name `claude` ships.
-- **The server keeps the best name any phase gave a block.** `db/store.rs:1029` prefers
-  a declaring `subagent` row's name, with `MAX` ignoring NULLs so a phase that carried
-  one wins over a phase that did not. That is what makes omitting the name at `started`
-  safe: a later phase can still supply it.
+Landing such a change has an order, and reversing it is worse than doing nothing: the
+**producer** stops sending a placeholder first, the **presentation** layer renames its
+fallback second. Reversed, one condition acquires two labels.
 
-Landing this has an order, and it is worth stating because getting it backwards is
-worse than doing nothing. The **producer** stops sending a placeholder first; the
-**presentation** layer renames its fallback second. Reversed, one condition acquires two
-labels — the adapter's word for trajectories it named and the client's for those it did
-not — which is worse than one imprecise label.
+**Consolidation keeps the closing event's fields, so a name given at open is lost
+unless it is carried forward.** The fold keys a block on its `completed` event — right
+for text, wrong for identity, since a trajectory is named at `started` and renamed by
+the delta carrying its brief, while its close reports an outcome. Every subagent card
+read the fallback once a turn consolidated, which looks exactly like a frontend bug two
+layers above where the name was dropped. Any per-block attribute only an early phase
+carries needs the same treatment.
 
-**A promoted trajectory closes with its host.** A `tool_call`'s `completed` phase
-means its input finished streaming, not that the delegated work finished — the
-`tool_result` sharing its `streamId` is the close, and its `isError` is the
-outcome. A client must not read a promoted node's lifecycle off its phase, or
-every delegation reads as finished the moment its arguments are parsed.
+### Keying rules that produce corruption when broken
 
-**One host may run many delegates, so a trajectory id must be the delegate's.**
-`claude`'s `Workflow` fans out to N agents under a single `tool_use_id`; keying a
-trajectory by the host collapses all N into one row, where the last name to arrive
-wins and every earlier delegate's identity is lost. Measured: a two-agent workflow
-rendered as one card reading `Demo: agent-2`. An id must come from whatever the
-vendor gives *per delegate* — `task_id` for `claude` — with the host named as its
-`span`. This is the same rule as *What the adapter must keep separate* below, one
-level up: never key a trajectory by something the vendor multiplexes.
+**Vendor block state must be keyed by `(trajectory, index)`, never by the vendor's
+index alone.** `claude` numbers content blocks per message, so two concurrent
+subagents both open index 0. One index-keyed map made each one's deltas append to the
+other's text — data corruption, not a display fault, and invisible until two delegates
+run at once.
 
-**A vendor tag coarser than a trajectory is not refinable by guessing, and needs no
-new protocol field.** The question a multiplexing host raises is where its *forwarded
-interior* belongs, and it is tempting to answer it with a new envelope field. It does
-not need one: `span` is already per-event and can name any trajectory at any depth.
-The missing correlation is entirely vendor-side — `claude` tags forwarded output with
-`parent_tool_use_id`, the *host*, which is precisely the id it multiplexes. So when a
-host has N delegates the vendor's own tag cannot say which one produced a given event,
-and an adapter must attribute that output to the **host** — the container, which is
-true — rather than pick a delegate, which is corruption indistinguishable from correct
-output. Only N = 1 is safe, because there the sole delegate is the only thing the
-interior can be.
+**One host may multiplex N delegates, so a trajectory id must be the delegate's.**
+`claude`'s `Workflow` fans out under a single `tool_use_id`. Keyed by the host, a
+two-agent workflow rendered as **one** card reading `Demo: agent-2` — the last name to
+arrive won and `agent-1` was absent from the timeline entirely. The per-delegate
+identity is `task_id`, with the host as its `span`. A fixture with one delegate per
+host cannot observe this: at N=1 the collapse is indistinguishable from correct.
 
-Two obligations follow, and both were real defects rather than hypotheses:
+**A vendor tag coarser than a trajectory is not refinable by guessing.** `claude` tags
+forwarded output with `parent_tool_use_id` — the *host*, which is precisely the id it
+multiplexes — so with N delegates the vendor's own tag cannot say which produced a
+given event. Attribute such output to the **host**, which is true, rather than picking
+a delegate, which is corruption indistinguishable from correct output. Only N=1 is
+safe. Two obligations follow, both real defects rather than hypotheses: a re-label must
+be **latched** (the table grows while the turn runs, so answering freshly per event
+splits one delegate's output across container and delegate at whatever instant the
+notification landed, and both halves render nested), and vendor block state must stay
+keyed by the vendor's tag rather than by the trajectory it resolves to (the tag is the
+only part identical across `start`, `delta`, and `stop`).
 
-* **A re-label must be latched.** The table an adapter consults grows while the turn
-  runs, so the same host answers "the host" before its `task_started` and "the sole
-  delegate" after it, while the forwarded stream does not pause in between. Answered
-  freshly per event, one delegate's output is split across the container and the
-  delegate at whatever instant the notification landed — and both halves render,
-  nested one inside the other, so nothing reports the split.
-* **Vendor block state must be keyed by the vendor's own tag, never by the
-  trajectory it resolves to.** The tag is the only part guaranteed identical across a
-  block's `start`, `delta` and `stop`. Keyed by the resolution, a notification landing
-  mid-block moves the key out from under an open block: the delta and the stop both
-  miss, so the block's text is dropped and no `completed` is ever emitted.
+### Structure survives the ephemeral/stable split
 
-Measured on `claude` 2.1.245: no host both forwards interior events and multiplexes.
-`--forward-subagent-text` forwards only for the built-in `Task`, whose notifications
-reuse the spawning id and so never make it multiplexing; `Agent` and `Workflow`
-multiplex and forward nothing. The N = 1 re-label is therefore a guard against a
-vendor change, not a path in use — which is exactly the shape the promotion rule above
-exists to make safe.
+**A `subagent` event is stable at every phase.** Ordinarily `started` and `delta` are
+ephemeral and never reach the journal. That is right for content and wrong for
+structure: the `started` phase is where a trajectory's identity, name, and parent live,
+so dropping it leaves every child pointing at a parent that was never recorded, and a
+reload flattens the whole subtree into the parent's own work — the pre-`span` bug,
+reintroduced by the storage tier instead of the protocol.
 
-**Progress is a snapshot, so it is not delta text.** A vendor's progress
-notification re-sends its whole current summary rather than a suffix, so appending
-each one repeats it — measured at six copies of one sentence. A `subagent` event
-carries such a summary as `data.progress`, which replaces, leaving `text`
-append-only as everywhere else in the protocol.
+**One fact with two derivations diverges the moment either grows a case.** Stability
+was both a field on the event and a method recomputing it from the phase. Equivalent,
+until `subagent` became stable at every phase for the structural reason above — after
+which a trajectory's `started` was classified stable, published as stable, and silently
+not journaled, because the method disagreed with the field beside it. Read the field.
+
+**An unknown `span` is not an error.** A client receiving an event naming a trajectory
+it has not seen renders it at the root rather than dropping it. The alternative loses
+work exactly where structure is least reliable: a link that died mid-delegation, or an
+adapter emitting out of order.
+
+**Two nodes naming each other silently delete both.** A cycle in `span` pointers is
+not merely a recursion hazard: attachment holds the first as an orphan waiting for the
+second, which then adopts it *and* is adopted by it, so neither is a root, neither is
+reachable, and the pair vanishes with nothing reporting it missing. No single-pass
+attachment detects this — repair by reachability afterwards, and carry a visited guard
+in any rollup, because unbounded recursion in a render path is a frozen tab.
+
+### Outcomes, and what a turn may close
+
+**A trajectory has its own outcome.** `completed` with an error flag closes it, so a
+failure three levels down is reportable at every level above without a client inferring
+failure from a missing result. An adapter that loses a trajectory leaves it open, and
+the server closes open trajectories when the turn terminates — an unexplained gap is
+worse than a recorded failure. Keep `abandoned` distinct from `failed`: the server
+closing a trajectory an adapter left open means nobody reported an outcome, and
+colouring that red reports an interrupted turn as a broken one.
+
+**A collapsed subtree must report what it hides.** Hiding a delegation's work by
+default is only defensible if a failure three levels down is still visible at the top;
+otherwise the user must open every branch to learn something broke, which is the work
+collapsing was supposed to save. A descendant failure escalates its ancestors' status,
+and a failed branch expands itself to the tool that failed.
 
 **A trajectory with no interior says so.** A vendor may report that delegated work
-exists without forwarding any of it — `claude` forwards interior events for its
-built-in delegation and only lifecycle notifications for the rest. A *closed*
-trajectory with no children is therefore a real state and not a loading one, and a
-client must distinguish it from a running trajectory that has not reported yet.
-Rendering both as an empty expandable card invites the user to keep opening a
-branch that will never fill.
+exists without forwarding any of it. *Measured on claude 2.x:* `--forward-subagent-text`
+forwards only for the built-in `Task` — an `Agent` delegation produced **zero**
+envelopes carrying `parent_tool_use_id`, and the delegate's own `Read` arrived as a
+top-level assistant message indistinguishable from the root agent's work. So for every
+delegating tool except `Task` the interior cannot be attributed at all, and a *closed*
+trajectory with no children is a real terminal state rather than a loading one. The card
+has to say so: presented as expandable it invites opening a branch that can never fill,
+and saying it only after the click is the lossy collapse the tree exists to avoid.
 
-**A `subagent` event is always stable, at every phase.** Ordinarily `started` and
-`delta` are ephemeral projections that never reach the journal (§ `docs/storage.md`).
-That rule is right for content and wrong for structure: the `started` phase is
-where a trajectory's identity, name, and parent live, so dropping it would leave
-every child event in the journal pointing at a parent that was never recorded.
-After a reload the whole delegated subtree would flatten into the parent's own work
-— which is precisely the pre-`span` bug, reintroduced by the storage tier instead
-of by the protocol.
+**Progress is a snapshot, not delta text.** A vendor's progress notification re-sends
+its whole current summary rather than a suffix, so appending each one repeats it —
+measured at six copies of one sentence. Such a summary **replaces**, leaving `text`
+append-only as everywhere else.
 
-**An unknown `span` is not an error.** A client that receives an event naming a
-trajectory it has not seen renders it at the root rather than dropping it. The
-alternative loses work in exactly the case where structure is least reliable: a
-link that died mid-delegation, or an adapter emitting out of order.
+**A trajectory id is session-scoped, not turn-scoped.** Two rules follow, and without
+them a delegation that outlives its turn cannot be described at all.
 
-**A trajectory has its own outcome.** `phase:"completed"` with `isError` closes it,
-so a delegation that failed three levels down is reportable at every level above
-it without a client inferring failure from the absence of a result. An adapter that
-loses a trajectory — its link died, its vendor stopped reporting — leaves it open,
-and the server closes open trajectories when the turn terminates, for the same
-reason a pending request becomes `abandoned`: an unexplained gap is worse than a
-recorded failure.
+*A turn closes only what it holds.* The turn-settle sweep resolves a trajectory only
+when some event **on that turn** carries it as its `stream_id`. A bare `span` naming
+something this turn never emitted is a reference outward, usually to a trajectory an
+earlier turn opened; treating it as an opening fabricates a record — measured, a
+`Workflow` that completed cleanly on the dispatching turn acquired a second
+`abandoned` close on a later turn for work it never ran. Note the obvious repair,
+"skip an id another turn declared", is **not available**: consolidation has moved the
+earlier turn's rows out by then, so the evidence of ownership is gone. The decidable
+rule is the local one.
 
-**A trajectory id is session-scoped, not turn-scoped.** Two rules follow, and
-without them a delegation that outlives its turn cannot be described at all.
+*A late outcome is recorded on the turn that owns the trajectory.* The event stays
+where it arrived — that is when it happened — and the server additionally corrects the
+owning turn's record. Only a provisional record may be corrected: a trajectory still
+open, or a close the *server* authored. An outcome the agent itself stated is never
+rewritten, because a later mention is a description, not a re-decision. This is what
+makes `abandoned` genuinely non-final rather than merely documented as such.
 
-*A turn closes only what it holds.* The turn-settle sweep resolves a trajectory
-only when some event on that turn carries it as its `streamId` — a declaring
-`subagent` row, or a `tool_call` its own children name (§ Promotion). A bare `span`
-naming something this turn never emitted is a reference outward, most often to a
-trajectory an earlier turn opened. Treating such a reference as an opening
-fabricates a record: measured, a `Workflow` that had completed cleanly on the
-dispatching turn acquired a second `abandoned` close on the agent's later turn, for
-work it never ran.
+### `is_backgrounded` inverts the sweep
 
-*A late outcome is recorded on the turn that owns the trajectory.* Backgrounded
-work reports back after its turn has settled (§ An agent may start a turn), so its
-`completed` arrives on a different turn than its `started`. The event stays where it
-arrived — that is when it happened, and a client watching that turn should see it —
-and the server additionally corrects the owning turn's record, which is what keeps
-the two from contradicting. Only a provisional record may be corrected: a trajectory
-still open, or a close the *server* authored. An outcome the agent itself stated is
-never rewritten, because a later mention is a description and not a re-decision.
+**An adapter that knows a delegation runs in the background must say so, and must
+re-attach the flag to every later phase.**
 
-This is what makes `abandoned` genuinely non-final rather than merely documented as
-such. It is also what makes skipping the sweep for backgrounded work safe: on its own
-that leaves no record on the dispatching turn at all, which trades a wrong answer for
-no answer.
+The sweep closes trajectories an adapter left open so silence never has to explain a
+gap. That is right in general and wrong for work the agent says is backgrounded, which
+is *expected* to outlive its turn and report on a later agent-initiated turn: closing
+it writes a contradiction the real completion cannot undo, and both records then exist
+on different turns with the earlier card still saying the work never finished.
 
-#### `data.is_backgrounded` — the field that inverts the sweep
+Three details, each of which was a defect:
 
-**An adapter that knows a delegation runs in the background must set
-`data.is_backgrounded = true`, and must re-attach it to every later phase.** It is a
-boolean inside the event's `data` object, not a top-level envelope field.
+- **Re-attaching is what an adapter author will otherwise get wrong.** `claude`
+  reports the flag on `task_started` and on **no** later notification, so the adapter
+  remembers it and stamps every subsequent phase. Set only at open, every backgrounded
+  delegation is closed as `abandoned`.
+- **The server's exclusion must test any row sharing the trajectory**, not the row
+  being swept — a correlated subquery over the trajectory, not a predicate on one row.
+  And when the flag is read out of stored JSON, compare against SQLite's integer `1`:
+  a comparison written against `true` matches nothing, and every backgrounded
+  delegation is swept closed.
+- **Skipping a step that writes a wrong record can delete the right one.** The
+  exclusion removed the contradiction and, unnoticed, the delegation: a trajectory with
+  no close carries no text, so it folded into no block and its children reattached to
+  the root — the flattening `span` exists to prevent, one layer down. When a fix is
+  "stop writing X", check what still writes the *record*.
 
-The sweep closes trajectories an adapter left open, so that silence never has to explain
-a gap. That is right in general and wrong for work the agent itself says is
-backgrounded, which is *expected* to outlive its turn and report on a later
-agent-initiated turn: closing it writes a contradiction the real completion cannot
-undo, and both records then exist on different turns with the earlier card still saying
-the work never finished. The server reads this flag from whichever row it finds and excludes those trajectories
-from the sweep — `store.rs:1077`, and the predicate is
-`json_extract(bg.data_json, '$.is_backgrounded') = 1`, inside a correlated
-`NOT EXISTS` over a `bg` alias.
-
-The two details this document previously dropped are the two that matter. The `bg.`
-alias is what makes it a subquery over *any* row sharing the trajectory rather than a
-test on the row being swept — which is the whole mechanism, since `claude` reports the
-flag on `task_started` and nowhere later. And `= 1` is load-bearing because
-`json_extract` returns SQLite's integer `1`, not a boolean: a comparison written against
-`true` matches nothing and every backgrounded delegation is swept closed, which is the
-exact contradiction this section exists to prevent. Quoting SQL with the alias and the
-literal removed leaves something that reads correct and would not work.
-
-**Re-attaching is the part an adapter author will otherwise get wrong.** `claude` reports
-`is_backgrounded` on `task_started` and on **no later notification**, so the adapter
-remembers it and stamps it onto every subsequent phase (`adapters/claude/adapter.py:1406`);
-`adapters/claude/adapter_test.py` exists partly to pin that. An adapter that sets it only
-at open has every backgrounded delegation closed as `abandoned`.
-
-Keep the exclusion narrow, and note what it does *not* apply to. An ordinary delegation
-left open is the permanent spinner the sweep exists to prevent — so do not set the flag
-speculatively. And **startup recovery deliberately ignores it, in both tiers**, because a
-dead process cannot report: "abandoned after a restart" is a truthful terminal state and
-must stay distinguishable from "still running in the background".
-
-An adapter that reports no flag is not broken; it gets the sweep's ordinary behaviour.
-The flag is the difference between a card reading *running* until the report arrives and
-one reading *never finished* until then.
-
-**What the adapter must keep separate.** Vendor block state has to be keyed by
-trajectory, not by the vendor's own block index. `claude` numbers content blocks
-per message, and two concurrent subagents both start at index 0 — an adapter with
-one index-keyed map merges their deltas into one another's text. That is data
-corruption, not a display fault, and it is invisible until two delegates run at
-once.
+Keep the exclusion narrow — an ordinary delegation left open is the permanent spinner
+the sweep exists to prevent. And **startup recovery deliberately ignores the flag**,
+because a dead process cannot report: "abandoned after a restart" is a truthful
+terminal state and must stay distinguishable from "still running in the background".
 
 ## An agent may start a turn
 
-A turn is not always a reply. An adapter may emit events with no turn in flight, and
-the server opens a turn for them rather than dropping them — an **agent-initiated**
-turn, recorded with `origin: "agent"` and an empty request text.
+Events arriving with no turn in flight were dropped — defensibly, since an event
+carries no turn id and a guessed one misplaces it in the transcript forever. The error
+was the conclusion. *Measured on `claude` 2.x:* a session with backgrounded work emits
+the delegate's completion **after** its turn's `result`, then an entire exchange of its
+own to report it, stdout still open, process still alive. So the drop discarded exactly
+the completion a user had been promised, and no monitor, schedule, or background job
+could reach a client however the rest of the stack was built.
 
-This is not hypothetical and not rare. Measured on `claude` 2.x, a session holding
-backgrounded work emits, *after* the dispatching turn's `result`:
+The server opens an **agent-initiated turn** (`origin: "agent"`) on the first
+out-of-turn event — the first of *any* kind, because the vendor's own `turn`/`started`
+arrives after the payload, so waiting for the bracket keeps the announcement and drops
+what it announces.
 
-```
-background_tasks_changed        the set of live background tasks changed
-task_updated                    patch{status: completed}
-task_notification               status, and the delegate's own summary
-init                            …and then an entire exchange of its own
-assistant                       "the background worker finished"
-result
-```
+Three consequences worth holding onto:
 
-That is the measured vendor sequence, not the sequence Sylph acts on:
-`background_tasks_changed` is **not handled by `claude`'s adapter at all** and is
-silently ignored, so in practice the turn is opened by whichever of `task_updated` or
-`task_notification` arrives first. It is shown here because it is what the vendor emits
-and an adapter author reading a live stream will see it — not because anything depends
-on it.
+- Such a turn has **no waiter**, so settling it means recording terminal state
+  directly rather than waking one. Leaving it unsettled wedges the session, since a
+  live turn refuses new messages.
+- Its request text is empty, so a client that does not render `origin` shows an answer
+  to a message the user never wrote.
+- A delegate closed by the turn-settle sweep may later report its *real* outcome on
+  that turn, so `abandoned` is not final.
 
-Its stdout stays open and the process does not exit. So the agent reports late work,
-and reports it twice over: the delegate's outcome, then its own account of it.
-
-**Why the events cannot simply be dropped.** They were, and the reasoning was sound
-as far as it went: an event carries no turn id, the server files it under whichever
-turn is running, and a *guessed* id misplaces it in the transcript permanently. The
-error was concluding that no turn means nowhere to belong. The answer is to open the
-turn that does exist rather than to guess at one that does not — otherwise the only
-observable effect is that a delegation promised to report back never does, with
-nothing anywhere saying why.
-
-**Why a turn and not a lesser thing.** A turn is the unit that orders, consolidates,
-and prunes (`docs/storage.md`): `turn_id` is what consolidation iterates and what
-`events` is indexed by. Attaching these to no turn would leave rows the journal never
-folds and never releases — a leak whose size is set by how much unprompted work an
-agent does. Making them a turn costs one row and inherits every guarantee.
-
-**When the turn opens.** On the *first* out-of-turn event of any kind, not on a
-`turn`/`started`. The vendor's own bracket arrives partway through the sequence above
-— `task_notification`, the payload this exists to deliver, precedes it — so waiting
-for the bracket keeps the announcement and drops what it announces. A later
-`turn`/`started` then lands inside the already-open turn instead of opening a second.
-
-**How it settles.** By its own `turn`/`completed`, like any turn. Nothing is parked on
-its outcome, since nobody asked for it, so the server records terminal state directly
-rather than waking a waiter. It must settle: a session with a live turn refuses new
-messages, so one unprompted turn left running would wedge the session.
-
-**A client has to say who started it.** `requestText` is empty by construction, which
-is indistinguishable from a user who sent nothing — so an unlabelled agent turn reads
-as an answer to a message the user never wrote. `origin` is the only thing that
-carries this.
-
-## Slash commands are turns
-
-A **prompt** command is delivered as `send` with `command` set:
-
-```json
-{"t":"send","id":"c9","command":"verify","args":{"target":"the auth change"},"text":""}
-```
-
-The adapter is free to implement this as literal prompt text (`/verify ...`),
-because for most CLIs that is precisely what a slash command is. Modelling it as
-a *kind of turn* rather than a separate operation is what keeps it in the
-transcript: a command produces normal events, appears in history, and is
-searchable. v1's `--command` mode returned an ephemeral status line that was
-shown once and lost.
-
-Two consequences worth stating, because both were wrong in v1:
-
-* A command's output is durable history, not a toast.
-* A command can be interrupted, steered, and can raise approvals, because it is
-  a turn like any other.
-
-A **control** command is not sent at all. It resolves to a config option, the
-client renders a picker, and the chosen value goes back as `set_config`. v2
-applied the paragraph above to every command uniformly, and that is precisely what
-made `/model` answer with prose: the CLI was asked a question in a channel that has
-no picker, and it did the only sensible thing.
-
-## v1 is not supported
-
-There is no degraded path. `runner.sh` is not discovered, `SYLPH_STREAM_FORMAT`
-has no meaning, and an agent directory without `adapter.sh` is simply not an
-agent.
-
-This project has no external consumers, so a compatibility shim would buy
-nothing and cost the thing that matters most: a single shape for what an agent
-is. Keeping v1 would have meant every layer above the seam carrying two notions
-of a session — one where a turn is a process and one where it is a message — and
-that duality does not stay contained. It shows up in the supervisor, in the API's
-capability reporting, in the UI's decision about whether to offer interrupt, and
-in every test that has to cover both.
-
-The Discord daemon still ran on v1 as of 2026-08-26 (`discord_chat_daemon.py` references
-the `harness/` runner contract). It is to be migrated to this server rather
-than kept on the old contract — see `docs/control-plane.md`, which owns that migration's
-status. That is more work than a shim and it is the work that leaves one control plane
-instead of two.
-
-An agent whose CLI genuinely has no duplex mode is still supportable: its adapter
-holds the session and spawns a one-shot CLI invocation per turn internally. The
-one-shot-ness becomes a vendor detail inside one adapter, which is exactly where
-vendor details belong, and the adapter declares a smaller `supports` list. The
-protocol does not need to know.
-
-## What the adapter owns, and what it must not
-
-Unchanged from v1 in principle, and worth restating because v3 gives the adapter
-more rope:
-
-The adapter owns vendor translation: how its CLI accepts a system prompt, spells
-a resume id, streams output, and represents a permission request. It owns
-injecting `SOUL.md` through an **additive** channel, never a replacing one.
-
-The adapter owns no policy. It does not decide whether to inject identity (the
-server sends `soul` or `""`), when a session resets, what a permission answer
-should be, or what is worth journaling. A pending request must never be
-auto-answered on the server's behalf — an adapter that helpfully approves a tool
-call has silently removed the user from a decision the protocol exists to give
-them.
+**A waiter's absence means two different things.** Settling every waiter-less turn made
+a deliberate stop get reported as a lost link, because claiming the waiter first is how
+a user's stop wins over the link teardown it causes. An agent turn never had a waiter; a
+user's turn whose waiter is gone has an owner already. `origin` is what separates them.
 
 ## Failure
 
-| Failure | Handling |
-| --- | --- |
-| Adapter exits mid-turn | Turn `failed`, stderr tail attached, pending requests `abandoned`, session detached |
-| Adapter stops reading stdin | Command times out (30s), link torn down |
-| Malformed line | Warned and skipped; a bad line is never fatal |
-| Handshake timeout (10s) | Adapter marked broken, excluded from listings, reason recorded |
-| Server restart | Every link is gone; sessions detached, in-flight turns `interrupted` |
-| Request unanswered | Stays pending; it is real state, and only the user or a link teardown resolves it |
+An adapter reports what it knows and omits what it does not. Three rules, each from a
+shipped defect:
 
-A link's death is never silent. The session records why it detached, because
-"the agent stopped responding" and "the agent finished" look identical in a
-transcript that does not say.
-
-
-
+- **Never report a refusal as a success** (§ A refused set).
+- **Never synthesize a value the vendor did not give.** A synthesized id, name, or
+  fingerprint is a lie a journal makes permanent.
+- **An error must name the layer that is actually at fault.** Answering a malformed
+  value with "`model` is not settable on a pi session" says the option does not exist
+  when the option was fine and the value was not. `pi`'s adapter separates unknown-option
+  from invalid-value for exactly this reason. The general form cost two rounds: a refused
+  write with no error path in the client presents as a dead control, so the layer that is
+  *not* at fault is the one that gets debugged.

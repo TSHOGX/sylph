@@ -1,11 +1,10 @@
 # Database Schema
 
-Sylph Web uses SQLite for the live session journal and TraceDB for stable cross-agent
-history.
+Sylph keeps one authoritative record, split across three files for SQLite's sake.
 
 **This file covers `journal.db` only.** The data directory holds three stores, not
 one: `journal.db` (hot, unconsolidated turns — below), `history.db` (warm,
-consolidated blocks) and `blobs/` beside them. `history.db`'s tables, its migrations
+consolidated blocks, and the FTS index over them) and `blobs/` beside them. `history.db`'s tables, its migrations
 under `backend/migrations/history/`, and the watermark and byte-accounting rows live in
 **`docs/storage.md` § Schema**, because they only make sense alongside the
 consolidation and retention rules that write them. Splitting one store into three is
@@ -37,99 +36,93 @@ code at all.
 
 #### sessions
 
-Session records with origin and policy modes.
-
 ```sql
 CREATE TABLE sessions (
-  id TEXT PRIMARY KEY,
-  origin TEXT NOT NULL CHECK (origin IN ('sylph', 'native')),
-  identity_mode TEXT NOT NULL CHECK (identity_mode IN ('sylph', 'preserve')),
-  lifecycle_mode TEXT NOT NULL CHECK (lifecycle_mode IN ('sylph', 'preserve')),
-  agent TEXT NOT NULL,
-  backend_session_id TEXT,
-  trace_session_id TEXT,
-  workdir TEXT NOT NULL,
-  title TEXT,
-  flags_json TEXT NOT NULL DEFAULT '{}',
-  status TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'running')),
-  created_at_ms INTEGER NOT NULL,
-  updated_at_ms INTEGER NOT NULL
+  -- (environment, agent, native_id) is the identity. Stored as three columns so
+  -- each is queryable, with a composite primary key so the triple is the row.
+  environment  TEXT NOT NULL,
+  agent        TEXT NOT NULL,
+  native_id    TEXT NOT NULL,
+
+  workdir          TEXT NOT NULL,
+  title            TEXT,
+  inject_identity  INTEGER NOT NULL,   -- 0/1; a default at creation, never patched
+  fidelity         TEXT NOT NULL CHECK (fidelity IN ('stream','blocks','messages')),
+  flags_json       TEXT NOT NULL DEFAULT '{}',
+  status           TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running')),
+  parent_session   TEXT,               -- encoded triple; delegation or fork ancestor
+  created_at_ms    INTEGER NOT NULL,
+  updated_at_ms    INTEGER NOT NULL,
+
+  PRIMARY KEY (environment, agent, native_id)
 );
 
 CREATE INDEX sessions_updated_idx ON sessions(updated_at_ms DESC);
-CREATE INDEX sessions_trace_idx ON sessions(trace_session_id) 
-  WHERE trace_session_id IS NOT NULL;
+CREATE INDEX sessions_workdir_idx ON sessions(environment, workdir);
 ```
 
-Fields:
-- `id` — UUID v4, generated server-side
-- `origin` — `sylph` (created by WebApp) or `native` (imported from TUI/CLI)
-- `identity_mode` — `sylph` (inject SOUL.md) or `preserve` (original agent context)
-- `lifecycle_mode` — `sylph` (24h timeout, 04:00 reset) or `preserve` (no implicit
-  lifecycle). **Written and read by nothing:** no code branches on this value, and
-  `end_incarnation` below has no callers, so neither reset fires. `docs/architecture.md`
-  § Session Model states the policy and marks it unimplemented
-- `agent` — agent name from discovery (e.g., `claude`, `pi`), which is the directory
-  name holding its `adapter.sh`
-- `backend_session_id` — opaque agent-native session ID
-- `trace_session_id` — TraceDB session ID after ingestion
-- `workdir` — absolute path to working directory
-- `title` — optional user-provided title
-- `flags_json` — JSON object of agent-specific flags (model, effort, etc.)
-- `status` — `idle` or `running`
+**There is no Sylph-minted id.** `docs/architecture.md` § Identity carries the
+argument and the measurement; the consequence for this table is that a row exists only
+once an agent has assigned the session an id, so `POST /sessions` starts an agent
+rather than reserving a row. The "draft session with no work in it" concept is gone,
+and with it the empty-session delete endpoint.
 
-#### backend_incarnations
+**A composite primary key rather than one encoded text column**, because every listing
+filters on `environment` and most group by `workdir` within it. The encoded form
+(`<env>:<agent>:<native>`, no `/` — see `docs/architecture.md`) exists for a URL path
+segment and for `parent_session`, not as the storage shape.
 
-Tracks backend session lifecycle resets for Sylph-managed sessions.
+Fields worth a note:
 
-```sql
-CREATE TABLE backend_incarnations (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  agent TEXT NOT NULL,
-  backend_session_id TEXT,
-  started_at_ms INTEGER NOT NULL,
-  ended_at_ms INTEGER,
-  reset_reason TEXT,
-  source_trace_session_id TEXT,
-  resulting_trace_session_id TEXT,
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'ended'))
-);
+- `environment` — the opaque id minted at pairing (`docs/environments.md`), never a
+  hostname. A name in a key means renaming destroys identity.
+- `inject_identity` — whether `SOUL.md` is appended. Settable at creation, **refused
+  afterwards**: a transcript records what produced it, so rewriting the flag would
+  rewrite what the stored history means. This is the one behavioural remnant of the
+  deleted `identity_mode`.
+- `fidelity` — how much resolution the source had, `stream` | `blocks` | `messages`.
+  A property of the record, not of who started the session: a session Sylph launched,
+  read back from the vendor's store after the process died, is `messages` too. A
+  renderer reads it to decide whether it may draw a duration.
+- `parent_session` — one column for two different relationships, which the row it
+  points at disambiguates. A delegation folds into its parent as a count; a **fork**
+  replays its origin's entire prefix and continues past it, so the two share every
+  early user turn and read as one conversation resumed. A listing must not show both
+  under one label.
 
-CREATE INDEX incarnations_session_idx
-  ON backend_incarnations(session_id, started_at_ms DESC);
-```
+**Four things were deleted here, and the deletion is the design.** `origin`,
+`identity_mode`, `lifecycle_mode`, and the whole `backend_incarnations` table are
+gone, along with `store::end_incarnation`. *Measured 2026-08-27:* `lifecycle_mode` had
+four write sites and **zero** reads, `origin` had zero backend branches, and
+`identity_mode` had exactly one — the `SOUL`-path choice now carried by
+`inject_identity`. `docs/architecture.md` § One class of session is authoritative for
+why a spec had hardened a distinction the implementation never made.
 
-An incarnation is a row rather than a mutated field, so a reset is recorded
-instead of overwritten. `backend_session_id` is nullable because the row is
-created before the agent reports the id it chose; `ended_at_ms` and
-`reset_reason` are written when it is retired, and the two trace columns record
-which archived session it continued from and which one it became. There is no
-unique index on `backend_session_id`: an agent may reuse an id across
-incarnations, and failing an insert on that is worse than recording it twice.
-
-An incarnation is created on first turn and, **by design**, discarded after:
-- 24 hours idle (for Sylph sessions)
-- Local time crosses 04:00 (for Sylph sessions)
-- Never for native sessions (single incarnation, never expires)
-
-**None of the discarding is implemented.** `end_incarnation` — the only writer of
-`status`, `ended_at_ms`, and `reset_reason` — has no callers, so those three columns are
-never written and every incarnation stays `active` forever. `resulting_trace_session_id`
-is worse than unused: it is read in the `SELECT` at `store.rs:400` but is not in the
-`INSERT` column list and is only ever bound `None`, so that read can never match. The
-practical consequence is that a session has exactly one incarnation whatever its origin.
-`docs/architecture.md` § Backend Incarnations carries the policy and what would call
-this; `docs/roadmap.md` § Audit, 2026-08-26 carries the measurement.
+`backend_incarnations` existed to track an agent-native id being replaced by a
+lifecycle reset. Nothing scheduled that reset, and under the identity rule above a
+reset would replace a session's *primary key* mid-life — so the table is not merely
+unused, it describes something the data model no longer permits.
 
 #### turns
+
+**Every child table carries the triple, not a surrogate.** A composite foreign key is
+more verbose than `session_id TEXT REFERENCES sessions(id)`, and the verbosity is the
+point: a surrogate key on `sessions` would have to be generated, which reintroduces
+exactly the second id space `docs/architecture.md` § Identity deletes — and with it the
+comparison that is silently always false. Three columns that cannot disagree with the
+parent beat one that can.
+
 
 Turn execution records.
 
 ```sql
 CREATE TABLE turns (
   id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  session_env    TEXT NOT NULL,
+  session_agent  TEXT NOT NULL,
+  session_native TEXT NOT NULL,
+  FOREIGN KEY (session_env, session_agent, session_native)
+    REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE,
   incarnation_id TEXT REFERENCES backend_incarnations(id),
   status TEXT NOT NULL CHECK (status IN (
     'queued', 'starting', 'running', 'stopping',
@@ -174,7 +167,7 @@ waiter, because a deliberate stop already claimed it" — conflating them report
 user's stop as `LINK_LOST`. `docs/session-protocol.md` § An agent may start a turn.
 
 `runner_exit_code` is a **legacy spelling kept for compatibility**, not evidence the
-v1 runner protocol still exists. Under `sylph.agent.v3` the adapter is a long-lived
+v1 runner protocol still exists. Under the current protocol the adapter is long-lived
 process and a turn is a message on its link, so there is no per-turn exit code to
 record; the column is written `NULL` on every current path.
 
@@ -192,7 +185,11 @@ Event stream journal (bounded live storage).
 -- it constrained `kind` to a closed list and spelled the adapter source 'runner'.
 CREATE TABLE events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  session_env    TEXT NOT NULL,
+  session_agent  TEXT NOT NULL,
+  session_native TEXT NOT NULL,
+  FOREIGN KEY (session_env, session_agent, session_native)
+    REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE,
   turn_id TEXT REFERENCES turns(id) ON DELETE CASCADE,
   seq INTEGER NOT NULL,
   kind TEXT NOT NULL,                      -- deliberately unconstrained; see below
@@ -268,7 +265,11 @@ attached when the request was raised.
 ```sql
 CREATE TABLE pending_requests (
   id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  session_env    TEXT NOT NULL,
+  session_agent  TEXT NOT NULL,
+  session_native TEXT NOT NULL,
+  FOREIGN KEY (session_env, session_agent, session_native)
+    REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE,
   turn_id TEXT NOT NULL,
   adapter_request_id TEXT NOT NULL,
   kind TEXT NOT NULL,                  -- approval | dialog | elicitation | choice
@@ -314,22 +315,40 @@ meaningful rather than missing: a request with no form is an approval, whose sub
 is the one proposed tool input in `detail_json`. See `docs/session-protocol.md`
 § Request forms.
 
-## The archive
+## Search lives beside `history.db`, not in a second store
 
-`archive.db` is the embedded TraceDB crate's own store. **This document does not
-describe its tables, and no Sylph code may query them.** That is the one rule the
-crate's API exists to enforce: the schema is TraceDB's to change, and a direct query
-turns every such change into a silent Sylph breakage. Embedding removes the JSON
-round trip that used to make the boundary physical, which makes the rule easier to
-break and no less binding.
+There is no `archive.db`. One vocabulary and one store (`docs/architecture.md` § One
+authority) means native history is parsed by an adapter into the same events a live
+turn emits, lands in the same journal → history pipeline, and is indexed by one FTS5
+table beside `history.db`.
 
-Read through `list`, `show`, `coverage`, and `search`. Sylph owns ingestion, so
-nothing outside this binary writes the file — but Sylph writes it *through* the
-crate, never as SQL.
+`docs/storage.md` § Schema owns that table. What belongs here is what it replaced and
+why the replacement is not merely tidier:
 
-Sylph's own sessions do not enter the archive; `journal.db` and `history.db` hold
-those, and the three stores are described separately above precisely because nothing
-merges them. See `docs/data-architecture.md` for who owns which fact.
+- **The old open question is answered by construction.** Full-text search used to
+  cover only what the separate archive had parsed, so a session whose environment had
+  gone away was searchable nowhere and one whose vendor file happened to be local was
+  searchable by coincidence. "Usually covered" is not a contract.
+- **`backend/src/tracedb/mod.rs` goes away whole** — 1440 lines, including
+  per-operation JSON casing pins that existed because the same archive spelled `show`
+  in snake_case and `list`/`search`/`stats` in camelCase.
+- **The two-id-space hazard cannot be written.** See `docs/storage.md` § One id space.
+
+Two rules that outlive the separate store, because they are about reading *any*
+external store rather than about that one:
+
+**Never query another component's tables.** The parsers now live in Sylph's own agent
+modules (`docs/agents.md`), so this applies to the vendors' native stores: read them
+through the agent module, never with SQL or ad-hoc file parsing elsewhere.
+
+**A path filter must be a path match, not a substring match.** The old archive
+compiled a `cwd` filter to `LIKE '%' || ? || '%'`, so asking for `/w/app` also
+returned `/w/app-old` and everything beneath it. Anything meaning "this one directory"
+compares for equality after normalizing trailing slashes. The same shape starved a
+paged scan: because a parent's pattern matched every path beneath it and those sorted
+by recency rather than depth, a directory with 88 sessions of its own reported empty
+because its first exact match landed ~1300 rows in. Bound such a scan in **rows
+examined**, not pages.
 
 ## Migrations
 
@@ -337,7 +356,7 @@ Numbered SQL migrations in `backend/migrations/`, applied by `sqlx::migrate!` on
 startup:
 
 ```
-001_initial_schema.sql
+001_initial_schema.sql         -- rebuilt: the identity triple, no origin/lifecycle
 002_pending_requests.sql       -- what an agent is blocked on
 003_agent_event_vocabulary.sql
 004_request_affordances.sql    -- allow_persistent, expires_at_ms
@@ -345,6 +364,14 @@ startup:
 006_turn_origin.sql            -- origin, for an agent-initiated turn
 007_request_form.sql           -- form_json
 ```
+
+**`001` is rewritten in place rather than followed by a migration that drops columns**,
+which the append-only rule below would normally forbid. `AGENTS.md` § Compatibility is
+why: there is no other consumer, no irreplaceable installed state, and every existing
+journal is re-derivable from the agents' own native stores. A migration chain that
+adds three columns and then deletes them documents an intermediate state nobody should
+reconstruct. Verify the native sources still exist before discarding a journal — that
+is the one precondition, and it is the same one `AGENTS.md` states.
 
 Attachments and commands need no migration of their own: attachments are staged on
 disk under the data directory rather than in a table, and a command invocation is a

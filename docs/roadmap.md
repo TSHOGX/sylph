@@ -6,9 +6,8 @@
 - Backend: Rust + Axum + SQLx (Phase 1 complete)
 - Frontend: Next.js 16 + React 19 + TanStack Query (Phase 2 complete)
 - Database: SQLite, split into `journal.db` (hot, unconsolidated turns) and
-  `history.db` (warm, consolidated blocks) with `blobs/` beside them, plus `archive.db`
-  written by the embedded TraceDB crate for agent-native cross-agent history. Nothing
-  merges the three (`docs/storage.md`, `docs/data-architecture.md`)
+  `history.db` (warm, consolidated blocks, plus the FTS index) with `blobs/` beside
+  them. One authoritative record, split for SQLite's sake (`docs/storage.md`)
 
 **Completed:**
 - Phase 1: backend core on port 4317 — 11 routes, LiveStore, TurnSupervisor,
@@ -1205,7 +1204,7 @@ Governing specs, written before the code:
 
 - `docs/session-protocol.md` — `sylph.agent.v3`, the duplex adapter contract
 - `docs/environments.md` — the `Environment` seam, local / khora / ssh
-- `docs/control-plane.md` — one server, many frontends; Discord as a frontend
+- the former `control-plane.md` — one server, many frontends; Discord as a frontend (absorbed into `docs/architecture.md`)
 - `docs/storage.md` — lossless replayable history, tiered, watermark-pruned
 
 ### Decisions taken
@@ -1826,10 +1825,98 @@ Its timeout is 10s against a 20s poll, so it cannot pass on a foregrounded tab a
 the bug it exists to catch — reverting the announcement fails it in 12.1s with the
 user's exact symptom.
 
+## Architecture rewrite, 2026-08-27: what the specs now say
+
+A first-principles pass over the whole of `docs/`, driven by the observation that the
+specs had been hardening distinctions the code never made. **Specs only — no code has
+moved yet**, which is why this section describes intent and the sections below it still
+describe what runs.
+
+Two documents are **deleted**: `data-architecture.md` and `control-plane.md`, absorbed
+into `architecture.md`. Four documents used to argue the authority question, which is how
+they came to disagree with one another. One document is **new**: `agents.md`, per-vendor
+knowledge in one place.
+
+### Five changes, and the evidence for each
+
+**One class of session.** `origin`, `identity_mode`, `lifecycle_mode`, and
+`backend_incarnations` are deleted. *Measured in `backend/src`:* `lifecycle_mode` had 4
+write sites and **0** reads, `origin` had 0 backend branches, `identity_mode` had exactly
+1 — the `SOUL`-path choice, now `inject_identity`, a boolean default. A whole section of
+invariants rested on one `Option<String>`. Sylph's 24h/04:00 reset policy is deleted
+rather than deferred: nothing scheduled it, and under the identity rule below a reset
+would replace a session's primary key mid-life.
+
+**Identity is `(environment, agent, native_id)`**, with no Sylph-minted UUID. *Measured:*
+`claude`'s adapter already mints a native id and dictates it with `--session-id`;
+`claude`, `pi`, and `gemini` accept the flag; `codex` reports its own. So a second id
+space was pure redundancy plus a permanent invitation to the comparison that is silently
+always false. Consequence: `POST /sessions` starts an agent rather than reserving a row,
+which deletes the empty-draft session and its delete endpoint.
+
+**One environment abstraction.** Not an `Environment` trait with an implementation per
+substrate — one **envagent** that dials *outward* to the server, differing only in how it
+came to exist (self-installed, SSH-bootstrapped from another envagent, khora-provisioned).
+This is the Cursor model, and it is what makes "whatever your machine can reach by SSH,
+your session list can reach" true. It adds one hard requirement the old shape did not
+have: a durable **spool** with server-side acks, because a dropped connection would
+otherwise put a hole in the journal at the tail of a turn.
+
+**One store, one vocabulary.** The separate archive is deleted. Native history is parsed
+by an adapter into the same events a live turn emits. Net line count favours this:
+`backend/src/tracedb/mod.rs` is 1440 lines deleted against **1219** lines of parser to
+port for three agents, before counting the 867 lines of `gemini` and `opencode` parsers
+that go with those agents. It also answers, by construction, the open question that
+search covered only what a parser had read.
+
+**Three agents.** `claude`, `codex`, `pi`. Dropping `gemini` and `opencode` closes two
+questions that were gating design work: `opencode` had no per-session file and no
+computable fingerprint (a naive read reached 4.6 GB still running at ~20 minutes), and
+`gemini`'s mid-turn write behaviour was never located.
+
+**And adapters become linked-in Rust traits**, not subprocesses speaking NDJSON. NDJSON
+survives only on the envagent wire, where bytes genuinely cross a machine boundary. This
+deletes agent discovery, which produced two total silent failures in this repo's history.
+
+### What was kept, and why it is worth naming
+
+Every measured pitfall survived the rewrite, restated where a reader implementing that
+part will meet it: facet-scoped capabilities, `span`-based trajectories with
+promotion-by-use, `name`-absent-when-unknown, `is_backgrounded`, agent-initiated turns,
+the two refusal codes, request forms, the delta offset/timing fold, watermark-gated
+retention, and the lineage-folding measurements. A rewrite that lost those would be a
+rewrite that pays for the same defects twice.
+
+### Open questions this pass did not close
+
+- **`claude`'s approval gate scope** — per-frame or once per peer. Decides whether live
+  continuation of a terminal `claude` session is a feature or a dead end. Highest-value
+  unknown in the system.
+- **Multi-user.** Reaching the server over the web from several accounts requires
+  identity, per-user visibility, transport security, and CSRF beyond the bootstrap
+  cookie — plus one question new with this topology: **who owns an envagent**, without
+  which one user can run agents on another's laptop. `browse_roots` becomes an
+  authorization boundary and is currently per-install.
+- **Horizontal scale.** The authority is SQLite and a link is stateful in one process, so
+  growth means shard-by-session-and-route, or moving to Postgres. Nothing in the API
+  forecloses either; the choice is not made.
+
+### Implementation order
+
+Nothing below is done. The order matters because each step makes the next mechanical:
+
+1. `crates/protocol` — the event vocabulary as types
+2. `crates/adapters` — port `claude` and `pi` from Python, write `codex`, absorb the three
+   parsers; recorded-payload tests for classification, plus a live path to refresh them
+3. `crates/server` — in-process adapter calls; delete `tracedb/` and agent discovery
+4. `crates/envagent` — the wire, the spool, pairing, SSH bootstrap
+5. Schema — rewrite `001` in place with the identity triple
+6. Frontend — delete the origin badge and native banner, add link facets and fidelity
+
 ## Data-architecture pass, 2026-08-27: what changed in the specs
 
 Prompted by the multi-environment / multi-frontend direction, and by two errors in the
-previous version of `docs/data-architecture.md` that were worth more than the document
+previous version of the former `data-architecture.md` that were worth more than the document
 was. It defended at length against a hazard the architecture **cannot produce** — one
 machine comparing its own files against another's fingerprints — and it had narrowed the
 requirement to "upload" when the goal is AFK continuity. Both are now stated as such,

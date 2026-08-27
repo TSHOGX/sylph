@@ -1,186 +1,226 @@
 # Environments
 
-Where a session's work actually happens. One authoritative record, several
-places the agent can run.
+Where a session's work runs, and the wire between there and the server.
 
-## The seam
+One authoritative record on the server; agents execute wherever an **envagent** is
+running. `docs/architecture.md` owns why the arrow points inward and why there is one
+abstraction instead of three; this document owns the protocol, the spool, pairing,
+and the two provisioning paths.
 
-Today the supervisor calls `Command::new(path).current_dir(workdir)`. Local
-fork/exec is not behind an interface; it *is* the interface, spread across
-process spawning, file staging, path containment, and the file-browsing API.
+## The envagent is the whole abstraction
 
-An environment is the answer to four questions, and nothing else:
+An envagent is a small binary that dials out to a server, authenticates, and then
+offers exactly four capabilities over one multiplexed connection:
 
-```rust
-#[async_trait]
-pub trait Environment: Send + Sync {
-    fn descriptor(&self) -> EnvironmentDescriptor;
-
-    /// Start a process. The handle owns its streams and its signal channel.
-    async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>>;
-
-    /// Files, for staging attachments and for the Artifacts pane.
-    fn files(&self) -> &dyn FileSystem;
-
-    /// Whether the environment is reachable right now, and why not.
-    async fn probe(&self) -> Health;
-}
-```
-
-`ProcessHandle` is the whole runtime contract:
-
-```rust
-#[async_trait]
-pub trait ProcessHandle: Send {
-    fn stdin(&mut self) -> Option<Box<dyn AsyncWrite + Send + Unpin>>;
-    fn stdout(&mut self) -> Option<Box<dyn AsyncRead + Send + Unpin>>;
-    fn stderr(&mut self) -> Option<Box<dyn AsyncRead + Send + Unpin>>;
-    async fn signal(&self, sig: Signal) -> Result<()>;
-    async fn wait(&mut self) -> Result<ExitStatus>;
-}
-```
-
-That shape is chosen so the adapter protocol is unchanged by where it runs: it is
-NDJSON over a duplex byte stream, which every candidate environment can provide.
-Had the protocol needed a pty, shared memory, or a local filesystem path for
-correlation, this seam would leak — and the leak would only appear when the
-second implementation arrived.
-
-## Why the adapter runs inside
-
-The adapter runs **in** the environment, not on the host talking to it. This is
-the decision the rest follows from.
-
-The alternative — host-side adapter, remote agent CLI — sounds lighter and is
-wrong. The adapter's job is vendor translation, which means reading the CLI's
-native session store, resolving its config, and inheriting its skills and project
-files. All of that is local to wherever the CLI lives. Split them and the
-adapter needs a remote filesystem for every vendor detail it touches, which is
-the same coupling, worse.
-
-So an environment must provide the agent CLIs and the adapters. For local that is
-already true. For Khora it is a Template concern: an image with `claude`, `codex`,
-`pi`, the adapters, and credentials mounted at runtime.
-
-## Implementations
-
-| Environment | Substrate | State |
-| --- | --- | --- |
-| `local` | `tokio::process`, host filesystem | Today's behaviour, unchanged |
-| `khora` | Khora sandbox: `ProcessService` + `FsService` | The reason the seam exists |
-| `ssh` | One multiplexed connection, `sftp` for files | Designed for, not first |
-
-### local
-
-The floor and the default. `spawn` is `tokio::process::Command` with
-`process_group(0)`; `signal` is `killpg`; `files` is `paths.rs` containment
-against the session's workdir. Behaviour is bit-for-bit what ships now, which is
-what makes the refactor verifiable: the existing suite is the regression test.
-
-### khora
-
-Khora provides exactly the four operations, which is why it is the shape the
-trait was drawn around rather than an adaptation of it:
-
-| Sylph needs | Khora offers |
+| Capability | What the server asks for |
 | --- | --- |
-| `spawn` | `ProcessService.Start`, streamed stdout/stderr/exit |
-| duplex stdin | `StreamInput` / `SendInput` / `CloseStdin` |
-| `signal` | `SendSignal`, preserved end to end |
-| reconnect | `Connect` replays a bounded tail, then live events |
-| `files` | `FsService` read/write/stat/list/mkdir/remove/move |
-| health | lifecycle Events with a replayable cursor |
+| **run** | start an agent session, carry its turns, report its events |
+| **watch** | follow a session this envagent did not start, from the vendor's native store |
+| **files** | read and write within a session's `workdir`, for attachments and the Artifacts pane |
+| **health** | is this machine reachable, does it have the agent CLIs, what does it report |
 
-Two Khora properties change the design rather than just satisfying it.
+There is no `Environment` trait with one implementation per substrate. Local, SSH,
+and sandbox differ only in how an envagent came to exist, and after it exists they
+are the same case. The adapters are **linked into the envagent**, so vendor
+translation happens on the machine holding the vendor's files — the constraint that
+made a server-side SSH implementation unworkable.
 
-**The data plane exists only while `running`.** Pause closes admission, drains,
-then quiesces the guest. So a sandbox environment has a lifecycle Sylph must
-model: a session's link dies when its sandbox pauses, and auto-pause on idle is a
-Khora feature, not a failure. This is the same detachment the protocol already
-handles for an idle link — which is why links were designed as disposable from
-the start rather than as a connection to keep alive.
+## `sylph.env.v1`
 
-**`Connect` replays a bounded tail, and is explicitly not durable.** So it cannot
-be the record. It is a reconnect convenience; the journal is the record. That
-distinction is what keeps the sandbox path from quietly having weaker history
-than local.
+One TLS connection per envagent, initiated by the envagent, carrying framed
+messages in both directions with independent streams multiplexed over it. A stream
+is a session's event flow, a file transfer, or a control exchange.
+
+*Decision: the envagent dials out.* A laptop behind NAT, an SSH host on a private
+network, and a sandbox that auto-pauses are then all one case; a server that had to
+reach in would work for exactly one of the three.
+
+*Decision: adapter framing is not the wire.* Inside the envagent, an adapter is a
+Rust call and events are values (`docs/session-protocol.md`). NDJSON survives only
+where bytes genuinely cross a machine boundary — here. So the vocabulary is shared
+with the adapter contract, but nothing depends on a subprocess existing.
+
+### Message classes
+
+| Class | Direction | Purpose |
+| --- | --- | --- |
+| `hello` / `welcome` | env → server, server → env | version, agents present, machine facts, resume cursor |
+| `session.*` | server → env | open, send a turn, interrupt, steer, set config |
+| `event` | env → server | one normalized event, sequenced per session |
+| `ack` | server → env | durable through this sequence number, per session |
+| `watch.*` | server → env | start or stop following a native session |
+| `adopt.*` | server → env | bring in what a native store already holds |
+| `files.*` | both | read, write, list, stat within a session's workdir |
+| `health` | both | probe and report |
+
+**Every event carries a per-session monotonic sequence, and the server acks by
+sequence.** That pair is what makes a dropped connection lossless rather than a hole
+in the record; § Spooling is why it cannot be skipped.
+
+## Spooling, and why the record survives a dropped connection
+
+The old shape was `adapter stdout → server → journal`, in one process,
+synchronously. Now there is a network in the middle, and **a drop puts a hole in the
+journal exactly at the tail of a turn** — which is the part AFK exists to deliver.
+
+So an envagent keeps a **local durable spool**:
+
+- Every event is appended to a local WAL-mode SQLite file **before** being sent.
+- Rows are deleted only when the server acks past them.
+- On reconnect, `hello` carries the last acked sequence per live session and the
+  envagent resumes from there.
+- The spool is bounded by size; on overflow the envagent stops the session's agent
+  rather than dropping events, because a silent gap is worse than a stopped turn.
+
+*Decision: the spool is not a second journal.* It is a bounded ack-gated buffer, and
+it is authoritative for nothing. Two durable records would reintroduce the "which
+copy is the truth" question the authority model exists to answer. Its only contract
+is: nothing leaves it until the server has it.
+
+This is the same shape as bringing in native sessions, differing only in what
+travels — live events rather than parsed history — which is why there is one
+mechanism and not two.
+
+Three ordinary events exercise it, and it is a correctness requirement for all
+three: closing a laptop lid, switching Wi-Fi, and a Khora sandbox auto-pausing on
+idle.
+
+### Renaming a WAL-mode SQLite file means checkpoint-then-rename
+
+The spool is WAL-mode SQLite, so it inherits a rule this repo already paid for:
+moving three files is wrong. A crash between renaming `-wal` and `.db` strands
+committed data in an orphaned WAL beside a database that no longer references it.
+`PRAGMA wal_checkpoint(TRUNCATE)`, close every connection, move the main file alone,
+delete the emptied sidecars.
+
+## Pairing, and who owns an envagent
+
+An envagent joins by pairing, not by holding a long-lived shared secret in a config
+file:
+
+1. A user asks the server for a pairing code — short-lived, single-use.
+2. `sylph-envagent pair --server <url> --code <code>` exchanges it for a durable
+   credential and an opaque environment id.
+3. The envagent stores the credential locally and dials in from then on.
+
+The environment id is **opaque and minted here**, never a hostname or a
+user-supplied name. `docs/architecture.md` § Identity is why: the id is in a
+session's key, so a rename would destroy identity. Display names are mutable
+metadata.
+
+*Measured 2026-08-27:* `codex remote-control pair` uses short-lived pairing codes for
+the same purpose, which is evidence the shape works rather than a guess.
+
+**Who owns an envagent is unresolved and gates multi-user.** On a single-user install
+it does not arise. The moment a server has two principals, an unowned envagent means
+one user can run agents on another user's laptop —
+`docs/architecture.md` § Security model carries this with the rest of that gate.
+
+## How an envagent comes to exist
+
+### Self-installed
+
+A user installs `sylph-envagent` and pairs it. This is the case for a laptop, a
+workstation, a build box. Nothing else is special about it, including on the machine
+the server itself runs on — *decision: the server does not embed an envagent*, so
+"the server's own machine" is not a privileged environment with its own code path.
+That is the same class of special case as the session classes deleted in
+`docs/architecture.md`, and it would drift the same way.
+
+### SSH-bootstrapped
+
+An existing envagent copies the binary to a host it can already reach and starts it
+there. **The bootstrap runs from an envagent, not from the server** — which is the
+whole point: whatever your machine can reach by SSH, your session list can reach.
+
+The requirement on the target is only what SSH already implies: a shell, a writable
+directory, and the agent CLIs the user wants to run.
+
+Once started, the target has two possibilities, and they differ in **what AFK
+promises**:
+
+| | Target can reach the server | Target cannot |
+| --- | --- | --- |
+| connection | target dials in directly | the bootstrapping envagent relays |
+| laptop may leave | yes | **no** — control dies with the relay |
+| what a client shows | an ordinary environment | "reachable via <machine>" |
+
+Both are real. A UI that showed them identically would promise AFK continuity it
+cannot keep in the second case.
+
+### Sandbox-provisioned (Khora)
+
+The server asks Khora for a sandbox whose image contains an envagent, which then
+dials in like any other. **Provisioning is server-side** — it needs Khora API
+credentials and must not depend on any client being online — but the running sandbox
+is not a special environment.
+
+That makes a sandbox the **only** environment needing no client online at all, which
+is the strongest AFK case in the system: start work from a phone, close everything,
+it keeps running.
+
+Two Khora properties shape the design rather than merely satisfying it:
+
+**The data plane exists only while `running`.** Pause closes admission, drains, then
+quiesces the guest. So auto-pause on idle is a feature, and a session's link dying is
+expected rather than a fault. This is what the spool and the ack cursor are for.
+
+**`Connect` replays a bounded tail and is explicitly not durable**, so it cannot be
+the record. It is a reconnect convenience; the server's store is the record. Without
+that distinction the sandbox path would quietly have weaker history than a laptop.
 
 Khora models no caller, account, or work unit by design, and Sylph must not push
-those into it. A sandbox is addressed by id and carries no Sylph identity; the
-mapping from session to sandbox lives in Sylph's journal. Pushing session
-semantics into the engine is rejected by its own §1.3 litmus, and a Sylph feature
-that needs it is a Sylph bug.
+those into it. A sandbox is addressed by id; the mapping from session to sandbox lives
+in the server's store. A Sylph feature that needs Khora to know about Sylph is a Sylph
+bug.
 
-### ssh
+## Watching and adopting a native session
 
-Included because designing for two implementations is how a seam ends up fitting
-exactly two. `spawn` is a channel on a multiplexed connection, `signal` is the
-channel's signal request with `kill -<sig> -<pgid>` as fallback, `files` is
-`sftp`. Not built first, but nothing in the trait forbids it.
+Both bring in a session Sylph did not start, and they differ only in whether it is
+still running. Both are **explicit acts** (`docs/architecture.md` § Data travels one
+way).
 
-## Binding a session to an environment
+**adopt** — the adapter parses what the native store already holds and emits it as
+normalized events. One pass, then done. Fidelity is whatever the vendor wrote.
 
-An environment is chosen at session creation and recorded on the session:
+**watch** — the same parse, then follow the file as it grows, emitting events as they
+appear. *Measured 2026-08-27:* `claude` flushes at tool-call and content-block
+boundaries, `codex` at item completion, `pi` at every `message_end` — so a watcher
+sees a turn in progress rather than only its end. Two `pi` hazards are recorded in
+`docs/agents.md` because a watcher must be built around them: it truncate-rewrites
+with mode `"w"` and no lock, and the file does not exist at all before the first
+assistant message.
 
-```json
-{"environment": {"kind": "khora", "id": "sbx_01H...", "template": "coding-2026-08"}}
-```
+A watched session's **control** facet is whatever that vendor offers a second party,
+which is not universal (`docs/agents.md` has the table). Its **observe** facet works
+regardless. This is the facet pair from `docs/architecture.md`, and a watched session
+is not a third link state.
 
-Immutable for the session's life. A session's transcript is a record of work in a
-place; moving it mid-history would make paths, tool output, and diffs refer to a
-filesystem that no longer exists. Moving work to another environment is a
-**fork** — a new session with a recorded ancestor, which is a relationship
-TraceDB already represents.
-
-`kind: local` is the default, and a session created without the field is local.
-That keeps every existing session and client valid rather than needing a
-migration.
-
-## Why the record does not move with the work
-
-TraceDB ingests from each agent's **native store on the host**. In a sandbox that
-store dies with the sandbox, so nothing is ever ingested — the archive silently
-has a hole exactly where the isolated work happened.
-
-The fix follows from where the events already are. The server sees every
-normalized event, because the protocol is what carries them, so the server is the
-one component present for all work regardless of environment. It journals the
-normalized stream as the durable record and feeds TraceDB from there.
-
-This makes the journal real history rather than a bounded projection — a change
-this repo has to make deliberately, since the journal was explicitly not a second
-transcript archive. The trade is accepted because the alternative is
-per-environment sync paths that each lose the tail on a crash, and because it is
-the only option that gives local, sandbox, and SSH identical fidelity.
-
-Vendor-native stores remain valuable where they exist, and they are the *only*
-record of a session Sylph did not start. So the archive keeps ingesting them, and
-the two records never need reconciling: a Sylph-born session's history is the
-journal's and an adopted session's is the archive's, keyed on
-`(environment, agent, native_id)` — the environment component is what makes the key
-sufficient, since a session never moves between environments and therefore never has
-two candidate copies to choose between.
-
-That is worth stating as the thing an environment does *not* have to do. There is no
-per-environment dedup pass, no cross-environment freshness comparison, and no
-"which copy is newer" question, because two environments cannot hold the same
-session. `docs/data-architecture.md` § Sessions do not migrate between environments
-is where the invariant is stated; nearly all of this document's simplicity is bought
-with it.
-
-`docs/data-architecture.md` is authoritative for what follows from this, and two
-of its consequences bind an environment directly. What a remote environment sends
-is **native source bytes, not projected rows**, because projection is the part most
-likely to change and the part an environment should never own — upload rows and
-every environment must be upgraded in lockstep with the schema. And the direction
-is upload only: an environment sends to the server, and the server never writes
-session data anywhere outside `~/.sylph`.
+Offering "bring in everything on this machine" once, when an envagent first pairs, is
+the right shape for the bulk case. A recurring background sweep is not: it would
+publish sessions the user never associated with Sylph.
 
 ## Health is per environment
 
-`/api/v1/health` reports `tracedb.available` today. With environments it also
-reports each configured environment's reachability, because "the agent will not
-start" has a different cause and a different fix per environment — a missing
-binary locally, an unreachable orchestrator or an exhausted node for Khora, a
-dead connection for SSH. Collapsing those into one boolean is what turns a
+`/api/v1/health` reports each environment separately, because "the agent will not
+start" has a different cause and a different fix per machine: a missing CLI locally,
+an unreachable orchestrator or exhausted node for Khora, a dead connection for a
+laptop that went to sleep. Collapsing those into one boolean is what turns a
 five-second diagnosis into an hour.
+
+An envagent reports which agent CLIs it found and their versions, so "which agents
+can I use" is answered per environment rather than globally. A user picking an
+environment with no `codex` on it should see that before creating the session, not
+after.
+
+## A degraded dependency is one fact per run, not one per attempt
+
+This repo has paid for this twice, one layer apart, and an envagent is a third place
+with the same shape. *Measured:* a per-request warning on an absent binary produced
+**2339 identical lines** in one E2E run.
+
+An unreachable envagent is a persistent state. Report it once at `error` and at
+`debug` thereafter, and let a caller ask whether it was already reported rather than
+each caller remembering. The fix belongs in the client that holds the connection, not
+in the API handlers that poll it — a sidebar and a picker both polling will otherwise
+rebuild the flood one layer up.

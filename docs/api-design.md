@@ -27,6 +27,26 @@ Sylph Web exposes a versioned REST API with SSE streaming for real-time updates.
 
 All endpoints require authentication (process-local HttpOnly cookie).
 
+## A session id in a path is the identity triple
+
+A session is `(environment, agent, native_id)` (`docs/architecture.md` § Identity).
+On the wire and in a path segment it is encoded `<environment>:<agent>:<native_id>`
+and **percent-encoded** as one segment, so `{id}` below is that string throughout.
+
+Two rules a client must not break:
+
+- **Do not split on `/`.** Native ids and vendor values contain slashes — 350 of
+  `pi`'s 372 model ids do — which is why the delimiter is `:` and why this repo already
+  paid for the other choice once.
+- **Treat it as opaque.** A client echoes it back; it never parses it to learn which
+  agent or environment a session belongs to. Those are separate fields on the session
+  object, and reading them from the id is how a rename or an encoding change breaks a
+  client silently.
+
+There is no server-minted UUID. `POST /sessions` therefore **starts an agent** rather
+than reserving a row, because a session has no identity until an agent has given it
+one — see that endpoint below for what changed with it.
+
 ## Core Endpoints
 
 ### Health & Diagnostics
@@ -41,10 +61,12 @@ Health check with version information.
   "ok": true,
   "apiVersion": "1",
   "schemaVersion": 7,
-  "tracedb": {
-    "available": true,
-    "version": "0.5.2"
-  }
+  "environments": [
+    {"id": "env_7fk2", "name": "laptop", "connected": true,
+     "agents": [{"name": "claude", "version": "2.1.247"}, {"name": "pi", "version": "0.84.3"}]},
+    {"id": "env_k9x1", "name": "build-box", "connected": false,
+     "disconnectedSinceMs": 1724057000000}
+  ]
 }
 ```
 
@@ -215,14 +237,12 @@ Four decisions:
   those need opposite fixes. Naming the variable in the row means acting on it does
   not require consulting a table elsewhere.
 - **`exists` is absent, not `false`, for anything that is not a path.** A log level
-  rendered as missing reports a working setting as broken. `tracedb.bin` is checked
-  against `PATH` when it is a bare command name, since that is the default and a
-  filesystem check would call a working install absent.
-- **Read-only, with no `PUT`.** `paths.browse_roots` bounds what any client of this
-  backend may enumerate and `paths.agents_dir` names directories the server executes
-  programs from. A loopback HTTP surface that could rewrite either is a materially
-  larger threat-model question than one that displays them, and the file is the
-  durable, reviewable record. The panel shows the values and the path to open.
+  rendered as missing reports a working setting as broken.
+- **Read-only, with no `PUT`.** These values name filesystem paths, and an
+  environment's `browse_roots` bounds where an agent may be spawned. A loopback HTTP
+  surface that could rewrite that is a materially larger threat-model question than one
+  that displays it, and the file is the durable, reviewable record. The panel shows the
+  values and the path to open.
 - **Authenticated.** Every value is an absolute local filesystem path. `/health`
   stays unauthenticated for supervisor probes and reports booleans only.
 
@@ -230,98 +250,352 @@ Built per request rather than cached: every `exists` field is a filesystem fact,
 a cached report would keep telling a user a directory is missing after they created
 it. It is a handful of `stat` calls against the page cache.
 
-`bundledAgentCandidates` lists every directory bundled-adapter resolution tried, in
-order, with the one it took marked. Without it "no agents" is unactionable — a
-missing install and a mistyped path produce the same empty list.
+There is no adapter-search report here any more, because there is no search: adapters
+are linked into the envagent and an agent's availability is whether its CLI is on that
+machine's `PATH`. `GET /api/v1/environments` reports that per machine, and
+`sylph-envagent doctor` reports it locally. What the old report existed for — making
+"no agents" actionable rather than an empty list with no cause — is answered by naming
+the CLI that was not found.
 
 See `docs/configuration.md` for the settings themselves.
 
-### Agents
+### Agents and environments
 
-#### `GET /api/v1/agents`
+#### `GET /api/v1/environments`
 
-List discovered agents. Each descriptor is what the adapter returned from its
-`hello`/`ok` handshake, not a static file read (`docs/session-protocol.md` § Handshake).
+Every paired environment, whether it is connected, and what it can run.
 
 **Response 200:**
 ```json
 {
-  "agents": [
+  "environments": [
     {
-      "name": "claude",
-      "description": "Claude Code",
-      "version": "2.1.238",
-      "session_key": "…",
-      "flags": {
-        "model": {
-          "choices": ["opus-5", "sonnet-5"],
-          "description": "Model to use"
-        },
-        "effort": { "choices": ["low", "medium", "high", "xhigh", "max"] }
-      },
-      "commands": {},
-      "supports": ["interrupt", "steer", "approval", "subagent", "slash", "set_config", "context", "fork"]
+      "id": "env_7fk2",
+      "name": "laptop",
+      "connected": true,
+      "origin": "self-installed",
+      "reachableVia": null,
+      "agents": [
+        {
+          "name": "claude",
+          "version": "2.1.247",
+          "flags": {
+            "model": {"choices": ["opus-5", "sonnet-5"], "description": "Model to use"},
+            "effort": {"choices": ["low", "medium", "high", "xhigh", "max"]}
+          },
+          "supports": ["interrupt", "steer", "approval", "subagent", "slash",
+                       "set_config", "context", "fork", "watch"]
+        }
+      ]
+    },
+    {
+      "id": "env_k9x1",
+      "name": "prod-builder",
+      "connected": true,
+      "origin": "ssh-bootstrapped",
+      "reachableVia": "env_7fk2",
+      "agents": [{"name": "codex", "version": "0.9.1", "flags": {}, "supports": []}]
     }
-  ],
-  "broken": {
-    "stale-agent": "no adapter.sh"
+  ]
+}
+```
+
+**Which agents exist is per environment, not global.** A user picking an environment
+with no `codex` on it should learn that before creating the session, not after. There is
+no top-level agent list, because the answer differs per machine and a merged list would
+be true of nowhere.
+
+**`reachableVia` is not decoration.** A non-null value means this environment is
+reachable only while the named one relays for it, so **control dies when that machine
+leaves** (`docs/environments.md` § SSH-bootstrapped). A UI rendering it identically to a
+directly-connected environment would promise AFK continuity it cannot keep.
+
+**Availability is `PATH`, not a handshake.** An agent is available when its CLI is on
+that machine's `PATH` and reports a version. There is no discovery pass, no adapter
+directory, and therefore no `broken` map — the two total failures that mechanism produced
+are recorded in `docs/session-protocol.md` § What changed. "Why can I not use this
+agent" now has one answer with one fix.
+
+**`flags` is the spawn-time option schema** — what can be chosen before a session
+exists. Anything adjustable on a *live* session is a config facet instead, reported by
+`GET /sessions/{id}/capabilities`, and a session's real slash-command list arrives there
+too because it depends on files the CLI reads at startup. Nothing in the UI hardcodes a
+model list, which is why `codex` correctly shows effort with no model selector.
+
+**`supports` is a closed vocabulary that drives the UI directly** — a composer must not
+offer interrupt to an agent that cannot interrupt.
+
+#### `POST /api/v1/environments/pairings`
+
+Mint a short-lived, single-use pairing code (`docs/environments.md` § Pairing). The
+envagent exchanges it for a durable credential and is assigned its opaque id.
+
+**Response 201:** `{"code": "…", "expiresAtMs": 1724054460000}`
+
+#### `DELETE /api/v1/environments/{id}`
+
+Unpair. Sessions recorded from that environment stay readable — their history is in the
+server's store — but their **control** facet reports unavailable, and retention treats
+them as terminal, because no reachable native source can confirm a bound
+(`docs/storage.md`).
+
+## A session id in a path is the identity triple
+
+A session is `(environment, agent, native_id)` (`docs/architecture.md` § Identity).
+On the wire and in a path segment it is encoded `<environment>:<agent>:<native_id>`
+and **percent-encoded** as one segment, so `{id}` below is that string throughout.
+
+Two rules a client must not break:
+
+- **Do not split on `/`.** Native ids and vendor values contain slashes — 350 of
+  `pi`'s 372 model ids do — which is why the delimiter is `:` and why this repo already
+  paid for the other choice once.
+- **Treat it as opaque.** A client echoes it back; it never parses it to learn which
+  agent or environment a session belongs to. Those are separate fields on the session
+  object, and reading them from the id is how a rename or an encoding change breaks a
+  client silently.
+
+There is no server-minted UUID. `POST /sessions` therefore **starts an agent** rather
+than reserving a row, because a session has no identity until an agent has given it
+one — see that endpoint below for what changed with it.
+
+## Core Endpoints
+
+### Health & Diagnostics
+
+#### `GET /api/v1/health`
+
+Health check with version information.
+
+**Response 200:**
+```json
+{
+  "ok": true,
+  "apiVersion": "1",
+  "schemaVersion": 7,
+  "environments": [
+    {"id": "env_7fk2", "name": "laptop", "connected": true,
+     "agents": [{"name": "claude", "version": "2.1.247"}, {"name": "pi", "version": "0.84.3"}]},
+    {"id": "env_k9x1", "name": "build-box", "connected": false,
+     "disconnectedSinceMs": 1724057000000}
+  ]
+}
+```
+
+#### `GET /api/v1/diagnostics`
+
+Detailed system state (sessions, turns, agents, retention).
+
+**Response 200:**
+```json
+{
+  "sessions": { "total": 15, "idle": 12, "running": 3 },
+  "turns": { "queued": 0, "running": 2, "completed": 143 },
+  "agents": ["claude", "codex", "pi"],
+  "uptimeSeconds": 8642,
+  "retention": {
+    "ranAtMs": 1724058000000,
+    "examined": 64,
+    "confirmed": 12,
+    "withheld": 52,
+    "terminal": 41,
+    "unchanged": 9,
+    "blocksPruned": 318,
+    "blobsSwept": 4,
+    "archiveAvailable": true,
+    "bytesHeld": 4183740928,
+    "sessionsMeasured": 357,
+    "bytesGrewBy": 12043776,
+    "largestSessions": [
+      {
+        "sessionId": "s_abc123",
+        "bytes": 1183741952,
+        "blocks": 21044,
+        "measuredAtMs": 1724058000000,
+        "grewBy": 8388608,
+        "grewOverMs": 300000
+      }
+    ]
   }
 }
 ```
 
-Three things about this shape catch clients out, and all three are deliberate:
+Authenticated, unlike `/health`: it carries counts, local filesystem paths, and
+agent failure messages.
 
-- **`flags` and `commands` are maps keyed by name, not arrays.** The shape is unchanged
-  from the v1 descriptor so that no client had to be rewritten.
-- **The descriptor keeps snake_case** (`session_key`, `supports`), unlike every other
-  response on this API. It passes through from the adapter's own handshake verbatim
-  rather than being re-serialized, and rewriting keys in transit would mean the server
-  had to know every field an adapter might add. `frontend/lib/api.ts` notes this at the
-  type.
-- **There is no `models` or `efforts` field.** Model and effort lists live inside `flags`
-  as a `FlagSpec.choices`, which is what lets an agent offer effort and no model list
-  without anything in the UI hardcoding either. `broken` is omitted entirely when empty.
+`retention` is the last completed pass, or `null` before the first one. Two things
+about its shape are load-bearing, both covered in `docs/storage.md`:
 
-`flags` is the **spawn-time** option schema — what can be chosen before a session
-exists. Anything adjustable on a *live* session is a config facet instead, reported by
-`GET /sessions/{id}/capabilities`. `commands` here is usually empty for the same
-reason: a project's real command list depends on files the CLI reads at startup, so it
-belongs to a session rather than to an agent.
+- **`withheld` beside `terminal`** is what separates correct behaviour from a
+  broken pass. A terminal session is *supposed* to keep everything, while a
+  delegated session that keeps withholding means the archive is not confirming it —
+  and an all-`unchanged` pass means the ingestion daemon has stopped advancing.
+- **The byte fields answer "which session is growing".** The counts cannot: forty
+  small withheld sessions and one enormous one report identically. `bytesHeld` is
+  the *logical* record across every measured session, not the footprint on disk, so
+  it exceeds what `du` reports on the data directory — it is a ranking measure, not
+  a disk gauge. `grewBy` is signed (negative means pruning worked) and **absent
+  when a session has been measured only once**, because one observation is not a
+  trend and reporting zero would claim stability.
 
-#### `POST /api/v1/agents`
+There is deliberately no configurable size bound. A terminal session's record is
+the only copy, so a size-triggered prune is a size-triggered deletion of data
+nothing else holds — the same trade a time-based rule makes, refused for the same
+reason. `docs/storage.md` § Why no configurable upper bound is offered.
 
-Re-run agent discovery: re-scan both adapter roots and re-handshake each one.
+### Identity
 
-**Not `POST /api/v1/agents/refresh`**, which this document and the OpenAPI schema both
-claimed for a release and which answers `NOT_FOUND`. Refresh is the `POST` method on the
-collection, registered on the same route as the `GET` (`backend/src/lib.rs:303`).
+#### `GET /api/v1/soul`
 
-**Response 200:** Same as `GET /api/v1/agents`
+The identity text Sylph appends to an agent's prompt, read from disk per request.
+
+This endpoint exists because the toggle that governs injection is meaningless
+without it. `SOUL.md` lives in the Sylph home directory — outside any other surface
+the app exposes — so asking a user to decide whether to append it to every session,
+with no way to read what it says, is asking for consent to something invisible.
+
+**Response 200 — a file resolved and was readable:**
+```json
+{
+  "available": true,
+  "path": "/Users/you/.sylph/SOUL.md",
+  "content": "# Sylph\n\nYou are ...",
+  "bytes": 3184,
+  "modifiedMs": 1724058000000
+}
+```
+
+**Response 200 — no `SOUL.md` on this install:**
+```json
+{ "available": false }
+```
+
+| Field | Present when | Meaning |
+| --- | --- | --- |
+| `available` | always | A readable `SOUL.md` resolved |
+| `path` | `available` | Absolute path, so the user can go edit it |
+| `content` | resolved and read | The text as the agent receives it |
+| `bytes` | `available` | Size on disk, before any truncation |
+| `modifiedMs` | `available` | mtime, epoch milliseconds |
+| `truncated` | only when `true` | `content` holds just the first 128 KiB |
+| `error` | resolved but unreadable | Why, e.g. `Could not read SOUL.md: PermissionDenied` |
+
+Four decisions this shape encodes:
+
+- **Read per request, not cached at startup.** `SOUL.md` is hand-edited between
+  sessions. A cached copy rendered beside a toggle that claims to control the live
+  file would be a lie, and the file is a few kilobytes from the page cache — the
+  cost of being correct is not measurable.
+- **A missing file is `200 {"available": false}`, not `404`.** An install without
+  `SOUL.md` is ordinary and runs every session on the agent's own identity whatever
+  the client asks for. The UI has to *say* that plainly rather than offer a choice
+  over a file that does not exist, and a `404` only reports that a request failed.
+- **Unreadable is a separate `error` field, not a `5xx`.** "There is no `SOUL.md`"
+  and "there is one and it cannot be read" are different problems with different
+  fixes, and the settings panel must render the toggle either way.
+- **Truncated at 128 KiB.** A prompt preamble is prose and the real one is ~3 KiB.
+  The bound keeps the response a preview: a file that grew to megabytes is a mistake
+  worth seeing the head of, not worth shipping to a browser in one string. It cuts
+  on a `char` boundary, since slicing raw bytes would render the tail as U+FFFD —
+  visible corruption in something meant to be faithful.
+
+Authenticated, like every route but `/health`: it returns an absolute filesystem
+path and the full text of a personal file.
+
+Resolution lives in `Config` (`backend/src/config/`), which resolves `paths.soul`
+once — `~/.sylph/SOUL.md` by default, overridden by `SYLPH_SOUL`. An explicit empty
+`SYLPH_SOUL` yields no identity, matching the adapter protocol's spelling, and a
+configured path that does not exist resolves to none for the same reason. Resolving
+it in two places is exactly how the settings panel and the spawned adapter would
+come to disagree about whether injection is active.
+
+#### `GET /api/v1/config`
+
+What configuration resolved to, and which source supplied each value. The same
+report `sylph-web-backend doctor` renders, so the terminal and the settings panel
+cannot disagree.
+
+**Response 200:**
+```json
+{
+  "home": "/Users/you/.sylph",
+  "configPath": "/Users/you/.sylph/config.toml",
+  "configPresent": true,
+  "entries": [
+    {
+      "key": "paths.data_dir",
+      "value": "/Users/you/.sylph/data",
+      "source": "default",
+      "envVar": "SYLPH_DATA_DIR",
+      "exists": true
+    },
+    {
+      "key": "server.port",
+      "value": "4400",
+      "source": "env",
+      "envVar": "SYLPH_PORT"
+    }
+  ],
+  "bundledAgentCandidates": [
+    { "path": "/opt/sylph/adapters", "exists": true, "chosen": true }
+  ]
+}
+```
+
+Four decisions:
+
+- **`source` and `envVar` on every entry.** A resolved value alone cannot
+  distinguish "this path is wrong" from "the path I set is not being read", and
+  those need opposite fixes. Naming the variable in the row means acting on it does
+  not require consulting a table elsewhere.
+- **`exists` is absent, not `false`, for anything that is not a path.** A log level
+  rendered as missing reports a working setting as broken.
+- **Read-only, with no `PUT`.** These values name filesystem paths, and an
+  environment's `browse_roots` bounds where an agent may be spawned. A loopback HTTP
+  surface that could rewrite that is a materially larger threat-model question than one
+  that displays it, and the file is the durable, reviewable record. The panel shows the
+  values and the path to open.
+- **Authenticated.** Every value is an absolute local filesystem path. `/health`
+  stays unauthenticated for supervisor probes and reports booleans only.
+
+Built per request rather than cached: every `exists` field is a filesystem fact, and
+a cached report would keep telling a user a directory is missing after they created
+it. It is a handful of `stat` calls against the page cache.
+
+There is no adapter-search report here any more, because there is no search: adapters
+are linked into the envagent and an agent's availability is whether its CLI is on that
+machine's `PATH`. `GET /api/v1/environments` reports that per machine, and
+`sylph-envagent doctor` reports it locally. What the old report existed for — making
+"no agents" actionable rather than an empty list with no cause — is answered by naming
+the CLI that was not found.
+
+See `docs/configuration.md` for the settings themselves.
 
 ### Sessions
 
 #### `GET /api/v1/sessions`
 
-List sessions (live + TraceDB, deduplicated).
+One list, one store. There is no live/archived split and no deduplication step,
+because native history is parsed into the same events a live turn emits and lands in
+the same store (`docs/architecture.md` § One authority).
 
-**Query parameters:**
-- `limit` (default 50, max 200)
-- `agent` (filter by agent name)
-- `origin` (`sylph` or `native`)
+**Query parameters:** `limit` (default 50, max 200), `agent`, `environment`,
+`workdir`.
 
 **Response 200:**
 ```json
 {
   "sessions": [
     {
-      "id": "s_abc123",
-      "origin": "sylph",
-      "identityMode": "sylph",
-      "lifecycleMode": "sylph",
+      "id": "env_7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
+      "environment": "env_7fk2",
+      "environmentName": "laptop",
       "agent": "claude",
-      "nativeSessionId": "native-agent-id",
+      "nativeId": "9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
       "workdir": "/Users/hsw/Workspace/project",
       "title": "Feature implementation",
+      "injectIdentity": true,
+      "fidelity": "stream",
       "flagsJson": "{\"model\":\"opus-5\",\"effort\":\"high\"}",
       "status": "idle",
       "createdAtMs": 1724054400000,
@@ -331,150 +605,161 @@ List sessions (live + TraceDB, deduplicated).
 }
 ```
 
-**A session response carries `flagsJson`, a JSON *string* — not a `flags` object.**
-Requests take `flags` as an object (`POST` and `PATCH`, below); responses report the
-stored column and the client parses it (`models/session.rs:25`,
-`frontend/lib/api.ts:42`). This document showed `flags` here for a release, so a client
-written from it read `undefined`.
+`id` is the encoded triple and the route key. `environment`, `agent`, and `nativeId`
+are also given as separate fields **so a client never parses the id** — see § A session
+id in a path.
 
-`nativeSessionId` and `traceSessionId` are **omitted when absent**, not `null`
-(`skip_serializing_if`). A live Sylph session has neither until its first turn and
-ingestion respectively.
+`environmentName` is display-only and mutable. It is never a key: a rename must not
+destroy identity (`docs/environments.md` § Pairing).
+
+**`fidelity` is what a renderer must read before drawing a duration.** `stream` means
+every delta and its arrival time is recorded; `blocks` and `messages` mean the source
+recorded less, and no care recovers a timing that was never written. A waterfall over
+message-fidelity data presents equal-length bars as measurements.
+
+**`flagsJson` is a JSON *string*, not a `flags` object.** Requests take `flags` as an
+object; responses report the stored column and the client parses it. This document
+showed `flags` here for a release, so a client written from it read `undefined`.
+
+**A path filter is an exact match after normalizing trailing slashes, never a
+substring.** The store this replaced compiled `workdir` to `LIKE '%' || ? || '%'`, so
+asking for `/w/app` also returned `/w/app-old` and every subdirectory.
 
 #### `POST /api/v1/sessions`
 
-Create a Sylph-managed session.
+**This starts an agent.** It does not reserve a row. A session has no identity until an
+agent has assigned one (`docs/architecture.md` § Identity), so there is nothing to
+create in advance.
 
 **Request:**
 ```json
 {
+  "environment": "env_7fk2",
   "agent": "claude",
   "workdir": "/Users/hsw/Workspace/project",
   "title": "Feature implementation",
-  "identityMode": "sylph",
-  "flags": {
-    "model": "opus-5",
-    "effort": "high"
-  }
+  "injectIdentity": true,
+  "flags": {"model": "opus-5", "effort": "high"}
 }
 ```
 
-`identityMode` is `sylph` (append `SOUL.md`) or `preserve` (run the agent on its
-own identity, no injection). It defaults to `sylph`, so a client that omits it
-keeps the original behaviour. A closed enumeration rather than a free string: a
-misspelling is a `422` naming the field, instead of a journal row carrying a value
-nothing downstream matches — which would read as "not sylph" everywhere and
-silently disable injection.
+`injectIdentity` decides whether `SOUL.md` is appended, defaults to `true`, and is
+**refused by `PATCH`**: a transcript records what produced it, so rewriting the flag
+would rewrite what the stored history means. It is a default, not a policy — see
+`GET /api/v1/soul` for the text it governs.
 
-**`identityMode` and `origin` are separate axes.** Opting out of injection does
-*not* make a session `native`. The WebApp created it, so Sylph lifecycle policy
-still applies and it may be reset or compacted; `origin` stays `sylph`. Collapsing
-the two would make "run this agent as itself" indistinguishable from an imported
-session that must never be reset. See `GET /api/v1/soul` for the text this governs.
+**Response 201:** the session object, with its id.
 
-**Response 201:**
-```json
-{
-  "session": { /* session object */ }
-}
-```
+**What changed, and what it deletes.** The previous shape wrote a row with a
+server-minted UUID and left the agent unstarted, which produced a class of session with
+no work in it. Three things go away with that: `DELETE /api/v1/sessions/{id}` for
+empties, the frontend probe that called it on unmount, and the window in which a
+session existed with no native id and therefore could not be resumed. A failed spawn now
+reports at the start screen instead of leaving a dead row behind.
 
-**`workdir` is bounded, and the bound is configuration.** It must resolve inside
-`paths.browse_roots` or the Quick Start directory, checked on the canonical path so
-`..` and symlinks are resolved rather than pattern-matched. This is the same root
-set `GET /api/v1/fs/*` browses, deliberately: that endpoint exists to name a
-workdir, so a second bound would be a second thing to keep equal.
+**`workdir` is bounded, and the bound now lives in the envagent.** It must resolve
+inside that environment's `browse_roots` or its Quick Start directory, checked on the
+canonical path. Only the machine holding the path can canonicalize it, know whether a
+component is a symlink, or resolve `..` — a server checking a remote path would be
+matching a string against a filesystem it cannot see (`docs/configuration.md`).
 
-The reason it is bounded at all is that this field is the `current_dir` of a
-spawned agent process, and a coding agent reads and writes the tree it is pointed
-at — so it decides where arbitrary code runs. Existence, the only property it was
-checked for previously, says nothing about whether it should. See
-`docs/configuration.md` § `browse_roots` bounds where agents run.
+The reason it is bounded at all: this field is the `current_dir` of a spawned agent, and
+a coding agent reads and writes the tree it is pointed at, so it decides **where
+arbitrary code runs**. Existence — the only property it was once checked for — says
+nothing about whether it should.
 
-The **canonical** path is journalled, not the string as sent, so two spellings of
-one directory do not become two workspaces and the recorded path carries no
-symlinked component that could be re-pointed after the check.
+The **canonical** path is recorded, not the string as sent, so two spellings of one
+directory do not become two workspaces. Note the consequence, which bit once: anything
+that groups, compares, or displays a path must use the same spelling. Comparing a
+canonical `workdir` against a *configured* Quick Start path reported every Quick Start
+session as not-Quick-Start, and nothing errored — the row and the sessions it counts
+simply stopped being the same directory. On macOS this is not an edge case: `/tmp`,
+`os.tmpdir()`, and everything under `/var` all differ from their canonical form, so the
+bug is invisible on Linux CI and certain on a developer's machine.
 
 **Errors:**
-- `400` — invalid agent, workdir missing or not a directory, flags validation
-- `403` — `POLICY_VIOLATION`: the workdir exists but is outside the permitted
-  roots. Distinct from `400` on purpose: the request is well-formed and the fix is
-  in `config.toml`, not in the request. The message lists what is permitted.
-- `409` — session already exists (rare, UUID collision)
-- `422` — `identityMode` outside the enumeration
+- `400` — unknown agent, workdir missing or not a directory, flags validation
+- `403` — `POLICY_VIOLATION`: the workdir exists but is outside that environment's
+  permitted roots. Distinct from `400` on purpose — the request is well-formed and the
+  fix is in configuration, not in the request. The message lists what is permitted.
+- `409` — the agent reported an id that already names a session
+- `502` — `AGENT_START_FAILED`: the CLI could not be started, or started and reported
+  no id. Reporting no id is a failure rather than a degraded success: without one the
+  session can never be resumed, so every link death would make it permanently
+  unlinkable.
+- `503` — `ENVIRONMENT_UNREACHABLE`: no envagent is connected for that environment
 
-A session already recorded outside the permitted roots stays fully readable:
-nothing re-checks a journalled workdir on read, list, or resume. Narrowing
-configuration must not orphan history.
+A session already recorded outside the permitted roots stays fully readable. Nothing
+re-checks a recorded workdir on read, list, or resume — a rule that applied on read
+would make every session created under wider configuration unreadable, which is a worse
+failure than the hole it closes.
 
-#### `POST /api/v1/sessions/import`
+#### `POST /api/v1/sessions/adopt`
 
-Import a native session from TraceDB.
+Bring in a session an agent already has on some environment, from that agent's own
+native store. Replaces `POST /sessions/import`.
 
 **Request:**
 ```json
 {
-  "traceSessionId": "ts_xyz789"
+  "environment": "env_7fk2",
+  "agent": "claude",
+  "nativeId": "9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
+  "watch": true
 }
 ```
 
-`traceSessionId` is formatted `<agent>:<native-id>`, exactly as TraceDB
-reports it. `title` may be supplied to override the derived one.
+`watch: true` follows the store as it grows, so a session running in a terminal right
+now appears and keeps updating; `false` parses one pass of what is already recorded
+(`docs/environments.md` § Watching and adopting). `title` may be supplied to override
+the derived one.
 
-Policy-relevant fields are derived from the archive, never taken from the
-request: the agent comes from the id prefix, because it selects identity and
-lifecycle policy, and the working directory comes from the archived session's
-own `system` event. A client naming the wrong agent would otherwise produce a
-session governed by the wrong rules. The title falls back to the first line of
-the opening user turn.
+**Response 201:** the session object, with `fidelity` reflecting what the vendor's store
+actually holds — `blocks` or `messages`, never `stream`.
 
-**Response 201:**
-```json
-{
-  "session": {
-    "id": "s_imported",
-    "origin": "native",
-    "identityMode": "preserve",
-    "lifecycleMode": "preserve",
-    "agent": "claude",
-    "workdir": "/Users/me/project",
-    "title": "refactor the store layer",
-    "status": "idle"
-  }
-}
-```
+**Policy-relevant fields are derived from the store, not from the request.** The
+working directory comes from the session's own recorded environment context; the title
+falls back to the opening user turn. `injectIdentity` defaults to **false** here,
+because the transcript so far was produced without it — but it is settable, since
+adopting a terminal session and injecting from that point on is a coherent thing to
+want.
 
-Live sessions expose `nativeSessionId` after the first turn. It is the
-agent-native id the agent reported, and is the id users should copy into
-the originating agent or TraceDB. `id` remains the Sylph Web route key. Native
-imports also expose `traceSessionId`, the complete TraceDB id. The backend uses
-both forms when reconciling a live row with an archive row.
+**The recorded working directory is bounded exactly like a created one**, and this is
+not belt-and-braces. A machine's store holds every session any agent ever ran there, so
+an unbounded adopt is a *general* way to start an agent anywhere: find a session that
+ran in the target directory, adopt it, send a turn. That the path came from the store
+rather than from the request changes who chose it, not what happens next.
 
-**The archived working directory is bounded exactly like a created one**, and this
-is not belt-and-braces. The archive holds every session any agent ever ran on this
-machine, so an unbounded import is a *general* way to start an agent anywhere: find
-a row that ran in the target directory, adopt it, send a turn. That the path came
-from the archive rather than from the request body changes who chose it, not what
-happens next — resuming spawns a process there either way.
-
-The consequence is that an archived session which ran outside
-`paths.browse_roots` cannot be imported until that directory is permitted. The
-error says so, and says what importing would enable, so the refusal reads as a
-policy decision rather than as a broken archive.
+**The title fallback must skip injected envelopes.** The first `user` event is usually
+not what the user typed — agents inject their own context as leading pseudo user turns
+(`<environment_context>`, `<skills_instructions>`, memory files, `claude`'s `Caveat:`
+preamble). Taking it verbatim labels most sessions with boilerplate byte-identical
+across every session of that agent; skipping those raised recognizable labels from ~10%
+to 98% over 311 measured sessions. Keep the rule narrow: treating a leading `You are `
+as boilerplate discarded 44 genuine labels, because subagent briefs open that way.
 
 **Errors:**
-- `400` — malformed `traceSessionId`, no adapter for the originating agent, or
-  the archived working directory no longer exists
-- `403` — `POLICY_VIOLATION`: the archived working directory exists but is outside
-  the directories this install permits sessions to run in
-- `404` — no such archived session (`TRACE_SESSION_NOT_FOUND`)
-- `409` — already imported (`SESSION_ALREADY_IMPORTED`)
-- `422` — `TRACE_SESSION_NOT_RESUMABLE`: the archive recorded no working directory
-- `503` — TraceDB unreachable (`TRACEDB_UNAVAILABLE`)
+- `400` — no such agent on that environment, or the recorded workdir no longer exists
+- `403` — `POLICY_VIOLATION`: the recorded workdir is outside that environment's roots
+- `404` — `NATIVE_SESSION_NOT_FOUND`: that environment's store has no such session
+- `409` — `SESSION_ALREADY_PRESENT`: adopting twice would produce two rows for one
+  conversation
+- `422` — `NATIVE_SESSION_NOT_RESUMABLE`: the store recorded no working directory
+- `503` — `ENVIRONMENT_UNREACHABLE`
 
-Those five are deliberately distinct because they have five different fixes:
-nothing to do, widen configuration, wrong id, already done, and reinstall the
-agent. Collapsing any pair would send a reader to the wrong layer.
+Those are distinct because they have distinct fixes: nothing to do, widen
+configuration, wrong id, already done, unusable source, and bring the machine online.
+Collapsing any pair sends a reader to the wrong layer.
+
+#### `GET /api/v1/sessions/enumerate`
+
+What native sessions an environment holds, without adopting any of them. This is what
+makes adopt offerable in a UI rather than requiring a user to know a vendor id.
+
+**Query parameters:** `environment` (required), `agent`, `workdir`, `limit`, `cursor`.
+
+Answered by the envagent from its local stores. A session already adopted is marked as
+such, so a picker can show it rather than offering a duplicate that would `409`.
 
 #### `GET /api/v1/sessions/{id}`
 
@@ -528,40 +813,34 @@ stored, dropped at turn time, and the turn would run on the default with nothing
 anywhere saying why. Validating on write turns that silent no-op into an error the
 UI can show against the control that caused it.
 
-Identity is deliberately not patchable. `agent`, `origin`, `identityMode`, and
-`lifecycleMode` decide which agent owns the conversation and whether `SOUL.md`
-may be injected; changing them on a session with history would rewrite what that
-history was produced by. Native→Sylph conversion is a separate, explicit
-operation for the same reason.
+**Identity is not patchable, and three of the four fields that used to say so are
+gone.** `environment`, `agent`, and `nativeId` *are* the session's identity, so
+changing one does not modify a session, it names a different one. `injectIdentity` is
+refused for a different reason: a transcript records what produced it, so rewriting the
+flag would rewrite what the stored history means. `origin`, `identityMode`, and
+`lifecycleMode` no longer exist — `docs/architecture.md` § One class of session carries
+the measurement showing they had four write sites and one behavioural branch between
+them.
 
 Errors: `SESSION_NOT_FOUND` (404), `INVALID_REQUEST` (400) for an undeclared flag
 key, a value outside a declared enumeration, or an agent that is no longer
 installed.
 
-#### `DELETE /api/v1/sessions/{id}`
+#### `DELETE /api/v1/sessions/{id}` — removed
 
-Discard an empty draft. Returns `204 No Content`.
+**There is no empty draft to discard, because `POST /sessions` now starts an agent.**
+A session exists only once an agent has assigned it an id, so the state this route
+existed for — a row representing nothing, created by picking a directory and navigating
+away — cannot occur. The frontend probe that called it on unmount goes with it.
 
-```sql
-DELETE FROM sessions WHERE id = ? AND origin = 'sylph'
-  AND NOT EXISTS (SELECT 1 FROM turns WHERE turns.session_id = sessions.id)
-```
+Recorded rather than silently dropped, because the shape it guarded is worth
+remembering: the route enforced "empty, and Sylph-created" **in the SQL statement**
+rather than by read-then-delete, and answered `204` on a miss because the caller was an
+unload path that could not act on an error. Both are the right choices for a route of
+that kind.
 
-The two conditions are the whole contract, and they are enforced in the statement
-rather than by a read-then-delete: a session that has run a turn, and any session
-imported from the archive, are both untouchable through this route. It exists for
-one narrow case — a user picks a directory, gets a session, and navigates away
-without sending anything. Creation is a mutation now rather than a form, so drafts
-are a normal consequence of browsing, and leaving them behind would fill the
-sidebar with rows representing nothing.
-
-**Idempotent, and deliberately not 404 on a miss.** A session that does not qualify,
-or does not exist at all, still answers `204`. The client's intent is "do not leave
-a draft behind", not "assert this row existed" — and the caller is usually an unload
-path that cannot act on an error anyway.
-
-There is no route that deletes a session with history. Session delete, move, and
-export are all still absent; see the roadmap.
+There is still no route that deletes a session **with** history. Delete, move, and
+export remain absent; see the roadmap.
 
 ### Turns
 
@@ -641,7 +920,7 @@ is otherwise indistinguishable from a user sending nothing. `docs/session-protoc
 § An agent may start a turn.
 
 **`runnerExitCode` is a legacy spelling, and it is `null` on every current path.** Under
-`sylph.agent.v3` the adapter is a long-lived process and a turn is a message on its
+the current protocol the adapter holds a session for its lifetime and a turn is a message on its
 link, so there is no per-turn exit code to report. The field is retained so no client
 had to change; do not read its presence as evidence the v1 runner protocol still exists.
 
@@ -769,9 +1048,10 @@ session to end one turn:
 
 ### Links
 
-A **link** is the live adapter process for a session. It is not the session: a session
-with no link is complete, resumable, and searchable, and links are torn down on idle
-(30 minutes) and do not survive a server restart. Everything in this subsection is
+A **link** is a live channel to a session's agent, held by the envagent for the
+environment that session runs in. It is not the session: a session with no link is
+complete, resumable, and searchable, and links are torn down on idle (30 minutes) and do
+not survive a server restart or an envagent disconnect. Everything in this subsection is
 therefore about *live* state, and a client must render it as live state rather than
 promising it unconditionally.
 
@@ -800,10 +1080,25 @@ Two consequences a client must handle:
   `staleTime: Infinity` makes one failed handshake permanent for the life of the page.
   Cache by failure code: `no_adapter` is cacheable like a success, because no retry
   installs an adapter; a failed handshake must be allowed to go stale.
-- **An empty capability surface means "Sylph cannot reach it", never "there is
-  nothing there".** For a Sylph-born session those coincide; for an **adopted** session
-  — one started in a terminal — the process is alive and simply not ours. See
-  `docs/data-architecture.md` § One link state, two typed capability facets.
+- **An empty capability surface means "Sylph cannot reach it", never "there is nothing
+  there".** These coincide for a session Sylph launched and are opposite for one running
+  in a terminal, where the process is alive and simply not ours to drive.
+
+**`LinkState` carries two typed facets, `observe` and `control`, each able to report
+unavailable with a reason.** This is the shape rather than a third link state, because
+the vendors do not sort into three buckets: a terminal `pi` is observable and
+undrivable, `codex` is both, `claude` is observable and semi-drivable behind a human
+approval gate (`docs/agents.md`). Two failure codes worth naming, because neither
+existed and both are the common case now:
+
+| Code | Means |
+| --- | --- |
+| `environment_unreachable` | no envagent connected for this session's environment — observe still answers from the store |
+| `not_ours_to_drive` | the process is alive under someone else, and this vendor offers a second party no control channel |
+
+Both are cacheable like a success in the sense above: no retry connects a sleeping
+laptop or teaches a vendor a new channel. What must go stale is a *failed handshake*
+against a reachable environment.
 
 #### `POST /api/v1/sessions/{id}/link`
 
@@ -813,6 +1108,8 @@ about to type can pay that cost before they finish rather than after they send.
 
 Unlike `capabilities`, a failure here **is** an error (`LINK_FAILED`), because
 establishing was the entire request rather than a side effect of one.
+`ENVIRONMENT_UNREACHABLE` (503) is separate from `LINK_FAILED` (502): one is fixed by
+bringing a machine online, the other by looking at the agent.
 
 #### `DELETE /api/v1/sessions/{id}/link`
 
@@ -987,7 +1284,7 @@ listing returns.
       "runningCount": 1,
       "lastUsedMs": 1755600000000,
       "isQuickStart": false,
-      "archivedCount": 0
+      "environment": "env_7fk2"
     }
   ]
 }
@@ -997,323 +1294,170 @@ Ordered newest-first by `lastUsedMs`. The Quick Start directory is always
 present, even with no sessions, because the sidebar section and the settings row
 exist before the first quick session is created.
 
-**Query parameters.** `includeArchived=true` also reports directories that exist
-only in the TraceDB archive, with `archivedCount` set. It is off by default
-because the sidebar polls this endpoint and needs only live sessions to group,
-while an archive scan walks every archived session. Surfaces where the user
-*picks* a directory pass it: a project someone is about to work in has no live
-session yet, so without this it could never be pinned or selected. When the flag
-is absent `archivedCount` is `0`, which therefore means "not counted" rather than
-"no history". An unreachable archive degrades to live-only rather than failing the
-request.
+**A workspace is scoped to an environment.** Two machines both having
+`/home/user/app` is not a collision, because a path is only ever read alongside the
+environment that named it (`docs/architecture.md` § Sessions do not migrate). Grouping
+by path alone would merge two unrelated directories into one row.
 
-### Archive
+**`includeUnpaired=true` also reports directories whose environment is not currently
+connected**, so a project can be pinned and browsed while the laptop holding it is
+asleep. It is off by default because the sidebar polls this endpoint and needs only what
+it can group; the surfaces where a user *picks* a directory pass it.
 
-Read-only browsing of durable coding-agent history, by directory.
+**Comparing a recorded path against a configured one needs the same spelling.**
+`workdir` is stored canonicalized, so comparing it against a configured Quick Start path
+reported every Quick Start session as `isQuickStart: false` — nothing errored, the row
+and the sessions it counts simply stopped being the same directory. On macOS this is
+certain rather than an edge case, and invisible on Linux CI.
 
-`/search` answers "which archived session mentioned X", which only helps someone
-who already knows what to ask. These endpoints answer what the sidebar asks:
-"what happened in this directory before?" Without them a freshly pinned workspace
-renders as empty while the archive holds hundreds of sessions for that same path.
+### Lineage, folding, and labels
 
-**Reading is not importing.** `POST /sessions/import` adopts a session so it can
-be *continued*: it writes a row, requires an adapter for the originating agent, and
-requires the recorded `cwd` to still exist. None of that is needed to read a
-transcript, and all of it fails for exactly the old sessions a user most wants to
-look back at. So these endpoints mutate nothing, and import stays an explicit
-action taken from the archived view.
+**There is no `/archive/*` namespace.** Reading history is `GET /sessions` and
+`GET /sessions/{id}`, because one store holds it (`docs/architecture.md` § One
+authority). What used to be a separate read path against a separate database is now
+query parameters on the listing above.
 
-#### `GET /api/v1/archive/sessions`
+What survives from it is every measured rule about *presenting* lineage, because those
+were derived from a real archive and are unchanged by where the rows live.
 
-| Parameter | Required | Meaning |
-| --- | --- | --- |
-| `workdir` | yes | Absolute directory to list history for |
-| `limit` | no | Rows to return, 1–100, default 20 |
-| `cursor` | no | `nextCursor` from a previous response |
+#### A listing folds delegated work into its parent
 
-**Response 200:**
-```json
-{
-  "sessions": [
-    {
-      "id": "claude:f1830315-5ce1-44e3-86c0-8f65ccbc961e",
-      "agent": "claude",
-      "label": "Fix the SSE reconnect loop",
-      "cwd": "/Users/you/Workspace/sylph-web",
-      "model": "claude-opus-5",
-      "startedAtMs": 1787223579574,
-      "endedAtMs": 1787227503012,
-      "events": 419,
-      "subagentCount": 2,
-      "subagents": [
-        {
-          "id": "claude:f1830315-5ce1-44e3-86c0-8f65ccbc961e/agent-a6e09e69b1b293ad2",
-          "agent": "claude",
-          "events": 14,
-          "startedAtMs": 1787223601233,
-          "endedAtMs": 1787223795018
-        }
-      ],
-      "sessionId": "0c3f..."
-    }
-  ],
-  "nextCursor": "1787223880382:636c...",
-  "available": true
-}
-```
+Delegated sessions are rows of their own and are **half of a real local archive** —
+2316 of 4606 non-empty, re-censused after the archive grew to 4922 sessions; it was
+2238 of 4416 before, so the ratio is stable and worth trusting over either absolute. A
+listing that does not fold them is half noise.
 
-`id` is a TraceDB session id, not a Sylph Web session id. `sessionId` is present
-only when this archived session has already been imported, which lets the UI open
-the live conversation instead of listing one conversation twice.
+So a row carries `delegateCount` and `delegates`, and the fold has one exception that
+is not optional:
 
-Three filters are applied here rather than upstream, each for a measured reason:
+**A cross-directory child is promoted to a row of its own.** 484 of 2238 delegates ran
+somewhere other than their parent — typically a worktree or a subdirectory — and folding
+those into a parent that is *not in the directory being listed* deletes them from the
+only listing that would ever show them. Measured: it emptied 42 directories, one holding
+193 sessions. In its own directory a delegated session is not delegated work, it **is**
+the work.
 
-- **Exact directory.** TraceDB matches `cwd` as a substring
-  (`cwd LIKE '%' || ? || '%'`), so a request for `/w/app` also returns
-  `/w/app-old` and every subdirectory. Rows are re-filtered for exact equality
-  after normalizing trailing slashes.
-- **Lineage rollup.** TraceDB's `list` does not collapse fork lineage, though
-  `search` does, and delegated sessions are half of a real archive (2316 of 4606
-  non-empty). They fold into the session that spawned them as `subagentCount`,
-  since listing them as peers buries the sessions a user actually started. See
-  **Lineage** below, which is the subtlest part of this endpoint.
-- **Empty sessions.** Rows with `events: 0` are dropped; they are common for
-  aborted runs and there is nothing to read.
+`delegates` carries the children themselves, and `delegateCount` is always its length.
+A count alone is a dead end: half the store is delegated work, so a row reading "13
+delegates" names sessions the client has no way to reach. The fold already visits every
+child to count it, so identity costs nothing beyond the bytes. Each entry is
+deliberately thinner than a listing row, and `cwd` appears only when the child ran
+somewhere other than its parent — the case worth showing.
 
-Because those filters shrink a page, one request may walk several upstream pages
-to fill `limit`, bounded by rows examined rather than pages. That bound is
-generous on purpose: the substring `cwd` match means a parent directory's pattern
-also matches everything beneath it, and those sort by recency rather than depth,
-so an exact match can sit far into the scan. One real directory with 88 sessions
-of its own had its first exact match ~1300 rows in, and a page-count cap reported
-it as empty. `nextCursor` continues from wherever the scan stopped.
+#### A fork and a delegation are different relationships
 
-##### Lineage
+`parentSession` names one column, and the row it points at says which relationship it
+is. They must not be presented the same way:
 
-The archive records two different relationships, and they want opposite
-treatment. Neither is reported by `list`, so each candidate row costs one metadata
-`show` — measured at **11.5 ms** and ~2.5 KB per call over 300 calls against a
-4922-session archive, so a page of 20 rows spends roughly 230 ms on lineage alone
-and a whole-archive scan would cost 52.9 s. It is the cheapest shape `show` offers
-and far cheaper than a full transcript, but it is not free, which is why the fold
-caches per parent and why nothing polled walks the archive this way. The `/agent-`
-id suffix is only a fallback for when
-that lookup fails, because it misses the 199 sessions that record a parent without
-carrying a suffix.
+- **Delegation** folds into the parent as a count.
+- **A fork** replays its origin's entire prefix and continues past it, so the two share
+  every early user turn and read as one conversation resumed. Listing both shows it
+  twice under one label, so **one survives** — and which one cannot be decided in
+  advance: of the two real local cases, one has its later work in the fork (1108 events
+  against 389) and the other in the origin (2459 against 649). Ordering by end time
+  descending makes the survivor whichever is reached first.
 
-- **`parent_session_id` — delegated work.** Folded into the parent as
-  `subagentCount` and `subagents`, *provided the parent is in the directory being
-  listed*. 484 of
-  2238 subagents ran somewhere else — a worktree or a subdirectory — and folding
-  those into an absent parent deletes them from the only listing that would show
-  them, which emptied 42 directories, one holding 193 sessions. A cross-directory
-  child is therefore promoted to a row of its own: in its own directory it is not
-  delegated work, it is the work.
-- **`forked_from` — the same conversation resumed.** A fork replays its origin's
-  entire prefix, so both sides share every early user turn and read as one
-  conversation; listing both shows it twice under one label. One side survives,
-  and which one cannot be fixed in advance — of the two real local cases, one has
-  its later work in the fork (1108 events against 389) and the other in the origin
-  (2459 against 649). Since `list` is ordered by `endedAtMs` descending, the
-  survivor is whichever is reached first.
+`forkOf` names the suppressed origin on a surviving fork row. Within one response the
+loser is already dropped, but **a pair can straddle two pages** — one measured pair sits
+268 rows apart — and the server keeps no state between requests. A client accumulating
+pages must therefore drop a row whose `forkOf` names a session it has already shown, and
+equally a row that a previously-shown fork names.
 
-`subagents` carries the folded children themselves, and `subagentCount` is always
-its length. A count alone is a dead end: half the archive is delegated work, so a
-row reading "13 subagents" names sessions the archive can open while giving the
-client no way to reach any of them. The fold already visits every child to count
-it, so identity costs nothing beyond the bytes. Each entry is deliberately thinner
-than a listing row — no `label` fallback to the opening user turn, because that is
-a second request per child and one measured parent has 193 of them — and `cwd`
-appears only when the child ran somewhere other than its parent, which is the case
-worth showing.
+#### Lineage is derived from the listing, not asked per row
 
-`forkOf` names the suppressed origin on a surviving fork row. Within one response
-the loser is already dropped, but a pair can straddle two pages — one measured
-pair sits 268 rows apart — and the server keeps no state between requests. A
-client that accumulates pages must therefore drop a row whose `forkOf` names a
-session it has already shown, and equally a row that a previously-shown fork
-names. `components/history-overlay.tsx` is the only such surface; the sidebar
-fetches a single page, where the server has already resolved the pair.
+This is a performance rule with a measurement behind it, and the ratio is why the fold
+caches per parent rather than asking about each row.
 
-`label` falls back through three sources, in order:
+Reading one session's metadata cost **11.5 ms and ~2.5 KB** (measured over 300
+sequential calls against a 4922-session archive), so a 20-row page spends ~230 ms on
+lineage alone and a whole-store scan costs **52.9 s**. A full unfiltered listing, by
+contrast, was 4922 rows in 10 pages at **164 ms** — about **300× cheaper per fact**. So
+derive what the listing already carries; ask per row only for what it cannot.
 
-1. **The archive's own title.** `claude` records one for 73% of sessions while
+Finding one session's children uses that: an id-prefix test over one pass found 2104 of
+2316 delegates, while the rest record only a parent id and would cost the full scan, so
+they are reached from their parent's directory listing instead.
+
+Two cautions that came with those numbers. **A measurement is only quotable while the
+thing it was measured against still exists** — that archive included an agent now
+unsupported, so the ratio has moved while the case has not. And this file once recorded
+one population as **212, "almost all `opencode`"** in two places and **199, "almost all
+`codex`"** in two others: one set, two figures, two agents, so at least one pair was
+always wrong and both read as measured fact. Cite a number once and point at it.
+
+#### An id-suffix convention is a fallback, not a lineage signal
+
+Some agents name a delegated session with a suffix derived from its parent, and that
+catches most of them. It **misses those that record only a parent id** — `codex` among
+them, measured from its own store: a rollout with `parent_thread_id` set,
+`thread_source: subagent`, and no suffix at all. Those sat at the top level of every
+listing until lineage started reading the store's own recorded parent. The suffix
+survives only for when that lookup fails.
+
+Attribution to the *specific* delegating call was measured and **rejected**: `claude`
+names a child `<parent>/agent-a<name>-<hash>`, but **1918 of 2104** suffixes are
+hash-only, so matching recovers 8.8% and misattributes on a collision. Structure that is
+right for one delegation in eleven is worse than an honest flat view, because nothing on
+screen distinguishes them. Delegation is therefore session-level in both directions.
+
+#### A label falls back through three sources
+
+1. **The vendor's own recorded title.** `claude` records one for ~73% of sessions;
    `codex` and `pi` record none — so the fallbacks are the common path, not the
    exception.
-2. **The opening *typed* message.** Leading harness-injected envelopes
-   (`<permissions instructions>`, `<environment_context>`,
-   `<skills_instructions>`, memory files, `Caveat:`) are skipped: they are
+2. **The opening *typed* message**, skipping leading harness-injected envelopes
+   (`<environment_context>`, `<skills_instructions>`, memory files, `Caveat:`). They are
    byte-identical across every session of an agent and identify nothing.
-3. **An envelope's `summary` attribute.** Some delegated sessions have no typed
-   turn at all — every one is a `<teammate-message ... summary="...">` block — but
-   that attribute is human-written and describes the task ("Author insects pests
-   unit"). XML entities in it are decoded.
+3. **An envelope's `summary` attribute.** Some delegated sessions have no typed turn at
+   all — every one is a `<teammate-message … summary="…">` block — but that attribute is
+   human-written and describes the task. XML entities in it are decoded.
 
-Measured over the whole local archive, those three take labelled sessions from
-94.3% (title plus typed ask alone) to **98.3%**; across the 138 directories that
-hold archived history, 99.5% of listed rows carry one.
+Measured over a whole local archive, those three take labelled sessions from 94.3%
+(title plus typed ask alone) to **98.3%**; across 138 directories holding history, 99.5%
+of listed rows carry one.
 
-An unreachable archive answers **200** with `available: false` and a `detail`,
-never 503, matching `/search`: TraceDB is optional locally, and the sidebar calls
-this for every expanded workspace.
+#### A paged scan is bounded in rows, not pages
 
-#### `GET /api/v1/archive/sessions/{traceId}`
-
-One archived transcript, for read-only viewing. `traceId` is matched greedily
-because a subagent id contains a slash (`claude:uuid/agent-name`).
-
-`limit` (1–5000, default 2000) bounds the events read; `truncated` reports when it
-cut the stream short. The cap matters: the largest session in a real local archive
-is 8167 events and 20 MB of JSON.
-
-**Response 200:**
-```json
-{
-  "id": "claude:f1830315-5ce1-44e3-86c0-8f65ccbc961e",
-  "agent": "claude",
-  "label": "Fix the SSE reconnect loop",
-  "cwd": "/Users/you/Workspace/sylph-web",
-  "startedAtMs": 1787223579574,
-  "events": [{ "seq": 2, "kind": "user", "phase": "completed", "...": "..." }],
-  "delegations": [
-    {
-      "id": "claude:f1830315-5ce1-44e3-86c0-8f65ccbc961e/agent-a6e09e69b1b293ad2",
-      "agent": "claude",
-      "events": 14
-    }
-  ],
-  "delegationsTruncated": false,
-  "parentId": null,
-  "forkedFrom": null,
-  "flat": true,
-  "truncated": false
-}
-```
-
-`events` are normalized into the same `StreamEvent` shape the live SSE stream and
-history endpoint use, so one timeline renderer serves both. Four adaptations:
-
-- Every event is `phase: "completed"` and `stability: "stable"`. Archived history
-  is settled, and a `delta` phase would leave the timeline waiting for text that
-  never arrives. `source` is `archive`.
-- Agent-internal `system` events are dropped. Every observed subtype (`mode`,
-  `permission-mode`, `task_started`, `world_state`, `model_change`, …) carries a
-  raw JSON configuration blob with no live-protocol equivalent, and one measured
-  session held 49 of them in 419 events.
-- Tool arguments move from `text` into `data.input`, which is where the client
-  reads them. `text` is left in place as the documented fallback for a payload
-  that is not JSON.
-- A `tool_result` is given the same `streamId` as its `tool_call` so the two
-  group. The agents record that link differently — `codex` repeats one `call_id`
-  on both, `claude` points the result's `parent_id` at the call's `native_id` —
-  and both are mapped onto one id.
-
-##### An archived transcript is flat, and says so
-
-A live turn carries delegation in every event: `span` names the trajectory an event
-ran in, so the timeline nests a subagent's work inside the tool call that spawned
-it. An archived transcript has **no `span` on any event**, `flat` is `true`, and
-that is a fact about what TraceDB stores rather than a limitation of this endpoint.
-
-Measured across all five agents in a real local archive, 36308 events sampled:
-`data_json` — the only field where a raw vendor payload could survive, and where
-`claude`'s own `parent_tool_use_id` would live — is **null on every event**. So no
-event-level parent pointer exists to translate.
-
-`parent_id` is the nearest-looking field and must not be mistaken for one, because
-it means a different thing per agent. Over 164 sessions:
-
-| Agent | What `parent_id` is | Shape |
-| --- | --- | --- |
-| `claude` | the `parentUuid` conversation chain | 13689 of 15119 name the immediately preceding event; fanout 1 |
-| `pi` | a mix of both | fanout 1–3 |
-| `codex` | never set | absent entirely |
-
-Honouring `claude`'s as a `span` would nest a whole transcript into a single chain
-thousands deep. The one real relationship it carries — a `tool_result` pointing at
-its `tool_call` — is already what `streamId` above expresses.
-
-Attribution to the *specific* call that delegated was measured and rejected.
-`claude` names a child `<parent>/agent-a<name>-<hash>`, so a child whose suffix
-carries the Task call's `name` can be matched back to it — but **1918 of 2104**
-suffixes in the local archive are hash-only, so this recovers 8.8% and
-misattributes on a name collision. Structure that is right for one delegation in
-eleven is worse than an honest flat view, because nothing on screen distinguishes
-the two.
-
-So delegation is reported where the archive actually records it, at session level
-and in both directions:
-
-- **`parentId`** — the session that delegated this one. Free, since `show` already
-  reports it. Without it a delegate opened from a search hit reads as a
-  conversation someone started, which for half the archive is wrong.
-- **`forkedFrom`** — the session this one forked or resumed from. A *different*
-  relationship, and calling it a parent would claim a delegation that did not
-  happen; it is what explains a transcript that appears to open mid-conversation.
-- **`delegations`** — the sessions this one delegated to, with
-  `delegationsTruncated` distinguishing "none" from "did not finish looking".
-
-`delegations` costs one bounded pass over `list`, because TraceDB exposes no parent
-filter — the ops are `stats`, `search`, `list`, `show`, `reconstruct`, and only
-`show` reports lineage, one session at a time. A full unfiltered pass measures
-**164 ms** for 4922 rows in 10 pages, and a transcript is opened deliberately
-rather than polled, so that is affordable here where it would not be on the
-sidebar's path. The `cwd` filter is deliberately not used to narrow it: 484 of 2238
-delegates ran in a different directory than their parent, so filtering by the
-parent's directory would drop exactly the ones whose location is most worth
-reporting.
-
-It is complete for delegates whose id carries the parent as a prefix — **2104 of
-2316** when measured — and deliberately not otherwise. The rest, `codex` in
-particular, record only a `parent_session_id`, visible only to `show`: finding them
-means a metadata call per candidate row, measured at 11.5 ms each and **52.9 s**
-across a 4922-session archive. Those are reached from the parent's *directory listing* instead, where the
-fold already reads their metadata for a different reason.
-
-A missing session is `404 TRACE_SESSION_NOT_FOUND`; an unreachable archive is
-`503 TRACEDB_UNAVAILABLE`. Unlike the listing, a single transcript has no useful
-degraded form, so it reports the failure rather than rendering an empty one. A
-delegation scan that fails while the transcript itself succeeded is *not* promoted
-to an error: the events are already in hand, and `delegationsTruncated` reports the
-list as incomplete.
+Because a directory filter also matches paths beneath it and those sort by recency
+rather than depth, a parent directory's first exact match can land deep: measured,
+`/Users/x/Workspace/huawei` has 88 sessions of its own whose first exact match is ~1300
+rows in, and an 8-page cap gave up first and reported the directory **empty**. Bound such
+a scan in rows examined.
 
 ### Search
 
 ```
-GET /api/v1/search?q=<text>&limit=20
+GET /api/v1/search?q=<text>&limit=20&environment=<id>
 ```
 
-FTS5 over the archive, answering "which archived session mentioned X". It is the
-complement of § Archive rather than a variant of it: the listing endpoints answer
-"what happened in *this directory*", which a sidebar asks on every render, while this
-one answers a question a user has to already know how to phrase.
+FTS5 over the server's own history. It is the complement of the listing endpoints
+rather than a variant of them: those answer "what happened in *this directory*", which a
+sidebar asks on every render, while this answers a question a user has to already know
+how to phrase.
 
-**It never returns 503.** An unreachable archive yields `200` with an empty `results`
-array, matching the workspace listing and for the same reason: the archive is optional
-locally, and `/health` already reports `archive.available` as one fact about the run
-rather than one fault per query. A search box that errors on an install with no archive
-teaches a user the feature is broken; an empty result beside a reported-unavailable
-archive does not. Whitespace-only `q` is treated as absent and answers empty without
-touching the archive, so a client may bind the field directly to keystrokes.
+**It covers everything the server holds, and that is what the rewrite bought.** Search
+used to run against a separate archive fed by parsing native stores, so it covered only
+what a parser had read: a session whose environment had gone away was searchable
+nowhere, and one whose vendor file happened to be local was searchable by coincidence.
+With one store and one vocabulary (`docs/architecture.md` § One authority), the index is
+over the same rows the timeline renders. The old caveat — "a client must not present this
+as search my history" — is retired rather than relocated.
 
-`limit` defaults to 20 (`api/search.rs`). There is no pagination and deliberately no
-cursor: a hit is a jumping-off point to a transcript, so the useful control is a
-narrower query, not a deeper page.
+**It never returns 503**, and answers `200` with an empty `results` array for a query
+that finds nothing. Whitespace-only `q` is treated as absent and answers empty without
+touching the index, so a client may bind the field directly to keystrokes.
 
-**This is the one archive read that must stay off any polled path.** Measured
-in-process, every other operation is microseconds to sub-millisecond — `coverage()` at
-5.2–9.0 µs, `show(0,0)` at 0.78 ms, a whole-archive scan at 7.9 ms — while `search` is
-**174–260 ms**, and 273 ms with two ingests running, because FTS5 work is real work and
-embedding does not make it cheaper. So the cost model that governs the rest of the
-archive does not transfer here, and this endpoint stays user-initiated.
+`limit` defaults to 20. There is no pagination and deliberately no cursor: a hit is a
+jumping-off point to a transcript, so the useful control is a narrower query, not a
+deeper page.
 
-**It covers only what a parser read.** The archive is fed by parsing native vendor
-stores, never by Sylph handing it normalized events (`docs/data-architecture.md`
-§ Sylph's normalized stream does not enter the archive), so anything whose native store
-the server never saw — a remote environment's session before upload, an agent with no
-parser — is absent from these results while being perfectly readable through
-`/sessions/{id}/turns`. That is a real gap in one direction only, and a client must not
-present this as "search my history".
+**This is the one read that must stay off any polled path.** Measured in-process against
+an equivalent store, every other operation is microseconds to sub-millisecond —
+per-session coverage at 5.2–9.0 µs, a targeted single-session read at 0.78 ms, a
+whole-store scan at 7.9 ms — while FTS5 search is **174–260 ms**, and 273 ms under
+concurrent write load. FTS5 work is real work and nothing about owning the store makes it
+cheaper, so the cost model that governs every other read does not transfer here and this
+endpoint stays user-initiated.
 
 ### Files
 

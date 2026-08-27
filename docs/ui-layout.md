@@ -19,7 +19,7 @@ not maintained against the code. Where it and this file disagree, this one wins.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ ▣ Sylph  [⌕ Search sessions and archive        ⌘K] ⚡Quick Start +New ⚙ ▣│
+│ ▣ Sylph  [⌕ Search sessions                    ⌘K] ⚡Quick Start +New ⚙ ▣│
 ├──────────────┬────────────────────────────────────┬──────────────────┤
 │ Workspaces   │ Conversation                       │ Artifacts        │
 │ (240px)      │ (flex, only this scrolls)          │ (320–384px)      │
@@ -432,8 +432,8 @@ depend on mount order.
 
 | Combo | Action |
 | --- | --- |
-| `Mod+K` | Global search (live sessions + archive) |
-| `Mod+Shift+K` | Browse this workspace's archived history |
+| `Mod+K` | Global search over every session the server holds |
+| `Mod+Shift+K` | Browse this workspace's full history |
 | `Mod+P` | Command palette |
 | `Mod+Shift+O` | New session (pick a directory) |
 | `Mod+J` | Quick Start in the configured scratch directory |
@@ -554,11 +554,10 @@ the component rendering that answer was fifty lines away.
 
 `WorkspacePicker` ranks known workspaces by recency, filters on the full path
 rather than the leaf name (the segment someone remembers is often in the middle:
-`huawei`, `sylph`), and shows each one's archived and live counts so an empty
-directory is visible before it is opened. It requests `includeArchived`, sharing
-the query key with the history browser: a directory with a live session is already
-one click away in the sidebar, so the ones worth listing here are mostly the ones
-that exist only in TraceDB.
+`huawei`, `sylph`), and shows each one's session count so an empty directory is visible
+before it is opened. It requests `includeUnpaired`, sharing the query key with the
+history browser: a directory whose environment is connected is already one click away in
+the sidebar, so the ones worth listing here are largely those whose machine is asleep.
 
 **Browse folders… is a footer button, not a row.** A row would be ranked against
 the workspaces and dropped by the very query that failed to match any of them —
@@ -605,9 +604,9 @@ navigation the shell already owned:
 
 | The list offered | The shell already offers |
 | --- | --- |
-| Every live session, `LIMIT`-capped | The sidebar, grouped by the directory each session runs in, plus that directory's archived history |
+| Every session, `LIMIT`-capped | The sidebar, grouped by the directory each session runs in, scoped to that directory's environment |
 | Filter by workdir substring | The sidebar's grouping *is* the workdir axis |
-| Filter by agent / origin / date | `Mod+K` searches live sessions and the archive by content, which is the question users actually arrive with |
+| Filter by agent / date | `Mod+K` searches by content, which is the question users actually arrive with |
 | A row per session | `Mod+Shift+K` pages one workspace's history, which the 50-row cap could not |
 
 A user opening the app has not asked to filter sessions by date. They have arrived
@@ -619,7 +618,7 @@ filtered results would collapse the menu to the agent already selected.
 What replaced it has three tiers, and two properties that constrain the design:
 
 1. **Identity and what a session is.** One line: a session pairs an agent with a
-   working directory, and archived history exists for directories agents have run
+   working directory, and history exists for directories agents have run
    in. This is the only place the app states it, and it is not guessable — a user
    who does not know it points a session at the wrong tree.
 2. **The two create paths**, as buttons running `runAction`, each showing its live
@@ -820,8 +819,8 @@ migration would otherwise have lost a real capability:
 | Field | For | Why it is shaped this way |
 | --- | --- | --- |
 | `keywords` | The palette's aliases — `cancel` reaching "Stop the running turn" | Matched, never rendered, and ranked *below* the visible hint: a row that matched on hidden text shows nothing explaining why it is there, so it must not displace one whose visible text matched |
-| `excerpt` | The archive hit's match snippet | Rendered, never matched. It is the *product* of TraceDB's ranking over a transcript the browser never loaded, so re-ranking by it would launder that ranking through a weaker one — and without it an archive row is a title that does not contain the query |
-| `external` | The search overlay's query | Ranking stays with the caller. Live sessions rank client-side and archive hits server-side, live fixed above archive; `buildRows` could only re-score the archive by its title, which is precisely the text that did not match. The query has to leave the hook anyway — it drives a debounced request |
+| `excerpt` | A search hit's match snippet | Rendered, never matched. It is the *product* of FTS5 ranking over a transcript the browser never loaded, so re-ranking by it would launder that ranking through a weaker one — and without it a hit is a title that does not contain the query |
+| `external` | The search overlay's query | Ranking stays with the caller. Hits are ranked server-side by FTS5; `buildRows` could only re-score them by title, which is precisely the text that did not match. The query has to leave the hook anyway — it drives a debounced request |
 
 `external` should stay rare, and the reason is worth stating: a caller that ranks
 its own rows also owns keeping `detail` searchable, which is the guarantee the row

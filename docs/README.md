@@ -1,197 +1,120 @@
-# Sylph Web Documentation
+# Sylph Documentation
 
-Sylph Web is a local-first native interface for Sylph and coding-agent sessions.
-The Sylph server holds the authoritative record of that history in its own store;
-`docs/data-architecture.md` governs who owns which fact and which direction data
-travels. This documentation describes the system design, implementation, and
-development practices.
+Sylph is a coding-agent workspace. A **server** holds the authoritative record of every
+session and owns all session policy; an **envagent** runs on each machine where agents
+execute and dials back to the server; a **web frontend** is one transport onto the
+server. `architecture.md` is where to start.
 
-## Quick Navigation
+## Read in this order
 
-### Getting Started
-- **[Installation Guide](installation.md)** — Install and run Sylph Web locally
-- **[Configuration](configuration.md)** — `~/.sylph`, `config.toml`, and moving an existing install
-- **[Development Guide](development.md)** — Set up a development environment
-- **[Roadmap](roadmap.md)** — Project status, completed phases, and future work
+1. **[architecture.md](architecture.md)** — the system's shape, the session model,
+   identity, authority, AFK, and the security gate. Everything else defers to it.
+2. **[environments.md](environments.md)** — the envagent wire protocol, spooling,
+   pairing, and how SSH and sandbox environments come to exist.
+3. **[session-protocol.md](session-protocol.md)** — the adapter contract: one event
+   vocabulary, three modes, capability facets, requests, delegated trajectories.
+4. **[agents.md](agents.md)** — per-vendor knowledge for `claude`, `codex`, `pi`.
 
-### Architecture & Design
-- **[System Architecture](architecture.md)** — High-level system design, data flow, core concepts
-- **[Frontend Architecture](frontend-architecture.md)** — how the frontend is built: state, streaming, performance
-- **[UI Layout and Design](ui-layout.md)** — what the interface is: panes, surfaces, components, tokens
-- **[API Design](api-design.md)** — REST API contracts and endpoint specifications
-- **[Database Schema](database-schema.md)** — SQLite schema, migrations, data model
+Then, by subject:
 
-### Contracts & Subsystems
-- **[Session Protocol](session-protocol.md)** — `sylph.agent.v3`: the contract between the server and a pluggable agent
-- **[Storage](storage.md)** — Lossless tiered history, replay, and watermark-gated retention
-- **[Data Architecture](data-architecture.md)** — Which copy is the truth, and which way data travels
-- **[Control Plane](control-plane.md)** — Why one server owns session policy and frontends are transports
-- **[Environments](environments.md)** — Where a session's work actually happens
-
-### UX & Interface Design
-- **[Agent UI Design Analysis](agent-ui-design-analysis.md)** — Why agent workspaces differ from chat UIs
-- **[Keyboard Shortcuts](keyboard-shortcuts-default-sessions-settings.md)** — Shortcuts, Quick Start, Settings
-
-## Documentation Principles
-
-### What Belongs Where
-
-| Question | Authoritative Source |
+| Question | Authoritative source |
 | --- | --- |
 | What is built, what is next | [roadmap.md](roadmap.md) |
-| System design, data flow | [architecture.md](architecture.md) |
-| Endpoint contracts | [api-design.md](api-design.md) |
-| Tables, indexes, migrations | [database-schema.md](database-schema.md) |
-| How the frontend is built | [frontend-architecture.md](frontend-architecture.md) |
-| What the interface looks like | [ui-layout.md](ui-layout.md) |
-| How to install/deploy | [installation.md](installation.md) |
-| Where files live, what a setting does | [configuration.md](configuration.md) |
-| How to develop locally | [development.md](development.md) |
-| Identity, origin, and `SOUL.md` | [architecture.md](architecture.md#session-model) |
-| Translations and locale | [frontend-architecture.md](frontend-architecture.md#internationalization) |
-| Which shortcuts a browser reserves | [ui-layout.md](ui-layout.md#keyboard-model) |
+| System design, session model, identity, authority | [architecture.md](architecture.md) |
+| Where a session's work runs, and the wire to it | [environments.md](environments.md) |
 | What an adapter may send, and when | [session-protocol.md](session-protocol.md) |
+| A vendor CLI's shapes, quirks, and control surface | [agents.md](agents.md) |
+| Endpoint contracts | [api-design.md](api-design.md), [api-v1.openapi.json](api-v1.openapi.json) |
+| Tables, indexes, migrations | [database-schema.md](database-schema.md) |
 | How history is kept, replayed, pruned | [storage.md](storage.md) |
-| Who owns a fact, and which way it travels | [data-architecture.md](data-architecture.md) |
-| Why the server owns session policy | [control-plane.md](control-plane.md) |
-| Where a session's work runs | [environments.md](environments.md) |
+| How the frontend is built | [frontend-architecture.md](frontend-architecture.md) |
+| Panes, surfaces, components, tokens | [ui-layout.md](ui-layout.md) |
+| Where files live, what a setting does | [configuration.md](configuration.md) |
+| How to install and deploy | [installation.md](installation.md) |
+| How to develop locally | [development.md](development.md) |
 
-### Design Decisions
+## What changed in this rewrite, and why the file list is shorter
 
-When a choice involves trade-offs, the rationale lives **in code comments** next to
-what it governs, not in separate decision logs. Examples:
-- `frontend/components/timeline.tsx` explains why memoization was chosen over
-  virtualization, and what evidence would reverse that call
-- `frontend/lib/use-sse.ts` documents why `fetch` replaced `EventSource`
-- `backend/src/tracedb/mod.rs` pins TraceDB API spellings and why
-- `backend/src/paths.rs` states the containment invariant every write endpoint shares
+Four documents used to argue the authority question — `architecture.md`,
+`data-architecture.md`, `control-plane.md`, and `environments.md` — which is how they
+came to disagree with each other. `data-architecture.md` and `control-plane.md` are
+**deleted**, absorbed into `architecture.md`. A claim now has one home.
 
-This keeps decisions close to their consequences, where future maintainers encounter
-them.
+Five design changes run through all of these, each with its own section in
+`architecture.md`:
 
-### Progress Tracking
+- **One class of session.** `origin`, `identity_mode`, and `lifecycle_mode` are gone.
+  Measured, they had four write sites and one behavioural branch between them, so a spec
+  had hardened a distinction the implementation never made. What survives is
+  `inject_identity`, a boolean with a default.
+- **Identity is `(environment, agent, native_id)`.** No server-minted UUID, so no second
+  id space and no comparison that is silently always false.
+- **One environment abstraction.** Not a trait with an implementation per substrate; one
+  envagent that dials in, differing only in how it came to exist.
+- **One store, one vocabulary.** Native history is parsed by an adapter into the same
+  events a live turn emits. The separate archive, its client, and its id translation are
+  gone — and with them the open question about search covering only part of history.
+- **Three agents.** `claude`, `codex`, `pi`. `gemini` and `opencode` are unsupported,
+  which closes two unresolved questions that were gating design work.
 
-**Record progress in commit messages and the roadmap.** Do not add new progress,
-handoff, or summary documents: they duplicate the roadmap, then drift from it.
-Carry-forward context belongs in the roadmap's open items; a durable gotcha
-belongs in the code comments or a **Pitfalls** section; reasoning about a specific
-decision belongs beside the code.
+## Principles
 
-### Language
+**One authority.** The server's store is the record. Everything else is a source it
+ingests from or a projection it serves. `AGENTS.md` § Compatibility governs the
+consequence: no other consumer exists, so schemas and wire formats change in place, and
+compatibility code is forbidden rather than merely discouraged.
 
-Code, documentation, and commit messages are English only: every `.rs`, `.ts`,
-`.tsx` file, everything in `docs/`, all comments, all identifiers and endpoint
-names, all test names, and both commit subject and body.
+**Local-first is about dependencies, not geography.** A server on a remote host is still
+local-first, because the authority is its own store and not somebody else's API.
 
-Conversation happens in whatever language the user writes in. Durable artifacts
-stay English regardless.
+**Agent workspace, not chat app.** Tool execution is primary content; assistant prose is
+connective tissue; thinking is debugging detail.
 
-## Key Design Principles
+**Fidelity must be visible.** A record says how much resolution its source had, because
+a waterfall drawn over message-granularity data presents equal-length bars as
+measurements.
 
-### 1. Origin as Policy
-Session origin (`sylph` or `native`) is immutable and determines identity and
-lifecycle. Native sessions preserve the originating agent's identity and never
-receive prompt injection or resets.
+**Accessibility is a requirement.** WCAG 2.1 AA, verified by automated testing and by
+manual screen-reader passes — and those catch different things. Well-formed ARIA that a
+real reader still fails has happened three times here: axe checks that the graph is
+valid, a screen reader walks it.
 
-### 2. Local-First
-Data lives with the server that owns it, and no third-party service is in the path.
-"Local" is a statement about dependencies rather than about geography: a Sylph
-server deployed on a remote host is still local-first, because the authority is the
-server's own store and not somebody else's API. `docs/architecture.md` § Design
-Principles is authoritative; this is a summary of it.
+## Where a decision lives
 
-### 3. The Server Owns the Record, for the Sessions It Spawned
-An agent still writes its native format. For a **Sylph-born** session the server's
-normalized event stream is the authority, because the server held the adapter's stdio
-and is the one component present for all such work regardless of where it runs. For an
-**adopted** session — one somebody else started, in a terminal — the server never saw a
-stream, so the vendor's own store is the only record and the server's job is to read it
-faithfully rather than to claim it. Fidelity and control are therefore properties of how
-a session began, not of the product. `docs/data-architecture.md` § Two classes of
-session is authoritative.
+**Rationale goes in a code comment next to what it governs**, not in a separate decision
+log. `frontend/components/timeline.tsx` is the intended density: it explains why
+memoization was chosen over virtualization and what evidence would reverse that call.
 
-### 4. Agent Workspace, Not Chat App
-The UI emphasizes tool execution over conversation. Tool calls are primary content
-with prominent display; assistant prose is connective tissue; thinking is debugging
-detail.
+**A durable gotcha goes in `AGENTS.md` § Pitfalls.** A cross-cutting design argument goes
+in the governing document above. Progress goes in commit messages and
+[roadmap.md](roadmap.md) — do not add progress, handoff, or summary documents, because
+they duplicate the roadmap and then drift from it.
 
-### 5. Performance Through Architecture
-Maintain fast load times and responsive interactions through:
-- Compact bundles via thoughtful dependency choices
-- Code splitting for on-demand features
-- Memoization and bounded rendering
-- Lazy loading where appropriate
+**A measurement is only quotable while the thing it measured still exists**, and a number
+repeated in four places is four chances to drift. Cite it once and point at it — this
+file's own history has an instance where one population was recorded as two different
+figures with two different agents, and nothing could catch it.
 
-Monitor bundle size and render performance, but never let arbitrary limits constrain
-valuable features or architectural improvements. Optimize deliberately; scale
-proportionally to value delivered.
+## When code and spec disagree
 
-### 6. Accessibility by Default
-WCAG 2.1 AA compliance maintained through automated testing (axe-core) and manual
-verification. Keyboard navigation, screen reader support, and color-independent
-indicators are requirements, not afterthoughts.
+Neither wins automatically. Identify whether behaviour or intent should move; if the
+design changed, update the governing document first, then the code; if evidence
+invalidated the design, update the document and say what the evidence was.
 
-## Development Workflow
+Do not silently rewrite a spec to bless an implementation accident. Do not contort code
+around a design evidence has invalidated. Both failures have shipped here, and the second
+is what this rewrite corrects.
 
-### Running Locally
-```sh
-# Backend
-cd backend && cargo run
+## Design documents
 
-# Frontend
-cd frontend && npm run dev
-```
+Two files are pre-implementation design arguments rather than descriptions of the code:
+[agent-ui-design-analysis.md](agent-ui-design-analysis.md) and
+[keyboard-shortcuts-default-sessions-settings.md](keyboard-shortcuts-default-sessions-settings.md).
+They are kept because the reasoning still governs the UI, and each opens with a banner
+saying what kind of document it is. Where they disagree with
+`frontend-architecture.md`, `ui-layout.md`, or `roadmap.md`, those win.
 
-### Testing
-```sh
-# Backend
-cd backend && cargo test && cargo clippy --all-targets
+## Language
 
-# Frontend
-cd frontend && npm test              # Vitest unit tests
-cd frontend && npm run build && npx eslint .
-cd frontend && npm run e2e           # Playwright E2E tests
-```
-
-E2E starts both servers on offset ports with throwaway data and a mock adapter, so
-it never touches your real journal or archive. It wipes its own home first, so do not
-start servers by hand for it.
-
-### Before Committing
-1. Run tests for every part of the repo you touched
-2. Stage files explicitly (never `git add .`)
-3. Check `git diff --staged`
-4. Write a descriptive commit message following Conventional Commits
-
-## Document Evolution
-
-Neither code nor spec wins automatically when they diverge. When implementation
-differs from documentation:
-
-1. Identify whether behavior or intent should move
-2. If the design changed: update the spec first, then update code
-3. If reality revealed the design was wrong: update spec to match reality and
-   document why
-
-Do not silently rewrite specs to bless implementation accidents. Do not contort
-code around designs that evidence has invalidated.
-
-## Design Documents vs Specs
-
-Two files here are pre-implementation design arguments rather than descriptions of
-the code: `agent-ui-design-analysis.md` and
-`keyboard-shortcuts-default-sessions-settings.md`. They are kept because the
-reasoning still governs the UI — the case against chat bubbles, and the shape of the
-shortcut map — and each marks where the shipped implementation diverged from it.
-
-Both now open with a status banner saying so, so a reader learns what kind of
-document they are in before the first claim rather than at the end. Where a
-divergence would mislead a reader who stops early, it is corrected in the body
-instead of only in the closing errata — the shortcuts document's reserved bindings
-(`Mod+Shift+O` and `Mod+J`, not the `Cmd+N` a browser takes first) and its Quick
-Start path are both fixed inline for that reason.
-
-When they disagree with `frontend-architecture.md`, `ui-layout.md`, or `roadmap.md`,
-those win. A design document records what was intended; the architecture spec records
-what is true. Do not update one to match the other without deciding which should move,
-per "Document Evolution" above.
+Code, documentation, and commit messages are English only. Conversation happens in
+whatever language the user writes in; durable artifacts stay English regardless.

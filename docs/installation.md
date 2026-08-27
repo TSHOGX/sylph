@@ -3,15 +3,24 @@
 This guide covers installing Sylph Web for daily use. To run it from a checkout
 while developing, see the Quick Start in `README.md` instead.
 
-Sylph Web binds to loopback only. It has no remote access story, and exposing it
-beyond `127.0.0.1` requires an authentication and threat-model change first.
+**Two products install separately: `sylph-server` and `sylph-envagent`.** The server
+holds every session's record and all policy; an envagent runs on each machine where
+agents actually execute and dials back to the server. On a single machine you install
+both, in one command — but they stay two products, because the server deliberately does
+not embed an envagent (`docs/environments.md`).
+
+The server binds to loopback by default. Exposing it beyond `127.0.0.1` requires an
+authentication and threat-model change first (`docs/architecture.md` § Security model),
+and that gate now also covers **who owns an envagent** — without it, one user could run
+agents on another user's machine.
 
 ## Requirements
 
 - macOS (the LaunchAgent path is macOS-specific; the rest is portable)
 - Rust 1.85+ and Node.js 22.5+, needed to build — not to run
-- TraceDB, if you want archived coding-agent sessions. Sylph Web runs without
-  it; the archive simply reports as unavailable.
+- The agent CLIs you want to use — `claude`, `codex`, `pi` — on the `PATH` of each
+  machine running an **envagent**, not on the server's. An agent is available when its
+  CLI is there; there is no separate database or adapter package to install.
 
 ## Install
 
@@ -69,9 +78,8 @@ proxy target into the route manifest, so a port supplied only when starting is
 ignored and the UI talks to `4317` regardless. The installer handles this; it is
 worth knowing if you build by hand.
 
-Everything else — the data directory, your own agents, the identity preamble, the
-TraceDB binary, browse roots, log level — is set in `config.toml` rather than
-here, so it is not something the installer has to know about or propagate. That is
+Everything else — the data directory, the identity preamble, the Quick Start
+directory, log level — is set in `config.toml` rather than here, so it is not something the installer has to know about or propagate. That is
 the point of the single root: the LaunchAgent plist carries `SYLPH_HOME` and does
 not grow a key every time a setting is added.
 
@@ -83,10 +91,13 @@ Everything is under `~/.sylph`:
 ~/.sylph/
 ├── config.toml      Your settings. Edit freely; commented on creation.
 ├── SOUL.md          The identity preamble. Yours to edit or delete.
-├── agents/          Agent adapters you added.
 ├── data/            The journal, history, blobs, attachments. Back this up.
 └── scratch/         Where Quick Start sessions run.
 ```
+
+There is no `agents/` directory: adapters are compiled into the envagent, so "this
+vendor changed faster than the shipped adapter" is answered by upgrading the envagent on
+that one machine — which touches no server, no schema, and no other environment.
 
 `data/` is the one directory that matters for backup, and it is one subtree on
 purpose: the two SQLite tiers, the blob store, and staged attachments reference
@@ -107,17 +118,33 @@ Schema changes are applied on startup and recorded in the database, so a
 development journal carries into a packaged install with no separate migration
 step — the default data directory is the same one `cargo run` uses.
 
-The archive is never written by anything here, so archived history is unaffected by an
-install, an upgrade, or a reset of the journal.
+**There is no separate archive to install, and nothing to configure to reach one.**
+History is one store the server owns under `data/`, holding both what Sylph ran and what
+it read out of an agent's native files — one vocabulary, one index
+(`docs/architecture.md` § One authority). A user installs Sylph, not Sylph and a
+database.
 
-**Two things about the archive are changing, and this section describes the current
-shape.** Today it is a separate `trace-db` process reached over a JSON API at that
-project's own default location. The design being built toward is a **private archive
-under `~/.sylph`, read in-process**, which removes the binary, the `tracedb.bin` setting,
-and the reachable/unreachable distinction together — a user installs Sylph, not Sylph and
-a database. `docs/data-architecture.md` § The archive is private, and Sylph owns its
-location is authoritative for why; `docs/configuration.md` § `tracedb.bin` is on its way
-out states what disappears with it.
+An agent's own native files are never written by anything here, so they are unaffected by
+an install, an upgrade, or a reset of the journal — which is what makes a journal
+disposable while native sources remain.
+
+### The envagent's own root
+
+```
+~/.sylph-env/
+├── config.toml      Which server, and what this machine may run agents in.
+├── credential       Written by `pair`. Not hand-edited.
+└── spool.db         Events not yet acked by the server. Bounded, ack-gated.
+```
+
+`spool.db` is why closing a laptop mid-turn does not put a hole in the record: events are
+written here before being sent and deleted only when the server acks past them
+(`docs/environments.md` § Spooling). It is **not** a second copy of history and is
+authoritative for nothing.
+
+`browse_roots` lives here rather than on the server, because only this machine can
+canonicalize its own paths and see whether a component is a symlink. It bounds where an
+agent may run, so widening it widens where arbitrary code executes.
 
 ## Upgrading
 
@@ -180,10 +207,10 @@ curl -s localhost:4317/api/v1/health        # liveness, no auth needed
 curl -s localhost:4317/api/v1/diagnostics   # counts and uptime, needs a cookie
 ```
 
-`/health` reports schema version and whether TraceDB is reachable. It stays
-unauthenticated so a supervisor can probe it, and therefore reports no counts or
-paths. `/diagnostics` adds session and turn counts, uptime, discovered agents,
-and any adapter that failed its handshake.
+`/health` reports the schema version and each paired environment with the agents it
+found. It stays unauthenticated so a supervisor can probe it, and therefore reports no
+counts or paths. `/diagnostics` adds session and turn counts, uptime, and the last
+retention pass.
 
 Check the agent itself with:
 
@@ -211,14 +238,18 @@ Settings → Configuration shows the same thing in the UI.
 this means another process holds the port. Find it with
 `lsof -ti :4317 -sTCP:LISTEN`, or install on a different port.
 
-**No agents in the dropdown.** The backend discovered none. `doctor` reports how
-many adapters it found and every directory it searched; `/api/v1/diagnostics` adds
-any that were found but failed their handshake, with the error rather than hidden.
+**No agents to pick from.** Either no envagent is connected, or the one that is has no
+agent CLI on its `PATH`. `GET /api/v1/health` reports each environment with the agents
+and versions it found, and `sylph-envagent doctor` reports the same locally including
+which server it is paired to. Those two answers have different fixes — start or pair the
+envagent, or install the CLI on that machine — which is why they are reported
+separately rather than as one empty list.
 
-**The archive is empty or search returns nothing.** TraceDB is a separate install.
-Check `doctor` marks `tracedb.bin` as found, and that `/api/v1/health` reports
-`tracedb.available: true`. Set `tracedb.bin` in `config.toml` if it lives in a
-checkout rather than on `PATH`.
+**A session says it cannot be driven.** Two different states, distinguished by the link's
+typed failure: `environment_unreachable` means that machine is not connected, so history
+still reads but nothing can be sent; `not_ours_to_drive` means the process is alive under
+someone else and that vendor offers a second party no control channel — `pi` never does
+(`docs/agents.md`). Neither is fixed by retrying.
 
 **A setting in `config.toml` seems to be ignored.** An environment variable
 overrides the file. `doctor` names the source of every value, so a row reading

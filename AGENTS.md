@@ -1,7 +1,8 @@
 # Sylph Web Development Guide
 
-Sylph Web is a local-first native interface for Sylph and coding-agent sessions
-archived by TraceDB.
+Sylph is a coding-agent workspace: a server holding the authoritative record of every
+session, an envagent on each machine that runs agents, and a web frontend as one
+transport onto the server.
 
 This file holds rules and facts that stay true as the project moves. It
 deliberately records no progress, phase, or status: `docs/roadmap.md` owns
@@ -9,29 +10,47 @@ those, and duplicating them here only creates a second copy to forget.
 
 ## Product Invariants
 
-- Treat session origin as durable data. `sylph` sessions use Sylph identity and
-  lifecycle policy; `native` sessions preserve the originating agent's identity
-  and lifecycle.
-- Never inject `SOUL.md`, reset, compact, or rewrite prompts for a native
-  session unless the user explicitly converts it to a Sylph session.
-- Read durable coding-agent history through TraceDB interfaces. Do not query
-  TraceDB's SQLite schema directly.
-- The live journal is authoritative only while a WebApp turn is active or has
-  not yet appeared in TraceDB. TraceDB is authoritative for stable history.
+- **There is one class of session.** Sylph does not divide sessions by who started
+  them. `origin`, `identity_mode`, and `lifecycle_mode` are deleted, along with
+  `backend_incarnations` — measured, they had four write sites and one behavioural
+  branch between them. What survives is `inject_identity`, a boolean settable at
+  creation and refused afterwards, because a transcript records what produced it.
+- **Identity is `(environment, agent, native_id)`.** No Sylph-minted UUID, so no
+  second id space and no comparison that is silently always false. `environment` is an
+  opaque id minted at pairing, never a hostname. The delimiter is not `/`.
+- **What varies is the link, not the session:** two typed facets, `observe` and
+  `control`, each able to report unavailable with a reason. An empty capability surface
+  means "Sylph cannot reach it", never "there is nothing there".
+- **`fidelity` is a property of the record** (`stream` | `blocks` | `messages`), not of
+  who started the session. A renderer reads it before drawing a duration.
+- **The server's store is the one authority, with one event vocabulary.** Native
+  history is parsed by an adapter into the same events a live turn emits. There is no
+  separate archive, no second per-vendor normalizer, and no id translation.
+- **The envagent dials outward to the server, never the reverse**, and adapters run
+  inside it — on the machine whose vendor files they read.
+- **Sessions do not migrate between environments.** Moving work elsewhere is a fork.
 - Bind to loopback by default. Any non-loopback deployment requires a separate
-  authentication and threat-model change.
+  authentication and threat-model change, which now also covers who owns an envagent.
+- **Three agents: `claude`, `codex`, `pi`.** `gemini` and `opencode` are not supported.
 
 ## Orientation
 
-- `backend/` — Rust, Axum, SQLx. HTTP and SSE on port 4317 by default.
+- `backend/` — Rust, Axum, SQLx. HTTP and SSE on port 4317 by default. Becomes
+  `crates/{protocol,adapters,server,envagent}`; `docs/roadmap.md` has the order.
 - `frontend/` — Next.js App Router, React, TanStack Query, Tailwind.
 - `docs/` — the governing specs. Read the relevant section before implementing.
 - `scripts/` — install and deployment tooling.
 
+**`docs/` was rewritten from first principles on 2026-08-27, specs only — no code has
+moved yet.** So a disagreement between `docs/` and `backend/src` right now is expected
+and the document is the intent. `docs/roadmap.md` § Architecture rewrite names what
+changed, what was deliberately kept, and the implementation order.
+
 | Question | Authoritative source |
 | --- | --- |
 | What is built, what is next | `docs/roadmap.md` |
-| System design, data flow | `docs/architecture.md` |
+| System design, session model, identity, authority | `docs/architecture.md` |
+| A vendor CLI's shapes, quirks, control surface | `docs/agents.md` |
 | Endpoint contracts | `docs/api-design.md`, `docs/api-v1.openapi.json` |
 | Tables, indexes, migrations | `docs/database-schema.md` |
 | How the frontend is built | `docs/frontend-architecture.md` |
@@ -89,37 +108,38 @@ outside the root is consulted, and no former location is kept as a fallback.
 | `SYLPH_CONFIG` | backend | `<home>/config.toml` |
 | `SYLPH_HOST` | backend | `127.0.0.1` |
 | `SYLPH_PORT` | backend | `4317` |
-| `SYLPH_DATA_DIR` | backend | `<home>/data` |
-| `SYLPH_AGENTS_DIR` | backend | `<home>/agents` |
-| `SYLPH_SOUL` | backend | `<home>/SOUL.md` |
-| `SYLPH_QUICK_START_DIR` | backend | `<home>/scratch` |
-| `SYLPH_BROWSE_ROOTS` | backend | *(none; `$HOME` always included)* |
-| `SYLPH_TRACEDB_BIN` | backend | `trace-db` on `PATH` |
-| `SYLPH_LOG`, then `RUST_LOG` | backend | `info` |
-| `SYLPH_BUNDLED_AGENTS_DIR` | backend, tests and packagers only | `<exe dir>/adapters`, then `<repo>/adapters` |
+| `SYLPH_DATA_DIR` | server | `<home>/data` |
+| `SYLPH_SOUL` | server | `<home>/SOUL.md` |
+| `SYLPH_QUICK_START_DIR` | server | `<home>/scratch` |
+| `SYLPH_LOG`, then `RUST_LOG` | server | `info` |
+| `SYLPH_ENV_HOME` | envagent | `$HOME/.sylph-env` |
+| `SYLPH_ENV_SERVER` | envagent | *(none; written by `pair`)* |
+| `SYLPH_BROWSE_ROOTS` | **envagent** | *(none; `$HOME` always included)* |
+| `SYLPH_ENV_SPOOL_MAX` | envagent | `512 MiB` |
 | `SYLPH_WEB_BACKEND` | frontend | `http://localhost:4317` |
 | `SYLPH_WEB_DEV_ORIGINS` | frontend, `next dev` only | *(none)* |
 | `SYLPH_WEB_PREFIX` | `scripts/install.sh` | `$HOME/.local/share/sylph-web` |
 | `SYLPH_WEB_BIN_DIR` | `scripts/install.sh` | `$HOME/.local/bin` |
 | `SYLPH_WEB_FRONTEND_PORT` | `scripts/install.sh` | `3000` |
 
-Each of these has a `config.toml` key except the first two (which locate the file
-itself) and `SYLPH_BUNDLED_AGENTS_DIR`. That one is environment-only on purpose:
-which adapters ship with a binary is decided by whoever built it, not by a user, and
-offering it in the file would invite pointing a supported setting at adapters
-versioned against another protocol release. E2E sets it because bundled resolution
-would otherwise find the repo's real `adapters/` and run the developer's actual
-agent CLIs.
+Each of these has a `config.toml` key except the two that locate the file itself.
+There are **two roots and two files**, because there are two products: the server does
+not embed an envagent, so "the machine the server runs on" is not a privileged
+environment with its own code path.
 
-`SYLPH_AGENTS_DIR` is the *user's own* adapters, searched **after** the bundled
-ones so a name there shadows a bundled adapter — the escape hatch when a vendor
-changes faster than the shipped adapter catches up. Copying bundled adapters into
-it would freeze them at install time and break the next upgrade.
+There is no adapter directory. Adapters are linked into the envagent, so the escape
+hatch for "a vendor changed faster than the shipped adapter" is upgrading the envagent
+on that one machine — which touches no server, no schema, and no other environment. The
+old `SYLPH_AGENTS_DIR` hatch carried a hazard of its own: copying a bundled adapter into
+it froze that adapter at install time and broke the next upgrade.
 
-`SYLPH_BROWSE_ROOTS` is colon-separated and *adds* to `$HOME`, which is always
+`SYLPH_BROWSE_ROOTS` **belongs to the envagent**, not the server: only the machine
+holding a path can canonicalize it, resolve `..`, or see whether a component is a
+symlink, so a server checking a remote path would be matching a string against a
+filesystem it cannot see. It is colon-separated and *adds* to `$HOME`, which is always
 browsable. It bounds **two** things, and the second is the larger one: what
 `/api/v1/fs/*` may *enumerate*, and what a client may *name* as a session's
-`workdir` on `POST /sessions` and `POST /sessions/import`. A workdir is the
+`workdir` on `POST /sessions` and `POST /sessions/adopt`. A workdir is the
 `current_dir` of a spawned agent, so widening this setting widens where arbitrary
 code may run — not merely what names are visible. The Quick Start directory is
 permitted in addition, always, since both `SYLPH_HOME` and `paths.quick_start_dir`
@@ -140,19 +160,26 @@ The journal is always `journal.db` inside the data dir, with `history.db` and
 because they are one store split for SQLite's sake. A pre-existing `live.db` is
 renamed on startup, after a truncating WAL checkpoint — never by moving the three
 WAL files, since a crash between renaming `-wal` and `.db` strands committed data
-in an orphaned WAL.
+in an orphaned WAL. The envagent's `spool.db` is WAL-mode too, so the same rule
+applies to it.
 
-TraceDB is a **separate project** this one depends on. It defaults to a `PATH`
-lookup, and `tracedb.bin` pins a checkout build. Unreachable is not a failure: live
-sessions work and archive features report themselves unavailable — check
-`/api/v1/health` for `tracedb.available`. Retention is one of them, and degrades
-safely: with no archive it keeps everything and says so in `/diagnostics` rather
-than reporting a failure per session.
+**There is no archive binary and no setting naming one.** History is one store the
+server owns, so `tracedb.bin`, `SYLPH_TRACEDB_BIN`, its `doctor` row, and
+`tracedb.available` are deleted together — a setting naming an external binary is only
+meaningful while an external binary answers, and keeping it offers a lever that changes
+nothing. What replaces "is the archive reachable" is **per-environment health**, which
+is a better question: it distinguishes a missing CLI from a sleeping laptop from an
+exhausted sandbox node.
 
-Three surfaces report what resolved, all from one producer so they cannot
-disagree: `sylph-web-backend doctor`, `GET /api/v1/config`, and Settings →
-Configuration. `sylph-web-backend migrate --from DIR` moves an older data
-directory in.
+Retention's authority moved with it. The only downstream copy is now the vendor's own
+native store, so a confirmation comes from the envagent that holds it, and an
+unreachable environment means the question was never put — recorded as withheld, never
+as a zero bound.
+
+Three surfaces report what resolved, all from one producer so they cannot disagree:
+`doctor`, `GET /api/v1/config`, and Settings → Configuration. The envagent has its own
+`doctor`, which also reports which agent CLIs it found and which server it is paired
+to.
 
 `SYLPH_WEB_DEV_ORIGINS` is comma-separated **hostnames**, no scheme and no port.
 Next 16 blocks cross-site requests to `/_next/*` as DNS-rebinding defence, so a
@@ -388,7 +415,8 @@ it. So one refused permission mode would have retired a picker whose other five 
 work. The code now travels as a typed `AdapterError` through `anyhow`, recovered with
 `downcast_ref`, deliberately **not** by parsing it back out of the message: the text is
 the adapter's and may be reworded, while the code is declared protocol. Same reasoning
-as `tracedb::Client::unavailability_reported`.
+as the degraded-dependency rule below: the flag is the client's own record of having
+spoken, never a string match on somebody else's message.
 
 **serde's `rename_all` does not rename fields inside enum variants.** An internally
 tagged enum needs `rename_all_fields` as well, or camelCase wire fields inside a
@@ -400,15 +428,17 @@ this happened to `api.files` during the Phase 7 merge, dropping two client metho
 Nothing in git reports it; only `npm run build` did. Run both sides' full checks on
 a merge that reports itself clean, especially the type check.
 
-**Sylph's session id and TraceDB's are disjoint id spaces, and confusing them is
+**Two id spaces for one conversation is silently always false.** *This one is now
+structurally impossible — identity is `(environment, agent, native_id)` throughout — and
+it is kept because the failure mode is worth recognizing in any new subsystem that talks
+to an external store.* Historically: Sylph's session id and the archive's were disjoint, and confusing them was
 silently always-false.** Sylph keys a session by UUID; the archive keys the same
 conversation as `<agent>:<native-id>` (`claude:9bdacb6e-…`). Comparing the two
 produces no error at any layer — the archive answers "no such session", the caller
 concludes nothing is confirmed, and every component behaves impeccably while the
 feature does nothing. This is how the first `TraceDbAuthority` shipped fully written
 and tested, pruning nothing, with an empty `watermarks` table that looked exactly
-like correct conservatism. `tracedb::archive_id` is the forward direction and
-`JournalStore::find_session_by_archive_id` the inverse; a type that needs the archive
+like correct conservatism. The translation helpers both directions needed are gone with the second id space; a type that needs the archive
 id to be constructed cannot be asked the unanswerable question, which is the actual
 fix. Anything comparing an id against the archive needs a test with a *real* archive
 id, because a wrong one passes.
@@ -422,19 +452,21 @@ confirmed, and `/diagnostics` reports confirmed/withheld/terminal/unchanged
 separately, because a single "pruned: 0" answers none of the questions that matter.
 
 **A degraded dependency is one fact about the run, not one fault per item — and not
-one per attempt either.** With no TraceDB, a supported configuration, probing per
+one per attempt either.** With the dependency absent — a supported configuration — probing per
 session turned one missing binary into a warning per session per pass. Probe once per
 pass. But that is only half of it: the *spawn* failure was also logged at `error` on
 every attempt, so a timer-driven caller reproduced the same unbounded stream one
-layer down — visible in the E2E log, which is exactly a no-TraceDB install. An absent
-binary is a persistent state, so `tracedb::Client` now reports it once at `error` and
+layer down — visible in the E2E log, which is exactly such an install. An absent
+dependency is a persistent state, so whatever holds the connection reports it once at `error` and
 at `debug` thereafter. Any client polled on a timer needs that shape; the fix belongs
 in the client, not in each caller.
 
 The related rule: "cannot ask" must never be recorded as "asked, and nothing is
 safe", or a watermark claims a check that never happened.
 
-**TraceDB's ingestion ack is archive-global and expensive to read.** It is one
+**A global "is the pipeline healthy" signal cannot replace a per-session bound.**
+*The archive this was measured against is gone; the shape of the mistake is not.* The
+archive's ingestion ack was It is one
 monotonic sequence per ingest *run*, committed after the data transaction so it is
 never a false positive — but it says nothing about which events of which session are
 covered, so it cannot replace a per-session coverage bound. Its only surfaces are a
@@ -452,16 +484,20 @@ exactly the turns that were in flight. `PRAGMA wal_checkpoint(TRUNCATE)` first, 
 every connection, then move the main file alone. The emptied sidecars must also be
 deleted, or a later `live.db` adopts them.
 
-**TraceDB's API spellings are inconsistent per-operation.** `show` emits
+**A cross-process JSON boundary lets a spelling change read as `None`.** *Deleted with
+the separate archive — the boundary is now a Rust type, so a rename is a compile error.
+Kept because the rule applies to every remaining vendor payload (`docs/agents.md`).*
+The archive's spellings were inconsistent per operation: `show` emitted
 snake_case (`created_at_ms`, `started_at_ms`), while `stats`, `search`, and
-`list` emit camelCase (`totalSessions`, `startedAtMs`). The backend client
-(`backend/src/tracedb/mod.rs`) pins the exact spelling each operation emits so
-a spelling change fails a test rather than silently yielding `None`. Do not add
+`list` emit camelCase (`totalSessions`, `startedAtMs`). The client pinned the exact spelling each operation emitted so
+a spelling change failed a test rather than silently yielding `None`. Do not add
 dual-spelling aliases: they mask future renames and suppress parse errors that
 would catch breaking changes.
 
-**The archive stores no event-level delegation structure, and `parent_id` is not
-it.** A live turn carries `span` on every event; nothing archived does. `data_json`
+**No vendor's native store holds event-level delegation structure, and a field that
+looks like a span is not one.** *This survives the move to one store unchanged: it is a
+`fidelity` fact about vendor files, not a fact about any archive.* A live turn carries
+`span` on every event; nothing read back from a native store does. `data_json`
 is the only field where a raw vendor payload could survive — where `claude`'s own
 `parent_tool_use_id` would be — and it is **null on all 36308 events sampled across
 all five agents**. `parent_id` is the field that looks like a span and means
@@ -499,18 +535,20 @@ would cost the 52.9 s scan, so they are reached from their parent's directory
 listing instead.
 
 **A caller that logs a degraded dependency per request rebuilds the flood the
-client was fixed to prevent.** `tracedb::Client` reports an absent binary once at
-`error` then at `debug` — but `api::archive` and `api::workspaces` each warned per
-request on top of that, and both are polled by the sidebar and workspace picker.
-Measured in one E2E run, which is a no-TraceDB install by construction: **2339
-identical `TraceDB list failed` lines**. The client now exposes
-`unavailability_reported()` so a caller can defer to what was already said, which is
+client was fixed to prevent.** The client reported an absent binary once at
+`error` then at `debug` — but two API handlers each warned per
+request on top of that, and both were polled by the sidebar and workspace picker.
+Measured in one E2E run, which was such an install by construction: **2339
+identical failure lines**. The client therefore exposed a
+"did I already say this" flag so a caller can defer to what was already said, which is
 deliberately not the same as string-matching the error message — the text is
-TraceDB's and may be reworded, while the flag is the client's own record of having
+the dependency's and may be reworded, while the flag is the client's own record of having
 spoken. This is the second instance of the pitfall below, one layer up from where it
 was first fixed.
 
-**TraceDB's `cwd` filter is a substring match, not a path match.** `list` and
+**A path filter must be a path match, not a substring match.** *Measured against the
+former archive, and the rule now governs Sylph's own queries — `docs/database-schema.md`
+carries it.* There, `list` and
 `search` compile it to `cwd LIKE '%' || ? || '%'`, so asking for `/w/app` also
 returns `/w/app-old` and every subdirectory. Anything that means "this one
 directory" must re-filter for exact equality after normalizing trailing slashes —
@@ -579,7 +617,7 @@ own context as leading pseudo user turns (`<permissions instructions>`,
 `<environment_context>`, `<skills_instructions>`, memory files as
 `# AGENTS.md instructions`, Claude's `Caveat:` preamble). Taking the first user
 event verbatim labels most sessions with boilerplate that is byte-identical across
-every session of that agent. `tracedb::is_injected_envelope` skips them, which over
+every session of that agent. Skipping injected envelopes, which over
 311 measured sessions raises recognizable labels from ~10% to 98%. Keep that rule
 narrow: an earlier version also treated a leading `You are ` as boilerplate and
 discarded 44 genuine labels, because subagent task briefs legitimately open that
@@ -1216,7 +1254,7 @@ rather than only naming the file.
 **A default that is one machine's absolute path is wrong everywhere else.**
 `TRACEDB_BIN` defaulted to `$HOME/Workspace/trace-db/target/release/trace-db` — a
 sibling checkout that exists on exactly one machine, so every other install got a
-silently unavailable archive that looked like a TraceDB bug. A dependency on a
+silently unavailable archive that looked like a dependency's own bug. A dependency on a
 separate project resolves through `PATH`, which is where its own install puts it;
 an absolute default is only ever right by coincidence, and the coincidence holds
 just long enough to be believed.
@@ -1349,18 +1387,18 @@ implementation details.
 
 ## Compatibility
 
-**Neither this project nor TraceDB has any other consumer, so breaking changes are
-free and compatibility code is forbidden.** Design for the best end state and change
+**This project has no other consumer, so breaking changes are free and compatibility
+code is forbidden.** Design for the best end state and change
 the schema, the wire format, or the internal API in place. Do not write a migration,
 a dual-spelling alias, a version branch, or a fallback for a caller that does not
-exist. This holds for `sylph-web` and for `trace-db` equally: Sylph is TraceDB's only
-consumer, and TraceDB may break Sylph whenever the result is better.
+exist. This held for `trace-db` too while Sylph depended on it; that dependency is deleted
+(`docs/architecture.md` § One authority), so the rule now applies to this repo alone.
 
 The cost of a compatibility branch is not the branch. It is that the branch makes the
 defect it papers over survivable, so nobody removes it — and a fallback that silently
 absorbs a rename is exactly how a vendor-key defect becomes permanent (see the
-vendor-key family above, and `tracedb-casing-break` in memory for the instance that
-prompted this rule). A hard break fails loudly at the one moment someone is looking.
+vendor-key family above; the instance that prompted this rule was an upstream rename
+absorbed by dual-spelling tolerance). A hard break fails loudly at the one moment someone is looking.
 
 So when a change would be improved by restructuring something older, restructure it.
 When existing code exists only to tolerate a shape no longer produced, delete it
@@ -1369,9 +1407,9 @@ has not landed.
 
 Two things this does **not** license. It is not permission to break a *vendor's*
 contract — an agent CLI is a real external dependency with real users, and an adapter
-still adapts. And it is not permission to lose a user's data: local provider state and
-archives are disposable because they are re-derivable from agent-native logs, so
-verify the source still exists before discarding a projection. Once Sylph is deployed
+still adapts. And it is not permission to lose a user's data: a local journal is disposable because it is
+re-derivable from agent-native logs, so verify the source still exists before discarding
+it. Once Sylph is deployed
 and holding data with no other copy — which multi-host upload makes true, since a
 remote host's native store may be unreachable — this section's first paragraph stops
 applying to *that* data specifically. Treat the presence of irreplaceable installed

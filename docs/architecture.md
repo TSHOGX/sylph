@@ -1,585 +1,440 @@
 # Architecture
 
-Sylph Web is a local-first native UI for coding-agent sessions. It orchestrates agent
-runtimes through a unified interface while preserving their native identities and
-lifecycle policies. Two adapters ship, `claude` and `pi`; archived history covers
-`codex` as well, which opens read-only.
+Sylph Web is a coding-agent workspace. A **server** holds the authoritative record
+of every session and owns all session policy. An **envagent** runs on each machine
+where agents actually execute and dials back to the server. A **web frontend** is a
+transport onto the server, and so is anything else.
 
-## System Overview
+This document owns the system's shape, the session model, identity, and the
+authority model. It absorbs what used to be spread across `architecture.md`,
+`data-architecture.md`, and `control-plane.md`; those three argued the same
+questions in three places, which is how they came to disagree.
+
+Claims are marked. *Measured* means observed against a real install on the stated
+date, with the evidence named. *Decision* means a design choice this document makes,
+which a reader may disagree with as a judgement rather than as a fact.
+
+## Topology
 
 ```
-Browser (127.0.0.1:3000)
-    │
-    │ HTTP + SSE
-    ▼
-Next.js Frontend
-    │ API proxy
-    ▼
-Rust Backend (127.0.0.1:4317)
-    │
-    ├─► journal.db (SQLite) ─────┐
-    │   Unsettled turns          │
-    ├─► history.db + blobs/      │
-    │   The durable record       ├─► Query & Search
-    ├─► archive.db ──────────────┘
-    │   Agent-native history, ingested
-    │
-    └─► Adapters (child processes)
-        claude, pi
+    browser            other frontends
+       │                      │
+       └──────────┬───────────┘
+                  │  HTTP + SSE, same origin
+        ┌─────────▼──────────────────────────────┐
+        │  sylph-server  (+ web, same origin)    │
+        │  sessions · turns · links · policy     │
+        │  journal.db · history.db · blobs/       │
+        │  THE authoritative record              │
+        └─────────▲──────────────────────────────┘
+                  │  sylph.env.v1 — envagent dials IN
+     ┌────────────┼─────────────┬──────────────────┐
+     │            │             │                  │
+ your laptop   SSH host     khora sandbox    someone else's box
+ envagent      envagent     envagent         envagent
+ + agent CLIs  + CLIs       + CLIs           + CLIs
+     ▲
+     └── bootstrapped the SSH host by copying itself over ssh
 ```
 
-**Components:**
-- **Frontend** — Next.js 16 + React 19, handles UI and real-time updates
-- **Backend** — Rust + Axum, REST API + SSE streaming, process supervision
-- **Journal** — SQLite (journal.db), sessions and turns that have not settled
-- **History** — SQLite (history.db) plus `blobs/`, the durable replayable record
-- **Archive** — SQLite (archive.db), agent-native history parsed and ingested by the
-  embedded TraceDB crate, searchable across agents
-- **Adapters** — An `adapter.sh` per agent, discovered in two roots and spawned per
-  session, speaking `sylph.agent.v3` on stdio
+Three deployable products, and the direction of the arrow is the design:
 
-## Design Principles
-
-1. **Local-first** — Data lives with the server that owns it, and no third-party service
-   is in the path. "Local" is a statement about dependencies rather than about geography:
-   a Sylph server deployed on a remote host is still local-first, because the authority is
-   the server's own store and not somebody else's API.
-2. **Origin as policy** — Session origin (`sylph` or `native`) determines identity and lifecycle
-3. **The server owns the record** — An agent still writes its native format, and TraceDB
-   still ingests it where it can be reached. But the server's normalized event stream is
-   the authority, because the server is the one component present for all work regardless
-   of where it runs — a sandbox's native store dies with the sandbox, and an archive
-   derived only from native stores acquires a hole exactly there. See
-   `docs/data-architecture.md`.
-4. **Bounded journal, durable history** — Unsettled turns in journal.db, consolidated
-   into history.db and pruned only when a downstream authority confirms the data
-5. **Durable turn supervision** — Turn execution independent of HTTP request lifecycle
-
-## Session Model
-
-### Session Origins
-
-| Origin | Created by | Lifecycle | SOUL.md injection |
-|--------|-----------|-----------|-------------------|
-| `sylph` | WebApp | 24h idle / 04:00 reset — **policy, not yet implemented** | Per `identityMode`, default yes |
-| `native` | CLI/TUI import | No implicit reset | Never |
-
-**Invariants:**
-- Origin is immutable after creation
-- Native sessions never receive SOUL.md or lifecycle resets
-- Sylph sessions are *intended* to follow a managed lifecycle (24h idle, 04:00 cutoff)
-
-> **The lifecycle half of this model is not enforced by the running system.**
-> `identity_mode` is read and acted on (`links/mod.rs:444` resolves `SYLPH_SOUL` from
-> it), so the native-session identity invariant holds and is tested. `lifecycle_mode` is
-> written to the journal and **read by nothing**: `end_incarnation` has no callers, no
-> timer or scheduler pass retires an incarnation, and neither the 24-hour idle reset nor
-> the 04:00 cutoff fires. Read this section as the policy the data model was built for.
->
-> Note what the exposure is and is not. A native session is not at risk — the reset that
-> would violate its invariant happens to nobody. The consequence is the reverse: a Sylph
-> session keeps one agent context indefinitely. Do not conflate this with the **link**
-> idle timeout, which *is* implemented (30 minutes, `links/mod.rs:211`) and is a
-> different thing: a link is a live adapter process, an incarnation is the agent's
-> conversational context. `docs/roadmap.md` § Audit, 2026-08-26 carries the measurement
-> and the open question about whether an automatic reset is even the right thing to
-> build.
-
-### Origin already names the class that matters, and the durable key includes environment
-
-`origin` is the axis `docs/data-architecture.md` calls **Sylph-born** versus
-**adopted**, so there is no third vocabulary: `sylph` means Sylph spawned the adapter
-and holds its stdio, `native` means somebody else started the process and Sylph reads
-it through the agent's own store. Naming it twice would be worse than naming it once —
-what the document adds is the consequence, which is that the two classes answer
-*every* later question differently: what can be observed, what can be driven, which
-store is authoritative, and whether upload is automatic or explicit.
-
-The durable key is `(environment, agent, native_id)`, with Sylph minting the UUID that
-the API exposes on first sighting. The archive id cannot be the key, because a session
-is observable before anything has ingested it. A content fingerprint cannot be either:
-it is a fact about a file, and an agent is free to keep no per-session file at all. The key is sufficient only because **a session never moves
-between environments** — that invariant is what removes every cross-environment
-freshness comparison, and it is also why `cwd` is unambiguous despite two machines
-plausibly both having `/home/user/app`.
-
-### Identity is a second axis, not a synonym for origin
-
-`identityMode` is `sylph` (inject `SOUL.md`) or `preserve` (run the agent on its own
-identity). It is chosen when a session is created, defaults to `sylph`, and `PATCH`
-refuses it — identity describes what a stored transcript was *produced by*, so
-changing it on a session with history would rewrite what that history means.
-
-**A Sylph session that declines injection is still a Sylph session.** Origin stays
-`sylph`, and managed lifecycle still governs it in policy. Collapsing the two axes would
-make "run this agent as itself" indistinguishable from an imported session that must
-never be reset or compacted — the invariant above. So:
-
-| | `identityMode: sylph` | `identityMode: preserve` |
+| Product | Where it runs | What it holds |
 | --- | --- | --- |
-| `origin: sylph` | The default. Injects; resets when reset is built. | Agent's own identity, same lifecycle class. |
-| `origin: native` | Never produced. | Every imported session. |
+| `sylph-server` | one host, with the web bundle beside it | every session's record, all policy |
+| `sylph-envagent` | every machine that runs agents | agent CLIs, vendor credentials, adapters |
+| web bundle | same host and origin as the server | rendering only |
 
-The two axes remain worth separating even while one is unenforced — arguably
-*especially* then. If they were one field, building the reset later would mean deriving
-"may I reset this" from a value that also decides injection, and the first session to
-decline injection would silently become unresettable.
+*Decision: the envagent connects outward to the server, never the reverse.* This is
+what makes a laptop behind NAT, an SSH host on a private network, and an
+auto-pausing sandbox all the same case. A server that had to reach in would work
+for exactly one of the three.
 
-An import sets both `identityMode` and `lifecycleMode` to `preserve`, derived from
-the archive rather than the request. `GET /api/v1/soul` serves the text this
-governs, so the toggle is not consent to something invisible.
+## An environment is an envagent, and that is the whole abstraction
 
-### Backend Incarnations
+There is no `local` / `ssh` / `khora` trichotomy in the code. There is one wire
+protocol, `sylph.env.v1`, and environments differ only in **how an envagent came to
+exist**:
 
-An **incarnation** is an opaque agent-native session ID. Sylph sessions may have multiple incarnations (after lifecycle resets); native sessions have exactly one.
+| Appearance | Mechanism |
+| --- | --- |
+| self-installed | a user installs `sylph-envagent` and pairs it |
+| SSH-bootstrapped | an existing envagent copies the binary to a host it can reach and starts it |
+| sandbox-provisioned | the server asks Khora for a sandbox whose image contains an envagent |
+| development | `cargo run -p sylph-envagent` beside a dev server |
 
-Lifecycle triggers (Sylph only), as designed:
-- 24 hours since last turn — *unimplemented*
-- Local time crosses 04:00 — *unimplemented*
-- User-initiated reset — *unimplemented; no endpoint*
+An earlier design had an `Environment` trait with one implementation per substrate,
+which put SSH and sandbox process control inside the server. That was wrong in a
+specific way: the adapter has to read the vendor CLI's native store, resolve its
+config, and inherit its skills and project files, all of which are local facts on
+the machine the CLI lives on. A server-side SSH implementation therefore needs a
+remote filesystem for every vendor detail it touches. Putting the adapter *in* the
+envagent removes the question — and once it is removed, the three implementations
+collapse into one.
 
-So in practice a session has exactly one incarnation today, whatever its origin, because
-nothing creates a second. The table and the columns exist and are correct for the design;
-`db/store.rs:518` (`end_incarnation`) is the function a reset would call, and it is
-uncalled.
+*This is the model Cursor uses*, and the reason is the same: it does not drive a
+remote host over a connection, it copies its own component there and runs it. The
+consequence for us is the one you want — **whatever your machine can reach by SSH,
+your session list can reach**, because the bootstrap runs from your envagent rather
+than from the server.
 
-On reset, when built:
-1. Discard old `backend_session_id`
-2. Create new incarnation
-3. Next turn starts fresh agent context
+`docs/environments.md` is authoritative for the wire protocol, spooling, pairing,
+and the SSH and sandbox paths.
 
-Native sessions skip this entirely — one incarnation, never expires. That part is true
-today by construction rather than by policy.
+### There is no "browser local"
 
-## Turn Execution Model
+A browser cannot fork a process, so no frontend can host an environment. What a web
+user gets instead is every envagent currently connected, **including the one on the
+laptop they are sitting at**. That is the same capability by a different route, and
+the UI must not imply the other thing exists.
 
-A **turn** is a durable execution resource:
+## One class of session
 
-1. Client calls `POST /api/v1/sessions/{id}/turns` with idempotency key
-2. Backend returns `202 Accepted` with turn ID immediately
-3. `TurnSupervisor` establishes a link if the session is detached, then sends the
-   turn as a `send` frame on it
-4. Client streams events via `GET /api/v1/turns/{id}/events` (SSE)
-5. Turn completes (or fails); status recorded when the `turn` event lands
+*Decision.* There is one kind of session. Sylph does not divide sessions by who
+started them.
 
-**Properties:**
-- Turn creation is idempotent (via client-provided key)
-- HTTP request ≠ turn lifecycle (turn survives request failure)
-- Browser can reconnect to SSE stream using `Last-Event-ID`
-- Service restart marks in-flight turns as `interrupted`
+The previous model had `origin` (`sylph` | `native`), `identity_mode`, and
+`lifecycle_mode` on every row, and the former `data-architecture.md` argued at length that
+the boundary "must not be smoothed over". The implementation says otherwise.
+*Measured 2026-08-27, `backend/src`:*
 
-### Process Supervision
-
-**A turn has no process of its own.** This is the largest change v3 made to this
-subsystem, and the reason the section below is short. The v1 supervisor spawned a
-process per turn and read its exit code to learn the outcome; under `sylph.agent.v3`
-the adapter is a long-lived **link** and a turn is a message on it, so the supervisor
-no longer *drives* a turn to completion — it marks running, sends, and waits to be
-told. The link's drain task journals the events. `backend/src/supervisor/turn.rs`
-states this at the top of the module, and `docs/session-protocol.md` § The unit is a
-session, not a turn is the reasoning.
-
-Process supervision is therefore a property of the **link**, not the turn.
-`LinkManager` owns it:
-
-- Spawns the adapter in a new process group, so a stop signal reaches the CLI the
-  adapter exec'd rather than only the wrapper script
-- Reads NDJSON from its stdout incrementally, one frame per line
-- Forwards SIGTERM on teardown, escalating to SIGKILL after a grace period
-- Tears down links idle for 30 minutes (`IDLE_TIMEOUT`), which is what keeps a live
-  process from outliving its usefulness — history is unaffected and the next turn
-  re-establishes
-
-Concurrency: one turn per session at a time; a second is refused rather than queued
-(`SESSION_ALREADY_RUNNING`), because the link holds one conversation.
-
-## Storage Architecture
-
-### Journal (journal.db)
-
-The hot tier. SQLite with WAL mode and `synchronous = NORMAL`, holding:
-- Sessions (all sessions created/imported by WebApp)
-- Backend incarnations (lifecycle tracking)
-- Turns (execution records)
-- Events for turns that have not settled yet, including deltas
-
-Bounded by consolidation rather than by a retention window: when a turn reaches a
-terminal state its events move into `history.db` and its journal rows are deleted.
-The file therefore stays small, which is the point of the split — see
-`docs/storage.md`.
-
-Ephemeral events (deltas) are batched into one transaction per ~50 ms window;
-stable events commit immediately, because a reconnect replays stable events from
-the journal and ephemeral ones from the hub's in-memory ring.
-
-### History (history.db) and CAS
-
-The warm and cold tiers. `synchronous = FULL`, because it is the record. Holds one
-row per block with its deltas folded into packed offset and timing arrays, plus
-content-addressed blobs in `blobs/` for payloads of 4 KB or more. Grows without bound and
-is read-mostly; pruned only by watermark.
-
-### Archive
-
-TraceDB is an embedded crate, not a service: it is a dependency of this binary, with
-no daemon, no `PATH` lookup, and no JSON round trip. What survives from the
-subprocess era is the *rule* — go through the crate's API, never its SQL — because
-the schema is the crate's to change and reading it directly makes every Sylph query
-a hidden coupling. What does not survive is the mechanism the rule used to name.
-
-Its value is `parsers/` — five vendors' native formats, and the reason not to
-reimplement. Operations Sylph calls: `list` (filtered session listing, carrying
-lineage and subagent counts), `show` (one session's trajectory), `coverage` (one
-session's ingest bounds), `search` (FTS5 across agents).
-
-Sylph reads the archive for the session list and archive browser, for native session
-import, and for cross-agent search. Search is FTS5 work and stays ~200 ms while
-every other operation is microseconds to sub-millisecond, so it is the one read that
-must never go per-row.
-
-Sylph owns ingestion; nothing outside this binary writes the archive. Ingestion is
-**one strategy per agent, not one scan**, and a shared timer must not assume
-otherwise: nothing constrains an agent to write a per-session file, or to produce the
-fingerprint the ingest path requires.
-
-The archive is fed by *parsing native sources*, never by Sylph handing it normalized
-events. That direction is the rule; it is not the claim that Sylph-born sessions are
-absent from the archive, since a vendor CLI writes its own file and the ordinary
-parser path ingests it — which is what retention confirms a watermark against. See
-`data-architecture.md` § Sylph's normalized stream does not enter the archive for the
-three structural reasons, and for what the boundary leaves unbuilt.
-
-### Retention
-
-Watermark-driven, never time-driven. A retention pass runs at startup and every
-five minutes, takes a bounded batch of sessions holding blocks (least-recently
-checked first), and asks one question per session: what sequence number has a
-downstream authority confirmed?
-
-Sessions split into two classes, and collapsing them would destroy the only copy
-of the second:
-
-| Class | When | Rule |
+| Column | Write sites | Behavioural branches |
 | --- | --- | --- |
-| Delegated | The environment keeps an agent-native store TraceDB ingests | Prune below the confirmed seq |
-| Terminal | No ingestion path — a sandbox, or a session that never linked | Compact, never prune |
+| `lifecycle_mode` | 4 | **0** — stored in SQLite, read by nothing |
+| `identity_mode` | 4 | **1** — `links/mod.rs:468`, chooses `SOUL` path or empty string |
+| `origin` | every insert | **0** in the backend; 1 badge, 1 banner, 1 search colour, 1 `deleteEmpty` guard in the frontend |
 
-The delegated watermark is derived from TraceDB by archive id
-(`<agent>:<native-id>`, a different id space from Sylph's session id), bounded by
-`endedAtMs` and admitted only for a `full` record. `docs/storage.md` governs the
-whole design; `/api/v1/diagnostics` reports each pass.
+So a whole section of invariants rested on one `Option<String>`. That is the
+inverse of the failure `AGENTS.md` warns about: not a spec blessing an
+implementation accident, but a spec hardening a distinction the implementation never
+made.
 
-## Event Streaming
+Three separate arguments say the split was wrong rather than merely unbuilt:
 
-### NDJSON Protocol
+**Who holds stdio is a property of a link, not of a session, and it flips both
+ways.** After its process exits, a session Sylph started is byte-identical on disk
+to one started in a terminal. After Sylph resumes a terminal session, Sylph holds
+its stdio. Any class written onto the session row lies the first time either
+happens.
 
-Runners output normalized events to stdout:
+**Identity injection has no relationship to who started the session.** Adopting a
+terminal session and then injecting `SOUL.md` from that point on is a coherent thing
+to want, and so is starting a session from Sylph with no injection at all. So
+injection is a per-session boolean with a default, not a class.
 
-```json
-{"kind":"thinking","phase":"started","seq":0}
-{"kind":"thinking","phase":"delta","seq":1,"text":"Analyzing"}
-{"kind":"thinking","phase":"completed","seq":2,"text":"Analyzing the codebase"}
-{"kind":"assistant","phase":"delta","seq":3,"text":"I'll"}
-{"kind":"assistant","phase":"completed","seq":4,"text":"I'll implement..."}
-{"kind":"tool_call","phase":"started","seq":5,"name":"Write","streamId":"tc_1"}
-{"kind":"tool_call","phase":"completed","seq":6,"name":"Write","text":"..."}
-{"kind":"usage","seq":7,"data":{"inputTokens":1234,"outputTokens":567}}
-```
+**Sylph has no lifecycle policy of its own.** The 24h-idle / 04:00-reset rule was
+inherited from the Discord chat daemon's `chat/state.py`. It is deleted, not
+deferred: nothing schedules it, `end_incarnation` has no callers, and a reset would
+break the one property this document most depends on — a stable identity — by
+replacing the agent-native id mid-session. The **link** idle timeout is a different
+and real thing (30 minutes) and stays.
 
-**Event types:**
-- `thinking` — reasoning/scratchpad
-- `assistant` — final assistant text
-- `tool_call` / `tool_result` — function calls
-- `usage` — token counts
-- `status` / `error` — system messages
+What is deleted: `sessions.origin`, `sessions.identity_mode`,
+`sessions.lifecycle_mode`, the whole `backend_incarnations` table,
+`store::end_incarnation`, and every frontend surface that renders an origin.
 
-**Phases:**
-- `started` — event begins (ephemeral)
-- `delta` — incremental update (ephemeral)
-- `completed` — event finalized (stable, persisted)
+What replaces the one branch that did work: `sessions.inject_identity`, a boolean,
+default true for a session Sylph starts and false for one it adopts. **A default,
+not a policy** — it is settable at creation and refused afterwards, because a
+transcript records what produced it and rewriting the flag would rewrite what the
+stored history means.
 
-### SSE Streaming
+### What genuinely differs, and where it belongs
 
-Backend normalizes NDJSON → SSE:
+Two real differences survive, and neither is a session class.
 
-```
-event: thinking
-data: {"seq":0,"phase":"started","text":""}
+**How events are obtained** is an adapter mode (§ `docs/session-protocol.md`): hold
+the process's stdio, or read the vendor's native store. One vocabulary comes out
+either way.
 
-event: thinking
-data: {"seq":2,"phase":"completed","text":"Analyzing the codebase"}
-```
+**How much resolution the record has** is `fidelity` on the record itself —
+`stream`, `blocks`, or `messages`. Note this is *not* correlated with who started
+the session: a session Sylph started, read back from the vendor's native store
+after the process died, is message fidelity too. A renderer reads the field to
+decide whether it may draw a duration; a waterfall over message-fidelity data would
+present equal-length bars as measurements.
 
-**Reconnection:**
-- Client sends `Last-Event-ID: N` or `?after_seq=N`
-- Server replays from journal + live projection
-- Stable events always available
-- Ephemeral events available if still in live projection (bounded)
+## Identity is `(environment, agent, native_id)`
 
-## Security Model
+*Decision.* A session's id is the triple, and there is no Sylph-minted UUID.
 
-**Loopback-only:**
-- Default bind: `127.0.0.1:4317`
-- Cookie: process-local, HttpOnly, SameSite=Strict
-- Host header validation (reject DNS rebinding)
-- Origin validation for mutations
+The evidence is better than the previous design assumed. *Measured 2026-08-27:*
+`claude`'s adapter already mints a UUID and hands it to the vendor with
+`--session-id` (`adapters/claude/adapter.py:425`); `claude`, `pi`, and `gemini` all
+accept `--session-id`; `codex` and `opencode` assign their own and report it. So the
+native id is available to Sylph for every agent, either by dictation or on the first
+frame, and a second Sylph id is pure redundancy — plus a permanent invitation to
+compare ids from two spaces, which is silently always false (`AGENTS.md` records the
+instance that shipped fully tested and pruned nothing).
 
-**Out of scope until auth redesign:**
-- Remote access
-- Multi-user
-- TLS termination
+Rules the triple needs to hold:
 
-Exposing beyond loopback requires:
-- Authenticated sessions
-- CSRF tokens
-- Origin allowlists
-- Attachment size enforcement
-- Explicit permission policy
+- **`environment` is an opaque id minted at pairing**, never a user-visible name.
+  A name in a key means renaming destroys identity. Display names are mutable
+  metadata.
+- **The encoding does not use `/`.** This repo has already paid for that once: 350
+  of `pi`'s 372 model ids contain a slash, so splitting on one mis-parses the
+  majority. The wire form is `<env>:<agent>:<native>` with `env` restricted to
+  base32, and a URL path segment carries it percent-encoded.
+- **A session exists once an agent has given it an id**, which means `POST
+  /sessions` starts the agent rather than reserving a row. This kills the "draft
+  session with no work in it" concept, and with it `DELETE /sessions/{id}` for
+  empties and the frontend's `deleteEmpty` probe. A failed spawn now reports at the
+  start screen instead of leaving a dead row behind.
+- **The id is stable for the session's whole life**, because nothing resets an
+  incarnation any more.
+
+Three alternatives, each rejected for a reason that would have surfaced late:
+
+- **A content fingerprint.** `opencode` writes no per-session file — one SQLite
+  store with a live WAL — so it cannot compute one (*measured*). A key one agent
+  cannot produce is not a key. (`opencode` is now unsupported, but the shape of the
+  argument is why the rule stands: nothing constrains an agent to keep a file.)
+- **An archive id.** A session is observable the moment its native store exists,
+  before anything has parsed it. Keying on a projection makes identity depend on
+  that projection's progress.
+- **Anything containing a host or a path.** Provenance, not identity; see below.
+
+## Sessions do not migrate between environments
+
+*Decision, and the load-bearing one.* A session belongs to the environment it was
+born in, for life. Sylph offers no move, no resume-elsewhere, and no reconciliation
+of two copies.
+
+Nearly all of this document's simplicity is bought with it:
+
+- No freshness comparison between two environments, because two environments never
+  hold candidate copies of one session.
+- `cwd` is unambiguous. Two machines both having `/home/user/app` is not a
+  collision, because a path is only ever read alongside the environment that named
+  it.
+- Upload can never conflict. It either brings a session the server has not seen, or
+  a longer prefix of one it has.
+
+Moving work elsewhere is a **fork**: a new session with a recorded ancestor.
+
+### Provenance is not identity
+
+`environment` is in the key because it names a birthplace, which does not change.
+`host_id`, hostnames, and paths are provenance: shown to a user, used for
+diagnosis, never an input to a comparison. And content-addressed objects stay
+**host-blind** — keyed by hash alone, so the same dependency source uploaded from
+three machines is stored once. A host column on the object table destroys exactly
+that.
+
+## One authority, one store, one vocabulary
+
+The server's own store under `~/.sylph` is the authoritative record. Everything
+else is a source it ingests from or a projection it serves.
+
+*Decision: there is exactly one event vocabulary and one durable store, and this is
+the largest change in this rewrite.* The previous design had two of each — an
+adapter protocol feeding `journal.db`/`history.db`, and trace-db's parsers feeding
+`archive.db` — meaning two per-vendor normalizers, two schemas, and two query
+paths for one concept. That is a drift generator, and it produced the open question
+the old document could not close: full-text search covered only what the archive
+had parsed, so a session whose environment had gone away was searchable nowhere.
+
+Under one vocabulary, native history is parsed *by an adapter* and emitted as the
+same events a live turn emits. It lands in the same journal → history pipeline,
+carries a `fidelity` marker, and is indexed by the same FTS table. The open question
+is answered by construction rather than moved.
+
+What this deletes: `archive.db` as a separate store, `backend/src/tracedb/mod.rs`
+(1440 lines of client plus per-operation spelling pins), the reachable/unreachable
+distinction, the `tracedb.bin` setting, and the two-id-space hazard in full.
+
+What it costs, stated plainly: the vendor-format knowledge in trace-db's
+`parsers/` must move into Sylph's adapters. *Measured:* that is **1219 lines** for
+the three supported agents (`claude.rs` 388, `codex.rs` 561, `pi.rs` 270), against
+1440 lines of client code deleted — a net subtraction before counting the 867 lines
+of `gemini.rs` and `opencode.rs` that go away with those agents.
+
+`docs/storage.md` owns the tiers and the fold format. `docs/agents.md` owns each
+vendor's native format and quirks.
+
+### Data travels one way: in
+
+The server never pushes history outward and never writes session data outside
+`~/.sylph`. There is no bidirectional sync, no last-writer-wins, no vector clock,
+and no merge — every one of those exists to answer "which of two conflicting writes
+wins", which the no-migration invariant means nobody asks.
+
+Two inbound paths:
+
+- **A live session** arrives as a consequence of running. The envagent streams
+  normalized events to the server as they happen, so there is no moment at which
+  the data is only in one place — see § Spooling in `docs/environments.md` for what
+  makes that true across a dropped connection.
+- **An existing native session** is brought in by an explicit act: **watch** it
+  (follow it as it runs) or **adopt** it (bring in what is already recorded).
+
+*Decision: bringing in native sessions stays explicit rather than becoming an
+automatic sweep of every store on the disk.* "Everything on this machine is now on
+the server" is not a default a tool picks on someone's behalf. Offering it as a
+one-time choice when an envagent first pairs is fine, and is the shape to build.
+
+What travels is what the adapter produced from the native bytes it read locally,
+which is why the adapter runs in the environment. Uploading rows the server has to
+trust would put the schema in every environment and require upgrading them in
+lockstep.
+
+## One link, two typed capability facets
+
+*Decision.* A link has one state and two facets, each of which can report
+unavailable with a typed reason: **observe** and **control**.
+
+A third link state was considered and rejected, because the vendors do not sort into
+three buckets (*measured 2026-08-27*): a terminal `pi` is observable and
+undrivable, `codex` is both, `claude` is observable and semi-drivable behind a
+human approval gate. A third enum variant would have to pick one and would
+misreport the others.
+
+Two inversions in the current code have to be repaired with it. `links/mod.rs:61`
+documents an empty capability surface as meaning *no process exists*, which is
+exactly backwards for a session running under someone else — the process is alive
+and it is Sylph that cannot reach it. And both `LinkFailureCode` values (`NoAdapter`,
+`HandshakeFailed`) describe *our own spawn* failing, so neither can say "somebody
+else's process, running fine, not ours to drive".
+
+This is also what makes "another machine is read-only" fall out rather than being a
+rule anyone writes: **control is available exactly while that environment's envagent
+is connected.** Disconnected, observe still answers from the server's store.
+
+## Observation is multi-party; control is single-owner
+
+Two questions get conflated because both read as "can two things touch one session".
+
+**Observation may be concurrent.** Several clients, a terminal and a browser
+together, more than one person — all reading is safe, because reading creates no
+branch. This is what makes the AFK case work: the terminal keeps going while the
+phone watches.
+
+**Control must have one owner, with explicit handoff.** *Measured:* none of the
+agent CLIs takes a lock, and two writers to one session produce sibling branches off
+a single parent pointer with zero errors at the storage layer. The damage is purely
+semantic, which is why nothing catches it. `claude`'s own approval gate is a vendor
+implementing this same idea, which is evidence the shape is right.
+
+## AFK degrades in a defined order
+
+The motivating scenario is the reason this architecture exists: work with an agent
+in a terminal, walk away, see it from a phone, continue it. It is not one
+capability. *Measured 2026-08-27 against claude 2.1.247, codex, pi:*
+
+| | claude | codex | pi |
+| --- | --- | --- | --- |
+| mid-turn native writes | tool-call and content-block boundaries | item completion | every `message_end` |
+| second-party control | authenticated per-process UDS: delivers messages, **cannot drive** | app-server daemon, `remote-control pair`, `queue --thread` | **none** — stdio only |
+| resume after exit | yes | yes | yes |
+
+So: **observe always, resume always, live continuation where the vendor lets a
+second party in.** A client renders "observable, not drivable" as a first-class
+state, never as a failure.
+
+`claude`'s inbound `user` frames are gated on the sitting human's approval — the
+binary carries "held for the recipient user's approval", declined, and expired
+strings. Whether the gate is per-frame or once per peer is **unresolved**, and it is
+the difference between useful remote continuation and a feature that fails precisely
+when nobody is at the keyboard. `docs/agents.md` carries the per-vendor detail.
+
+## Turn execution
+
+A **turn** is a durable resource, not an HTTP request's lifetime:
+
+1. `POST /sessions/{id}/turns` with an idempotency key → `202` and a turn id
+2. The server ensures a link, then sends the turn on it
+3. The client streams `GET /turns/{id}/events` (SSE), reconnecting with
+   `Last-Event-ID`
+4. The turn settles when the adapter reports an outcome — there is no process exit
+   to read, because the adapter is long-lived and a turn is a message on it
+5. A server restart marks in-flight turns `interrupted`
+
+One turn per session at a time; a second is refused (`SESSION_ALREADY_RUNNING`)
+rather than queued, because the link holds one conversation.
+
+**An agent may start a turn.** *Measured on claude 2.x:* a session with
+backgrounded work emits the delegate's completion after its turn's `result`, then an
+entire exchange of its own to report it. So the server opens an agent-initiated turn
+(`origin: "agent"`) on the first out-of-turn event of any kind. Such a turn has no
+waiter, its request text is empty, and a client that ignores `origin` will render an
+answer to a message the user never wrote. This is turn `origin` and is unrelated to
+the deleted session `origin`.
+
+Two orderings here are load-bearing and were each paid for:
+
+- **`stop` settles the turn before touching the link.** An agent that stops
+  producing looks like a lost link to the drain task, which would report `LINK_LOST`
+  for something the user asked for. Interrupting first was a race that failed
+  `stopping_a_running_turn_cancels_it` about two runs in five.
+- **A session returns to `idle` before its turn is marked terminal.** These are two
+  writes and a client will observe between them, so the row that makes the next
+  action legal is written first. The other order leaves a finished turn on a
+  `running` session, which is the state that makes the composer refuse the next
+  message.
+
+## Security model, and what multi-user requires
+
+Today: loopback bind, a process-local `HttpOnly` `SameSite=Strict` cookie whose
+token rotates on restart, Host header validation, Origin validation on mutations.
+That is adequate for a single-user local server and **is not an authentication
+system** — it knows a request came from a browser that completed a local handshake,
+not who is asking.
+
+*Decision: multi-user gets a place in the model, not an implementation.* One person
+with a laptop, a phone, and a browser tab needs no identity model; they need the
+authority to be the server, which it now is. What stays so the door is not closed:
+every mutation is a server operation, so an authorization check has one home;
+request resolution records who resolved; and both environment binding and session
+ownership are per-session, which is the unit a boundary would follow.
+
+The topology this document describes makes three of the unsolved questions sharper,
+and **"many users reach it over the web" requires all of them answered first**:
+
+- Identity, per-user session visibility, transport security, CSRF beyond the
+  bootstrap cookie.
+- **Who owns an envagent.** New with this design and with no home in the current
+  model. Without it, one user can run agents on another user's laptop.
+- `browse_roots` becomes an **authorization boundary** rather than a convenience,
+  because it bounds where an agent may execute. It is currently per-install.
+
+Binding to a non-loopback interface stays a separate, explicit change and must not
+be reached by relaxing the bind address.
 
 ### Filesystem exposure
 
-Three endpoints turn a client-supplied string into a filesystem operation, and
-they are bounded differently because their roots differ. The *check* is shared —
-`backend/src/paths.rs` canonicalizes, then compares component-wise with
-`Path::starts_with` — because a containment rule implemented twice is one that
-will diverge. Canonicalizing first is what defeats both `..` and a symlink whose
-escape lives on disk rather than in the request.
+A client string becomes a filesystem operation on three surfaces, and the *check* is
+shared (`paths::contain_in_any`: canonicalize, then compare component-wise) because a
+containment rule written twice is one that will diverge.
 
 | Surface | Root | Scope |
 | --- | --- | --- |
-| `GET /sessions/{id}/files` | the session's journalled `workdir` | list one directory |
-| `GET /sessions/{id}/files/content` | same | text and image bytes, encoding decided by the bytes |
-| `GET /sessions/{id}/files/document` | same | parsed structure for Office, CSV, PDF |
-| `GET /sessions/{id}/files/raw` | same | raw bytes the browser renders itself |
-| `POST /sessions/{id}/files` | same | create files, no overwrite by default |
-| `GET /fs/{roots,tree}` | `Config::browse_roots` (`$HOME` + `SYLPH_BROWSE_ROOTS`) | list directories only |
+| `GET /sessions/{id}/files*` | the session's recorded `workdir` | list, read, parse, raw bytes |
+| `POST /sessions/{id}/files` | same | create; no overwrite by default |
+| `GET /fs/{roots,tree}` | `browse_roots` (`$HOME` + configured) | directory names only |
 
-Containment is asserted per route rather than assumed inherited, because a new
-route added beside a safe one is exactly where the check goes missing. `/files/raw`
-also carries hardened response headers: dropping the CSP header there silently
-reintroduces cookie disclosure through previewed HTML, which was measured rather
-than assumed, so the headers are asserted server-side.
+Two invariants that were each paid for in a real hole:
 
-Two decisions are worth recording, because both could reasonably have gone the
-other way:
+**Derive the path you operate on from the check itself.** Canonicalize once, into
+one variable, and use that variable. A `contain_in_any` result paired with a path it
+did not produce is not a bound — that shape let a read canonicalize for the check and
+then open the original path, following a symlink out of the workdir.
 
-**Machine-level browsing lists directories, never file contents.** It exists only
-so a user can name a workspace, which a browser cannot do for itself. Enumerating
-directory names is a strictly smaller disclosure than serving bytes, and there is
-deliberately no `/fs/content` — reading bytes stays session-scoped, where the root
-is journalled rather than chosen. A symlink leaving a root is omitted from
-listings rather than merely refused, so it is never advertised as a node to try.
+**A write cannot canonicalize its own target**, because the file does not exist yet,
+so containment sits on the parent and the last component is appended verbatim. A
+pre-existing symlink there is inside the root by name and points anywhere. Inspect
+with `symlink_metadata` first, then resolve and re-check.
 
-**Writing is confined to the session's own workdir.** The agent driving a session
-already writes anywhere under `workdir`, so a browser upload into the same subtree
-grants no new capability; it only makes an existing one explicit. Allowing uploads
-anywhere the *picker* can reach would have given the browser a wider write range
-than the agent, which is why the upload root is the journalled workdir and not the
-browse roots.
+With environments, both checks live in the **envagent**, evaluated against that
+machine's own configuration. The server never resolves a remote path.
 
-**`browse_roots` bounds two things, and the second is the larger one.** It bounds
-what `/fs/*` may enumerate, and it bounds what a client may *name* as a session's
-`workdir` — `POST /sessions` and `POST /sessions/import` both go through
-`contain_workdir`, which derives the stored path from `paths::contain_in_any` rather
-than checking one path and using another. A `workdir` is the `current_dir` of a
-spawned agent, so the naming bound governs where arbitrary code may run, while
-enumeration only governs which names are visible. Widening the setting widens the
-first; read `configuration.md` § `browse_roots` bounds where agents run before doing
-so. One setting rather than two because `/fs/*` exists solely to name a workdir, so a
-second key would have to be kept equal to this one.
+## What is deliberately not built
 
-## Agent Discovery
-
-Adapters are searched in two roots, bundled first: the `adapters/` directory
-shipped beside the binary, then `~/.sylph/agents/`. An agent is a directory holding
-an executable `adapter.sh`.
-
-Two words, both current: an **agent** is what a user picks, and an **adapter** is the
-`adapter.sh` that speaks for it. A **runner** was v1's process-per-turn script, deleted
-in Phase 12; the name no longer appears in a path. It survives only in comments that
-describe the v1 contract as history, where it is the right word.
-
-Discovery still recognizes a directory holding `runner.sh` or `runner.py` and no
-`adapter.sh` — not for compatibility, but to report it as **broken** rather than skip
-it. Such a directory is an agent that cannot be spoken to, not an absent one, and
-silently skipping it is what produced the `0 usable, 0 broken` total failure.
-
-The startup log says `Agent discovery: N usable, M broken`, and that string is what to
-grep for when a session cannot be created. Bundled first means a user-added adapter of
-the same name *shadows* rather than duplicates — the escape hatch when a vendor changes
-faster than the shipped adapter catches up. See `docs/configuration.md`.
-
-Discovery is a **live handshake**, not a static descriptor read. The backend
-scans both roots on startup, and for each directory holding an `adapter.sh` it
-spawns the adapter, exchanges `hello`/`ok`, and keeps what came back — then caches
-it in memory, refreshable via the API. `DISCOVERY_TIMEOUT` is 10s, matching the
-link's own budget: an adapter that cannot say who it is in ten seconds will not run
-a turn either. `docs/session-protocol.md` § Handshake is authoritative for the
-frames.
-
-A directory that holds a `runner.sh` or `runner.py` but no `adapter.sh` is recorded
-as **broken**, not skipped. Such a directory is an agent this server cannot speak
-to rather than an ordinary folder, and skipping it silently is what once made a
-stale tree report zero usable *and* zero broken — so nothing anywhere said the
-directory had been seen and rejected.
-
-**Descriptor schema** (`AgentDescriptor` in `backend/src/agents/mod.rs`):
-```json
-{
-  "name": "claude",
-  "description": "Claude Code",
-  "version": "2.1.238",
-  "session_key": "…",
-  "flags": {
-    "model": {"choices": ["opus-5", "sonnet-5"], "description": "…"},
-    "effort": {"choices": ["low", "medium", "high", "xhigh", "max"]}
-  },
-  "commands": {},
-  "supports": ["interrupt", "steer", "approval", "subagent", "slash"]
-}
-```
-
-The shape is unchanged from the v1 descriptor so no client had to change: `flags`
-and `commands` are still maps keyed by name, not arrays. `version` is the agent
-CLI's own, learned from the handshake rather than declared by the wrapper.
-
-`flags` is the **spawn-time** option schema: what can be chosen before a session
-exists, which is all the create-a-session screen can know. A flag with an empty
-`choices` list is free-form; an enumerated one is validated against its own
-enumeration when `PATCH /sessions/{id}` writes it. Nothing in the UI hardcodes a
-model list, which is why `codex` correctly shows effort with no model selector.
-Anything adjustable on a *live* session is a config facet instead
-(`docs/session-protocol.md` § Session config).
-
-`commands` here is usually **empty, and deliberately so**. A project's real command
-list depends on files the CLI reads at startup, so it belongs to a session rather
-than to an agent: `GET /sessions/{id}/capabilities` is where dozens of them come
-from. The field stays in the shape so the settings UI still renders.
-
-`supports` is a closed vocabulary that drives the UI directly — a composer must not
-offer interrupt to an adapter that cannot interrupt.
-
-**A turn is not an invocation.** Under v3 the adapter is a long-lived process and
-a turn is a message on its link, so there is no per-turn command line: the session
-is opened once with `open`, and each turn is a `send` frame on the same stdin.
-`docs/session-protocol.md` is authoritative for both. What the process gets at
-spawn time is the environment; what it gets per turn is a frame.
-
-Identity is still enforced at that seam, and still through `SYLPH_SOUL`. Injection
-is the adapter's job, but *whether* it happens is the backend's: a native session
-sends the empty string, which the protocol reserves for "inject nothing". An unset
-variable means "resolve your default", which is not the same thing — and a
-configured path that does not exist resolves to none, matching the adapters' own
-`[[ -f "$SOUL_PATH" ]] || SOUL_PATH=""`.
-
-The child runs in a new process group (`process_group(0)`), so a stop signal reaches
-the CLI the adapter exec'd rather than only the wrapper script. Adapters stream
-NDJSON to stdout and the backend consumes it incrementally — one frame per line,
-which is what lets a turn be observed while it runs rather than after it ends.
-
-There is no degraded path for v1: `runner.sh` is not discovered, `SYLPH_STREAM_FORMAT`
-has no meaning, and a directory without `adapter.sh` is not an agent. The reasoning
-for refusing a compatibility shim is in `docs/session-protocol.md` § "v1 is not
-supported".
-
-## Data Flow
-
-### Create Sylph Session
-
-1. Client: names a directory — from a sidebar group that already is one, from the
-   start screen, or through the `/fs/*` picker. There is no form on this path
-2. Client: `POST /api/v1/sessions`
-3. Backend: generate UUID, insert into `sessions` table
-4. Backend: return `201` with session object
-5. Frontend: navigate to `/sessions/{id}`
-
-The agent is switchable until the first turn, because `agent` is fixed at creation
-server-side; switching on an empty session creates a new one, which is correct
-rather than a workaround since there is nothing yet to preserve. A draft nobody
-sends anything in is removed by `DELETE /api/v1/sessions/{id}`, which refuses any
-session carrying a turn.
-
-### Send Message
-
-1. Client: `POST /api/v1/sessions/{id}/turns` with idempotency key
-2. Backend: check idempotency, insert turn (status=queued)
-3. Backend: return `202` with turn ID
-4. Client: open SSE stream `GET /api/v1/turns/{id}/events`
-5. TurnSupervisor: establish a link if detached, `send` the turn, set status=running
-6. Backend: adapter NDJSON → journal → SSE → client
-7. The adapter's `turn`/`completed` event arrives: set status=completed. There is no
-   process exit to read, which is why the outcome is an event rather than an exit code
-8. SSE stream closes
-
-### Import Native Session
-
-1. Client: `POST /api/v1/sessions/import` with TraceDB session ID
-2. Backend: query TraceDB for session metadata
-3. Backend: create session with origin=native, identity_mode=preserve
-4. Backend: return `201`
-5. Frontend: navigate to session, show preservation policy banner
-6. User sends first message: creates turn linked to imported session
-
-### Search
-
-1. Client: `Cmd+K` opens the search overlay
-2. Frontend: ranks live sessions client-side from the shared sessions query, and
-   queries the archive via `/api/v1/search?q=...`
-3. Backend: forward to TraceDB JSON API
-4. Backend/frontend: deduplicate an archived hit that is already imported, by
-   `trace_session_id` or by the agent's `<agent>:<native-session-id>` identity
-5. Frontend: render live and archived results together, archived marked `⌗`
-
-Browsing by *directory* rather than by query is a different path:
-`Cmd+Shift+K` pages `GET /api/v1/archive/sessions` for one workspace, which is what
-answers "what happened here" when the user has no search term.
-
-## Deployment Model
-
-**Development:**
-- `cargo run` for backend
-- `npm run dev` for frontend, with Turbopack reload
-
-**Production:**
-- Single Rust binary: `cargo build --release`
-- Frontend as `output: "standalone"`, a self-contained bundle carrying its own
-  `node_modules`. **Not** a static export: `/sessions/[id]` and `/archive/[...id]`
-  are dynamic routes and the proxy rewrite to the backend is a server concern, so
-  neither survives one
-- LaunchAgent for macOS auto-start
-- Health checks on startup
-- Logs under the install prefix, rotated at 16 MB keeping one generation
-
-`SYLPH_WEB_BACKEND` is compiled into the route manifest, so it must be set for
-`next build` and not only for `next start`. See `docs/installation.md`.
-
-**Sylph home** (`~/.sylph` by default, `SYLPH_HOME` to relocate):
-- `config.toml` — settings; `SOUL.md` — the identity preamble
-- `data/journal.db` — the hot tier: unsettled turns
-- `data/history.db`, `data/blobs/` — consolidated history and its payloads
-- `data/attachments/{session}/{turn}/` — staged files
-- `agents/` — user-added adapters; `scratch/` — Quick Start's working directory
-
-## Extension Points
-
-Future features should preserve these boundaries:
-
-1. **Runner protocol** — NDJSON events are additive; new kinds/phases OK
-2. **API versioning** — there is none, and adding one would be the mistake. The
-   `/api/v1/` prefix is a path segment, not a compatibility promise: this backend's
-   only client is the frontend in this repo, both are built from one commit, and a
-   token that rotates on restart means no third party is holding a session across a
-   deploy. So a breaking change edits the endpoint, the schema, and the client in
-   place. Standing up `/api/v2/` beside a live `/api/v1/` would double the surface
-   under test to serve a caller that does not exist — and, worse, make the old shape
-   survivable, so nobody would finish the migration. See `AGENTS.md` § Compatibility
-3. **Database migrations** — numbered, transactional, append-only
-4. **TraceDB interface** — always via JSON protocol, never direct schema access
-5. **Session origin** — immutable policy decision, never silently changed
-
-Planned extensions:
-- Diff/plan event types
-- Approval requests (interactive prompts from agent)
-- Per-turn artifacts (screenshots, logs)
-- Session forking and reconstruction
-- Permission audit log
+- Session migration between environments (§ above). Forking is the answer.
+- Multi-user authentication and per-user visibility (§ above).
+- Horizontal scale-out. The authority is SQLite and a link is stateful in one
+  process, so growth is **shard by session and route**, not stateless replicas.
+  Anything else means moving to Postgres. Worth knowing now because it decides
+  which of the two happens later; nothing in the API forecloses either.
+- A compatibility layer for anything. `AGENTS.md` § Compatibility applies: no other
+  consumer exists, so schemas, wire formats, and internal APIs change in place.

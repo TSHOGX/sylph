@@ -53,7 +53,7 @@ this file, next to what they govern: **Why not EventSource**, the dependency cos
 ## Design Philosophy
 
 **Core principles:**
-1. **Origin-aware UI** — Visual distinction between Sylph-managed and native sessions
+1. **Honest capability** — a session shows what can be observed, what can be driven, and how much resolution its record has
 2. **Real-time first** — SSE-driven updates with optimistic rendering
 3. **Local-first** — No external dependencies, works offline after initial load
 4. **Accessibility** — WCAG 2.1 AA compliance, keyboard navigation, screen reader support
@@ -71,11 +71,11 @@ this file, next to what they govern: **Why not EventSource**, the dependency cos
 | Error-state and loading patterns | Syntax-highlighting library → hand-rolled `code-block.tsx` |
 
 **Sylph-specific, with no DSH equivalent:**
-- Dual-origin session indicators (green Sylph / violet native)
-- Preservation policy warning on native session resume
-- Per-session agent, model, and effort flags, read from `--describe`
-- TraceDB archive browsing and search, with lineage rollup and deduplication
-- Session incarnation history (backend lifecycle tracking)
+- Per-session agent, model, and effort flags, read from the agent's own report
+- History browsing and search with lineage rollup
+- Link capability facets: observe and control reported separately, each with a reason
+- Fidelity indicators, so a duration is only drawn where one was recorded
+- Environment picker, including whether an environment is reachable only via a relay
 
 Lifecycle indicators (24h idle, 04:00 reset) are modelled in the backend and surfaced
 nowhere in the UI yet.
@@ -158,7 +158,7 @@ frontend/
 ├── app/
 │   ├── layout.tsx              # Root layout: providers + AppShell
 │   ├── page.tsx                # Start screen: begin, resume, learn the keys
-│   ├── search/page.tsx         # TraceDB archive search and import
+│   ├── search/page.tsx         # Full-text search over the server's history
 │   ├── sessions/[id]/page.tsx  # Conversation canvas
 │   └── globals.css
 │
@@ -837,156 +837,140 @@ function ConversationCanvas({ sessionId }: Props) {
 
 ## Sylph-Specific Features
 
-### Origin-Aware UI
+### There is no origin badge, and no reset banner
 
-**Session origin indicators:**
+Both are deleted. They were the frontend half of a distinction the backend never made:
+`origin` had **zero** behavioural branches in the backend, and the 24h-idle / 04:00-reset
+policy the banner described was never scheduled by anything (`docs/architecture.md` § One
+class of session).
+
+Recorded because a reader coming from an older screenshot will look for them. The badge
+rendered green-sylph / violet-native, and a banner promised a native session would not be
+injected into or reset. The promise was kept by construction — nothing reset anything —
+so the banner was describing an absence as a feature, on every one of those sessions,
+forever.
+
+What replaces them is smaller and says more.
+
+### Two facets, each with a reason
+
+A session's drivability is a property of its **link**, not of the session, and it has two
+independent halves (`docs/architecture.md` § One link, two typed capability facets):
 
 ```tsx
-function OriginBadge({ origin }: { origin: 'sylph' | 'native' }) {
-  const config = {
-    sylph: {
-      color: 'green',
-      icon: '🟢',
-      label: 'Sylph'
-    },
-    native: {
-      color: 'violet',
-      icon: '🟣',
-      label: 'Native'
-    }
-  }[origin]
-  
-  return (
-    <Badge className={`bg-${config.color}-100 text-${config.color}-700`}>
-      {config.icon} {config.label}
-    </Badge>
-  )
+// Not a boolean, and not a third link state. The vendors do not sort into three
+// buckets: a terminal `pi` is observable and undrivable, `codex` is both, and
+// `claude` is observable and semi-drivable behind a human approval gate.
+function DriveState({ link }: { link: LinkState }) {
+  if (link.control.available) return null
+
+  const reason = {
+    environment_unreachable: "This machine is offline. History reads; nothing can be sent.",
+    not_ours_to_drive: "Running in a terminal. This agent offers no channel to a second party.",
+    no_agent: "The agent CLI is not installed on that machine.",
+  }[link.control.reason]
+
+  return <Notice icon="eye">{reason}</Notice>
 }
 ```
 
-**Native session warnings:**
+Two rules the composer must follow, both learned from shipped defects:
 
-When user opens a native session, show a banner:
+- **An empty capability surface means "we cannot reach it", never "there is nothing
+  there".** Those coincide for a session Sylph launched and are opposite for one running
+  under someone else.
+- **Do not cache a failed reach forever.** `environment_unreachable` and
+  `not_ours_to_drive` are cacheable — no retry wakes a laptop or teaches a vendor a new
+  channel — but a failed handshake against a *reachable* environment must be allowed to go
+  stale. Caching all of them under `staleTime: Infinity` made one failure permanent for
+  the life of the page, which is what made a deterministic config problem present as
+  intermittent.
 
-```tsx
-{session.origin === 'native' && (
-  <InfoBanner variant="warning">
-    <Icon name="shield-alert" />
-    <Text>
-      This is a native session imported from {session.agent}.
-      Identity and context are preserved. No SOUL.md injection or
-      automatic resets will occur.
-    </Text>
-    <Tooltip>
-      <InfoIcon />
-      <Content>
-        Native sessions maintain their original agent's identity
-        and lifecycle policy. Sylph Web will not modify the prompt
-        or compact context.
-      </Content>
-    </Tooltip>
-  </InfoBanner>
-)}
-```
-
-### Lifecycle Indicators
-
-**Sylph sessions show lifecycle state:**
+### Fidelity gates what may be drawn
 
 ```tsx
-function SessionHeader({ session }: Props) {
-  const idleHours = (Date.now() - session.updatedAtMs) / (1000 * 60 * 60)
-  const willReset = session.origin === 'sylph' && idleHours >= 24
-  
-  return (
-    <Header>
-      <Title>{session.title}</Title>
-      <Meta>
-        {session.agent} · {session.flags.model} · {session.flags.effort}
-      </Meta>
-      {willReset && (
-        <Badge variant="warning">
-          Will reset at 04:00 ({idleHours.toFixed(1)}h idle)
-        </Badge>
-      )}
-    </Header>
-  )
-}
+// `stream` means every delta and its arrival time was recorded. `blocks` and
+// `messages` mean the source recorded less, and no care recovers a timing that
+// was never written — so a waterfall here would present equal-length bars as
+// measurements. Show the marker; do not draw the chart.
+{session.fidelity !== "stream" && <FidelityMarker value={session.fidelity} />}
 ```
 
-### TraceDB Search Integration
+Note what this is *not* correlated with: who started the session. A session Sylph
+launched, read back from the vendor's store after its process died, is `messages` too.
+Gating on anything else — an origin, a link state, whether the row came from a listing —
+draws a duration that was never measured.
 
-**Unified session search:**
+
+### Search integration
+
+**One query, because there is one store.** This used to merge two result sets and
+deduplicate them, and the deduplication is what is gone:
 
 ```tsx
 function SessionSearch() {
-  const { data: liveResults } = useQuery(['sessions'])
-  const { data: traceResults } = useQuery(
+  // No second source to merge, and no id translation. Search covers everything the
+  // server holds, including sessions read out of an agent's native files, because
+  // those are parsed into the same events and indexed by the same FTS table.
+  const { data } = useQuery(
     ['search', query],
     () => api.search({ q: query }),
-    { enabled: query.length >= 2 }
+    { enabled: query.trim().length >= 2 },
   )
-  
-  // The backend annotates archive hits with the matching Web session id. For
-  // live rows without an import, nativeSessionId is the durable identity.
-  const merged = useMemo(() => {
-    const live = liveResults.sessions
-    const trace = traceResults?.sessions || []
-    
-    const traceIds = new Set(live.map(s => s.traceSessionId).filter(Boolean))
-    const nativeIds = new Set(live
-      .filter(s => s.nativeSessionId)
-      .map(s => `${s.agent}:${s.nativeSessionId}`))
-    const uniqueTrace = trace.filter(s =>
-      !traceIds.has(s.traceSessionId) && !nativeIds.has(s.traceSessionId))
-    
-    return [...live, ...uniqueTrace]
-  }, [liveResults, traceResults])
-  
+
   return (
     <SearchInput
-      placeholder="Search sessions..."
-      results={merged}
+      placeholder="Search sessions…"
+      results={data?.sessions ?? []}
       renderResult={(session) => <SessionCard session={session} />}
     />
   )
 }
 ```
 
-### Archived history in the sidebar
+**What the old version had to do, and why not doing it is a correctness win as well as
+less code.** It held a set of archive ids seen on live rows, plus a fallback set built by
+re-deriving `<agent>:<native-id>` for live rows that had no archive id yet — a
+translation between two id spaces. Comparing across those spaces produces **no error at
+any layer** when it is wrong: the archive answers "no such session", the caller concludes
+nothing matched, and every component behaves impeccably while the feature silently does
+nothing. With identity now `(environment, agent, native_id)` throughout, that comparison
+cannot be written.
 
-The left pane is built from two sources, because one of them does not know what
-the user has done. `GET /sessions` holds only sessions created in this app, so a
-directory with years of coding-agent history rendered as **"No sessions yet"** —
-the sidebar claimed a workspace was empty while TraceDB held hundreds of sessions
-for that same path. Archived history was reachable only through full-text search,
-which requires already knowing what to search for.
+**Keep it user-initiated.** FTS5 search measured **174–260 ms** while every other read is
+microseconds to sub-millisecond, so `enabled` gating on a real query length is not
+politeness — it is the difference between a search box and a load generator.
 
-Each expanded group therefore also queries `GET /archive/sessions?workdir=...`,
-and merges:
+### History in the sidebar
 
-- **Live rows first**, then archived ones. A session you can continue outranks one
-  you can only read.
-- **Deduplicated** on `traceSessionId` / `sessionId`, with a backend fallback to
-  the originating agent's `<agent>:<native-session-id>` identity. This covers a
-  normal live session as soon as TraceDB ingests it, before any explicit import.
-  An imported archived session is the same conversation as a live row, so listing
-  both would offer two routes into one history.
-- **Marked by shape, not colour** (WCAG 1.4.1): `●` sylph, `◆` native, `⌗`
-  archived, with `⑂N` for rolled-up subagent sessions. `⑂N` counts only subagents
-  that ran in *this* directory — one that ran in a worktree or subdirectory is a
-  row in that directory instead, because there it is the work rather than a
-  delegation.
-- **Fetched only while the group is open** (`enabled: open`), because each row
-  costs the backend a lineage lookup and, when the archive recorded no title, a
-  label lookup. `staleTime` is 60s: archived history only changes when TraceDB
-  ingests, which nothing in this tab drives.
+The left pane is built from **one** source, and that is the change worth stating,
+because it used to be two.
 
-The group count reads `8+` rather than a total. The archive count for a directory
-is unknown without paging all of it, and a live-plus-preview sum would look like a
-complete tally while being an arbitrary partial one. A `⚠` replaces the `+` when
-the archive is unreachable, so "no history" and "cannot see history" stay
-distinguishable.
+`GET /sessions` once held only sessions this app created, so a directory with years of
+coding-agent history rendered as **"No sessions yet"** — the sidebar claimed a workspace
+was empty while a separate archive held hundreds of sessions for that same path. The pane
+therefore queried both and merged them, which brought a deduplication step, a
+two-id-space fallback, and a count that could only be reported as `8+`.
+
+With one store and one vocabulary (`docs/architecture.md` § One authority) all three go
+away: a group is one query, rows are rows, and the count is a count.
+
+What survives from that design, because it was about *presentation* rather than about
+which store answered:
+
+- **Marked by shape, not colour** (WCAG 1.4.1). What is marked has changed: there is no
+  sylph/native distinction to draw. A row shows its **fidelity** when it is not `stream`,
+  and `⑂N` for rolled-up delegated sessions.
+- **`⑂N` counts only delegates that ran in *this* directory.** One that ran in a worktree
+  or subdirectory is a row in that directory instead, because there it is the work rather
+  than a delegation. Measured: 484 of 2238 delegates ran elsewhere, and folding those into
+  an absent parent emptied 42 directories, one holding 193 sessions.
+- **Fetched only while the group is open** (`enabled: open`), because each row costs the
+  backend a lineage fold.
+- **A distinguishable unreachable state.** "No history here" and "cannot reach the
+  machine that holds it" must not render identically. What is unreachable is now an
+  *environment* rather than a database, which is a better fact to show: it names a machine
+  the user can wake.
 
 ### Browsing history: `Mod+Shift+K`
 
@@ -1001,9 +985,10 @@ the question someone has when a workspace looks unfamiliar. The scope comes from
 `activeWorkdir` in `lib/workspace-ui.tsx`, set by the open session or by the
 sidebar group whose `Browse all` was clicked.
 
-Filtering is deliberately local. TraceDB's full-text search is already `Mod+K`,
-and re-querying it per keystroke would spawn a subprocess per character to answer
-a narrower question; the footer says the filter covers loaded sessions only.
+Filtering is deliberately local. Full-text search is already `Mod+K`, and re-querying it
+per keystroke would run an FTS5 query per character — measured at 174–260 ms each
+(`docs/api-design.md` § Search) — to answer a narrower question than the one already
+loaded. The footer says the filter covers loaded sessions only.
 
 **Paging is a footer control, not a row.** As the last child of the list it was both
 invalid ARIA — a `listbox` admits only options — and below however many rows had
@@ -1042,23 +1027,31 @@ has already resolved any pair.
 the same `Timeline` the live conversation uses — the backend normalizes archived
 events into the live `StreamEvent` shape, so there is no second renderer to drift.
 
-A catch-all route because a subagent id contains a slash
-(`claude:uuid/agent-name`). Next hands those segments back **still
-percent-encoded**, so each is decoded before rejoining; without that the client
-re-encodes and the backend looks up a literal `claude%3A...`.
+A catch-all route, because a session id is the encoded triple and a native id can
+itself contain a slash (`env:claude:uuid/agent-name`). Next hands those segments back
+**still percent-encoded**, so each is decoded before rejoining; without that the client
+re-encodes and the backend looks up a literal `env%3Aclaude%3A...`.
 
-Browsing must not mutate, which is why this is separate from import. Continuation
-is offered as an explicit action, disabled with its reason shown when the archive
-recorded no `cwd` — `POST /sessions/import` rejects those, and a button that always
-fails is worse than one that explains itself. There is no composer.
+**Reading never mutates, and reading no longer implies a separate store.** A session
+whose environment is offline, or whose vendor offers no second-party channel, opens and
+renders like any other — what differs is the link's `control` facet, which reports
+unavailable with a reason, so the composer explains itself instead of failing. There is
+no "import to read" step, because there is nothing to import: the history is already the
+server's.
 
 #### Delegation is shown beside the transcript, not inside it
 
-A live turn nests a subagent's work inside the tool call that spawned it, because
-every event carries a `span`. An archived transcript carries none, and the page has
-to be built around that rather than around the resemblance: the backend sets
-`flat: true` and no archived event has a `span` at all, because TraceDB stores no
-event-level parent pointer (`docs/api-design.md` § An archived transcript is flat).
+A live turn nests a subagent's work inside the tool call that spawned it, because every
+event carries a `span`. **A record read from a vendor's native store carries none**, and
+the page has to be built around that rather than around the resemblance.
+
+This is a `fidelity` consequence, not an archive consequence, and it survives the move to
+one store unchanged: no vendor writes event-level delegation structure to its native
+files. Measured, the raw vendor payload field was null on all 36308 events sampled, and
+the field that *looks* like a span means something different per agent — for `claude` it is
+the conversation chain, where 13689 of 15119 pointers name the immediately preceding
+event, so honouring it as a span nests a whole transcript into one chain thousands deep.
+Its only sound use is pairing a `tool_result` to its `tool_call`.
 
 So the page renders two session-level surfaces and nothing that imitates a
 trajectory:
@@ -1292,7 +1285,7 @@ gray-900 measures 3.66:1.
 
 Nothing is conveyed by colour alone (WCAG 1.4.1):
 
-- Session origin: shape (`●` vs `◆`) plus a `title`, not just green vs violet.
+- Fidelity and link state: a shape plus an accessible name, never colour alone.
 - Diff lines: a `+`/`−` sign as real text, plus an `sr-only` "added:"/"removed:"
   prefix — the glyph alone reads as punctuation to a screen reader.
 - Tool failure: the word "failed" and the exit code, not a red border alone.
@@ -1601,7 +1594,7 @@ journal.** Specs share one backend and run serially, so by the time a spec runs
 other sessions exist. `page.route` is how the empty-app and slow-listing branches
 become deterministic, and it is the *client's* branch under test either way.
 
-The mock adapter (`e2e/fixtures/adapters/e2e/adapter.sh`, which execs `adapter.py`)
+The E2E mock agent (a test-only `Adapter` implementation compiled into the envagent)
 branches on its prompt to emit twelve scenarios: a plain streamed reply, a tool
 sequence with a real diff and a failing command (`tools`), a 1000-event bulk
 transcript (`bulk`), an approval, a `narrow` approval that forbids a lasting grant, a
@@ -1735,7 +1728,7 @@ This list was written when most of it was unbuilt. What remains genuinely absent
 **Session management** — delete, move, and export have no endpoint behind them. Rename
 has one (`PATCH /api/v1/sessions/{id}` accepts `title`) but no menu item calls it.
 Forking at a turn would need an adapter able to resume from a prefix, which
-`sylph.agent.v3` does not currently ask for.
+the session protocol does not currently ask for.
 
 **Search** — `Cmd+F` filters turns rather than highlighting matches inside them.
 Highlighting means reaching into the Markdown, diff, and code renderers to rewrite
