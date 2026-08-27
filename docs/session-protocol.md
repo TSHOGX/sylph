@@ -85,9 +85,19 @@ called a **link**, and a session is `attached` (a link is live) or `detached`.
 A link is **not** required for a session to work. Links are expensive and do not
 survive a server restart, so:
 
-* A turn on a detached session **establishes a link first**, resuming the
-  agent's native session by id. This is the ordinary path after any restart, not
-  an error path.
+* A turn on a detached **Sylph-born** session **establishes a link first**,
+  resuming the agent's native session by id. This is the ordinary path after any
+  restart, not an error path.
+
+  This does **not** generalize to an adopted session — one somebody else started
+  in a terminal. There, the process is already alive and holds the vendor's own
+  session; spawning a second one to "resume" it would fork the conversation into
+  sibling branches off one parent pointer, which no vendor CLI locks against and
+  no storage layer reports. Detached-plus-adopted means *reachable only through
+  whatever second-party channel the vendor exposes*, which is per-agent and
+  sometimes nothing. `docs/data-architecture.md` § AFK is two capabilities holds
+  the measured table; § One link state, two typed capability facets is why this is
+  not a third value of `attached`.
 * A link idles out (default 30 minutes) and is torn down. History is unaffected;
   the next turn re-establishes.
 * Interactive capability is a property of the link, so the UI reports it as
@@ -150,7 +160,7 @@ a peer that does not know one behaves as though the sender had not sent it.
 The server opens the link, then negotiates before anything can go wrong:
 
 ```json
-{"t":"hello","id":"h1","protocol":"sylph.agent.v3","server":"sylph-web/0.2.0",
+{"t":"hello","id":"h1","protocol":"sylph.agent.v3","server":"sylph-web/0.1.0",
  "accepts":["approval","dialog","elicitation","choice"]}
 ```
 
@@ -163,7 +173,7 @@ negotiated rather than discovered.
 The adapter replies with what it and its CLI can actually do:
 
 ```json
-{"t":"ok","id":"h1","adapter":"claude/2.0.0","agent":{"name":"claude","version":"2.1.238"},
+{"t":"ok","id":"h1","adapter":"claude/3.0.0","agent":{"name":"claude","version":"2.1.238"},
  "supports":["interrupt","steer","approval","subagent","slash","set_config","context","fork"],
  "flags":{"model":{"choices":["opus-5","sonnet-5"],"description":"..."},
           "effort":{"choices":["low","medium","high","xhigh","max"]}}}
@@ -786,9 +796,19 @@ a gap. That is right in general and wrong for work the agent itself says is
 backgrounded, which is *expected* to outlive its turn and report on a later
 agent-initiated turn: closing it writes a contradiction the real completion cannot
 undo, and both records then exist on different turns with the earlier card still saying
-the work never finished. The server reads this flag from whichever row it finds
-(`db/store.rs:1066`, `json_extract(data_json, '$.is_backgrounded')`) and excludes those
-trajectories from the sweep.
+the work never finished. The server reads this flag from whichever row it finds and excludes those trajectories
+from the sweep — `store.rs:1077`, and the predicate is
+`json_extract(bg.data_json, '$.is_backgrounded') = 1`, inside a correlated
+`NOT EXISTS` over a `bg` alias.
+
+The two details this document previously dropped are the two that matter. The `bg.`
+alias is what makes it a subquery over *any* row sharing the trajectory rather than a
+test on the row being swept — which is the whole mechanism, since `claude` reports the
+flag on `task_started` and nowhere later. And `= 1` is load-bearing because
+`json_extract` returns SQLite's integer `1`, not a boolean: a comparison written against
+`true` matches nothing and every backgrounded delegation is swept closed, which is the
+exact contradiction this section exists to prevent. Quoting SQL with the alias and the
+literal removed leaves something that reads correct and would not work.
 
 **Re-attaching is the part an adapter author will otherwise get wrong.** `claude` reports
 `is_backgrounded` on `task_started` and on **no later notification**, so the adapter

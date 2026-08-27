@@ -61,7 +61,24 @@ pub struct LinkState {
     /// What this agent can actually do, so a UI never offers a control that
     /// would fail. Empty when detached: capability is a property of a live link,
     /// and reporting a remembered list would promise interrupt on a session that
-    /// has no process to interrupt.
+    /// Sylph holds no channel to.
+    ///
+    /// # Why the reasoning here is narrower than it reads
+    ///
+    /// This used to say "no process to interrupt", which is true for every session
+    /// this type has ever described and false for the class being added. A
+    /// Sylph-born session with no link has no process; an *adopted* session — one a
+    /// human started in a terminal — has a process that is alive and simply not
+    /// ours. Both report `attached: false` and an empty `supports`, so the empty
+    /// surface means "Sylph cannot reach it", never "there is nothing there".
+    ///
+    /// The distinction is not cosmetic: for an adopted session, what is reachable
+    /// is decided by whatever second-party channel the vendor exposes, which is
+    /// per-agent and sometimes nothing at all. `docs/data-architecture.md` § One
+    /// link state, two typed capability facets is why that becomes two facets on
+    /// this struct rather than a third value of `attached` — the vendors do not
+    /// sort into three buckets, so a third variant would have to pick one of them
+    /// to represent and misreport the rest.
     pub supports: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<SessionCapabilities>,
@@ -103,6 +120,13 @@ pub struct LinkFailure {
 #[error("No adapter registered for agent '{0}'; it was not discovered")]
 pub struct NoAdapter(pub String);
 
+/// Note what this vocabulary cannot yet say: both values describe *our own spawn*
+/// failing, so neither expresses "somebody else's process, running fine, not ours
+/// to drive" — the adopted session. That is a missing variant rather than a
+/// mislabelled one, and adding it is gated on the per-agent control table in
+/// `docs/data-architecture.md` § AFK is two capabilities, because the code a client
+/// acts on has to distinguish "no channel exists for this agent" from "a channel
+/// exists and the sitting human has not approved us".
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkFailureCode {

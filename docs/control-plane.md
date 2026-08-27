@@ -32,10 +32,16 @@ a session is.
                                     │
                      ┌──────────────┼──────────────┐
                      │              │              │
-                Environments    Adapters       TraceDB
-              local / khora /   per agent    (archive, search)
-                    ssh        (v3 duplex)
+                Environments    Adapters        Archive
+              local / khora /   per agent    (in-process parse,
+                    ssh        (v3 duplex)     read, search)
 ```
+
+The archive is drawn in-process deliberately. It is a private store under `~/.sylph`
+that this server owns, not a daemon a user installs and this server talks to — see
+`docs/data-architecture.md` § The archive is private, and Sylph owns its location.
+A frontend never reaches it directly, so "which copy is the truth" has one answer per
+session class and no negotiation.
 
 The server owns: session identity and origin, identity and lifecycle policy,
 turn supervision, link management, the event journal, pending requests,
@@ -123,9 +129,45 @@ beyond the bootstrap cookie, per-user visibility, credential isolation between
 users sharing a host, and the CSRF and origin work that non-loopback binding
 requires. Binding to a non-loopback interface stays a separate, explicit change.
 
+**Decision: multi-user gets a place in the model, not an implementation.** The daemon
+form — a Sylph server a user installs, reached by several clients — makes multi-*client*
+real immediately and multi-*user* only eventually, and those are different problems. One
+person with a laptop, a phone, and a web tab needs no identity model at all; it needs the
+authority to be the server, which is what this document already says. So the three
+affordances above stay, `resolvedBy` keeps its column, and nothing else is built yet.
+
+The reason not to build more is specific rather than a matter of taste. A user concept
+whose only consumer is a single-user install cannot be exercised, so every check would be
+written against an imagined threat model and would be wrong in a way no test could
+observe — the shape recorded in `AGENTS.md` as a compatibility branch outliving the
+defect it papers over. The signal to build it is a real second principal: a shared host,
+or a server holding sessions their owner should not be able to see all of. Until then the
+honest statement is that this is single-user software with a multi-client surface, and it
+must say so rather than implying otherwise by carrying half a permission system.
+
+## Adopted sessions are the reason this matters most
+
+The sharpest case for one server owning policy is not two of Sylph's own frontends
+disagreeing. It is a session **Sylph did not start**: an agent run in a terminal, which
+the user then walks away from and wants to keep watching from a phone. Nothing about that
+session is Sylph's — not the process, not the identity, not the transcript's format — so
+whatever reaches the phone has to be assembled by the one component that can read the
+vendor's store and hold a channel to the vendor's process. A frontend cannot do it, and a
+second frontend doing it differently is the drift this document exists to prevent.
+
+That splits the capability in two, and the split is per-vendor rather than per-product:
+**observation is near-universal, control is not.** Every frontend must therefore render
+"observable but not drivable" as a first-class state rather than as a failure — the
+degradation order is observe, then resume, then live continuation where the vendor admits
+a second party. `docs/data-architecture.md` § AFK is two capabilities, not one carries
+the measured per-vendor table.
+
 ## API surface
 
-Additive to `/api/v1`. Existing endpoints keep their contracts.
+Additive to `/api/v1`, and all of it is now in `docs/api-v1.openapi.json` — 33 paths, 41
+method-path pairs, matching the router exactly. Existing endpoints keeping their
+contracts is a statement about this phase, not a policy: this project writes no
+compatibility code, and a better shape is a reason to change a contract in place.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -151,10 +193,28 @@ back as a paragraph, because a headless CLI has no picker to open, so the option
 typed state a client renders and choosing one is a typed set. See
 `docs/session-protocol.md` § Session config.
 
-`interrupt` is deliberately separate from the existing `stop`. `stop` kills the
-process group; `interrupt` asks the agent to stop the turn and stay alive. They
-are different user intentions — "that is not what I meant" versus "stop
-everything" — and conflating them means one of the two is unavailable.
+`interrupt` is deliberately separate from the existing `stop`, and the difference is
+**not** the one this document used to claim. It said `stop` kills the process group
+while `interrupt` asks the agent to stay alive; read against `supervisor/turn.rs`,
+`stop` asks the adapter to interrupt *first* and only tears the link down when that
+fails or is refused. So the two overlap in mechanism and differ in guarantee:
+
+* `stop` is **unconditional**. It settles the turn as `Interrupted` before touching the
+  link at all, so the record does not wait on the agent to answer and a user asking to
+  stop is never told the agent declined. The teardown fallback costs the session, which
+  is why it is a fallback.
+* `interrupt` is **cooperative**. It asks and reports what happened, keeping the session
+  and its link.
+
+The ordering inside `stop` is load-bearing rather than tidy: an agent that stops
+producing is one its drain task observes closing, which reports `LINK_LOST` — true about
+the transport and false about what happened, since the user asked for this. Settling
+first means the drain task finds the turn already terminal and does nothing.
+Interrupting first was a race, not a fix: `stopping_a_running_turn_cancels_it` failed
+roughly two runs in five on it. Note also what teardown is: `close`, 500 ms, then
+`SIGTERM` to the process group — there is **no `SIGKILL` escalation**, and the older
+"SIGTERM, escalating after 2 s" description belonged to a v1 shape where one process per
+turn made killing it equal stopping the turn.
 
 ## Event stream
 

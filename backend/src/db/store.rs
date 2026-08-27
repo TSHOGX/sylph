@@ -889,16 +889,26 @@ impl JournalStore {
         Ok(())
     }
 
-    /// Schema version recorded in `app_meta`, or 0 when unset.
+    /// Highest applied migration version, or 0 on an unmigrated journal.
     ///
     /// Reported by `/health` so a client can detect that it is talking to a
     /// backend whose journal shape it does not understand.
+    ///
+    /// # Why this reads `_sqlx_migrations` rather than `app_meta`
+    ///
+    /// It used to read an `app_meta.schema_version` key that migrations bumped by
+    /// hand. `001` wrote `1`, `003` wrote `3`, and `004` through `007` forgot — so a
+    /// fully-migrated journal published `3` while seven migrations had run, and the
+    /// one question the field exists to answer was answered wrongly. A number the
+    /// migration runner already maintains must not have a second hand-written copy:
+    /// the copy is what drifts, and it drifts silently because nothing compares them.
     pub async fn schema_version(&self) -> Result<i64> {
-        let value: Option<String> =
-            sqlx::query_scalar("SELECT value FROM app_meta WHERE key = 'schema_version'")
+        let value: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
                 .fetch_optional(&self.pool)
-                .await?;
-        Ok(value.and_then(|v| v.parse().ok()).unwrap_or(0))
+                .await?
+                .flatten();
+        Ok(value.unwrap_or(0))
     }
 
     /// Journaled events for one turn after `after_seq`, in sequence order.

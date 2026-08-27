@@ -91,9 +91,19 @@ pub struct DiagnosticsResponse {
     /// here rather than in `/health` because it is a count, and `/health` is
     /// unauthenticated.
     tracedb: Option<crate::tracedb::ArchiveCounts>,
-    /// Turns with a live child process right now. May be lower than the journal's
-    /// running count if a process died without the reaper having recorded it yet.
-    active_processes: usize,
+    /// Turns the supervisor is running right now. May be lower than the journal's
+    /// running count if a link died without the reaper having recorded it yet.
+    ///
+    /// # Why this is not called `activeProcesses`
+    ///
+    /// It was, and the value has always been `active_turn_count()` — a turn count
+    /// published under a process name. That was harmless only while every process
+    /// was one Sylph spawned, so the two numbers differed by nothing a reader could
+    /// observe. It stops being harmless with adopted sessions, where a process is
+    /// alive and is not ours: "active processes" would then be read as a count of
+    /// agents on this machine, which this number has never been and cannot become
+    /// without asking every vendor. Name the thing that is counted.
+    active_turns: usize,
     /// The last retention pass, or `null` before the first one completes.
     ///
     /// Reported because retention's correct behaviour is usually "nothing was
@@ -153,7 +163,7 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
             .map(|path| path.display().to_string())
             .collect(),
         tracedb: state.tracedb.archive_counts().await,
-        active_processes: state.turns.active_turn_count().await,
+        active_turns: state.turns.active_turn_count().await,
         retention: state.retention.last_pass().await,
     }))
 }

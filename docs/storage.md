@@ -247,6 +247,18 @@ the sole copy, so "delete and re-ingest" stops being a recovery and the free-bre
 policy stops applying to that data. The rules in this table are unchanged by any of
 that; which class a given session falls into is not.
 
+**One sentence in that document is easy to misread into deleting this table's first
+row.** It says Sylph's own sessions do not enter the archive, and that is about
+*direction*: Sylph never hands the archive normalized events. A Sylph-born session's
+vendor CLI still writes its own native file, and the ordinary parser path still ingests
+it with a real fingerprint — which is precisely what `TraceDbAuthority` confirms a
+watermark against. So the **delegated** class is populated by Sylph-born sessions whose
+vendor store is reachable, and the distinction that matters for retention is
+reachability of that store, never who spawned the process. Reading the rule the other
+way would leave every journal session terminal and prune nothing, which is
+indistinguishable from retention working correctly on a terminal-only install — the
+failure this document's `/diagnostics` reporting exists to make visible.
+
 This is why the watermark is an interface with one question rather than a TraceDB
 call:
 
@@ -403,35 +415,44 @@ TraceDB has no ingestion-status call — its API is `list`, `show`, `search`,
 `stats`. A watermark therefore has to be derived, and it is, from two facts
 confirmed in its source rather than assumed:
 
-**Ingestion is whole-session and transactional.** `Facade::scan` compares a
-source fingerprint and either skips the session as unchanged or re-parses it
-entirely; there is no incremental append. `IngestMode::retain_full` returns `Full`
-unconditionally, and its own comment records why: *"Every new write is lossless.
-`partial` remains readable and accepted as a compatibility spelling ... but it can
-no longer create a partial record."* So a session present in TraceDB is complete
-as of its ingestion, never half-delivered.
+**Ingestion is whole-session and transactional.** A pass compares a source
+fingerprint and either skips the session as unchanged or re-parses it entirely;
+there is no incremental append. So a session present in the archive is complete as
+of its ingestion, never half-delivered.
 
-**`list` reports the extent of what it holds.** Each row carries `events` (a
-count), `ingestedAtMs`, `endedAtMs`, and `mode`:
+**Losslessness is a structural invariant, not a per-session fact.** There is no
+`mode` field to consult, and there never meaningfully was one: `retain_full` ignored
+its argument and `partial` was canonicalized to `full` on every write, so the guard
+that read it was tautologically true. TraceDB deleted the field rather than keep a
+distinction that did not exist, and `verify`'s schema contract enforces losslessness
+archive-wide. Retention must therefore **not** look for a replacement field — a
+per-session capture-quality question is not one the archive answers, because it is
+not one the archive can fail.
 
-```json
-{"agent":"claude","id":"claude:c1fd24f3-...","events":527,
- "mode":"full","ingestedAtMs":1787536152784,"endedAtMs":1787536141749}
-```
-
-That makes the derivation exact:
+**The bound comes from the extent of what is held.** `coverage` answers a session's
+ingest bounds from one indexed row with every aggregate materialized, which is the
+cheapest shape available and the right one for a per-session check:
 
 ```
 watermark(session) = max seq where created_at_ms <= endedAtMs
-                     given mode == "full"
 ```
 
-`endedAtMs` rather than `ingestedAtMs` is the load-bearing choice. `ingestedAtMs`
-is when TraceDB *ran*; `endedAtMs` is the timestamp of the last event it actually
-holds. Using the former would assume the agent had flushed its native store
-completely by the moment the scan read it — a race whose window is the agent's own
-buffering, invisible from here. `endedAtMs` is a statement about data rather than
-about timing, so it needs no assumption about flush behaviour at all.
+`endedAtMs` rather than `ingestedAtMs` is the load-bearing choice, and measurement
+has since made it more load-bearing rather than less. `ingestedAtMs` is when a pass
+*ran*; `endedAtMs` is the timestamp of the last event it actually holds. Using the
+former would assume the agent had flushed its native store completely by the moment
+the scan read it — and agents demonstrably have not: four of the five write
+*mid-turn*, so a pass routinely reads a session whose next event is already being
+composed. `endedAtMs` is a statement about data rather than about timing, so it needs
+no assumption about flush behaviour at all, which is exactly why sub-turn writers do
+not threaten it.
+
+The one thing this costs: `coverage` does not carry `ended_at_ms` today, though it is
+already a column on `sessions`. It has to be added there rather than recovered by a
+second call — the "producer already records it, only the wire drops it" shape this
+file records elsewhere. A watermark derivation must state which row it reads, because
+`SessionCoverage` and `SessionSummary` do not carry the same fields and picking the
+wrong one yields `None` rather than an error.
 
 Because the event-identity question never arises, the earlier worry about matching
 journal rows to archived events is moot: atomicity makes a timestamp bound
@@ -446,10 +467,9 @@ One safeguard is real, and one this section used to claim is not:
 * **There is no `events`-count cross-check.** This section previously described one as
   a second safeguard: a count far below the journal's block count meaning the two
   disagree, and a disagreement being a reason to withhold. Nothing implements it.
-  `IngestState` carries only `ended_at_ms`, `mode`, and `source_fingerprint`, and
-  `ingest_state` deliberately requests `from: 0, to: 0` so that no events are fetched
-  at all — the whole point of that shape being that it is one cheap targeted `show`.
-  Retention never reads a count.
+  Retention never reads a count. `coverage` does carry one, so the cross-check became
+  *available* without becoming *real* — which is the more dangerous state of the two,
+  because a reader checking whether the data exists will now find that it does.
 
 The removed claim is worth keeping visible rather than deleting, because it described
 *conservatism that a reader would otherwise assume is protecting them*. What actually

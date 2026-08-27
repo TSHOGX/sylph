@@ -29,9 +29,11 @@ CREATE TABLE app_meta (
 );
 ```
 
-Tracked keys:
-- `schema_version` — current migration number
-- `instance_id` — process-local identifier
+No keys are tracked. The table survives as a place to put one, and two former keys
+are worth naming so they are not reinvented: `schema_version` was a hand-maintained
+copy of a number `sqlx` already keeps in `_sqlx_migrations` and drifted four
+migrations behind before anyone noticed, and `instance_id` was never written by any
+code at all.
 
 #### sessions
 
@@ -312,21 +314,22 @@ meaningful rather than missing: a request with no form is an approval, whose sub
 is the one proposed tool input in `detail_json`. See `docs/session-protocol.md`
 § Request forms.
 
-## TraceDB
+## The archive
 
-TraceDB is accessed only through its JSON protocol. The service never queries TraceDB's SQLite schema directly.
+`archive.db` is the embedded TraceDB crate's own store. **This document does not
+describe its tables, and no Sylph code may query them.** That is the one rule the
+crate's API exists to enforce: the schema is TraceDB's to change, and a direct query
+turns every such change into a silent Sylph breakage. Embedding removes the JSON
+round trip that used to make the boundary physical, which makes the rule easier to
+break and no less binding.
 
-Queries:
-- `list` — list sessions with filters
-- `show` — fetch session trajectory
-- `search` — full-text search across sessions
+Read through `list`, `show`, `coverage`, and `search`. Sylph owns ingestion, so
+nothing outside this binary writes the file — but Sylph writes it *through* the
+crate, never as SQL.
 
-Sylph Web reads from TraceDB for:
-- Session list in UI (mixed with live sessions)
-- Native session import (create a lightweight continuation record)
-- Cross-agent search
-
-TraceDB writes come from the agent's native store (ingestion is external to Sylph Web).
+Sylph's own sessions do not enter the archive; `journal.db` and `history.db` hold
+those, and the three stores are described separately above precisely because nothing
+merges them. See `docs/data-architecture.md` for who owns which fact.
 
 ## Migrations
 
@@ -347,15 +350,18 @@ Attachments and commands need no migration of their own: attachments are staged 
 disk under the data directory rather than in a table, and a command invocation is a
 column on `turns`.
 
-**`app_meta.schema_version` stopped tracking at 3, and `/api/v1/health` reports it
-anyway.** `001` inserts `1` and `003` updates it to `3`; `004` through `007` add
-columns and leave it alone. So a fully-migrated journal reports `schemaVersion: 3`
-while seven migrations have run, and the value cannot answer the question it exists
-for — checking a packaged install against the binary running it. `sqlx` maintains its
-own `_sqlx_migrations` table, which is the real answer and is not exposed; this key is
-a second, hand-maintained copy that drifted the moment someone forgot the `UPDATE`.
-Either every migration bumps it, or the field reports `_sqlx_migrations` instead and
-the key goes away. Do not read the current value as a schema generation.
+**`/api/v1/health` reports `MAX(version)` from `_sqlx_migrations`, not a stored key.**
+It used to read `app_meta.schema_version`, which migrations bumped by hand: `001`
+wrote `1`, `003` wrote `3`, and `004` through `007` forgot. So a fully-migrated
+journal published `3` while seven migrations had run, and the one question the field
+exists to answer — whether a client understands this journal's shape — was answered
+wrongly for four migrations without anything reporting it.
+
+The rule this settles: a number the migration runner already maintains must not have
+a second hand-written copy. The copy is what drifts, and it drifts silently because
+nothing compares the two. The integration test now counts the `migrations/` directory
+rather than pinning a literal, since a literal in the test is a third copy and would
+have agreed with the wrong value just as happily as the code did.
 
 Migration rules:
 - Each migration is idempotent (use `IF NOT EXISTS`)

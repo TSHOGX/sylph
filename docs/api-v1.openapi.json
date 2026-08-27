@@ -21,7 +21,14 @@
         "security": [],
         "responses": {
           "200": {
-            "description": "Service health"
+            "description": "Service health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -31,7 +38,14 @@
         "description": "Runtime state: session and turn counts, discovered and broken agents, every agent root considered, archive totals, live child processes, and the last retention pass. Authenticated, unlike /health, because it carries counts and local filesystem paths. The retention block's withheld/terminal pair separates correct behaviour from a broken pass — a terminal session is supposed to keep everything, while a delegated session that keeps withholding means the archive is not confirming it, and an all-unchanged pass means ingestion has stopped advancing. Its byte fields answer which session is growing, which the counts cannot: forty small withheld sessions and one enormous one report identically. bytesHeld is the logical record across every measured session rather than the footprint on disk, so it exceeds what du reports — a ranking measure, not a disk gauge. grewBy is signed, since negative means pruning worked, and is absent when a session has been measured only once, because one observation is not a trend and reporting zero would claim stability. There is deliberately no configurable size bound: a terminal session's record is the only copy, so a size-triggered prune is a size-triggered deletion of data nothing else holds.",
         "responses": {
           "200": {
-            "description": "Diagnostics snapshot"
+            "description": "Diagnostics snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticsResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -76,14 +90,28 @@
       "get": {
         "responses": {
           "200": {
-            "description": "Discovered agent descriptors"
+            "description": "Discovered agent descriptors",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentsResponse"
+                }
+              }
+            }
           }
         }
       },
       "post": {
         "responses": {
           "200": {
-            "description": "Discovered agent descriptors"
+            "description": "Discovered agent descriptors",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentsResponse"
+                }
+              }
+            }
           }
         },
         "summary": "Re-run agent discovery",
@@ -115,7 +143,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Product sessions"
+            "description": "Product sessions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionListResponse"
+                }
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/Error"
@@ -129,7 +164,14 @@
         },
         "responses": {
           "201": {
-            "$ref": "#/components/responses/SessionCreated"
+            "$ref": "#/components/responses/SessionCreated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionEnvelope"
+                }
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/Error"
@@ -148,7 +190,14 @@
         },
         "responses": {
           "201": {
-            "$ref": "#/components/responses/SessionCreated"
+            "$ref": "#/components/responses/SessionCreated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionEnvelope"
+                }
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/Error"
@@ -180,7 +229,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Session detail"
+            "description": "Session detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionEnvelope"
+                }
+              }
+            }
           },
           "404": {
             "$ref": "#/components/responses/Error"
@@ -208,11 +264,11 @@
         },
         "responses": {
           "200": {
-            "description": "The session after the update",
+            "description": "The session after the update. Previously `$ref`'d CreateSession — the *request* schema — so a generated client typed this response as the body it had just sent.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreateSession"
+                  "$ref": "#/components/schemas/SessionEnvelope"
                 }
               }
             }
@@ -255,7 +311,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Turn list"
+            "description": "Turn list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -273,10 +336,24 @@
         },
         "responses": {
           "202": {
-            "$ref": "#/components/responses/TurnAccepted"
+            "$ref": "#/components/responses/TurnAccepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnEnvelope"
+                }
+              }
+            }
           },
           "200": {
-            "$ref": "#/components/responses/TurnAccepted"
+            "$ref": "#/components/responses/TurnAccepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnEnvelope"
+                }
+              }
+            }
           },
           "409": {
             "$ref": "#/components/responses/Error"
@@ -286,18 +363,31 @@
     },
     "/api/v1/search": {
       "get": {
+        "summary": "Full-text search across archived sessions",
+        "description": "FTS5 over the archive. Answers \"which archived session mentioned X\". Never 503 when the archive is unreachable — it is optional locally, and an empty result with availability reported elsewhere keeps a sidebar working. This is the one archive read that must never go per-row: search is ~200 ms while every other operation is microseconds to sub-millisecond. It covers only what a parser read, so it does not cover Sylph-born history whose native store the server never saw.",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Query"
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Whitespace-only is treated as absent."
           },
           {
-            "$ref": "#/components/parameters/Limit"
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20
+            }
           }
         ],
-        "description": "Search the durable TraceDB archive. Hits are lineage-collapsed and ranked by TraceDB, which owns both. A whitespace-only query returns no results without consulting the archive. An unreachable archive is a normal local state, so it answers 200 with available=false rather than 503.",
         "responses": {
           "200": {
-            "description": "Archive search results",
+            "description": "Hits, or empty when the archive is unreachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -318,7 +408,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Turn resource"
+            "description": "Turn resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnEnvelope"
+                }
+              }
+            }
           },
           "404": {
             "$ref": "#/components/responses/Error"
@@ -368,7 +465,14 @@
         ],
         "responses": {
           "202": {
-            "description": "Stop requested"
+            "description": "Stop requested",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnEnvelope"
+                }
+              }
+            }
           },
           "409": {
             "$ref": "#/components/responses/Error"
@@ -960,6 +1064,544 @@
           },
           "403": {
             "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/capabilities": {
+      "get": {
+        "summary": "What this session's agent can do",
+        "description": "Establishes a link as a side effect. A failed handshake is 200 with `attached:false` and a typed `failure`, not 5xx: it is the agent's failure, not the request's, and the session's history stays readable. Do not cache indefinitely — see api-design.md § Links.",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Link state, attached or detached-with-reason",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/link": {
+      "post": {
+        "summary": "Establish a link eagerly",
+        "description": "Its own operation because establishment is slow (an agent CLI loads a project), so a UI can pay the cost before the user finishes typing. Unlike /capabilities a failure here is an error, because establishing was the whole request.",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The established link",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Tear the link down without ending the session",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "State after teardown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/interrupt": {
+      "post": {
+        "summary": "Ask the agent to stop producing",
+        "description": "Session-scoped, not turn-scoped: it acts on the agent, and the session is what holds a link. A turn-scoped route would force a caller to know a turn id to interrupt the only turn running.",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Link state after the interrupt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/steer": {
+      "post": {
+        "summary": "Send guidance into a running turn",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SteerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Link state after steering",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/config": {
+      "post": {
+        "summary": "Set a typed session config value",
+        "description": "A refusal distinguishes UNSUPPORTED_FIELD (no such option; disabling the control is justified) from INVALID_VALUE (this value, right now; leave it usable). A client must render the refusal — a mutation with only a success path makes a rejected set look like a dead control.",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetConfigRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Surface after the set, with currentValue from the vendor confirmation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/replay": {
+      "get": {
+        "summary": "Server-paced reconstruction of session history",
+        "description": "SSE. Lives on the server because reconstruction is subtle enough that doing it per frontend would let two frontends disagree about what one history means.",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/event-stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/events": {
+      "get": {
+        "summary": "Session-scoped facts as SSE",
+        "description": "A link attaching or dying, capabilities changing, a request raised or retired. Distinct from the turn stream, which exists only while a turn does. A pending request is published on every transition including its departure, and the payload is the row (carrying `status`) rather than the transition.",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/event-stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/requests": {
+      "get": {
+        "summary": "What this session is waiting on, oldest first",
+        "description": "Read from the journal rather than from the link, so it answers after a reconnect, from a different frontend, and for a session whose link has since died — which is exactly when a user needs to know why nothing is happening.",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Open requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PendingRequest"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/requests/{requestId}/resolve": {
+      "post": {
+        "summary": "Answer a request an agent raised",
+        "description": "The answer is validated against the request's declared form. Answering against a dead link still retires the request everywhere, because the claim is what makes the answer final.",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveRequestBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The request, now resolved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingRequest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -2453,6 +3095,658 @@
           "endedAtMs": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "description": "A session as every session-returning endpoint serializes it. Mirrors `backend/src/models/session.rs`. Note `nativeSessionId`: the field is `backend_session_id` in Rust and renamed on the wire, so a reader looking for the Rust name in this document will not find it.",
+        "required": [
+          "id",
+          "origin",
+          "identityMode",
+          "lifecycleMode",
+          "agent",
+          "workdir",
+          "flagsJson",
+          "status",
+          "createdAtMs",
+          "updatedAtMs"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Sylph's own id, and the only id any route uses. Disjoint from the archive's `<agent>:<native-id>` space; comparing the two is silently always-false."
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "sylph",
+              "native"
+            ],
+            "description": "`sylph` means Sylph spawned the adapter and holds its stdio; `native` means somebody else started the process. Immutable after creation, and the axis every capability question resolves on."
+          },
+          "identityMode": {
+            "type": "string",
+            "enum": [
+              "sylph",
+              "preserve"
+            ],
+            "description": "Whether `SOUL.md` is injected. Fixed at creation and refused by PATCH, because it describes what stored history was produced by."
+          },
+          "lifecycleMode": {
+            "type": "string",
+            "description": "Written to the journal and read by nothing today. See architecture.md § Session Origins before relying on it."
+          },
+          "agent": {
+            "type": "string",
+            "description": "Adapter name, e.g. `claude`."
+          },
+          "nativeSessionId": {
+            "type": "string",
+            "description": "The agent's own session id, used to resume. Absent until the agent reports one."
+          },
+          "traceSessionId": {
+            "type": "string",
+            "description": "Archive id this session was imported from, `<agent>:<native-id>`. Present only for an imported session, and serialized so the archive browser can tell an archived row is the same conversation as a live one."
+          },
+          "workdir": {
+            "type": "string",
+            "description": "Canonical working directory of the spawned agent, derived from the containment check rather than from the request string."
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "flagsJson": {
+            "type": "string",
+            "description": "Agent flags as a JSON string, not an object. Serialized as stored."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "running",
+              "error"
+            ]
+          },
+          "createdAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updatedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "SessionEnvelope": {
+        "type": "object",
+        "description": "Every single-session response wraps the session under one key rather than returning it bare.",
+        "required": [
+          "session"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/Session"
+          }
+        }
+      },
+      "Turn": {
+        "type": "object",
+        "description": "A turn as the API serializes it. Mirrors `backend/src/models/turn.rs`. `origin` is the field that stops a client rendering an answer to a message the user never wrote: an `agent` turn is one nobody asked for, opened when an agent speaks after its previous turn settled, and its `requestText` is empty by construction.",
+        "required": [
+          "id",
+          "sessionId",
+          "status",
+          "origin",
+          "requestText",
+          "createdAtMs"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "incarnationId": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "completed",
+              "failed",
+              "stopped"
+            ]
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "user",
+              "agent"
+            ],
+            "default": "user",
+            "description": "Who started it. Not a synonym for the session's `origin`."
+          },
+          "requestText": {
+            "type": "string",
+            "description": "Empty for an agent-initiated turn."
+          },
+          "commandInvocationId": {
+            "type": "string",
+            "nullable": true
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "nullable": true
+          },
+          "errorCode": {
+            "type": "string",
+            "nullable": true,
+            "description": "One of the 25 codes in ErrorResponse's enum, at exact parity with the Rust vocabulary."
+          },
+          "errorMessage": {
+            "type": "string",
+            "nullable": true
+          },
+          "runnerExitCode": {
+            "type": "integer",
+            "nullable": true
+          },
+          "createdAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "startedAtMs": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "completedAtMs": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "stoppedAtMs": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
+      },
+      "FlagSpec": {
+        "type": "object",
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "CommandSpecEntry": {
+        "type": "object",
+        "description": "A named command an agent reported at discovery. Usually absent — a project's real command list depends on files the CLI reads at startup, so it belongs to a session and comes from GET /sessions/{id}/capabilities.",
+        "additionalProperties": true
+      },
+      "AgentDescriptor": {
+        "type": "object",
+        "description": "An agent as discovery found it. `flags` and `commands` are maps keyed by name, not arrays. `supports` is what the adapter declared, and it is longer than prose elsewhere in these docs suggests — read the adapter, not the example.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "session_key": {
+            "type": "string",
+            "description": "Not camelCase: this struct predates the rename convention and is serialized as declared."
+          },
+          "flags": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/FlagSpec"
+            }
+          },
+          "commands": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CommandSpecEntry"
+            }
+          },
+          "supports": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "version": {
+            "type": "string",
+            "description": "The agent CLI's own version, when it reported one."
+          }
+        }
+      },
+      "AgentsResponse": {
+        "type": "object",
+        "required": [
+          "agents"
+        ],
+        "description": "`broken` is omitted when empty. A directory holding an adapter that cannot be spoken to is reported here rather than skipped, because such an agent is unusable rather than absent — and zero discovered agents is a silent total failure that reads as a UI bug.",
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentDescriptor"
+            }
+          },
+          "broken": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Adapter directory to the reason it is unusable."
+          }
+        }
+      },
+      "SessionListResponse": {
+        "type": "object",
+        "required": [
+          "sessions"
+        ],
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            }
+          }
+        },
+        "description": "Capped server-side. Do not assert on a count against a shared home; assert on identity."
+      },
+      "TurnEnvelope": {
+        "type": "object",
+        "required": [
+          "turn"
+        ],
+        "properties": {
+          "turn": {
+            "$ref": "#/components/schemas/Turn"
+          }
+        }
+      },
+      "TurnWithEvents": {
+        "type": "object",
+        "required": [
+          "turn",
+          "events"
+        ],
+        "properties": {
+          "turn": {
+            "$ref": "#/components/schemas/Turn"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          }
+        },
+        "description": "Events oldest first. `delta` events are never included: they are transient by protocol and their text is already in the matching `completed` event, so replaying both would duplicate every token."
+      },
+      "HistoryResponse": {
+        "type": "object",
+        "required": [
+          "turns"
+        ],
+        "properties": {
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TurnWithEvents"
+            }
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "description": "Unauthenticated, so it reports availability only — never counts, names, or paths. `agents.available` is here because a server with zero agents answers every other probe successfully while no session can run and no command can be offered, so liveness alone reports healthy for a process that cannot do its job.",
+        "required": [
+          "ok",
+          "apiVersion",
+          "schemaVersion",
+          "tracedb",
+          "agents"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "apiVersion": {
+            "type": "string",
+            "example": "1"
+          },
+          "schemaVersion": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Highest applied migration, read from `_sqlx_migrations`. It is not a hand-maintained number: an `app_meta` copy used to be bumped by migrations and four of them forgot, so the field answered its one question wrongly."
+          },
+          "tracedb": {
+            "type": "object",
+            "required": [
+              "available"
+            ],
+            "properties": {
+              "available": {
+                "type": "boolean",
+                "description": "Unreachable is a supported configuration, not a failure: live sessions work and archive features report themselves unavailable. Deleted when the archive becomes an embedded crate, since nothing external will answer."
+              }
+            }
+          },
+          "agents": {
+            "type": "object",
+            "required": [
+              "available"
+            ],
+            "properties": {
+              "available": {
+                "type": "boolean",
+                "description": "Whether any agent is usable at all. A boolean rather than a count, to keep this endpoint free of anything an unauthenticated caller should not learn."
+              }
+            }
+          }
+        }
+      },
+      "RetentionPassReport": {
+        "type": "object",
+        "description": "The last retention pass. Reported because retention's correct behaviour is usually 'nothing was dropped', which is indistinguishable from a broken pass without the counts: `withheld` beside `terminal` separates a session that is supposed to keep everything from one the archive is not confirming, and an all-`unchanged` pass means ingestion has stopped advancing.",
+        "additionalProperties": true
+      },
+      "ArchiveCounts": {
+        "type": "object",
+        "description": "Archive-wide totals, or null when the archive is unreachable. Here rather than in /health because it is a count and /health is unauthenticated.",
+        "additionalProperties": true
+      },
+      "DiagnosticsResponse": {
+        "type": "object",
+        "description": "Authenticated: exposes counts, agent names, and local filesystem paths.",
+        "required": [
+          "ok",
+          "version",
+          "uptimeSeconds",
+          "sessions",
+          "turns",
+          "agents",
+          "brokenAdapters",
+          "agentRoots",
+          "activeTurns"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          },
+          "uptimeSeconds": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Count per status."
+          },
+          "turns": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Count per status."
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "brokenAdapters": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "agentRoots": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every directory bundled-adapter resolution considered, in order, plus the user's own agents directory. Present because a missing install and a mistyped `paths.agents_dir` give the same empty list and need opposite fixes."
+          },
+          "tracedb": {
+            "$ref": "#/components/schemas/ArchiveCounts",
+            "nullable": true
+          },
+          "activeTurns": {
+            "type": "integer",
+            "description": "Turns the supervisor is running right now. Was `activeProcesses`, which named a process count and always held a turn count — harmless only while every process was one Sylph spawned."
+          },
+          "retention": {
+            "$ref": "#/components/schemas/RetentionPassReport",
+            "nullable": true
+          }
+        }
+      },
+      "LinkFailure": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "no_adapter",
+              "handshake_failed"
+            ],
+            "description": "Closed vocabulary so a UI can choose its own words and offer the right recovery. `no_adapter` is the one a retry cannot fix. Both values describe *Sylph's own spawn* failing, so neither can yet express an adopted session — a process running fine that is not ours to drive."
+          },
+          "message": {
+            "type": "string",
+            "description": "Always populated, so an unrecognized code still renders."
+          }
+        }
+      },
+      "LinkState": {
+        "type": "object",
+        "required": [
+          "attached",
+          "supports"
+        ],
+        "description": "Live link state. An empty `supports` means Sylph cannot reach the agent, never that the agent has no capabilities — for an adopted session the process is alive and simply not ours.",
+        "properties": {
+          "attached": {
+            "type": "boolean"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "supports": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Empty when detached: capability is a property of a live link, and a remembered list would promise interrupt on a session Sylph holds no channel to."
+          },
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Commands, config, permission mode, context window. Facet-scoped by protocol: an unmentioned facet is never cleared."
+          },
+          "failure": {
+            "$ref": "#/components/schemas/LinkFailure",
+            "nullable": true,
+            "description": "Present only when establishing was tried and failed. Not cached — the next read tries again."
+          }
+        }
+      },
+      "SteerRequest": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string",
+            "description": "The turn the client believes is running. Optional: a client with no turn in view is steering whatever is running, which is a coherent ask."
+          }
+        }
+      },
+      "SetConfigRequest": {
+        "type": "object",
+        "required": [
+          "configId",
+          "value"
+        ],
+        "properties": {
+          "configId": {
+            "type": "string"
+          },
+          "value": {
+            "description": "Opaque by contract — a token the agent enumerated and the client echoes back, never something to parse. This is what lets a composite encoding change with no client change."
+          }
+        }
+      },
+      "PendingRequest": {
+        "type": "object",
+        "description": "Something the agent is waiting on. A resource rather than a stream message, because the agent blocks until answered — so it must outlive every client and be answerable from a frontend that attached an hour later. Note what is deliberately absent: the adapter's own request id. It is scoped to one link and means nothing to a client, and exposing it would invite a client to send it, which is a way to answer a request that was never raised.",
+        "required": [
+          "id",
+          "sessionId",
+          "turnId",
+          "kind",
+          "title",
+          "detailJson",
+          "optionsJson",
+          "allowPersistent",
+          "status",
+          "createdAtMs"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "How a client addresses this request."
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "turnId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "approval, question, elicitation."
+          },
+          "tool": {
+            "type": "string"
+          },
+          "toolUseId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "detailJson": {
+            "type": "string",
+            "description": "The proposed input, as a JSON string."
+          },
+          "optionsJson": {
+            "type": "string",
+            "description": "Offered options, as a JSON string."
+          },
+          "formJson": {
+            "type": "string",
+            "description": "The input this request declared it wants collected. Absent means an approval, whose subject is one proposed tool input rendered from `detailJson`. A client must not sniff `detailJson` for field names it recognizes — only the agent knows what it is asking for, which is why a form is declared rather than inferred."
+          },
+          "defaultOption": {
+            "type": "string"
+          },
+          "risk": {
+            "type": "string"
+          },
+          "allowPersistent": {
+            "type": "boolean",
+            "description": "When false the client must omit \"always allow\" entirely: the agent has said a lasting grant would be broader than this ask. Persisted rather than held on the link, because the dialog may be rendered by a client that attached long after the request was raised."
+          },
+          "expiresAtMs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Advisory. Nothing server-side acts on it."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "resolved",
+              "abandoned"
+            ],
+            "description": "Reconcile against this rather than against a vocabulary of verbs — a status added later then needs no client change."
+          },
+          "chosenOption": {
+            "type": "string"
+          },
+          "resolvedInputJson": {
+            "type": "string"
+          },
+          "resolvedBy": {
+            "type": "string"
+          },
+          "createdAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "resolvedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ResolveRequestBody": {
+        "type": "object",
+        "required": [
+          "option"
+        ],
+        "properties": {
+          "option": {
+            "type": "string"
+          },
+          "input": {
+            "description": "An edited version of what the agent proposed. This is what makes \"allow, but change the command\" work — a real terminal affordance a yes/no dialog drops. Absent means as proposed."
           }
         }
       }

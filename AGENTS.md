@@ -478,6 +478,14 @@ is worse than an honest flat view, because nothing on screen distinguishes them.
 archived delegation is session-level in both directions (`parentId`, `delegations`),
 and the UI must say the archive records no link to the exact call.
 
+trace-db later grew `Event.span_id` and `Span.parent_span_id`, which look like they
+retire this and do not. `upsert_many` sets `span_id` **unconditionally** to
+`call:<call_id>` for every tool call and result (`model.rs:538`) — it is a
+parser-synthesized pairing, which is precisely the one use named above, not vendor
+delegation structure recovered from anywhere. The consequence runs the other way: a
+field a parser always overwrites would silently replace Sylph's own trajectory
+identity if Sylph's events were ever pushed through ingest.
+
 **`session_metadata` is 11.5 ms, not the 0.5 ms this file used to claim.**
 Re-measured over 300 sequential calls against a 4922-session archive: 11.5 ms and
 ~2.5 KB each. So a 20-row listing page spends ~230 ms on lineage alone and a

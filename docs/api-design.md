@@ -2,9 +2,9 @@
 
 Sylph Web exposes a versioned REST API with SSE streaming for real-time updates.
 
-> **On this file's length, which is deliberate.** It is ~1580 lines and 1480 of those
-> are one section, `Core Endpoints`. That concentration was checked and left alone:
-> unlike a prose spec, this is a reference organized by resource — ten subsections, one
+> **On this file's length, which is deliberate.** It is ~1900 lines and the large
+> majority are one section, `Core Endpoints`. That concentration was checked and left alone:
+> unlike a prose spec, this is a reference organized by resource — twelve subsections, one
 > per resource, each scoped to its own endpoints — and it is searched rather than read
 > end to end. The length is the size of the endpoint surface, so splitting it would
 > fragment a lookup without removing anything. `docs/frontend-architecture.md` was split
@@ -40,7 +40,7 @@ Health check with version information.
 {
   "ok": true,
   "apiVersion": "1",
-  "schemaVersion": 3,
+  "schemaVersion": 7,
   "tracedb": {
     "available": true,
     "version": "0.5.2"
@@ -260,7 +260,7 @@ List discovered agents. Each descriptor is what the adapter returned from its
         "effort": { "choices": ["low", "medium", "high", "xhigh", "max"] }
       },
       "commands": {},
-      "supports": ["interrupt", "steer", "approval", "subagent", "slash"]
+      "supports": ["interrupt", "steer", "approval", "subagent", "slash", "set_config", "context", "fork"]
     }
   ],
   "broken": {
@@ -743,7 +743,142 @@ Stop a running turn.
 }
 ```
 
-Process receives SIGTERM, escalates to SIGKILL after 2 seconds.
+**What actually happens, in order.** This paragraph used to read "process receives
+SIGTERM, escalates to SIGKILL after 2 seconds", which described a v1 shape — one
+process per turn, so killing it *was* stopping the turn. Nothing in `backend/src`
+implements that escalation and no timeout of 2 seconds exists anywhere. Under v3 a
+turn runs inside a session-long link, so killing the process would cost the whole
+session to end one turn:
+
+1. **The turn is settled first**, as `Interrupted`, before the link is touched at all.
+   This ordering is the point rather than an optimization: every way of ending a turn
+   asks the agent to stop producing, and an agent that stops producing is one its
+   drain task observes closing — which reports `LINK_LOST`. Claiming the outcome first
+   means that attempt finds the turn already terminal and does nothing, so a
+   deliberate stop is never reported as a transport failure. Settling *after*
+   interrupting was a race, not a fix: `stopping_a_running_turn_cancels_it` failed
+   roughly two runs in five on it.
+2. **The adapter is asked to interrupt.** Settling first is also what makes stop
+   unconditional — the record does not wait on the agent to answer, so a user asking
+   to stop is never told the agent declined.
+3. **If interrupt fails or is unsupported, the link is torn down.** That costs the
+   session's live context, which is why it stays the fallback rather than the path.
+   Link teardown itself is `close` on the wire, a 500 ms grace period, then `SIGTERM`
+   to the process group; escalation is unconditional because signalling an
+   already-exited group is defined to be harmless. There is no `SIGKILL` step.
+
+### Links
+
+A **link** is the live adapter process for a session. It is not the session: a session
+with no link is complete, resumable, and searchable, and links are torn down on idle
+(30 minutes) and do not survive a server restart. Everything in this subsection is
+therefore about *live* state, and a client must render it as live state rather than
+promising it unconditionally.
+
+These five routes had no section in this document at all until now, which is why they
+are grouped rather than filed under Sessions: `capabilities`, `link`, `interrupt`,
+`steer`, `config`, plus the session event stream below.
+
+#### `GET /api/v1/sessions/{id}/capabilities`
+
+Returns `LinkState`. **Establishes a link as a side effect** — this is the read that
+most clients use to attach, because a UI asking what a session can do is a UI about to
+offer it.
+
+A failure here is **200, not 5xx**, carrying `attached: false` and a typed `failure`.
+That is the endpoint's one non-obvious decision and it is deliberate: a missing adapter
+or a refusing agent is the *agent's* failure, not the request's, and the session remains
+valid with readable history — a 500 would make the whole session look broken. Logging
+the reason and returning a bare `attached: false` was the original defect, because a
+client then could not distinguish a failed handshake from an agent that simply declares
+no commands, so the only honest thing it could render was nothing at all. That is how a
+stale install presented as a composer ignoring the `/` key.
+
+Two consequences a client must handle:
+
+- **Do not cache this response indefinitely.** A detached-with-reason 200 under
+  `staleTime: Infinity` makes one failed handshake permanent for the life of the page.
+  Cache by failure code: `no_adapter` is cacheable like a success, because no retry
+  installs an adapter; a failed handshake must be allowed to go stale.
+- **An empty capability surface means "Sylph cannot reach it", never "there is
+  nothing there".** For a Sylph-born session those coincide; for an **adopted** session
+  — one started in a terminal — the process is alive and simply not ours. See
+  `docs/data-architecture.md` § One link state, two typed capability facets.
+
+#### `POST /api/v1/sessions/{id}/link`
+
+Establishes a link eagerly and returns `LinkState`. Worth its own operation because
+establishment is slow — an agent CLI loads a project — so a UI that knows a user is
+about to type can pay that cost before they finish rather than after they send.
+
+Unlike `capabilities`, a failure here **is** an error (`LINK_FAILED`), because
+establishing was the entire request rather than a side effect of one.
+
+#### `DELETE /api/v1/sessions/{id}/link`
+
+Tears the link down without ending the session, and returns the resulting `LinkState`.
+History is unaffected. The next turn re-establishes.
+
+#### `POST /api/v1/sessions/{id}/interrupt`
+
+Asks the agent to stop producing. Session-scoped rather than turn-scoped, and so are
+`steer` and `config`: all three act on the *agent*, and the session is what holds a
+link. A turn-scoped route would force a caller to know a turn id in order to interrupt
+the only turn running.
+
+#### `POST /api/v1/sessions/{id}/steer`
+
+```json
+{ "text": "actually, use the existing helper", "turnId": "t_abc" }
+```
+
+`turnId` is optional, because a client with no turn in view is steering "whatever is
+running", which is a coherent ask rather than a missing field.
+
+#### `POST /api/v1/sessions/{id}/config`
+
+```json
+{ "configId": "model", "value": "anthropic claude-opus-5" }
+```
+
+A typed set, so `/model` and `/permissions` are not prose sent as a prompt. Four rules
+this endpoint's history earned, each of which cost a debugging round:
+
+- **`value` is opaque.** It is a token the agent enumerated and the client echoes back,
+  never something to parse. `pi`'s model ids contain `/` in 350 of 372 cases, so the
+  composite encoding uses a space — and only because the value is opaque can that
+  encoding change without a client change.
+- **A refusal distinguishes two codes.** `UNSUPPORTED_FIELD` means no such option and
+  justifies disabling the control; `INVALID_VALUE` means *this value, right now* and
+  must leave it usable. Flattening both into one retires a picker whose other values
+  work.
+- **A client must render the refusal.** A mutation with only an `onSuccess` path leaves
+  a rejected set invisible: the cached surface is untouched, the control re-renders from
+  it, and the sole observable outcome is that clicking did nothing. Every layer behaves
+  correctly and the symptom points at the one that is not at fault.
+- **The reported `currentValue` comes from the vendor's confirmation, never from the
+  request.** A vendor's `success` is not a promise it did what you asked: measured on
+  `claude` 2.1.246, `manual` answers success while confirming `default`.
+
+#### `GET /api/v1/sessions/{id}/events`
+
+Session-scoped facts as SSE: a link attaching or dying, capabilities changing, a request
+raised or retired. Distinct from the turn stream, which exists only while a turn does —
+these happen with no turn running, which is precisely when a client would otherwise have
+no way to learn them.
+
+Two properties worth relying on. A **pending request is published on every transition**,
+including its departure, from one method rather than three call sites — a set that only
+ever grew is what made an answered question sit on a second client until reload. And the
+payload is the **row**, carrying `status`, not the transition, so a client reconciles
+against a state rather than replaying a vocabulary of verbs, and a status added later
+needs no client change.
+
+#### `GET /api/v1/sessions/{id}/replay`
+
+Server-paced reconstruction of a session's history. It is session-scoped and lives on
+the server for one reason: reconstruction is subtle enough that doing it per frontend
+would let two frontends disagree about what the same history means.
 
 ### Requests
 
@@ -1142,6 +1277,44 @@ degraded form, so it reports the failure rather than rendering an empty one. A
 delegation scan that fails while the transcript itself succeeded is *not* promoted
 to an error: the events are already in hand, and `delegationsTruncated` reports the
 list as incomplete.
+
+### Search
+
+```
+GET /api/v1/search?q=<text>&limit=20
+```
+
+FTS5 over the archive, answering "which archived session mentioned X". It is the
+complement of § Archive rather than a variant of it: the listing endpoints answer
+"what happened in *this directory*", which a sidebar asks on every render, while this
+one answers a question a user has to already know how to phrase.
+
+**It never returns 503.** An unreachable archive yields `200` with an empty `results`
+array, matching the workspace listing and for the same reason: the archive is optional
+locally, and `/health` already reports `archive.available` as one fact about the run
+rather than one fault per query. A search box that errors on an install with no archive
+teaches a user the feature is broken; an empty result beside a reported-unavailable
+archive does not. Whitespace-only `q` is treated as absent and answers empty without
+touching the archive, so a client may bind the field directly to keystrokes.
+
+`limit` defaults to 20 (`api/search.rs`). There is no pagination and deliberately no
+cursor: a hit is a jumping-off point to a transcript, so the useful control is a
+narrower query, not a deeper page.
+
+**This is the one archive read that must stay off any polled path.** Measured
+in-process, every other operation is microseconds to sub-millisecond — `coverage()` at
+5.2–9.0 µs, `show(0,0)` at 0.78 ms, a whole-archive scan at 7.9 ms — while `search` is
+**174–260 ms**, and 273 ms with two ingests running, because FTS5 work is real work and
+embedding does not make it cheaper. So the cost model that governs the rest of the
+archive does not transfer here, and this endpoint stays user-initiated.
+
+**It covers only what a parser read.** The archive is fed by parsing native vendor
+stores, never by Sylph handing it normalized events (`docs/data-architecture.md`
+§ Sylph's normalized stream does not enter the archive), so anything whose native store
+the server never saw — a remote environment's session before upload, an agent with no
+parser — is absent from these results while being perfectly readable through
+`/sessions/{id}/turns`. That is a real gap in one direction only, and a client must not
+present this as "search my history".
 
 ### Files
 
@@ -1647,39 +1820,39 @@ loopback. See `docs/development.md`.
 
 ## OpenAPI Specification
 
-Full machine-readable spec: `docs/api-v1.openapi.json` — **24 paths, 31 method-path
-pairs. The router registers 41**, so the schema is incomplete and knowing which way is
-the point of this section.
+Full machine-readable spec: `docs/api-v1.openapi.json` — **33 paths, 41 method-path
+pairs, which is exactly what the router registers.** Measured on 2026-08-27 by
+normalizing path parameters and diffing the spec against the `.route(...)` calls in
+`backend/src/lib.rs`; the diff is empty in both directions. Every operation also
+declares a `2xx` response schema, no `$ref` dangles, and no schema is unreferenced.
 
-Measured on 2026-08-26 by normalizing path parameters and diffing
-`docs/api-v1.openapi.json` against the `.route(...)` calls in `backend/src/lib.rs`.
-Nothing in the schema is stale — every documented pair exists. What is missing is the
-whole Phase-12 control plane:
+**The history is worth keeping, because both of this section's previous claims were
+wrong and in opposite directions.** It once said "22 paths, covering every route the
+router registers" while a ten-endpoint gap was live — the whole Phase-12 control plane,
+`capabilities` through `resolve` — and named `DELETE /sessions/{id}` and `/fs/*` as the
+gap its process had let through. Corrected, it then said `/search` was documented in
+prose here when no heading named it. A claim that something is documented is itself a
+thing to verify, and both cheap checks are mechanical: diff the routes, and grep for a
+heading.
 
-| Missing from the schema | `lib.rs` |
-| --- | --- |
-| `GET /sessions/{id}/capabilities` | 371 |
-| `POST` / `DELETE /sessions/{id}/link` | 375, 379 |
-| `POST /sessions/{id}/interrupt` | 387 |
-| `POST /sessions/{id}/steer` | 391 |
-| `POST /sessions/{id}/config` | 394 |
-| `GET /sessions/{id}/replay` | 397 |
-| `GET /sessions/{id}/events` | 401 |
-| `GET /sessions/{id}/requests` | 380 |
-| `POST /requests/{id}/resolve` | 383 |
-| `GET /search` | 362 |
+Two defects the closing pass found are worth naming, because neither is visible to a
+count:
 
-The request/resolve pair and `/search` are documented in *this* file, in prose above —
-so the gap is schema-only for those, and both-files for the rest. This section
-previously claimed "22 paths, covering every route the router registers", which was
-wrong in both directions and self-congratulating about it: it named
-`DELETE /sessions/{id}` and `/fs/*` as the gap the process let through while a
-ten-endpoint gap was live.
+- **`PATCH /sessions/{id}`'s 200 `$ref`'d `CreateSession`** — the *request* schema. A
+  generated client would have typed the response as the body it had just sent. A path
+  being present is not a path being right, so the check that matters is whether each
+  response names a response shape.
+- **`GET /sessions/{id}` declared no response content at all**, which a generator reads
+  as an untyped body rather than as an omission.
+
+Both now use `SessionEnvelope`.
 
 Keep the spec authoritative for the wire contract. A route added to
 `backend/src/lib.rs` without a matching path here is the recurring failure, and the
-check is mechanical — the diff above is a ten-line script, worth re-running rather than
-trusting a count in prose.
+check is mechanical — the diff is a ten-line script over `.route(...)` calls, worth
+re-running rather than trusting a count in prose. `docs/roadmap.md` records the standing
+suggestion to make it a test, mirroring `error::tests::codes_match_the_openapi_enum`,
+which is the only part of this contract a failure currently reports on its own.
 
 The frontend does not consume generated types: `frontend/lib/api.ts` is hand-written
 and mirrors the wire shape directly. Generating a second definition of every shape

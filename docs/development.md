@@ -107,7 +107,7 @@ Expected output:
 {
   "ok": true,
   "apiVersion": "1",
-  "schemaVersion": 1,
+  "schemaVersion": 7,
   "tracedb": {
     "available": true
   }
@@ -197,7 +197,14 @@ Archived coding-agent history lives in TraceDB and is reached three ways:
 
 The architecture separates:
 - **Active sessions** (journal.db) — ongoing work, resumable, editable
-- **Archived sessions** (TraceDB) — historical read-only records, searchable
+- **Archived sessions** (the archive) — historical read-only records, searchable
+
+The split that governs what each can *do* is a different one, and it is easy to
+conflate. Journal-versus-archive is about which store holds a session; **Sylph-born
+versus adopted** is about whether Sylph ever held the agent's stdio, and that is what
+decides fidelity and whether the session can be driven at all. A session can be in the
+journal and still not drivable — an adopted one, whose process belongs to a terminal
+somebody else is sitting at. See `docs/data-architecture.md` § Two classes of session.
 
 An archived session opens read-only and offers explicit continuation. Importing is
 not required to read one; it is required to make it a live, resumable session, and
@@ -375,7 +382,13 @@ For remote access:
 - `~/.sylph/` — everything Sylph owns: `config.toml`, `SOUL.md`, `agents/`,
   `data/`, `scratch/`
 - `~/.sylph/data/journal.db` — active sessions (SQLite)
-- `~/Library/Application Support/trace-db/trace.db` — archived sessions (TraceDB, macOS)
+- `~/.sylph/data/history.db`, `~/.sylph/data/blobs/` — consolidated history, derived from
+  the journal rather than separately configurable
+- `~/Library/Application Support/trace-db/trace.db` — archived sessions, **currently**,
+  because the archive is still `trace-db`'s own process at `trace-db`'s own default. The
+  design moves it under `~/.sylph` as a private store Sylph owns; the point of that is
+  that one root holds everything Sylph has, so a reset or a backup has one target rather
+  than two on different platform conventions. See `docs/data-architecture.md`.
 
 ## Cleanup
 

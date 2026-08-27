@@ -19,10 +19,17 @@ async fn health_is_public() {
     let body = json_body(response).await;
     assert_eq!(body["ok"], true);
     assert_eq!(body["apiVersion"], "1");
-    // Migrations ran, so the recorded schema version must be present. Pinned to
-    // the current number rather than asserted non-zero: a client that does not
-    // understand the journal shape needs this to change when the shape does.
-    assert_eq!(body["schemaVersion"], 3);
+    // Asserted against the migration directory rather than a literal. The previous
+    // version pinned `3`, which is what the code also said, so the two agreed with
+    // each other and neither could catch the field drifting away from the schema —
+    // and it had, by four migrations. Counting the files fails when a migration is
+    // added without the reported version following it.
+    let migrations = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
+        .expect("migrations directory")
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "sql"))
+        .count();
+    assert_eq!(body["schemaVersion"], migrations as i64);
 }
 
 #[tokio::test]
@@ -77,7 +84,14 @@ async fn diagnostics_reports_runtime_state() {
     assert_eq!(body["ok"], true);
     assert!(body["uptimeSeconds"].is_number());
     assert_eq!(body["agents"], json!(["mock"]));
-    assert_eq!(body["activeProcesses"], 0);
+    // `activeTurns`, not `activeProcesses`: the value has always been a turn count,
+    // and the old name only read as accurate while every process was one Sylph
+    // spawned. An adopted session has a live process that is not ours to count.
+    assert_eq!(body["activeTurns"], 0);
+    assert!(
+        body["activeProcesses"].is_null(),
+        "the old name must be gone rather than kept beside the new one"
+    );
 }
 
 // ------------------------------------------------------------- sessions

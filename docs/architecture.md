@@ -18,11 +18,11 @@ Rust Backend (127.0.0.1:4317)
     │   Unsettled turns          │
     ├─► history.db + blobs/      │
     │   The durable record       ├─► Query & Search
-    ├─► TraceDB ─────────────────┘
-    │   Stable cross-agent history
+    ├─► archive.db ──────────────┘
+    │   Agent-native history, ingested
     │
-    └─► Runners (child processes)
-        claude, codex, pi, opencode
+    └─► Adapters (child processes)
+        claude, codex, pi, opencode, gemini
 ```
 
 **Components:**
@@ -30,8 +30,10 @@ Rust Backend (127.0.0.1:4317)
 - **Backend** — Rust + Axum, REST API + SSE streaming, process supervision
 - **Journal** — SQLite (journal.db), sessions and turns that have not settled
 - **History** — SQLite (history.db) plus `blobs/`, the durable replayable record
-- **TraceDB** — External durable store, cross-agent searchable history
-- **Runners** — Agent binaries discovered via `--describe`, managed as child processes
+- **Archive** — SQLite (archive.db), agent-native history parsed and ingested by the
+  embedded TraceDB crate, searchable across agents
+- **Adapters** — An `adapter.sh` per agent, discovered in two roots and spawned per
+  session, speaking `sylph.agent.v3` on stdio
 
 ## Design Principles
 
@@ -79,6 +81,24 @@ Rust Backend (127.0.0.1:4317)
 > conversational context. `docs/roadmap.md` § Audit, 2026-08-26 carries the measurement
 > and the open question about whether an automatic reset is even the right thing to
 > build.
+
+### Origin already names the class that matters, and the durable key includes environment
+
+`origin` is the axis `docs/data-architecture.md` calls **Sylph-born** versus
+**adopted**, so there is no third vocabulary: `sylph` means Sylph spawned the adapter
+and holds its stdio, `native` means somebody else started the process and Sylph reads
+it through the agent's own store. Naming it twice would be worse than naming it once —
+what the document adds is the consequence, which is that the two classes answer
+*every* later question differently: what can be observed, what can be driven, which
+store is authoritative, and whether upload is automatic or explicit.
+
+The durable key is `(environment, agent, native_id)`, with Sylph minting the UUID that
+the API exposes on first sighting. A fingerprint cannot be the key because `opencode`
+cannot compute one; the archive id cannot, because a session is observable before
+anything has ingested it. The key is sufficient only because **a session never moves
+between environments** — that invariant is what removes every cross-environment
+freshness comparison, and it is also why `cwd` is unambiguous despite two machines
+plausibly both having `/home/user/app`.
 
 ### Identity is a second axis, not a synonym for origin
 
@@ -196,22 +216,35 @@ row per block with its deltas folded into packed offset and timing arrays, plus
 content-addressed blobs in `blobs/` for payloads of 4 KB or more. Grows without bound and
 is read-mostly; pruned only by watermark.
 
-### TraceDB
+### Archive
 
-Accessed only through JSON protocol, never direct SQLite queries.
+TraceDB is an embedded crate, not a service: it is a dependency of this binary, with
+no daemon, no `PATH` lookup, and no JSON round trip. What survives from the
+subprocess era is the *rule* — go through the crate's API, never its SQL — because
+the schema is the crate's to change and reading it directly makes every Sylph query
+a hidden coupling. What does not survive is the mechanism the rule used to name.
 
-Operations:
-- `list` — list sessions with filters
-- `show` — fetch session trajectory
-- `search` — full-text search
+Its value is `parsers/` — five vendors' native formats, and the reason not to
+reimplement. Operations Sylph calls: `list` (filtered session listing, carrying
+lineage and subagent counts), `show` (one session's trajectory), `coverage` (one
+session's ingest bounds), `search` (FTS5 across agents).
 
-Sylph Web reads from TraceDB for:
-- Session list and archive browser (deduplicated by imported TraceDB id or by
-  the agent's native session id once ingestion is observed)
-- Native session import (creates lightweight continuation)
-- Cross-agent search
+Sylph reads the archive for the session list and archive browser, for native session
+import, and for cross-agent search. Search is FTS5 work and stays ~200 ms while
+every other operation is microseconds to sub-millisecond, so it is the one read that
+must never go per-row.
 
-TraceDB writes come from agent native stores (ingestion is external).
+Sylph owns ingestion; nothing outside this binary writes the archive. Ingestion is
+**one strategy per agent, not one scan** — `opencode` writes no per-session file and
+cannot produce the fingerprint the ingest path requires, so its read strategy is
+unresolved and a shared timer must not assume otherwise.
+
+The archive is fed by *parsing native sources*, never by Sylph handing it normalized
+events. That direction is the rule; it is not the claim that Sylph-born sessions are
+absent from the archive, since a vendor CLI writes its own file and the ordinary
+parser path ingests it — which is what retention confirms a watermark against. See
+`data-architecture.md` § Sylph's normalized stream does not enter the archive for the
+three structural reasons, and for what the boundary leaves unbuilt.
 
 ### Retention
 
@@ -341,10 +374,16 @@ anywhere the *picker* can reach would have given the browser a wider write range
 than the agent, which is why the upload root is the journalled workdir and not the
 browse roots.
 
-Note that `POST /sessions` already accepts any `workdir` that exists, with no
-containment check. Browsing therefore adds *enumeration*, not the ability to name
-a path — a distinction worth keeping in mind before widening `browse_roots`, since
-enumeration is the part that scales with an attacker's ignorance of the layout.
+**`browse_roots` bounds two things, and the second is the larger one.** It bounds
+what `/fs/*` may enumerate, and it bounds what a client may *name* as a session's
+`workdir` — `POST /sessions` and `POST /sessions/import` both go through
+`contain_workdir`, which derives the stored path from `paths::contain_in_any` rather
+than checking one path and using another. A `workdir` is the `current_dir` of a
+spawned agent, so the naming bound governs where arbitrary code may run, while
+enumeration only governs which names are visible. Widening the setting widens the
+first; read `configuration.md` § `browse_roots` bounds where agents run before doing
+so. One setting rather than two because `/fs/*` exists solely to name a workdir, so a
+second key would have to be kept equal to this one.
 
 ## Agent Discovery
 

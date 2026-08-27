@@ -1,7 +1,9 @@
 # Sylph Web Documentation
 
-Sylph Web is a local-first native interface for coding-agent sessions archived by
-TraceDB. This documentation describes the system design, implementation, and
+Sylph Web is a local-first native interface for Sylph and coding-agent sessions.
+The Sylph server holds the authoritative record of that history in its own store;
+`docs/data-architecture.md` governs who owns which fact and which direction data
+travels. This documentation describes the system design, implementation, and
 development practices.
 
 ## Quick Navigation
@@ -92,15 +94,28 @@ lifecycle. Native sessions preserve the originating agent's identity and never
 receive prompt injection or resets.
 
 ### 2. Local-First
-All data stored locally, no cloud dependencies. The system works offline and
-respects user privacy by default.
+Data lives with the server that owns it, and no third-party service is in the path.
+"Local" is a statement about dependencies rather than about geography: a Sylph
+server deployed on a remote host is still local-first, because the authority is the
+server's own store and not somebody else's API. `docs/architecture.md` § Design
+Principles is authoritative; this is a summary of it.
 
-### 3. Agent Workspace, Not Chat App
+### 3. The Server Owns the Record, for the Sessions It Spawned
+An agent still writes its native format. For a **Sylph-born** session the server's
+normalized event stream is the authority, because the server held the adapter's stdio
+and is the one component present for all such work regardless of where it runs. For an
+**adopted** session — one somebody else started, in a terminal — the server never saw a
+stream, so the vendor's own store is the only record and the server's job is to read it
+faithfully rather than to claim it. Fidelity and control are therefore properties of how
+a session began, not of the product. `docs/data-architecture.md` § Two classes of
+session is authoritative.
+
+### 4. Agent Workspace, Not Chat App
 The UI emphasizes tool execution over conversation. Tool calls are primary content
 with prominent display; assistant prose is connective tissue; thinking is debugging
 detail.
 
-### 4. Performance Through Architecture
+### 5. Performance Through Architecture
 Maintain fast load times and responsive interactions through:
 - Compact bundles via thoughtful dependency choices
 - Code splitting for on-demand features
@@ -111,7 +126,7 @@ Monitor bundle size and render performance, but never let arbitrary limits const
 valuable features or architectural improvements. Optimize deliberately; scale
 proportionally to value delivered.
 
-### 5. Accessibility by Default
+### 6. Accessibility by Default
 WCAG 2.1 AA compliance maintained through automated testing (axe-core) and manual
 verification. Keyboard navigation, screen reader support, and color-independent
 indicators are requirements, not afterthoughts.

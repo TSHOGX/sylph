@@ -6,8 +6,9 @@
 - Backend: Rust + Axum + SQLx (Phase 1 complete)
 - Frontend: Next.js 16 + React 19 + TanStack Query (Phase 2 complete)
 - Database: SQLite, split into `journal.db` (hot, unconsolidated turns) and
-  `history.db` (warm, consolidated blocks) with `blobs/` beside them, plus TraceDB
-  for durable cross-agent history (`docs/storage.md`)
+  `history.db` (warm, consolidated blocks) with `blobs/` beside them, plus `archive.db`
+  written by the embedded TraceDB crate for agent-native cross-agent history. Nothing
+  merges the three (`docs/storage.md`, `docs/data-architecture.md`)
 
 **Completed:**
 - Phase 1: backend core on port 4317 — 11 routes, LiveStore, TurnSupervisor,
@@ -1825,6 +1826,48 @@ Its timeout is 10s against a 20s poll, so it cannot pass on a foregrounded tab a
 the bug it exists to catch — reverting the announcement fails it in 12.1s with the
 user's exact symptom.
 
+## Data-architecture pass, 2026-08-27: what changed in the specs
+
+Prompted by the multi-environment / multi-frontend direction, and by two errors in the
+previous version of `docs/data-architecture.md` that were worth more than the document
+was. It defended at length against a hazard the architecture **cannot produce** — one
+machine comparing its own files against another's fingerprints — and it had narrowed the
+requirement to "upload" when the goal is AFK continuity. Both are now stated as such,
+because a spec that argues against an unreachable failure teaches a reader the shape is
+reachable, which is how a defence outlives the defect it guards.
+
+Five invariants now govern, and each removes work rather than adding it:
+
+* **Two classes of session, not one.** Sylph-born (Sylph spawned the adapter and held
+  its stdio; full `sylph.agent.v3`; journals every delta; drivable) versus adopted
+  (someone else spawned it; read-only through the vendor's store; fidelity and control
+  decided by the vendor). `origin` already names this axis, so there is no third
+  vocabulary.
+* **Identity is `(environment, agent, native_id)`**, with Sylph minting the exposed UUID
+  on first sighting. Rejected: a content fingerprint (opencode cannot compute one), the
+  archive id (observable before it is ingested), anything host- or path-shaped.
+* **Sessions do not migrate between environments.** This is the load-bearing one: it
+  deletes every cross-environment freshness comparison and scopes `cwd` per environment.
+* **Data travels one way — upload.** The server is the authority; an environment writes
+  to it. There is no bidirectional sync and no writing outside `~/.sylph`.
+* **AFK is two capabilities.** Observation is near-universal; continuation is per-vendor.
+  A frontend renders "observable but not drivable" as a state, not a failure.
+
+Documents rewritten or corrected: `data-architecture.md` (whole, 184 → 402 lines),
+`architecture.md`, `configuration.md`, `environments.md`, `storage.md`,
+`session-protocol.md`, `control-plane.md`, `api-design.md`, `api-v1.openapi.json`,
+`README.md`, `installation.md`, `development.md`. Code changes were small and are
+recorded where they live: `links/mod.rs` doc comments on why an empty capability surface
+means "Sylph cannot reach it" rather than "there is nothing there", and
+`api/health.rs`'s `activeProcesses` → `activeTurns`, a turn count that had been published
+under a process name — harmless only while every process was one Sylph spawned.
+
+Doc-versus-code drift the pass closed, listed because each was a claim a reader could
+have acted on: the SIGTERM/SIGKILL stop path (the documented mechanism does not exist);
+`supports` shown with 5 values against the adapter's real 8; two stale version strings;
+`/search` asserted to be documented in prose when no heading named it; the
+`is_backgrounded` SQL quoted without its `bg.` alias or its `= 1`, both load-bearing.
+
 ## Audit, 2026-08-26: what the specs claimed and the code did not do
 
 A pass over every document against the implementation, prompted by the Phase 12
@@ -1903,26 +1946,39 @@ instead, so the column is a leftover from a design that was replaced rather than
 placeholder for future work — `docs/database-schema.md` previously described it as the
 latter, which read as "pruning is unbuilt" when pruning is built and shipped.
 
-### `app_meta.schema_version` stopped tracking at 3
+### ~~`app_meta.schema_version` stopped tracking at 3~~ — resolved
 
-`001` inserts `1`, `003` updates to `3`, and `004`–`007` add columns without touching it.
-So a fully-migrated journal reports `schemaVersion: 3` through `/api/v1/health` while
-seven migrations have run, and the value cannot answer the question it exists for —
-checking a packaged install against the binary running it. `sqlx` maintains
-`_sqlx_migrations`, which is the real answer and is not exposed. Either every migration
-bumps this key, or `/health` reports the `sqlx` table and the key is deleted; a
-hand-maintained second copy of a number the library already tracks will drift again.
+`/health` now reports `MAX(version)` from `_sqlx_migrations` and the key is gone, along
+with `instance_id`, which no code ever wrote. The choice was framed here as "either every
+migration bumps it, or the field reports the `sqlx` table" — the second, because the first
+asks a human to remember something a library already does, which is what failed. The
+integration test counts `migrations/` instead of pinning a literal: the old test asserted
+`3`, agreeing with the wrong value for four migrations, which is the "a test that hardcodes
+what the code hardcodes proves only that they agree" pitfall. Verified by reverting the
+query and watching the test fail.
 
-### The OpenAPI schema is missing the whole Phase-12 control plane
+### ~~The OpenAPI schema is missing the whole Phase-12 control plane~~ — resolved
 
-24 paths / 31 method-path pairs documented against **41 registered** (measured by
-normalizing path parameters and diffing `lib.rs`). Nothing documented is stale — the gap
-is one-directional and is `capabilities`, `link`, `interrupt`, `steer`, `config`,
-`replay`, `sessions/{id}/events`, `sessions/{id}/requests`, `requests/{id}/resolve`, and
-`/search`. `docs/api-design.md` § OpenAPI Specification carries the table with line
-numbers. The check is a ten-line script and is worth automating into a test, exactly as
-`error::tests::every_emitted_code_is_published_in_the_openapi_enum` pins the error enum —
-that test is the precedent, and it is the reason the error gap was catchable at all.
+24 paths / 31 method-path pairs against **41 registered**. The eleven missing were
+`capabilities`, both `link` verbs, `interrupt`, `steer`, `config`, `replay`,
+`sessions/{id}/events`, `sessions/{id}/requests`, `requests/{id}/resolve`, and `/search`.
+All are now documented: **33 paths, 41 method-path pairs, diff empty in both
+directions**, every operation declaring a `2xx` schema, no dangling `$ref`, no
+unreferenced schema (re-measured 2026-08-27).
+
+Two defects the same pass found are the reason a path count is not the check.
+`PATCH /sessions/{id}`'s 200 `$ref`'d `CreateSession` — the *request* schema — so a
+generated client would have typed the response as the body it had just sent; and
+`GET /sessions/{id}` declared no response content at all, which a generator reads as an
+untyped body rather than as an omission. A present path is not a correct path.
+
+**Still open: the check is not a test.** It remains a ten-line script diffing
+`.route(...)` calls against the spec, and the precedent for automating it is
+`error::tests::every_emitted_code_is_published_in_the_openapi_enum`, which is why the
+error-enum gap was catchable at all. Read that precedent with the entry below, though —
+the same test failed to notice six codes because the list it enumerated was itself
+hand-maintained. A route-coverage test has to derive both sides, or it will reproduce
+exactly that.
 
 ### A hand-maintained list inside a test defeated the test
 

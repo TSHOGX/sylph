@@ -107,8 +107,17 @@ Schema changes are applied on startup and recorded in the database, so a
 development journal carries into a packaged install with no separate migration
 step — the default data directory is the same one `cargo run` uses.
 
-The TraceDB archive is never written and never read directly. Sylph Web talks to
-TraceDB over its JSON API, so archived history is unaffected by anything here.
+The archive is never written by anything here, so archived history is unaffected by an
+install, an upgrade, or a reset of the journal.
+
+**Two things about the archive are changing, and this section describes the current
+shape.** Today it is a separate `trace-db` process reached over a JSON API at that
+project's own default location. The design being built toward is a **private archive
+under `~/.sylph`, read in-process**, which removes the binary, the `tracedb.bin` setting,
+and the reachable/unreachable distinction together — a user installs Sylph, not Sylph and
+a database. `docs/data-architecture.md` § The archive is private, and Sylph owns its
+location is authoritative for why; `docs/configuration.md` § `tracedb.bin` is on its way
+out states what disappears with it.
 
 ## Upgrading
 

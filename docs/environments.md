@@ -153,10 +153,20 @@ transcript archive. The trade is accepted because the alternative is
 per-environment sync paths that each lose the tail on a crash, and because it is
 the only option that gives local, sandbox, and SSH identical fidelity.
 
-Vendor-native stores remain valuable where they exist: a local session's
-`~/.claude` store keeps its own fidelity and TraceDB keeps ingesting it. The two
-are reconciled by native session id, which is how a session already deduplicates
-against the archive.
+Vendor-native stores remain valuable where they exist, and they are the *only*
+record of a session Sylph did not start. So the archive keeps ingesting them, and
+the two records never need reconciling: a Sylph-born session's history is the
+journal's and an adopted session's is the archive's, keyed on
+`(environment, agent, native_id)` — the environment component is what makes the key
+sufficient, since a session never moves between environments and therefore never has
+two candidate copies to choose between.
+
+That is worth stating as the thing an environment does *not* have to do. There is no
+per-environment dedup pass, no cross-environment freshness comparison, and no
+"which copy is newer" question, because two environments cannot hold the same
+session. `docs/data-architecture.md` § Sessions do not migrate between environments
+is where the invariant is stated; nearly all of this document's simplicity is bought
+with it.
 
 `docs/data-architecture.md` is authoritative for what follows from this, and two
 of its consequences bind an environment directly. What a remote environment sends

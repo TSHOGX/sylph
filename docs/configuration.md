@@ -174,12 +174,36 @@ a meaningful act — the protocol reserves "no identity" — and re-creating a f
 user removed would be the app arguing with them. `sylph-web-backend config init`
 puts it back on request.
 
-## TraceDB
+## The archive
 
-TraceDB is a separate project that Sylph depends on for durable cross-agent
-history. It is found on `PATH` by default, which is where a normal install of it
-lands, and can be pinned with `tracedb.bin` or `SYLPH_TRACEDB_BIN` for a
-checkout-local build:
+The archive holds durable history read out of each agent's native store, which is the
+only record an **adopted** session has. Sylph-born history is the journal's, and nothing
+merges the two.
+
+Say that precisely, because the imprecise version deletes retention's authority. The rule
+is about **direction**: the archive is fed by parsing native sources, never by Sylph
+handing it normalized events (`docs/data-architecture.md` § Sylph's normalized stream does
+not enter the archive). A Sylph-born session usually *does* appear in the archive anyway —
+not because Sylph put it there, but because the vendor CLI wrote its own file and the
+ordinary parser path ingested it. That is exactly what retention's watermark reads, so
+"the archive knows nothing about Sylph's sessions" is both false and load-bearing if
+believed.
+
+`docs/data-architecture.md` gives the server a **private** archive under `data/`,
+not TraceDB's default path, and makes trace-db an **embedded crate** rather than a
+subprocess. Both consequences land in this document rather than only in the
+architecture one, because they delete a setting:
+
+- No external `trace-db` daemon is assumed to exist and no user installs one. On a
+  machine that happens to have one, Sylph neither reads nor writes its archive.
+- A private archive has one writer, which removes the busy timeout, the per-agent
+  commit transaction, and the exclusive reindex lock a shared file needs. Every
+  failure mode those guard against is a silent interleaving.
+
+### `tracedb.bin` is on its way out
+
+Until embedding lands, TraceDB is a subprocess found on `PATH` and pinnable to a
+checkout build:
 
 ```toml
 [tracedb]
@@ -190,17 +214,14 @@ An unreachable TraceDB is not a failure. Live sessions work; archive search and
 native import report themselves unavailable, and `/api/v1/health` says
 `tracedb.available: false`.
 
-**The archive is moving inside this root.** `docs/data-architecture.md` makes the
-Sylph server the sole authority and gives it a **private** archive under `data/`,
-rather than reading TraceDB's default path. Two consequences for configuration, both
-worth knowing before that lands: no external `trace-db` daemon is assumed to exist,
-and on a machine that has one Sylph neither reads nor writes its archive. A private
-archive has one writer, which is what removes the busy timeout, the per-agent commit
-transaction, and the exclusive reindex lock that a shared file would need — and every
-failure mode those guard against is a silent interleaving.
-
-`tracedb.bin` above is therefore about which *code* projects the archive, not which
-file holds it.
+**Embedding deletes this key, `SYLPH_TRACEDB_BIN`, the `doctor` row, and
+`tracedb.available` together, and that is deliberate rather than incidental.** A
+setting naming an external binary is only meaningful while an external binary is what
+answers; keeping it afterwards would offer an operator a lever that changes nothing,
+which is the failure `SYLPH_WEB_HOST` already demonstrated here — read into `Config`
+and then discarded, so setting it did nothing with no error. The replacement fact is
+not a path but a version: which parser code this build carries. Nothing outside the
+process can change that, so nothing should appear to.
 
 ## Inspecting what resolved
 
