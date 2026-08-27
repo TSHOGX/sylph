@@ -1,6 +1,9 @@
 # Architecture
 
-Sylph Web is a local-first native UI for coding-agent sessions. It orchestrates multiple agent runtimes (Claude, Codex, Pi, OpenCode) through a unified interface while preserving their native identities and lifecycle policies.
+Sylph Web is a local-first native UI for coding-agent sessions. It orchestrates agent
+runtimes through a unified interface while preserving their native identities and
+lifecycle policies. Two adapters ship, `claude` and `pi`; archived history covers
+`codex` as well, which opens read-only.
 
 ## System Overview
 
@@ -22,7 +25,7 @@ Rust Backend (127.0.0.1:4317)
     │   Agent-native history, ingested
     │
     └─► Adapters (child processes)
-        claude, codex, pi, opencode, gemini
+        claude, pi
 ```
 
 **Components:**
@@ -93,9 +96,9 @@ what the document adds is the consequence, which is that the two classes answer
 store is authoritative, and whether upload is automatic or explicit.
 
 The durable key is `(environment, agent, native_id)`, with Sylph minting the UUID that
-the API exposes on first sighting. A fingerprint cannot be the key because `opencode`
-cannot compute one; the archive id cannot, because a session is observable before
-anything has ingested it. The key is sufficient only because **a session never moves
+the API exposes on first sighting. The archive id cannot be the key, because a session
+is observable before anything has ingested it. A content fingerprint cannot be either:
+it is a fact about a file, and an agent is free to keep no per-session file at all. The key is sufficient only because **a session never moves
 between environments** — that invariant is what removes every cross-environment
 freshness comparison, and it is also why `cwd` is unambiguous despite two machines
 plausibly both having `/home/user/app`.
@@ -235,9 +238,9 @@ every other operation is microseconds to sub-millisecond, so it is the one read 
 must never go per-row.
 
 Sylph owns ingestion; nothing outside this binary writes the archive. Ingestion is
-**one strategy per agent, not one scan** — `opencode` writes no per-session file and
-cannot produce the fingerprint the ingest path requires, so its read strategy is
-unresolved and a shared timer must not assume otherwise.
+**one strategy per agent, not one scan**, and a shared timer must not assume
+otherwise: nothing constrains an agent to write a per-session file, or to produce the
+fingerprint the ingest path requires.
 
 The archive is fed by *parsing native sources*, never by Sylph handing it normalized
 events. That direction is the rule; it is not the claim that Sylph-born sessions are

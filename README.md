@@ -7,10 +7,9 @@ local attachments, search stable cross-agent history, and resume sessions origin
 created in another agent without changing their identity policy.
 
 Two adapters ship in the repo, `claude` and `pi` (`adapters/`). Reading and importing
-archived history is not limited to those: TraceDB archives Claude Code, Codex,
-OpenCode, Gemini, and Pi, and any of them can be browsed and searched. *Continuing* an
-imported session needs an adapter for its originating agent, so today that means
-`claude` or `pi`; the rest open read-only.
+archived history is not limited to those: Claude Code, Codex, and Pi can all be browsed
+and searched. *Continuing* an imported session needs an adapter for its originating
+agent, so today that means `claude` or `pi`; `codex` opens read-only.
 
 ## Architecture
 

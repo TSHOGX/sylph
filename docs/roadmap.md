@@ -1671,10 +1671,10 @@ spends real tokens and only observes whatever shapes one live turn produces, so 
   No protocol field was added — `parent_tool_use_id` already covers `claude`, and
   `Workflow` forwards nothing, so a field would encode a hazard no vendor exhibits.
 - ✅ **Archived sessions are a session-level tree, and cannot be an event-level one.**
-  Measured before designing: `data_json` is null on **all 36,308 events sampled across
-  five agents**, so no vendor payload survives ingestion, and `parent_id` means a
+  Measured before designing: `data_json` is null on **all 36,308 events sampled**, so no
+  vendor payload survives ingestion, and `parent_id` means a
   different relationship per agent — `claude`'s is the `parentUuid` conversation chain,
-  `opencode`'s groups parts under a message, `codex` and `gemini` never set it. Reading
+  `pi` mixes that with grouping parts under a message, `codex` never sets it. Reading
   it as a `span` would nest a whole transcript into one chain thousands deep. Anchoring
   a delegation to its host tool call was measured and rejected: 1,918 of 2,104 id
   suffixes are hash-only, so it recovers 8.8% and misattributes on collisions —
@@ -1844,8 +1844,9 @@ Five invariants now govern, and each removes work rather than adding it:
   decided by the vendor). `origin` already names this axis, so there is no third
   vocabulary.
 * **Identity is `(environment, agent, native_id)`**, with Sylph minting the exposed UUID
-  on first sighting. Rejected: a content fingerprint (opencode cannot compute one), the
-  archive id (observable before it is ingested), anything host- or path-shaped.
+  on first sighting. Rejected: a content fingerprint (an agent need keep no per-session
+  file), the archive id (observable before it is ingested), anything host- or
+  path-shaped.
 * **Sessions do not migrate between environments.** This is the load-bearing one: it
   deletes every cross-environment freshness comparison and scopes `cwd` per environment.
 * **Data travels one way — upload.** The server is the authority; an environment writes

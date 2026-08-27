@@ -45,14 +45,15 @@ Three candidates were rejected, each for a reason that would have surfaced late:
 
 - **A content fingerprint.** trace-db's staleness signal is
   `sha256(file):bytes:mtime_ns` and is `NOT NULL` (*measured*, `parsers/mod.rs:116`).
-  `opencode` writes no per-session file at all — a single SQLite store with a live WAL
-  — so it cannot produce one, and a key one of five agents cannot compute is not a key.
+  A key is only as good as the weakest store it has to describe, and an agent is free
+  to keep no per-session file at all — a single SQLite store with a live WAL cannot
+  produce one. Identity has to be available at first sight regardless.
 - **The archive id.** A session is observable the moment its native store exists, which
   is before anything has ingested it. Keying on the archive would make identity depend
   on a projection's progress.
 - **Anything containing a host or a path.** See § Provenance is not identity.
 
-The triple is available at first sight for all five agents — the native id is the file
+The triple is available at first sight for every agent — the native id is the file
 name or the store's own row id — and it is stable *because sessions do not migrate
 between environments*. That constraint is what makes the simple key sufficient; it is
 stated as an invariant below rather than left implicit.
@@ -195,12 +196,10 @@ environment should never own: upload bytes and the server re-derives, upload row
 every environment must be upgraded in lockstep with the schema. It is also why there is
 exactly one parser version in the system at any time.
 
-`opencode` is the exception that proves the rule is per-agent. It has no per-session
-file, only a 541 MB SQLite store with a live WAL, so "upload the bytes" has no
-straightforward referent and the fingerprint the ingest path requires cannot be produced
-(*measured*; an attempt reached 4.6 GB still running at ~20 minutes and starved every
-other agent's pass). **Its read strategy is unresolved and must not be guessed.**
-Ingestion is one strategy per agent, not one scan.
+Ingestion is one strategy per agent, not one scan. Nothing constrains an agent to write
+a per-session file, and a shared timer that assumes one breaks on the agent that does
+not: a single SQLite store with a live WAL has no straightforward referent for "upload
+the bytes" and cannot produce the fingerprint the ingest path requires.
 
 ### Provenance is not identity
 
@@ -225,11 +224,11 @@ exists to serve, and it decomposes into two capabilities with very different pro
 strength. *Decision: they are surfaced separately, because a single "AFK works" boolean
 would be a promise Sylph cannot keep for every agent.*
 
-**Observation is near-universal.** *Measured 2026-08-27*, four of five agents flush their
-native store mid-turn, so a session's state is externally readable while it is still
-running: `claude` at tool-call and content-block boundaries (record age at flush reached
-9.4 s), `codex` at item completion, `pi` on every `message_end`, `opencode` into SQLite
-rows. `gemini`'s mechanism is **unlocated** — a genuine unknown, not a measured absence.
+**Observation is universal across the supported agents.** *Measured 2026-08-27*, all
+three flush their native store mid-turn, so a session's state is externally readable
+while it is still running: `claude` at tool-call and content-block boundaries (record
+age at flush reached 9.4 s), `codex` at item completion, and `pi` on every
+`message_end`.
 
 Two `pi` hazards are recorded because a reader would otherwise design around the wrong
 shape: `_rewriteFile()` truncate-rewrites with mode `"w"` and no lock, so a reader can
@@ -238,15 +237,14 @@ message, so the file does not exist at all early in a turn. "Only at `message_en
 also true-but-trap — a turn emits one per assistant message *and* per tool result, so a
 5-tool turn was ~11 appends. That is message granularity, not turn granularity.
 
-**Continuation is per-agent, and three of five have a channel.** *Measured:*
+**Continuation is per-agent, and only one of the three has a drivable channel.**
+*Measured.*
 
 | Agent | Second-party control surface |
 | --- | --- |
 | `codex` | Shared local app-server daemon; `remote-control start\|stop\|pair`, `queue --thread <uuid> --message <text>`, `--remote ws://\|wss://\|unix://` |
-| `opencode` | `serve` + `attach <url>` + `acp` |
 | `claude` | Per-process authenticated UDS; delivers messages, **cannot drive** |
 | `pi` | None. `RpcClientOptions` is `{cliPath, cwd, env, provider, model, args}` — no address field, no `createServer`, no `.sock` |
-| `gemini` | Start-time flags only |
 
 `claude`'s socket is worth stating precisely because an earlier version of this document
 got it wrong. The `[uds-messaging]` module accepts eight frame types and all eight are
@@ -378,13 +376,6 @@ Recorded because they are load-bearing and unresolved, not as a task list.
 **`claude`'s approval gate scope.** Per-frame or once per peer. This decides whether
 live continuation of a terminal `claude` session is a feature or a dead end, and it is
 the highest-value unknown in this document.
-
-**`gemini`'s mid-turn write behaviour.** Unlocated rather than absent. Until measured,
-`gemini` must be treated as observation-unknown rather than observation-capable.
-
-**`opencode`'s ingestion strategy.** No per-session file, no computable fingerprint, and
-a naive read is catastrophically expensive. Must be decided before any ingestion timer
-ships.
 
 **Search over what the archive never parsed.** The archive indexes whatever a parser
 read; the journal holds Sylph's normalized events with no index. A Sylph-born session

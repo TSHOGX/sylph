@@ -533,10 +533,10 @@ pub struct TranscriptResponse {
     /// **Complete for delegates whose id carries the parent as a prefix, and
     /// deliberately not otherwise.** 2104 of the archive's 2316 delegates are
     /// named `<parent>/agent-…`, so a prefix test finds them from the listing
-    /// alone. The remaining 212 — almost all `opencode` — record only a
+    /// alone. The rest — `codex` in particular — record only a
     /// `parent_session_id`, which is visible only to `show`: finding them means a
     /// metadata call per candidate row, measured at 11.5 ms each and **52.9 s**
-    /// across the archive. That is not a request anyone can wait on, so those
+    /// across a 4922-session archive. That is not a request anyone can wait on, so those
     /// delegates are reached from their parent's *directory listing*, where the
     /// fold already reads their metadata for a different reason.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -841,8 +841,8 @@ fn normalize_events(events: &[TraceEvent]) -> Vec<StreamEvent> {
             // `parentUuid` conversation chain, where 13689 of 15119 pointers
             // name the immediately preceding event and fanout is 1 — as a `span`
             // that nests a whole transcript into a single chain thousands deep.
-            // `opencode` uses it to group parts under a message (fanout 4-5),
-            // `pi` mixes both, and `codex` and `gemini` never set it at all.
+            // `pi` mixes that with grouping parts under a message, and `codex`
+            // never sets it at all.
             // Only the `tool_result` → `tool_call` case is a real relationship,
             // and that is what `stream_id` above already carries.
             //
@@ -1004,10 +1004,17 @@ mod tests {
     const REAL_PARENT: &str = "claude:53e66af0-0ffa-49ed-8026-4e3823a285a9";
     const REAL_CHILD: &str =
         "claude:53e66af0-0ffa-49ed-8026-4e3823a285a9/agent-amorphology-ch05-137ddc835b490511";
-    /// A real `opencode` delegation, which records a parent while carrying no
-    /// suffix — the 212 cases the id shape cannot see.
-    const REAL_SUFFIXLESS_CHILD: &str = "opencode:ses_fc911ef21ffeea4YjsIy3jxkXR";
-    const REAL_SUFFIXLESS_PARENT: &str = "opencode:ses_fc9401b73ffePlTal4Zxc1XuzG";
+    /// A real `codex` delegation, which records a parent while carrying no suffix
+    /// — the case the id shape cannot see.
+    ///
+    /// Measured 2026-08-26 from `codex`'s own native store, not from the archive:
+    /// `~/.codex/sessions/2026/06/05/rollout-2026-06-05T17-44-36-019e972b-….jsonl`
+    /// records `parent_thread_id: 019e9719-f2b5-…` with `thread_source: subagent`
+    /// and an id carrying no `/agent-` segment. A real id matters here because a
+    /// wrong one passes: the two id spaces are disjoint and comparing them is
+    /// silently always-false.
+    const REAL_SUFFIXLESS_CHILD: &str = "codex:019e972b-967f-7770-97a9-afff157643a1";
+    const REAL_SUFFIXLESS_PARENT: &str = "codex:019e9719-f2b5-7a01-9de7-5bc23fb623f7";
 
     fn trace_session(id: &str) -> crate::tracedb::TraceSession {
         crate::tracedb::TraceSession {
@@ -1038,11 +1045,11 @@ mod tests {
 
     #[test]
     fn a_delegate_recording_no_suffix_still_reports_its_parent() {
-        // `opencode` names a child as a session of its own, so the id shape says
-        // nothing. Only `parent_session_id` does, and reading the suffix alone
+        // `codex` names a delegated child as a session of its own, so the id shape
+        // says nothing. Only the recorded parent does, and reading the suffix alone
         // leaves this session claiming to be work someone started.
         let mut child = trace_session(REAL_SUFFIXLESS_CHILD);
-        child.agent = "opencode".to_string();
+        child.agent = "codex".to_string();
         child.parent_session_id = Some(REAL_SUFFIXLESS_PARENT.to_string());
 
         assert_eq!(

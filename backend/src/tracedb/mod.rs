@@ -213,10 +213,9 @@ pub struct SessionFacts {
 ///
 /// camelCase is `list`'s actual spelling, matching `search` rather than `show`.
 /// `title` is absent far more often than present — measured over the local
-/// archive, `claude` records one for 73% of sessions and `opencode` for all of
-/// them, while `codex` and `pi` record none at all. So a caller that needs a
-/// human-readable label cannot rely on this field; see
-/// [`Client::first_user_text`].
+/// archive, `claude` records one for 73% of sessions while `codex` and `pi`
+/// record none at all. So a caller that needs a human-readable label cannot rely
+/// on this field; see [`Client::first_user_text`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
@@ -361,8 +360,13 @@ impl TraceSession {
     ///
     /// The id suffix is checked last, as a fallback for a session whose metadata
     /// records no parent but whose id says otherwise. It cannot be the primary
-    /// signal — 199 sessions record a parent with no suffix — but it costs nothing
-    /// and covers the reverse case.
+    /// signal — `codex` in particular records a parent with no suffix — but it
+    /// costs nothing and covers the reverse case.
+    ///
+    /// No count is quoted, deliberately: a recorded parent and an id suffix are
+    /// independent signals and neither implies the other, which is the property
+    /// this code depends on. A ratio measured against one archive is not that
+    /// property, and this repo previously carried two disagreeing figures for it.
     pub fn lineage(&self) -> Lineage<'_> {
         if let Some(parent) = self.parent_session_id.as_deref().filter(|p| !p.is_empty()) {
             return Lineage::Subagent { parent };
@@ -423,8 +427,8 @@ fn envelope_summary(text: &str) -> Option<String> {
 ///
 /// TraceDB names a subagent session after the session that spawned it, as
 /// `claude:<uuid>/agent-<name>`. This is a *fallback* signal only: it is available
-/// without a `show` call, but it is incomplete, because 199 non-empty sessions in
-/// the local archive record a `parent_session_id` while carrying no suffix.
+/// without a `show` call, but it is incomplete, because some non-empty sessions
+/// record a `parent_session_id` while carrying no suffix — `codex` in particular.
 /// [`TraceSession::lineage`] is the authoritative answer.
 ///
 /// The agent prefix (`claude:`) is left attached to the root, because that is the

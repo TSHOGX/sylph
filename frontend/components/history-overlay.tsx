@@ -133,9 +133,9 @@ export function HistoryOverlay() {
     () =>
       sessions.map((session) => ({
         // A string, because the label is what the filter matches. The untitled case
-        // used to be dimmed markup; `claude` and `opencode` record a title for most
-        // sessions while `codex` and `pi` record none, so this row is common enough
-        // that "Untitled <agent> session" being searchable is the better trade.
+        // used to be dimmed markup; `claude` records a title for most sessions
+        // while `codex` and `pi` record none, so this row is common enough that
+        // "Untitled <agent> session" being searchable is the better trade.
         label: session.label ?? `Untitled ${session.agent} session`,
         // Shape plus title, not colour alone (WCAG 1.4.1). The archive box marks
         // archived history throughout the app; an imported one carries the native

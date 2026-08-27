@@ -1137,9 +1137,9 @@ fetches a single page, where the server has already resolved the pair.
 
 `label` falls back through three sources, in order:
 
-1. **The archive's own title.** `claude` records one for 73% of sessions and
-   `opencode` for all of them, while `codex` and `pi` record none — so the
-   fallbacks are the common path, not the exception.
+1. **The archive's own title.** `claude` records one for 73% of sessions while
+   `codex` and `pi` record none — so the fallbacks are the common path, not the
+   exception.
 2. **The opening *typed* message.** Leading harness-injected envelopes
    (`<permissions instructions>`, `<environment_context>`,
    `<skills_instructions>`, memory files, `Caveat:`) are skipped: they are
@@ -1226,9 +1226,8 @@ it means a different thing per agent. Over 164 sessions:
 | Agent | What `parent_id` is | Shape |
 | --- | --- | --- |
 | `claude` | the `parentUuid` conversation chain | 13689 of 15119 name the immediately preceding event; fanout 1 |
-| `opencode` | parts grouped under a message | fanout 4–5 |
 | `pi` | a mix of both | fanout 1–3 |
-| `codex`, `gemini` | never set | absent entirely |
+| `codex` | never set | absent entirely |
 
 Honouring `claude`'s as a `span` would nest a whole transcript into a single chain
 thousands deep. The one real relationship it carries — a `tool_result` pointing at
@@ -1265,10 +1264,10 @@ parent's directory would drop exactly the ones whose location is most worth
 reporting.
 
 It is complete for delegates whose id carries the parent as a prefix — **2104 of
-2316** — and deliberately not otherwise. The remaining 212, almost all `opencode`,
-record only a `parent_session_id`, visible only to `show`: finding them means a
-metadata call per candidate row, measured at 11.5 ms each and **52.9 s** across the
-archive. Those are reached from the parent's *directory listing* instead, where the
+2316** when measured — and deliberately not otherwise. The rest, `codex` in
+particular, record only a `parent_session_id`, visible only to `show`: finding them
+means a metadata call per candidate row, measured at 11.5 ms each and **52.9 s**
+across a 4922-session archive. Those are reached from the parent's *directory listing* instead, where the
 fold already reads their metadata for a different reason.
 
 A missing session is `404 TRACE_SESSION_NOT_FOUND`; an unreachable archive is

@@ -59,8 +59,8 @@ export default function SearchPage() {
             className="mt-1 w-full rounded-lg border px-3 py-2 focus-ring"
           />
           <p id="archive-query-hint" className="mt-1 text-xs text-ink-muted">
-            Searches history recorded by Claude Code, Codex, and OpenCode outside
-            Sylph Web. Importing adopts a session without altering what was recorded.
+            Searches history recorded by Claude Code, Codex, and Pi outside Sylph
+            Web. Importing adopts a session without altering what was recorded.
           </p>
         </form>
 

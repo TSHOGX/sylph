@@ -467,8 +467,8 @@ is the only field where a raw vendor payload could survive — where `claude`'s 
 all five agents**. `parent_id` is the field that looks like a span and means
 something different per agent: for `claude` it is the `parentUuid` conversation
 chain (13689 of 15119 pointers name the immediately preceding event, fanout 1), for
-`opencode` it groups parts under a message (fanout 4–5), `pi` mixes both, and
-`codex` and `gemini` never set it. Honouring `claude`'s as a `span` nests a whole
+`pi` it mixes that with grouping parts under a message (fanout 1–3), and
+`codex` never sets it. Honouring `claude`'s as a `span` nests a whole
 transcript into one chain thousands deep. Its only real use is pairing a
 `tool_result` to its `tool_call`. Attribution to the *specific* delegating call was
 measured and rejected too: `claude` names a child `<parent>/agent-a<name>-<hash>`,
@@ -494,9 +494,9 @@ for anything a user waits on, and is why the lineage fold caches per parent. By
 contrast a *full unfiltered `list`* is 4922 rows in 10 pages at **164 ms**, so
 deriving what you can from the listing is ~300× cheaper per fact than asking per
 row. Finding one session's children uses that: an id-prefix test over one pass
-finds 2104 of 2316 delegates, while the other 212 (almost all `opencode`, which
-records only a `parent_session_id`) would cost the 52.9 s scan and are reached from
-their parent's directory listing instead.
+finds 2104 of 2316 delegates, while the rest record only a `parent_session_id` and
+would cost the 52.9 s scan, so they are reached from their parent's directory
+listing instead.
 
 **A caller that logs a degraded dependency per request rebuilds the flood the
 client was fixed to prevent.** `tracedb::Client` reports an absent binary once at
@@ -525,11 +525,23 @@ listing that does not fold them into their parent is half noise.
 `Client::session_metadata` is the cheapest shape, but see the measurement above:
 11.5 ms and ~2.5 KB, not the ~0.5 ms once recorded here.
 
-**The `/agent-` id suffix is not a reliable lineage signal.** It catches 2039
-subagents but misses 199 that record only a `parent_session_id`, almost all
-`codex`; those sat at the top level of every listing until
-`TraceSession::lineage` started reading the archive's own record. The suffix
-survives as a fallback for when a metadata lookup fails.
+**The `/agent-` id suffix is not a reliable lineage signal.** It catches most
+subagents but misses those that record only a `parent_session_id` — `codex` among
+them, measured from its own store: a `rollout-…jsonl` with
+`parent_thread_id` set, `thread_source: subagent`, and no `/agent-` segment. Those
+sat at the top level of every listing until `TraceSession::lineage` started reading
+the archive's own record. The suffix survives as a fallback for when a metadata
+lookup fails.
+
+**A count repeated in four places is four chances to drift, and nothing checks
+them against each other.** That population's size was carried in four separate
+passages and two of them disagreed with the other two — both a different figure and
+a different agent — so at least one pair had always been wrong while reading as
+measured fact. Neither could be re-derived, because the archive they were measured
+against no longer exists. Two rules: state the *shape* a piece of code depends on
+rather than a ratio, since the shape is what stays true; and where a number is
+genuinely worth quoting, cite it once and point at it from everywhere else. A
+measurement is only quotable while the thing it was measured against still exists.
 
 **A subagent often runs in a different directory than its parent.** 484 of 2238
 do — typically a worktree or a subdirectory. Folding those into a parent that is
@@ -591,9 +603,8 @@ was set when it ran. A moved Node install therefore needs a re-run.
 with `kill -0` instead. Any new shell script here has to hold to 3.2 syntax.
 
 **Archived titles are per-agent, not universal.** `claude` records one for ~73% of
-sessions and `opencode` for all of them; `codex` and `pi` record none. Any surface
-showing an archived title needs the opening-ask fallback, or most rows read as
-untitled.
+sessions; `codex` and `pi` record none. Any surface showing an archived title needs
+the opening-ask fallback, or most rows read as untitled.
 
 **`100vh` is taller than the screen on a phone.** It is the *large* viewport
 height: it measures as though the browser's collapsible toolbars were hidden, so

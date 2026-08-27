@@ -69,7 +69,7 @@ test("typing filters the list, and matches the agent's description as well as th
   const filter = page.getByRole("combobox", { name: /filter provider model/i });
   const options = page.getByRole("listbox", { name: /provider model/i }).getByRole("option");
 
-  await filter.fill("gemini");
+  await filter.fill("kimi");
   await expect(options).toHaveCount(2);
 
   // The hint is the agent's own description of a choice, which for a model catalogue

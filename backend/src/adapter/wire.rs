@@ -127,9 +127,8 @@ pub struct ConfigChoice {
 ///
 /// The shape is ACP's `SessionConfigOption`, adopted rather than invented: it
 /// already covers `claude`'s model / effort / permission mode / output style,
-/// `pi`'s model / thinking level / queue modes, `codex`'s approval policy, and
-/// `gemini`'s approval mode. Two variants are enough for every knob those four
-/// actually expose.
+/// `pi`'s model / thinking level / queue modes, and `codex`'s approval policy.
+/// Two variants are enough for every knob those three actually expose.
 ///
 /// `category` is advisory grouping — `model`, `effort`, `permission_mode`, or
 /// anything an agent invents — so a client groups by it without having to know the

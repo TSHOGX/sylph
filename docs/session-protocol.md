@@ -29,7 +29,7 @@ generalization rather than a guess:
 
 | | commands | model and mode |
 | --- | --- | --- |
-| **ACP** (`gemini --acp`, `opencode acp`) | `AvailableCommand {name, description, input?}` | `SessionModelState`, `SessionModeState`, `SessionConfigOption` |
+| **ACP** (the Agent Client Protocol spec) | `AvailableCommand {name, description, input?}` | `SessionModelState`, `SessionModeState`, `SessionConfigOption` |
 | **codex app-server** | no command concept at all | `model/list`, `config/value/write`, `thread/settings/updated` |
 | **pi** (`--mode rpc`) | `get_commands`, which *excludes* built-in TUI commands by design | `set_model`, `set_thinking_level`, `get_available_models` |
 
@@ -293,7 +293,7 @@ Everything adjustable on a live session, in one shape:
 it without needing to know the vocabulary. The shape is ACP's
 `SessionConfigOption`, adopted rather than invented because it already covers
 `claude`'s model / effort / permission mode / output style, `pi`'s model / thinking
-level / queue modes, `codex`'s approval policy, and `gemini`'s approval mode.
+level / queue modes, and `codex`'s approval policy.
 
 ```json
 {"t":"set_config","id":"c9","configId":"model","value":"sonnet"}

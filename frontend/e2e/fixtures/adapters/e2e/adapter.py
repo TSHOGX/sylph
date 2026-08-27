@@ -47,8 +47,8 @@ COMMANDS = [
 
 # A long catalogue, because the threshold between "a menu" and "a searchable list"
 # is a real behaviour and nothing could observe it while every fixture option had two
-# choices. Fourteen is above `SELECT_SEARCH_THRESHOLD` and in the range real agents
-# report — `pi` declares 21 across providers, `claude` around a dozen — and the ids
+# choices. Seventeen is well above `SELECT_SEARCH_THRESHOLD` (8) and in the range real
+# agents report — `pi` declares 21 across providers, `claude` around a dozen — and the ids
 # are deliberately long enough to be the kind that once widened a `<select>` past the
 # right edge of a phone. Descriptions carry the provider, so a spec can assert the
 # filter matches the hint and not only the label.
@@ -61,8 +61,8 @@ CATALOGUE = [
     ("gpt-5-codex-preview", "GPT-5 Codex Preview", "OpenAI"),
     ("gpt-5-mini", "GPT-5 Mini", "OpenAI"),
     ("o5-reasoning", "o5 Reasoning", "OpenAI"),
-    ("gemini-3-pro", "Gemini 3 Pro", "Google"),
-    ("gemini-3-flash", "Gemini 3 Flash", "Google"),
+    ("kimi-k2-thinking", "Kimi K2 Thinking", "Moonshot"),
+    ("kimi-k2", "Kimi K2", "Moonshot"),
     ("llama-4-405b-instruct", "Llama 4 405B Instruct", "Meta"),
     ("mistral-large-3", "Mistral Large 3", "Mistral"),
     ("qwen-3-max", "Qwen 3 Max", "Alibaba"),
