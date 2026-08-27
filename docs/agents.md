@@ -163,6 +163,24 @@ present an empty slash menu as a failure. Its typed config is approval policy.
 own store: a rollout with `parent_thread_id` set and `thread_source: subagent`. So
 lineage cannot be recovered from an id-naming convention alone.
 
+**`thread_history_*.sqlite` is a projection of the rollouts, not a replacement — read
+the JSONL.** *Measured 2026-08-28 against codex-cli 0.150.1.* The store also holds
+`~/.codex/thread_history_1.sqlite` (`thread_items`, `thread_turns`) and the CLI offers
+`migrate-rollouts` to publish legacy sessions into it, which together read as a store
+migrating away from files. It is not: `thread_history_projection_state` tracks a
+per-thread `next_rollout_byte_offset` and `next_rollout_ordinal`, and `thread_turns`
+keeps `rollout_byte_offset`/`rollout_end_byte_offset` pointing back into the file — the
+table is an incrementally-built pagination index *over* the rollouts. The census settles
+it: 1258 `rollout-*.jsonl` against 73 projected threads on the same install, so a
+parser reading only SQLite would silently miss 94% of the sessions on this machine.
+
+Two consequences for an adapter. The JSONL is the authoritative source for `adopt` and
+`watch`, as the row above says. But `enumerate` may legitimately prefer the projection
+where a thread is present, because it is the only place carrying turn-level `status`,
+`duration_ms`, `started_at`, and `completed_at` — facts a rollout scan would have to
+reconstruct — and it must fall back to walking the files for every thread the
+projection does not hold.
+
 **Model and thinking are read from `--describe`**, which is why `codex` correctly
 shows effort with no model selector — nothing in the UI hardcodes a model list.
 
