@@ -1,0 +1,36 @@
+# The Rust side of Sylph, as one workspace.
+#
+# `docs/roadmap.md` § Implementation order names the crates this grows into:
+# `protocol`, `adapters`, `server`, `envagent`. Only `protocol` exists yet, and
+# `backend` is the standing server until step 3 moves it.
+#
+# One workspace rather than four independent crates because they share one
+# vocabulary and one dependency set. A shared `Cargo.lock` is the part that
+# matters: two crates in this repo resolving serde to different patch versions
+# would be a wire mismatch nobody declared.
+[workspace]
+resolver = "2"
+members = ["backend", "crates/protocol"]
+
+# Pins every member inherits with `.workspace = true`.
+#
+# Only the dependencies more than one crate will hold are listed. A pin that
+# lives in exactly one manifest is noise here, and moving it up would invite the
+# next reader to assume it is shared.
+#
+# Versions are copied verbatim from `backend/Cargo.toml` as it stood before the
+# workspace existed. Nothing is bumped: a version change is a separate act with
+# its own verification, and folding one into a restructuring hides it.
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "2.0"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+tokio = { version = "1.44", features = ["full"] }
+# The adapter seam is dyn-dispatched — the envagent holds a `dyn Adapter` chosen
+# per agent at runtime — so its async methods need boxing that native `async fn`
+# in traits still does not provide for trait objects. Same reason `Environment`
+# already uses it.
+async-trait = "0.1"

@@ -1,0 +1,26 @@
+[package]
+name = "sylph-protocol"
+version = "0.1.0"
+edition = "2021"
+# Matches the workspace's other member. Claiming less would be a claim this
+# crate has not tested.
+rust-version = "1.88"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+# `EventStream` is a `Stream`, so the trait definition needs the trait itself.
+# `futures` rather than bare `futures-core` because the adapters in step 2 will
+# want the combinators, and one pin is better than two.
+futures = { workspace = true }
+
+# Deliberately absent: `tokio`, `sqlx`, `axum`, `chrono`.
+#
+# This crate is the vocabulary and the contract, so it must be compilable by
+# anything that speaks either — including a future test harness with no runtime.
+# `chrono` in particular would be easy to reach for and is not needed: every
+# timestamp here is an `i64` of epoch milliseconds, which is what the journal
+# stores and what the wire carries.

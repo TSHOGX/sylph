@@ -391,9 +391,21 @@ async fn capabilities_are_read_from_the_live_agent() {
     assert_eq!(body["attached"], true);
     assert_eq!(body["agent"], "mock");
     // Declared in the handshake, and what a UI reads before offering the control.
+    //
+    // The mock declares five names and only three survive: `approval` and `slash` are
+    // deliberately not in `Capability` any more. *Measured:* neither was ever read
+    // outside the declaring module, and each duplicated a fact the capability *surface*
+    // already carries — whether a session has slash commands is `commands`, and whether
+    // it raises approvals is whether requests arrive. A second place to state one fact
+    // is a place that can disagree with it. `sylph_protocol::Capability` records the
+    // per-variant reasoning. The mock still declares them on purpose, so this asserts
+    // the filtering rather than only asserting what the mock happens to send.
     let supports = body["supports"].as_array().unwrap();
     assert!(supports.iter().any(|s| s == "interrupt"));
-    assert!(supports.iter().any(|s| s == "approval"));
+    assert!(supports.iter().any(|s| s == "steer"));
+    assert!(supports.iter().any(|s| s == "set_config"));
+    assert!(!supports.iter().any(|s| s == "approval"));
+    assert!(!supports.iter().any(|s| s == "slash"));
     // The command list is the session's own, learned at open rather than declared
     // in a static descriptor.
     assert_eq!(body["capabilities"]["commands"][0]["name"], "noop");
@@ -453,6 +465,16 @@ async fn setting_a_config_option_answers_with_the_refreshed_surface() {
     // change another's choices, so a client that trusted its own optimistic value
     // would drift from the agent exactly when it matters.
     assert_eq!(model["currentValue"], "slow");
+    // The discriminant is still spelled `type`, still at the top level beside `id`.
+    //
+    // Asserted here rather than only in a unit test because this is the one place that
+    // observes the whole path: a Python adapter emits the JSON, the server parses it
+    // into `sylph_protocol::ConfigOption`, and a client reads it back out. That struct
+    // is a flat `{id, type, currentValue, …}` where v3 had an internally tagged enum,
+    // and the two produce identical bytes — but "identical" is a claim about serde's
+    // internal tagging that only a round trip through a real producer can settle.
+    assert_eq!(model["type"], "select");
+    assert!(model.get("kind").is_none(), "the Rust field name must not reach a client");
     // And the rest of the surface is intact, which is the property the whole facet
     // design exists to guarantee.
     assert_eq!(body["capabilities"]["commands"].as_array().unwrap().len(), 2);

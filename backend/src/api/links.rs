@@ -289,7 +289,7 @@ pub async fn set_config(
     let Some(option) = surface
         .config
         .iter()
-        .find(|option| option.id() == body.config_id)
+        .find(|option| option.id == body.config_id)
     else {
         return Err(Error::InvalidRequest(format!(
             "'{}' is not a config option this session offers",
@@ -319,8 +319,8 @@ pub async fn set_config(
     // last investigation to the picker.
     link.set_config(&body.config_id, body.value)
         .await
-        .map_err(|error| match error.downcast_ref::<crate::adapter::link::AdapterError>() {
-            Some(refusal) if refusal.code == "INVALID_VALUE" => {
+        .map_err(|error| match error.downcast_ref::<sylph_protocol::AdapterError>() {
+            Some(refusal) if refusal.code == sylph_protocol::RefusalCode::InvalidValue => {
                 Error::InvalidRequest(refusal.message.clone())
             }
             _ => Error::Unsupported(format!("{:#}", error)),

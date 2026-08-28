@@ -10,7 +10,7 @@ rust-version = "1.88"
 [dependencies]
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
-tokio = { version = "1.44", features = ["full"] }
+tokio = { workspace = true }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
 
@@ -23,9 +23,16 @@ sqlx = { version = "0.8", features = [
     "chrono",
 ] }
 
+# The event vocabulary and the adapter contract as types.
+#
+# A path dependency rather than a module because step 2's adapters and step 4's
+# envagent link against it without linking against the server. See
+# `docs/roadmap.md` § Implementation order.
+sylph-protocol = { path = "../crates/protocol" }
+
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
 # The on-disk config format. TOML rather than JSON because this file is
 # hand-edited and seeded fully commented: JSON has no comments, so a seeded file
 # could not explain itself, and every default would have to be duplicated into
@@ -33,7 +40,7 @@ serde_json = "1.0"
 toml = "1.1"
 
 # Async utilities
-futures = "0.3"
+futures = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
 
@@ -42,12 +49,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
-anyhow = "1.0"
-thiserror = "2.0"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
 
 # Utilities
 uuid = { version = "1.11", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
@@ -69,7 +76,7 @@ nix = { version = "0.29", features = ["signal", "process"] }
 # `dyn Environment` chosen per session at runtime, so its async methods need
 # boxing that native `async fn` in traits still does not provide for trait
 # objects. See `docs/environments.md`.
-async-trait = "0.1"
+async-trait = { workspace = true }
 
 # Office document parsing for the Artifacts pane.
 #
