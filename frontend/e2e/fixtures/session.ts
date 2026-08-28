@@ -14,8 +14,52 @@ import { expect, type Page } from "@playwright/test";
  * one spec owns the path, the rest state their precondition.
  */
 
-/** The mock runner installed by `playwright.config.ts`. The only agent present. */
+/** The fixture agent installed by `playwright.config.ts`. The only agent present. */
 const AGENT = "e2e";
+
+/**
+ * The environment this machine is, resolved once per worker.
+ *
+ * `POST /sessions` requires an `environment`, and it is **not** optional with a sensible
+ * default — that is the point of the field. Identity is `(environment, agent, native_id)`
+ * and availability is per machine, so there is no global default that is true anywhere:
+ * "codex is installed" is a fact about one laptop, and a server-side guess would key a
+ * session to a machine the caller did not name.
+ *
+ * So it is read from `GET /api/v1/environments` rather than written here. A hardcoded id
+ * would pass on this checkout and fail on any other install, which is the same class of
+ * defect as a default pointing at one machine's absolute path (`AGENTS.md` records one
+ * that shipped). Until pairing lands there is exactly one environment, so the first row is
+ * the local one.
+ *
+ * Cached because every spec calls `createSession` and the answer cannot change within a
+ * run: one worker, one backend, one machine.
+ */
+let cachedEnvironment: string | undefined;
+
+async function environmentId(page: Page): Promise<string> {
+  if (cachedEnvironment) return cachedEnvironment;
+
+  const response = await page.request.get("/api/v1/environments");
+  expect(
+    response.ok(),
+    `environments lookup failed: ${response.status()} ${await response.text()}`,
+  ).toBe(true);
+
+  const { environments } = (await response.json()) as {
+    environments: { id: string }[];
+  };
+  // Asserted rather than optional-chained: with no environment there is nothing to key a
+  // session to, and every spec would otherwise fail on a 422 about a missing field —
+  // which reads as a broken request rather than as a backend reporting no machine.
+  expect(
+    environments.length,
+    "the backend reported no environments, so no session can be created",
+  ).toBeGreaterThan(0);
+
+  cachedEnvironment = environments[0].id;
+  return cachedEnvironment;
+}
 
 /**
  * Open a page and wait until keyboard shortcuts actually work.
@@ -71,8 +115,17 @@ export async function createSession(
   // findable among several. The create picker deliberately does not ask for it:
   // a session is labelled by its opening message, which the user is about to
   // type anyway.
+  // `environment` is part of the identity triple and is **required** — not ceremony to
+  // trim. A session is keyed by `(environment, agent, native_id)`, so a create with no
+  // environment names no machine and is refused with a 422. This fixture omitted it, which
+  // is why every spec that creates a session failed at its first request.
   const response = await page.request.post("/api/v1/sessions", {
-    data: { agent: AGENT, workdir, ...(title ? { title } : {}) },
+    data: {
+      environment: await environmentId(page),
+      agent: AGENT,
+      workdir,
+      ...(title ? { title } : {}),
+    },
   });
   expect(
     response.ok(),

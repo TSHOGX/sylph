@@ -42,12 +42,12 @@
  */
 
 import dynamic from "next/dynamic";
-import { useParams } from "next/navigation";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api, type FileEntry } from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
 import { iconFor, type FileIconName } from "@/lib/file-kind";
+import { useSessionIdParam } from "@/lib/use-session-id-param";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useT, type Translate } from "@/lib/i18n";
 import { ContextMenu, MenuButton, type MenuItem } from "@/components/ui/menu";
@@ -107,8 +107,9 @@ const FullscreenViewer = dynamic(
 
 export function ArtifactsPane() {
   const t = useT();
-  const params = useParams();
-  const sessionId = typeof params?.id === "string" ? params.id : undefined;
+  // Decoded, or the file endpoints receive a double-encoded id and the pane reports
+  // "Could not list the working directory" — see `use-session-id-param`.
+  const sessionId = useSessionIdParam();
   const {
     artifact,
     showArtifact,

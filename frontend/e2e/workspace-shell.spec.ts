@@ -686,3 +686,41 @@ test("attachments stage inside the composer rather than in a separate dropzone",
   await staged.getByRole("button", { name: "Remove note.txt" }).click();
   await expect(staged).toHaveCount(0);
 });
+
+/**
+ * The open session's row is marked as current in the sidebar.
+ *
+ * # Why this is an E2E spec and cannot be a unit test
+ *
+ * The bug it guards was a comparison that was **silently always false**. The sidebar read
+ * the route param raw — `local%3Ae2e%3A…` — and compared it against `session.id`, which is
+ * the decoded triple, so no row ever matched. Nothing errored, no request was malformed,
+ * and the only observable symptom was the absence of a highlight nobody was looking for.
+ *
+ * That shape has no unit-test signature: reading the param raw still yields a string, so a
+ * test over the comparison would need to already know which of the two spellings is right,
+ * which is the very thing that was wrong. Only a rendered tree with a real route can
+ * observe two id spaces failing to meet — which is why `lib/use-session-id-param.ts` is a
+ * shared helper rather than three edits, and why this spec exists beside its unit tests.
+ *
+ * Asserted on `aria-current="page"` rather than on a class, because that is the promise to
+ * a screen reader as well as the thing the styling hangs off: a highlight that is only
+ * colour tells an assistive client nothing about where it is.
+ */
+test("the sidebar marks the session named by the route as current", async ({ page }) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sylph-e2e-active-"));
+  const sessionId = await createSession(page, { workdir: dir });
+
+  const sidebar = page.getByRole("complementary", { name: "Workspaces" });
+  await expect(sidebar).toBeVisible();
+
+  // Exactly one row, and it is this session's. Matched by href rather than by label,
+  // because a row's text is its workdir and its agent — neither of which is unique once a
+  // run has created a hundred sessions, which is the accumulation `AGENTS.md` warns
+  // against counting on.
+  const current = sidebar.locator(`a[href="/sessions/${encodeURIComponent(sessionId)}"]`);
+  await expect(current).toHaveAttribute("aria-current", "page");
+
+  // And only that one, or "current" would mean nothing.
+  await expect(sidebar.locator('a[aria-current="page"]')).toHaveCount(1);
+});

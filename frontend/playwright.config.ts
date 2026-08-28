@@ -90,7 +90,11 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: "cargo run --quiet",
+      // `--features e2e` compiles in the deterministic E2E agent
+      // (`crates/adapters/src/e2e.rs`). It is a feature rather than an environment
+      // variable so a production binary has no code path that reaches the fixture at
+      // all: "which agents exist" must not depend on a variable a running server reads.
+      command: "cargo run --quiet --features e2e",
       cwd: path.join(__dirname, "..", "backend"),
       url: `http://127.0.0.1:${BACKEND_PORT}/api/v1/health`,
       reuseExistingServer: false,
@@ -101,17 +105,28 @@ export default defineConfig({
       env: {
         SYLPH_HOME: sylphHome,
         SYLPH_PORT: String(BACKEND_PORT),
-        // Pinned to the fixtures tree, and pinned for *both* roots. Left unset,
-        // bundled-adapter resolution finds the repo's real `adapters/`, so the
-        // suite would discover `claude` and `pi` and run the developer's actual
-        // agent CLIs — spawning real processes, and making specs pass or fail on
-        // which agents happen to be installed. Naming it keeps the fixture the
-        // only agent that exists.
+        // Pinned to the fixtures tree, and pinned for *both* roots.
+        //
+        // Still needed, and the reason is worth stating because the compiled-in adapter
+        // looks like it should have replaced this. The backend's *live* path still starts
+        // an agent by spawning `adapter.sh` as a subprocess and speaking NDJSON to it
+        // (`backend/src/adapter/link.rs`); in-process adapter calls are step 3 of
+        // `docs/roadmap.md` § Implementation order and are not written yet. So the
+        // fixture that a session can actually be *started* with is
+        // `e2e/fixtures/adapters/e2e/`, and `--features e2e` above is what makes the
+        // agent of that name pass the validation gate on `POST /sessions`.
+        //
+        // Measured on this checkout: with the feature and without these two roots, the
+        // agent list reads `claude, codex, e2e, pi` and creating an `e2e` session fails
+        // `AGENT_START_FAILED: Agent 'e2e' is not available on this machine` — listed and
+        // unstartable, because `LinkManager::adapter_path` finds no `adapter.sh`.
+        //
+        // Pinning both roots is also what keeps the *developer's* agents out of the run.
+        // Left unset, bundled-adapter resolution finds the repo's real `adapters/`, so the
+        // suite would run the developer's actual `claude` and `pi` CLIs — spawning real
+        // processes, and making specs pass or fail on which agents happen to be installed.
         SYLPH_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "adapters"),
         SYLPH_BUNDLED_AGENTS_DIR: path.join(__dirname, "e2e", "fixtures", "adapters"),
-        // Point at a path that does not exist so archive-dependent screens
-        // exercise their unavailable state instead of the developer's archive.
-        SYLPH_TRACEDB_BIN: path.join(sylphHome, "absent-trace-db"),
         // Browse roots always include `$HOME`, but the specs create sessions
         // outside it. Naming these keeps the directory picker assertable without
         // depending on what happens to live in the developer's home directory.

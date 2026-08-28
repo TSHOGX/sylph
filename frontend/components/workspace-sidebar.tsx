@@ -24,13 +24,13 @@
  */
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Session } from "@/lib/api";
 import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
 import { liveSessionsQuery } from "@/lib/sessions-query";
 import { relayName, useEnvironments, type Environments } from "@/lib/environments";
+import { useSessionIdParam } from "@/lib/use-session-id-param";
 import { useT } from "@/lib/i18n";
 import { useSettings } from "@/lib/settings";
 import dynamic from "next/dynamic";
@@ -68,8 +68,11 @@ interface Group {
 export function WorkspaceSidebar() {
   const { settings, update } = useSettings();
   const t = useT();
-  const params = useParams();
-  const activeId = typeof params?.id === "string" ? params.id : undefined;
+  // Decoded, because this is compared against `session.id` — the decoded triple — to
+  // decide which row is current. Read raw, that comparison is silently always false and
+  // the active row never highlights, with nothing erroring anywhere
+  // (`use-session-id-param`).
+  const activeId = useSessionIdParam();
   const [picking, setPicking] = useState(false);
 
   const bindWorkspace = (path: string) => {

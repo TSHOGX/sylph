@@ -16,7 +16,6 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
@@ -27,6 +26,7 @@ import {
   type TurnWithEvents,
   type UnavailableReason,
 } from "@/lib/api";
+import { useSessionIdParam } from "@/lib/use-session-id-param";
 import { useT } from "@/lib/i18n";
 import { ErrorBoundary } from "@/lib/error-boundary";
 import { formatTimestamp, sessionLabel } from "@/lib/format";
@@ -62,8 +62,10 @@ const TERMINAL: ReadonlySet<Turn["status"]> = new Set([
 
 export default function SessionPage() {
   const t = useT();
-  const params = useParams();
-  const sessionId = String(params.id);
+  // Decoded by the hook, never read raw: the App Router hands back the raw path
+  // segment, and a session id is the identity triple, so it is percent-encoded there.
+  // `use-session-id-param` holds the reasoning and the three ways this failed.
+  const sessionId = useSessionIdParam() ?? "";
   const queryClient = useQueryClient();
   const { settings } = useSettings();
   const { showArtifact, registerSessionActions, setActiveWorkdir } = useWorkspaceUI();

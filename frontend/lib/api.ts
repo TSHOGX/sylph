@@ -1104,8 +1104,16 @@ function queryString(params: Record<string, string | number | undefined>): strin
  *
  * `encodeURIComponent` and never `encodeURI`: the latter deliberately leaves `/` and
  * `:` alone, which are precisely the two characters this exists to escape.
+ *
+ * **Exported because the streaming paths do not go through this client.** `use-agent-session`
+ * opens its event stream with `fetch` directly, so it interpolates a session id itself — and
+ * it did so raw, which is exactly the defect this function's first paragraph describes:
+ * the browser percent-encoded the `:` on the way out, and the backend's `SessionId::decode`
+ * splits on a *literal* `:` and never decodes, so it refused an id it had itself minted.
+ * Exported rather than copied, because two copies of one escaping rule is one that will
+ * diverge.
  */
-function segment(id: string): string {
+export function segment(id: string): string {
   return encodeURIComponent(id);
 }
 

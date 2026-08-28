@@ -22,6 +22,7 @@ import json
 import sys
 import threading
 import time
+import uuid
 
 PROTOCOL = "sylph.agent.v3"
 
@@ -683,10 +684,25 @@ def serve():
                       "description": "Model tier"}}})
 
         elif t == "open":
-            # A stable id, so a resumed session in a spec is recognisably the same
-            # conversation rather than a new one that happens to look alike.
+            # Echo the id we were handed, and mint one only when there is none.
+            #
+            # The echo is what makes a resume a resume: a re-open passes the native id the
+            # journal already holds, so the session is recognisably the same conversation
+            # rather than a new one that happens to look alike. That half is unchanged.
+            #
+            # The *fallback* used to be the constant `"e2e-native-session"`, and once
+            # identity became `(environment, agent, native_id)` that made every fresh
+            # session collide: the server opens a new session with no id (`links/mod.rs`
+            # passes `session_id: None`), so session #2 received the same triple as #1 and
+            # the primary key correctly refused it. The whole suite failed with
+            # `409 SESSION_ALREADY_PRESENT` after the first spec — a fixture problem that
+            # reads as a server one, since the error is exactly what a real duplicate
+            # deserves.
+            #
+            # Minted per process *and* per open, because a spec may create several sessions
+            # in one run and a per-process id would only move the collision.
             emit({"t": "ok", "id": mid,
-                  "sessionId": msg.get("sessionId") or "e2e-native-session",
+                  "sessionId": msg.get("sessionId") or "e2e-{}".format(uuid.uuid4()),
                   "commands": COMMANDS,
                   "subagents": [{"name": "Explore", "description": "Read-only search"}],
                   "config": fixture.config,
