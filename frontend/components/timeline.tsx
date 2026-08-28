@@ -821,9 +821,26 @@ function ToolCall({
   const status = result ? resultStatus(result) : { failed: false, exitCode: undefined };
   const running = streaming || (!result && event.phase !== "completed");
 
+  // Derived, not initial — the same repair the trajectory row above already carries, and
+  // this was the other half of it. `AGENTS.md` § "`useState(derived)` captures a snapshot"
+  // names both sites; only that one had been fixed.
+  //
+  // `status.failed` comes from the `tool_result`, which arrives *after* the `tool_call`
+  // this row mounted on. So `useState(defaultOpen)` read the flag once, before the failure
+  // was knowable, and auto-expand-on-failure fired only when both events landed in a single
+  // render — which is to say only against a mock fast enough to batch them. Against a real
+  // agent, and against the paced fixture, a failed command stayed collapsed behind "more",
+  // which is the one case where the output *is* the answer.
+  //
+  // Three inputs, one boolean, so the precedence is stated rather than left to `??`
+  // ordering: an explicit expand-all/collapse-all wins, then this row's own toggle, then
+  // the derived default. `userOpen` remembers the *override* rather than the value, so a
+  // row the user deliberately collapsed does not re-open when a later event changes the
+  // default.
   const defaultOpen =
     shape.hunks.length > 0 || status.failed || settings.expandToolOutput || running;
-  const [open, setOpen] = useState(defaultOpen);
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? defaultOpen;
   const isOpen = expandAll ?? open;
 
   const openFile = useCallback(
@@ -857,7 +874,7 @@ function ToolCall({
           {hasBody && (
             <button
               type="button"
-              onClick={() => setOpen(!isOpen)}
+              onClick={() => setUserOpen(!isOpen)}
               aria-expanded={isOpen}
               className="rounded px-1 text-3xs text-ink-muted hover:bg-hover hover:text-ink-soft focus-ring"
             >
