@@ -234,6 +234,16 @@ mistakes surface in tests, which is why store-level tests matter.
 or `npm run lint`). `npx next lint` fails with a misleading
 `Invalid project directory` error naming a `lint` directory.
 
+**Deleting a route leaves `.next/dev/types/` behind, and the stale copy fails the
+type check.** `npm run build` reported `error TS2307: Cannot find module
+'../../../app/search/page.js'` after that route was deleted — naming a module that
+no longer exists and that no source file references. The generated validator in
+`.next/` still declared it, so the error describes the build directory rather than
+the code. `rm -rf .next` and rebuild. Worth recognising because the message points
+at a path in `app/`, which reads as an unfinished deletion rather than as a cached
+artifact, and because `.next` is gitignored so the state is invisible to `git
+status`.
+
 **`SYLPH_WEB_BACKEND` is read at build time.** Next compiles rewrites into the
 route manifest, so it must be set for `next build`, not only for `next start`.
 Setting it only at start time leaves a production build proxying to the default
