@@ -99,15 +99,17 @@ test("a path that does not exist is called out, and a non-path is not", async ({
   await expect(logLevel).not.toContainText("missing");
 });
 
-test("the adapter directory actually in use is marked among the ones tried", async ({ page }) => {
-  await gotoReady(page);
-  const settings = await openConfig(page);
-
-  // "No agents" is unactionable without this: a missing install and a mistyped
-  // path produce the same empty list and need opposite fixes. Exactly one entry
-  // can be the one being read.
-  await expect(settings.getByText("in use")).toHaveCount(1);
-});
+// The "adapter directory in use" spec is deleted, not skipped, because the question it
+// asked no longer exists. It asserted exactly one of the searched adapter directories was
+// marked as the one being read — a diagnosis that mattered while discovery walked
+// directories and a mistyped path produced the same empty agent list as a missing install.
+// Adapters are linked into the envagent now, so there is no directory to search and no
+// candidate to choose between (`settings-config.tsx` states the same at the deleted table).
+//
+// The *concern* survives and moved rather than vanishing: "no agents" must still be
+// actionable, and it is now answered per environment — `GET /environments` names which CLI
+// each machine is missing. A spec for that belongs with the environments UI, which is
+// stubbed until pairing lands.
 
 test("the section is read-only, offering no way to edit a path from the browser", async ({
   page,
