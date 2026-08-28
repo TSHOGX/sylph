@@ -83,7 +83,27 @@ async fn diagnostics_reports_runtime_state() {
     let body = json_body(response).await;
     assert_eq!(body["ok"], true);
     assert!(body["uptimeSeconds"].is_number());
-    assert_eq!(body["agents"], json!(["mock"]));
+    // **Asserted on identity, not on the exact set.** Availability is now the union of
+    // linked-in adapters (whose vendor CLI is on this machine's `PATH`) and fixture
+    // `adapter.sh` directories, so an exact-set assertion passes or fails on which agent
+    // CLIs the developer happens to have installed — it read `["mock"]` on a machine with
+    // none and `["claude","codex","mock","pi"]` on one with all three. What the endpoint
+    // promises is that it reports what this environment can run, and the fixture is what
+    // this test installed.
+    let agents = body["agents"]
+        .as_array()
+        .expect("agents is an array")
+        .iter()
+        .map(|name| name.as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        agents.iter().any(|name| name == "mock"),
+        "the fixture agent this test installed must be reported, found {agents:?}"
+    );
+    assert!(
+        !agents.iter().any(|name| name == "gemini" || name == "opencode"),
+        "a deliberately unsupported agent must never be reported, found {agents:?}"
+    );
     // `activeTurns`, not `activeProcesses`: the value has always been a turn count,
     // and the old name only read as accurate while every process was one Sylph
     // spawned. An adopted session has a live process that is not ours to count.

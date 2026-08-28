@@ -23,6 +23,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
   isRetryable,
+  segment,
   type Facet,
   type LinkState,
   type PendingRequest,
@@ -177,7 +178,15 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
     async function listen() {
       try {
         const response = await fetch(
-          `/api/v1/sessions/${sessionId}/events`,
+          // `segment`, not raw interpolation: a session id is the identity triple, so it
+          // holds `:` — and a native id can hold `/` besides, since `claude` names a
+          // delegated session `<parent>/agent-a<name>-<hash>`. Raw, the browser encodes
+          // the colons itself and the backend refuses the result, because
+          // `SessionId::decode` splits on a literal `:` rather than decoding first.
+          // `sessionId!` for the same reason the queries above use it: the effect returns
+          // early when it is absent, but that guard does not narrow inside this nested
+          // function.
+          `/api/v1/sessions/${segment(sessionId!)}/events`,
           { signal: controller.signal, headers: { Accept: "text/event-stream" } },
         );
         if (!response.ok || !response.body) return;

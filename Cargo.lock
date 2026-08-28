@@ -1850,6 +1850,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "sylph-adapters"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "sylph-protocol",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "sylph-protocol"
 version = "0.1.0"
 dependencies = [
@@ -1882,6 +1898,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "sylph-adapters",
  "sylph-protocol",
  "tempfile",
  "thiserror",

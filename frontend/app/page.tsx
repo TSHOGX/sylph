@@ -232,7 +232,11 @@ function Recents({
         {rows.map(({ workdir, session, otherCount }) => (
           <li key={workdir}>
             <Link
-              href={`/sessions/${session.id}`}
+              // Encoded, matching `workspace-sidebar.tsx`'s own link. A session id is the
+              // identity triple, so it holds `:`, and a native id can hold `/`. The two
+              // entry points into a session must agree, or one of them opens a route the
+              // other does not.
+              href={`/sessions/${encodeURIComponent(session.id)}`}
               className="flex items-baseline gap-3 rounded-lg px-2 py-2 hover:bg-sunken focus-ring"
             >
               <span className="min-w-0 flex-1">

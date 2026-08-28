@@ -123,6 +123,11 @@ export function useSSE({ turnId, afterSeq = -1, enabled = true }: UseSSEOptions)
 
       try {
         const response = await fetch(
+          // Raw interpolation is safe *here specifically*: a turn id is a server-minted
+          // surrogate key with no `:` or `/` in it. It is not safe for a session id, which
+          // is the identity triple — see `segment` in `lib/api.ts`, and the sibling stream
+          // in `use-agent-session.ts` that had to adopt it. Do not copy this line for an
+          // id type without checking what characters that type can hold.
           `/api/v1/turns/${turnId}/events?after_seq=${cursorRef.current}`,
           {
             credentials: "include",

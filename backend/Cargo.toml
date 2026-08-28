@@ -29,6 +29,14 @@ sqlx = { version = "0.8", features = [
 # envagent link against it without linking against the server. See
 # `docs/roadmap.md` § Implementation order.
 sylph-protocol = { path = "../crates/protocol" }
+# The adapter implementations, so `crate::adapters` delegates rather than reading the
+# filesystem. `AGENTS.md` § Compatibility forbids keeping the seam once the real crate
+# answers.
+#
+# The `e2e` feature is **not** enabled here: it must be asked for explicitly
+# (`cargo run --features e2e`), because a fixture agent reachable from a default build
+# would make "which agents exist" depend on how the server was compiled.
+sylph-adapters = { path = "../crates/adapters" }
 
 # Serialization
 serde = { workspace = true }
@@ -114,3 +122,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "sylph-web-backend"
 path = "src/main.rs"
+
+[features]
+# Forwards to `sylph-adapters/e2e`, which compiles in the deterministic E2E agent.
+#
+# A feature rather than an environment variable, and that is the whole point: the fixture
+# cannot be enabled on a running server, so a production binary has no code path that
+# reaches it. `frontend/playwright.config.ts` builds the backend with this.
+e2e = ["sylph-adapters/e2e"]
