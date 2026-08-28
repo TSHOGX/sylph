@@ -309,19 +309,12 @@ async fn serve() -> anyhow::Result<()> {
     let port = config.port;
     let state = AppState::build(config).await?;
 
-    match state.tracedb.archive_counts().await {
-        Some(counts) => tracing::info!(
-            "TraceDB available: {} archived sessions, {} events",
-            counts.sessions.unwrap_or(0),
-            counts.events.unwrap_or(0)
-        ),
-        None => tracing::warn!(
-            "TraceDB unavailable, so archive search and native session import will return \
-             no results. It is a separate install: put `trace-db` on your PATH, or set \
-             `tracedb.bin` in {}.",
-            state.config.config_path.display()
-        ),
-    }
+    // The archive-availability line that used to sit here is gone with the separate
+    // store. There is no external binary whose presence could be reported: history is
+    // `history.db` beside the journal, which either opened during `AppState::build` or
+    // failed the startup outright. `AppState::build` logs which agents this build can
+    // run, which is the fact that replaced it — and `GET /api/v1/environments` is where
+    // per-machine availability is reported (`docs/environments.md`).
 
     let app = router(state);
 

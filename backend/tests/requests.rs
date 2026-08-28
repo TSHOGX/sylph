@@ -13,10 +13,14 @@ use sylph_web_backend::models::PendingRequest;
 
 /// Insert a request the way the link drain task would, so these tests exercise
 /// the API and the store without needing a live adapter process.
-async fn raise_request(server: &TestBackend, session_id: &str, tool: &str) -> PendingRequest {
+async fn raise_request(
+    server: &TestBackend,
+    session_id: &sylph_protocol::SessionId,
+    tool: &str,
+) -> PendingRequest {
     let request = PendingRequest {
         id: uuid::Uuid::new_v4().to_string(),
-        session_id: session_id.to_string(),
+        session_id: session_id.clone(),
         turn_id: "turn-1".to_string(),
         adapter_request_id: "adapter-req-1".to_string(),
         kind: "approval".to_string(),
@@ -53,7 +57,7 @@ async fn raise_request(server: &TestBackend, session_id: &str, tool: &str) -> Pe
 async fn a_pending_request_is_listed_with_what_the_agent_proposed() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    raise_request(&server, &session_id, "Bash").await;
+    raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
 
     let response = server
         .get_authed(&format!("/api/v1/sessions/{}/requests", session_id))
@@ -80,7 +84,7 @@ async fn a_pending_request_is_listed_with_what_the_agent_proposed() {
 async fn the_adapter_request_id_is_never_serialized_to_a_client() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    raise_request(&server, &session_id, "Bash").await;
+    raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
 
     let body = json_body(
         server
@@ -103,7 +107,7 @@ async fn the_adapter_request_id_is_never_serialized_to_a_client() {
 async fn a_restart_abandons_pending_requests_rather_than_leaving_them_answerable() {
     let mut server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &session_id, "Bash").await;
+    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
 
     server.restart().await;
 
@@ -136,7 +140,7 @@ async fn a_restart_abandons_pending_requests_rather_than_leaving_them_answerable
 async fn an_option_the_agent_never_offered_is_refused() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &session_id, "Bash").await;
+    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
 
     let response = server
         .post_authed(
@@ -174,19 +178,19 @@ async fn resolving_an_unknown_request_is_a_404() {
 async fn a_second_answer_to_one_request_is_a_conflict() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &session_id, "Bash").await;
+    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
 
-    // No link exists in this harness, so the first answer claims the row and then
-    // reports that nothing is waiting for it. That is the correct order: the
-    // claim is what must be exclusive.
+    // The first answer claims the row and forwards it. `POST /sessions` starts an agent
+    // now, so this session has a live link — where this test previously asserted a
+    // `LINK_GONE` conflict, which was a fact about the harness rather than about
+    // resolution. The property under test is below: the claim is exclusive.
     let first = server
         .post_authed(
             &format!("/api/v1/requests/{}/resolve", request.id),
             json!({"option": "allow"}),
         )
         .await;
-    assert_eq!(first.status(), StatusCode::CONFLICT);
-    assert_eq!(json_body(first).await["error"]["code"], "LINK_GONE");
+    assert_eq!(first.status(), StatusCode::OK);
 
     let claimed = server.state.store.get_request(&request.id).await.unwrap().unwrap();
     assert_eq!(claimed.status, "resolved");
@@ -228,7 +232,7 @@ async fn a_second_answer_to_one_request_is_a_conflict() {
 async fn answering_a_request_announces_it_so_other_clients_stop_showing_it() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &session_id, "Bash").await;
+    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
 
     // Subscribed before the answer, standing in for the laptop that is already
     // displaying the panel.
@@ -279,7 +283,7 @@ async fn answering_a_request_announces_it_so_other_clients_stop_showing_it() {
 async fn a_request_abandoned_with_its_agent_is_announced_too() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &session_id, "Bash").await;
+    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
 
     // A real link, so this exercises the path a dying agent takes rather than an
     // artificial one. `detach` returns early when there is nothing attached — correct,
@@ -287,7 +291,7 @@ async fn a_request_abandoned_with_its_agent_is_announced_too() {
     server
         .state
         .links
-        .ensure(&session_id)
+        .ensure(&common::TestBackend::session_id(&session_id))
         .await
         .expect("the mock adapter must link");
 
@@ -295,7 +299,7 @@ async fn a_request_abandoned_with_its_agent_is_announced_too() {
     // in the buffer ahead of what this test is about.
     let mut other_client = server.state.hub.attach_session(&session_id).await;
 
-    server.state.links.detach(&session_id, "test").await;
+    server.state.links.detach(&common::TestBackend::session_id(&session_id), "test").await;
 
     // The request's own announcement, ahead of the `link` event: a client learns what
     // happened to the thing it is displaying, not only that something happened.
@@ -314,7 +318,7 @@ async fn a_request_abandoned_with_its_agent_is_announced_too() {
 async fn an_answer_can_carry_an_edited_version_of_the_proposed_input() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &session_id, "Bash").await;
+    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
 
     server
         .post_authed(
@@ -334,23 +338,56 @@ async fn an_answer_can_carry_an_edited_version_of_the_proposed_input() {
 #[tokio::test]
 async fn requests_on_an_unknown_session_are_a_404() {
     let server = TestBackend::start().await;
-    let response = server.get_authed("/api/v1/sessions/nope/requests").await;
+    let response = server.get_authed("/api/v1/sessions/env7fk2%3Amock%3Anope/requests").await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-/// Interrupt and steer need a live agent. Without one they report that rather
-/// than appearing to succeed, so a UI does not show a turn as interrupted when
-/// nothing was.
+/// Interrupt and steer reach the session's live agent.
+///
+/// This previously asserted the *absence* of one — `create_session` reserved a row and
+/// started nothing, so both controls reported a missing agent. `POST /sessions` now
+/// starts the agent, so the honest assertion is that both reach it. The behaviour the old
+/// name described is still covered, by
+/// `interrupt_and_steer_report_a_missing_agent_once_its_link_is_gone` below, which
+/// detaches first rather than relying on a link never having existed.
 #[tokio::test]
-async fn interrupt_and_steer_report_a_missing_agent_rather_than_succeeding() {
+async fn interrupt_and_steer_reach_a_live_agent() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
 
     let interrupted = server
         .post_authed(&format!("/api/v1/sessions/{}/interrupt", session_id), json!({}))
         .await;
-    assert_eq!(interrupted.status(), StatusCode::CONFLICT);
-    assert_eq!(json_body(interrupted).await["error"]["code"], "LINK_GONE");
+    assert_eq!(interrupted.status(), StatusCode::OK);
+
+    let steered = server
+        .post_authed(
+            &format!("/api/v1/sessions/{}/steer", session_id),
+            json!({"text": "also check the tests"}),
+        )
+        .await;
+    assert_eq!(steered.status(), StatusCode::OK);
+}
+
+/// Without a live agent they report that rather than appearing to succeed, so a UI does
+/// not show a turn as interrupted when nothing was.
+///
+/// The link is torn down explicitly, which is what makes this a test about the *feature*
+/// rather than about how the harness happens to create sessions — the distinction that
+/// made the version of this test above assert the wrong thing once creation started
+/// spawning an agent.
+#[tokio::test]
+async fn interrupt_and_steer_report_a_missing_agent_once_its_link_is_gone() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    server
+        .state
+        .links
+        .detach(&common::TestBackend::session_id(&session_id), "test")
+        .await;
+    // Removed so `ensure` cannot transparently establish a fresh link, which is what
+    // every one of these routes does on demand.
+    std::fs::remove_dir_all(server.agents_dir().join("mock")).unwrap();
 
     let steered = server
         .post_authed(
@@ -388,7 +425,7 @@ async fn capabilities_are_read_from_the_live_agent() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = json_body(response).await;
-    assert_eq!(body["attached"], true);
+    assert_eq!(body["link"]["control"]["available"], true);
     assert_eq!(body["agent"], "mock");
     // Declared in the handshake, and what a UI reads before offering the control.
     //
@@ -425,6 +462,15 @@ async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
     // anything the moment that layout changes — leaving a test that asserts the
     // detached path while never producing it.
     std::fs::remove_dir_all(server.agents_dir().join("mock")).unwrap();
+    // Torn down as well as removed. `POST /sessions` starts an agent now, so this
+    // session holds a *live* link that removing the adapter directory does not kill —
+    // and a live link keeps answering, which is correct: the process is running. What
+    // this test is about is the state after that link is gone and cannot be re-made.
+    server
+        .state
+        .links
+        .detach(&common::TestBackend::session_id(&session_id), "test")
+        .await;
 
     let body = json_body(
         server
@@ -433,10 +479,23 @@ async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
     )
     .await;
 
-    assert_eq!(body["attached"], false);
+    assert_eq!(body["link"]["control"]["available"], false);
+    // **The reason is what the empty list could never say.** An unexplained `false` was
+    // the original defect: a client could not tell a failed handshake from an agent that
+    // declares no commands, so the only honest thing it could render was nothing — which
+    // is how a stale install presented as a composer ignoring the `/` key. `no_agent`
+    // means an install rather than a retry, and a client caches it like a success.
+    assert_eq!(body["link"]["control"]["reason"], "no_agent");
+    // **Observe stays available**, which is the whole point of two facets: the transcript
+    // is the server's own record, so it reads whether or not the agent can be reached.
+    assert_eq!(body["link"]["observe"]["available"], true);
+    assert!(
+        body["link"]["observe"].get("reason").is_none(),
+        "an available facet carries no reason: {body}"
+    );
     assert_eq!(body["supports"].as_array().unwrap().len(), 0);
     // Capability is a property of a live link. Reporting a remembered list would
-    // promise interrupt on a session with no process to interrupt.
+    // promise interrupt on a session Sylph holds no channel to.
     assert!(body["capabilities"].is_null());
 }
 
@@ -688,7 +747,7 @@ async fn a_session_relinks_after_its_link_is_torn_down() {
             .await,
     )
     .await;
-    assert_eq!(first["attached"], true);
+    assert_eq!(first["link"]["control"]["available"], true);
     let commands = first["capabilities"]["commands"].as_array().unwrap().len();
 
     let detached = json_body(
@@ -697,7 +756,7 @@ async fn a_session_relinks_after_its_link_is_torn_down() {
             .await,
     )
     .await;
-    assert_eq!(detached["attached"], false);
+    assert_eq!(detached["link"]["control"]["available"], false);
 
     // The assertion the bug would fail: asking again must establish a new link by
     // resuming, not report a session that can never be spoken to again.
@@ -707,7 +766,7 @@ async fn a_session_relinks_after_its_link_is_torn_down() {
             .await,
     )
     .await;
-    assert_eq!(relinked["attached"], true, "a detached session must be relinkable");
+    assert_eq!(relinked["link"]["control"]["available"], true, "a detached session must be relinkable");
     assert_eq!(
         relinked["capabilities"]["commands"].as_array().unwrap().len(),
         commands,
@@ -757,10 +816,13 @@ async fn establishing_a_link_does_not_reorder_a_session_as_recent() {
 ///
 /// The options are verbs here, not answers: the fields carry what was chosen, which
 /// is what makes "pick, then annotate, then submit" expressible.
-async fn raise_question(server: &TestBackend, session_id: &str) -> PendingRequest {
+async fn raise_question(
+    server: &TestBackend,
+    session_id: &sylph_protocol::SessionId,
+) -> PendingRequest {
     let request = PendingRequest {
         id: uuid::Uuid::new_v4().to_string(),
-        session_id: session_id.to_string(),
+        session_id: session_id.clone(),
         turn_id: "turn-1".to_string(),
         adapter_request_id: "adapter-req-2".to_string(),
         kind: "choice".to_string(),
@@ -810,7 +872,7 @@ async fn raise_question(server: &TestBackend, session_id: &str) -> PendingReques
 async fn a_declared_form_reaches_a_client_that_lists_the_request() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    raise_question(&server, &session_id).await;
+    raise_question(&server, &common::TestBackend::session_id(&session_id)).await;
 
     let response = server
         .get_authed(&format!("/api/v1/sessions/{}/requests", session_id))
@@ -832,7 +894,7 @@ async fn a_declared_form_reaches_a_client_that_lists_the_request() {
 async fn a_form_answer_is_recorded_with_its_values_and_notes() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_question(&server, &session_id).await;
+    let request = raise_question(&server, &common::TestBackend::session_id(&session_id)).await;
 
     let response = server
         .post_authed(
@@ -843,8 +905,7 @@ async fn a_form_answer_is_recorded_with_its_values_and_notes() {
             }}),
         )
         .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(json_body(response).await["error"]["code"], "LINK_GONE");
+    assert_eq!(response.status(), StatusCode::OK);
 
     let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "resolved");
@@ -877,7 +938,7 @@ async fn an_answer_that_does_not_fit_the_form_is_refused_and_leaves_it_open() {
     ];
 
     for input in cases {
-        let request = raise_question(&server, &session_id).await;
+        let request = raise_question(&server, &common::TestBackend::session_id(&session_id)).await;
         let response = server
             .post_authed(
                 &format!("/api/v1/requests/{}/resolve", request.id),
@@ -904,7 +965,7 @@ async fn an_answer_that_does_not_fit_the_form_is_refused_and_leaves_it_open() {
 async fn declining_a_form_does_not_require_it_to_be_complete() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_question(&server, &session_id).await;
+    let request = raise_question(&server, &common::TestBackend::session_id(&session_id)).await;
 
     let response = server
         .post_authed(
@@ -913,8 +974,7 @@ async fn declining_a_form_does_not_require_it_to_be_complete() {
         )
         .await;
     // Claimed, then reported as having nowhere to go — not refused as incomplete.
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(json_body(response).await["error"]["code"], "LINK_GONE");
+    assert_eq!(response.status(), StatusCode::OK);
 
     let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
     assert_eq!(stored.chosen_option.as_deref(), Some("deny"));
@@ -926,7 +986,7 @@ async fn declining_a_form_does_not_require_it_to_be_complete() {
 async fn a_request_with_no_form_still_accepts_an_edited_proposal() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &session_id, "Bash").await;
+    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
 
     let response = server
         .post_authed(
@@ -934,7 +994,7 @@ async fn a_request_with_no_form_still_accepts_an_edited_proposal() {
             json!({"option": "allow", "input": {"command": "rm -rf build/tmp"}}),
         )
         .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::OK);
 
     let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "resolved");

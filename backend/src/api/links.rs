@@ -9,6 +9,8 @@ use axum::extract::{Path, State};
 use axum::Json;
 use tokio_stream::StreamExt;
 
+use sylph_protocol::SessionId;
+
 use crate::error::{Error, Result};
 use crate::links::LinkState;
 use crate::models::{PendingRequest, ResolveRequest};
@@ -24,7 +26,7 @@ pub async fn capabilities(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<LinkState>> {
-    require_session(&state, &session_id).await?;
+    let session_id = require_session(&state, &session_id).await?;
 
     if let Err(error) = state.links.ensure(&session_id).await {
         // A missing adapter or a refusing agent is a real failure, but it is the
@@ -52,7 +54,7 @@ pub async fn attach(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<LinkState>> {
-    require_session(&state, &session_id).await?;
+    let session_id = require_session(&state, &session_id).await?;
 
     state
         .links
@@ -68,7 +70,7 @@ pub async fn detach(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<LinkState>> {
-    require_session(&state, &session_id).await?;
+    let session_id = require_session(&state, &session_id).await?;
     state.links.detach(&session_id, "client").await;
     Ok(Json(state.links.state(&session_id).await))
 }
@@ -83,7 +85,7 @@ pub async fn list_requests(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<PendingRequest>>> {
-    require_session(&state, &session_id).await?;
+    let session_id = require_session(&state, &session_id).await?;
     Ok(Json(state.store.open_requests(&session_id).await?))
 }
 
@@ -200,7 +202,7 @@ pub async fn interrupt(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
-    require_session(&state, &session_id).await?;
+    let session_id = require_session(&state, &session_id).await?;
 
     let link = state.links.get(&session_id).await.ok_or(Error::LinkGone)?;
 
@@ -224,7 +226,7 @@ pub async fn steer(
     Path(session_id): Path<String>,
     Json(body): Json<SteerRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    require_session(&state, &session_id).await?;
+    let session_id = require_session(&state, &session_id).await?;
 
     if body.text.trim().is_empty() {
         return Err(Error::InvalidRequest("Steering text cannot be empty".into()));
@@ -272,7 +274,7 @@ pub async fn set_config(
     Path(session_id): Path<String>,
     Json(body): Json<SetConfigRequest>,
 ) -> Result<Json<LinkState>> {
-    require_session(&state, &session_id).await?;
+    let session_id = require_session(&state, &session_id).await?;
 
     if body.config_id.trim().is_empty() {
         return Err(Error::InvalidRequest("A config id is required".into()));
@@ -354,9 +356,9 @@ pub async fn events(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<impl axum::response::IntoResponse> {
-    require_session(&state, &session_id).await?;
+    let session_id = require_session(&state, &session_id).await?;
 
-    let live = state.hub.attach_session(&session_id).await;
+    let live = state.hub.attach_session(&session_id.encode()).await;
     let stream = tokio_stream::wrappers::BroadcastStream::new(live)
         .filter_map(|result| result.ok())
         .map(|event| {
@@ -384,11 +386,23 @@ pub async fn events(
 /// Without this, asking for capabilities on a mistyped id would try to establish
 /// a link, fail on a missing session deeper in, and report that as an agent
 /// problem rather than as a bad id.
-async fn require_session(state: &AppState, session_id: &str) -> Result<()> {
+/// Decode a path segment and confirm the session exists, answering with its id.
+///
+/// Returns the typed [`SessionId`] rather than `()` so every handler gets the decoded
+/// value from the same call that validated it. Decoding separately would mean two
+/// places that know how a path segment becomes an identity, and the second one is where
+/// a hand-assembled string creeps in.
+///
+/// Two distinct failures, deliberately not collapsed: a malformed triple is a **400**
+/// because the request is unintelligible, while a well-formed id naming nothing is a
+/// **404**. Answering 404 for both would tell a client with a corrupted id that its
+/// session had been deleted.
+async fn require_session(state: &AppState, encoded: &str) -> Result<SessionId> {
+    let session_id = crate::api::sessions::decode_id(encoded)?;
     state
         .store
-        .get_session(session_id)
+        .get_session(&session_id)
         .await?
         .ok_or(Error::SessionNotFound)?;
-    Ok(())
+    Ok(session_id)
 }

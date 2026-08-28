@@ -2,10 +2,11 @@ use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
 };
 use std::path::Path;
+use crate::db::labels::summarize_line;
 use crate::error::{Error, Result};
 use crate::events::data_from_column;
-use crate::models::{Event, Incarnation, PendingRequest, Session, Turn};
-use crate::tracedb::summarize_line;
+use crate::models::{Event, PendingRequest, Session, Turn};
+use sylph_protocol::SessionId;
 
 #[derive(Clone)]
 pub struct JournalStore {
@@ -14,13 +15,27 @@ pub struct JournalStore {
 
 /// Narrowing criteria for a session listing. `None` means "do not narrow on
 /// this field", which is distinct from matching an empty value.
+///
+/// `origin` is gone with the one-class-of-session rule (`docs/architecture.md`
+/// § One class of session), and `environment` replaces it as the axis a listing
+/// genuinely filters on — every listing does, which is why it is also the leading
+/// column of `sessions_workdir_idx`.
 #[derive(Debug, Clone)]
 pub struct SessionFilter {
     pub limit: i64,
     pub agent: Option<String>,
-    pub origin: Option<String>,
-    /// Case-insensitive substring of the working directory, so a user can type
-    /// a project name without reproducing an absolute path.
+    /// Which environment's sessions to list.
+    pub environment: Option<String>,
+    /// **One directory, matched exactly** — never a substring.
+    ///
+    /// This was `instr(lower(workdir), lower(?)) > 0`, and `AGENTS.md` records what
+    /// that shape costs: asking for `/w/app` also returns `/w/app-old` and every
+    /// subdirectory. It is fixed here rather than left for a caller to re-filter,
+    /// because `api::workspaces` groups by exact workdir — so a listing and its own
+    /// grouping disagreed about which sessions belong to a directory.
+    ///
+    /// Trailing slashes are normalized on both sides. The stored spelling is the
+    /// canonical path, which is what session creation journals.
     pub workdir: Option<String>,
     pub updated_after_ms: Option<i64>,
     pub updated_before_ms: Option<i64>,
@@ -31,7 +46,7 @@ impl Default for SessionFilter {
         Self {
             limit: 50,
             agent: None,
-            origin: None,
+            environment: None,
             workdir: None,
             updated_after_ms: None,
             updated_before_ms: None,
@@ -74,29 +89,41 @@ impl JournalStore {
     }
 
     // Session operations
+
+    /// Record a session an agent has already assigned an id.
+    ///
+    /// **The caller must have started the agent first.** A row exists only once a
+    /// session has an identity (`docs/architecture.md` § Identity), so this is the
+    /// second half of `POST /sessions` rather than the whole of it — see
+    /// [`crate::links::LinkManager::open_session`], which owns that ordering.
+    /// Nothing here can enforce it, and that is what the type is for: a [`Session`]
+    /// cannot be constructed without a [`SessionId`], which only an agent's answer
+    /// produces.
+    ///
+    /// A duplicate triple is a genuine conflict rather than an upsert. Two rows for
+    /// one conversation is exactly the state the primary key exists to refuse.
     pub async fn create_session(&self, session: &Session) -> Result<Session> {
         sqlx::query_as::<_, Session>(
             r#"
             INSERT INTO sessions (
-                id, origin, identity_mode, lifecycle_mode, agent,
-                backend_session_id, trace_session_id, workdir, title,
-                flags_json, status, created_at_ms, updated_at_ms
+                environment, agent, native_id, workdir, title,
+                inject_identity, fidelity, flags_json, status, parent_session,
+                created_at_ms, updated_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
-        .bind(&session.id)
-        .bind(&session.origin)
-        .bind(&session.identity_mode)
-        .bind(&session.lifecycle_mode)
-        .bind(&session.agent)
-        .bind(&session.backend_session_id)
-        .bind(&session.trace_session_id)
+        .bind(session.id.environment.as_str())
+        .bind(session.id.agent.as_str())
+        .bind(session.id.native_id.as_str())
         .bind(&session.workdir)
         .bind(&session.title)
+        .bind(session.inject_identity)
+        .bind(session.fidelity.to_string())
         .bind(&session.flags_json)
         .bind(&session.status)
+        .bind(&session.parent_session)
         .bind(session.created_at_ms)
         .bind(session.updated_at_ms)
         .fetch_one(&self.pool)
@@ -104,12 +131,17 @@ impl JournalStore {
         .map_err(Error::Database)
     }
 
-    pub async fn get_session(&self, id: &str) -> Result<Option<Session>> {
-        let mut session = sqlx::query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(Error::Database)?;
+    pub async fn get_session(&self, id: &SessionId) -> Result<Option<Session>> {
+        let mut session = sqlx::query_as::<_, Session>(
+            "SELECT * FROM sessions
+              WHERE environment = ? AND agent = ? AND native_id = ?",
+        )
+        .bind(id.environment.as_str())
+        .bind(id.agent.as_str())
+        .bind(id.native_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::Database)?;
         if let Some(session) = session.as_mut() {
             self.hydrate_session_title(session).await?;
         }
@@ -128,8 +160,11 @@ impl JournalStore {
             r#"
             SELECT * FROM sessions
             WHERE (?1 IS NULL OR agent = ?1)
-              AND (?2 IS NULL OR origin = ?2)
-              AND (?3 IS NULL OR instr(lower(workdir), lower(?3)) > 0)
+              AND (?2 IS NULL OR environment = ?2)
+              -- An exact match, not a substring: see `SessionFilter::workdir`.
+              -- `rtrim` normalizes a trailing slash on both sides, so two
+              -- spellings of one directory cannot become two workspaces.
+              AND (?3 IS NULL OR rtrim(workdir, '/') = rtrim(?3, '/'))
               AND (?4 IS NULL OR updated_at_ms >= ?4)
               AND (?5 IS NULL OR updated_at_ms <= ?5)
             ORDER BY updated_at_ms DESC
@@ -137,7 +172,7 @@ impl JournalStore {
             "#,
         )
         .bind(filter.agent.as_deref())
-        .bind(filter.origin.as_deref())
+        .bind(filter.environment.as_deref())
         .bind(filter.workdir.as_deref())
         .bind(filter.updated_after_ms)
         .bind(filter.updated_before_ms)
@@ -151,20 +186,34 @@ impl JournalStore {
         Ok(sessions)
     }
 
-    /// Fill titles for older live rows created before title derivation existed.
-    /// The first user event is the user's actual opening ask, unlike the
-    /// runner's injected envelope, and therefore matches TraceDB's label rule.
+    /// Fill in a title from the session's opening ask, when it has none.
+    ///
+    /// The rule lives in [`crate::db::labels`] rather than here, because it is a
+    /// fact about transcripts rather than about this table: the first `user` event
+    /// is usually *not* what the user typed, and skipping the agent's injected
+    /// envelopes is what raised recognizable labels from ~10% to 98% over 311
+    /// measured sessions.
     async fn hydrate_session_title(&self, session: &mut Session) -> Result<()> {
-        if session.title.as_deref().is_some_and(|title| !title.trim().is_empty()) {
+        if session
+            .title
+            .as_deref()
+            .is_some_and(|title| !title.trim().is_empty())
+        {
             return Ok(());
         }
         let Some(text) = sqlx::query_scalar::<_, String>(
-            "SELECT text FROM events WHERE session_id = ? AND kind = 'user' ORDER BY seq LIMIT 1",
+            "SELECT text FROM events
+              WHERE session_env = ? AND session_agent = ? AND session_native = ?
+                AND kind = 'user'
+              ORDER BY seq LIMIT 1",
         )
-        .bind(&session.id)
+        .bind(session.id.environment.as_str())
+        .bind(session.id.agent.as_str())
+        .bind(session.id.native_id.as_str())
         .fetch_optional(&self.pool)
         .await
-        .map_err(Error::Database)? else {
+        .map_err(Error::Database)?
+        else {
             return Ok(());
         };
         let title = summarize_line(&text);
@@ -172,63 +221,30 @@ impl JournalStore {
             return Ok(());
         }
         sqlx::query(
-            "UPDATE sessions SET title = ? WHERE id = ? AND (title IS NULL OR trim(title) = '')",
+            "UPDATE sessions SET title = ?
+              WHERE environment = ? AND agent = ? AND native_id = ?
+                AND (title IS NULL OR trim(title) = '')",
         )
         .bind(&title)
-        .bind(&session.id)
+        .bind(session.id.environment.as_str())
+        .bind(session.id.agent.as_str())
+        .bind(session.id.native_id.as_str())
         .execute(&self.pool)
         .await?;
         session.title = Some(title);
         Ok(())
     }
 
-    /// Associate an archived TraceDB id with a live session. Normal live turns
-    /// only know the runner's native id, so the fallback matches the stable
-    /// `<agent>:<native-id>` identity that TraceDB uses once ingestion occurs.
-    pub async fn find_session_by_archive_id(&self, archive_id: &str) -> Result<Option<Session>> {
-        if let Some(session) = self.find_session_by_trace_id(archive_id).await? {
-            return Ok(Some(session));
-        }
-        // A slash denotes a TraceDB subagent identity. Its root native id is
-        // shared with the parent, so matching only the prefix would incorrectly
-        // hide delegated work as if it were the live parent row.
-        if archive_id.contains('/') {
-            return Ok(None);
-        }
-        let Some((agent, native)) = archive_id.split_once(':') else {
-            return Ok(None);
-        };
-        sqlx::query_as::<_, Session>(
-            "SELECT s.* FROM sessions s
-             WHERE s.agent = ?
-               AND (s.backend_session_id = ? OR EXISTS (
-                 SELECT 1 FROM backend_incarnations i
-                 WHERE i.session_id = s.id AND i.backend_session_id = ?
-               ))
-             ORDER BY s.updated_at_ms DESC LIMIT 1",
+    pub async fn update_session_status(&self, id: &SessionId, status: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET status = ?, updated_at_ms = ?
+              WHERE environment = ? AND agent = ? AND native_id = ?",
         )
-        .bind(agent)
-        .bind(native)
-        .bind(native)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(Error::Database)
-    }
-
-    /// Remove a provisional Sylph session that never received a turn.
-    pub async fn delete_empty_sylph_session(&self, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE id = ? AND origin = 'sylph' AND NOT EXISTS (SELECT 1 FROM turns WHERE turns.session_id = sessions.id)")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn update_session_status(&self, id: &str, status: &str) -> Result<()> {
-        sqlx::query("UPDATE sessions SET status = ?, updated_at_ms = ? WHERE id = ?")
-            .bind(status)
-            .bind(now_ms())
-            .bind(id)
+        .bind(status)
+        .bind(now_ms())
+        .bind(id.environment.as_str())
+        .bind(id.agent.as_str())
+        .bind(id.native_id.as_str())
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -239,16 +255,17 @@ impl JournalStore {
         sqlx::query_as::<_, Turn>(
             r#"
             INSERT INTO turns (
-                id, session_id, incarnation_id, status, origin, request_text,
-                command_invocation_id, idempotency_key, created_at_ms
+                id, session_env, session_agent, session_native, status, origin,
+                request_text, command_invocation_id, idempotency_key, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
         .bind(&turn.id)
-        .bind(&turn.session_id)
-        .bind(&turn.incarnation_id)
+        .bind(turn.session_id.environment.as_str())
+        .bind(turn.session_id.agent.as_str())
+        .bind(turn.session_id.native_id.as_str())
         .bind(&turn.status)
         .bind(&turn.origin)
         .bind(&turn.request_text)
@@ -268,11 +285,15 @@ impl JournalStore {
             .map_err(Error::Database)
     }
 
-    pub async fn list_turns(&self, session_id: &str, limit: i64) -> Result<Vec<Turn>> {
+    pub async fn list_turns(&self, session_id: &SessionId, limit: i64) -> Result<Vec<Turn>> {
         sqlx::query_as::<_, Turn>(
-            "SELECT * FROM turns WHERE session_id = ? ORDER BY created_at_ms DESC LIMIT ?",
+            "SELECT * FROM turns
+              WHERE session_env = ? AND session_agent = ? AND session_native = ?
+              ORDER BY created_at_ms DESC LIMIT ?",
         )
-        .bind(session_id)
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -284,14 +305,17 @@ impl JournalStore {
         sqlx::query_as::<_, Event>(
             r#"
             INSERT INTO events (
-                session_id, turn_id, seq, kind, phase, stream_id, span, name,
-                text, data_json, is_error, stability, source, created_at_ms
+                session_env, session_agent, session_native, turn_id, seq, kind,
+                phase, stream_id, span, name, text, data_json, is_error,
+                stability, source, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
-        .bind(&event.session_id)
+        .bind(event.session_id.environment.as_str())
+        .bind(event.session_id.agent.as_str())
+        .bind(event.session_id.native_id.as_str())
         .bind(&event.turn_id)
         .bind(event.seq)
         .bind(&event.kind)
@@ -312,118 +336,85 @@ impl JournalStore {
 
     pub async fn get_events(
         &self,
-        session_id: &str,
+        session_id: &SessionId,
         turn_id: Option<&str>,
         after_seq: Option<i32>,
     ) -> Result<Vec<Event>> {
         let query = match (turn_id, after_seq) {
             (Some(tid), Some(seq)) => {
                 sqlx::query_as::<_, Event>(
-                    "SELECT * FROM events WHERE session_id = ? AND turn_id = ? AND seq > ? ORDER BY seq",
+                    "SELECT * FROM events
+                      WHERE session_env = ? AND session_agent = ? AND session_native = ?
+                        AND turn_id = ? AND seq > ?
+                      ORDER BY seq",
                 )
-                .bind(session_id)
+                .bind(session_id.environment.as_str())
+                .bind(session_id.agent.as_str())
+                .bind(session_id.native_id.as_str())
                 .bind(tid)
                 .bind(seq)
             }
             (Some(tid), None) => {
                 sqlx::query_as::<_, Event>(
-                    "SELECT * FROM events WHERE session_id = ? AND turn_id = ? ORDER BY seq",
+                    "SELECT * FROM events
+                      WHERE session_env = ? AND session_agent = ? AND session_native = ? AND turn_id = ?
+                      ORDER BY seq",
                 )
-                .bind(session_id)
+                .bind(session_id.environment.as_str())
+                .bind(session_id.agent.as_str())
+                .bind(session_id.native_id.as_str())
                 .bind(tid)
             }
             (None, Some(seq)) => {
                 sqlx::query_as::<_, Event>(
-                    "SELECT * FROM events WHERE session_id = ? AND seq > ? ORDER BY seq",
+                    "SELECT * FROM events
+                      WHERE session_env = ? AND session_agent = ? AND session_native = ? AND seq > ?
+                      ORDER BY seq",
                 )
-                .bind(session_id)
+                .bind(session_id.environment.as_str())
+                .bind(session_id.agent.as_str())
+                .bind(session_id.native_id.as_str())
                 .bind(seq)
             }
             (None, None) => {
                 sqlx::query_as::<_, Event>(
-                    "SELECT * FROM events WHERE session_id = ? ORDER BY seq",
+                    "SELECT * FROM events
+                      WHERE session_env = ? AND session_agent = ? AND session_native = ?
+                      ORDER BY seq",
                 )
-                .bind(session_id)
+                .bind(session_id.environment.as_str())
+                .bind(session_id.agent.as_str())
+                .bind(session_id.native_id.as_str())
             }
         };
 
         query.fetch_all(&self.pool).await.map_err(Error::Database)
     }
 
-    /// Persist agent-native session id on both the session and its incarnation.
-    pub async fn set_backend_session_id(
-        &self,
-        session_id: &str,
-        incarnation_id: Option<&str>,
-        backend_session_id: &str,
-    ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-
-        // `updated_at_ms` is deliberately not touched. It orders sessions by *user
-        // activity* — it is what "pick up where you left off" and the sidebar sort
-        // mean — and learning where an agent keeps its own session is bookkeeping, not
-        // activity. Bumping it made merely *opening* an old session reorder it above a
-        // newer one, because establishing a link persists this id.
-        sqlx::query("UPDATE sessions SET backend_session_id = ? WHERE id = ?")
-            .bind(backend_session_id)
-            .bind(session_id)
-            .execute(&mut *tx)
-            .await?;
-
-        if let Some(incarnation_id) = incarnation_id {
-            sqlx::query("UPDATE backend_incarnations SET backend_session_id = ? WHERE id = ?")
-                .bind(backend_session_id)
-                .bind(incarnation_id)
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn set_trace_session_id(&self, session_id: &str, trace_id: &str) -> Result<()> {
-        sqlx::query("UPDATE sessions SET trace_session_id = ?, updated_at_ms = ? WHERE id = ?")
-            .bind(trace_id)
-            .bind(now_ms())
-            .bind(session_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn find_session_by_trace_id(&self, trace_id: &str) -> Result<Option<Session>> {
-        sqlx::query_as::<_, Session>(
-            "SELECT s.* FROM sessions s
-             WHERE s.trace_session_id = ? OR EXISTS (
-               SELECT 1 FROM backend_incarnations i
-               WHERE i.session_id = s.id
-                 AND (i.source_trace_session_id = ? OR i.resulting_trace_session_id = ?)
-             )
-             ORDER BY s.updated_at_ms DESC LIMIT 1",
+    pub async fn touch_session(&self, id: &SessionId) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET updated_at_ms = ?
+              WHERE environment = ? AND agent = ? AND native_id = ?",
         )
-        .bind(trace_id)
-        .bind(trace_id)
-        .bind(trace_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(Error::Database)
-    }
-
-    pub async fn touch_session(&self, session_id: &str) -> Result<()> {
-        sqlx::query("UPDATE sessions SET updated_at_ms = ? WHERE id = ?")
-            .bind(now_ms())
-            .bind(session_id)
+        .bind(now_ms())
+        .bind(id.environment.as_str())
+        .bind(id.agent.as_str())
+        .bind(id.native_id.as_str())
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    pub async fn set_session_title(&self, session_id: &str, title: &str) -> Result<()> {
-        sqlx::query("UPDATE sessions SET title = ?, updated_at_ms = ? WHERE id = ?")
-            .bind(title)
-            .bind(now_ms())
-            .bind(session_id)
+    pub async fn set_session_title(&self, id: &SessionId, title: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET title = ?, updated_at_ms = ?
+              WHERE environment = ? AND agent = ? AND native_id = ?",
+        )
+        .bind(title)
+        .bind(now_ms())
+        .bind(id.environment.as_str())
+        .bind(id.agent.as_str())
+        .bind(id.native_id.as_str())
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -432,16 +423,20 @@ impl JournalStore {
     /// Set the opening title once, without changing activity ordering. This is
     /// used when a turn starts so live and archived rows acquire the same label
     /// before TraceDB ingestion catches up.
-    pub async fn set_session_title_if_empty(&self, session_id: &str, title: &str) -> Result<()> {
+    pub async fn set_session_title_if_empty(&self, id: &SessionId, title: &str) -> Result<()> {
         let title = summarize_line(title);
         if title.is_empty() {
             return Ok(());
         }
         sqlx::query(
-            "UPDATE sessions SET title = ? WHERE id = ? AND (title IS NULL OR trim(title) = '')",
+            "UPDATE sessions SET title = ?
+              WHERE environment = ? AND agent = ? AND native_id = ?
+                AND (title IS NULL OR trim(title) = '')",
         )
         .bind(&title)
-        .bind(session_id)
+        .bind(id.environment.as_str())
+        .bind(id.agent.as_str())
+        .bind(id.native_id.as_str())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -454,83 +449,21 @@ impl JournalStore {
     /// per key: the caller has already validated the complete set against the
     /// agent's declared schema, and a merge here would let a stale key survive a
     /// change the user believed was total.
-    pub async fn set_session_flags(&self, session_id: &str, flags_json: &str) -> Result<()> {
-        sqlx::query("UPDATE sessions SET flags_json = ?, updated_at_ms = ? WHERE id = ?")
-            .bind(flags_json)
-            .bind(now_ms())
-            .bind(session_id)
+    pub async fn set_session_flags(&self, id: &SessionId, flags_json: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET flags_json = ?, updated_at_ms = ?
+              WHERE environment = ? AND agent = ? AND native_id = ?",
+        )
+        .bind(flags_json)
+        .bind(now_ms())
+        .bind(id.environment.as_str())
+        .bind(id.agent.as_str())
+        .bind(id.native_id.as_str())
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    // Incarnation operations
-
-    pub async fn create_incarnation(&self, incarnation: &Incarnation) -> Result<Incarnation> {
-        sqlx::query_as::<_, Incarnation>(
-            r#"
-            INSERT INTO backend_incarnations (
-                id, session_id, agent, backend_session_id, started_at_ms,
-                source_trace_session_id, status
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            RETURNING *
-            "#,
-        )
-        .bind(&incarnation.id)
-        .bind(&incarnation.session_id)
-        .bind(&incarnation.agent)
-        .bind(&incarnation.backend_session_id)
-        .bind(incarnation.started_at_ms)
-        .bind(&incarnation.source_trace_session_id)
-        .bind(&incarnation.status)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Error::Database)
-    }
-
-    /// The session's current incarnation, or None if it has never run a turn.
-    pub async fn active_incarnation(&self, session_id: &str) -> Result<Option<Incarnation>> {
-        sqlx::query_as::<_, Incarnation>(
-            r#"
-            SELECT * FROM backend_incarnations
-            WHERE session_id = ? AND status = 'active'
-            ORDER BY started_at_ms DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(session_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(Error::Database)
-    }
-
-    pub async fn list_incarnations(&self, session_id: &str) -> Result<Vec<Incarnation>> {
-        sqlx::query_as::<_, Incarnation>(
-            "SELECT * FROM backend_incarnations WHERE session_id = ? ORDER BY started_at_ms DESC",
-        )
-        .bind(session_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(Error::Database)
-    }
-
-    /// End the active incarnation so the next turn starts a fresh agent context.
-    pub async fn end_incarnation(&self, incarnation_id: &str, reason: &str) -> Result<()> {
-        sqlx::query(
-            r#"
-            UPDATE backend_incarnations
-            SET status = 'ended', ended_at_ms = ?, reset_reason = ?
-            WHERE id = ?
-            "#,
-        )
-        .bind(now_ms())
-        .bind(reason)
-        .bind(incarnation_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
 
     // Turn lifecycle
 
@@ -541,13 +474,16 @@ impl JournalStore {
     /// agent process.
     pub async fn find_turn_by_idempotency_key(
         &self,
-        session_id: &str,
+        session_id: &SessionId,
         key: &str,
     ) -> Result<Option<Turn>> {
         sqlx::query_as::<_, Turn>(
-            "SELECT * FROM turns WHERE session_id = ? AND idempotency_key = ?",
+            "SELECT * FROM turns
+              WHERE session_env = ? AND session_agent = ? AND session_native = ? AND idempotency_key = ?",
         )
-        .bind(session_id)
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
         .bind(key)
         .fetch_optional(&self.pool)
         .await
@@ -557,16 +493,15 @@ impl JournalStore {
     /// Claim a queued turn for execution, returning false if it is no longer
     /// queued. The compare-and-set keeps two supervisors from starting the same
     /// turn twice.
-    pub async fn mark_turn_running(&self, turn_id: &str, incarnation_id: &str) -> Result<bool> {
+    pub async fn mark_turn_running(&self, turn_id: &str) -> Result<bool> {
         let result = sqlx::query(
             r#"
             UPDATE turns
-            SET status = 'running', started_at_ms = ?, incarnation_id = ?
+            SET status = 'running', started_at_ms = ?
             WHERE id = ? AND status IN ('queued', 'starting')
             "#,
         )
         .bind(now_ms())
-        .bind(incarnation_id)
         .bind(turn_id)
         .execute(&self.pool)
         .await?;
@@ -605,14 +540,13 @@ impl JournalStore {
         &self,
         turn_id: &str,
         status: &str,
-        exit_code: Option<i32>,
         error_code: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<bool> {
         let result = sqlx::query(
             r#"
             UPDATE turns
-            SET status = ?, completed_at_ms = ?, runner_exit_code = ?,
+            SET status = ?, completed_at_ms = ?,
                 error_code = ?, error_message = ?
             WHERE id = ?
               AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
@@ -620,7 +554,6 @@ impl JournalStore {
         )
         .bind(status)
         .bind(now_ms())
-        .bind(exit_code)
         .bind(error_code)
         .bind(error_message)
         .bind(turn_id)
@@ -723,7 +656,6 @@ impl JournalStore {
                     stability: "stable".to_string(),
                     source: "server".to_string(),
                     created_at_ms: now_ms(),
-                    reconciled_at_ms: None,
                 };
                 self.append_event(&event).await?;
                 closed += 1;
@@ -740,21 +672,19 @@ impl JournalStore {
     /// higher numbers, so continuing from this turn's own maximum would collide with
     /// it and the insert would fail. Appending at the session tail puts the close
     /// after the delegation it closes, which is what a reader needs.
-    async fn turn_tail(&self, turn_id: &str) -> Result<Option<(String, i32)>> {
-        let Some(session_id) =
-            sqlx::query_scalar::<_, String>("SELECT session_id FROM turns WHERE id = ?")
-                .bind(turn_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(Error::Database)?
-        else {
+    async fn turn_tail(&self, turn_id: &str) -> Result<Option<(SessionId, i32)>> {
+        let Some(turn) = self.get_turn(turn_id).await? else {
             return Ok(None);
         };
+        let session_id = turn.session_id;
 
         let max_seq = sqlx::query_scalar::<_, Option<i32>>(
-            "SELECT MAX(seq) FROM events WHERE session_id = ?",
+            "SELECT MAX(seq) FROM events
+              WHERE session_env = ? AND session_agent = ? AND session_native = ?",
         )
-        .bind(&session_id)
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
         .fetch_one(&self.pool)
         .await
         .map_err(Error::Database)?;
@@ -762,15 +692,24 @@ impl JournalStore {
         Ok(Some((session_id, max_seq.unwrap_or(0) + 1)))
     }
 
-    pub async fn count_turns_by_status(&self, session_id: Option<&str>) -> Result<Vec<(String, i64)>> {
+    pub async fn count_turns_by_status(
+        &self,
+        session_id: Option<&SessionId>,
+    ) -> Result<Vec<(String, i64)>> {
+        // One prepared statement for both the whole-journal and per-session cases:
+        // every predicate is a no-op when its bound value is NULL.
         sqlx::query_as::<_, (String, i64)>(
             r#"
             SELECT status, COUNT(*) FROM turns
-            WHERE (?1 IS NULL OR session_id = ?1)
+            WHERE (?1 IS NULL OR session_env = ?1)
+              AND (?2 IS NULL OR session_agent = ?2)
+              AND (?3 IS NULL OR session_native = ?3)
             GROUP BY status
             "#,
         )
-        .bind(session_id)
+        .bind(session_id.map(|id| id.environment.as_str()))
+        .bind(session_id.map(|id| id.agent.as_str()))
+        .bind(session_id.map(|id| id.native_id.as_str()))
         .fetch_all(&self.pool)
         .await
         .map_err(Error::Database)
@@ -791,12 +730,16 @@ impl JournalStore {
     ///
     /// Used to seed the in-memory sequence counter after a restart so new
     /// events never collide with journaled ones.
-    pub async fn max_event_seq(&self, session_id: &str) -> Result<i32> {
-        let seq: Option<i32> =
-            sqlx::query_scalar("SELECT MAX(seq) FROM events WHERE session_id = ?")
-                .bind(session_id)
-                .fetch_one(&self.pool)
-                .await?;
+    pub async fn max_event_seq(&self, session_id: &SessionId) -> Result<i32> {
+        let seq: Option<i32> = sqlx::query_scalar(
+            "SELECT MAX(seq) FROM events
+              WHERE session_env = ? AND session_agent = ? AND session_native = ?",
+        )
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
+        .fetch_one(&self.pool)
+        .await?;
         Ok(seq.unwrap_or(-1))
     }
 
@@ -815,13 +758,16 @@ impl JournalStore {
         sqlx::query(
             r#"
             INSERT INTO events (
-                session_id, turn_id, seq, kind, phase, stream_id, span, name,
-                text, data_json, is_error, stability, source, created_at_ms
+                session_env, session_agent, session_native, turn_id, seq, kind,
+                phase, stream_id, span, name, text, data_json, is_error,
+                stability, source, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(&event.session_id)
+        .bind(event.session_id.environment.as_str())
+        .bind(event.session_id.agent.as_str())
+        .bind(event.session_id.native_id.as_str())
         .bind(&event.turn_id)
         .bind(event.seq)
         .bind(&event.kind)
@@ -862,13 +808,16 @@ impl JournalStore {
             sqlx::query(
                 r#"
                 INSERT INTO events (
-                    session_id, turn_id, seq, kind, phase, stream_id, span, name,
-                    text, data_json, is_error, stability, source, created_at_ms
+                    session_env, session_agent, session_native, turn_id, seq, kind,
+                    phase, stream_id, span, name, text, data_json, is_error,
+                    stability, source, created_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
-            .bind(&event.session_id)
+            .bind(event.session_id.environment.as_str())
+            .bind(event.session_id.agent.as_str())
+            .bind(event.session_id.native_id.as_str())
             .bind(&event.turn_id)
             .bind(event.seq)
             .bind(&event.kind)
@@ -1115,17 +1064,19 @@ impl JournalStore {
         sqlx::query_as::<_, PendingRequest>(
             r#"
             INSERT INTO pending_requests (
-                id, session_id, turn_id, adapter_request_id, kind, tool,
-                tool_use_id, title, detail_json, options_json, form_json,
-                default_option, risk, allow_persistent, expires_at_ms, status,
-                created_at_ms
+                id, session_env, session_agent, session_native, turn_id,
+                adapter_request_id, kind, tool, tool_use_id, title, detail_json,
+                options_json, form_json, default_option, risk, allow_persistent,
+                expires_at_ms, status, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
             RETURNING *
             "#,
         )
         .bind(&request.id)
-        .bind(&request.session_id)
+        .bind(request.session_id.environment.as_str())
+        .bind(request.session_id.agent.as_str())
+        .bind(request.session_id.native_id.as_str())
         .bind(&request.turn_id)
         .bind(&request.adapter_request_id)
         .bind(&request.kind)
@@ -1146,13 +1097,15 @@ impl JournalStore {
     }
 
     /// What a session is currently waiting on, oldest first.
-    pub async fn open_requests(&self, session_id: &str) -> Result<Vec<PendingRequest>> {
+    pub async fn open_requests(&self, session_id: &SessionId) -> Result<Vec<PendingRequest>> {
         sqlx::query_as::<_, PendingRequest>(
             "SELECT * FROM pending_requests
-             WHERE session_id = ? AND status = 'pending'
-             ORDER BY created_at_ms",
+              WHERE session_env = ? AND session_agent = ? AND session_native = ? AND status = 'pending'
+              ORDER BY created_at_ms",
         )
-        .bind(session_id)
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
         .fetch_all(&self.pool)
         .await
         .map_err(Error::Database)
@@ -1215,18 +1168,21 @@ impl JournalStore {
     /// the late close cannot amend itself.
     pub async fn reconcile_trajectory(
         &self,
-        session_id: &str,
+        session_id: &SessionId,
         stream_id: &str,
         except_turn_id: &str,
         outcome: &crate::supervisor::TrajectoryOutcome<'_>,
     ) -> Result<bool> {
         let Some(row) = sqlx::query_as::<_, Event>(
             "SELECT * FROM events
-              WHERE session_id = ? AND stream_id = ? AND turn_id <> ?
+              WHERE session_env = ? AND session_agent = ? AND session_native = ?
+                AND stream_id = ? AND turn_id <> ?
                 AND kind = 'subagent'
               ORDER BY seq DESC LIMIT 1",
         )
-        .bind(session_id)
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
         .bind(stream_id)
         .bind(except_turn_id)
         .fetch_optional(&self.pool)
@@ -1250,7 +1206,7 @@ impl JournalStore {
         let result = sqlx::query(
             "UPDATE events
                 SET phase = ?, text = ?, is_error = ?, source = ?, data_json = ?
-              WHERE session_id = ? AND seq = ?",
+              WHERE session_env = ? AND session_agent = ? AND session_native = ? AND seq = ?",
         )
         .bind(&phase)
         .bind(&text)
@@ -1261,7 +1217,9 @@ impl JournalStore {
                 .map(|d| d.to_string())
                 .unwrap_or_else(|| "{}".to_string()),
         )
-        .bind(session_id)
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
         .bind(row.seq)
         .execute(&self.pool)
         .await
@@ -1283,24 +1241,34 @@ impl JournalStore {
     /// no other way to learn the question died with its agent — and a count cannot be
     /// announced. Returning the rows is what lets one publisher serve every departure
     /// from `pending`; callers wanting the old number take `.len()`.
-    pub async fn abandon_open_requests(&self, session_id: &str) -> Result<Vec<PendingRequest>> {
+    pub async fn abandon_open_requests(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<PendingRequest>> {
         sqlx::query_as::<_, PendingRequest>(
             "UPDATE pending_requests
                 SET status = 'abandoned', resolved_at_ms = ?
-              WHERE session_id = ? AND status = 'pending'
+              WHERE session_env = ? AND session_agent = ? AND session_native = ? AND status = 'pending'
             RETURNING *",
         )
         .bind(now_ms())
-        .bind(session_id)
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
         .fetch_all(&self.pool)
         .await
         .map_err(Error::Database)
     }
 
     /// A session's status, without loading the whole row.
-    pub async fn session_status(&self, session_id: &str) -> Option<String> {
-        sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE id = ?")
-            .bind(session_id)
+    pub async fn session_status(&self, id: &SessionId) -> Option<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM sessions
+              WHERE environment = ? AND agent = ? AND native_id = ?",
+        )
+        .bind(id.environment.as_str())
+        .bind(id.agent.as_str())
+        .bind(id.native_id.as_str())
             .fetch_optional(&self.pool)
             .await
             .ok()
@@ -1313,13 +1281,15 @@ impl JournalStore {
     /// know turn ids — they are the server's concept. Ordered descending so a
     /// journal that somehow holds two running turns attributes to the newer,
     /// which is the one an event just arrived for.
-    pub async fn running_turn_id(&self, session_id: &str) -> Result<Option<String>> {
+    pub async fn running_turn_id(&self, session_id: &SessionId) -> Result<Option<String>> {
         sqlx::query_scalar::<_, String>(
             "SELECT id FROM turns
-              WHERE session_id = ? AND status IN ('running', 'stopping')
+              WHERE session_env = ? AND session_agent = ? AND session_native = ? AND status IN ('running', 'stopping')
               ORDER BY created_at_ms DESC LIMIT 1",
         )
-        .bind(session_id)
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
         .fetch_optional(&self.pool)
         .await
         .map_err(Error::Database)
@@ -1329,13 +1299,20 @@ impl JournalStore {
     ///
     /// Distinct from `turn_events_after`: a replay is session-scoped, and the
     /// journal holds only the tail that consolidation has not moved yet.
-    pub async fn session_events_after(&self, session_id: &str, after_seq: i32) -> Result<Vec<Event>> {
+    pub async fn session_events_after(
+        &self,
+        session_id: &SessionId,
+        after_seq: i32,
+    ) -> Result<Vec<Event>> {
         sqlx::query_as::<_, Event>(
             "SELECT * FROM events
-              WHERE session_id = ? AND seq > ? AND stability = 'stable'
+              WHERE session_env = ? AND session_agent = ? AND session_native = ?
+                AND seq > ? AND stability = 'stable'
               ORDER BY seq",
         )
-        .bind(session_id)
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
         .bind(after_seq)
         .fetch_all(&self.pool)
         .await
@@ -1416,6 +1393,11 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
+    /// The session every fixture below hangs off.
+    fn session_id() -> SessionId {
+        crate::fixtures::test_session_id("web-1")
+    }
+
     /// A session and turn to hang events on. Both are foreign keys, so an event
     /// cannot be journaled without them.
     async fn seeded(dir: &std::path::Path) -> JournalStore {
@@ -1424,17 +1406,16 @@ mod tests {
             .expect("store");
         store
             .create_session(&Session {
-                id: "web-1".to_string(),
-                origin: "sylph".to_string(),
-                identity_mode: "sylph".to_string(),
-                lifecycle_mode: "sylph".to_string(),
-                agent: "claude".to_string(),
-                backend_session_id: None,
-                trace_session_id: None,
+                id: session_id(),
                 workdir: "/tmp/project".to_string(),
                 title: None,
+                inject_identity: true,
+                // A live link holds the process's own stdio, so a session these
+                // fixtures journal events onto is stream fidelity.
+                fidelity: sylph_protocol::Fidelity::Stream,
                 flags_json: "{}".to_string(),
                 status: "idle".to_string(),
+                parent_session: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
             })
@@ -1443,8 +1424,7 @@ mod tests {
         store
             .create_turn(&crate::models::Turn {
                 id: "turn-1".to_string(),
-                session_id: "web-1".to_string(),
-                incarnation_id: None,
+                session_id: session_id(),
                 status: "running".to_string(),
                 origin: "user".to_string(),
                 request_text: "go".to_string(),
@@ -1452,7 +1432,6 @@ mod tests {
                 idempotency_key: None,
                 error_code: None,
                 error_message: None,
-                runner_exit_code: None,
                 created_at_ms: 1,
                 started_at_ms: Some(1),
                 completed_at_ms: None,
@@ -1466,7 +1445,7 @@ mod tests {
     fn span_event(seq: i32, kind: &str, phase: &str, stream: &str, span: Option<&str>) -> Event {
         Event {
             id: None,
-            session_id: "web-1".to_string(),
+            session_id: session_id(),
             turn_id: Some("turn-1".to_string()),
             seq,
             kind: kind.to_string(),
@@ -1480,7 +1459,6 @@ mod tests {
             stability: "stable".to_string(),
             source: "agent".to_string(),
             created_at_ms: seq as i64,
-            reconciled_at_ms: None,
         }
     }
 
@@ -1865,71 +1843,6 @@ mod tests {
         assert_eq!(store.close_stale_trajectories().await.expect("again"), 0);
     }
 
-    #[tokio::test]
-    async fn archive_identity_matches_native_root_but_not_subagent_prefix() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let store = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
-            .await
-            .expect("store");
-        store
-            .create_session(&Session {
-                id: "web-1".to_string(),
-                origin: "sylph".to_string(),
-                identity_mode: "sylph".to_string(),
-                lifecycle_mode: "sylph".to_string(),
-                agent: "claude".to_string(),
-                backend_session_id: Some("native-1".to_string()),
-                trace_session_id: None,
-                workdir: "/tmp/project".to_string(),
-                title: None,
-                flags_json: "{}".to_string(),
-                status: "idle".to_string(),
-                created_at_ms: 1,
-                updated_at_ms: 1,
-            })
-            .await
-            .expect("session");
-        store
-            .create_incarnation(&Incarnation {
-                id: "inc-1".to_string(),
-                session_id: "web-1".to_string(),
-                agent: "claude".to_string(),
-                backend_session_id: Some("native-old".to_string()),
-                started_at_ms: 1,
-                ended_at_ms: Some(2),
-                reset_reason: Some("test".to_string()),
-                source_trace_session_id: None,
-                resulting_trace_session_id: None,
-                status: "ended".to_string(),
-            })
-            .await
-            .expect("incarnation");
-
-        assert_eq!(
-            store
-                .find_session_by_archive_id("claude:native-1")
-                .await
-                .expect("lookup")
-                .expect("root match")
-                .id,
-            "web-1"
-        );
-        assert_eq!(
-            store
-                .find_session_by_archive_id("claude:native-old")
-                .await
-                .expect("lookup")
-                .expect("historical match")
-                .id,
-            "web-1"
-        );
-        assert!(store
-            .find_session_by_archive_id("claude:native-1/agent-worker")
-            .await
-            .expect("lookup")
-            .is_none());
-    }
-
     /// A late outcome corrects the sweep's provisional close on the earlier turn.
     ///
     /// The contradiction this removes: both records existed, on different turns, and
@@ -1947,7 +1860,7 @@ mod tests {
 
         let amended = store
             .reconcile_trajectory(
-                "web-1",
+                &session_id(),
                 "bg-task",
                 "turn-2",
                 &crate::supervisor::TrajectoryOutcome {
@@ -2002,7 +1915,7 @@ mod tests {
 
         let amended = store
             .reconcile_trajectory(
-                "web-1",
+                &session_id(),
                 "task-a",
                 "turn-2",
                 &crate::supervisor::TrajectoryOutcome {
@@ -2043,7 +1956,7 @@ mod tests {
 
         assert!(store
             .reconcile_trajectory(
-                "web-1",
+                &session_id(),
                 "bg-task",
                 "turn-2",
                 &crate::supervisor::TrajectoryOutcome {

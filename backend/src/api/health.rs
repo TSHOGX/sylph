@@ -29,21 +29,21 @@ pub struct HealthResponse {
     ok: bool,
     api_version: String,
     schema_version: i64,
-    tracedb: TraceDbHealth,
-    /// Whether any agent is usable at all.
+    /// Whether this build can run any agent at all.
     ///
     /// A server with zero agents answers every other probe successfully while no
-    /// session can run and no command can be offered, so liveness alone reports
-    /// healthy for a process that cannot do its job. A boolean rather than a count,
-    /// to keep this endpoint free of anything an unauthenticated caller should not
-    /// learn — `/diagnostics` carries the names and the failure reasons.
+    /// session can run and no command can be offered, so liveness alone reports healthy
+    /// for a process that cannot do its job — and `AGENTS.md` records what that cost:
+    /// the symptom was a composer ignoring the `/` key, three layers from the cause.
+    ///
+    /// A boolean rather than a count, to keep this endpoint free of anything an
+    /// unauthenticated caller should not learn. **Which** agent is missing on **which**
+    /// machine is `GET /environments`, and that is the better question — it distinguishes
+    /// a missing CLI from a sleeping laptop from an exhausted sandbox node.
+    ///
+    /// The `tracedb` block that used to sit beside this is gone: there is no separate
+    /// archive to be reachable, so a field reporting its health could only ever be true.
     agents: AgentsHealth,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TraceDbHealth {
-    available: bool,
 }
 
 #[derive(Serialize)]
@@ -59,15 +59,14 @@ pub struct AgentsHealth {
 /// reports only availability, never counts or paths.
 pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>> {
     let schema_version = state.store.schema_version().await.unwrap_or(0);
-    let available = state.tracedb.probe().await;
-    let agents_available = !state.registry.lock().await.list_agents().is_empty();
 
     Ok(Json(HealthResponse {
         ok: true,
         api_version: "1".to_string(),
         schema_version,
-        tracedb: TraceDbHealth { available },
-        agents: AgentsHealth { available: agents_available },
+        agents: AgentsHealth {
+            available: !crate::adapters::available(&state.config.agent_roots()).is_empty(),
+        },
     }))
 }
 
@@ -79,18 +78,14 @@ pub struct DiagnosticsResponse {
     uptime_seconds: u64,
     sessions: HashMap<String, i64>,
     turns: HashMap<String, i64>,
+    /// Which agents this build can run.
+    ///
+    /// `broken_adapters` and `agent_roots` are gone with discovery. Both existed because
+    /// an adapter was a *directory to be found*, so "no agents" needed to name where it
+    /// looked — a missing install and a mistyped path gave the same empty list and
+    /// needed opposite fixes. An adapter is now linked into the binary, so there is no
+    /// path to get wrong and no broken-but-present state to report.
     agents: Vec<String>,
-    broken_adapters: HashMap<String, String>,
-    /// Every directory bundled-adapter resolution considered, in order, plus the
-    /// user's own agents directory. Present because "no agents" is otherwise
-    /// unactionable: a missing install and a mistyped `paths.agents_dir` give the
-    /// same empty list and need opposite fixes. Authenticated, since these are
-    /// local filesystem paths.
-    agent_roots: Vec<String>,
-    /// Archive-wide totals, or `null` when TraceDB is unreachable. Present
-    /// here rather than in `/health` because it is a count, and `/health` is
-    /// unauthenticated.
-    tracedb: Option<crate::tracedb::ArchiveCounts>,
     /// Turns the supervisor is running right now. May be lower than the journal's
     /// running count if a link died without the reaper having recorded it yet.
     ///
@@ -134,35 +129,13 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         .into_iter()
         .collect();
 
-    let (agents, broken_adapters) = {
-        let registry = state.registry.lock().await;
-        let mut agents: Vec<String> = registry
-            .list_agents()
-            .iter()
-            .map(|a| a.name.clone())
-            .collect();
-        // Discovery order follows directory iteration, which is not stable;
-        // sort so the output does not churn between calls.
-        agents.sort();
-        (agents, registry.broken_adapters().clone())
-    };
-
     Ok(Json(DiagnosticsResponse {
         ok: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds: uptime_seconds(),
         sessions,
         turns,
-        agents,
-        broken_adapters,
-        agent_roots: state
-            .config
-            .bundled_agents_candidates
-            .iter()
-            .chain(std::iter::once(&state.config.agents_dir))
-            .map(|path| path.display().to_string())
-            .collect(),
-        tracedb: state.tracedb.archive_counts().await,
+        agents: crate::adapters::available(&state.config.agent_roots()),
         active_turns: state.turns.active_turn_count().await,
         retention: state.retention.last_pass().await,
     }))

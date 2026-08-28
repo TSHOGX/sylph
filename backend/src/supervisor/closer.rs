@@ -50,12 +50,12 @@ impl TurnCloser {
     /// the status, so a second attempt is a no-op and reports `false` — which is what
     /// makes this safe to reach from both a waiter's outcome and an agent's own
     /// `turn`/`completed` without either having to know about the other.
-    pub async fn close(&self, session_id: &str, turn_id: &str, outcome: Outcome) -> bool {
+    pub async fn close(&self, session_id: &sylph_protocol::SessionId, turn_id: &str, outcome: Outcome) -> bool {
         let (status, error_code, message) = outcome.as_status();
 
         let settled = match self
             .store
-            .finish_turn(turn_id, status, None, error_code, Some(&message))
+            .finish_turn(turn_id, status, error_code, Some(&message))
             .await
         {
             Ok(settled) => settled,
@@ -153,7 +153,7 @@ impl TurnCloser {
     /// rather than briefly holding a finished turn that still contains running work.
     async fn close_open_trajectories(
         &self,
-        session_id: &str,
+        session_id: &sylph_protocol::SessionId,
         turn_id: &str,
         outcome: &Outcome,
     ) {
@@ -200,7 +200,7 @@ impl TurnCloser {
 
     async fn emit(
         &self,
-        session_id: &str,
+        session_id: &sylph_protocol::SessionId,
         turn_id: &str,
         mut event: StreamEvent,
     ) -> crate::error::Result<()> {

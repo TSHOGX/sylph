@@ -145,7 +145,7 @@ impl TrajectoryReconciler {
     /// is then no earlier record to correct.
     pub async fn record(
         &self,
-        session_id: &str,
+        session_id: &sylph_protocol::SessionId,
         stream_id: &str,
         arriving_turn_id: &str,
         outcome: &TrajectoryOutcome<'_>,
@@ -167,7 +167,9 @@ impl TrajectoryReconciler {
 
         match self
             .history
-            .reconcile_trajectory(session_id, stream_id, arriving_turn_id, outcome)
+            // `history.db` keys on the encoded triple, so the encoding happens here at
+            // the boundary between the two stores.
+            .reconcile_trajectory(&session_id.encode(), stream_id, arriving_turn_id, outcome)
             .await
         {
             Ok(true) => amended = true,

@@ -65,27 +65,6 @@ fn exists(path: &Path) -> bool {
     path.exists()
 }
 
-/// A bare command name is resolved on `PATH`, so `exists` cannot be a filesystem
-/// check for it — a `trace-db` on the `PATH` is present, and reporting it missing
-/// because no file sits at the relative path `trace-db` would be a false alarm on
-/// the default configuration.
-fn command_exists(path: &Path) -> bool {
-    if path.components().count() > 1 || path.is_absolute() {
-        return path.is_file();
-    }
-    let Some(name) = path.file_name() else {
-        return false;
-    };
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| {
-                let candidate = dir.join(name);
-                candidate.is_file()
-            })
-        })
-        .unwrap_or(false)
-}
-
 impl Report {
     /// Build the report from a resolution and the bundled-adapter candidates.
     ///
@@ -156,13 +135,6 @@ impl Report {
                 source: resolved.browse_roots.source,
                 env_var: "SYLPH_BROWSE_ROOTS".to_string(),
                 exists: None,
-            },
-            Entry {
-                key: "tracedb.bin".to_string(),
-                value: resolved.tracedb_bin.value.display().to_string(),
-                source: resolved.tracedb_bin.source,
-                env_var: "SYLPH_TRACEDB_BIN".to_string(),
-                exists: Some(command_exists(&resolved.tracedb_bin.value)),
             },
             text("log.level", "SYLPH_LOG", &resolved.log_level),
         ];
@@ -282,7 +254,6 @@ mod tests {
             "paths.soul",
             "paths.quick_start_dir",
             "paths.browse_roots",
-            "tracedb.bin",
             "log.level",
         ] {
             assert!(keys.contains(&expected), "{expected} missing from {keys:?}");
@@ -325,32 +296,6 @@ mod tests {
         for key in ["server.host", "server.port", "log.level", "paths.browse_roots"] {
             let entry = report.entries.iter().find(|e| e.key == key).unwrap();
             assert_eq!(entry.exists, None, "{key} is not a path");
-        }
-    }
-
-    /// The default `trace-db` is a `PATH` lookup, so a filesystem check against
-    /// the bare name would report a working install as missing.
-    #[test]
-    fn a_bare_command_name_is_looked_up_on_path_not_on_disk() {
-        // A directory that certainly holds no `trace-db`, so the answer is
-        // deterministic regardless of what the developer has installed.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let previous = std::env::var_os("PATH");
-        // Safe here: this test does not spawn anything, and it restores the value.
-        unsafe { std::env::set_var("PATH", tmp.path()) };
-        assert!(!command_exists(Path::new("trace-db")));
-
-        let bin = tmp.path().join("trace-db");
-        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
-        assert!(command_exists(Path::new("trace-db")), "found on PATH");
-
-        // An explicit path is a real filesystem check, not a PATH lookup.
-        assert!(command_exists(&bin));
-        assert!(!command_exists(Path::new("/no/such/trace-db")));
-
-        match previous {
-            Some(value) => unsafe { std::env::set_var("PATH", value) },
-            None => unsafe { std::env::remove_var("PATH") },
         }
     }
 

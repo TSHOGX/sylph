@@ -12,20 +12,16 @@
 //! of work for the same reason and a second scheduling idiom would be a second
 //! thing to reason about.
 //!
-//! **A pass is cheap by construction, not by skipping.** Each session costs one
-//! targeted `show` (~0.5 ms) against a bounded batch, so a pass is tens of
-//! milliseconds every five minutes. Nothing here tries to avoid that round trip:
-//! the fingerprint that would tell us a session is unchanged *arrives in the
-//! response*, so it cannot gate the call that fetches it, and the writes it could
-//! skip are one upsert and a DELETE matching no rows. It is recorded as provenance
-//! and counted as a staleness signal — a pass where every session is unchanged
-//! means the archive is not advancing, which is the shape of a broken ingestion
-//! daemon.
+//! **A pass is cheap by construction, not by skipping.** It examines a bounded batch,
+//! drawn least-recently-checked first so successive passes rotate through every session
+//! rather than re-examining one prefix.
 //!
-//! A global epoch to poll instead was considered and rejected: the only surface
-//! carrying TraceDB's archive-wide ack is `doctor --json`, measured at 2m34s
-//! because it walks every agent's native store — far more expensive than the
-//! per-session reads it would be gating.
+//! **An unreachable environment is one fact about the pass, not N session failures.**
+//! Each environment is probed once, before any session. This repo has paid for the other
+//! shape twice, one layer apart: per-session probing turned one missing dependency into
+//! a warning per session per pass, and a timer-driven caller then reproduced the same
+//! unbounded stream a layer down — 2339 identical lines in one measured E2E run. An
+//! install with no environment paired is a supported configuration, not a fault.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,9 +30,10 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use crate::db::JournalStore;
+use crate::env::Environment;
 use crate::storage::history::HistoryStore;
 use crate::storage::retention::{self, Resolved};
-use crate::tracedb::Client as TraceDbClient;
+use sylph_protocol::SessionId;
 
 /// How many sessions one pass examines.
 ///
@@ -74,16 +71,22 @@ pub struct PassReport {
     pub ran_at_ms: i64,
     /// Sessions examined this pass.
     pub examined: usize,
-    /// Sessions whose archived source was byte-identical to the last pass.
-    ///
-    /// A diagnostic rather than a skip. All-unchanged across passes means the
-    /// archive is not advancing — a stopped ingestion daemon looks exactly like a
-    /// healthy steady state otherwise.
-    pub unchanged: usize,
     /// Sessions where an authority confirmed a sequence number.
     pub confirmed: usize,
     /// Sessions where nothing was safe to drop.
+    ///
+    /// **Counted from the authority's own reported reason, never inferred from an
+    /// absent bound.** `confirmed_seq.is_none()` cannot separate "the environment
+    /// answered and nothing is safe yet" from "no envagent was connected, so nobody was
+    /// asked", and those call for opposite responses — the second means the check never
+    /// happened. `withheld_reasons` below is what makes the difference legible.
     pub withheld: usize,
+    /// How many sessions withheld for each reason, so a report says *why* rather than
+    /// only *how many*.
+    ///
+    /// A `BTreeMap` for a stable key order: an unordered map churns the diagnostics
+    /// response between calls for no reason a reader can act on.
+    pub withheld_reasons: std::collections::BTreeMap<String, usize>,
     /// Sessions governed by `terminal` — no ingestion path, so never pruned.
     pub terminal: usize,
     pub blocks_pruned: u64,
@@ -111,17 +114,17 @@ pub struct PassReport {
     pub largest_sessions: Vec<crate::storage::history::SessionBytes>,
     /// Sessions whose pass failed, so their history is simply kept.
     pub failed: usize,
-    /// Whether the archive could be reached at all this pass.
+    /// Which environments answered this pass, and which did not.
     ///
-    /// Probed once per pass rather than discovered per session. An install without
-    /// TraceDB is a supported degraded state, and treating it as N session failures
-    /// would report a configuration fact as a fault N times per pass forever —
-    /// while `false` here says the actionable thing once.
+    /// Probed once per pass rather than per session, and reported per environment rather
+    /// than as one boolean — which is the better question the rewrite bought. A single
+    /// `archive_available` could only say "the archive is unreachable"; this
+    /// distinguishes a missing CLI from a sleeping laptop from an exhausted sandbox node
+    /// (`docs/environments.md` § Health is per environment).
     ///
-    /// A pass with no archive prunes nothing and records nothing, because "cannot
-    /// ask" is not "asked and nothing is safe". Writing a watermark would claim a
-    /// check that never happened.
-    pub archive_available: bool,
+    /// A session whose environment is absent from this map, or present and false, is
+    /// **left entirely alone**: not pruned, and *not* recorded as checked.
+    pub environments_reachable: std::collections::BTreeMap<String, bool>,
 }
 
 /// Bytes for a log line, in the unit a reader can act on.
@@ -157,13 +160,14 @@ fn human_bytes(bytes: i64) -> String {
 pub struct RetentionScheduler {
     journal: JournalStore,
     history: HistoryStore,
-    tracedb: TraceDbClient,
     /// The environment sessions run in.
     ///
-    /// One value today because `local` is the only environment. It is a field
-    /// rather than a literal at the call site so a per-session environment later
-    /// replaces one lookup instead of introducing the concept.
-    environment_kind: String,
+    /// One today. Held as the trait object rather than a kind string because the
+    /// authority now asks it a *question* — is this session's native source still
+    /// there — rather than branching on what kind of environment it is. That branch
+    /// (`matches!(kind, "local")`) was the "who started it" reading `docs/storage.md`
+    /// forbids.
+    environment: Arc<dyn Environment>,
     /// One pass at a time, for the same reason the consolidator serializes: this is
     /// I/O-heavy background work and competing with the token path for the same
     /// disk is what the tiering exists to avoid.
@@ -175,14 +179,12 @@ impl RetentionScheduler {
     pub fn new(
         journal: JournalStore,
         history: HistoryStore,
-        tracedb: TraceDbClient,
-        environment_kind: impl Into<String>,
+        environment: Arc<dyn Environment>,
     ) -> Self {
         Self {
             journal,
             history,
-            tracedb,
-            environment_kind: environment_kind.into(),
+            environment,
             gate: Arc::new(Semaphore::new(1)),
             last: Arc::new(Mutex::new(None)),
         }
@@ -206,10 +208,14 @@ impl RetentionScheduler {
             ..PassReport::default()
         };
 
-        // Once, before any session. A delegated session cannot be confirmed without
-        // the archive, and asking each one separately turns one configuration fact
-        // into a per-session failure.
-        report.archive_available = self.tracedb.probe().await;
+        // Once, before any session. A backed session cannot be confirmed without its
+        // environment, and asking per session turns one configuration fact into a
+        // per-session failure.
+        let descriptor = self.environment.descriptor();
+        let reachable = self.environment.probe().await.available;
+        report
+            .environments_reachable
+            .insert(descriptor.id.clone(), reachable);
 
         let sessions = match self.history.sessions_awaiting_retention(PASS_BATCH).await {
             Ok(sessions) => sessions,
@@ -307,18 +313,30 @@ impl RetentionScheduler {
                     None => String::new(),
                 }
             );
-        } else if !report.archive_available && report.examined > 0 {
-            // Once per pass, not once per session, and at debug because an install
-            // without TraceDB is a supported configuration rather than a fault.
-            // `/diagnostics` carries the same fact for anyone looking.
+        } else if report
+            .environments_reachable
+            .values()
+            .any(|reachable| !reachable)
+            && report.examined > 0
+        {
+            // Once per pass, not once per session, and at `debug` because an install
+            // with an unpaired environment is a supported configuration rather than a
+            // fault. `/diagnostics` carries the same fact per environment for anyone
+            // looking.
             debug!(
-                "Retention pass: archive unavailable, so {} session(s) keep everything",
+                "Retention pass: {} environment(s) unreachable, so some of {} session(s) \
+                 keep everything",
+                report
+                    .environments_reachable
+                    .values()
+                    .filter(|reachable| !**reachable)
+                    .count(),
                 report.examined
             );
         } else {
             debug!(
-                "Retention pass: examined {} session(s), {} unchanged, nothing to drop",
-                report.examined, report.unchanged
+                "Retention pass: examined {} session(s), {} withheld, nothing to drop",
+                report.examined, report.withheld
             );
         }
 
@@ -327,74 +345,98 @@ impl RetentionScheduler {
     }
 
     /// One session: resolve its authority, skip it if unchanged, otherwise prune.
-    async fn run_one(&self, session_id: &str, report: &mut PassReport) -> anyhow::Result<()> {
-        // A session whose journal row is gone cannot have its authority resolved —
-        // there is no agent or native id to derive an archive identity from — so it
-        // is treated as terminal and its history is kept.
-        let session = self.journal.get_session(session_id).await?;
-        let Some(session) = session else {
+    async fn run_one(&self, encoded: &str, report: &mut PassReport) -> anyhow::Result<()> {
+        // `history.db` keys on the encoded triple, so a batch arrives as strings and
+        // this is where the decode happens. A key that will not decode cannot name a
+        // session, so nothing can be asked about it and its history is kept — the safe
+        // direction, and counted so a corrupt row is visible rather than silently
+        // skipped.
+        let Ok(session_id) = SessionId::decode(encoded) else {
             report.terminal += 1;
-            report.withheld += 1;
-            debug!(
-                "No journal row for {}; keeping its history rather than guessing",
-                session_id
-            );
+            self.record_withheld(report, retention::WithheldReason::NoNativeSource);
+            warn!("History holds blocks under an unparseable session id: {encoded}");
             return Ok(());
         };
 
-        let resolved = retention::resolve_authority(
-            &self.tracedb,
-            &self.history,
-            &self.environment_kind,
-            &session.agent,
-            session.backend_session_id.as_deref(),
-            session.trace_session_id.as_deref(),
-        );
+        // A session whose journal row is gone cannot be asked about: nothing says which
+        // environment held its native source. Terminal, and its history is kept.
+        if self.journal.get_session(&session_id).await?.is_none() {
+            report.terminal += 1;
+            self.record_withheld(report, retention::WithheldReason::NoNativeSource);
+            debug!(
+                "No journal row for {}; keeping its history rather than guessing",
+                encoded
+            );
+            return Ok(());
+        }
+
+        let resolved = retention::resolve_authority(&self.environment, &session_id);
 
         if matches!(resolved, Resolved::Terminal(_)) {
             report.terminal += 1;
         }
 
-        // A delegated session with no reachable archive is left entirely alone: not
-        // pruned, and not recorded as checked. Recording it would write a watermark
-        // asserting a confirmation that was never obtained, and "cannot ask" must
-        // not be stored as "asked, and nothing is safe yet".
+        // A backed session whose environment did not answer is left **entirely alone**:
+        // not pruned, and *not* recorded as checked. Writing a watermark would assert a
+        // confirmation that was never obtained, and "cannot ask" must not be stored as
+        // "asked, and nothing is safe yet" — a later pass would believe a bound had been
+        // established.
         //
-        // A terminal session still proceeds. It never consults the archive, so its
+        // A terminal session still proceeds. It never consults an environment, so its
         // answer does not depend on one being there.
-        if matches!(resolved, Resolved::Delegated(_)) && !report.archive_available {
-            report.withheld += 1;
+        //
+        // Read from the per-environment map rather than one global boolean, and absent
+        // counts as unreachable: an environment nobody probed is one nobody asked.
+        let reachable = report
+            .environments_reachable
+            .get(session_id.environment.as_str())
+            .copied()
+            .unwrap_or(false);
+        if matches!(resolved, Resolved::Backed(_)) && !reachable {
+            self.record_withheld(report, retention::WithheldReason::EnvironmentUnreachable);
             debug!(
-                "Archive unavailable; leaving {}'s history and watermark untouched",
-                session_id
+                "Environment {} is unreachable; leaving {}'s history and watermark untouched",
+                session_id.environment, encoded
             );
             return Ok(());
         }
 
-        // Read before the pass overwrites it, so the two fingerprints being
-        // compared are the previous observation and the current one.
-        let previous_fingerprint = self.history.watermark_fingerprint(session_id).await?;
+        let outcome =
+            retention::run_retention(&self.history, resolved.authority(), &session_id).await?;
 
-        let outcome = retention::run_retention(&self.history, resolved.authority(), session_id)
-            .await?;
-
-        // Only meaningful when both exist: a first pass has no previous fingerprint
-        // and a terminal session never has one, and neither is "unchanged".
-        if let (Some(before), Some(after)) = (
-            previous_fingerprint,
-            self.history.watermark_fingerprint(session_id).await?,
-        ) {
-            if before == after {
-                report.unchanged += 1;
-            }
-        }
-
+        // **Read from the authority's own answer, not inferred from an absent bound.**
+        // `confirmed_seq.is_none()` was what this used to branch on, and it cannot
+        // separate a conservative answer from a question that was never put.
         match outcome.confirmed_seq {
             Some(_) => report.confirmed += 1,
-            None => report.withheld += 1,
+            None => {
+                let reason = outcome
+                    .withheld
+                    // An authority that confirmed nothing and gave no reason is a bug in
+                    // that authority rather than a state to render, so it is recorded
+                    // under the most conservative reason rather than dropped from the
+                    // count — a withheld session missing from `withheld` would make the
+                    // totals disagree with each other.
+                    .unwrap_or(retention::WithheldReason::Ambiguous);
+                self.record_withheld(report, reason);
+            }
         }
         report.blocks_pruned += outcome.pruned;
         Ok(())
+    }
+
+    /// Count one withheld session, and why.
+    ///
+    /// One helper rather than two increments at each of the five sites, because the
+    /// total and the per-reason breakdown must agree: a site that bumped `withheld` and
+    /// forgot the reason would report a session as withheld for no reason at all, which
+    /// is exactly the ambiguity the breakdown exists to remove.
+    fn record_withheld(&self, report: &mut PassReport, reason: retention::WithheldReason) {
+        report.withheld += 1;
+        *report
+            .withheld_reasons
+            .entry(reason.as_str().to_string())
+            .or_insert(0) += 1;
     }
 
     /// Pass now, then keep passing.

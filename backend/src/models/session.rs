@@ -1,31 +1,145 @@
-use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+//! A session row, keyed by the identity triple.
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+use serde::{Deserialize, Serialize};
+use sqlx::{FromRow, Row};
+use sylph_protocol::{AgentName, EnvironmentId, Fidelity, NativeId, SessionId};
+
+/// Compose a [`SessionId`] out of three columns of one row.
+///
+/// # Why a decode error rather than a lossy fallback
+///
+/// [`EnvironmentId::parse`] and [`AgentName::parse`] can both fail, and a failure
+/// here means the journal holds a row whose key is not a well-formed identity. That
+/// is a corrupt store, so it surfaces as a `sqlx` decode error naming the column —
+/// loudly, at the one moment someone is looking.
+///
+/// The alternative was tempting and wrong: substituting a placeholder id would make
+/// the row readable and make every comparison against it silently false, which is
+/// precisely the failure mode the triple exists to delete (`AGENTS.md` § Two id
+/// spaces). A row that cannot be identified must not be handed out as if it could.
+pub(crate) fn triple_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+    environment: &str,
+    agent: &str,
+    native: &str,
+) -> Result<SessionId, sqlx::Error> {
+    let decode = |column: &str, error: sylph_protocol::IdentityError| sqlx::Error::ColumnDecode {
+        index: column.to_string(),
+        source: Box::new(error),
+    };
+
+    Ok(SessionId::new(
+        EnvironmentId::parse(row.try_get::<String, _>(environment)?)
+            .map_err(|error| decode(environment, error))?,
+        AgentName::parse(row.try_get::<String, _>(agent)?)
+            .map_err(|error| decode(agent, error))?,
+        NativeId::new(row.try_get::<String, _>(native)?),
+    ))
+}
+
+/// Read `sessions.fidelity` back into the typed enum.
+///
+/// The column carries a CHECK constraint, so an unrecognized value means the schema
+/// and this code disagree — a decode error rather than a default, for the same reason
+/// as the triple above.
+fn fidelity_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Fidelity, sqlx::Error> {
+    let raw: String = row.try_get("fidelity")?;
+    match raw.as_str() {
+        "stream" => Ok(Fidelity::Stream),
+        "blocks" => Ok(Fidelity::Blocks),
+        "messages" => Ok(Fidelity::Messages),
+        other => Err(sqlx::Error::ColumnDecode {
+            index: "fidelity".to_string(),
+            source: format!("'{other}' is not a fidelity this build knows").into(),
+        }),
+    }
+}
+
+/// One session.
+///
+/// **There is no Sylph-minted id** (`docs/architecture.md` § Identity): [`Self::id`]
+/// *is* the identity, and a row exists only once an agent has assigned one. What used
+/// to sit here and does not any more — `origin`, `identity_mode`, `lifecycle_mode`,
+/// `trace_session_id`, `backend_session_id` — is recorded in
+/// `docs/database-schema.md`; measured, they had four write sites and one behavioural
+/// branch between them, and that branch is now [`Self::inject_identity`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
-    pub id: String,
-    pub origin: String,
-    pub identity_mode: String,
-    pub lifecycle_mode: String,
-    pub agent: String,
-    #[serde(rename = "nativeSessionId", skip_serializing_if = "Option::is_none")]
-    pub backend_session_id: Option<String>,
-    /// TraceDB id this session was imported from, when it was.
-    ///
-    /// Serialized because the archive browser needs it: without it the client
-    /// cannot tell that an archived row it is about to list is the same
-    /// conversation as a live session, and would offer the user two ways into one
-    /// history. The Web UUID remains the route id; this field is the durable
-    /// archive identity used by the originating agent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_session_id: Option<String>,
+    /// The identity triple. Serialized three ways at once, which is deliberate: a
+    /// client echoes `id` back as a path segment and reads `environment`, `agent`,
+    /// and `nativeId` as fields, **so it never parses the id** to learn which agent
+    /// a session belongs to (`docs/api-design.md` § A session id in a path).
+    #[serde(flatten, with = "session_id_fields")]
+    pub id: SessionId,
     pub workdir: String,
     pub title: Option<String>,
+    /// Whether `SOUL.md` is appended. Settable at creation and refused by `PATCH`,
+    /// because a transcript records what produced it.
+    pub inject_identity: bool,
+    /// How much resolution this record has. A renderer reads it before drawing a
+    /// duration.
+    pub fidelity: Fidelity,
+    /// A JSON *string*, not an object. Requests take `flags` as an object; a response
+    /// reports the stored column and the client parses it — this document showed
+    /// `flags` here for a release and a client written from it read `undefined`.
     pub flags_json: String,
     pub status: String,
+    /// The delegation parent or fork origin, as an encoded triple.
+    ///
+    /// One column for two relationships, which the row it points at disambiguates
+    /// (`crate::db::labels::lineage`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+/// Serialize a [`SessionId`] as the four fields a client reads.
+///
+/// `id` is the encoded form for a path segment; the three parts are given
+/// separately so nothing downstream has to split the string.
+mod session_id_fields {
+    use super::*;
+    use serde::ser::SerializeMap;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(id: &SessionId, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(4))?;
+        map.serialize_entry("id", &id.encode())?;
+        map.serialize_entry("environment", id.environment.as_str())?;
+        map.serialize_entry("agent", id.agent.as_str())?;
+        map.serialize_entry("nativeId", id.native_id.as_str())?;
+        map.end()
+    }
+
+    /// Read back from the encoded `id` alone, since that is the one field guaranteed
+    /// to round-trip and the three parts are derivable from it.
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SessionId, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            id: String,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        SessionId::decode(&wire.id).map_err(serde::de::Error::custom)
+    }
+}
+
+impl FromRow<'_, sqlx::sqlite::SqliteRow> for Session {
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: triple_from_row(row, "environment", "agent", "native_id")?,
+            workdir: row.try_get("workdir")?,
+            title: row.try_get("title")?,
+            inject_identity: row.try_get("inject_identity")?,
+            fidelity: fidelity_from_row(row)?,
+            flags_json: row.try_get("flags_json")?,
+            status: row.try_get("status")?,
+            parent_session: row.try_get("parent_session")?,
+            created_at_ms: row.try_get("created_at_ms")?,
+            updated_at_ms: row.try_get("updated_at_ms")?,
+        })
+    }
 }
 
 impl Session {
@@ -34,54 +148,56 @@ impl Session {
     }
 }
 
+/// What a client asks for when starting a session.
+///
+/// **This starts an agent** (`docs/api-design.md` § `POST /api/v1/sessions`). There is
+/// no id to supply, because a session has no identity until an agent has given it
+/// one — which is why `nativeId` is absent here and present on the adopt request.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionRequest {
+    /// Which environment runs it. Required: an agent's availability is decided per
+    /// machine by what is on that machine's `PATH`, so there is no global default
+    /// that would be true anywhere.
+    pub environment: String,
     pub agent: String,
     pub workdir: String,
     pub title: Option<String>,
+    /// Whether to append `SOUL.md`. Defaults to **true** for a session Sylph starts.
+    ///
+    /// Accepted here and nowhere else: `PATCH` refuses it, because a transcript
+    /// records what produced it and rewriting the flag would rewrite what the stored
+    /// history means. This is the one behavioural remnant of the deleted
+    /// `identity_mode`, which was a four-valued pair of enums with exactly one read.
+    #[serde(default = "inject_identity_default")]
+    pub inject_identity: bool,
     pub flags: Option<serde_json::Value>,
-    /// Whether this session gets Sylph's identity. `sylph` injects `SOUL.md`,
-    /// `preserve` runs the agent as it comes. Defaults to `sylph`, so an older
-    /// client that does not send the field keeps the behaviour it had.
-    ///
-    /// This is the *creating* client's choice, and it is only a choice for a
-    /// Sylph-origin session. An imported native session is `preserve` because
-    /// its identity is already fixed by the history it resumes — see
-    /// [`crate::api::sessions::import`], which derives the field rather than
-    /// reading it.
-    ///
-    /// It is accepted here and nowhere else. Identity decides what the stored
-    /// transcript was produced by, so it is fixed at creation: `PATCH /sessions`
-    /// deliberately refuses it, and converting an existing session is a separate
-    /// explicit operation.
-    pub identity_mode: Option<IdentityMode>,
 }
 
-/// Identity policy for a session.
+fn inject_identity_default() -> bool {
+    true
+}
+
+/// What a client asks for when adopting a session an agent already has.
 ///
-/// A closed enum rather than a string, so an unrecognized value is a 422 from
-/// serde with the field named, instead of a row in the journal carrying a
-/// spelling nothing downstream matches — which would silently read as "not
-/// sylph" and disable injection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum IdentityMode {
-    /// Inject `SOUL.md`: this is a Sylph session.
-    #[default]
-    Sylph,
-    /// Run the agent with its own identity and no injection.
-    Preserve,
-}
-
-impl IdentityMode {
-    /// Journal spelling. These strings are already in the schema and in
-    /// `docs/database-schema.md`, so they are pinned here rather than derived
-    /// from the variant names.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Sylph => "sylph",
-            Self::Preserve => "preserve",
-        }
-    }
+/// Replaces `POST /sessions/import`, and the difference is where the id comes from:
+/// an import named a row in a separate archive, while this names a session in the
+/// **vendor's own native store** on a specific machine.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptSessionRequest {
+    pub environment: String,
+    pub agent: String,
+    pub native_id: String,
+    /// Follow the store as it grows, so a session running in a terminal right now
+    /// appears and keeps updating. `false` parses one pass of what is recorded.
+    #[serde(default)]
+    pub watch: bool,
+    /// Overrides the title derived from the opening ask.
+    pub title: Option<String>,
+    /// Defaults to **false** here, because the transcript so far was produced without
+    /// it — but settable, since adopting a terminal session and injecting from that
+    /// point on is a coherent thing to want.
+    #[serde(default)]
+    pub inject_identity: bool,
 }

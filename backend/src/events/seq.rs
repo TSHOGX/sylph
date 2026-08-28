@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 
 use crate::db::JournalStore;
 use crate::error::Result;
+use sylph_protocol::SessionId;
 
 /// Hands out monotonic sequence numbers, seeded from the journal.
 #[derive(Clone)]
@@ -39,10 +40,14 @@ impl SeqAllocator {
     ///
     /// Seeded from `MAX(seq)` on first use so numbering keeps climbing across a
     /// restart rather than restarting at zero and colliding with journaled rows.
-    pub async fn next(&self, session_id: &str) -> Result<i32> {
+    pub async fn next(&self, session_id: &SessionId) -> Result<i32> {
+        // Keyed on the encoded triple rather than on `SessionId` itself: the map is
+        // hot — one lookup per event — and the encoding has a single producer, so the
+        // two spellings cannot diverge.
+        let key = session_id.encode();
         let counter = {
             let counters = self.counters.read().await;
-            counters.get(session_id).cloned()
+            counters.get(&key).cloned()
         };
 
         let counter = match counter {
@@ -54,7 +59,7 @@ impl SeqAllocator {
                 // whichever landed first is what keeps numbering monotonic — the
                 // loser's seed would rewind the counter.
                 counters
-                    .entry(session_id.to_string())
+                    .entry(key)
                     .or_insert_with(|| Arc::new(AtomicI32::new(max + 1)))
                     .clone()
             }
@@ -84,8 +89,8 @@ mod tests {
     async fn numbers_climb_and_never_repeat_for_one_session() {
         let (store, _dir) = store().await;
         let allocator = SeqAllocator::new(store);
-        let first = allocator.next("s1").await.unwrap();
-        let second = allocator.next("s1").await.unwrap();
+        let first = allocator.next(&crate::fixtures::test_session_id("s1")).await.unwrap();
+        let second = allocator.next(&crate::fixtures::test_session_id("s1")).await.unwrap();
         assert_eq!(second, first + 1);
     }
 
@@ -95,9 +100,9 @@ mod tests {
         // numbers forward and leave gaps in its stream.
         let (store, _dir) = store().await;
         let allocator = SeqAllocator::new(store);
-        allocator.next("s1").await.unwrap();
-        allocator.next("s1").await.unwrap();
-        assert_eq!(allocator.next("s2").await.unwrap(), 0);
+        allocator.next(&crate::fixtures::test_session_id("s1")).await.unwrap();
+        allocator.next(&crate::fixtures::test_session_id("s1")).await.unwrap();
+        assert_eq!(allocator.next(&crate::fixtures::test_session_id("s2")).await.unwrap(), 0);
     }
 
     /// The property the shared allocator exists for: concurrent producers never
@@ -113,7 +118,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let mut mine = Vec::new();
                 for _ in 0..50 {
-                    mine.push(allocator.next("shared").await.unwrap());
+                    mine.push(allocator.next(&crate::fixtures::test_session_id("shared")).await.unwrap());
                 }
                 mine
             }));

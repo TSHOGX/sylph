@@ -23,10 +23,22 @@ async fn history_store() -> (HistoryStore, TempDir) {
     (store, dir)
 }
 
+/// The session these fixtures hang off.
+///
+/// A `SessionId` cannot be built from a bare string — it goes through the protocol's own
+/// parsers — which is the property under test everywhere the type appears.
+fn session_id() -> sylph_protocol::SessionId {
+    sylph_protocol::SessionId::new(
+        sylph_protocol::EnvironmentId::parse("env7fk2").unwrap(),
+        sylph_protocol::AgentName::parse("claude").unwrap(),
+        sylph_protocol::NativeId::new("s1"),
+    )
+}
+
 fn event(seq: i32, kind: &str, phase: Option<&str>, stream: Option<&str>, text: &str, at_ms: i64) -> Event {
     Event {
         id: None,
-        session_id: "s1".to_string(),
+        session_id: session_id(),
         turn_id: Some("turn-1".to_string()),
         seq,
         kind: kind.to_string(),
@@ -44,7 +56,6 @@ fn event(seq: i32, kind: &str, phase: Option<&str>, stream: Option<&str>, text: 
         },
         source: "agent".to_string(),
         created_at_ms: at_ms,
-        reconciled_at_ms: None,
     }
 }
 
@@ -67,7 +78,7 @@ async fn a_streamed_block_replays_exactly_what_the_client_saw() {
     let blocks = history::consolidate(&events);
     history.put_blocks(&blocks).await.unwrap();
 
-    let stored = history.blocks("s1", -1).await.unwrap();
+    let stored = history.blocks(&session_id().encode(), -1).await.unwrap();
     // The user's message and one assistant block: the deltas folded into it.
     assert_eq!(stored.len(), 2);
 
@@ -112,7 +123,7 @@ async fn a_trajectory_keeps_the_name_an_earlier_phase_gave_it() {
         .await
         .unwrap();
 
-    let stored = history.blocks("s1", -1).await.unwrap();
+    let stored = history.blocks(&session_id().encode(), -1).await.unwrap();
     let trajectory = stored.iter().find(|b| b.kind == "subagent").unwrap();
     assert_eq!(
         trajectory.name.as_deref(),
@@ -156,7 +167,7 @@ async fn a_trajectory_left_open_survives_consolidation_as_running() {
         .await
         .unwrap();
 
-    let stored = history.blocks("s1", -1).await.unwrap();
+    let stored = history.blocks(&session_id().encode(), -1).await.unwrap();
     let trajectory = stored
         .iter()
         .find(|b| b.stream_id.as_deref() == Some("bg-task"))
@@ -203,7 +214,7 @@ async fn a_restart_closes_a_trajectory_history_still_holds_as_running() {
     let closed = history.close_running_trajectories().await.unwrap();
     assert_eq!(closed, 1);
 
-    let stored = history.blocks("s1", -1).await.unwrap();
+    let stored = history.blocks(&session_id().encode(), -1).await.unwrap();
     let trajectory = stored
         .iter()
         .find(|b| b.stream_id.as_deref() == Some("bg-task"))
@@ -245,7 +256,7 @@ async fn a_late_outcome_corrects_a_consolidated_trajectory() {
 
     let amended = history
         .reconcile_trajectory(
-            "s1",
+        &session_id().encode(),
             "bg-task",
             "turn-later",
             &sylph_web_backend::supervisor::TrajectoryOutcome {
@@ -258,7 +269,7 @@ async fn a_late_outcome_corrects_a_consolidated_trajectory() {
         .unwrap();
     assert!(amended);
 
-    let stored = history.blocks("s1", -1).await.unwrap();
+    let stored = history.blocks(&session_id().encode(), -1).await.unwrap();
     let trajectory = stored
         .iter()
         .find(|b| b.stream_id.as_deref() == Some("bg-task"))
@@ -309,11 +320,11 @@ async fn deltas_become_one_block_rather_than_a_row_each() {
         .unwrap();
 
     assert_eq!(
-        history.block_count("s1").await.unwrap(),
+        history.block_count(&session_id().encode()).await.unwrap(),
         1,
         "200 deltas and their completion are one block"
     );
-    let block = &history.blocks("s1", -1).await.unwrap()[0];
+    let block = &history.blocks(&session_id().encode(), -1).await.unwrap()[0];
     assert_eq!(HistoryStore::replay_block(block).len(), 200);
 }
 
@@ -332,7 +343,7 @@ async fn a_consolidated_block_publishes_when_it_began_and_not_only_when_it_close
         .await
         .unwrap();
 
-    let block = &history.blocks("s1", -1).await.unwrap()[0];
+    let block = &history.blocks(&session_id().encode(), -1).await.unwrap()[0];
     let wire = block_to_event(block);
 
     // Consolidation keys the folded row on the *closing* event, so `createdAtMs`
@@ -361,7 +372,7 @@ async fn a_journal_row_reports_no_start_because_it_is_one_arrival() {
     // answer, and it is what lets a client tell streaming from settled.
     let row = Event {
         id: None,
-        session_id: "s1".to_string(),
+        session_id: session_id(),
         turn_id: Some("t1".to_string()),
         seq: 0,
         kind: "assistant".to_string(),
@@ -375,7 +386,6 @@ async fn a_journal_row_reports_no_start_because_it_is_one_arrival() {
         stability: "ephemeral".to_string(),
         source: "runner".to_string(),
         created_at_ms: 1000,
-        reconciled_at_ms: None,
     };
 
     assert_eq!(StreamEvent::from_row(&row).started_at_ms, None);
@@ -399,7 +409,7 @@ async fn an_unstreamed_block_replays_as_a_single_arrival() {
         .await
         .unwrap();
 
-    let block = &history.blocks("s1", -1).await.unwrap()[0];
+    let block = &history.blocks(&session_id().encode(), -1).await.unwrap()[0];
     assert!(block.folded.is_none());
     let replayed = HistoryStore::replay_block(block);
     assert_eq!(replayed.len(), 1);
@@ -419,7 +429,7 @@ async fn a_large_block_is_externalized_and_still_reads_back_whole() {
         .await
         .unwrap();
 
-    let block = &history.blocks("s1", -1).await.unwrap()[0];
+    let block = &history.blocks(&session_id().encode(), -1).await.unwrap()[0];
     assert_eq!(block.text.len(), 20_000);
     assert_eq!(block.text, big);
 }
@@ -448,7 +458,7 @@ async fn a_payload_repeated_across_turns_is_stored_once() {
     let objects = count_files(&_dir.path().join("cas"));
     assert_eq!(objects, 1, "content addressing stores it once");
     // And both blocks still read it.
-    for block in history.blocks("s1", -1).await.unwrap() {
+    for block in history.blocks(&session_id().encode(), -1).await.unwrap() {
         assert_eq!(block.text, shared);
     }
 }
@@ -467,7 +477,7 @@ async fn consolidating_the_same_turn_twice_is_harmless() {
     history.put_blocks(&blocks).await.unwrap();
     history.put_blocks(&blocks).await.unwrap();
 
-    assert_eq!(history.block_count("s1").await.unwrap(), 2);
+    assert_eq!(history.block_count(&session_id().encode()).await.unwrap(), 2);
 }
 
 /// The ordering rule: history holds the turn before the journal drops it. A turn
@@ -531,7 +541,7 @@ async fn a_block_cut_off_mid_stream_keeps_what_arrived() {
         .await
         .unwrap();
 
-    let blocks = history.blocks("s1", -1).await.unwrap();
+    let blocks = history.blocks(&session_id().encode(), -1).await.unwrap();
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].text, "I was saying");
     assert_eq!(blocks[0].phase.as_deref(), Some("incomplete"));
@@ -551,7 +561,7 @@ async fn multibyte_deltas_survive_the_round_trip() {
         .await
         .unwrap();
 
-    let block = &history.blocks("s1", -1).await.unwrap()[0];
+    let block = &history.blocks(&session_id().encode(), -1).await.unwrap()[0];
     let replayed = HistoryStore::replay_block(block);
     let rebuilt: String = replayed.iter().map(|d| d.text.as_str()).collect();
     assert_eq!(rebuilt, "我会先读取配置。");
@@ -734,26 +744,56 @@ async fn a_retention_pass_examines_a_consolidated_session_and_keeps_unconfirmed_
         "every block stays"
     );
 
-    // The harness has no TraceDB, which is a supported degraded state. What matters
-    // is that it is reported as one fact about the pass rather than as a per-session
-    // fault, and that no watermark claims a check that never happened.
-    assert!(
-        !report.archive_available,
-        "the harness has no archive, and the pass must say so: {report:?}"
+    // Reachability is reported **per environment**, once per pass rather than per
+    // session — the shape that keeps one configuration fact from becoming N faults.
+    // The harness's own environment is reachable, so the interesting assertion is the
+    // next one: nothing was confirmed, and the pass says *why*.
+    assert_eq!(
+        report.environments_reachable.len(),
+        1,
+        "one environment, probed once: {report:?}"
+    );
+    // **Withheld is read from the authority's own reason, never inferred from an absent
+    // bound.** `confirmed_seq.is_none()` cannot separate "answered conservatively" from
+    // "never asked", and those call for opposite responses. No native-store bound is
+    // derivable until `Adapter::enumerate` lands, so this is `ambiguous` — deliberately
+    // not a zero bound, which would read as a completed check.
+    assert_eq!(report.withheld, 1, "{report:?}");
+    assert_eq!(
+        report.withheld_reasons.get("ambiguous"),
+        Some(&1),
+        "the pass records why it withheld rather than only that it did: {report:?}"
     );
     assert_eq!(
         report.failed, 0,
-        "an absent archive is a configuration fact, not N session failures: {report:?}"
+        "withholding is a defined outcome, not a failure: {report:?}"
     );
-    assert!(
-        backend
-            .state
-            .history
-            .watermark(&session_id)
-            .await
-            .unwrap()
-            .is_none(),
-        "'cannot ask' must not be recorded as 'asked, and nothing is safe yet'"
+    // **A watermark row is written even though nothing was confirmed**, and the
+    // direction of this assertion is the opposite of what it used to be — worth stating
+    // plainly, because it looks like a weakened test and is not.
+    //
+    // Before, the harness had no archive at all: the environment could not be asked, so
+    // writing a row would have claimed a check that never happened, and the assertion
+    // was that no row existed. Here the environment *is* reachable and *did* answer —
+    // conservatively, because no native-store bound is derivable yet. That is the other
+    // side of the same rule: "checked, and nothing is safe yet" must be distinguishable
+    // from "never checked", and an absent row cannot say the first.
+    //
+    // The case the old assertion guarded still exists and is still guarded: an
+    // unreachable environment is skipped entirely by `RetentionScheduler::run_one`,
+    // which returns before `run_retention` and therefore writes nothing.
+    let watermark = backend
+        .state
+        .history
+        .watermark(&session_id)
+        .await
+        .unwrap()
+        .expect("a pass that examined this session must record that it looked");
+    assert_eq!(
+        watermark,
+        ("envagent".to_string(), None),
+        "the environment holding the native store is the authority, and it confirmed \
+         no bound"
     );
 }
 
@@ -783,14 +823,14 @@ async fn a_terminal_session_records_its_watermark_even_with_no_archive() {
     let report = sylph_web_backend::storage::retention::run_retention(
         &history,
         &sylph_web_backend::storage::TerminalAuthority,
-        "s1",
+        &session_id(),
     )
     .await
     .unwrap();
 
     assert_eq!(report.pruned, 0);
     assert_eq!(
-        history.watermark("s1").await.unwrap(),
+        history.watermark(&session_id().encode()).await.unwrap(),
         Some(("terminal".to_string(), None)),
         "the row names the authority, so a reader knows why nothing was dropped"
     );
@@ -824,10 +864,11 @@ async fn a_pass_reports_bytes_held_even_with_no_archive_to_confirm_anything() {
 
     let report = backend.state.retention.pass().await;
 
-    assert!(
-        !report.archive_available,
-        "the premise of this test is a degraded archive: {report:?}"
-    );
+    // The premise: nothing could confirm a bound, so nothing was pruned. Bytes held
+    // must still be reported — measuring only where a watermark was written would leave
+    // the report empty on exactly the install whose growth is unbounded.
+    assert_eq!(report.confirmed, 0, "{report:?}");
+    assert_eq!(report.withheld, 1, "{report:?}");
     assert!(
         report.bytes_held > 0,
         "held bytes must be reported without an authority to confirm them: {report:?}"
@@ -944,4 +985,172 @@ async fn a_second_retention_pass_over_unchanged_history_changes_nothing() {
         after_first,
         "a repeated pass must be a no-op, not a slow erosion of history"
     );
+}
+
+// ------------------------------------------------------------------ search
+//
+// `blocks_fts` is net-new: search was entirely the separate archive's, so deleting it
+// deleted the only implementation. These pin the shape `docs/api-design.md` § Search
+// defines and the two decisions that shape rests on.
+
+/// A block is findable by its text once consolidated, and the hit resolves to a position.
+#[tokio::test]
+async fn a_consolidated_block_is_findable_by_its_text() {
+    let (history, _dir) = history_store().await;
+    history
+        .put_blocks(&history::consolidate(&[event(
+            0,
+            "assistant",
+            Some("completed"),
+            Some("a1"),
+            "the reconnect loop drops every frame",
+            1000,
+        )]))
+        .await
+        .unwrap();
+
+    let hits = history.search("reconnect", 10).await.unwrap();
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session_id, session_id().encode());
+    assert_eq!(hits[0].seq, 0);
+    assert!(
+        hits[0].excerpt.contains("reconnect"),
+        "the excerpt is the text containing the query: {}",
+        hits[0].excerpt
+    );
+}
+
+/// **Decoded text is indexed, not the stored bytes**, which is why `blocks_fts` cannot be
+/// an external-content table.
+///
+/// A block over the compression threshold is stored zstd, and one over the externalization
+/// threshold is not in the row at all — its bytes live under `blobs/` and `text_inline` is
+/// NULL. An external-content index would hold compressed bytes for the first and nothing
+/// for the second, so **the rows most worth finding — the large ones — would be exactly
+/// the unfindable ones.** That failure is silent: the index builds, queries run, and they
+/// simply never match.
+#[tokio::test]
+async fn a_compressed_and_an_externalized_block_are_both_findable() {
+    let (history, _dir) = history_store().await;
+
+    // Over the 512-byte compression threshold, and compressible.
+    let compressed = format!("{} needleone", "padding ".repeat(200));
+    // Over the 4 KB externalization threshold, so the text leaves the row entirely.
+    let externalized = format!("{} needletwo", "filler ".repeat(2000));
+
+    history
+        .put_blocks(&history::consolidate(&[
+            event(0, "assistant", Some("completed"), Some("a1"), &compressed, 1000),
+            event(1, "tool_result", Some("completed"), Some("t1"), &externalized, 2000),
+        ]))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        history.search("needleone", 10).await.unwrap().len(),
+        1,
+        "a zstd-compressed block must still be findable"
+    );
+    assert_eq!(
+        history.search("needletwo", 10).await.unwrap().len(),
+        1,
+        "an externalized block must still be findable — this is the row an \
+         external-content index would silently lose"
+    );
+}
+
+/// **A result is one session carrying its best match, never one row per block.**
+///
+/// `limit` bounds sessions for the same reason: grouped client-side after a row limit, a
+/// session with thirty hits would consume the whole page and crowd out every other
+/// session's single good hit.
+#[tokio::test]
+async fn many_matches_in_one_session_are_one_result_carrying_a_count() {
+    let (history, _dir) = history_store().await;
+    let blocks: Vec<_> = (0..5)
+        .map(|seq| {
+            event(
+                seq,
+                "assistant",
+                Some("completed"),
+                Some(&format!("a{seq}")),
+                "the widget failed again",
+                1000 + seq as i64,
+            )
+        })
+        .collect();
+    history.put_blocks(&history::consolidate(&blocks)).await.unwrap();
+
+    let hits = history.search("widget", 10).await.unwrap();
+
+    assert_eq!(hits.len(), 1, "five matching blocks in one session are one result");
+    assert_eq!(hits[0].hits, 5, "and the count says how many matched");
+}
+
+/// Pruning removes index entries with the rows, in one transaction.
+///
+/// `blocks_fts` is standalone rather than external-content, so nothing removes its entries
+/// automatically — and a hit pointing at a pruned block is worse than no hit, because a
+/// client follows it and finds nothing.
+#[tokio::test]
+async fn pruning_a_block_removes_it_from_the_index() {
+    let (history, _dir) = history_store().await;
+    history
+        .put_blocks(&history::consolidate(&[event(
+            0,
+            "assistant",
+            Some("completed"),
+            Some("a1"),
+            "findable until pruned",
+            1000,
+        )]))
+        .await
+        .unwrap();
+    assert_eq!(history.search("findable", 10).await.unwrap().len(), 1);
+
+    history.prune_below(&session_id().encode(), 0).await.unwrap();
+
+    assert!(
+        history.search("findable", 10).await.unwrap().is_empty(),
+        "a hit that resolves to nothing is worse than no hit"
+    );
+}
+
+/// Re-consolidating a turn must not index it twice.
+///
+/// `put_blocks` is idempotent by `INSERT OR REPLACE`, but `blocks_fts` has no primary key
+/// to replace on — so the insert is preceded by a delete. Without it a crash between the
+/// history write and the journal delete, which consolidation is explicitly designed to
+/// survive, would return the same session twice from one query with a doubled count.
+#[tokio::test]
+async fn re_consolidating_a_turn_does_not_index_it_twice() {
+    let (history, _dir) = history_store().await;
+    let blocks = history::consolidate(&[event(
+        0,
+        "assistant",
+        Some("completed"),
+        Some("a1"),
+        "indexed exactly once",
+        1000,
+    )]);
+
+    history.put_blocks(&blocks).await.unwrap();
+    history.put_blocks(&blocks).await.unwrap();
+
+    let hits = history.search("indexed", 10).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].hits, 1, "the second pass replaced rather than added");
+}
+
+/// A malformed FTS5 query is an error carrying the engine's own message, not a panic and
+/// not a silently empty result.
+///
+/// The query is bound as a parameter rather than interpolated, so this needs no
+/// hand-written parser to detect — and an empty result would be indistinguishable from a
+/// valid query that found nothing.
+#[tokio::test]
+async fn a_malformed_query_is_an_error_rather_than_an_empty_result() {
+    let (history, _dir) = history_store().await;
+    assert!(history.search("\"unbalanced", 10).await.is_err());
 }

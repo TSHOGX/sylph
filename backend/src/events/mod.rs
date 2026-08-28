@@ -133,10 +133,10 @@ impl StreamEvent {
     }
 
     /// Convert into a persistable row.
-    pub fn to_row(&self, session_id: &str, turn_id: &str) -> Event {
+    pub fn to_row(&self, session_id: &sylph_protocol::SessionId, turn_id: &str) -> Event {
         Event {
             id: None,
-            session_id: session_id.to_string(),
+            session_id: session_id.clone(),
             turn_id: Some(turn_id.to_string()),
             seq: self.seq,
             kind: self.kind.clone(),
@@ -154,7 +154,6 @@ impl StreamEvent {
             stability: self.stability.clone(),
             source: self.source.clone(),
             created_at_ms: self.created_at_ms,
-            reconciled_at_ms: None,
         }
     }
 
@@ -492,7 +491,7 @@ mod tests {
         original.data = Some(serde_json::json!({"path": "/tmp/x"}));
         original.is_error = true;
 
-        let restored = StreamEvent::from_row(&original.to_row("sess-1", "turn-1"));
+        let restored = StreamEvent::from_row(&original.to_row(&crate::fixtures::test_session_id("sess-1"), "turn-1"));
 
         assert_eq!(restored.seq, 7);
         assert_eq!(restored.kind, "tool_call");
@@ -507,11 +506,10 @@ mod tests {
 
     #[test]
     fn to_row_carries_the_session_and_turn_ids() {
-        let row = event(1, "status", None).to_row("sess-9", "turn-9");
-        assert_eq!(row.session_id, "sess-9");
+        let row = event(1, "status", None).to_row(&crate::fixtures::test_session_id("sess-9"), "turn-9");
+        assert_eq!(row.session_id.native_id.as_str(), "sess-9");
         assert_eq!(row.turn_id.as_deref(), Some("turn-9"));
         assert!(row.id.is_none(), "a new row has no assigned id yet");
-        assert!(row.reconciled_at_ms.is_none());
     }
 
     #[test]
@@ -519,7 +517,7 @@ mod tests {
         // The column is NOT NULL, so absent data is stored as "{}" rather than
         // an empty string. Both spellings must read back as None so a row
         // written by an older build does not resurface as Some({}).
-        let row = event(1, "status", None).to_row("s", "t");
+        let row = event(1, "status", None).to_row(&crate::fixtures::test_session_id("s"), "t");
         assert_eq!(row.data_json, "{}");
         assert!(StreamEvent::from_row(&row).data.is_none());
 
@@ -532,7 +530,7 @@ mod tests {
     fn malformed_stored_data_reads_back_as_none_rather_than_failing() {
         // A corrupt data column must not make an otherwise readable event
         // unrenderable; the text and kind still carry the useful content.
-        let mut row = event(1, "assistant", Some("completed")).to_row("s", "t");
+        let mut row = event(1, "assistant", Some("completed")).to_row(&crate::fixtures::test_session_id("s"), "t");
         row.data_json = "{not json".to_string();
         assert!(StreamEvent::from_row(&row).data.is_none());
     }

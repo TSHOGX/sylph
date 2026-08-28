@@ -48,6 +48,28 @@ pub struct Block {
     pub created_at_ms: i64,
 }
 
+/// One session that matched a full-text query, with its best block.
+///
+/// Carries the session and sequence rather than a rowid, because `blocks_fts` stores
+/// them `UNINDEXED` for exactly this: a hit resolves to a block without a join back
+/// through a rowid mapping that would have to be maintained separately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHit {
+    /// The encoded identity triple.
+    pub session_id: String,
+    /// The `seq` of the best-ranked matching block, which is what a client scrolls to.
+    pub seq: i32,
+    /// The matched text, elided around the hit rather than returned whole.
+    pub excerpt: String,
+    /// The turn that block belongs to. `None` when the block row is gone — pruning can
+    /// remove it while the index entry is being rebuilt — and absent rather than
+    /// fabricated, because a wrong turn id would scroll a client to the wrong place.
+    pub turn_id: Option<String>,
+    /// How many blocks matched **within this session**, so one strong match and thirty
+    /// weak ones are distinguishable.
+    pub hits: i64,
+}
+
 /// How much record one session holds, and how that changed.
 ///
 /// `grewBy` is a signed delta, and negative is a real and useful reading: it means
@@ -210,6 +232,42 @@ impl HistoryStore {
                 .execute(&mut *tx)
                 .await?;
             }
+
+            // The search index, fed the **decoded** text.
+            //
+            // This is why `blocks_fts` cannot be an external-content FTS5 table, which
+            // is the shape the separate archive used and therefore the obvious thing to
+            // copy. External content re-reads the column from the base table at query
+            // time, and `text_inline` is not text: it may be zstd, and when the payload
+            // is externalized to CAS the column is NULL and the bytes live under
+            // `blobs/`. Such an index would hold compressed bytes for some rows and
+            // nothing at all for the rows most worth finding — the large ones. So the
+            // decoded copy is inserted here, which costs a second copy of the text and
+            // is the price of the tier split (`docs/storage.md`).
+            //
+            // Deleted first, because `INSERT OR REPLACE` above makes re-consolidating a
+            // turn idempotent and this table has no primary key to replace on — a
+            // second pass would otherwise index the same block twice and return it
+            // twice from one query.
+            //
+            // Empty text is skipped rather than indexed: a `tool_call` carries its
+            // arguments in `data_json` and no text at all, and an empty row can never
+            // match a query while still costing an index entry per block.
+            sqlx::query("DELETE FROM blocks_fts WHERE session_id = ? AND seq = ?")
+                .bind(&block.session_id)
+                .bind(block.seq)
+                .execute(&mut *tx)
+                .await?;
+            if !block.text.trim().is_empty() {
+                sqlx::query(
+                    "INSERT INTO blocks_fts (text, session_id, seq) VALUES (?, ?, ?)",
+                )
+                .bind(&block.text)
+                .bind(&block.session_id)
+                .bind(block.seq)
+                .execute(&mut *tx)
+                .await?;
+            }
         }
 
         tx.commit().await?;
@@ -350,12 +408,117 @@ impl HistoryStore {
     /// every pruned blob permanently. The ref outliving its block is a dangling
     /// row the sweep reconciles, which is the safe direction.
     pub async fn prune_below(&self, session_id: &str, confirmed_seq: i32) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query("DELETE FROM blocks WHERE session_id = ? AND seq <= ?")
             .bind(session_id)
             .bind(confirmed_seq)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        // The index goes with the rows, in the same transaction. `blocks_fts` is
+        // standalone rather than external-content, so nothing removes its entries
+        // automatically — and a hit pointing at a pruned block is worse than no hit,
+        // because a client would follow it and find nothing.
+        sqlx::query("DELETE FROM blocks_fts WHERE session_id = ? AND seq <= ?")
+            .bind(session_id)
+            .bind(confirmed_seq)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(result.rows_affected())
+    }
+
+    /// Full-text search across every session's consolidated history, grouped by session.
+    ///
+    /// # Grouped rather than flat, and the grouping happens in SQL
+    ///
+    /// `docs/api-design.md` § Search defines a result as one **session** carrying its
+    /// best match and a hit count, not one row per matching block. That shape is what
+    /// lets a client render the same row component it uses for a listing, and it makes
+    /// "one strong match" distinguishable from "thirty weak ones" — which a flat list
+    /// cannot express, because thirty rows from one session would crowd out every other
+    /// session's single good hit.
+    ///
+    /// `limit` therefore bounds **sessions**, not blocks. Grouping client-side after a
+    /// row limit would silently do the opposite: a session with thirty hits would consume
+    /// the whole page.
+    ///
+    /// `snippet()` rather than the stored text, so a two-word query against a 200 KB tool
+    /// result returns a line instead of the file. FTS5 computes it from the indexed copy,
+    /// which is the decoded text `put_blocks` inserted.
+    ///
+    /// Ordered by `MIN(rank)` — FTS5's own bm25 relevance for each session's best block.
+    /// Ordering by recency was rejected: a search for a rare term should surface it
+    /// wherever it is, and a client that wants recency can sort what it receives.
+    ///
+    /// **This is the one read that must stay off any polled path.** Measured, FTS5 search
+    /// is 174–260 ms while every other operation here is microseconds to sub-millisecond,
+    /// and owning the store makes FTS5 work no cheaper.
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        // Bound as a *parameter*, never interpolated: this string is a user's, and FTS5
+        // has its own query syntax in which unbalanced quotes are a syntax error. A
+        // malformed query is therefore a database error carrying FTS5's own message
+        // rather than something this function has to re-implement a parser to detect.
+        //
+        // **`snippet()` cannot appear inside the subquery**, which is what forces this
+        // into two statements rather than one. FTS5's auxiliary functions are only
+        // callable in a query that reads the virtual table directly — used in a subquery
+        // whose results are then joined, SQLite answers `unable to use function snippet
+        // in the requested context`. So the ranking pass selects only plain columns, and
+        // the excerpt is fetched per surviving row.
+        let ranked = sqlx::query_as::<_, (String, i32, i64)>(
+            "SELECT ranked.session_id, ranked.seq, ranked.hits
+               FROM (
+                 SELECT session_id,
+                        seq,
+                        rank AS score,
+                        COUNT(*) OVER (PARTITION BY session_id) AS hits,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY session_id ORDER BY rank
+                        ) AS position
+                   FROM blocks_fts
+                  WHERE blocks_fts MATCH ?
+               ) AS ranked
+              WHERE ranked.position = 1
+              ORDER BY ranked.score
+              LIMIT ?",
+        )
+        .bind(query)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(ranked.len());
+        for (session_id, seq, hits) in ranked {
+            // One statement per result rather than per match, so this is bounded by
+            // `limit` — the whole reason the ranking pass groups first.
+            let row = sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT snippet(blocks_fts, 0, '', '', '…', 24), blocks.turn_id
+                   FROM blocks_fts
+                   LEFT JOIN blocks
+                     ON blocks.session_id = blocks_fts.session_id
+                    AND blocks.seq = blocks_fts.seq
+                  WHERE blocks_fts MATCH ?
+                    AND blocks_fts.session_id = ?
+                    AND blocks_fts.seq = ?
+                  LIMIT 1",
+            )
+            .bind(query)
+            .bind(&session_id)
+            .bind(seq)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            let (excerpt, turn_id) = row.unwrap_or_default();
+            out.push(SearchHit {
+                session_id,
+                seq,
+                excerpt,
+                turn_id,
+                hits,
+            });
+        }
+
+        Ok(out)
     }
 
     /// Delete blobs nothing references any more, returning how many.
@@ -425,39 +588,47 @@ impl HistoryStore {
     ) -> Result<()> {
         sqlx::query(
             "INSERT INTO watermarks (
-               session_id, authority, confirmed_seq, checked_at_ms,
-               archive_id, source_fingerprint
+               session_id, authority, confirmed_seq, checked_at_ms, source, withheld
              )
              VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(session_id) DO UPDATE SET
                authority = excluded.authority,
                confirmed_seq = excluded.confirmed_seq,
                checked_at_ms = excluded.checked_at_ms,
-               archive_id = excluded.archive_id,
-               source_fingerprint = excluded.source_fingerprint",
+               source = excluded.source,
+               withheld = excluded.withheld",
         )
         .bind(session_id)
         .bind(authority)
         .bind(confirmation.safe_to_drop)
         .bind(chrono::Utc::now().timestamp_millis())
-        .bind(confirmation.archive_id.as_deref())
-        .bind(confirmation.source_fingerprint.as_deref())
+        .bind(
+            confirmation
+                .source
+                .map(crate::storage::retention::NativeSourceState::as_str),
+        )
+        .bind(
+            confirmation
+                .withheld
+                .map(crate::storage::retention::WithheldReason::as_str),
+        )
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// The fingerprint recorded for a session at its last pass, if any.
+    /// Why a session's last pass withheld, if it did.
     ///
-    /// A pass compares this against what the archive reports now. It cannot gate
-    /// the `show` call — the current fingerprint arrives in that same response —
-    /// so this is not an optimization: it is how "the archive re-ingested this
-    /// session" becomes observable. A pass where every session is unchanged means
-    /// the copy is not advancing, which is what a stopped ingestion daemon looks
-    /// like, and which is otherwise indistinguishable from a healthy steady state.
-    pub async fn watermark_fingerprint(&self, session_id: &str) -> Result<Option<String>> {
+    /// This replaces `watermark_fingerprint`, and the two answer different questions
+    /// rather than one being a rename of the other. The fingerprint was the *separate
+    /// archive's* `file-v2:<sha256>:…` over a native file, and a pass counted how many
+    /// were unchanged to detect a stalled ingestion daemon — a signal about a component
+    /// that no longer exists. What is worth reporting now is the reason a bound was not
+    /// established, because that is what separates "the environment answered
+    /// conservatively" from "nobody was asked".
+    pub async fn watermark_withheld(&self, session_id: &str) -> Result<Option<String>> {
         sqlx::query_scalar::<_, Option<String>>(
-            "SELECT source_fingerprint FROM watermarks WHERE session_id = ?",
+            "SELECT withheld FROM watermarks WHERE session_id = ?",
         )
         .bind(session_id)
         .fetch_optional(&self.pool)
@@ -874,7 +1045,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 }
 
                 blocks.push(Block {
-                    session_id: event.session_id.clone(),
+                    session_id: event.session_id.encode(),
                     seq: event.seq,
                     turn_id: event.turn_id.clone().unwrap_or_default(),
                     kind: event.kind.clone(),
@@ -912,7 +1083,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
         let folded = fold::fold(&deltas, &text, started_at_ms);
 
         blocks.push(Block {
-            session_id: declaring.session_id.clone(),
+            session_id: declaring.session_id.encode(),
             seq: declaring.seq,
             turn_id: declaring.turn_id.clone().unwrap_or_default(),
             kind: declaring.kind.clone(),
@@ -955,9 +1126,14 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
         warn!("Block {} was never completed; storing what arrived", stream_id);
 
         blocks.push(Block {
+            // Every event in this fold belongs to one session, so the first row's id is
+            // the block's. An empty run cannot reach here — the caller only folds a
+            // stream that has deltas — and `String::new()` rather than a panic keeps a
+            // malformed fold from taking the process down over a block it could still
+            // write.
             session_id: events
                 .first()
-                .map(|e| e.session_id.clone())
+                .map(|e| e.session_id.encode())
                 .unwrap_or_default(),
             // Sequence numbers order the stream, and an incomplete block has none
             // of its own. The last delta's is the closest true position.
