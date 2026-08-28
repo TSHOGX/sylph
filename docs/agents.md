@@ -156,20 +156,28 @@ block — nowhere else.** *Measured 2026-08-28 over 3226 files in `~/.claude/pro
 while scoping the parser port, and worth stating because trace-db's parser looked in
 four other places and found none of them.*
 
-`tool_use_id` sits on the `tool_result` block inside `message.content[]`, on **23569 of
-23569** blocks. It is *not* on `toolUseResult` under either spelling, and not at the top
-level of the record — those four keys occur zero times in the whole store. A parser
-reading them pairs nothing: every tool result gets a null call id, and the pairing that
-`docs/session-protocol.md` § Keying rules depends on silently does not exist.
+`tool_use_id` sits on the `tool_result` block inside `message.content[]`, on **every such
+block without exception** — measured three times over 2026-08-28 as the store grew, and
+the ratio was total each time. It is *not* on `toolUseResult` under either spelling, and
+not at the top level of the record: those four keys occur **zero** times anywhere in the
+store. A parser reading them pairs nothing — every tool result gets a null call id, and
+the pairing `docs/session-protocol.md` § Keying rules depends on silently does not exist.
 
-`is_error` is on that same block, and **only** on records whose `message.role` is
-`user`: 46196 occurrences, 2100 of them true. It never appears on an assistant message.
-A parser reading it from the assistant branch classifies all 2100 real tool failures as
-successes — which is the shape this file's § Reading a vendor payload warns about, since
-`false` and "absent, defaulted to false" are indistinguishable downstream.
+`is_error` is on that same block and **only** on records whose `message.role` is `user`;
+it never appears on an assistant message. So a parser reading it from the assistant branch
+classifies **every real tool failure as a success** — the shape this file's § Reading a
+vendor payload warns about, since `false` and "absent, defaulted to false" are
+indistinguishable downstream.
 
-Both bugs shipped in a parser that parses the whole store without a single error, which
-is the point: the risk in reading a vendor store is not a crash, it is a plausible value.
+**Both facts are stated as shapes rather than as counts, deliberately.** Three passes over
+this store on one day returned 46196, 46957, and 47580 occurrences with 2100, 2131, and
+2148 failures, because a developer's session store grows while you measure it. `AGENTS.md`
+§ "A count repeated in four places is four chances to drift" is the rule: the *shape* —
+this key is on that block, and on no other — is what a parser depends on and what stays
+true, so a test asserts a failure parses as a failure rather than asserting a total.
+
+Both bugs shipped in a parser that reads the whole store without a single error, which is
+the point: the risk in reading a vendor store is not a crash, it is a plausible value.
 
 ## `codex`
 
