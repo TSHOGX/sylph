@@ -1,0 +1,38 @@
+[package]
+name = "sylph-adapters"
+version = "0.1.0"
+edition = "2021"
+# Matches every other member. Claiming less would claim support this crate has
+# not tested.
+rust-version = "1.88"
+
+[dependencies]
+sylph-protocol = { path = "../protocol" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+# An adapter holds a vendor process and reads its stdio, so unlike `protocol`
+# this crate genuinely needs a runtime. `process` for the spawn, `io-util` for
+# the line reader, `sync` for the reply correlation, `time` for the RPC timeout.
+tokio = { workspace = true }
+# The native-store parsers read the vendor's own ISO stamps. `chrono` rather
+# than hand-rolled parsing because two of the three stores write RFC3339 and one
+# writes it *without* an offset on 746 of 4881 records — see
+# `native::timestamp`, which is the only place either shape is decoded.
+chrono = { workspace = true }
+# `run` dictates a session id for `claude` and `pi`, which both take one on the
+# command line. Never used to mint a *native* id the vendor then reports: that
+# would be the synthesized-identity failure `sylph_protocol::NativeId` forbids.
+uuid = { version = "1.11", features = ["v4"] }
+
+[features]
+# The deterministic E2E agent. Behind a feature because it is a test fixture that
+# must never be reachable from a production build — `registry()` offering it
+# would make "which agents exist" depend on how the server was compiled, and a
+# fixture that can be discovered by accident is the failure
+# `docs/session-protocol.md` § What changed records twice.
+e2e = []

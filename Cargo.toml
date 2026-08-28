@@ -1,7 +1,7 @@
 # The Rust side of Sylph, as one workspace.
 #
 # `docs/roadmap.md` § Implementation order names the crates this grows into:
-# `protocol`, `adapters`, `server`, `envagent`. Only `protocol` exists yet, and
+# `protocol`, `adapters`, `server`, `envagent`. `protocol` and `adapters` exist;
 # `backend` is the standing server until step 3 moves it.
 #
 # One workspace rather than four independent crates because they share one
@@ -10,7 +10,7 @@
 # would be a wire mismatch nobody declared.
 [workspace]
 resolver = "2"
-members = ["backend", "crates/protocol"]
+members = ["backend", "crates/protocol", "crates/adapters"]
 
 # Pins every member inherits with `.workspace = true`.
 #
