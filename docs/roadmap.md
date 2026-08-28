@@ -1903,15 +1903,40 @@ rewrite that pays for the same defects twice.
 
 ### Implementation order
 
-Nothing below is done. The order matters because each step makes the next mechanical:
+Four of the six are done. The order held: each step did make the next mechanical.
 
-1. `crates/protocol` — the event vocabulary as types
-2. `crates/adapters` — port `claude` and `pi` from Python, write `codex`, absorb the three
-   parsers; recorded-payload tests for classification, plus a live path to refresh them
-3. `crates/server` — in-process adapter calls; delete `tracedb/` and agent discovery
-4. `crates/envagent` — the wire, the spool, pairing, SSH bootstrap
-5. Schema — rewrite `001` in place with the identity triple
-6. Frontend — delete the origin badge and native banner, add link facets and fidelity
+1. ✅ `crates/protocol` — the event vocabulary as types. 2932 lines; `wire.rs` fell from
+   1502 to 517, keeping only what describes framing.
+2. ✅ `crates/adapters` — 14693 lines. `claude` and `pi` ported, `codex` written from the
+   measurement corpus, the three parsers absorbed **correctively** rather than faithfully,
+   and the E2E fixture agent compiled in behind a feature.
+3. ⏳ `crates/server` — `tracedb/` and discovery are deleted and the identity triple is
+   in, but **adapter calls are not yet in-process**: `adapter::Link::establish` still
+   spawns `adapter.sh` and speaks NDJSON. See the open item below.
+4. ⏳ `crates/envagent` — not started.
+5. ✅ Schema — `001` rewritten in place, `002`–`007` folded in and deleted.
+6. ✅ Frontend — origin badge and native banner gone, link facets and fidelity in, and
+   the waterfall gated on fidelity.
+
+**What step 3 being half-done costs, stated because it is currently observable.**
+`backend/src/adapters.rs` answers availability as the **union** of two live mechanisms:
+the vendor CLI being on `PATH`, and an adapter directory existing. Both are genuinely
+live — the trait exists but the live path still spawns a subprocess — so the union is the
+truthful answer rather than compatibility code, and it collapses to `PATH` alone the
+moment `Link` becomes `Box<dyn Session>`.
+
+The visible consequence is that an agent can be **listed and unstartable**: a machine
+with `claude` installed reports it, and a `POST /sessions` naming it fails
+`AGENT_START_FAILED` because no `adapters/claude` directory answers. That is what
+`session-lifecycle.spec.ts:16` currently fails on — it is the one spec that creates a
+session through the real UI rather than the API, so it takes the first agent the
+environment reports, which is `claude` rather than the compiled-in fixture. The spec is
+correct and the product is not yet; it goes green with step 3, and it is worth leaving
+red rather than pinning it to the fixture, because a spec that drives the real create
+path is exactly what should notice this.
+
+`adapters/*.py` and `adapter_path` are deleted in that same change — `scripts/install.sh`
+needs the directory today, so removing it before the trait is live breaks real installs.
 
 ## Data-architecture pass, 2026-08-27: what changed in the specs
 
