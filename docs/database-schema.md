@@ -121,38 +121,44 @@ CREATE TABLE turns (
   session_env    TEXT NOT NULL,
   session_agent  TEXT NOT NULL,
   session_native TEXT NOT NULL,
-  FOREIGN KEY (session_env, session_agent, session_native)
-    REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE,
-  incarnation_id TEXT REFERENCES backend_incarnations(id),
   status TEXT NOT NULL CHECK (status IN (
     'queued', 'starting', 'running', 'stopping',
     'completed', 'failed', 'cancelled', 'interrupted'
   )),
+  origin TEXT NOT NULL DEFAULT 'user' CHECK (origin IN ('user', 'agent')),
   request_text TEXT NOT NULL DEFAULT '',
   command_invocation_id TEXT,
   idempotency_key TEXT,
   error_code TEXT,
   error_message TEXT,
-  runner_exit_code INTEGER,
   created_at_ms INTEGER NOT NULL,
   started_at_ms INTEGER,
   completed_at_ms INTEGER,
   stopped_at_ms INTEGER,
-  UNIQUE(session_id, idempotency_key)
+  UNIQUE(session_env, session_agent, session_native, idempotency_key),
+  FOREIGN KEY (session_env, session_agent, session_native)
+    REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE
 );
 
--- Added by 006_turn_origin.sql
-ALTER TABLE turns ADD COLUMN origin TEXT NOT NULL DEFAULT 'user'
-  CHECK (origin IN ('user', 'agent'));
-
-CREATE INDEX turns_session_idx ON turns(session_id, created_at_ms DESC);
+CREATE INDEX turns_session_idx
+  ON turns(session_env, session_agent, session_native, created_at_ms DESC);
 CREATE INDEX turns_status_idx ON turns(status)
   WHERE status IN ('queued', 'starting', 'running', 'stopping');
 ```
 
+Three deletions and one absorption, since `001` is rewritten in place rather than
+migrated. `incarnation_id` referenced `backend_incarnations`, deleted above — a
+foreign key to a table that no longer exists is not a stale comment, it is DDL that
+does not run. `runner_exit_code` is gone: it was described here as a legacy spelling
+kept for compatibility, `AGENTS.md` § Compatibility forbids exactly that, and every
+current path writes it `NULL` because an adapter is long-lived and a turn is a message
+on its link, so there is no per-turn exit code to record. And `origin` is folded into
+the table body rather than shown as `006`'s `ALTER`, because a rewritten `001` has no
+history to replay.
+
 `idempotency_key` is nullable, so a turn the server originates carries none while
-the `UNIQUE(session_id, idempotency_key)` constraint still de-duplicates every
-client retry. `command_invocation_id` links a turn to an agent command rather than
+the `UNIQUE(session_env, session_agent, session_native, idempotency_key)` constraint
+still de-duplicates every client retry. `command_invocation_id` links a turn to an agent command rather than
 to typed text. The partial `turns_status_idx` covers exactly the in-flight states,
 which is the query restart reconciliation runs.
 
@@ -166,11 +172,6 @@ is also load-bearing in the supervisor: an agent turn never had a waiter, so
 waiter, because a deliberate stop already claimed it" — conflating them reported a
 user's stop as `LINK_LOST`. `docs/session-protocol.md` § An agent may start a turn.
 
-`runner_exit_code` is a **legacy spelling kept for compatibility**, not evidence the
-v1 runner protocol still exists. Under the current protocol the adapter is long-lived
-process and a turn is a message on its link, so there is no per-turn exit code to
-record; the column is written `NULL` on every current path.
-
 Status transitions:
 - `queued` → `starting` → `running` → `completed` / `failed` / `cancelled`
 - `running` → `stopping` → `cancelled`
@@ -181,20 +182,17 @@ Status transitions:
 Event stream journal (bounded live storage).
 
 ```sql
--- As rebuilt by 003_agent_event_vocabulary.sql. 001's shape is not what is on disk:
--- it constrained `kind` to a closed list and spelled the adapter source 'runner'.
 CREATE TABLE events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_env    TEXT NOT NULL,
   session_agent  TEXT NOT NULL,
   session_native TEXT NOT NULL,
-  FOREIGN KEY (session_env, session_agent, session_native)
-    REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE,
   turn_id TEXT REFERENCES turns(id) ON DELETE CASCADE,
   seq INTEGER NOT NULL,
   kind TEXT NOT NULL,                      -- deliberately unconstrained; see below
   phase TEXT,
   stream_id TEXT,
+  span TEXT,
   name TEXT,
   text TEXT NOT NULL DEFAULT '',
   data_json TEXT NOT NULL DEFAULT '{}',
@@ -202,19 +200,28 @@ CREATE TABLE events (
   stability TEXT NOT NULL DEFAULT 'stable'
     CHECK (stability IN ('ephemeral', 'stable')),
   source TEXT NOT NULL DEFAULT 'server'
-    CHECK (source IN ('agent', 'server', 'tracedb')),
+    CHECK (source IN ('agent', 'server')),
   created_at_ms INTEGER NOT NULL,
-  reconciled_at_ms INTEGER,
-  UNIQUE(session_id, seq)
+  UNIQUE(session_env, session_agent, session_native, seq),
+  FOREIGN KEY (session_env, session_agent, session_native)
+    REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE
 );
 
--- Added by 005_event_span.sql
-ALTER TABLE events ADD COLUMN span TEXT;
-
-CREATE INDEX events_session_idx ON events(session_id, seq);
+CREATE INDEX events_session_idx
+  ON events(session_env, session_agent, session_native, seq);
 CREATE INDEX events_turn_idx ON events(turn_id, seq) WHERE turn_id IS NOT NULL;
-CREATE INDEX idx_events_span ON events(session_id, span, seq);
+CREATE INDEX idx_events_span
+  ON events(session_env, session_agent, session_native, span, seq);
 ```
+
+Three things this shape settles, all of them consequences of `001` being rewritten
+rather than migrated. `span` sits in the table body instead of `005`'s `ALTER`, and
+`kind` is unconstrained from the start rather than rebuilt by `003`. `source` loses
+`'tracedb'`, which named a producer the separate archive supplied and nothing writes
+today — the only `"tracedb"` literals left in the tree are an *authority* name in
+retention, a different concept. And `reconciled_at_ms` is deleted: `docs/roadmap.md`
+§ Audit measured it vestigial, and a rewrite is when a vestigial column goes rather
+than being carried into a new schema.
 
 **`kind` carries no CHECK, and that is the fix rather than an omission.** 001
 constrained it to ten values, which is a promise to break on the next adapter that
@@ -239,10 +246,6 @@ what keeps focus mode and single-subtree replay from scanning the session.
 Event lifecycle:
 - `ephemeral` events (`started`, `delta`) exist only in live projection
 - `stable` events (`completed`) are persisted to journal
-- `reconciled_at_ms` is a per-row column that **nothing writes**. Retention is gated on
-  a per-session watermark in `history.db` instead (`docs/storage.md` § Retention is
-  watermark-driven), so pruning is built and this column is vestigial rather than a
-  placeholder for future work
 
 Note that `stability` has one derivation, in the `stability` column — not two.
 `StreamEvent::is_stable()` reads the field rather than re-computing it from `phase`.
@@ -250,8 +253,8 @@ They were equivalent until `subagent` became stable at *every* phase for structu
 reasons, after which the method disagreed with the field beside it and a trajectory's
 `started` was silently not journaled, flattening every delegated subtree on reload.
 
-`UNIQUE(session_id, seq)` is what makes SSE resume-by-sequence safe: a replayed
-frame cannot be journalled twice. `seq` is per session, not per turn, so
+The uniqueness of `seq` within a session is what makes SSE resume-by-sequence safe: a
+replayed frame cannot be journalled twice. `seq` is per session, not per turn, so
 `events_session_idx` orders by it rather than by timestamp — two events written in
 the same millisecond still have one defined order.
 
@@ -268,8 +271,6 @@ CREATE TABLE pending_requests (
   session_env    TEXT NOT NULL,
   session_agent  TEXT NOT NULL,
   session_native TEXT NOT NULL,
-  FOREIGN KEY (session_env, session_agent, session_native)
-    REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE,
   turn_id TEXT NOT NULL,
   adapter_request_id TEXT NOT NULL,
   kind TEXT NOT NULL,                  -- approval | dialog | elicitation | choice
@@ -288,11 +289,14 @@ CREATE TABLE pending_requests (
   resolved_input_json TEXT,
   resolved_by TEXT,
   created_at_ms INTEGER NOT NULL,
-  resolved_at_ms INTEGER
+  resolved_at_ms INTEGER,
+  FOREIGN KEY (session_env, session_agent, session_native)
+    REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE
 );
 
 CREATE INDEX pending_requests_open
-  ON pending_requests(session_id, created_at_ms) WHERE status = 'pending';
+  ON pending_requests(session_env, session_agent, session_native, created_at_ms)
+  WHERE status = 'pending';
 CREATE INDEX pending_requests_by_adapter_id
   ON pending_requests(adapter_request_id, status);
 ```
@@ -322,16 +326,28 @@ authority) means native history is parsed by an adapter into the same events a l
 turn emits, lands in the same journal → history pipeline, and is indexed by one FTS5
 table beside `history.db`.
 
-`docs/storage.md` § Schema owns that table. What belongs here is what it replaced and
-why the replacement is not merely tidier:
+`docs/storage.md` § Schema owns that table, and § "`blocks_fts` is standalone" owns why
+it cannot be the external-content index the separate archive used. What belongs here is
+what it replaced and why the replacement is not merely tidier:
 
+- **Search is the one capability this rewrite takes from working to absent**, so it is
+  net-new work rather than a port. Today `/api/v1/search` is entirely
+  `state.tracedb.search()`; deleting the archive deletes the only implementation, and
+  nothing in this repo has ever held an FTS index.
 - **The old open question is answered by construction.** Full-text search used to
   cover only what the separate archive had parsed, so a session whose environment had
   gone away was searchable nowhere and one whose vendor file happened to be local was
   searchable by coincidence. "Usually covered" is not a contract.
-- **`backend/src/tracedb/mod.rs` goes away whole** — 1440 lines, including
+- **`backend/src/tracedb/mod.rs` goes away whole** — 1279 lines, including
   per-operation JSON casing pins that existed because the same archive spelled `show`
-  in snake_case and `list`/`search`/`stats` in camelCase.
+  in snake_case and `list`/`search`/`stats` in camelCase. Four pieces of logic in it
+  are *not* archive work and need a new home rather than deletion:
+  `is_injected_envelope` (the rule that raised recognizable session labels from ~10%
+  to 98%, with its narrow-scope warning), `summarize_line` (char-not-byte truncation
+  at 80, already called by `store::hydrate_session_title` and
+  `set_session_title_if_empty`), `envelope_summary`, and `TraceSession::lineage`'s
+  parent-over-fork precedence. `split_lineage` and `archive_id` are the two that
+  genuinely go, because the identity triple deletes the second id space they bridged.
 - **The two-id-space hazard cannot be written.** See `docs/storage.md` § One id space.
 
 Two rules that outlive the separate store, because they are about reading *any*

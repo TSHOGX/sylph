@@ -419,6 +419,14 @@ CREATE TABLE session_bytes (
   previous_bytes          INTEGER,
   previous_measured_at_ms INTEGER
 ) WITHOUT ROWID;
+
+-- Cross-session search. Standalone rather than external-content: see below.
+CREATE VIRTUAL TABLE blocks_fts USING fts5(
+  text,
+  session_id UNINDEXED,
+  seq        UNINDEXED,
+  tokenize = 'unicode61'
+);
 ```
 
 `WITHOUT ROWID` on `blocks` because the primary key *is* the access path — every
@@ -433,6 +441,39 @@ learn it is large is the kind of read amplification that makes a list view slow.
 deltas are offsets from its start, and without the start they are relative to
 nothing.
 
+### `blocks_fts` is standalone, and that is forced rather than chosen
+
+This table was promised in three places and defined in none, which is worth stating
+plainly: search today is entirely `tracedb.search()`, so deleting the separate archive
+deletes the *only* implementation. It is the one capability in this rewrite that goes
+from working to absent, and the DDL above is the whole replacement.
+
+**It cannot be an external-content FTS5 table**, which is the shape the separate
+archive used (`content='events'`, `content_rowid='id'`) and therefore the obvious thing
+to copy. External content re-reads the column from the base table at query time, and
+`blocks.text_inline` is not text: `text_encoding` says it may be `zstd`, and when the
+text is externalized to CAS the column is `NULL` and the bytes live under
+`blobs/`. So an external-content index would index compressed bytes for some rows and
+nothing at all for the rows most worth finding — the large ones. Consolidation
+therefore inserts the *decoded* text, which costs a second copy of it and is the price
+of the tier split.
+
+`session_id` and `seq` ride along `UNINDEXED` so a hit resolves to a block without a
+join back through a rowid mapping that would have to be maintained separately.
+
+**The tokenizer is `unicode61`, and that is a stated limitation for CJK rather than a
+default nobody looked at.** `unicode61` splits on non-alphanumerics, so a run of Han
+characters becomes one token and a query for a substring of it does not match — which
+matters here, because this project's own transcripts are substantially Chinese. The
+separate archive solved it with a loadable jieba tokenizer
+(`~/Workspace/trace-db/native/fts5-jieba`, selected through a config key that defaulted
+to `unicode61` and fell back when the extension was absent), and that remains the
+reference implementation if segmented CJK search is wanted. It is deliberately not
+adopted here yet: a loadable SQLite extension is a per-platform build artifact and an
+`sqlx` connection has to be told to allow loading it, which is a real dependency to
+take on for a capability that is currently zero. Ship the stock tokenizer, and treat
+CJK segmentation as a separate decision with a known answer.
+
 ## Deriving a native-source bound
 
 An environment cannot report "I have ingested through event 400", because a vendor
@@ -442,9 +483,17 @@ is derived from two facts about that rather than assumed.
 **A native store is written whole-message, not half-delivered.** Each of the three
 supported agents appends complete records — `claude` at content-block boundaries,
 `codex` at item completion, `pi` at `message_end` (`docs/agents.md`). So the last
-record in the file is complete, and everything before it is too. What a store never
-contains is intra-message delta timing, which is why pruning drops *deltas* and never
-blocks.
+record in the file is complete, and everything before it is too.
+
+What a native store never contains is intra-message delta timing, so that is the one
+thing pruning destroys outright. **It is not the only thing pruning deletes**: the
+operation is `DELETE FROM blocks WHERE session_id = ? AND seq <= :watermark` — whole
+rows, as § Retention is watermark-driven shows and `HistoryStore::prune_below`
+implements. An earlier version of this sentence claimed pruning "drops *deltas* and
+never blocks", which read as a promise that retention is lossless against the local
+store alone. It is not, and that is the entire reason a watermark gates it: what makes
+the deletion safe is a confirmation that the vendor's own store still holds those
+records, never a claim that Sylph kept them.
 
 **A record's identity is the vendor's own.** The bound is expressed as the last
 native record the environment can see, translated by the adapter into the sequence

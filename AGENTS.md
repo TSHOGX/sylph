@@ -157,11 +157,11 @@ once, in `Config`, so the settings panel shows the same file the adapter reads.
 
 The journal is always `journal.db` inside the data dir, with `history.db` and
 `blobs/` beside it; all three are derived rather than separately configurable,
-because they are one store split for SQLite's sake. A pre-existing `live.db` is
-renamed on startup, after a truncating WAL checkpoint — never by moving the three
-WAL files, since a crash between renaming `-wal` and `.db` strands committed data
-in an orphaned WAL. The envagent's `spool.db` is WAL-mode too, so the same rule
-applies to it.
+because they are one store split for SQLite's sake. **No `live.db` rename runs on
+startup** — `3dff4e5` deleted it as compatibility code for an older on-disk layout,
+having first verified `~/.sylph/data/` held no such file, so nothing was at risk.
+The checkpoint-then-rename *rule* survives that deletion and is below under
+Pitfalls, because the envagent's `spool.db` is WAL-mode too and will need it.
 
 **There is no archive binary and no setting naming one.** History is one store the
 server owns, so `tracedb.bin`, `SYLPH_TRACEDB_BIN`, its `doctor` row, and
@@ -482,7 +482,9 @@ files.** A crash between renaming `-wal` and renaming `.db` leaves committed dat
 an orphaned WAL beside a database that no longer references it — silent loss of
 exactly the turns that were in flight. `PRAGMA wal_checkpoint(TRUNCATE)` first, close
 every connection, then move the main file alone. The emptied sidecars must also be
-deleted, or a later `live.db` adopts them.
+deleted, or the next database opened at that path adopts them. Nothing in this repo
+performs such a rename today — the one that did was deleted as compatibility code —
+so this is recorded for the envagent's `spool.db`, which is WAL-mode and will.
 
 **A cross-process JSON boundary lets a spelling change read as `None`.** *Deleted with
 the separate archive — the boundary is now a Rust type, so a rename is a compile error.
