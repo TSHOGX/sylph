@@ -846,8 +846,8 @@ Two consequences a client must handle:
 
 - **Do not cache this response indefinitely.** A detached-with-reason 200 under
   `staleTime: Infinity` makes one failed handshake permanent for the life of the page.
-  Cache by failure code: `no_adapter` is cacheable like a success, because no retry
-  installs an adapter; a failed handshake must be allowed to go stale.
+  Cache by reason: `no_agent` is cacheable like a success, because no retry installs a
+  vendor CLI; a failed handshake must be allowed to go stale.
 - **An empty capability surface means "Sylph cannot reach it", never "there is nothing
   there".** These coincide for a session Sylph launched and are opposite for one running
   in a terminal, where the process is alive and simply not ours to drive.
@@ -864,9 +864,20 @@ existed and both are the common case now:
 | `environment_unreachable` | no envagent connected for this session's environment — observe still answers from the store |
 | `not_ours_to_drive` | the process is alive under someone else, and this vendor offers a second party no control channel |
 
-Both are cacheable like a success in the sense above: no retry connects a sleeping
-laptop or teaches a vendor a new channel. What must go stale is a *failed handshake*
-against a reachable environment.
+**The two differ in whether a retry can change the answer, and an earlier version of this
+passage had it wrong for one of them.** `not_ours_to_drive` is cacheable like a success —
+no retry teaches a vendor a control channel it does not have — and so is `no_agent`. But
+`environment_unreachable` **must be allowed to go stale**, because a laptop wakes up and
+an envagent redials: caching it like a success is how a reachable machine goes on being
+reported offline for the life of the page, which is the same defect as the
+`staleTime: Infinity` one above wearing a different reason code. `crates/protocol`'s
+`UnavailableReason::is_retryable` is the single definition; a client mirrors that rather
+than re-deriving the rule inside a cache policy.
+
+The vocabulary is authoritative in `crates/protocol/src/link.rs`. Note `no_agent` was
+called `no_adapter` while adapters were subprocesses discovered on disk; availability is
+now whether a vendor CLI is on that machine's `PATH`, which is one question with one
+answer and one fix.
 
 #### `POST /api/v1/sessions/{id}/link`
 
@@ -1218,6 +1229,31 @@ touching the index, so a client may bind the field directly to keystrokes.
 `limit` defaults to 20. There is no pagination and deliberately no cursor: a hit is a
 jumping-off point to a transcript, so the useful control is a narrower query, not a
 deeper page.
+
+**What a hit contains**, since a session is now identified by a triple and there is no
+second store to name:
+
+```json
+{
+  "results": [
+    {
+      "session": { "id": "env7fk2:claude:9bdacb6e-…", "workdir": "…", "…": "…" },
+      "bestMatch": {"seq": 412, "turnId": "…", "excerpt": "…the matched text…"},
+      "hits": 3
+    }
+  ]
+}
+```
+
+`session` is the same object the listing endpoints return, so a client renders one row
+component for both and never has a shape that exists only in search. `bestMatch` carries
+the `seq` a client scrolls to and the excerpt that is the only text on the row containing
+the query — which is why the search overlay keeps its own ranking rather than being
+re-scored by a client-side list engine (`docs/frontend-architecture.md`). `hits` is the
+count within that session, so one strong match and thirty weak ones are distinguishable.
+
+Both `bestMatch` and `hits` are omitted rather than zeroed when the index cannot supply
+them; a client must not read an absent `bestMatch` as "matched at the beginning".
 
 **This is the one read that must stay off any polled path.** Measured in-process against
 an equivalent store, every other operation is microseconds to sub-millisecond —

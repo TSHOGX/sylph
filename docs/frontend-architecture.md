@@ -921,8 +921,8 @@ function SessionSearch() {
   return (
     <SearchInput
       placeholder="Search sessions…"
-      results={data?.sessions ?? []}
-      renderResult={(session) => <SessionCard session={session} />}
+      results={data?.results ?? []}
+      renderResult={(hit) => <SessionCard session={hit.session} />}
     />
   )
 }
