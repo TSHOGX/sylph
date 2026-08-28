@@ -465,6 +465,36 @@ name is accepted silently, so the vendor offers no `UNSUPPORTED_FIELD` signal at
 Anything not enum-typed in the schema must be validated adapter-side against what the
 vendor enumerates, or a refused write is indistinguishable from an applied one.
 
+**An adapter that writes a turn's outcome instead of reading it turns every vendor
+failure into a silent empty reply.** *Measured 2026-08-28 on `pi` 0.84.3.* Its configured
+model had reached the end of a testing period, so every request answered
+`404: {"message":"Thank you for participating in the Stealth Ox Alpha testing period…"}`.
+The observable result in Sylph was a turn that opened, closed `completed` with
+`error_code` NULL, and produced **no assistant block at all** — a session that looks like
+it worked and simply said nothing.
+
+The cause is one line: `adapters/pi/adapter.py:515` emits
+`data={"stopReason": "end_turn"}` on `agent_settled`, hardcoded, while pi's own record
+carries `stopReason: "error"` and an `errorMessage`. So the adapter asserted a clean
+finish over a failed one. **The Rust port inherited it** (`crates/adapters/src/pi.rs:1526`),
+which is the part worth noticing: a hardcoded constant survives a rewrite precisely
+because it compiles and reads as a default.
+
+Three rules follow, and the third is the one that generalizes:
+
+- **A turn's outcome is a vendor fact, so read it.** `stopReason` is reported; writing a
+  literal makes the adapter the authority on the one thing only the vendor knows — the
+  same error as recording `currentValue` from a request rather than a confirmation, above.
+- **A failed turn must be distinguishable from an empty one.** `error` and `aborted` are
+  real `stopReason` values and both are failures. The vocabulary already has somewhere to
+  put the vendor's sentence: `EventKind::Notice` is "agent-originated notification worth
+  surfacing", and `Turn`'s `completed` carries the stop reason.
+- **Silence is the hardest outcome to debug, so nothing may produce it by default.** A
+  turn with no content and no error says the same thing whether the model 404'd, the
+  agent chose not to answer, or the adapter dropped the stream — three causes with three
+  different fixes and one appearance. Any path that can end a turn without content has to
+  say *why*, or the first question anyone asks has no answer in the record.
+
 **A launch flag gating a runtime-mutable value bets the user never changes it.**
 `--permission-prompt-tool stdio` can only be asked for on the command line, while the
 mode it serves changes through `set_permission_mode` — so gating it on the *launch*
