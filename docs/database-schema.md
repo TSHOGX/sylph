@@ -112,6 +112,22 @@ exactly the second id space `docs/architecture.md` § Identity deletes — and w
 comparison that is silently always false. Three columns that cannot disagree with the
 parent beat one that can.
 
+**This rule stops at the database boundary, and `history.db` therefore keeps a
+single-column encoded `session_id`** (`docs/storage.md` § Schema). The reason is a
+property of SQLite rather than a preference: **a foreign key names a table in its own
+database, so a cross-database reference is accepted at `CREATE TABLE` and then fails at
+runtime.** Verified 2026-08-28 — declaring `REFERENCES sessions(environment, agent,
+native_id)` on a table in an attached `history` database creates cleanly, and the first
+insert answers `no such table: history.sessions`, because resolution looked for
+`sessions` beside the child rather than in the journal. `PRAGMA foreign_key_check`
+reports nothing, so the declaration reads as enforced while enforcing nothing.
+
+That is worse than an unavailable feature, because the DDL looks correct. Since the
+constraint cannot exist across the split, the verbosity buys nothing there and the three
+columns would be three chances to disagree with no parent to check them against. The
+encode boundary sits at the journal↔history calls instead, which is a small number of
+sites that a `SessionId` type makes explicit.
+
 
 Turn execution records.
 

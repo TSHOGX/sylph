@@ -474,6 +474,16 @@ adopted here yet: a loadable SQLite extension is a per-platform build artifact a
 take on for a capability that is currently zero. Ship the stock tokenizer, and treat
 CJK segmentation as a separate decision with a known answer.
 
+**A user's query is not an FTS5 query, and passing it through unescaped fails with an
+error naming the wrong layer.** FTS5 reads punctuation as syntax: measured 2026-08-28,
+`MATCH 'needle-one'` is parsed as `needle` NOT `one` and answers **`no such column:
+one`** — so a perfectly ordinary search string produces an error about a column, three
+layers from the text box that produced it. Hyphens are the common case here because
+identifiers and flags are exactly what someone searches a transcript for. Quote or
+escape the user's text into a phrase rather than interpolating it, and keep a test whose
+query contains a hyphen — without one this is invisible, since every single-word query
+works.
+
 ## Deriving a native-source bound
 
 An environment cannot report "I have ingested through event 400", because a vendor
