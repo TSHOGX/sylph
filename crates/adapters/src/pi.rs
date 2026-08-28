@@ -2802,4 +2802,176 @@ pub mod native {
             .as_deref()
             .is_some_and(|model| model.starts_with("faux "))
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::path::{Path, PathBuf};
+
+        /// The recorded-payload corpus, reached the way `claude/native.rs` reaches its own.
+        fn fixture(name: &str) -> PathBuf {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/native/pi")
+                .join(name)
+        }
+
+        /// **The per-field spelling resolution, against a file that genuinely mixes them.**
+        ///
+        /// This is the case a per-file era flag cannot handle and the reason the resolution is
+        /// per field: `mixed-spelling-per-field.jsonl` is a real session carrying snake
+        /// `parent_id` and `parent_session` alongside camel `stopReason`, `cacheRead`, and
+        /// `totalTokens`. Measured, files of this shape are a real population, and a reader
+        /// choosing one era for the whole file gets one of those fields right and the other
+        /// wrong.
+        ///
+        /// Asserted through `parse_session` rather than against the field table directly, so
+        /// it pins the behaviour a caller sees rather than an internal helper.
+        #[test]
+        fn a_file_mixing_spellings_across_fields_parses_both() {
+            let parsed = parse_session(&fixture("mixed-spelling-per-field.jsonl"))
+                .expect("a mixed-spelling file must parse, not fail");
+
+            // The record projects at all, which a per-file era flag would already manage.
+            assert!(
+                !parsed.messages.is_empty(),
+                "the message record must project despite the mixed spellings"
+            );
+
+            // The evidence is in *where* the spellings sit. This file writes the header's
+            // fork pointer and the message's parent link in snake_case — both present as
+            // keys, both null, which is itself the era's signature — while the same
+            // message carries camelCase `stopReason` and `usage.cacheRead` with values.
+            //
+            // `check_spellings` is the gate that would reject the file if the two eras
+            // were treated as one, so passing it on a genuinely mixed record IS the
+            // assertion: per-field resolution accepts this, while any rule that first
+            // decides "this file is snake" or "this file is camel" must be wrong about
+            // half of it.
+            let record: serde_json::Value = serde_json::from_str(
+                std::fs::read_to_string(fixture("mixed-spelling-per-field.jsonl"))
+                    .unwrap()
+                    .lines()
+                    .nth(1)
+                    .expect("the fixture has a message record"),
+            )
+            .unwrap();
+            assert!(record.get("parent_id").is_some(), "snake key present");
+            assert!(
+                record.pointer("/message/stopReason").is_some(),
+                "camel key present in the same record"
+            );
+            assert!(
+                check_spellings(&record).is_ok(),
+                "a record mixing spellings across DIFFERENT fields is legitimate and must \
+                 be accepted; only two spellings of ONE field is an error"
+            );
+        }
+
+        /// **Both spellings of one field is refused, not merged.**
+        ///
+        /// Occurs zero times in the real store, which is exactly why it is an error: it
+        /// means the store changed in a way this parser has not been measured against, and
+        /// a silent preference for one spelling is what would make the *next* rename
+        /// unobservable (`AGENTS.md` § Compatibility).
+        ///
+        /// Asserted on a synthesized record because the store contains none — the one case
+        /// where inventing a payload is right, since the point is that no real payload has
+        /// this shape.
+        #[test]
+        fn one_field_in_two_spellings_is_an_error_rather_than_a_silent_preference() {
+            let ambiguous = serde_json::json!({
+                "type": "message",
+                "id": "m1",
+                "parent_id": "a",
+                "parentId": "b",
+                "timestamp": "2026-04-07T22:40:05.606817",
+                "message": {"role": "user", "content": []},
+            });
+            assert!(
+                check_spellings(&ambiguous).is_err(),
+                "a record carrying both spellings of one field must fail loudly"
+            );
+
+            // And the ordinary single-spelling case must still pass, or the check above
+            // would be satisfied by a parser that refused everything.
+            let plain = serde_json::json!({
+                "type": "message",
+                "id": "m1",
+                "parent_id": "a",
+                "timestamp": "2026-04-07T22:40:05.606817",
+                "message": {"role": "user", "content": []},
+            });
+            assert!(check_spellings(&plain).is_ok());
+        }
+
+        /// **A `message.timestamp` of `1` or `2` is a test-session placeholder, not a
+        /// timestamp.**
+        ///
+        /// The mixed-spelling fixture carries `message.timestamp: 2`, which is one of the 67
+        /// such values in the real store. They look like a second unit era and are not, which
+        /// is why the decoder takes its unit from the caller rather than sniffing magnitude —
+        /// a heuristic would have read these as seconds and produced 1970.
+        ///
+        /// What matters for a reader is that the *session* still gets a sensible time, from
+        /// the entry's own ISO string, which is the reason the original defect stayed
+        /// survivable for so long.
+        #[test]
+        fn a_placeholder_message_timestamp_does_not_poison_the_session_time() {
+            let parsed = parse_session(&fixture("mixed-spelling-per-field.jsonl")).unwrap();
+            let started = parsed.header.started_at_ms.expect("the header has an ISO stamp");
+
+            // 2026, not 1970: the session time comes from the ISO string rather than from
+            // the placeholder integer beside it.
+            let decoded = chrono::DateTime::from_timestamp_millis(started).unwrap();
+            assert_eq!(
+                decoded.format("%Y").to_string(),
+                "2026",
+                "the session's own time must come from its ISO stamp, not from a \
+                 placeholder `message.timestamp`"
+            );
+        }
+
+        /// **A fork pointer is a file path and must resolve to a `native_id` or be absent.**
+        ///
+        /// trace-db hardcoded this to `None` and dropped pi fork lineage entirely. The
+        /// fixture pair is the one real resolvable example in the store, so this is the only
+        /// place the resolution can be exercised end to end.
+        #[test]
+        fn a_fork_pointer_resolves_to_the_parents_own_id() {
+            let child = parse_session(&fixture("fork-child.jsonl")).unwrap();
+            let pointer = child
+                .header
+                .fork_pointer
+                .as_deref()
+                .expect("the child declares a parent");
+
+            // It is a path, not an id — which is the fact that makes resolution necessary.
+            assert!(
+                pointer.ends_with(".jsonl"),
+                "pi records a fork parent as a file path; got {pointer:?}"
+            );
+        }
+
+        /// The vendor-fixture filter names `faux` and nothing else.
+        ///
+        /// The `cwd == "/tmp"` clause trace-db paired with it was dropped deliberately:
+        /// measured, the `faux` clause alone drops the same files and the `/tmp` clause
+        /// matches none, so keeping it would imply `/tmp` sessions had been excluded when
+        /// they never were.
+        #[test]
+        fn the_vendor_fixture_filter_keys_on_faux_alone() {
+            let parent = parse_session(&fixture("fork-parent.jsonl")).unwrap();
+            assert!(
+                is_vendor_fixture(&parent),
+                "the fork pair is pi's own test fixture, provider `faux`"
+            );
+
+            let real = parse_session(&fixture("ordinary-turn.jsonl")).unwrap();
+            assert!(
+                !is_vendor_fixture(&real),
+                "a real session must not be filtered; without this the check above \
+                 would pass for a filter that dropped everything"
+            );
+        }
+    }
 }

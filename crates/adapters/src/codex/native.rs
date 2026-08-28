@@ -15,11 +15,37 @@ use sylph_protocol::{EventStream, Fidelity, NativeId, NativeSummary, StoreFilter
 
 /// The fidelity a parsed `codex` session yields.
 ///
-/// [`Fidelity::Blocks`] rather than [`Fidelity::Messages`]: the store flushes at item
-/// completion, and a turn's items are finer than its messages — measured, 18 distinct
-/// appends over a 26.5 s turn with the first at 0.1 s. So a renderer may time an item
-/// and must not time a token.
+/// [`Fidelity::Blocks`] rather than [`Fidelity::Messages`], and it holds for **both**
+/// eras though for different reasons, which is worth stating because `fidelity` is a
+/// property of the *record* rather than of the agent (`docs/architecture.md`), so a
+/// per-agent constant has to be true of every file the agent writes.
+///
+/// - A `paginated` file carries per-item timestamps, so an item is separately timeable.
+/// - A `legacy` file carries only each record's outer timestamp — but those are distinct
+///   per content record, measured within one turn at `12:15:08.073Z`, `12:15:08.951Z`,
+///   `12:15:26.110Z`. So the granularity is still the item, not the message.
+///
+/// What is *not* recoverable in either era is anything within an item, which is what
+/// separates this from [`Fidelity::Stream`]. A renderer may time an item and must not
+/// time a token.
 pub const NATIVE_FIDELITY: Fidelity = Fidelity::Blocks;
+
+/// **Reasoning text is mostly unrecoverable from a rollout, and a parser must expect
+/// that rather than emit empty thinking events.**
+///
+/// Measured over a 400-file sample: every one of 12045 `response_item/reasoning` records
+/// carries `encrypted_content`, and only **967** also carry a plaintext `summary`. The
+/// `item_completed` side is emptier still — `Reasoning.summary_text` and
+/// `Reasoning.raw_content` are present as fields and empty in practice.
+///
+/// So for roughly 92% of reasoning records the content exists only as vendor ciphertext.
+/// The honest projection is to emit the summary where there is one and **omit the event
+/// entirely** where there is not: an empty `thinking` event renders as a blank block,
+/// which reads as a rendering bug rather than as an absent record, and a journal makes
+/// that permanent (`docs/session-protocol.md` § "`name` is absent when unknown" states
+/// the same rule for a different field).
+pub const REASONING_IS_MOSTLY_ENCRYPTED: &str =
+    "reasoning content is ciphertext on ~92% of records; emit the summary or nothing";
 
 /// Which content vocabulary one rollout file speaks.
 ///
@@ -32,29 +58,38 @@ pub const NATIVE_FIDELITY: Fidelity = Fidelity::Blocks;
 ///
 /// **The two content streams are mutually exclusive per file**, which is the half of
 /// this that a document-driven reader gets backwards. "Both must be read" is true of
-/// the *store* and false of a *record*: 72 files hold `item_completed` and no
-/// `event_msg/agent_message`, 1122 hold the reverse, and only **10 of 1258** hold both
-/// — all of them cli_version 0.104–0.115, the oldest rather than the newest. Reading
-/// both in a `paginated` file double-counts every assistant message.
+/// the *store* and false of a *record*: a paginated file carries `item_completed` and no
+/// `event_msg/agent_message`, and reading both would double-count every assistant
+/// message.
+///
+/// # Why there is no `Overlapping` variant
+///
+/// A small number of files do carry both streams, and an earlier version of this enum
+/// declared a third variant for them. It was unreachable: measured, **every one of those
+/// files has no `history_mode` at all** — they predate the field, being the oldest
+/// versions in the store — so they arrive here as [`Self::Legacy`] and the variant could
+/// never be constructed. That is the declared-only-variant trap this very module
+/// documents about `SubAgentActivity.kind`, reproduced one file away from the correction.
+///
+/// Deleting it is also the right answer rather than merely the tidy one, because
+/// `Legacy` is *correct* for those files: `event_msg/agent_message` carries their content
+/// and `item_completed` is an addition beside it, so a legacy reading loses nothing. The
+/// shape to rely on is that `history_mode == "paginated"` is what makes `item_completed`
+/// the content carrier — not a count, which drifts as the store grows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Era {
-    /// `event_msg/agent_message` carries assistant text. 1122 files.
+    /// `event_msg/agent_message` carries assistant text. The large majority, and the
+    /// right reading for every file without a `history_mode`.
     Legacy,
-    /// `event_msg/item_completed` carries it, keyed by `item.type`. 72 files.
+    /// `event_msg/item_completed` carries it, keyed by `item.type`.
     Paginated,
-    /// Both are present. 10 files, all cli_version 0.104–0.115.
-    ///
-    /// A distinct variant rather than a coin flip, because the right behaviour is to
-    /// prefer one and say which, not to discover the overlap per record.
-    Overlapping,
 }
 
 impl Era {
     /// Read the era off a `session_meta` payload's `history_mode`.
     ///
-    /// Absent on 1154 of 1258 files, which are all pre-`history_mode` and legacy — so
-    /// absence is [`Era::Legacy`] rather than an error, and that is measured rather
-    /// than assumed.
+    /// Absent on most files, which are all pre-`history_mode` and legacy — so absence is
+    /// [`Era::Legacy`] rather than an error, and that is measured rather than assumed.
     pub fn of(history_mode: Option<&str>) -> Self {
         match history_mode {
             Some("paginated") => Self::Paginated,
