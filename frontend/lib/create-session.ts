@@ -15,62 +15,100 @@
 
 import { useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Agent, type IdentityMode } from "@/lib/api";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { api, type Environment } from "@/lib/api";
+import { defaultEnvironment, useEnvironments } from "@/lib/environments";
 import { useSettings, type Settings } from "@/lib/settings";
 
-/** Agent, flags, and identity a new session gets when nobody picks them. */
+/** Environment, agent, flags, and identity a new session gets when nobody picks them. */
 export interface SessionDefaults {
+  /**
+   * Which machine to run on.
+   *
+   * **Required and never omitted.** `POST /sessions` has no default environment,
+   * because there is no privileged machine — not even the one the server runs on
+   * (`docs/environments.md` § Self-installed). A client that does not send this cannot
+   * create a session at all, which is why resolution fails loudly below rather than
+   * falling back to something.
+   */
+  environment: string;
   agent: string;
   /** Omitted rather than empty when no usable model default applies. */
   flags?: Record<string, string>;
   /**
-   * Identity policy for the session.
+   * Whether `SOUL.md` is appended.
    *
-   * Always explicit, never omitted, even though `sylph` is also the backend's
-   * default. An omitted field would make "the user chose Sylph identity" and "an
-   * old client that does not know about identity" the same request, and the
-   * created session's own record is the only place this decision is ever
-   * readable afterwards.
+   * Always explicit, never omitted, even though `true` is also the backend's default.
+   * An omitted field would make "the user asked for Sylph's identity" and "a client
+   * that does not know about identity" the same request, and the created session's own
+   * record is the only place this decision is ever readable afterwards.
    */
-  identityMode: IdentityMode;
+  injectIdentity: boolean;
 }
 
+/** Why defaults could not be resolved. Each has a different thing for a user to do. */
+export type DefaultsProblem =
+  /** Nothing is paired, or everything paired is offline. Wake a machine, or pair one. */
+  | "no-environment"
+  /** The chosen machine reports no agent CLI on its `PATH`. Install one there. */
+  | "no-agent";
+
 /**
- * Resolve the configured defaults against the runners that actually exist.
+ * Resolve the configured defaults against the machines and agents that actually exist.
  *
- * Both fallbacks matter, and both are about stored preferences outliving the
- * thing they name. A `defaultAgent` whose runner was uninstalled would be sent
- * verbatim and rejected by the backend as an unknown agent; a `defaultModels`
- * entry the runner no longer declares would be passed as `--flag model=...` and
- * fail at turn time, well away from the setting that caused it. Checking both
- * against `--describe` output turns a stale preference into a silent, correct
- * fallback. This mirrors what `/sessions/new` does with its select elements, so
- * the two paths cannot drift into different notions of "the default".
+ * # Every fallback here is a stored preference outliving what it names
  *
- * Returns `null` when no runner was discovered at all — the one case with no
- * sensible default, which the caller must report rather than paper over.
+ * A `defaultAgent` whose CLI was uninstalled would be sent verbatim and rejected as an
+ * unknown agent; a `defaultModels` entry the agent no longer declares would be sent as
+ * a flag and fail at turn time, well away from the setting that caused it. Checking
+ * both against what the environment reports turns a stale preference into a silent,
+ * correct fallback.
+ *
+ * # Agents are resolved *within* an environment, which is the change that matters
+ *
+ * Availability is per machine. `settings.defaultAgent` is a preference expressed with
+ * no environment in view, so it names an agent that may exist on one machine and not
+ * on the one this session is about to run on — resolving it against the chosen
+ * environment's own list is what stops "start a session here" from failing with an
+ * unknown agent on a machine where that agent was never installed. That is also why
+ * this takes an `Environment` rather than an agent array: there is no global list to
+ * pass.
+ *
+ * Returns a {@link DefaultsProblem} rather than `null`, because the two failures have
+ * different fixes and a caller that cannot tell them apart can only say "something is
+ * wrong": pair or wake a machine, against install a CLI on the one you have.
  */
 export function resolveSessionDefaults(
-  agents: Agent[],
+  environment: Environment | null,
   settings: Pick<Settings, "defaultAgent" | "defaultModels" | "injectSoul">,
-): SessionDefaults | null {
+): SessionDefaults | DefaultsProblem {
+  if (!environment) return "no-environment";
+
+  const agents = environment.agents;
   const agent = agents.find((a) => a.name === settings.defaultAgent) ?? agents[0];
-  if (!agent) return null;
+  if (!agent) return "no-agent";
 
   const model = settings.defaultModels[agent.name];
   const declared = agent.flags?.model?.choices ?? [];
   const usable = model && declared.includes(model) ? model : undefined;
 
   return {
+    environment: environment.id,
     agent: agent.name,
     flags: usable ? { model: usable } : undefined,
     // Not validated against anything, unlike the two above: identity is a policy
-    // choice the backend accepts from any client, not a value that has to exist
-    // in a runner's descriptor. A missing SOUL.md makes `sylph` behave like
-    // `preserve` anyway, decided at spawn time by the runner rather than here.
-    identityMode: settings.injectSoul ? "sylph" : "preserve",
+    // choice the backend accepts from any client, not a value that has to exist in an
+    // agent's descriptor. An absent SOUL.md makes `true` behave like `false` anyway,
+    // decided at spawn time by the envagent rather than here.
+    injectIdentity: settings.injectSoul,
   };
+}
+
+/** Whether resolution produced defaults or a problem. Narrows for the caller. */
+export function isDefaultsProblem(
+  resolved: SessionDefaults | DefaultsProblem,
+): resolved is DefaultsProblem {
+  return typeof resolved === "string";
 }
 
 export interface QuickCreate {
@@ -92,7 +130,7 @@ export function useQuickCreateSession(): QuickCreate {
   const queryClient = useQueryClient();
   const { settings } = useSettings();
 
-  const agentsQuery = useQuery({ queryKey: ["agents"], queryFn: () => api.agents.list() });
+  const environments = useEnvironments();
 
   const mutation = useMutation({
     mutationFn: async (workdir: string | undefined) => {
@@ -102,17 +140,27 @@ export function useQuickCreateSession(): QuickCreate {
       if (!workdir) {
         throw new Error("Still resolving the directory. Try again in a moment.");
       }
-      const defaults = resolveSessionDefaults(agentsQuery.data?.agents ?? [], settings);
-      if (!defaults) {
+      const resolved = resolveSessionDefaults(
+        defaultEnvironment(environments.all),
+        settings,
+      );
+      if (isDefaultsProblem(resolved)) {
+        // Two distinct messages, because the fixes differ and a merged one would send
+        // the reader to the wrong place. This path has no environment picker by
+        // design — it exists so that clicking a directory creates a session — so the
+        // message is the only thing telling the user what to go and do.
         throw new Error(
-          "No agent runners were discovered, so there is nothing to start a session with.",
+          resolved === "no-environment"
+            ? "No machine is connected, so there is nowhere to start a session. Pair one, or wake the machine you have."
+            : "That machine reports no agent CLIs on its PATH, so there is nothing to start a session with.",
         );
       }
       return api.sessions.create({
-        agent: defaults.agent,
+        environment: resolved.environment,
+        agent: resolved.agent,
         workdir,
-        flags: defaults.flags,
-        identityMode: defaults.identityMode,
+        flags: resolved.flags,
+        injectIdentity: resolved.injectIdentity,
       });
     },
     onSuccess: ({ session }) => {

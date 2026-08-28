@@ -93,10 +93,6 @@
   --warning-solid: oklch(76.9% 0.188 70.08);
   --info: oklch(48.8% 0.243 264.376);
   --info-solid: oklch(62.3% 0.214 259.815);
-  /* Session origin is product data, not decoration: `native` preserves the
-     originating agent's identity and lifecycle. Violet is the spec's colour. */
-  --native: oklch(43.2% 0.232 292.759);
-  --native-solid: oklch(60.6% 0.25 292.717);
   --link: oklch(48.8% 0.243 264.376);
 }
 
@@ -149,8 +145,6 @@
   --warning-solid: oklch(76.9% 0.188 70.08);
   --info: oklch(76% 0.13 253);
   --info-solid: oklch(62.3% 0.214 259.815);
-  --native: oklch(78% 0.13 293);
-  --native-solid: oklch(60.6% 0.25 292.717);
   --link: oklch(76% 0.13 253);
 }
 
@@ -223,11 +217,6 @@
   --color-info-solid: var(--info-solid);
   --color-info-bg: color-mix(in oklab, var(--info) 10%, var(--canvas));
   --color-info-line: color-mix(in oklab, var(--info) 32%, var(--canvas));
-
-  --color-native: var(--native);
-  --color-native-solid: var(--native-solid);
-  --color-native-bg: color-mix(in oklab, var(--native) 10%, var(--canvas));
-  --color-native-line: color-mix(in oklab, var(--native) 32%, var(--canvas));
 
   --color-link: var(--link);
 }

@@ -623,28 +623,50 @@ export function TrashIcon(props: IconProps) {
   );
 }
 
-/* ── Session origin ───────────────────────────────────────────────────────── */
+/* ── Record fidelity, and how an environment is reached ────────────────────── */
 
 /**
- * Origin markers.
+ * Fidelity markers.
  *
- * Two different *shapes*, filled, not two colours of the same dot: origin decides
- * identity and lifecycle policy, so it has to survive greyscale and colour
- * blindness (WCAG 1.4.1). The circle is a Sylph session, the diamond a native one
- * whose originating agent's identity is preserved.
+ * Different *shapes*, not two tints of one: fidelity decides whether a duration may
+ * be drawn at all, so it has to survive greyscale and colour blindness (WCAG 1.4.1).
+ * Two stacked bars for `blocks` — a record flushed at block boundaries — and a single
+ * bar for `messages`, the coarser of the two. `stream` has no icon because it is
+ * unmarked: a marker on the ordinary case carries no information.
+ *
+ * These replace the origin circle and diamond, which marked a distinction the backend
+ * never branched on.
  */
-export function OriginSylphIcon(props: IconProps) {
+export function BlocksFidelityIcon(props: IconProps) {
   return (
     <Icon {...props}>
-      <circle cx="12" cy="12" r="5" fill="currentColor" stroke="none" />
+      <rect x="5" y="7" width="14" height="4" rx="1" fill="currentColor" stroke="none" />
+      <rect x="5" y="13" width="9" height="4" rx="1" fill="currentColor" stroke="none" />
     </Icon>
   );
 }
 
-export function OriginNativeIcon(props: IconProps) {
+export function MessagesFidelityIcon(props: IconProps) {
   return (
     <Icon {...props}>
-      <path d="M12 6.5l5.5 5.5L12 17.5 6.5 12Z" fill="currentColor" stroke="none" />
+      <rect x="5" y="10" width="14" height="4" rx="1" fill="currentColor" stroke="none" />
+    </Icon>
+  );
+}
+
+/**
+ * An environment reached through another machine.
+ *
+ * Two hops with a node between them, because that is the fact it carries: control
+ * survives only while the relaying machine does. Drawn as a path rather than a badge
+ * colour for the WCAG 1.4.1 reason above — this one changes what AFK can promise, so
+ * it is the last thing that should depend on hue.
+ */
+export function RelayIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" />
+      <path d="M4 12h3.5M16.5 12H20" />
     </Icon>
   );
 }

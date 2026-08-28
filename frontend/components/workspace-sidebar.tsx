@@ -9,27 +9,28 @@
  * without picking a project, and mixing them into the project list would bury
  * the projects under scratch work.
  *
- * Each group shows live sessions *and* recent archived ones. The live journal
- * only holds sessions this app created, so a directory with years of
- * coding-agent history rendered as "No sessions yet" — the sidebar claimed a
- * workspace was empty while TraceDB held hundreds of sessions for that exact
- * path. Archived rows are read-only and marked `⌗`; `Browse all` opens the
- * paged history browser, because a 240px pane is not where you page a thousand
- * rows.
+ * **One source per group, which used to be two.** `GET /sessions` once held only
+ * sessions this app created, so a directory with years of coding-agent history
+ * rendered as "No sessions yet" while a separate archive held hundreds of sessions for
+ * that exact path — so the pane queried both and merged them, which brought a
+ * deduplication step, a translation between two id spaces, and a count that could only
+ * be reported as `8+`. With one store and one event vocabulary all three go away: a
+ * group is one query, rows are rows, and the count is a count.
+ *
+ * What survives from that design is the part that was about *presentation* rather than
+ * about which store answered: a row is marked by shape rather than colour, and
+ * `Browse all` opens the paged history browser, because a 240px pane is not where you
+ * page a thousand rows.
  */
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type ArchiveSession, type Session } from "@/lib/api";
-import {
-  formatRelative,
-  originalSessionId,
-  sessionLabel,
-  shortenHome,
-} from "@/lib/format";
+import { api, type Session } from "@/lib/api";
+import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
 import { liveSessionsQuery } from "@/lib/sessions-query";
+import { relayName, useEnvironments, type Environments } from "@/lib/environments";
 import { useT } from "@/lib/i18n";
 import { useSettings } from "@/lib/settings";
 import dynamic from "next/dynamic";
@@ -44,30 +45,17 @@ const WorkspacePicker = dynamic(
 import { ContextMenu, MenuButton, type MenuItem } from "@/components/ui/menu";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Button, IconButton } from "@/components/ui/button";
+import { EnvironmentChip, FidelityMarker } from "@/components/badges";
 import {
-  AlertTriangleIcon,
   ArchiveIcon,
-  BranchIcon,
   ChevronRightIcon,
   FolderIcon,
   FolderOpenIcon,
   MoreIcon,
-  OriginNativeIcon,
-  OriginSylphIcon,
   PinIcon,
   PlusIcon,
   RunningIcon,
 } from "@/components/icons";
-
-/**
- * Archived sessions fetched per expanded group.
- *
- * Small on purpose. This is a recency teaser that proves the directory has
- * history and gets the user one click from it; browsing is `Browse all`'s job.
- * Each row costs the backend a label lookup, so a large number here would make
- * expanding a group noticeably slower for rows the user has to scroll to see.
- */
-const ARCHIVE_PREVIEW = 6;
 
 interface Group {
   path: string;
@@ -100,6 +88,10 @@ export function WorkspaceSidebar() {
     queryFn: () => api.workspaces.list(),
     staleTime: 30_000,
   });
+
+  // Only to decide whether a row names its machine at all, and to resolve a relaying
+  // id into a name. One machine means no chips anywhere — see `useEnvironments`.
+  const environments = useEnvironments();
 
   const quickStartDir = workspacesQuery.data?.quickStartDir;
   const home = workspacesQuery.data?.home;
@@ -226,6 +218,8 @@ export function WorkspaceSidebar() {
               activeId={activeId}
               home={home}
               emptyHint={t("sidebar.quickSessionsHint")}
+              environments={environments}
+              sessionsPending={sessionsQuery.isPending}
             />
 
             <h2 className="mt-3 px-1.5 pb-1 text-3xs font-semibold uppercase tracking-wider text-ink-muted">
@@ -242,6 +236,8 @@ export function WorkspaceSidebar() {
                   group={group}
                   activeId={activeId}
                   home={home}
+                  environments={environments}
+                  sessionsPending={sessionsQuery.isPending}
                   pinned={settings.pinnedWorkspaces.includes(group.path)}
                   onTogglePin={() =>
                     update({
@@ -323,6 +319,8 @@ function GroupSection({
   title,
   home,
   emptyHint,
+  environments,
+  sessionsPending,
   pinned,
   onTogglePin,
   onRename,
@@ -332,6 +330,9 @@ function GroupSection({
   title?: string;
   home?: string;
   emptyHint?: string;
+  environments: Environments;
+  /** Whether the one sessions listing is still in flight. */
+  sessionsPending: boolean;
   pinned?: boolean;
   onTogglePin?: () => void;
   onRename?: (name: string) => void;
@@ -345,34 +346,12 @@ function GroupSection({
   const [open, setOpen] = useState(true);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
-  // Only while expanded, and only for a real directory: a collapsed sidebar
-  // must not cost a label lookup per row, and the Quick Sessions placeholder has
-  // no path until `GET /workspaces` resolves it.
-  const archiveQuery = useQuery({
-    queryKey: ["archive", "sessions", group.path, ARCHIVE_PREVIEW],
-    queryFn: () => api.archive.list({ workdir: group.path, limit: ARCHIVE_PREVIEW }),
-    enabled: open && Boolean(group.path),
-    // Archived history is settled: it only changes when TraceDB ingests, which
-    // is not driven by anything happening in this tab.
-    staleTime: 60_000,
-  });
-
-  const archived = useMemo(() => {
-    const live = new Set(group.sessions.map((session) => session.traceSessionId).filter(Boolean));
-    // No fork de-duplication here: this fetches a single page, and the server
-    // already resolves a fork pair within one response. Only a surface that
-    // accumulates pages — the history overlay — can see a pair split across two.
-    return (archiveQuery.data?.sessions ?? []).filter(
-      // An imported session is already a live row above; listing it again offers
-      // two routes into one conversation.
-      (row) => !row.sessionId && !live.has(row.id),
-    );
-  }, [archiveQuery.data, group.sessions]);
-
+  // No per-group query at all any more. A group used to fetch archived rows on
+  // expansion and merge them against a set of already-imported ids; one store deleted
+  // both the fetch and the deduplication, so a group is now a pure function of the one
+  // sessions listing the pane already has.
   const running = group.sessions.filter((s) => s.status === "running").length;
   const label = title ?? group.name;
-  const archiveAvailable = archiveQuery.data?.available ?? true;
-  const hasMoreArchive = Boolean(archiveQuery.data?.nextCursor) || archived.length > 0;
 
   const items: MenuItem[] = [
     // Creates immediately with the configured default agent and model. A group
@@ -463,26 +442,11 @@ function GroupSection({
               <RunningIcon size={9} />
             </span>
           )}
-          {/* Live count only. The archive count is unknown without paging the
-              whole directory, and a live-plus-preview total would read as a
-              complete tally while actually being an arbitrary partial sum. `+`
-              says "there is more here" without inventing a number. */}
-          <span>
-            {group.sessions.length}
-            {archived.length > 0 && (
-              <span title="plus archived history" className="text-ink-faint">
-                +
-              </span>
-            )}
-          </span>
-          {!archiveAvailable && (
-            <span
-              title={t("sidebar.archiveUnavailable")}
-              className="text-warning"
-            >
-              <AlertTriangleIcon size={11} />
-            </span>
-          )}
+          {/* A count, not `N+`. It used to carry a `+` because the total was a live
+              count plus an arbitrary partial page of archived rows, which would have
+              read as a complete tally while being a partial sum. One store makes it
+              simply the number of sessions here. */}
+          <span>{group.sessions.length}</span>
         </span>
       </button>
 
@@ -512,20 +476,21 @@ function GroupSection({
               session={session}
               active={session.id === activeId}
               home={home}
+              environments={environments}
             />
           ))}
 
-          {archived.map((session) => (
-            <ArchivedRow key={session.id} session={session} />
-          ))}
-
-          {group.sessions.length === 0 && archived.length === 0 && (
+          {group.sessions.length === 0 && (
             <li className="px-1.5 py-1 text-2xs text-ink-muted">
-              {archiveQuery.isFetching ? t("sidebar.loadingHistory") : (emptyHint ?? t("sidebar.noSessions"))}
+              {sessionsPending ? t("sidebar.loadingHistory") : (emptyHint ?? t("sidebar.noSessions"))}
             </li>
           )}
 
-          {hasMoreArchive && group.path && (
+          {/* Offered whatever this group holds, because the pane shows the most
+              recent rows and a directory can hold over a thousand. It used to be
+              gated on an archive preview having produced something, which meant a
+              directory whose history had not been ingested offered no way to look. */}
+          {group.path && (
             <li>
               <button
                 type="button"
@@ -557,10 +522,12 @@ function SessionRow({
   session,
   active,
   home,
+  environments,
 }: {
   session: Session;
   active: boolean;
   home?: string;
+  environments: Environments;
 }) {
   const queryClient = useQueryClient();
   const t = useT();
@@ -568,19 +535,21 @@ function SessionRow({
 
   const items: MenuItem[] = [
     {
-      label:
-        session.traceSessionId || session.nativeSessionId
-          ? t("sidebar.copyOriginalId")
-          : t("sidebar.copyWebId"),
-      onSelect: () =>
-        void navigator.clipboard.writeText(originalSessionId(session)).catch(() => {}),
+      // **One entry, because there is one id.** This used to be two — "copy original
+      // id" and "copy web id" — because a session had a Sylph-minted UUID *and* an
+      // agent-native id, and pasting the wrong one into the wrong tool silently found
+      // nothing. Identity is now the triple, so the id in the URL and the id that
+      // names this conversation to its vendor are parts of one value: copying it is
+      // one action, and the string that goes to the clipboard is what a Sylph route
+      // takes verbatim.
+      //
+      // The *native* id is deliberately not offered separately. It is one field of
+      // this session object, so a user who needs it can read it, and a second menu
+      // entry would recreate exactly the ambiguity about which id to paste that this
+      // deletion removes.
+      label: t("sidebar.copySessionId"),
+      onSelect: () => void navigator.clipboard.writeText(session.id).catch(() => {}),
     },
-    ...(session.traceSessionId || session.nativeSessionId
-      ? [{
-          label: t("sidebar.copyWebId"),
-          onSelect: () => void navigator.clipboard.writeText(session.id).catch(() => {}),
-        }]
-      : []),
     {
       label: t("sidebar.copyWorkspacePath"),
       onSelect: () => void navigator.clipboard.writeText(session.workdir).catch(() => {}),
@@ -592,10 +561,12 @@ function SessionRow({
     },
   ];
 
+  const relay = relayName(session.environment, environments);
+
   return (
     <li className="group/row relative">
       <Link
-        href={`/sessions/${session.id}`}
+        href={`/sessions/${encodeURIComponent(session.id)}`}
         aria-current={active ? "page" : undefined}
         onContextMenu={(event) => {
           event.preventDefault();
@@ -606,27 +577,25 @@ function SessionRow({
           active ? "bg-accent text-accent-ink" : "text-ink-soft hover:bg-hover"
         }`}
       >
-        {/* Origin is durable policy data, so it stays visible even at this size.
-            Two different shapes, filled, not two colours of one dot — the
-            distinction has to survive greyscale and colour blindness (WCAG
-            1.4.1), because it decides identity and lifecycle policy. */}
-        <span
-          title={session.origin === "native" ? "native session" : "sylph session"}
-          className={`shrink-0 ${
-            active
-              ? "text-accent-ink-muted"
-              : session.origin === "native"
-                ? "text-native"
-                : "text-success"
-          }`}
-        >
-          {session.origin === "native" ? (
-            <OriginNativeIcon size={9} />
-          ) : (
-            <OriginSylphIcon size={9} />
-          )}
-        </span>
         <span className="min-w-0 flex-1 truncate">{sessionLabel(session)}</span>
+        {/* Fidelity is what replaces the origin dot here, and it is a different fact:
+            not who started the session but how much its record holds, which is what
+            decides whether a duration in it can be trusted. Marked only when it is not
+            `stream`, so an ordinary row carries no marker — a marker on every row
+            carries no information, which is the one thing the deleted dot got right.
+
+            The marker's own tooltip explains what is missing, so at this size the
+            shape alone is enough (WCAG 1.4.1: it is a shape, not a hue). */}
+        {session.fidelity !== "stream" && (
+          <span
+            className={`shrink-0 ${active ? "text-accent-ink-muted" : "text-ink-faint"}`}
+          >
+            <FidelityMarker value={session.fidelity} />
+          </span>
+        )}
+        {environments.showEnvironment && (
+          <EnvironmentChip name={session.environmentName} reachableVia={relay} />
+        )}
         {session.status === "running" ? (
           <span
             className={`shrink-0 ${active ? "text-accent-ink-muted" : "text-info"}`}
@@ -671,92 +640,6 @@ function SessionRow({
           items={items}
           onClose={() => setMenu(null)}
           label={`${sessionLabel(session)} actions`}
-        />
-      )}
-    </li>
-  );
-}
-
-/**
- * One archived session, linking to the read-only view.
- *
- * Visually subordinate to a live row: this is history, and the sidebar's job is
- * still to get the user to work they can continue. `⌗` rather than a colour
- * change carries the distinction, so it survives greyscale and colour-blindness
- * (WCAG 1.4.1).
- */
-function ArchivedRow({ session }: { session: ArchiveSession }) {
-  const queryClient = useQueryClient();
-  const t = useT();
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const when = session.endedAtMs ?? session.startedAtMs;
-  const label = session.label ?? `Untitled ${session.agent} session`;
-  const items: MenuItem[] = [
-    {
-      label: t("sidebar.copyOriginalId"),
-      onSelect: () => void navigator.clipboard.writeText(session.id).catch(() => {}),
-    },
-    {
-      label: t("sidebar.copyWorkspacePath"),
-      onSelect: () => void navigator.clipboard.writeText(session.cwd).catch(() => {}),
-    },
-    {
-      label: t("sidebar.refreshTranscript"),
-      onSelect: () => {
-        void queryClient.invalidateQueries({ queryKey: ["archive", "transcript", session.id] });
-        void queryClient.invalidateQueries({ queryKey: ["archive", "sessions"] });
-      },
-    },
-  ];
-
-  return (
-    <li className="group/row relative">
-      <Link
-        href={`/archive/${encodeURIComponent(session.id)}`}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          setMenu({ x: event.clientX, y: event.clientY });
-        }}
-        title={`${label} — archived ${session.agent} session, read-only`}
-        className="tap-row flex items-center gap-1.5 rounded-md py-1.5 pr-8 pl-1.5 text-xs text-ink-muted hover:bg-hover hover:text-ink focus-ring md:py-1"
-      >
-        {/* An archive box, not a colour change: this is history, and the
-            distinction has to survive greyscale (WCAG 1.4.1). */}
-        <span title="archived session" className="shrink-0 text-ink-faint">
-          <ArchiveIcon size={12} />
-        </span>
-        <span className="min-w-0 flex-1 truncate">{label}</span>
-        {session.subagentCount > 0 && (
-          <span
-            title={`${session.subagentCount} subagent session${session.subagentCount === 1 ? "" : "s"}`}
-            className="flex shrink-0 items-center gap-0.5 text-3xs text-ink-muted"
-          >
-            <BranchIcon size={10} />
-            {session.subagentCount}
-          </span>
-        )}
-        <span className="shrink-0 text-3xs text-ink-muted">
-          {formatRelative(when).replace(" ago", "")}
-        </span>
-      </Link>
-
-      <span className="absolute inset-y-0 right-0 flex items-center pr-0.5 opacity-0 group-hover/row:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
-        <MenuButton label={`${label} actions`} items={items} align="end">
-          {(trigger) => (
-            <IconButton label={`${label} actions`} {...trigger}>
-              <MoreIcon size={14} />
-            </IconButton>
-          )}
-        </MenuButton>
-      </span>
-
-      {menu && (
-        <ContextMenu
-          x={menu.x}
-          y={menu.y}
-          items={items}
-          onClose={() => setMenu(null)}
-          label={`${label} actions`}
         />
       )}
     </li>

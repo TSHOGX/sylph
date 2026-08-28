@@ -59,14 +59,15 @@ export interface Settings {
    * Whether a session started from this app gets Sylph's identity.
    *
    * This one is unlike its neighbours: every other field here is a display
-   * preference the backend never sees, while this is sent as `identityMode` on
+   * preference the backend never sees, while this is sent as `injectIdentity` on
    * `POST /sessions` and stored on the row. It lives here because it is a
    * *default for new sessions* — the same kind of thing as `defaultAgent`, which
    * is also a preference that becomes durable session data at creation.
    *
    * It cannot be anything but a creation-time default: identity decides what a
-   * transcript was produced by, so changing it later would misdescribe history
-   * the runner already wrote. An open session keeps whatever it was created with.
+   * transcript was produced by, so changing it later would misdescribe history the
+   * agent already wrote. `PATCH /sessions` refuses the field for that reason, and an
+   * open session keeps whatever it was created with.
    */
   injectSoul: boolean;
   /** Show thinking blocks expanded on arrival. Off by default: reasoning is

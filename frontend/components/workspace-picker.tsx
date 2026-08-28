@@ -19,16 +19,16 @@
  *
  * # Known directories first, the filesystem second
  *
- * A directory the archive has never seen is absent from this list by construction,
- * and refusing to offer it would make the picker unable to answer a question the
- * backend can. So "Browse folders…" is always present in the footer rather than as
- * a row: a row would be filtered away by the very query that failed to match
- * anything, which is exactly the moment it is needed.
+ * A directory nothing has ever run in is absent from this list by construction, and
+ * refusing to offer it would make the picker unable to answer a question the backend
+ * can. So "Browse folders…" is always present in the footer rather than as a row: a
+ * row would be filtered away by the very query that failed to match anything, which
+ * is exactly the moment it is needed.
  *
- * `includeArchived` is on, and the query key matches the history overlay's so the
- * two share one cache entry. It carries directories that exist only in TraceDB,
- * which is the majority of what a user wants here — a directory with a live session
- * is already one click away in the sidebar.
+ * The query key matches the sidebar's and the history overlay's, so all three share
+ * one cache entry. It used to be a *distinct* key carrying `includeArchived: true`,
+ * because folding in directories that existed only in the separate archive would
+ * otherwise have leaked them into the sidebar's poll. One store, one listing, one key.
  */
 
 import { useMemo, useState } from "react";
@@ -81,11 +81,11 @@ export function WorkspacePicker({
   const [browsing, setBrowsing] = useState(false);
 
   const workspacesQuery = useQuery({
-    // Shared with the history overlay deliberately: same request, same shape, and
-    // one of the two surfaces having a colder cache than the other is a difference
-    // the user would feel as an inconsistent wait.
-    queryKey: ["workspaces", { includeArchived: true }],
-    queryFn: () => api.workspaces.list({ includeArchived: true }),
+    // Shared with the sidebar and the history overlay deliberately: same request,
+    // same shape, and one surface having a colder cache than another is a difference
+    // the user feels as an inconsistent wait.
+    queryKey: ["workspaces"],
+    queryFn: () => api.workspaces.list(),
     staleTime: 60_000,
   });
 
@@ -105,7 +105,7 @@ export function WorkspacePicker({
         // exists in the row model: a project is remembered by a middle segment
         // that its leaf name does not carry.
         detail: shortenHome(workspace.path, home),
-        meta: describeCounts(workspace.archivedCount, workspace.sessionCount, t),
+        meta: describeCount(workspace.sessionCount, t),
         // `undefined` rather than `false` when the caller named no current
         // directory, so the check column is not reserved on a list where no row
         // could ever carry one — and so a row is announced as an action rather
@@ -167,8 +167,9 @@ export function WorkspacePicker({
             </button>
           </div>
         ) : items.length === 0 ? (
-          // Distinct from "no match": an empty archive is answered by browsing,
-          // and saying so is the difference between a dead end and a next step.
+          // Distinct from "no match": a machine with no recorded directories is
+          // answered by browsing, and saying so is the difference between a dead end
+          // and a next step.
           <p className="px-3 py-6 text-center text-xs text-ink-muted">
             {t("workspacePicker.empty")}
           </p>
@@ -208,14 +209,16 @@ export function WorkspacePicker({
 /**
  * What a directory holds, or nothing at all.
  *
- * Shown because it is the difference between a directory worth opening and one
- * that renders an empty list. Returns `undefined` rather than an empty string when
- * there is nothing to report, so `meta` stays absent and the row does not reserve
- * a column for a value it never has.
+ * Shown because it is the difference between a directory worth opening and one that
+ * renders an empty list. Returns `undefined` rather than an empty string when there is
+ * nothing to report, so `meta` stays absent and the row does not reserve a column for a
+ * value it never has.
+ *
+ * One number now, not two. It used to report archived and live counts separately,
+ * because they came from two stores and a directory could have history in one and
+ * nothing in the other — which also meant neither number alone answered "is there
+ * anything here". One store makes it a count.
  */
-function describeCounts(archived: number, live: number, t: Translate): string | undefined {
-  const parts: string[] = [];
-  if (archived > 0) parts.push(t("workspacePicker.archived", { count: archived }));
-  if (live > 0) parts.push(t("workspacePicker.live", { count: live }));
-  return parts.length > 0 ? parts.join(" · ") : undefined;
+function describeCount(sessions: number, t: Translate): string | undefined {
+  return sessions > 0 ? t("workspacePicker.sessions", { count: sessions }) : undefined;
 }

@@ -35,6 +35,7 @@
  */
 
 import { useMemo, useState } from "react";
+import type { Fidelity } from "@/lib/api";
 import {
   trajectoryName,
   trajectoryReport,
@@ -75,9 +76,18 @@ const MAX_LABEL_INDENT = 2;
 
 export function DelegationOverview({
   nodes,
+  fidelity,
   onFocus,
 }: {
   nodes: TimelineNode[];
+  /**
+   * The record's fidelity, from the session.
+   *
+   * Threaded down rather than read here, because this component is rendered per
+   * timeline and the session is the timeline's own context. `buildWaterfall` refuses
+   * to lay out an axis without it — see that module on why the failure is silent.
+   */
+  fidelity: Fidelity;
   onFocus: (trajectory: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -90,7 +100,10 @@ export function DelegationOverview({
   // the trap the `NODE_CACHE` pitfall describes from the other side: a key the
   // producer reallocates can never hit, and here there is nothing stabler to key on
   // because the value genuinely changes.
-  const waterfall = useMemo(() => buildWaterfall(nodes, order), [nodes, order]);
+  const waterfall = useMemo(
+    () => buildWaterfall(nodes, fidelity, order),
+    [nodes, fidelity, order],
+  );
 
   // One delegation compares to nothing. The card already reports its duration, so an
   // overview here would be a second copy of one number.
@@ -107,10 +120,25 @@ export function DelegationOverview({
           aria-expanded={open}
           className="tap-row rounded px-1 text-2xs font-medium text-ink-soft hover:bg-hover hover:text-ink focus-ring"
         >
-          {open ? "Hide" : "Compare"} {count} delegations
+          {/* "Compare" is a promise about durations, so an unrecorded record must not
+              make it. The list is still worth opening — it is the structure of the
+              delegation — so the verb changes rather than the section disappearing. */}
+          {open ? "Hide" : waterfall.unrecorded ? "List" : "Compare"} {count} delegations
         </button>
 
-        {open && (
+        {/* Stated once for the whole list rather than per row, because it is one fact
+            about the source and not two hundred missing figures. Above the ordering
+            control deliberately: it explains why that control has nothing to sort by,
+            which is why it is withheld below. */}
+        {open && waterfall.unrecorded && (
+          <p className="text-3xs text-ink-muted">
+            This session was read from the agent&rsquo;s own files, which record no
+            per-event timing — so there is nothing here to time or compare. The
+            structure below is complete.
+          </p>
+        )}
+
+        {open && !waterfall.unrecorded && (
           // Two buttons, not a `<select>`: a select is sized by its longest option
           // and cannot be styled or truncated, which is what pushed the composer off
           // the right edge of a phone.
@@ -134,7 +162,7 @@ export function DelegationOverview({
             see which bars are faded has no way to ask for it. The two are counted
             apart because "no figure" and "a weak figure" send a reader to different
             places — the first looks like a bug, the second is read off the `≥`. */}
-        {open && waterfall.bounded > 0 && (
+        {open && !waterfall.unrecorded && waterfall.bounded > 0 && (
           <p className="text-3xs text-ink-muted">
             {waterfall.bounded === count ? "Every" : `${waterfall.bounded} of ${count}`}{" "}
             {waterfall.bounded === 1 ? "row is" : "rows are"} a lower bound (
@@ -145,7 +173,7 @@ export function DelegationOverview({
           </p>
         )}
 
-        {open && waterfall.untimed > 0 && (
+        {open && !waterfall.unrecorded && waterfall.untimed > 0 && (
           <p className="text-3xs text-ink-muted">
             {waterfall.untimed} of {count} cannot be timed at all: nothing was forwarded
             to measure from.
@@ -160,7 +188,14 @@ export function DelegationOverview({
               <OverviewRow key={row.key} row={row} onFocus={onFocus} />
             ))}
           </ol>
-          <AxisFooter spanMs={waterfall.spanMs} timed={waterfall.timed} />
+          {/* No axis at all for an unrecorded record, rather than an axis reading
+              "0ms". The footer's own untimed branch says "no delegation reports both a
+              start and an end", which is true of a *stream* turn that happened not to
+              measure any — a different statement from a source that measures nothing,
+              and one already made above. */}
+          {!waterfall.unrecorded && (
+            <AxisFooter spanMs={waterfall.spanMs} timed={waterfall.timed} />
+          )}
         </>
       )}
     </section>
@@ -277,7 +312,13 @@ function OverviewRow({
 
       {/* The bar restates the label, so it carries no accessible content of its own.
           No `ring` anywhere in here: a ring is a box-shadow, and the focusable
-          element is the label above, which uses `focus-ring` (an outline). */}
+          element is the label above, which uses `focus-ring` (an outline).
+
+          Omitted entirely for an unrecorded record — not rendered empty. An empty
+          track is still a track: it reads as a bar of zero length against a real
+          axis, which is the fabricated measurement the whole gate exists to prevent,
+          and it would also draw a scale that does not exist. */}
+      {row.extent.kind !== "unrecorded" && (
       <span
         aria-hidden="true"
         className="relative mx-1 block h-1 rounded-sm bg-hover"
@@ -306,6 +347,7 @@ function OverviewRow({
           />
         )}
       </span>
+      )}
     </li>
   );
 }
@@ -336,6 +378,10 @@ function AxisFooter({ spanMs, timed }: { spanMs: number; timed: boolean }) {
 
 /** The trailing figure on a row: elapsed time, or why there is none. */
 function timing(row: WaterfallRow): string {
+  // Nothing at all, not "untimed": every row in an unrecorded record would carry the
+  // same word, and the section states it once above. A per-row marker there would be
+  // two hundred copies of one fact competing with the names.
+  if (row.extent.kind === "unrecorded") return "";
   if (row.extent.kind === "open") return "running";
   if (row.extent.kind === "instant") return "untimed";
   if (row.durationMs === undefined) return "";
@@ -367,6 +413,10 @@ function describe(row: WaterfallRow, name: string): string {
   } else if (row.extent.kind === "instant") {
     parts.push("duration unknown, only its closing time was recorded");
   }
+  // Deliberately says nothing for `unrecorded`. The section's own caveat has already
+  // said it once, and repeating "not timed" on every row makes a screen-reader user
+  // listen to it two hundred times to learn what the structure is — which is the
+  // information this list still genuinely carries.
 
   if (row.slowest) parts.push("the longest here");
 

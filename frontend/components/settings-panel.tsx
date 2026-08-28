@@ -12,7 +12,7 @@
  */
 
 import { useMemo, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api, type Agent } from "@/lib/api";
 import {
   DEFAULT_SHORTCUTS,
@@ -23,14 +23,16 @@ import {
 } from "@/lib/settings";
 import { comboFromEvent, formatCombo, reservedReason, useIsMac } from "@/lib/shortcuts";
 import { LOCALE_NAMES, LOCALES, useT, type Locale, type MessageKey } from "@/lib/i18n";
+import { useEnvironments } from "@/lib/environments";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
+import { EnvironmentChip } from "@/components/badges";
 import { Overlay } from "@/components/overlay";
 import { IdentitySection } from "@/components/settings-identity";
 import { ConfigSection } from "@/components/settings-config";
 import { MenuButton, type MenuItem } from "@/components/ui/menu";
 import { ChevronDownIcon } from "@/components/icons";
 
-type Section = "general" | "identity" | "agents" | "workspaces" | "config" | "shortcuts";
+type Section = "general" | "identity" | "environments" | "workspaces" | "config" | "shortcuts";
 
 const SECTIONS: Array<{ id: Section; label: MessageKey }> = [
   { id: "general", label: "settings.section.general" },
@@ -38,7 +40,9 @@ const SECTIONS: Array<{ id: Section; label: MessageKey }> = [
   // an agent is told rather than how the app looks, so it should not sit below
   // three panels of display toggles.
   { id: "identity", label: "settings.section.identity" },
-  { id: "agents", label: "settings.section.agents" },
+  // "Machines" rather than "Agents": which agents exist is decided per machine, so
+  // this section is about the machines and their agents is what it lists.
+  { id: "environments", label: "settings.section.environments" },
   { id: "workspaces", label: "settings.section.workspaces" },
   // Near the end, because it is the section a user opens when something is wrong
   // rather than when they want to change something — and it is the one that
@@ -91,7 +95,7 @@ export function SettingsPanel() {
         <div className="min-h-0 flex-1 pane p-3">
           {section === "general" && <GeneralSection />}
           {section === "identity" && <IdentitySection />}
-          {section === "agents" && <AgentsSection />}
+          {section === "environments" && <EnvironmentsSection />}
           {section === "workspaces" && <WorkspacesSection />}
           {section === "config" && <ConfigSection />}
           {section === "shortcuts" && <ShortcutsSection />}
@@ -190,30 +194,171 @@ function GeneralSection() {
 }
 
 /**
- * Runner discovery, and the model defaults that depend on it.
+ * Which machines exist, what each can run, and the model defaults that depend on it.
  *
- * The refresh button reports what discovery *found*, not merely that it ran. The
- * earlier version awaited the call and reset a spinner, which made "re-read the
- * scripts and nothing had changed" indistinguishable from "the button is broken"
- * — and since a runner that hardcodes its model list in its own `--describe`
- * output will keep reporting the same models until that script is edited, "nothing
- * changed" is the common case. A user adding a provider to their agent's config
- * and then refreshing here has no way to tell those apart without being told.
- */
-/**
- * What discovery currently reports, as one comparable string.
+ * # There is no "discovery" here any more, and that deleted a whole control
  *
- * Sorted, so map iteration order cannot make an unchanged registry look changed.
- * Includes each agent's declared models, because a provider added to a runner is
- * the change a user is most likely to be refreshing *for*.
+ * This section used to hold a Refresh button that re-ran a `--describe` pass over
+ * adapter directories, plus a fingerprint of what it found so the panel could
+ * distinguish "re-read and something changed" from "re-read and nothing did" — because
+ * a runner hardcoding its model list keeps reporting the same models until its script
+ * is edited, which made "nothing changed" the common case and an honest button look
+ * broken.
+ *
+ * All of it is gone with the discovery pass. An agent is available when its CLI is on
+ * some machine's `PATH` and reports a version, answered by that machine's envagent
+ * (`docs/api-design.md` § Agents and environments), so there is no pass on this side to
+ * re-run and nothing for a fingerprint to compare. What replaces it is better: the list
+ * is *per machine*, which is the question a user actually has — "why can I not use this
+ * agent" now has one answer with one fix, and it names the machine.
+ *
+ * The `broken` map went the same way. A pass over directories could half-succeed and
+ * needed to report a directory that failed to describe itself; `PATH` plus a version
+ * cannot, so there is no third state between available and absent.
  */
-function describeDiscovery(agents: Agent[]): string {
-  return agents
-    .map((agent) => `${agent.name}:${(agent.flags?.model?.choices ?? []).join(",")}`)
-    .sort()
-    .join("|");
-}
+function EnvironmentsSection() {
+  const { settings, update } = useSettings();
+  const t = useT();
+  const environments = useEnvironments();
 
+  /**
+   * Agents to offer as a *preference*, across every reachable machine.
+   *
+   * Deliberately not "the agent list", which no longer exists: `defaultAgent` and
+   * `defaultModels` are preferences expressed with no environment in view, so they have
+   * to be pickable from a union — while `resolveSessionDefaults` validates the choice
+   * against whichever machine a session actually lands on. That split is the honest
+   * shape: the preference is global and the availability is not.
+   */
+  const offered = useMemo(() => {
+    const byName = new Map<string, Agent>();
+    for (const environment of environments.all) {
+      if (!environment.connected) continue;
+      for (const agent of environment.agents) {
+        // First writer wins, which only decides whose `flags` populate the model
+        // picker. Two machines with the same agent at different versions can declare
+        // different model lists, and there is no correct merge — the *session's* own
+        // live config is the authority on what it can be set to, and this is only
+        // seeding a default.
+        if (!byName.has(agent.name)) byName.set(agent.name, agent);
+      }
+    }
+    return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [environments.all]);
+
+  return (
+    <div className="space-y-4">
+      {/* The machines themselves, first: everything below is scoped by them, and a
+          user opening this panel because an agent is missing needs to see whether the
+          machine it lives on is even connected. */}
+      <Field
+        label={t("settings.environments.label")}
+        hint={t("settings.environments.hint")}
+      >
+        {environments.isPending ? (
+          <p className="text-xs text-ink-muted">{t("action.loading")}</p>
+        ) : environments.all.length === 0 ? (
+          <p className="text-xs text-ink-muted">{t("settings.environments.none")}</p>
+        ) : (
+          <ul className="space-y-1.5">
+            {environments.all.map((environment) => (
+              <li key={environment.id} className="rounded border border-line px-2 py-1.5">
+                <div className="flex items-baseline gap-2">
+                  <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                    {environment.name}
+                  </span>
+                  {/* Connectedness carries a word, not only a hue (WCAG 1.4.1), and
+                      the relay chip is drawn distinguishably because it changes what
+                      AFK can promise — control on a relayed machine ends when its
+                      relay leaves. */}
+                  {environment.reachableVia && (
+                    <EnvironmentChip
+                      name={environment.name}
+                      reachableVia={
+                        environments.nameOf(environment.reachableVia) ?? environment.reachableVia
+                      }
+                    />
+                  )}
+                  <span
+                    className={`shrink-0 text-2xs font-medium ${
+                      environment.connected ? "text-success" : "text-ink-muted"
+                    }`}
+                  >
+                    {environment.connected
+                      ? t("settings.environments.connected")
+                      : t("settings.environments.offline")}
+                  </span>
+                </div>
+                <p className="mt-0.5 text-2xs text-ink-soft">
+                  {environment.agents.length === 0
+                    ? t("settings.environments.noAgents")
+                    : environment.agents
+                        .map((agent) => `${agent.name} ${agent.version}`)
+                        .join(" · ")}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Field>
+
+      <Field label={t("settings.agents.default.label")} hint={t("settings.agents.default.hint")}>
+        <select
+          value={settings.defaultAgent}
+          onChange={(event) => update({ defaultAgent: event.target.value })}
+          aria-label={t("settings.agents.default.label")}
+          className="w-full rounded border border-line px-2 py-1 text-xs focus-ring"
+        >
+          <option value="">{t("settings.agents.default.first")}</option>
+          {offered.map((agent) => (
+            <option key={agent.name} value={agent.name}>
+              {agent.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field label={t("settings.agents.models.label")} hint={t("settings.agents.models.hint")}>
+        {offered.length === 0 ? (
+          <p className="text-xs text-ink-muted">{t("settings.agents.models.none")}</p>
+        ) : (
+          <ul className="space-y-1.5">
+            {offered.map((agent) => {
+              // Spawn-time choices, from what the agent declares about itself. An agent
+              // that declares no `model` flag correctly offers none rather than a
+              // guessed list — `codex` is that case, measured.
+              const choices = agent.flags?.model?.choices ?? [];
+              return (
+                <li key={agent.name} className="flex items-center gap-2">
+                  <span className="w-24 shrink-0 truncate text-xs font-medium">{agent.name}</span>
+                  {choices.length === 0 ? (
+                    <span className="text-2xs text-ink-muted">
+                      {t("settings.agents.models.noFlag")}
+                    </span>
+                  ) : (
+                    <ModelDefaultPicker
+                      agent={agent.name}
+                      choices={choices}
+                      value={settings.defaultModels[agent.name] ?? ""}
+                      onChange={(choice) =>
+                        update({
+                          defaultModels: {
+                            ...settings.defaultModels,
+                            [agent.name]: choice,
+                          },
+                        })
+                      }
+                    />
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </Field>
+    </div>
+  );
+}
 /**
  * A default-model choice, as a button that opens a filterable list.
  *
@@ -273,186 +418,6 @@ function ModelDefaultPicker({
         </button>
       )}
     </MenuButton>
-  );
-}
-
-function AgentsSection() {
-  const { settings, update } = useSettings();
-  const queryClient = useQueryClient();
-  const t = useT();
-  const agentsQuery = useQuery({ queryKey: ["agents"], queryFn: () => api.agents.list() });
-  const [refreshing, setRefreshing] = useState(false);
-  const [outcome, setOutcome] = useState<string | null>(null);
-
-  // Memoized rather than `?? []` inline: the fallback allocates a fresh array on
-  // every render while the query is pending, which would invalidate both memos
-  // below on every render and make them worse than no memo at all.
-  const agents = useMemo(() => agentsQuery.data?.agents ?? [], [agentsQuery.data]);
-  const broken = agentsQuery.data?.broken ?? {};
-
-  /**
-   * A stable description of what discovery currently reports.
-   *
-   * Compared before and after a refresh so the panel can distinguish "re-read the
-   * scripts and they say something new" from "re-read them and nothing changed" —
-   * the difference between a working button and an apparently broken one. Names
-   * and declared models both matter: a runner appearing and a runner gaining a
-   * model are both changes worth reporting.
-   */
-  const fingerprint = useMemo(() => describeDiscovery(agents), [agents]);
-
-  const declaredModels = useMemo(
-    () => agents.reduce((total, agent) => total + (agent.flags?.model?.choices?.length ?? 0), 0),
-    [agents],
-  );
-
-  return (
-    <div className="space-y-4">
-      <Field label={t("settings.agents.default.label")} hint={t("settings.agents.default.hint")}>
-        <select
-          value={settings.defaultAgent}
-          onChange={(event) => update({ defaultAgent: event.target.value })}
-          aria-label={t("settings.agents.default.label")}
-          className="w-full rounded border border-line px-2 py-1 text-xs focus-ring"
-        >
-          <option value="">{t("settings.agents.default.first")}</option>
-          {agents.map((agent) => (
-            <option key={agent.name} value={agent.name}>
-              {agent.name}
-            </option>
-          ))}
-        </select>
-      </Field>
-
-      <Field label={t("settings.agents.models.label")} hint={t("settings.agents.models.hint")}>
-        {agents.length === 0 ? (
-          <p className="text-xs text-ink-muted">{t("settings.agents.models.none")}</p>
-        ) : (
-          <ul className="space-y-1.5">
-            {agents.map((agent) => {
-              // Models come from the runner's own `--describe` output, so an
-              // agent that declares no `model` flag correctly offers no choice
-              // rather than a guessed list.
-              const choices = agent.flags?.model?.choices ?? [];
-              return (
-                <li key={agent.name} className="flex items-center gap-2">
-                  <span className="w-24 shrink-0 truncate text-xs font-medium">{agent.name}</span>
-                  {choices.length === 0 ? (
-                    <span className="text-2xs text-ink-muted">
-                      {t("settings.agents.models.noFlag")}
-                    </span>
-                  ) : (
-                    <ModelDefaultPicker
-                      agent={agent.name}
-                      choices={choices}
-                      value={settings.defaultModels[agent.name] ?? ""}
-                      onChange={(choice) =>
-                        update({
-                          defaultModels: {
-                            ...settings.defaultModels,
-                            [agent.name]: choice,
-                          },
-                        })
-                      }
-                    />
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </Field>
-
-      <Field
-        label={t("settings.agents.discovery.label")}
-        hint={t("settings.agents.discovery.hint")}
-      >
-        <button
-          type="button"
-          disabled={refreshing}
-          onClick={async () => {
-            setRefreshing(true);
-            setOutcome(null);
-            const before = fingerprint;
-            try {
-              await api.agents.refresh();
-              // The refresh response already carries the new descriptors, but the
-              // query cache is what every other surface reads — the create dialog
-              // and the composer share this key. Invalidating makes them all
-              // consistent instead of leaving them on the pre-refresh descriptor
-              // until their next fetch.
-              await queryClient.invalidateQueries({ queryKey: ["agents"] });
-              const next = await agentsQuery.refetch();
-              const fresh = next.data?.agents ?? [];
-              setOutcome(
-                describeDiscovery(fresh) === before
-                  ? t("settings.agents.discovery.unchanged")
-                  : t("settings.agents.discovery.changed", {
-                      summary: t("settings.agents.discovery.result", {
-                        agents: fresh.length,
-                        models: fresh.reduce(
-                          (total, agent) => total + (agent.flags?.model?.choices?.length ?? 0),
-                          0,
-                        ),
-                      }),
-                    }),
-              );
-            } catch (error) {
-              setOutcome(
-                t("settings.agents.discovery.failed", {
-                  message: error instanceof Error ? error.message : String(error),
-                }),
-              );
-            } finally {
-              setRefreshing(false);
-            }
-          }}
-          className="rounded border border-line-strong px-2 py-1 text-xs font-medium hover:bg-sunken focus-ring disabled:opacity-50"
-        >
-          {refreshing
-            ? t("settings.agents.discovery.busy")
-            : t("settings.agents.discovery.button")}
-        </button>
-
-        <p className="text-2xs text-ink-muted">
-          {t("settings.agents.discovery.result", {
-            agents: agents.length,
-            models: declaredModels,
-          })}
-        </p>
-
-        {/* `aria-live`, so the outcome is announced rather than only drawn: the
-            button's own label goes back to its resting state, and without this a
-            screen reader user would get no signal that anything happened. */}
-        {outcome && (
-          <p aria-live="polite" className="text-2xs leading-relaxed text-ink-soft">
-            {outcome}
-          </p>
-        )}
-      </Field>
-
-      {/* Fetched by `/agents` all along and never rendered, which meant a runner
-          that failed to describe itself was invisible in the one panel a user
-          opens to ask why their agent is missing. */}
-      {Object.keys(broken).length > 0 && (
-        <Field
-          label={t("settings.agents.broken.label")}
-          hint={t("settings.agents.broken.hint")}
-        >
-          <ul className="space-y-1">
-            {Object.entries(broken).map(([name, message]) => (
-              <li
-                key={name}
-                className="rounded border border-danger-line bg-danger-bg px-2 py-1 text-2xs"
-              >
-                <span className="font-medium">{name}</span>
-                <p className="mt-0.5 font-mono break-words text-ink-soft">{message}</p>
-              </li>
-            ))}
-          </ul>
-        </Field>
-      )}
-    </div>
   );
 }
 

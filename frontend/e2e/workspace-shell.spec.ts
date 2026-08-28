@@ -140,17 +140,22 @@ test("global search finds a session and opens it", async ({ page }) => {
 });
 
 /**
- * An archive hit shows why it matched.
+ * An index hit shows why it matched.
  *
- * The E2E backend points `TRACEDB_BIN` at a path that does not exist, so no spec has
- * ever rendered an archive row — the search overlay's other half. That matters here
- * because the archive row is the only one carrying a match excerpt, and the excerpt is
- * the only thing on it that contains the query: TraceDB ranked the hit by full-text
- * search over the transcript, text the browser never loaded, so a row showing just a
- * title and a path is a result the user cannot account for. Interception is what makes
- * the path reachable; the markup under test is the client's either way.
+ * The excerpt is the only text on such a row that contains the query: the server ranked
+ * the hit by full-text search over the transcript, text the browser never loaded, so a
+ * row showing just a title and a path is a result the user cannot account for.
+ *
+ * Interception rather than a real indexed session, and that is a deliberate limit
+ * stated rather than hidden: the FTS index is the server's, so a spec cannot make one
+ * match without depending on the indexing pipeline. What is under test here is the
+ * client's rendering of a hit — which is what the defect would be in.
+ *
+ * The payload is the *new* shape: a hit carries a whole session rather than an archive
+ * row, so there is no `available` flag, no `cwd`/`title` pair flattened onto the hit,
+ * and no `sessionId` that is set only for an already-imported row. Every hit opens.
  */
-test("an archive hit renders its match snippet, which is the only text carrying the query", async ({
+test("an index hit renders its match snippet, which is the only text carrying the query", async ({
   page,
 }) => {
   await createSession(page);
@@ -158,16 +163,25 @@ test("an archive hit renders its match snippet, which is the only text carrying 
   await page.route("**/api/v1/search?*", (route) =>
     route.fulfill({
       json: {
-        available: true,
         results: [
           {
-            id: "claude:9bdacb6e-0000-4000-8000-000000000001",
-            agent: "claude",
-            title: "Notes",
-            cwd: "/tmp/archived-project",
+            session: {
+              id: "env7fk2:claude:9bdacb6e-0000-4000-8000-000000000001",
+              environment: "env7fk2",
+              environmentName: "laptop",
+              agent: "claude",
+              nativeId: "9bdacb6e-0000-4000-8000-000000000001",
+              workdir: "/tmp/indexed-project",
+              title: "Notes",
+              injectIdentity: true,
+              fidelity: "messages",
+              flagsJson: "{}",
+              status: "idle",
+              createdAtMs: 1_700_000_000_000,
+              updatedAtMs: 1_700_000_060_000,
+            },
             bestMatch: { snippet: "the supervisor deadlocked on the\nsettle sweep" },
-            startedAtMs: 1_700_000_000_000,
-            endedAtMs: 1_700_000_060_000,
+            hits: 3,
           },
         ],
       },
@@ -177,17 +191,23 @@ test("an archive hit renders its match snippet, which is the only text carrying 
   await expect(page.getByLabel("Message")).toBeVisible();
   await page.keyboard.press("ControlOrMeta+k");
   const dialog = page.getByRole("dialog");
-  // Two characters is the threshold below which the archive is not queried at all.
+  // Two characters is the threshold below which the index is not queried at all: FTS5
+  // is 174-260ms where every other read is sub-millisecond.
   await dialog.getByRole("combobox", { name: /search query/i }).fill("deadlock");
 
   const hit = dialog.getByRole("option").filter({ hasText: "Notes" });
-  await expect(hit).toContainText("archive");
   // Collapsed whitespace: a snippet spanning lines in the transcript is one line here,
   // and a raw newline inside a truncating row renders as a gap of arbitrary width.
   await expect(hit).toContainText("the supervisor deadlocked on the settle sweep");
   // The path is still its own line, not displaced by the snippet: `/tmp/x` and
   // `/tmp/x-old` are distinguishable only by it.
-  await expect(hit).toContainText("/tmp/archived-project");
+  await expect(hit).toContainText("/tmp/indexed-project");
+  // The fidelity marker rides along, because a hit renders the session it carries — so
+  // a coarse record is recognizable before it is opened. `exact` because Playwright
+  // matches text as a case-insensitive substring and this row also holds the word
+  // "messages" nowhere else, which is precisely the collision that has bitten here
+  // three times.
+  await expect(hit.getByText("messages", { exact: true })).toBeVisible();
 });
 
 test("Escape closes an overlay and returns focus to its opener", async ({ page }) => {
@@ -396,15 +416,15 @@ test("a workspace group creates in its own directory, with one menu item and no 
 });
 
 /**
- * Archive browsing with no archive.
+ * Browsing one workspace's history.
  *
- * The e2e backend points `TRACEDB_BIN` at a path that does not exist, so these
- * cover the degradation path: on a machine without TraceDB the sidebar must still
- * list live sessions, and the history browser must say the archive is unavailable
- * rather than render an error or hang. That is the state every user without a
- * TraceDB build is in, which makes it the more important of the two paths to pin.
+ * The unavailable-archive assertion this replaces is gone with the archive: there is no
+ * external store to be absent, so the degradation path it pinned does not exist. What
+ * survives is the part that was always about this surface — it is scoped to a directory
+ * rather than global, and it focuses its filter so the first keystroke narrows rather
+ * than changing the workspace.
  */
-test("the history browser opens by keyboard and reports an unavailable archive", async ({
+test("the history browser opens by keyboard, scoped to the open session's workspace", async ({
   page,
 }) => {
   await createSession(page);
@@ -413,9 +433,10 @@ test("the history browser opens by keyboard and reports an unavailable archive",
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
 
-  // Scoped to the open session's workspace, not a global list.
+  // Scoped to the open session's workspace, not a global list — and the filter has
+  // focus, because a control above it would otherwise take the first keystroke and
+  // change the workspace instead of filtering.
   await expect(dialog.getByRole("combobox", { name: /filter this workspace/i })).toBeFocused();
-  await expect(dialog.getByText(/archive is unavailable/i)).toBeVisible();
 
   // Escape closes it, like every other overlay.
   await page.keyboard.press("Escape");
@@ -425,7 +446,7 @@ test("the history browser opens by keyboard and reports an unavailable archive",
 /**
  * Switching which workspace the history browser reads.
  *
- * This replaced a `<select>`, which on a real archive is 200+ options sharing a
+ * This replaced a `<select>`, which on a real machine is 200+ options sharing a
  * `~/Workspace/` prefix and reachable only by first letter. What matters here is
  * that the switcher filters on any part of the path and hands focus to its own
  * input — a mode swap inside one modal, so a second focus trap is never mounted.
@@ -457,7 +478,7 @@ test("the history browser switches workspace through a filterable picker", async
   await expect(dialog.getByRole("combobox", { name: /filter this workspace/i })).toBeVisible();
   await expect(dialog.getByRole("button", { name: /^Workspace:.*tmp/ })).toBeVisible();
 
-  // The filesystem fallback exists for a directory the archive has never seen.
+  // The filesystem fallback exists for a directory nothing has ever run in.
   await dialog.getByRole("button", { name: /^Workspace:/ }).click();
   await dialog.getByRole("button", { name: "Browse folders..." }).click();
   // A `listbox`, not a `list`: the folder browser is filterable now, and a
@@ -470,37 +491,28 @@ test("the history browser switches workspace through a filterable picker", async
   await expect(dialog).toBeHidden();
 });
 
-test("the sidebar still lists live sessions when the archive is absent", async ({ page }) => {
+test("the sidebar lists a created session in its workspace group", async ({ page }) => {
   await createSession(page);
 
   const sidebar = page.getByRole("navigation", { name: "Sessions by workspace" });
   await expect(sidebar).toBeVisible();
-
-  // The live session is listed, and no archived row is invented.
   await expect(sidebar.getByRole("link").first()).toBeVisible();
-  await expect(sidebar.locator('a[href^="/archive/"]')).toHaveCount(0);
 });
 
-test("an archived session missing from the archive says so, with no composer", async ({
-  page,
-}) => {
-  // Also covers the catch-all route decoding a colon-bearing trace id: a
-  // double-encoded id would look up a literal `claude%3A...` and report the wrong
-  // thing.
-  await page.goto(`/archive/${encodeURIComponent("claude:does-not-exist")}`);
+// Two tests are deleted here rather than adapted, because both asserted on the
+// separate archive and there is nothing left for them to assert:
+//
+// - "the sidebar still lists live sessions when the archive is absent" checked that no
+//   `/archive/…` row was invented when the archive could not be reached. There is one
+//   store, so a row is a row and the absent-archive state does not exist.
+// - "an archived session missing from the archive says so" exercised the
+//   `/archive/[...id]` catch-all route, including its decoding of a colon-bearing
+//   trace id. That route is gone with the second id space. The decoding concern it
+//   covered is *not* gone and has moved somewhere better: a session id contains `:`
+//   and may contain `/`, so `api.ts`'s `segment` encodes every path interpolation, and
+//   `lib/api.ts` documents why. That is now a property of every session route rather
+//   than one archive route's own trick.
 
-  // A heading, not `role=alert`: Next mounts its own empty route announcer with
-  // that role, so matching on the role alone is ambiguous.
-  await expect(page.getByRole("heading", { level: 1 })).toContainText(
-    /archive|could not load/i,
-  );
-  // Asserted on the controls themselves, not on `getByLabel("Message")`: that
-  // matches accessible names by substring, so every `SendMessage tool call`
-  // section in a transcript satisfies it — 13 of them in one real session. The
-  // assertion would then pass whether or not a composer was present.
-  await expect(page.locator("textarea")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /^Send$/ })).toHaveCount(0);
-});
 test("binding a workspace from the empty sidebar area needs no session first", async ({
   page,
 }) => {
@@ -524,9 +536,9 @@ test("binding a workspace from the empty sidebar area needs no session first", a
   // only path to binding a fresh directory undiscoverable.
   await sidebar.getByRole("button", { name: "New Workspace..." }).click();
 
-  // Known workspaces first: binding a directory that already holds archived
-  // history is the common case, and that directory is absent from the sidebar
-  // precisely because nothing has bound it yet.
+  // Known workspaces first: binding a directory that already holds history is the
+  // common case — a project worked on before this UI existed — and that directory is
+  // absent from the sidebar precisely because nothing has bound it yet.
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("combobox", { name: /filter workspaces/i })).toBeVisible();

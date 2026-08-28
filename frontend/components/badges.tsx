@@ -1,46 +1,80 @@
-import type { SessionOrigin, TurnStatus } from "@/lib/api";
-import { OriginNativeIcon, OriginSylphIcon } from "@/components/icons";
+import type { Fidelity, TurnStatus } from "@/lib/api";
+import { BlocksFidelityIcon, MessagesFidelityIcon, RelayIcon } from "@/components/icons";
 
 /**
- * Session origin badge.
+ * How much resolution a session's record has, marked when it is not `stream`.
  *
- * Origin is durable product data, not decoration: a `sylph` session runs under
- * Sylph identity policy, while a `native` session preserves the originating
- * agent's identity and must never be given SOUL.md, reset, or compacted. Green
- * vs violet is the spec's convention (docs/roadmap.md, UX).
+ * **Not an origin badge.** The distinction this replaces divided sessions by who
+ * started them, which the backend never branched on; this one is a property of the
+ * *record*, and it is the fact a reader actually needs — a session Sylph launched,
+ * read back from the vendor's store after the process died, is `messages` too.
  *
- * The colour is paired with text because colour alone is not an accessible
- * distinction (WCAG 1.4.1 Use of Color).
+ * `stream` is unmarked, because a marker on the ordinary case carries no information.
+ * That is the same rule the deleted badge got right and the only thing worth keeping
+ * from it.
  *
- * **The tooltip says "identity", not "identity and lifecycle", and that is a
- * correction rather than brevity.** Of the two axes origin governs, only identity
- * is enforced: the backend resolves `SYLPH_SOUL` from `identity_mode`, while
- * `lifecycle_mode` is written to the journal and read by nothing — no timer
- * retires an incarnation, so the documented 24h-idle and 04:00 resets do not
- * happen (docs/roadmap.md § Audit, 2026-08-26). Claiming a policy "applies" when
- * nothing implements it is the surface promising more than it has. Restore the
- * fuller wording when a reset actually fires, not before.
- *
- * The `native` tooltip is unaffected and stays as it was: preservation is the
- * absence of a reset, and no reset is exactly what happens.
+ * Shape plus text, never colour alone (WCAG 1.4.1), and the two non-stream values get
+ * *different* shapes rather than two tints of one: the difference between them decides
+ * whether a duration inside a block is recoverable, so it has to survive greyscale.
+ * The tooltip says what is missing rather than naming the level again — "blocks" is
+ * meaningless to a reader who has not read the protocol, and what they need to know is
+ * that the timings are coarse.
  */
-export function OriginBadge({ origin }: { origin: SessionOrigin }) {
-  const native = origin === "native";
+export function FidelityMarker({ value }: { value: Fidelity }) {
+  if (value === "stream") return null;
+  const blocks = value === "blocks";
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-md border border-line bg-hover px-1.5 py-0.5 text-2xs font-medium text-ink-soft"
+      title={
+        blocks
+          ? "Read from the agent's own files, which flush at block boundaries. Durations inside a block were never recorded."
+          : "Read from the agent's own files, which flush once per message. Only message-level timing was recorded."
+      }
+    >
+      {blocks ? <BlocksFidelityIcon size={9} /> : <MessagesFidelityIcon size={9} />}
+      {value}
+    </span>
+  );
+}
+
+/**
+ * Which machine a session runs on.
+ *
+ * Rendered from `environmentName`, never from the id: the id is opaque and base32, so
+ * showing it names nothing a user recognizes. The name is mutable and is never a key,
+ * which is exactly why it is safe to render and unsafe to compare.
+ *
+ * `reachableVia` is drawn *differently* rather than merely annotated, and that is a
+ * promise rather than decoration: a relayed environment is reachable only while the
+ * named machine relays for it, so control dies when that machine leaves
+ * (`docs/environments.md` § SSH-bootstrapped). Rendering it identically to a directly
+ * connected environment would promise AFK continuity Sylph cannot keep.
+ */
+export function EnvironmentChip({
+  name,
+  reachableVia,
+}: {
+  name: string;
+  /** The relaying environment's *name*, already resolved. Null when direct. */
+  reachableVia?: string | null;
+}) {
+  const relayed = Boolean(reachableVia);
   return (
     <span
       className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-2xs font-medium ${
-        native
-          ? "border-native-line bg-native-bg text-native"
-          : "border-success-line bg-success-bg text-success"
+        relayed
+          ? "border-warning-line bg-warning-bg text-warning"
+          : "border-line bg-hover text-ink-soft"
       }`}
       title={
-        native
-          ? "Native session: the originating agent's identity and lifecycle are preserved."
-          : "Sylph session: Sylph identity is injected."
+        relayed
+          ? `Runs on ${name}, reachable only while ${reachableVia} relays for it — control ends when that machine leaves.`
+          : `Runs on ${name}.`
       }
     >
-      {native ? <OriginNativeIcon size={9} /> : <OriginSylphIcon size={9} />}
-      {native ? "native" : "sylph"}
+      {relayed && <RelayIcon size={9} />}
+      {name}
     </span>
   );
 }

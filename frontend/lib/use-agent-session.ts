@@ -22,7 +22,8 @@ import { useCallback, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
-  type LinkFailure,
+  isRetryable,
+  type Facet,
   type LinkState,
   type PendingRequest,
 } from "@/lib/api";
@@ -42,16 +43,25 @@ const REQUEST_POLL_MS = 20_000;
 export interface AgentSession {
   /** Live capability surface, or undefined until the first handshake lands. */
   link?: LinkState;
-  /** Whether an agent process is attached right now. */
-  attached: boolean;
+  /**
+   * Can Sylph see what this session is doing, and why not.
+   *
+   * Separate from {@link control} rather than flattened into one `attached`, because
+   * the two genuinely differ and the interesting case is where they disagree: a
+   * session running in a terminal is observable and undrivable, so a surface that
+   * read one boolean would either hide readable history or offer a composer that
+   * cannot send. Defaults to unavailable-for-an-unreachable-environment before the
+   * first handshake, which is the honest answer while nothing has been asked.
+   */
+  observe: Facet;
+  /** Can Sylph send this session a turn, and why not. */
+  control: Facet;
   /**
    * True while a handshake is in flight — it spawns an agent CLI and can take
    * seconds. Covers a retry as well as the first attempt, because to the user
    * they are the same wait and both need the same "not broken, just slow" signal.
    */
   connecting: boolean;
-  /** Why there is no link, when an attempt failed. */
-  failure?: LinkFailure;
   /** Establish a link now, after a failure. */
   reattach: () => void;
   requests: PendingRequest[];
@@ -78,6 +88,17 @@ export interface AgentSession {
   configError: unknown;
 }
 
+/**
+ * What a facet reads as before any handshake has answered.
+ *
+ * `environment_unreachable` rather than a bare `available: false`, because an
+ * unexplained false is the original defect this whole vocabulary exists to fix. It
+ * is also the accurate reading: nothing has reached that machine yet. `connecting`
+ * is what distinguishes "on its way" from "settled", and it outranks this reason at
+ * every surface that renders one.
+ */
+const UNREACHED: Facet = { available: false, reason: "environment_unreachable" };
+
 export function useAgentSession(sessionId: string | undefined): AgentSession {
   const queryClient = useQueryClient();
   const enabled = Boolean(sessionId);
@@ -88,24 +109,35 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
   // the user tabbed back.
   //
   // The stale time is conditional because a failure is *also* a 200 here — the
-  // endpoint reports detached-with-reason rather than erroring, so the session
+  // endpoint reports unavailable-with-a-reason rather than erroring, so the session
   // stays readable. Cached forever, that made one failed handshake permanent for
   // the life of the page: `/` stayed dead until a turn was sent or the tab
   // reloaded, which is what made the symptom look intermittent rather than
-  // configured. A recoverable failure is therefore allowed to go stale, so the
-  // next mount or explicit retry tries again.
+  // configured.
   //
-  // `no_adapter` is exempt: no number of retries installs an adapter, and each
-  // attempt costs a process spawn. That one is cached like a success and cleared
-  // only by the user retrying or by a `link` event saying otherwise.
+  // Which reasons may go stale is `isRetryable`'s answer, not a condition spelled
+  // out here — it mirrors `UnavailableReason::is_retryable` in
+  // `crates/protocol/src/link.rs`, so the rule has one definition rather than a copy
+  // in every client that caches. `no_agent` and `not_ours_to_drive` cache like a
+  // success because no retry installs a CLI or teaches a vendor a new channel;
+  // `environment_unreachable` must not, because a laptop wakes up.
+  //
+  // Keyed on `control`, which is the facet a retry is for: establishing a link is
+  // what `POST /link` does, and observation answers from the server's store whether
+  // or not that succeeds. An unreachable environment therefore goes stale on the
+  // strength of the control facet even while observe is fine.
   const linkQuery = useQuery({
     queryKey: ["session", sessionId, "capabilities"],
     queryFn: () => api.sessions.capabilities(sessionId!),
     enabled,
     staleTime: (query) => {
-      const failure = query.state.data?.failure;
-      if (!failure) return Infinity;
-      return failure.code === "no_adapter" ? Infinity : 0;
+      const control = query.state.data?.link.control;
+      if (!control || control.available) return Infinity;
+      // An unavailable facet always carries a reason (`Facet`'s constructors enforce
+      // it server-side). A missing one is a server that broke that invariant, and
+      // treating it as retryable is the safe reading: a wasted refetch, rather than
+      // a failure pinned for the life of the page.
+      return control.reason && !isRetryable(control.reason) ? Infinity : 0;
     },
     retry: false,
   });
@@ -281,12 +313,15 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
 
   return {
     link,
-    attached: Boolean(link?.attached),
+    // Before the first handshake both facets read as unreached rather than
+    // available. Defaulting the other way would render a composer that can send to
+    // a session nothing has reached yet.
+    observe: link?.link.observe ?? UNREACHED,
+    control: link?.link.control ?? UNREACHED,
     // `isFetching` rather than `isLoading`, so a retry reads as connecting too: a
     // refetch over cached failure data is not "loading" to React Query, but it is
     // exactly the wait the user needs told about.
     connecting: linkQuery.isFetching || reattachMutation.isPending,
-    failure: link?.failure,
     reattach: () => reattachMutation.mutate(),
     requests,
     current,

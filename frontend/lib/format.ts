@@ -75,14 +75,10 @@ export function shortenHome(path: string, home?: string): string {
   return rest.startsWith("/") ? `~${rest}` : path;
 }
 
-/** The id users can paste into the originating agent or TraceDB. */
-export function originalSessionId(session: {
-  id: string;
-  agent: string;
-  nativeSessionId?: string;
-  traceSessionId?: string;
-}): string {
-  if (session.traceSessionId) return session.traceSessionId;
-  if (session.nativeSessionId) return `${session.agent}:${session.nativeSessionId}`;
-  return session.id;
-}
+// `originalSessionId` is deleted, and its absence is the point rather than a
+// simplification. It answered "which of this session's two ids do you want" — a
+// Sylph-minted UUID, or `<agent>:<native-id>` for the vendor's own tools — and
+// picking the wrong one produced no error at any layer, just a lookup that found
+// nothing. Identity is `(environment, agent, nativeId)` now, so `session.id` is
+// simultaneously the route key and the value that names the conversation to its
+// vendor: there is one id, so there is no function to choose between them.

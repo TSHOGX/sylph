@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildRows, buildTree } from "@/lib/timeline-tree";
 import { buildWaterfall, type WaterfallRow } from "@/lib/timeline-waterfall";
-import type { StreamEvent } from "@/lib/api";
+import type { Fidelity, StreamEvent } from "@/lib/api";
 
 /**
  * Sibling comparison over one time axis.
@@ -55,8 +55,17 @@ function serverCloses(id: string, at: number): StreamEvent {
   return closes(id, at, { isError: true, data: { closedBy: "server" } });
 }
 
-function waterfall(events: StreamEvent[], order?: "structure" | "duration") {
-  return buildWaterfall(buildTree(buildRows(events)), order);
+/**
+ * Every case below is `stream` fidelity unless it says otherwise, which is what makes
+ * the geometry assertions meaningful: a bar is only a measurement when the record
+ * recorded one. The gate itself is asserted in its own block at the bottom.
+ */
+function waterfall(
+  events: StreamEvent[],
+  order?: "structure" | "duration",
+  fidelity: Fidelity = "stream",
+) {
+  return buildWaterfall(buildTree(buildRows(events)), fidelity, order);
 }
 
 function named(rows: WaterfallRow[]): string[] {
@@ -496,5 +505,130 @@ describe("buildWaterfall", () => {
 
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.length).toBeLessThanOrEqual(2);
+  });
+});
+
+/**
+ * Fidelity, which is the one guard here that nothing in the data can enforce.
+ *
+ * Every other honesty rule in this module is checkable from the events: a consolidated
+ * row has no close timestamp, an abandoned one carries the server's own marker, a
+ * running one has no end. This one is not. Under `blocks` or `messages` the events
+ * still carry a `createdAtMs` — the server stamps every row it writes — so the
+ * subtraction succeeds, the axis derives, the bars lay out to scale, and the rank names
+ * a winner. **Nothing is missing, nothing throws, and every number is a claim about
+ * when a file happened to be flushed.**
+ *
+ * That is why these assert on the *absence* of geometry rather than on its values.
+ * Asserting a bar's width can only ever confirm that the arithmetic ran; the question
+ * is whether it was permissible to run at all, and for two of the three fidelities the
+ * answer is no. The suite that existed before this gate asserted bar geometry
+ * throughout and was fully green against a mock whose fidelity nothing had declared —
+ * which is exactly the shape of defect `AGENTS.md` records twice already.
+ */
+describe("fidelity gates the axis", () => {
+  /** The same fan-out shape the geometry tests use, so only fidelity differs. */
+  const fanout = [
+    opens("a", 1000, "First"),
+    opens("b", 1000, "Second"),
+    closes("a", 3000),
+    closes("b", 9000),
+  ];
+
+  it("draws no bar for a record whose source recorded no timings", () => {
+    // The defect this exists to prevent, stated as an assertion. At `stream` these
+    // exact events produce two measured extents and a rank; the events are identical
+    // here, so any non-zero geometry below is a measurement invented from a flush time.
+    for (const fidelity of ["blocks", "messages"] as const) {
+      const { rows, timed, spanMs, originMs, unrecorded } = waterfall(
+        fanout,
+        undefined,
+        fidelity,
+      );
+
+      expect(unrecorded, fidelity).toBe(true);
+      expect(timed, fidelity).toBe(false);
+      // No axis either: an origin or a span is a *scale*, and a scale for bars that
+      // must not be drawn is the same fabrication one step removed.
+      expect(originMs, fidelity).toBe(0);
+      expect(spanMs, fidelity).toBe(0);
+
+      for (const row of rows) {
+        expect(row.extent, `${fidelity} ${row.key}`).toEqual({ kind: "unrecorded" });
+        expect(row.durationMs, `${fidelity} ${row.key}`).toBeUndefined();
+        expect(row.length, `${fidelity} ${row.key}`).toBe(0);
+        expect(row.offset, `${fidelity} ${row.key}`).toBe(0);
+        // `startOffsetMs` is what the accessible name reads to say "started 2s in", so
+        // a value here speaks an invented measurement aloud even with no bar on screen.
+        expect(row.startOffsetMs, `${fidelity} ${row.key}`).toBeUndefined();
+      }
+    }
+  });
+
+  it("crowns nobody when no duration was recorded", () => {
+    // The rank is the strongest claim this view makes — one row named the slowest of
+    // its siblings — so it is the one that most needs to not survive the gate. At
+    // `stream` this fan-out names "Second" (8000ms against 2000ms).
+    const { rows } = waterfall(fanout, undefined, "messages");
+    expect(rows.some((row) => row.slowest)).toBe(false);
+  });
+
+  it("still reports the structure, because that part is genuinely recorded", () => {
+    // The gate withholds *timing*, not the delegation tree. A record read from a
+    // vendor's store knows perfectly well which agent delegated to which, so refusing
+    // to render the list would discard a true answer along with the false one — and an
+    // honest degradation would then look like a broken view.
+    const { rows, unrecorded } = waterfall(
+      [
+        opens("parent", 1000, "Parent"),
+        opens("child", 1500, "Child", "parent"),
+        closes("child", 2000),
+        closes("parent", 3000),
+      ],
+      undefined,
+      "blocks",
+    );
+
+    expect(unrecorded).toBe(true);
+    expect(named(rows)).toEqual(["Parent", "Child"]);
+    expect(rows.map((row) => row.depth)).toEqual([0, 1]);
+    // Status and navigability come from the tree rather than from a clock, so they
+    // survive the gate and the card's own honesty rules still hold.
+    expect(rows[0].status).toBe("done");
+    expect(rows[0].navigable).toBe(true);
+  });
+
+  it("counts every row as untimed rather than as a weak figure", () => {
+    // `untimed` and `bounded` send a reader to different places — "no figure" reads as
+    // a bug, "a weak figure" is read off the `≥`. An unrecorded record has no figures
+    // at all, so counting any of these as bounded would offer a `≥` over nothing.
+    const { untimed, bounded, rows } = waterfall(fanout, undefined, "blocks");
+    expect(untimed).toBe(rows.length);
+    expect(bounded).toBe(0);
+  });
+
+  it("keeps the same rows under a duration sort it cannot honour", () => {
+    // `order` stays available because it is a display choice, but there is nothing to
+    // sort by. The requirement is that it neither invents an order nor drops a row: a
+    // sort that silently reordered by something else would be presenting a ranking.
+    const structure = waterfall(fanout, "structure", "messages");
+    const byDuration = waterfall(fanout, "duration", "messages");
+    expect([...named(byDuration.rows)].sort()).toEqual([...named(structure.rows)].sort());
+    expect(byDuration.rows.every((row) => row.durationMs === undefined)).toBe(true);
+  });
+
+  it("measures normally at stream fidelity, which is what makes the gate meaningful", () => {
+    // The control, and it is not ceremony: without it every assertion above would also
+    // pass against a build that gated *everything*, and a view that never draws a bar
+    // is not the fix. This is the same reason `AGENTS.md` says to verify such a fix by
+    // reverting it and watching the test fail.
+    const { rows, timed, unrecorded, spanMs } = waterfall(fanout, undefined, "stream");
+    expect(unrecorded).toBe(false);
+    expect(timed).toBe(true);
+    expect(spanMs).toBe(8000);
+    expect(rows.map((row) => row.durationMs)).toEqual([2000, 8000]);
+    expect(rows.filter((row) => row.slowest).map((row) => row.node.row.event.name)).toEqual(
+      ["Second"],
+    );
   });
 });

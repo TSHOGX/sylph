@@ -56,10 +56,11 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   api,
   ApiError,
+  isRetryable,
   sessionFlags,
   type Agent,
   type ConfigOption,
-  type LinkFailure,
+  type Facet,
   type Session,
   type SessionCommand,
 } from "@/lib/api";
@@ -166,7 +167,7 @@ export function Composer({
   commands = [],
   config = [],
   agentConnecting = false,
-  agentFailure,
+  control,
   onReattach,
   onRunCommand,
   onSetConfig,
@@ -218,7 +219,15 @@ export function Composer({
    */
   agentConnecting?: boolean;
   /** Why there is no live agent, when an attempt failed. */
-  agentFailure?: LinkFailure;
+  /**
+   * Whether Sylph can send to this session, and why not.
+   *
+   * The facet rather than a boolean: `/` has to be able to say *which* of "still
+   * connecting", "agent not installed", "that machine is asleep", and "running in
+   * someone else's terminal" it is, and a bare false made all of them the dead
+   * keystroke this prop exists to prevent.
+   */
+  control: Facet;
   /** Retry establishing the link. Absent when there is nothing to retry. */
   onReattach?: () => void;
   /** Invoke a prompt command instead of sending the text as a message. */
@@ -296,7 +305,7 @@ export function Composer({
     matchCount: slashMatches.length,
     commandCount: commands.length,
     connecting: agentConnecting,
-    failed: Boolean(agentFailure),
+    failed: !control.available,
   });
 
   // Reset the highlight when the candidate set changes, or a narrowing query
@@ -430,22 +439,28 @@ export function Composer({
   });
 
   /**
-   * Changing the agent replaces the session: `agent` is fixed at creation
-   * server-side, and identity policy hangs off it. On an empty session there is
-   * nothing to preserve, so this creates a fresh one in the same directory and
-   * navigates to it — which is why it is only offered at turn zero.
+   * Changing the agent replaces the session: `agent` is part of a session's
+   * identity, so it cannot be edited — it is one of the three fields the id is
+   * made of. On an empty session there is nothing to preserve, so this creates a
+   * fresh one in the same directory on the same machine and navigates to it, which
+   * is why it is only offered at turn zero.
    */
   const recreate = useMutation({
     mutationFn: (agent: string) =>
       api.sessions.create({
+        // The same environment, always. A session does not migrate between machines
+        // — moving work elsewhere is a fork (`docs/architecture.md`) — so silently
+        // landing the replacement somewhere else would change more than the one
+        // thing the user asked to change.
+        environment: session.environment,
         agent,
         workdir: session.workdir,
-        // Carried from the session being replaced, not re-read from settings.
-        // The user is changing one thing — the agent — and identity is fixed at
-        // creation, so re-deriving it here would silently flip a session started
-        // with the agent's own identity back to Sylph's the moment its model was
-        // switched, with nothing on screen saying so.
-        identityMode: session.identityMode === "preserve" ? "preserve" : "sylph",
+        // Carried from the session being replaced, not re-read from settings. The
+        // user is changing one thing — the agent — and identity is fixed at creation,
+        // so re-deriving it here would silently flip a session started without
+        // Sylph's identity back to having it the moment its agent was switched, with
+        // nothing on screen saying so.
+        injectIdentity: session.injectIdentity,
       }),
     onSuccess: ({ session: created }) => {
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
@@ -754,7 +769,7 @@ export function Composer({
           )}
           {status && (
             <div className="absolute inset-x-0 bottom-full z-30 mb-2">
-              <SlashStatus status={status} failure={agentFailure} onReattach={onReattach} />
+              <SlashStatus status={status} control={control} onReattach={onReattach} />
             </div>
           )}
           <textarea
@@ -1093,8 +1108,14 @@ export function Composer({
  * The composer used to render nothing in this case, which is the one thing it
  * must not do: pressing `/` is a deliberate act, and a deliberate act that
  * produces no visible change is indistinguishable from a broken control. That is
- * how a backend with zero discovered adapters presented — as a composer ignoring
+ * how a backend with zero usable agents presented — as a composer ignoring
  * a keystroke, three layers from the actual cause.
+ *
+ * **An empty capability surface means "Sylph cannot reach it", never "there is nothing
+ * there."** Those coincide for a session Sylph launched and are opposite for one
+ * running in a terminal, where the agent has a full command list and simply will not
+ * take instructions from a second party. So this reads the `control` facet's *reason*
+ * and never infers anything from the emptiness of the list.
  *
  * Not a `listbox`. There is nothing selectable here, so announcing options a
  * screen reader cannot move through would be a lie, and `aria-activedescendant`
@@ -1103,28 +1124,40 @@ export function Composer({
  */
 function SlashStatus({
   status,
-  failure,
+  control,
   onReattach,
 }: {
   status: SlashStatus;
-  failure?: LinkFailure;
+  control: Facet;
   onReattach?: () => void;
 }) {
   const t = useT();
 
-  // Only a handshake failure is worth retrying. `no_adapter` is a configuration
-  // fact — no number of retries installs an adapter — so offering a button there
-  // would invite the user to keep paying a process spawn for an outcome that
-  // cannot change.
-  const retryable = status === "unavailable" && failure?.code !== "no_adapter";
+  const reason = control.available ? undefined : control.reason;
+
+  // Whether a retry can change the answer is the protocol's rule, not this
+  // component's: `isRetryable` mirrors `UnavailableReason::is_retryable`, so the button
+  // cannot come to disagree with the cache lifetime in `use-agent-session.ts` that is
+  // decided from the same rule. Offering a retry for `no_agent` would invite the user
+  // to keep paying a process spawn for an outcome that cannot change.
+  const retryable = status === "unavailable" && Boolean(reason && isRetryable(reason));
 
   const label =
     status === "connecting"
       ? t("composer.slash.connecting")
       : status === "unavailable"
-        ? failure?.code === "no_adapter"
-          ? t("composer.slash.noAdapter")
-          : t("composer.slash.unavailable")
+        ? // Exhaustive over the closed union, so a reason added to the protocol fails
+          // the type check here rather than falling through to a sentence that does
+          // not describe it. Each of these sends the reader somewhere different: to a
+          // machine to wake, to a terminal they are already in, to an install, or to
+          // a retry.
+          reason === "no_agent"
+          ? t("composer.slash.noAgent")
+          : reason === "environment_unreachable"
+            ? t("composer.slash.environmentUnreachable")
+            : reason === "not_ours_to_drive"
+              ? t("composer.slash.notOursToDrive")
+              : t("composer.slash.unavailable")
         : status === "none"
           ? t("composer.slash.none")
           : t("composer.slash.noMatch");
@@ -1146,14 +1179,6 @@ function SlashStatus({
           </button>
         )}
       </div>
-      {/* The server's own words, kept for the case a human has to act on them —
-          a missing adapter names the agent, a failed handshake names what broke.
-          Secondary to the sentence above, which is what most readers need. */}
-      {status === "unavailable" && failure?.message && (
-        <p className="mt-1 break-words font-mono text-3xs leading-relaxed text-ink-faint">
-          {failure.message}
-        </p>
-      )}
     </div>
   );
 }

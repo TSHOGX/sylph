@@ -161,7 +161,26 @@ async function stillLive(page: Page, what: string) {
   ).toBeVisible();
 }
 
-/** Open the strip and hand back its region. */
+/**
+ * Open the strip and hand back its region.
+ *
+ * **Every assertion in this file runs at `stream` fidelity, and that is now a
+ * precondition rather than an incidental fact.** A session created through the fixture
+ * is streamed from a live process, so its record holds every delta's arrival time and
+ * the bars below are real measurements. Under `blocks` or `messages` fidelity the
+ * overview draws no bars at all and this toggle reads "List N delegations" rather than
+ * "Compare" — `lib/timeline-waterfall.test.ts` § "fidelity gates the axis" is what pins
+ * that, and it is a unit test on purpose: the defect is in the *layout function*, which
+ * happily computes plausible geometry from flush timestamps, and asserting on bar
+ * geometry here cannot distinguish a measurement from an artefact.
+ *
+ * There is no E2E case for the gated path yet, and the reason is worth stating rather
+ * than leaving as a silent gap: reaching non-`stream` fidelity end-to-end requires
+ * adopting a session out of a vendor's native store, which needs `POST /sessions/adopt`
+ * and a fixture that writes one. Both belong to the backend and fixture-adapter work
+ * landing alongside this. When they exist, the spec to add is a delegation-bearing
+ * adopted session asserting this toggle says "List" and that no bar is rendered.
+ */
 async function openOverview(page: Page) {
   const overview = page.getByRole("region", { name: "Delegation overview" });
   await expect(overview).toBeVisible();
