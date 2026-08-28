@@ -57,7 +57,7 @@ goes stale invisibly.*
 | fork | — | `exec fork <id>`, `thread/fork` | — |
 | native store | JSONL per session | `rollout-*.jsonl` | JSONL per session |
 | mid-turn flush | tool-call and content-block boundaries | item completion | every `message_end` |
-| second-party control | authenticated per-process UDS — **delivers, cannot drive** | app-server: **fully drivable**, 148 methods incl. interrupt and steer | **none** — stdio only |
+| second-party control | authenticated per-process UDS — **delivers, cannot drive** | app-server: **fully drivable**, 153 methods incl. interrupt and steer | **none** — stdio only |
 | second-party observe | — | explicit `thread/resume`; independent of control | — |
 | forwards delegate interior | only for built-in `Task` | **yes**, with the child's `threadId` | no delegation on the wire at all |
 | slash commands | yes, project-dependent | no command concept | yes |
@@ -179,7 +179,11 @@ behind every claim in this section live in the parser-port measurement set; each
 
 **The strongest second-party surface of the three, and the reason the control facet is
 worth having** — by a wider margin than this section used to claim. The app-server
-exposes **148 client request methods** in its own generated schema, including
+exposes **153 client request methods** in its own generated schema — counted from the
+`ClientRequest` union's own `oneOf`, which is 153 variants and 153 distinct method names.
+An earlier count of 148 here came from grepping for slash-bearing names and silently
+missed the five that carry none, which is the same class of error as reading a vendor key
+by pattern rather than by structure. Among them
 `turn/interrupt`, `turn/steer`, `thread/settings/update`, `thread/fork`, `thread/resume`,
 `thread/unsubscribe`, and `config/value/write`. Interrupt and steer were both measured
 driving a live turn, so **a codex `control` facet declares itself full**, not queue-only.
@@ -229,25 +233,35 @@ present an empty slash menu as a failure. Its typed config is approval policy.
 **Native store is `rollout-*.jsonl`, flushed at item completion**, with
 `token_count` ticks proving mid-turn append.
 
-**The record vocabulary changed around cli_version 0.147, and the new dominant record
-is the one trace-db's parser discards.** *Measured 2026-08-28 over 1258 rollouts in
-`~/.codex/sessions/`; counts are from the newest 120.* `event_msg/item_completed` is now
-the second most common record after `response_item` — 11231 occurrences — and it carries
-the turn's actual content, keyed by `item.type`: Reasoning 4895, CommandExecution 3805,
-AgentMessage 1162, FileChange 1121, UserMessage 154, SubAgentActivity 42, McpToolCall 18,
-ContextCompaction 17, ImageView 15, CollabAgentToolCall 2. trace-db matches it in the
-same arm as `agent_message` and drops both on the floor, so an adapter that inherits
-that parser reads almost nothing from a current rollout.
+**The record vocabulary has two eras, the discriminant is `history_mode`, and the newer
+era's dominant record is the one trace-db's parser discards.** *Measured 2026-08-28 over
+all 1258 rollouts in `~/.codex/sessions/`.* `event_msg/item_completed` carries the turn's
+content keyed by `item.type` — 11231 occurrences in the newest 120 files: Reasoning 4895,
+CommandExecution 3805, AgentMessage 1162, FileChange 1121, UserMessage 154,
+SubAgentActivity 42, McpToolCall 18, ContextCompaction 17, ImageView 15,
+CollabAgentToolCall 2. trace-db matches it in the same arm as `agent_message` and drops
+both, so an adapter inheriting that parser reads almost nothing from a paginated rollout.
 
-Note the older `event_msg/agent_message` has **not** disappeared — 453 in the same
-sample — so this is a shift in which record carries the content, not a clean cutover.
-Both must be read, which raises the duplication question below.
+**Do not discriminate on `cli_version`.** An earlier version of this section said the
+vocabulary changed "around cli_version 0.147", and that is measurably wrong: 0.147.0
+appears as `paginated` on 42 files and as `legacy` on 21, and the store holds a **0.150.1
+file — the newest version present — writing `history_mode: "legacy"` with zero
+`item_completed`.** So a version comparison picks the wrong parser on a file the vendor is
+still producing today. The discriminant is `session_meta.payload.history_mode`; it is
+absent on 1154 of 1258 files, all of which predate the field and are legacy, so absence
+reads as legacy rather than as an error.
 
-**The two streams do overlap, and the obvious dedup does not work.** Assistant and user
-text appear both as `response_item` and inside `item_completed`, with matching `msg_…`
-ids — but the pair differs by 1–2 ms and by block type (`input_text` against `text`), so
-a key of `sha(text):timestamp` cannot match them. Deduplicating on content and time is
-therefore not sufficient; the vendor's own item id is.
+**The two content streams are mutually exclusive per file**, which is where the previous
+wording had it backwards. "Both must be read" is true of the *store* and false of a
+*record*: 72 files hold `item_completed` and no `event_msg/agent_message`, 1122 hold the
+reverse, and only **10 of 1258** hold both — all of them cli_version 0.104–0.115, the
+oldest rather than the newest. Reading both in a paginated file **double-counts every
+assistant message**, which is the defect the old sentence would have produced.
+
+For those 10 overlapping files the streams do carry the same text with matching `msg_…`
+ids, and the obvious dedup fails: the pair differs by 1–2 ms and by block type
+(`input_text` against `text`), so a key of `sha(text):timestamp` cannot match them. Prefer
+one stream per file and say which, rather than discovering the overlap per record.
 
 **`CommandExecution` is not redundant with the tool call, and cannot be dropped as a
 duplicate.** It is the only carrier of `exit_code`, `status`, and `duration`, it uses a
@@ -278,12 +292,35 @@ structure. That is what `span` can honestly be built from here; see § Reading a
 payload for why a parser-synthesized pairing is not.
 
 **codex forwards a delegate's interior, and this is the opposite of `claude`.** A real
-`spawn_agent` delegation emitted `subAgentActivity` (`kind: started|interacted|
-interrupted|completed`, with `agentThreadId` and `agentPath`) and `collabAgentToolCall`
-(`senderThreadId`, `receiverThreadIds`, `agentsStates`) — **and the delegate's own
-`commandExecution` and `agentMessage` items arrived unprompted, carrying the child's
-`threadId`.** So `span` maps to `agentThreadId`, and a codex delegation card may claim a
-real, fillable interior.
+`spawn_agent` delegation emitted `subAgentActivity` and `collabAgentToolCall`, **and the
+delegate's own `commandExecution` and `agentMessage` items arrived unprompted, carrying
+the child's `threadId`** — so a codex delegation card may claim a real, fillable interior.
+
+Three corrections to how that structure was described here, each measured over all 1258
+rollouts and each a branch someone would otherwise have written from this document:
+
+- **`kind` is `started` or `interacted` only** — `started` 9, `interacted` 33. This
+  section listed `interrupted` and `completed`; both occur **zero** times. That is the
+  declared-only-event trap in its usual form (§ "A type in a vendor's event union is not
+  a promise anything emits it"), and the consequence is concrete: **a codex delegation
+  has no close record in the store**, so a parsed delegation's end has to come from the
+  turn containing it.
+- **`agent_thread_id` is the *other party*, not the child.** In a parent's rollout it
+  names the child; in the child's own rollout a `kind: "interacted"` record names the
+  **parent** (`agent_path: "/root"`). Mapping it to `span` unconditionally therefore
+  inverts the edge for every child-side record, producing a tree that is not merely
+  incomplete but backwards — and nothing downstream can detect that.
+- **`collabAgentToolCall` is not lineage.** Both real instances carry
+  `receiver_thread_ids: []` and `agents_states: {}` with `tool: "wait"`, and their
+  `status: "completed"` is the *wait's* — the paired output reads
+  `{"message":"Wait timed out.","timed_out":true}`. It marks a barrier.
+
+And one thing this section did not mention at all, which is the most consequential for a
+delegation card: **from 0.147 the `spawn_agent` brief is ciphertext**, so a delegation's
+name is unrecoverable from the parent's own record. `docs/session-protocol.md` § "`name`
+is absent when unknown" governs — the name must be omitted, because a journal makes every
+guess permanent and a row written with a placeholder is afterwards indistinguishable from
+one that carried a real name.
 
 Do not carry `claude`'s conclusion across. There, `--forward-subagent-text` forwards only
 for the built-in `Task`, so a childless trajectory is a real terminal state and the card
@@ -314,8 +351,10 @@ did — § "A type in a vendor's event union is not a promise anything emits it"
 form. Write branches for what was observed and let an unknown variant through rather than
 dropping it.
 
-The rollout's tool-call shape has also moved: `custom_tool_call` named `exec` supersedes
-the older `function_call` the trace-db parsers were written against.
+**`custom_tool_call` did not supersede `function_call`** — an earlier version of this
+section said it did. Measured: 550 files hold both, and `function_call` is still how every
+collaboration tool is issued. A parser that switched shapes on a version would stop
+reading the calls that matter.
 
 **Mid-turn flush confirmed, so `watch` is genuinely offerable**: 18 distinct rollout
 appends over a 26.5 s turn, the first at 0.1 s, interleaving `response_item/reasoning`,
@@ -449,41 +488,50 @@ cannot hold a tool result, and the spelling check is not independent of the tool
 path.
 
 The unit bug is the more consequential half and belongs to the *reader*, not the vendor.
-`message.timestamp` is **epoch milliseconds**, verified by `1776416849330` on an entry
-whose sibling ISO stamp is `2026-04-17T17:07:29.330418` — equal to the millisecond, on
-3880 records. trace-db's parser divided an integer timestamp by 1000 while its string
-branch returned milliseconds, so every per-event time it produced decoded to 1970. Two
-things made it survivable: the session-level start and end come from the *entry's* ISO
-string and were therefore right, so only the finer-grained per-event times were wrong;
-and the 67 remaining integers are the literal `1` written by test sessions
-(`"model":"claude-test"`), which look like a second unit era and are not. Do not sniff
-magnitude to choose a divisor — the vendor writes milliseconds, so read milliseconds.
+`message.timestamp` is **epoch milliseconds** — trace-db's parser divided an integer
+timestamp by 1000 while its string branch returned milliseconds, so every per-event time
+it produced decoded to 1970, on 3880 records. Two things made it survivable: the
+session-level start and end come from the *entry's* ISO string and were therefore right,
+so only the finer-grained per-event times were wrong; and the 67 remaining integers are
+the literal `1` written by test sessions (`"model":"claude-test"`), which look like a
+second unit era and are not. Do not sniff magnitude to choose a divisor — the vendor
+writes milliseconds, so read milliseconds.
 
-The second timestamp era compounds it. **746 of 4881 outer ISO stamps carry no UTC
-offset** (`2026-04-08T03:20:12.387333`), so an RFC3339 parse fails outright; and because
-the value is a string, an integer fallback never fires either, so those yield absent
-rather than a wrong number. This split *is* clean — 407 files naive-only, 120
-offset-aware-only, none mixing — but the naive window (2026-04-07 to 04-20) sits in the
-**middle** of the offset-aware range (2026-02-27 to 08-26), so a "before/after this date"
-heuristic gets it backwards. Parse both forms, and treat a missing offset as UTC.
+The second timestamp era compounds it, and the fix is the opposite of what this section
+used to say. **746 of 4881 outer ISO stamps carry no UTC offset**
+(`2026-04-08T03:20:12.387333`), so an RFC3339 parse fails outright; and because the value
+is a string, an integer fallback never fires either, so those yield absent rather than a
+wrong number. The split is clean — 407 files naive-only, 120 offset-aware-only, none
+mixing — but the naive window (2026-04-07 to 04-20) sits in the **middle** of the
+offset-aware range (2026-02-27 to 08-26), so a "before/after this date" heuristic gets it
+backwards.
 
-**A fork pointer is a file path, not a session id.** The session header carries
-`parentSession`/`parent_session` naming another `.jsonl` on disk. Under an identity of
-`(environment, agent, native_id)` it cannot be stored as given: it has to be resolved by
-reading the target file's header for its id, or recorded as unresolvable. trace-db's
-parser hardcoded `parent_session_id: None` and never read the field under either
-spelling, so pi fork lineage was dropped entirely rather than partially.
+**Read an offsetless stamp as local wall-clock time, not as UTC.** *Measured 2026-08-28
+over all 3880 messages carrying both an outer ISO string and an inner integer, where the
+integer is known-correct epoch milliseconds:*
 
-The unit bug is the more consequential half and belongs to the *reader*, not the vendor.
-`message.timestamp` is **epoch milliseconds**, verified by `1776416849330` on an entry
-whose sibling ISO stamp is `2026-04-17T17:07:29.330418` — equal to the millisecond, on
-3880 records. trace-db's parser divided an integer timestamp by 1000 while its string
-branch returned milliseconds, so every per-event time it produced decoded to 1970. Two
-things made it survivable: the session-level start and end come from the *entry's* ISO
-string and were therefore right, so only the finer-grained per-event times were wrong;
-and the 67 remaining integers are the literal `1` written by test sessions
-(`"model":"claude-test"`), which look like a second unit era and are not. Do not sniff
-magnitude to choose a divisor — the vendor writes milliseconds, so read milliseconds.
+| outer stamp | integer minus outer-read-as-UTC | pairs |
+| --- | --- | --- |
+| offset-bearing | **0 h** | 3750 |
+| offsetless | **−8 h**, exactly the measuring machine's zone | 130 |
+
+So the offsetless era is written in whatever zone the machine was in. An earlier version
+of this section cited one of those very pairs as proof that UTC was correct, having
+compared the ISO string against its sibling integer without noticing the pair was drawn
+from the offsetless era — where they disagree by construction. The millisecond agreement
+that looked like evidence only ever held for the offset-bearing era.
+
+This is worth stating as a general rule, because it is the vendor-key family in its
+subtlest form: **a wrong time zone yields a plausible timestamp, so no presence check and
+no eyeball test can catch it, and the error is invisible on a machine whose offset is
+zero.** What settles it is comparing against a sibling whose units are already known —
+which means censusing *pairs* rather than stamps.
+
+Reading these locally makes the result depend on where the parser runs, which is normally
+a hazard and is right here for two reasons: the stamps are local wall-clock time, so every
+fixed zone is wrong by construction; and the offsetless era is a **closed window** of 13
+days with every later record offset-bearing, so the branch reads a bounded set of
+historical records on the machine that produced them.
 
 **A fork pointer is a file path, not a session id.** The session header carries
 `parentSession`/`parent_session` naming another `.jsonl` on disk. Under an identity of
