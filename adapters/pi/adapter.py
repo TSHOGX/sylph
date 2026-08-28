@@ -230,6 +230,9 @@ class Session:
         self.blocks = {}
         self.message_seq = 0
         self.message_id = "pi"
+        # The outcome `message_end` reported, held until `agent_settled` closes the
+        # turn. Two payloads, because the settling event carries no fields of its own.
+        self.outcome = None
         self.current_model = None
         self.current_thinking = None
         # The catalogue entry for the selected model, as `get_state` reported it.
@@ -485,6 +488,23 @@ class Session:
             self._delta(msg)
             return
 
+        if mtype == "message_end":
+            # Publishes nothing, and remembers the one thing only it carries. Its
+            # blocks are the `_end` deltas already reported, so emitting them again
+            # would duplicate every block — but its `message` is the authoritative
+            # AssistantMessage, and `stopReason` / `errorMessage` appear nowhere else
+            # on the wire. `agent_settled` carries no payload at all, so without this
+            # the turn's outcome is unknowable.
+            message = msg.get("message") or {}
+            reason = message.get("stopReason") or message.get("stop_reason")
+            if reason:
+                self.outcome = {
+                    "stopReason": reason,
+                    "errorMessage": (message.get("errorMessage")
+                                     or message.get("error_message")),
+                }
+            return
+
         if mtype == "tool_execution_start":
             tool_id = msg.get("toolCallId") or "pi-tool"
             event("tool_call", "completed",
@@ -512,7 +532,24 @@ class Session:
             # the turn there would settle it while the agent was still working, and
             # the remaining output would arrive with no turn to belong to.
             self.turn_open = False
-            event("turn", "completed", text="", data={"stopReason": "end_turn"})
+            # Reports the vendor's outcome, and states none when the vendor stated
+            # none. A hardcoded reason here asserted a clean finish over every
+            # failure: pi answering 404 on every request produced a turn that
+            # opened, closed successfully, and emitted no assistant block — a
+            # session that looks like it worked and simply said nothing.
+            #
+            # Only `error` is a failure. `aborted` is a user stopping a turn, and
+            # colouring that red reports an interrupted turn as a broken one.
+            outcome, self.outcome = self.outcome, None
+            if not outcome:
+                event("turn", "completed", text="")
+                return
+            data = {"stopReason": outcome["stopReason"]}
+            text = outcome.get("errorMessage") or ""
+            if text:
+                data["errorMessage"] = text
+            event("turn", "completed", text=text,
+                  isError=outcome["stopReason"] == "error", data=data)
             return
 
         if mtype == "extension_error":

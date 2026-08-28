@@ -1395,6 +1395,56 @@ pub mod translate {
         /// one settled turn — a retry, a compaction, a queued continuation — so a second
         /// `turn`/`started` would bracket a turn that is already bracketed.
         turn_open: bool,
+        /// The outcome the vendor last reported, held until `agent_settled` closes the turn.
+        ///
+        /// **`agent_settled` carries no payload** — its declared shape is `{type}` alone
+        /// (`dist/core/agent-session.d.ts`) — while the outcome sits on the `AssistantMessage`
+        /// that `message_end` delivers, as `stopReason` plus an optional `errorMessage`. So
+        /// the settling event and the outcome arrive on different payloads, which is the
+        /// second of the only two reasons this struct has memory at all.
+        ///
+        /// `None` means the vendor stated no outcome, and that is published as no stop
+        /// reason rather than as a successful one.
+        outcome: Option<Outcome>,
+    }
+
+    /// What the vendor said about how a response ended.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Outcome {
+        /// One of pi's seven `StopReason` values, verbatim.
+        pub stop_reason: String,
+        /// The provider's own sentence, when the response carried one.
+        pub error_message: Option<String>,
+    }
+
+    impl Outcome {
+        /// Read an outcome off an `AssistantMessage`, or `None` when it states none.
+        ///
+        /// Both spellings of both fields are read through [`native::defect_field_spelling`]'s
+        /// tables, so the live path and the store path resolve one field the same way.
+        pub fn read(message: &Value) -> Option<Self> {
+            let stop_reason = super::native::STOP_REASON
+                .read(message)
+                .and_then(|(value, _)| value.as_str())?
+                .to_string();
+            Some(Self {
+                stop_reason,
+                error_message: super::native::ERROR_MESSAGE
+                    .read(message)
+                    .and_then(|(value, _)| value.as_str())
+                    .map(str::to_string),
+            })
+        }
+
+        /// Whether this outcome is a failure.
+        ///
+        /// **Only `error` is.** `aborted` is a user stopping a turn, and colouring that red
+        /// reports an interrupted turn as a broken one (`docs/session-protocol.md`
+        /// § Outcomes). `pending` and `deferred` are neither, and the remaining three —
+        /// `stop`, `length`, `toolUse` — are ordinary ends.
+        pub fn is_error(&self) -> bool {
+            self.stop_reason == "error"
+        }
     }
 
     impl Correlation {
@@ -1522,9 +1572,7 @@ pub mod translate {
                     self.turn_open = false;
                     self.blocks.clear();
                     out.settled = true;
-                    let mut event = Event::new(EventKind::Turn, Some(Phase::Completed), at_ms);
-                    event.data = Some(json!({"stopReason": "end_turn"}));
-                    out.push(event);
+                    out.push(self.close_turn(at_ms));
                 }
                 Some("extension_error") => {
                     let mut event = Event::new(EventKind::Status, Some(Phase::Completed), at_ms);
@@ -1533,17 +1581,59 @@ pub mod translate {
                     event.is_error = true;
                     out.push(event);
                 }
+                Some("message_end") => {
+                    // **Publishes nothing, and remembers the one thing only it carries.** Its
+                    // blocks are the `_end` deltas already reported, so emitting them again
+                    // would duplicate every block — but its `message` is the authoritative
+                    // `AssistantMessage`, and `stopReason` and `errorMessage` appear nowhere
+                    // else on the wire. `agent_settled` then closes the turn with it.
+                    if let Some(outcome) =
+                        payload.get("message").and_then(Outcome::read)
+                    {
+                        out.observed_model = observed_model(payload.get("message"));
+                        self.outcome = Some(outcome);
+                    }
+                }
                 // Every other kind pi emits. `turn_start`/`turn_end` are deliberately here
                 // rather than bracketing anything: pi's "turn" is one assistant response
                 // plus its tool calls, so a multi-tool exchange emits several of them
                 // inside one Sylph turn — treating them as brackets would open and close a
                 // turn per model call. `queue_update`, `bash_execution_update`, the retry
                 // family, and `tool_execution_update` carry progress a Sylph event has no
-                // shape for; `message_end` is the block-level `_end` deltas already
-                // reported, so publishing it again would duplicate every block.
+                // shape for.
                 _ => {}
             }
             out
+        }
+
+        /// The `turn`/`completed` that closes a settled turn.
+        ///
+        /// **Reports the vendor's outcome, and states none when the vendor stated none.** A
+        /// hardcoded `stopReason` here asserted a clean finish over every failure: pi answering
+        /// `404` on every request produced a turn that opened, closed successfully, and emitted
+        /// no assistant block — a session that looks like it worked and simply said nothing,
+        /// which is the hardest outcome to debug because the record cannot distinguish it from
+        /// a model that chose not to answer or an adapter that dropped the stream.
+        ///
+        /// So the reason is read from what the vendor reported, `errorMessage` becomes the
+        /// event's text where the failure is legible, and `is_error` follows the reason rather
+        /// than a literal. An absent outcome publishes no `data` at all: a turn must still
+        /// close, and a synthesized reason would be a lie the journal makes permanent.
+        fn close_turn(&mut self, at_ms: i64) -> Event {
+            let mut event = Event::new(EventKind::Turn, Some(Phase::Completed), at_ms);
+            let Some(outcome) = self.outcome.take() else {
+                return event;
+            };
+            event.is_error = outcome.is_error();
+            let mut detail = json!({"stopReason": outcome.stop_reason});
+            if let Some(text) = outcome.error_message {
+                if let Some(object) = detail.as_object_mut() {
+                    object.insert("errorMessage".to_string(), Value::String(text.clone()));
+                }
+                event.text = text;
+            }
+            event.data = Some(detail);
+            event
         }
 
         /// One streaming delta, projected onto Sylph's event kinds.
@@ -1720,6 +1810,185 @@ pub mod translate {
     /// A JSON value as one compact line, for an event's `text`.
     fn compact(value: &Value) -> String {
         serde_json::to_string(value).unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Feed a turn's payloads through one correlation, as the vendor sends them.
+        fn turn(payloads: &[Value]) -> Vec<Event> {
+            let mut link = Correlation::new();
+            let mut events = Vec::new();
+            for (index, payload) in payloads.iter().enumerate() {
+                let out = link.translate(payload, 1_000 + index as i64);
+                events.extend(out.events().into_iter().cloned());
+            }
+            events
+        }
+
+        fn closing_turn(events: &[Event]) -> &Event {
+            events
+                .iter()
+                .find(|event| {
+                    event.kind == EventKind::Turn && event.phase == Some(Phase::Completed)
+                })
+                .expect("a settled turn must publish a close")
+        }
+
+        /// A failed response closes the turn as a failure, carrying the provider's sentence.
+        ///
+        /// *The defect this pins:* the close hardcoded `stopReason: "end_turn"`, so pi
+        /// answering `404` on every request produced a turn that opened, closed cleanly, and
+        /// emitted no assistant block — indistinguishable in the record from a model that
+        /// chose not to answer. Asserting the *values* is what catches it; the hardcoded
+        /// version parsed, compiled, and published a well-formed event.
+        #[test]
+        fn a_failed_response_closes_the_turn_as_a_failure_with_the_vendors_sentence() {
+            let events = turn(&[
+                json!({"type": "agent_start"}),
+                json!({"type": "message_start", "message": {"role": "assistant"}}),
+                json!({"type": "message_end", "message": {
+                    "role": "assistant",
+                    "stopReason": "error",
+                    "errorMessage": "404: Thank you for participating in the testing period",
+                }}),
+                json!({"type": "agent_settled"}),
+            ]);
+
+            let close = closing_turn(&events);
+            assert!(close.is_error, "stopReason `error` is a failure");
+            let data = close.data.as_ref().expect("a stated outcome publishes data");
+            assert_eq!(data["stopReason"], json!("error"));
+            assert_eq!(
+                data["errorMessage"],
+                json!("404: Thank you for participating in the testing period")
+            );
+            assert!(
+                close.text.contains("404"),
+                "the vendor's sentence must be legible on the event, not only in data"
+            );
+        }
+
+        /// An aborted turn is not a failed one.
+        ///
+        /// A user stopping a turn and a model erroring are different outcomes, and colouring
+        /// the first red reports an interrupted turn as a broken one.
+        #[test]
+        fn an_aborted_response_is_reported_as_aborted_and_not_as_an_error() {
+            let events = turn(&[
+                json!({"type": "agent_start"}),
+                json!({"type": "message_end", "message": {
+                    "role": "assistant", "stopReason": "aborted",
+                }}),
+                json!({"type": "agent_settled"}),
+            ]);
+
+            let close = closing_turn(&events);
+            assert!(!close.is_error);
+            assert_eq!(close.data.as_ref().unwrap()["stopReason"], json!("aborted"));
+        }
+
+        /// An ordinary end reports the vendor's own token, not a synthesized one.
+        #[test]
+        fn an_ordinary_end_reports_the_vendors_own_stop_reason() {
+            let events = turn(&[
+                json!({"type": "agent_start"}),
+                json!({"type": "message_end", "message": {
+                    "role": "assistant", "stopReason": "stop",
+                }}),
+                json!({"type": "agent_settled"}),
+            ]);
+
+            let close = closing_turn(&events);
+            assert!(!close.is_error);
+            // `stop`, because that is what pi says. Not `end_turn`, which is a different
+            // vendor's word and was never pi's.
+            assert_eq!(close.data.as_ref().unwrap()["stopReason"], json!("stop"));
+        }
+
+        /// A turn the vendor gave no outcome for still closes, and claims nothing.
+        ///
+        /// Measured on the native store: `stopReason` is absent on 44 real assistant
+        /// messages. The turn must close — a live turn refuses the next message — and it must
+        /// not report a success nobody stated.
+        #[test]
+        fn a_turn_with_no_stated_outcome_closes_without_claiming_one() {
+            let events = turn(&[
+                json!({"type": "agent_start"}),
+                json!({"type": "message_end", "message": {"role": "assistant"}}),
+                json!({"type": "agent_settled"}),
+            ]);
+
+            let close = closing_turn(&events);
+            assert!(!close.is_error);
+            assert!(
+                close.data.is_none(),
+                "an unstated outcome publishes no stop reason at all"
+            );
+        }
+
+        /// Both spellings of the outcome fields resolve, because the store's rename landed
+        /// field by field.
+        #[test]
+        fn the_outcome_reads_both_spelling_eras() {
+            let snake = turn(&[
+                json!({"type": "message_end", "message": {
+                    "role": "assistant", "stop_reason": "error", "error_message": "boom",
+                }}),
+                json!({"type": "agent_settled"}),
+            ]);
+            let close = closing_turn(&snake);
+            assert!(close.is_error);
+            assert_eq!(close.data.as_ref().unwrap()["errorMessage"], json!("boom"));
+        }
+
+        /// A second turn does not inherit the first turn's outcome.
+        ///
+        /// The outcome is taken on close, so a turn the vendor states nothing about cannot
+        /// borrow the previous turn's reason — which would report a stale failure as this
+        /// turn's.
+        #[test]
+        fn an_outcome_is_not_carried_into_the_next_turn() {
+            let mut link = Correlation::new();
+            for payload in [
+                json!({"type": "agent_start"}),
+                json!({"type": "message_end", "message": {
+                    "role": "assistant", "stopReason": "error", "errorMessage": "first",
+                }}),
+                json!({"type": "agent_settled"}),
+            ] {
+                link.translate(&payload, 1_000);
+            }
+
+            let mut second = Vec::new();
+            for payload in [
+                json!({"type": "agent_start"}),
+                json!({"type": "agent_settled"}),
+            ] {
+                second.extend(link.translate(&payload, 2_000).events().into_iter().cloned());
+            }
+
+            let close = closing_turn(&second);
+            assert!(!close.is_error, "the previous turn's failure is not this one's");
+            assert!(close.data.is_none());
+        }
+
+        /// `message_end` publishes no blocks, so a block is not reported twice.
+        #[test]
+        fn message_end_publishes_no_events_of_its_own() {
+            let mut link = Correlation::new();
+            let out = link.translate(
+                &json!({"type": "message_end", "message": {
+                    "role": "assistant", "stopReason": "stop",
+                }}),
+                1_000,
+            );
+            assert!(
+                out.events().is_empty(),
+                "its blocks are the `_end` deltas already reported"
+            );
+        }
     }
 }
 
