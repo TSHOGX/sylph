@@ -1154,6 +1154,18 @@ expression: `expandAll ?? open` silently outranked the per-row toggle. **Three i
 to one boolean need a stated precedence, or two of them are latent bugs** — here
 expand-all, then the user's toggle, then the derived default.
 
+The repair landed on the trajectory row and **not** on the tool row beside it, and that
+went unnoticed for a reason worth naming: a defect whose only symptom is a race is
+invisible to whichever fixture happens to win the race. Restoring the broken
+`useState(defaultOpen)` on the tool row leaves `timeline.spec.ts` passing 13/13, because
+the current fixture delivers a `tool_call` and its `tool_result` close enough together to
+land in one render. So a spec asserting the *outcome* of an auto-expand cannot tell a
+correct implementation from a snapshot one, and a green suite is not evidence either way.
+Two consequences: when a pitfall entry names more than one site, check every site rather
+than the one that prompted it; and a fixture that wants to observe an
+arrives-after-mount defect has to *delay* the second event, which is the same rule as
+"testing it streams needs a runner slower than one render", one layer down.
+
 **Announcing a thing's arrival and not its departure lets a client's view only ever
 grow.** A pending request was published when raised and on no path when it left
 `pending` — not on `resolve`, not when a dying link abandoned it. So the set a client
