@@ -3,27 +3,47 @@
 /**
  * `Cmd+K`: find a session and jump to it.
  *
- * Two sources, ranked separately because they answer different questions. Live
- * sessions are matched client-side: the list is already cached for the sidebar,
- * so filtering it is instant and works with the backend's archive unavailable.
- * The TraceDB archive is searched server-side, because full-text search over
- * durable history is exactly what it exists for and the events are not in the
- * browser.
+ * **One store, so one kind of result.** This used to hold two sources ranked
+ * separately — live sessions matched client-side, and a separate archive searched
+ * server-side — plus the machinery that came with having two: a filter dropping hits
+ * that had already been imported, an import mutation, an "importing…" badge, and an
+ * "archive unavailable" footer. All of it is gone, because a hit is now a session that
+ * can simply be opened.
  *
- * Live results come first. A session you can open beats one you would have to
- * import first.
+ * What is worth recording is that the deduplication was not merely redundant, it was
+ * a hazard: it compared a live row's remembered archive id against a hit's id across
+ * two disjoint id spaces, and a wrong comparison there produces **no error at any
+ * layer** — the sets simply never intersect, every component behaves impeccably, and
+ * the feature silently shows one conversation twice. With identity as
+ * `(environment, agent, nativeId)` throughout, that comparison cannot be written.
+ *
+ * Two sources still feed the list, but they are the same *kind* of row and are
+ * combined rather than ranked apart:
+ *
+ * - **The cached listing, filtered locally.** Instant, and it is what makes an empty
+ *   query useful — the recent sessions, which is what a picker opened by muscle memory
+ *   wants.
+ * - **`GET /search`, for text inside transcripts the browser never loaded.** Debounced
+ *   and gated on a real query, because FTS5 is 174–260 ms where every other read here
+ *   is sub-millisecond. That is not politeness: bound to keystrokes it is a load
+ *   generator.
+ *
+ * A session matched locally *and* by the index is one row, deduplicated by id — which
+ * is now a safe comparison, since both sides carry the same id.
  */
 
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type SearchResult, type Session } from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
+import { api, type Session } from "@/lib/api";
 import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
 import { liveSessionsQuery } from "@/lib/sessions-query";
+import { relayName, useEnvironments } from "@/lib/environments";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useDebounced } from "@/lib/use-debounced";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useT } from "@/lib/i18n";
+import { EnvironmentChip, FidelityMarker } from "@/components/badges";
 import { Overlay } from "@/components/overlay";
 import {
   SelectFilter,
@@ -32,20 +52,23 @@ import {
   useSelectList,
 } from "@/components/ui/select-list";
 import type { SelectChoice } from "@/lib/select-list";
-import {
-  ArchiveIcon,
-  OriginNativeIcon,
-  OriginSylphIcon,
-} from "@/components/icons";
 
-type Row =
-  | { type: "live"; session: Session }
-  | { type: "archive"; hit: SearchResult };
+/** Rows with no query: recent sessions, which is what muscle memory wants. */
+const RECENT_ROWS = 8;
+
+/** Cap per source, so one cannot bury the other. */
+const PER_SOURCE = 12;
+
+/** One row: a session, plus the transcript excerpt that matched it, when one did. */
+interface Hit {
+  session: Session;
+  /** Only ever set by the index — a local match is on the label, which is visible. */
+  excerpt?: string;
+}
 
 export function SearchOverlay() {
   const t = useT();
   const router = useRouter();
-  const queryClient = useQueryClient();
   const { closeOverlay } = useWorkspaceUI();
 
   /**
@@ -53,9 +76,9 @@ export function SearchOverlay() {
    *
    * It has to: it drives a debounced request to the backend, so this component reads
    * it, and the ranking below is the caller's own for the reason spelled out at
-   * `useSelectList`'s `external` option — archive hits are ordered by a full-text
-   * index over transcripts the browser never loaded. The cursor still belongs to the
-   * list, which is the half that had two owners before.
+   * `useSelectList`'s `external` option — index hits are ordered by a full-text score
+   * over transcripts the browser never loaded. The cursor still belongs to the list,
+   * which is the half that had two owners before.
    */
   const [query, setQuery] = useState("");
   const debounced = useDebounced(query);
@@ -72,122 +95,85 @@ export function SearchOverlay() {
     staleTime: 60_000,
   });
 
-  // The archive is only searched once the query is worth a subprocess spawn:
-  // TraceDB search shells out, so firing it per keystroke would queue processes
-  // faster than they finish.
-  const archiveQuery = useQuery({
+  const environments = useEnvironments();
+
+  // Gated on a query worth 174–260 ms of FTS5 work. Two characters rather than one,
+  // matching `docs/api-design.md` § Search: a single letter matches most of a real
+  // store and answers a question nobody asked.
+  const indexQuery = useQuery({
     queryKey: ["search", debounced],
-    queryFn: () => api.search(debounced, 20),
+    queryFn: () => api.search(debounced, PER_SOURCE),
     enabled: debounced.trim().length >= 2,
   });
 
-  const rows = useMemo<Row[]>(() => {
+  const hits = useMemo<Hit[]>(() => {
     const sessions = sessionsQuery.data?.sessions ?? [];
-    const live: Row[] = (
+    const local: Hit[] = (
       query.trim()
         ? fuzzyRank(sessions, query, (session) => [
             sessionLabel(session),
             session.agent,
             session.workdir,
           ]).map((result) => result.item)
-        : // No query: most recent sessions, which is the useful default for a
-          // picker opened by muscle memory.
-          sessions.slice(0, 8)
-    ).map((session) => ({ type: "live" as const, session }));
+        : sessions.slice(0, RECENT_ROWS)
+    )
+      .slice(0, PER_SOURCE)
+      .map((session) => ({ session }));
 
-    const archive: Row[] = (archiveQuery.data?.results ?? [])
-      // A hit already imported is the same session as a live row, so showing it
-      // twice would offer two ways to reach one conversation.
-      .filter((hit) => !hit.sessionId)
-      .map((hit) => ({ type: "archive" as const, hit }));
+    // Deduplicated by session id, which is the comparison that used to be
+    // unwritable. Local rows come first and win, because a row already in cache
+    // carries the same session and its label matched something the user can see.
+    const seen = new Set(local.map((hit) => hit.session.id));
+    const indexed: Hit[] = (indexQuery.data?.results ?? [])
+      .filter((result) => !seen.has(result.session.id))
+      .slice(0, PER_SOURCE)
+      .map((result) => ({
+        session: result.session,
+        excerpt: result.bestMatch?.snippet?.replace(/\s+/g, " "),
+      }));
 
-    return [...live.slice(0, 12), ...archive.slice(0, 12)];
-  }, [sessionsQuery.data, archiveQuery.data, query]);
-
-  const importSession = useMutation({
-    mutationFn: (hit: SearchResult) =>
-      api.sessions.import({ traceSessionId: hit.id, title: hit.title }),
-    onSuccess: ({ session }) => {
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      closeOverlay();
-      router.push(`/sessions/${session.id}`);
-    },
-  });
+    return [...local, ...indexed];
+  }, [sessionsQuery.data, indexQuery.data, query]);
 
   const home = workspacesQuery.data?.home;
-  // Which hit is being imported, read from the mutation's own variables rather than
-  // from the cursor. The cursor was the wrong source twice over: hovering another row
-  // moved the badge off the row that was actually importing, and deriving it from
-  // `activeIndex` would now make the rows depend on the list that is built from them.
-  const importingId = importSession.isPending ? importSession.variables?.id : undefined;
-  // Destructured, because the mutation object is a fresh one every render and the memo
-  // below would then rebuild every row on every keystroke. `mutate` is stable.
-  const importHit = importSession.mutate;
 
   const items = useMemo<SelectChoice[]>(
     () =>
-      rows.map((row) => {
-        if (row.type === "live") {
-          const session = row.session;
-          return {
-            label: sessionLabel(session),
-            icon: (
-              <span
-                className={session.origin === "native" ? "text-native" : "text-success"}
-              >
-                {session.origin === "native" ? (
-                  <OriginNativeIcon size={9} />
-                ) : (
-                  <OriginSylphIcon size={9} />
-                )}
-              </span>
-            ),
-            detail: `${session.agent}${
-              session.workdir ? ` · ${shortenHome(session.workdir, home)}` : ""
-            }`,
-            meta: formatRelative(session.updatedAtMs),
-            onSelect: () => {
-              closeOverlay();
-              router.push(`/sessions/${session.id}`);
-            },
-          };
-        }
-
-        const hit = row.hit;
-        return {
-          label: hit.title ?? hit.ask ?? hit.id,
-          icon: (
-            <span className="text-ink-muted">
-              <ArchiveIcon size={12} />
-            </span>
-          ),
-          detail: `${hit.agent}${hit.cwd ? ` · ${shortenHome(hit.cwd, home)}` : ""}`,
-          // The snippet is why this row is here at all: TraceDB matched words in the
-          // transcript, and without showing them an archive hit is a title that does
-          // not contain the query.
-          excerpt: (hit.bestMatch?.snippet ?? hit.ask)?.replace(/\s+/g, " "),
-          meta: (
-            <span className="flex items-center gap-1.5">
-              <span className="rounded bg-hover px-1 font-medium text-ink-muted">
-                {importingId === hit.id ? t("search.importing") : t("search.archiveBadge")}
-              </span>
-              {formatRelative(hit.endedAtMs ?? hit.startedAtMs)}
-            </span>
-          ),
-          // Importing preserves the originating agent's identity and lifecycle; the
-          // backend derives every policy field from the archive, so nothing here
-          // needs to (or may) choose them.
-          onSelect: () => importHit(hit),
-        };
-      }),
-    [rows, home, importingId, closeOverlay, router, importHit, t],
+      hits.map(({ session, excerpt }) => ({
+        label: sessionLabel(session),
+        detail: `${session.agent}${
+          session.workdir ? ` · ${shortenHome(session.workdir, home)}` : ""
+        }`,
+        // Why this row is here at all, when the match was inside the transcript: the
+        // index matched words the title does not contain, so without the snippet the
+        // row is a label that has nothing to do with what was typed.
+        excerpt,
+        meta: (
+          <span className="flex items-center gap-1.5">
+            <FidelityMarker value={session.fidelity} />
+            {environments.showEnvironment && (
+              <EnvironmentChip
+                name={session.environmentName}
+                reachableVia={relayName(session.environment, environments)}
+              />
+            )}
+            {formatRelative(session.updatedAtMs)}
+          </span>
+        ),
+        // Every hit opens. There is no import step and no second destination, which
+        // is what deleted this surface's mutation, its pending badge, and its error
+        // footer along with the archive.
+        onSelect: () => {
+          closeOverlay();
+          router.push(`/sessions/${encodeURIComponent(session.id)}`);
+        },
+      })),
+    [hits, home, environments, closeOverlay, router],
   );
 
   // `searchable: true` and `external`: the field is the surface's whole point, and the
-  // ranking is this component's. No `onClose` — a live row navigates and an archive
-  // row starts a mutation that closes on success, so tearing the surface down here
-  // would hide an import that can still fail. Escape belongs to `Overlay`.
+  // ranking is this component's. No `onClose` — a row navigates, and Escape belongs to
+  // `Overlay`.
   const list = useSelectList(items, {
     searchable: true,
     external: { query, setQuery },
@@ -198,16 +184,16 @@ export function SearchOverlay() {
       <SelectFilter
         list={list}
         name={t("search.results")}
-        // Not "Filter search results": this query reaches TraceDB's index over
-        // transcripts that were never sent to the browser, so it searches rather than
-        // narrows, and the name a screen reader reads has to say which.
+        // Not "Filter results": this query reaches an index over transcripts that were
+        // never sent to the browser, so it searches rather than narrows, and the name a
+        // screen reader reads has to say which.
         label={t("search.field")}
         placeholder={t("search.placeholder")}
         size="roomy"
         trailing={
-          archiveQuery.isFetching ? (
+          indexQuery.isFetching ? (
             <span className="shrink-0 text-3xs text-ink-muted">
-              {t("search.searchingArchive")}
+              {t("search.searching")}
             </span>
           ) : undefined
         }
@@ -228,14 +214,13 @@ export function SearchOverlay() {
         className="flex shrink-0 items-center justify-between gap-2 border-t border-line bg-sunken px-3 py-1.5 text-3xs text-ink-muted"
       >
         <span>{t("search.keys")}</span>
-        {archiveQuery.data && !archiveQuery.data.available && (
-          <span className="text-warning">{t("search.archiveUnavailable")}</span>
-        )}
-        {importSession.error && (
-          <span role="alert" className="text-danger">
-            {importSession.error instanceof Error
-              ? importSession.error.message
-              : t("search.importFailed")}
+        {/* A failed index read is reported rather than swallowed. It used to be an
+            "archive unavailable" note, which was a different claim — that an optional
+            external process was absent. This one is an actual failure, so it says so
+            and the locally-matched rows above it are still usable. */}
+        {indexQuery.error && (
+          <span role="alert" className="text-warning">
+            {t("search.indexFailed")}
           </span>
         )}
       </footer>

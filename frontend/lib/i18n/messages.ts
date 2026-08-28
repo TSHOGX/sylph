@@ -105,12 +105,14 @@ export const en = {
   "shell.closeFiles": "Close files",
   "shell.showArtifacts": "Show artifacts sidebar",
   "shell.hideArtifacts": "Hide artifacts sidebar",
-  "shell.search": "Search sessions and archive",
+  "shell.search": "Search sessions",
   "shell.createFailed": "Could not create the session.",
   "shell.newSession.title": "New session",
   "shell.newSession.confirm": "Start session here",
 
-  // Searching live sessions and the archive together (`Mod+K`).
+  // Finding a session and jumping to it (`Mod+K`). One store, so one kind of result:
+  // this used to say "and the TraceDB archive", and the import badge and
+  // archive-unavailable notice that went with it are gone too.
   //
   // `search.field` is deliberately *not* `shell.search`, which names the top-bar
   // button that opens this overlay. Giving the button and the field inside it one
@@ -118,20 +120,19 @@ export const en = {
   // collision that failed forty specs at once and is recorded under Pitfalls.
   "search.title": "Search sessions",
   "search.field": "Search query",
-  "search.placeholder": "Search live sessions and the TraceDB archive...",
+  "search.placeholder": "Search titles and transcripts...",
   "search.results": "Search results",
   "search.none": "No matching sessions.",
   "search.empty": "No sessions yet.",
   // "open" rather than `select.keys`' "choose": this list navigates to a session
   // rather than picking a value, and the footer is the only place that says so.
   "search.keys": "↑↓ navigate · ↵ open · Esc close",
-  "search.archiveUnavailable": "Archive unavailable — live sessions only",
-  "search.importFailed": "Import failed.",
-  // Lowercase on purpose: these sit in a trailing badge or beside the field, not
-  // in a sentence.
-  "search.importing": "importing...",
-  "search.archiveBadge": "archive",
-  "search.searchingArchive": "searching archive...",
+  // A real failure now, not an optional dependency being absent: the index is part of
+  // the server's own store, so this says so and leaves the cached rows usable.
+  "search.indexFailed": "Could not search transcripts — showing cached sessions only",
+  // Lowercase on purpose: this sits in a trailing slot beside the field, not in a
+  // sentence.
+  "search.searching": "searching transcripts...",
 
   // The command palette (`Mod+P`).
   //
@@ -163,9 +164,8 @@ export const en = {
   "palette.cmd.quickStart": "Quick Start session",
   "palette.cmd.stopTurn": "Stop the running turn",
   "palette.cmd.search": "Search sessions and archive",
-  "palette.cmd.browseHistory": "Browse this workspace's archived history",
+  "palette.cmd.browseHistory": "Browse this workspace's history",
   "palette.cmd.startScreen": "Go to the start screen",
-  "palette.cmd.archive": "Go to archive search page",
   // Each toggle reads as the action it performs, not the state it is in, so the
   // label answers "what happens if I press this" rather than "what is true now".
   "palette.cmd.hideLeft": "Hide workspaces sidebar",
@@ -182,7 +182,7 @@ export const en = {
   // than interpolated raw — the same words the settings panel shows for it.
   "palette.cmd.density": "Cycle density (currently {density})",
   "palette.cmd.settings": "Open settings",
-  "palette.cmd.refreshAgents": "Refresh agent runners",
+  "palette.cmd.refreshEnvironments": "Refresh machines and their agents",
   "palette.cmd.reloadData": "Reload sessions and workspaces",
 
   // Sidebar: workspaces and their sessions.
@@ -203,11 +203,13 @@ export const en = {
   "sidebar.renameLabel": "Workspace display name",
   "sidebar.copyPath": "Copy path",
   "sidebar.copyWorkspacePath": "Copy workspace path",
-  "sidebar.copyOriginalId": "Copy original session ID",
-  "sidebar.copyWebId": "Copy Web session ID",
+  // **One entry, because there is one id.** This was two — "copy original session ID"
+  // and "copy Web session ID" — because a session had a Sylph-minted UUID as well as
+  // an agent-native one, and pasting the wrong one into the wrong tool found nothing
+  // with no error. The id is the identity triple now, so there is one string to copy.
+  "sidebar.copySessionId": "Copy session ID",
   "sidebar.refreshTranscript": "Refresh transcript",
   "sidebar.loadingHistory": "Loading history...",
-  "sidebar.archiveUnavailable": "Archive unavailable — showing live sessions only",
   "sidebar.turnRunning": "A turn is running",
 
   // Choosing a workspace: the directories this machine has worked in, ranked by
@@ -223,37 +225,34 @@ export const en = {
   "workspacePicker.empty": "No workspaces yet. Browse for a folder to start one.",
   "workspacePicker.browse": "Browse folders...",
   "workspacePicker.browseTitle": "Browse for a folder",
-  "workspacePicker.archived": "{count} archived",
-  "workspacePicker.live": "{count} live",
+  "workspacePicker.sessions": "{count} sessions",
   // The history browser's own verb for the filesystem fallback, which is where a
   // chosen folder lands when it was reached by browsing rather than by picking.
   "history.showHistory": "Show its history",
-  // Browsing one workspace's archived sessions.
+  // Browsing one workspace's history.
   "history.title": "Workspace history",
   "history.field": "Filter this workspace's history",
   "history.placeholder": "Filter loaded sessions...",
-  "history.list": "Archived sessions",
+  "history.list": "Sessions in this workspace",
   "history.chooseWorkspace": "Choose a workspace...",
   // The switcher's accessible name states the current directory *and* the verb,
   // because a button showing a truncated path is announced as that path alone.
   "history.workspaceButton": "Workspace: {path}. Change",
   "history.noWorkspace": "none chosen",
-  // Paging is by request, so the count is what has been *fetched*, not what exists
-  // — `+` marks that more remain rather than being part of the number.
+  // `+` marks that the listing hit its cap rather than being part of the number.
   "history.loaded": "{count} loaded",
   "history.loadedMore": "{count}+ loaded",
-  "history.loadOlder": "Load older sessions",
   "history.loadFailed": "Could not load history",
   "history.none": "No loaded session matches.",
-  "history.empty": "No archived sessions here yet.",
-  "history.archiveUnavailable":
-    "The TraceDB archive is unavailable, so past sessions cannot be listed.",
-  // Its own string rather than `select.keys`, because Enter here opens a read-only
-  // view: a shared "choose" would promise a session that can be continued.
-  "history.keys": "↑↓ navigate · ↵ open read-only · Esc close",
-  // Only shown while more pages remain, which is when the filter's reach is a fact a
-  // user needs: it searches what has loaded, and the rest is behind the paging button.
-  "history.filterScope": "filter searches loaded sessions only",
+  "history.empty": "No sessions here yet.",
+  // Every row opens a continuable session now — there is no read-only archive view —
+  // so this no longer promises a read-only one.
+  "history.keys": "↑↓ navigate · ↵ open · Esc close",
+  // Shown only when the cap actually bites. `GET /sessions` takes no cursor, so past
+  // this there is nothing to page to and a truncated list would otherwise read as a
+  // complete one. `Mod+K` reaches the rest by text.
+  "history.capped":
+    "showing the newest {count} — search to reach older ones",
 
   // The filesystem fallback: one directory level per request.
   "directoryPicker.title": "Choose a folder",
@@ -302,12 +301,22 @@ export const en = {
   // A control command opens a picker instead of sending a message. Short because it
   // is a badge in a dense list, not a sentence.
   "composer.setting": "setting",
-  // What `/` answers when it has no commands to offer. Four distinct states,
-  // because they need four different responses from the user: wait, fix the
-  // install, accept that this agent has none, or retype.
+  // What `/` answers when it has no commands to offer. Six distinct states, because
+  // they need six different responses from the user: wait, install a CLI, wake a
+  // machine, accept that this session cannot be driven at all, accept that this agent
+  // has no commands, or retype.
+  //
+  // **None of these may be inferred from the empty list.** An empty capability surface
+  // means "Sylph cannot reach it", never "there is nothing there" — and the two are
+  // opposite for a session running in a terminal, which has a full command list that
+  // is simply not ours to read. Each of these is the `control` facet's own reason.
   "composer.slash.connecting": "Connecting to the agent to load its commands...",
-  "composer.slash.noAdapter":
-    "This session's agent was not found, so it reports no commands.",
+  "composer.slash.noAgent":
+    "That agent's CLI is not installed on this session's machine, so it reports no commands.",
+  "composer.slash.environmentUnreachable":
+    "That machine is not connected, so its commands cannot be read and nothing can be sent.",
+  "composer.slash.notOursToDrive":
+    "This session is running in a terminal. Sylph can follow it, but this agent takes no commands from a second party.",
   "composer.slash.unavailable": "The agent could not be reached, so it reports no commands.",
   "composer.slash.none": "This agent reports no slash commands.",
   "composer.slash.noMatch": "No command matches.",
@@ -481,7 +490,7 @@ export const en = {
   "settings.sections": "Settings sections",
   "settings.section.general": "General",
   "settings.section.identity": "Identity",
-  "settings.section.agents": "Agents & models",
+  "settings.section.environments": "Machines & agents",
   "settings.section.workspaces": "Workspaces",
   "settings.section.shortcuts": "Shortcuts",
 
@@ -520,11 +529,6 @@ export const en = {
   "settings.config.source.file": "config.toml",
   "settings.config.source.default": "default",
   "settings.config.missing": "missing",
-  "settings.config.adapters.label": "Bundled adapters",
-  "settings.config.adapters.hint":
-    "Adapters shipped with Sylph, searched in this order. Your own live in the agents directory above and shadow these by name.",
-  "settings.config.adapters.inUse": "in use",
-  "settings.config.adapters.absent": "not found",
   "settings.reset.label": "Reset",
   "settings.reset.hint": "Clears stored preferences. Sessions and history are untouched.",
   "settings.reset.button": "Reset preferences",
@@ -546,33 +550,35 @@ export const en = {
   "settings.identity.preview.readFailed": "This file could not be read.",
   "settings.identity.meta": "{bytes}, edited {when}",
   "settings.identity.appliesTo":
-    "Native sessions imported from the archive never receive SOUL.md, whatever this is set to. That is a product invariant, not a preference.",
+    "An adopted session defaults to running without SOUL.md, because the transcript it already holds was produced without it — but that is settable per session, not fixed here.",
 
-  // Settings: agents.
+  // Settings: machines, and the agents each one can run.
+  //
+  // "Machine" in user-facing copy, `environment` on the wire. The wire name is right
+  // for a thing that may be a laptop, an SSH host, or a sandbox; "machine" is what a
+  // user calls the laptop on their desk, and this is the panel where they look for it.
+  "settings.environments.label": "Machines",
+  "settings.environments.hint":
+    "Every paired machine, and the agent CLIs found on each. Which agents you can use is decided per machine, not globally.",
+  "settings.environments.none":
+    "No machines are paired, so there is nowhere to run a session. Pair one with `sylph-envagent pair`.",
+  "settings.environments.connected": "connected",
+  "settings.environments.offline": "offline",
+  "settings.environments.noAgents": "no agent CLIs on its PATH",
+
   "settings.agents.default.label": "Default agent",
-  "settings.agents.default.hint": "Used by Quick Start and preselected in the create dialog.",
-  "settings.agents.default.first": "First discovered runner",
+  "settings.agents.default.hint":
+    "Used by Quick Start. Applies only where that agent is installed — a machine without it falls back to what it has.",
+  "settings.agents.default.first": "First available agent",
   "settings.agents.models.label": "Default model per agent",
   "settings.agents.models.hint": "Applied as the `model` flag on new sessions.",
   "settings.agents.models.none":
-    "No agents discovered. Check the paths in Configuration, then refresh.",
+    "No agents are available on any connected machine, so there is nothing to set a model for.",
   "settings.agents.models.noFlag": "declares no model flag",
-  "settings.agents.models.runnerDefault": "Runner default",
+  "settings.agents.models.runnerDefault": "Agent default",
   // Names one agent's model control. Distinct from the section label, which names
   // the whole list: the control and its container must not share a name.
   "settings.agents.models.forAgent": "{agent} model",
-  "settings.agents.discovery.label": "Discovery",
-  "settings.agents.discovery.hint": "Re-runs `--describe` against every runner script.",
-  "settings.agents.discovery.button": "Refresh runners",
-  "settings.agents.discovery.busy": "Refreshing...",
-  "settings.agents.discovery.result": "{agents} runners, {models} models declared.",
-  "settings.agents.discovery.unchanged":
-    "Nothing changed. A runner that lists its models as a fixed set in its own `--describe` output will keep reporting the same ones until that script is edited — refreshing re-reads the script, it does not re-read the agent's configuration.",
-  "settings.agents.discovery.changed": "Discovery updated: {summary}",
-  "settings.agents.discovery.failed": "Refresh failed: {message}",
-  "settings.agents.broken.label": "Runners that failed to describe themselves",
-  "settings.agents.broken.hint":
-    "These scripts exist but did not return a usable descriptor, so they offer no agent.",
 
   // Settings: workspaces.
   "settings.workspaces.quickStart.label": "Quick Start directory",

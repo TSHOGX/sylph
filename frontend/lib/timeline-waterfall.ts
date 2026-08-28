@@ -42,8 +42,28 @@
  * The same honesty rule the cards follow applies to width: a `Workflow` whose
  * interior the vendor never forwarded has no measurable interior, so the row carries
  * a note saying so rather than an empty bar that reads as "did nothing".
+ *
+ * # Fidelity gates the whole axis, and this is the one that fails silently
+ *
+ * Everything above is about rows within a `stream` record — one where every delta and
+ * its arrival time was written down. Under `blocks` or `messages` fidelity the record
+ * was read back from a vendor's own store, which flushes at block or message
+ * boundaries, and the per-event timings a bar is computed from **were never
+ * recorded at all** (`docs/architecture.md` § What genuinely differs). The events still
+ * carry a `createdAtMs`, because the server stamps a row when it writes one — so the
+ * subtraction succeeds, produces a plausible number, and lays out a bar that is
+ * entirely an artefact of when a file was flushed.
+ *
+ * That is why the gate is here and not in the renderer. Nothing about the arithmetic
+ * can detect it: there is no missing field, no `undefined`, no error. It is the same
+ * shape as the two failures this module already guards — a bound crowned as a rank, a
+ * consolidated row given a width — except that those are visible in the data and this
+ * one is only visible in a field on the *session*. A caller that forgets to pass it
+ * would draw invented measurements, so `fidelity` is a required parameter rather than
+ * an option with a default.
  */
 
+import type { Fidelity } from "./api";
 import { flattenTrajectories, type TimelineNode, type TrajectoryStatus } from "./timeline-tree";
 
 /**
@@ -69,7 +89,17 @@ export type Extent =
    * no interior: its phases were consolidated into one row, and it has no descendants
    * to bound it from either.
    */
-  | { kind: "instant"; atMs: number };
+  | { kind: "instant"; atMs: number }
+  /**
+   * The record itself holds no timing to read: fidelity is `blocks` or `messages`.
+   *
+   * Distinct from `instant`, and the distinction is the whole point of having both.
+   * `instant` is a *stream* record whose one row lost its start to consolidation — a
+   * property of that row, which its descendants can sometimes still bound. This is a
+   * property of the **source**: nothing anywhere in the record was timed, so no other
+   * row and no descendant can supply a bound, and the axis itself does not exist.
+   */
+  | { kind: "unrecorded" };
 
 /**
  * What a measured extent is a measurement *of*.
@@ -175,6 +205,17 @@ export interface Waterfall {
    * reading the `≥`.
    */
   bounded: number;
+  /**
+   * True when the *record* holds no timings, so nothing here may be drawn as a bar.
+   *
+   * Counted separately from `untimed` and `bounded` for the same reason those are
+   * separate from each other: it is a different statement with a different response.
+   * `untimed` is a row whose measurement was lost; this is a session whose
+   * measurements were never taken, and there is no version of this view that recovers
+   * them. The renderer must say so once for the whole list rather than annotating two
+   * hundred rows with the same missing figure.
+   */
+  unrecorded: boolean;
 }
 
 /**
@@ -194,15 +235,25 @@ const MIN_LENGTH = 0.012;
  * trajectory's children under focus — so the comparison is always between rows the
  * user can see as siblings. Scoping it to the focused subtree is what keeps a
  * hundred-trajectory workflow's overview about the branch in hand.
+ *
+ * `fidelity` is the record's, from the session. **Required rather than defaulted**,
+ * because the failure it prevents is silent: under `blocks` or `messages` every
+ * subtraction here still succeeds and every bar still lays out, on timings the source
+ * never wrote. A default would make forgetting it look exactly like passing `stream`.
  */
 export function buildWaterfall(
   nodes: TimelineNode[],
+  fidelity: Fidelity,
   order: WaterfallOrder = "structure",
 ): Waterfall {
   const entries = flattenTrajectories(nodes);
+  // Read once, before any row is measured. Everything below branches on this rather
+  // than re-deriving it, so there is one place the question is asked — the pitfall
+  // this module already carries about one fact with two derivations.
+  const unrecorded = fidelity !== "stream";
 
   const rows: WaterfallRow[] = entries.map(({ node, depth }) => {
-    const extent = extentOf(node);
+    const extent: Extent = unrecorded ? { kind: "unrecorded" } : extentOf(node);
     return {
       node,
       depth,
@@ -218,6 +269,30 @@ export function buildWaterfall(
     };
   });
 
+  // Nothing else is computed for an unrecorded record, and returning early rather than
+  // letting the code below fall through is deliberate. Every step of it — the axis, the
+  // rank, the geometry — would arrive at a *correct* answer over fabricated inputs:
+  // `originMs` would be the earliest write, the rank would name whichever row a file
+  // was flushed for last, and the bars would be laid out to scale. There is no
+  // arithmetic guard that catches this, so the guard has to be structural.
+  //
+  // Every row keeps its identity, depth, note, and status: the list is still the honest
+  // answer to "what delegated to what", and only the *timing* half is withheld. The
+  // rows are still ordered, because `order` is a display choice — but a `duration`
+  // request over rows with no duration sorts nothing, which is why `rank` sinks them
+  // all equally rather than inventing an order.
+  if (unrecorded) {
+    return {
+      rows,
+      originMs: 0,
+      spanMs: 0,
+      timed: false,
+      untimed: rows.length,
+      bounded: 0,
+      unrecorded: true,
+    };
+  }
+
   // The axis is derived from the data and never from a clock, so it only moves when
   // an event moves it. A `Date.now()` end would re-lay out every bar on every frame
   // for the whole time a delegation runs.
@@ -225,7 +300,7 @@ export function buildWaterfall(
   for (const row of rows) {
     if (row.extent.kind === "measured") instants.push(row.extent.startMs, row.extent.endMs);
     else if (row.extent.kind === "open") instants.push(row.extent.startMs);
-    else instants.push(row.extent.atMs);
+    else if (row.extent.kind === "instant") instants.push(row.extent.atMs);
   }
 
   const originMs = instants.length ? Math.min(...instants) : 0;
@@ -278,6 +353,7 @@ export function buildWaterfall(
 
   for (const row of rows) {
     const { extent } = row;
+    if (extent.kind === "unrecorded") continue;
     if (extent.kind === "instant") {
       // A caret, not a bar: the width would be a fabricated measurement.
       row.offset = fraction(extent.atMs - originMs, spanMs);
@@ -312,6 +388,7 @@ export function buildWaterfall(
     bounded: rows.filter(
       (row) => row.extent.kind === "measured" && row.extent.bound !== "exact",
     ).length,
+    unrecorded: false,
   };
 }
 

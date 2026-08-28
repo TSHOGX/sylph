@@ -4,13 +4,18 @@ import { recentWorkspaces, selectStartState } from "@/lib/welcome";
 
 function session(id: string, updatedAtMs: number, workdir = "/tmp"): Session {
   return {
-    id,
-    origin: "sylph",
-    identityMode: "sylph",
-    lifecycleMode: "sylph",
+    // The encoded triple, which is what a real id is. Written out rather than built
+    // from parts because a client never assembles one — it echoes back what the server
+    // gave it, and a helper that composed it here would model the wrong contract.
+    id: `env7fk2:e2e:${id}`,
+    environment: "env7fk2",
+    environmentName: "laptop",
     agent: "e2e",
+    nativeId: id,
     workdir,
     title: null,
+    injectIdentity: true,
+    fidelity: "stream",
     flagsJson: "{}",
     status: "idle",
     createdAtMs: updatedAtMs,
@@ -56,8 +61,11 @@ describe("recentWorkspaces", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0].workdir).toBe("/w/app");
-    // The row opens the newest, which is the one a user means by "resume".
-    expect(rows[0].session.id).toBe("a");
+    // The row opens the newest, which is the one a user means by "resume". Matched on
+    // `nativeId` rather than on the encoded id, so the assertion says which session
+    // without restating the encoding — a test that spelled the triple out here would
+    // fail on an encoding change that this behaviour does not depend on.
+    expect(rows[0].session.nativeId).toBe("a");
     expect(rows[0].otherCount).toBe(2);
   });
 
@@ -114,7 +122,7 @@ describe("recentWorkspaces", () => {
     // in place would reorder the sidebar's grouping as a side effect.
     const input = [session("a", 1), session("b", 3), session("c", 2)];
     recentWorkspaces(input);
-    expect(input.map((s) => s.id)).toEqual(["a", "b", "c"]);
+    expect(input.map((s) => s.nativeId)).toEqual(["a", "b", "c"]);
   });
 
   it("handles an empty list", () => {

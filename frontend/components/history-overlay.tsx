@@ -1,33 +1,42 @@
 "use client";
 
 /**
- * `Cmd+Shift+K`: browse one workspace's archived history.
+ * `Cmd+Shift+K`: browse one workspace's history.
  *
- * This is the deep-paging counterpart to the sidebar, which shows only the most
- * recent few sessions per workspace. A directory in this archive can hold over a
- * thousand sessions, so the sidebar cannot be the browse surface — a 240px pane
- * paging a thousand rows is not navigation.
+ * The deep-browse counterpart to the sidebar, which shows the most recent rows per
+ * workspace. Scoped to a directory rather than global, which is what separates it from
+ * `Cmd+K`: search answers "which session mentioned X" across everything, this answers
+ * "what have I done in this project" — the question a user has when they open a
+ * workspace and see nothing familiar.
  *
- * Scoped to a directory rather than global, which is what separates it from
- * `Cmd+K`. Search answers "which session mentioned X" across everything; this
- * answers "what have I done in this project", which is the question a user has
- * when they open a workspace and see nothing familiar.
+ * **One store, so one source.** This used to page a separate archive with a cursor and
+ * fold fork lineage across page boundaries in the client, because the server held no
+ * state between requests and a measured fork pair sat 268 rows apart. Both are gone:
+ * rows are sessions, and a fork is a session of its own that belongs in the listing.
  *
- * Filtering is client-side over the loaded pages. That is deliberate: TraceDB's
- * full-text search is already `Cmd+K`, and re-querying it per keystroke here
- * would spawn a subprocess per character to answer a narrower question than the
- * one the user is asking. Rows the filter cannot see are reached by paging, which
- * the footer states.
+ * # A known limitation, and it is the server's to fix
+ *
+ * `GET /sessions` takes `limit` (max 200) and **no cursor** (`docs/api-design.md` §
+ * Sessions), so this surface can no longer reach past the newest 200 sessions in a
+ * directory — and a real directory holds over a thousand. That is a regression against
+ * the paged archive this replaces, and it is stated on screen rather than hidden,
+ * because a list that silently stops at 200 reads as a directory with 200 sessions in
+ * it. The filter is explicitly scoped to what loaded for the same reason: a filter that
+ * searches a truncated set while looking like it searches the directory is the worse
+ * failure. `Cmd+K` reaches the rest by text, which is a different question but a real
+ * answer.
  */
 
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { useCallback, useMemo, useState } from "react";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useT } from "@/lib/i18n";
-import { formatRelative, shortenHome } from "@/lib/format";
+import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
+import { relayName, useEnvironments } from "@/lib/environments";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
+import { EnvironmentChip, FidelityMarker } from "@/components/badges";
 import { Overlay } from "@/components/overlay";
 import {
   SelectFilter,
@@ -36,7 +45,7 @@ import {
   useSelectList,
 } from "@/components/ui/select-list";
 import type { SelectChoice } from "@/lib/select-list";
-import { ArchiveIcon, ChevronDownIcon, OriginNativeIcon } from "@/components/icons";
+import { ChevronDownIcon } from "@/components/icons";
 
 // Split out because it is reached only by opening the switcher, while this overlay
 // itself is reached by a shortcut. The picker in turn lazy-loads the filesystem
@@ -46,8 +55,13 @@ const WorkspacePicker = dynamic(
   { ssr: false },
 );
 
-/** Rows per request. Enough to fill the list without a long first wait. */
-const PAGE_SIZE = 25;
+/**
+ * Rows requested, which is also the endpoint's maximum.
+ *
+ * Asked for in full rather than in pages because there is no cursor to continue with:
+ * a smaller number would truncate more with nothing to reach the rest.
+ */
+const LIMIT = 200;
 
 export function HistoryOverlay() {
   const t = useT();
@@ -64,122 +78,74 @@ export function HistoryOverlay() {
   const [mode, setMode] = useState<"list" | "switch">("list");
 
   const workspacesQuery = useQuery({
-    // Distinct key from the sidebar's: this variant carries archive-only
-    // directories, and sharing a key would leak them into the sidebar's poll (or
-    // strip them from here, depending on which query resolved last).
-    queryKey: ["workspaces", { includeArchived: true }],
-    queryFn: () => api.workspaces.list({ includeArchived: true }),
+    // The same key the sidebar uses, and that is now correct rather than a hazard: it
+    // used to be deliberately distinct because this surface asked for
+    // `includeArchived` and sharing a key would have leaked archive-only directories
+    // into the sidebar's poll. There is one workspace listing now, so one key.
+    queryKey: ["workspaces"],
+    queryFn: () => api.workspaces.list(),
     staleTime: 60_000,
   });
 
   // Falls back to the most recently used workspace when nothing set a scope —
-  // opening the browser from the home page should still show something useful
+  // opening the browser from the start screen should still show something useful
   // rather than an empty picker.
   const workspaces = workspacesQuery.data?.workspaces ?? [];
   const workdir = activeWorkdir ?? workspaces[0]?.path ?? null;
   const home = workspacesQuery.data?.home;
 
-  const history = useInfiniteQuery({
-    queryKey: ["archive", "sessions", workdir],
+  const environments = useEnvironments();
+
+  const history = useQuery({
+    // Not `liveSessionsQuery`'s key: that one is unfiltered and polled for the
+    // sidebar, and this is a directory-scoped read that must not disturb it.
+    queryKey: ["sessions", { workdir, limit: LIMIT }],
     enabled: Boolean(workdir),
-    queryFn: ({ pageParam }) =>
-      api.archive.list({ workdir: workdir!, limit: PAGE_SIZE, cursor: pageParam }),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (last) => last.nextCursor,
+    queryFn: () => api.sessions.list({ workdir: workdir!, limit: LIMIT }),
   });
 
-  // Depends on `history.data` rather than a `?? []` fallback: the fallback
-  // allocates a fresh array every render, which would make the memo below
-  // recompute on every keystroke instead of only when a page arrives.
-  const pages = history.data?.pages;
-  const available = pages === undefined || pages.length === 0 || pages[0].available;
-  const sessions = useMemo(() => {
-    const all = (pages ?? []).flatMap((page) => page.sessions);
-
-    // Collapse forks across page boundaries. A fork and its origin are one
-    // conversation — both replay the same prefix — and the server drops the loser
-    // within a single response, but it holds no state between requests. One
-    // measured pair sits 268 rows apart, so only a client accumulating pages sees
-    // both.
-    //
-    // Both directions matter, because either side can come first. Rows arrive
-    // newest-first, so the survivor is whichever appears earlier: a fork naming an
-    // origin already shown is the duplicate, and an origin whose fork was shown
-    // earlier is likewise the duplicate.
-    //
-    // Two index maps rather than a nested scan, so this stays linear as pages
-    // accumulate — a directory here can reach several hundred loaded rows.
-    const firstIndexById = new Map<string, number>();
-    const forkIndexByOrigin = new Map<string, number>();
-    all.forEach((session, index) => {
-      if (!firstIndexById.has(session.id)) firstIndexById.set(session.id, index);
-      if (session.forkOf && !forkIndexByOrigin.has(session.forkOf)) {
-        forkIndexByOrigin.set(session.forkOf, index);
-      }
-    });
-
-    return all.filter((session, index) => {
-      const originIndex = session.forkOf ? firstIndexById.get(session.forkOf) : undefined;
-      // A fork whose origin appears earlier: the origin survives.
-      if (originIndex !== undefined && originIndex < index) return false;
-      // An origin whose fork appears earlier: the fork survives.
-      const forkIndex = forkIndexByOrigin.get(session.id);
-      if (forkIndex !== undefined && forkIndex < index) return false;
-      return true;
-    });
-  }, [pages]);
+  // Depends on `history.data` rather than a `?? []` fallback in the memo below: the
+  // fallback allocates a fresh array on every render while the query is pending, which
+  // would rebuild every row on every keystroke instead of only when the listing
+  // arrives. Same reason the workspace picker reads its query data directly.
+  const sessions = useMemo(() => history.data?.sessions ?? [], [history.data]);
+  // The endpoint caps at `LIMIT`, so a full page is indistinguishable from a directory
+  // holding exactly that many — and with no cursor there is nothing to ask for next.
+  // Reported as a bound rather than as a count, since that is what it is.
+  const truncated = sessions.length >= LIMIT;
 
   const items = useMemo<SelectChoice[]>(
     () =>
       sessions.map((session) => ({
-        // A string, because the label is what the filter matches. The untitled case
-        // used to be dimmed markup; `claude` records a title for most sessions
-        // while `codex` and `pi` record none, so this row is common enough that
-        // "Untitled <agent> session" being searchable is the better trade.
-        label: session.label ?? `Untitled ${session.agent} session`,
-        // Shape plus title, not colour alone (WCAG 1.4.1). The archive box marks
-        // archived history throughout the app; an imported one carries the native
-        // origin diamond, because that is what it becomes once imported.
-        icon: (
-          <span
-            title={session.sessionId ? "imported session" : "archived session"}
-            className={session.sessionId ? "text-native" : "text-ink-faint"}
-          >
-            {session.sessionId ? <OriginNativeIcon size={9} /> : <ArchiveIcon size={12} />}
-          </span>
-        ),
-        // Agent and model on the searchable line, which is what the hand-rolled filter
-        // matched: they are how a session is recalled when its title is absent.
-        detail: [
-          session.agent,
-          `${session.events} events`,
-          session.subagentCount > 0
-            ? `${session.subagentCount} subagent${session.subagentCount === 1 ? "" : "s"}`
-            : undefined,
-          session.model ?? undefined,
-        ]
+        // A string, because the label is what the filter matches. `sessionLabel` falls
+        // back to `agent · leaf` for an untitled session, which is most of them for
+        // `codex` and `pi` — those record no title at all — so making the fallback
+        // searchable is what keeps those rows reachable by the filter.
+        label: sessionLabel(session),
+        detail: [session.agent, shortenHome(session.workdir, home)]
           .filter(Boolean)
           .join(" · "),
         meta: (
           <span className="flex items-center gap-1.5">
-            {session.sessionId && (
-              <span className="rounded bg-native-bg px-1 font-medium text-native">imported</span>
+            <FidelityMarker value={session.fidelity} />
+            {environments.showEnvironment && (
+              <EnvironmentChip
+                name={session.environmentName}
+                reachableVia={relayName(session.environment, environments)}
+              />
             )}
-            {formatRelative(session.endedAtMs ?? session.startedAtMs)}
+            {formatRelative(session.updatedAtMs)}
           </span>
         ),
+        // One destination. A row used to open either a live session or a read-only
+        // archive view depending on whether it had been imported; there is one kind of
+        // session now, and every row is continuable.
         onSelect: () => {
           closeOverlay();
-          // An imported session has a live conversation, which is the better
-          // destination: it can be continued, and the read-only view cannot.
-          router.push(
-            session.sessionId
-              ? `/sessions/${session.sessionId}`
-              : `/archive/${encodeURIComponent(session.id)}`,
-          );
+          router.push(`/sessions/${encodeURIComponent(session.id)}`);
         },
       })),
-    [sessions, closeOverlay, router],
+    [sessions, home, environments, closeOverlay, router],
   );
 
   // `searchable: true`, never `auto`: nothing here is a single-select choice, so the
@@ -193,7 +159,7 @@ export function HistoryOverlay() {
       setActiveWorkdir(path);
       // The filter is cleared with the scope it was typed against. A query that
       // matched nothing in the new directory would otherwise present the switch as
-      // having found an empty archive.
+      // having found an empty history.
       setQuery("");
       setMode("list");
     },
@@ -228,11 +194,11 @@ export function HistoryOverlay() {
         size="roomy"
       />
 
-      {/* A button into a filterable switcher, not a `<select>`. A native select
-          of this archive is 200+ options with identical `~/Workspace/` prefixes,
-          navigable only by first letter, and it could not reach a directory that
-          has no archived sessions at all. The switcher filters by any part of the
-          path and offers the filesystem as a fallback. */}
+      {/* A button into a filterable switcher, not a `<select>`. A native select of a
+          real machine's workspaces is 200+ options with identical `~/Workspace/`
+          prefixes, navigable only by first letter, and it could not reach a directory
+          that has no sessions at all. The switcher filters by any part of the path and
+          offers the filesystem as a fallback. */}
       <div className="shrink-0 border-b border-line">
         <div className="flex items-center gap-2 px-3 py-2">
           <button
@@ -253,7 +219,7 @@ export function HistoryOverlay() {
           <span className="shrink-0 text-3xs text-ink-muted">
             {history.isFetching && sessions.length === 0
               ? t("action.loading")
-              : t(history.hasNextPage ? "history.loadedMore" : "history.loaded", {
+              : t(truncated ? "history.loadedMore" : "history.loaded", {
                   count: sessions.length,
                 })}
           </span>
@@ -261,11 +227,7 @@ export function HistoryOverlay() {
       </div>
 
       <SelectScroll list={list} label={t("history.list")} fill>
-        {!available ? (
-          <p className="px-3 py-6 text-center text-xs text-ink-muted">
-            {t("history.archiveUnavailable")}
-          </p>
-        ) : history.isPending ? (
+        {history.isPending ? (
           <output aria-live="polite" className="block px-3 py-6 text-center text-xs text-ink-muted">
             {t("action.loading")}
           </output>
@@ -295,22 +257,11 @@ export function HistoryOverlay() {
       >
         <span className="text-3xs text-ink-muted">
           {t("history.keys")}
-          {history.hasNextPage && ` · ${t("history.filterScope")}`}
+          {/* Stated only when it bites. The listing endpoint has no cursor, so past
+              this cap there is nothing to page to — saying so is what stops a
+              truncated list reading as a complete one. */}
+          {truncated && ` · ${t("history.capped", { count: LIMIT })}`}
         </span>
-        {/* Paging moved out of the list. A `listbox` may only contain options, so a
-            button among the rows was invalid ARIA — and it was also below however many
-            rows had loaded, which is the one place a user paging a thousand sessions
-            has to scroll to reach. */}
-        {history.hasNextPage && (
-          <button
-            type="button"
-            onClick={() => void history.fetchNextPage()}
-            disabled={history.isFetchingNextPage}
-            className="shrink-0 rounded border border-line bg-raised px-2 py-0.5 text-3xs font-medium hover:bg-sunken disabled:opacity-60 focus-ring"
-          >
-            {history.isFetchingNextPage ? t("action.loading") : t("history.loadOlder")}
-          </button>
-        )}
       </footer>
     </Overlay>
   );

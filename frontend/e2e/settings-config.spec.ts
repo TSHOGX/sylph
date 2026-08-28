@@ -44,11 +44,13 @@ test("the configuration section reports what this backend resolved", async ({ pa
     "server.host",
     "server.port",
     "paths.data_dir",
-    "paths.agents_dir",
     "paths.soul",
     "paths.quick_start_dir",
+    // `paths.agents_dir` and `tracedb.bin` are deliberately absent from this list.
+    // Adapters are linked into the envagent, so there is no directory to name, and a
+    // setting naming an external archive binary is only meaningful while an external
+    // binary answers.
     "paths.browse_roots",
-    "tracedb.bin",
     "log.level",
   ]) {
     await expect(table.getByRole("rowheader", { name: key })).toBeVisible();
@@ -69,9 +71,6 @@ test("a value's source is shown, so an ignored setting is distinguishable from a
   const browseRoots = table.getByRole("row").filter({ hasText: "paths.browse_roots" });
   await expect(browseRoots).toContainText("SYLPH_BROWSE_ROOTS");
 
-  const tracedb = table.getByRole("row").filter({ hasText: "tracedb.bin" });
-  await expect(tracedb).toContainText("SYLPH_TRACEDB_BIN");
-
   // And one the harness leaves alone, so the column is not simply printing "env"
   // for everything.
   const host = table.getByRole("row").filter({ hasText: "server.host" });
@@ -83,14 +82,14 @@ test("a path that does not exist is called out, and a non-path is not", async ({
   const settings = await openConfig(page);
   const table = settings.getByRole("table");
 
-  // The suite points TRACEDB at a file it never creates, which is exactly the
-  // shape of the real failure: the archive silently returns nothing and the UI
-  // otherwise looks healthy.
-  const tracedb = table.getByRole("row").filter({ hasText: "tracedb.bin" });
-  await expect(tracedb).toContainText("missing");
-
-  // Seeded by the backend's own first run, so it is there — and proves "missing"
-  // is a real check rather than a label on every row.
+  // The row that used to carry this assertion was `tracedb.bin`, pointed at a file the
+  // suite never creates. That was a good subject and it is gone with the setting, so
+  // what remains is the pair below: one path that exists and one value that is not a
+  // path at all. Between them they still pin that "missing" is a real check rather than
+  // a label on every row — which is the property that matters, since a panel marking
+  // everything missing is as useless as one marking nothing.
+  //
+  // Seeded by the backend's own first run, so it is there.
   const dataDir = table.getByRole("row").filter({ hasText: "paths.data_dir" });
   await expect(dataDir).not.toContainText("missing");
 
@@ -116,11 +115,12 @@ test("the section is read-only, offering no way to edit a path from the browser"
   await gotoReady(page);
   const settings = await openConfig(page);
 
-  // Deliberate, not unfinished: browse_roots bounds what any client of this
-  // backend may enumerate and agents_dir names directories the server executes
-  // from, so a loopback HTTP surface able to rewrite them is a different threat
-  // model. If an edit control is ever added here, that decision should be
-  // revisited on purpose rather than by this spec quietly starting to fail.
+  // Deliberate, not unfinished: `browse_roots` bounds not merely what a client may
+  // *enumerate* but what it may name as a session's workdir — the `current_dir` of a
+  // spawned agent — so it decides where arbitrary code may run, and a loopback HTTP
+  // surface able to rewrite it is a different threat model. If an edit control is ever
+  // added here, that decision should be revisited on purpose rather than by this spec
+  // quietly starting to fail.
   await expect(settings.getByRole("textbox")).toHaveCount(0);
   await expect(settings.getByRole("table").getByRole("button")).toHaveCount(0);
 });

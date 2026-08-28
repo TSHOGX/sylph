@@ -18,11 +18,20 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, type Session, type Turn, type TurnWithEvents } from "@/lib/api";
+import {
+  api,
+  ApiError,
+  type Facet,
+  type Fidelity,
+  type Turn,
+  type TurnWithEvents,
+  type UnavailableReason,
+} from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { ErrorBoundary } from "@/lib/error-boundary";
 import { formatTimestamp, sessionLabel } from "@/lib/format";
 import { densityClasses, useSettings } from "@/lib/settings";
+import { relayName, useEnvironments } from "@/lib/environments";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useSSE } from "@/lib/use-sse";
 import { useAgentSession } from "@/lib/use-agent-session";
@@ -30,7 +39,12 @@ import { ApprovalDialog } from "@/components/approval-dialog";
 import { type StagedAttachment } from "@/components/attachment-picker";
 import { Composer } from "@/components/composer";
 import { Timeline } from "@/components/timeline";
-import { OriginBadge, SessionStatusBadge, TurnStatusBadge } from "@/components/badges";
+import {
+  EnvironmentChip,
+  FidelityMarker,
+  SessionStatusBadge,
+  TurnStatusBadge,
+} from "@/components/badges";
 import { Button, IconButton } from "@/components/ui/button";
 import { MenuButton } from "@/components/ui/menu";
 import {
@@ -63,9 +77,6 @@ export default function SessionPage() {
   const [expandAll, setExpandAll] = useState<boolean | null>(null);
   const [find, setFind] = useState<string | null>(null);
   const hasCommittedWork = useRef(false);
-  const sessionRef = useRef<Session | undefined>(undefined);
-  const hasHistoryRef = useRef(false);
-  const cleanupTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const sessionQuery = useQuery({
     queryKey: ["session", sessionId],
@@ -80,43 +91,14 @@ export default function SessionPage() {
   const session = sessionQuery.data?.session;
   const history = useMemo(() => historyQuery.data?.turns ?? [], [historyQuery.data]);
 
-  // Mirrored into refs so the unmount cleanup below can read current values: it
-  // has an empty dependency array on purpose, because re-running it on every
-  // session or history change would schedule and cancel the discard repeatedly
-  // rather than once at unmount.
-  //
-  // Written in an effect rather than during render. A render-phase ref write is a
-  // side effect in a function React may call speculatively and discard, so it can
-  // publish a value from a render that never committed — and it is what
-  // `react-hooks/refs` flags. An effect runs only after commit, which is exactly
-  // the guarantee the cleanup needs.
-  useEffect(() => {
-    sessionRef.current = session;
-    hasHistoryRef.current = history.length > 0;
-  }, [session, history]);
-
-  useEffect(() => {
-    if (cleanupTimerRef.current !== undefined) {
-      clearTimeout(cleanupTimerRef.current);
-      cleanupTimerRef.current = undefined;
-    }
-    return () => {
-      // Defer one tick so React Strict Mode's development-only setup/cleanup
-      // probe can cancel this before it is mistaken for real navigation.
-      cleanupTimerRef.current = setTimeout(() => {
-        const current = sessionRef.current;
-        if (
-          hasCommittedWork.current ||
-          hasHistoryRef.current ||
-          !current ||
-          current.origin !== "sylph"
-        ) {
-          return;
-        }
-        void api.sessions.deleteEmpty(current.id);
-      }, 0);
-    };
-  }, []);
+  // There is deliberately no empty-session cleanup here any more. `POST /sessions`
+  // starts an agent rather than reserving a row, so a session has no identity until an
+  // agent has assigned one — the empty-draft state this discarded cannot exist, and
+  // the `DELETE /sessions/{id}` it called is gone from the API with it. What it cost
+  // while it existed is worth recording, because it looked like three lines and was
+  // not: three refs mirrored in an effect, a deferred timer so Strict Mode's
+  // setup/cleanup probe could cancel it, and an unmount path that deleted a session
+  // whenever any of its conditions read stale.
 
   // The turn to stream is derived, not stored: a turn this tab started takes
   // precedence, otherwise any unfinished turn in history is adopted so reopening
@@ -224,7 +206,13 @@ export default function SessionPage() {
     },
   });
 
-  const agentsQuery = useQuery({ queryKey: ["agents"], queryFn: () => api.agents.list() });
+  // Scoped to *this session's* environment, because agent availability is per
+  // machine: a global list would offer the composer's agent switcher an agent this
+  // session's machine cannot run. `undefined` while the query is in flight, and for an
+  // environment this client has not been told about — both of which the composer reads
+  // as "no alternatives to offer" rather than as an empty machine.
+  const environments = useEnvironments();
+  const environment = environments.find(session?.environment ?? "");
 
   // The session's live agent: its real command list, and anything it is blocked
   // on. Owned by its own hook because both are session facts rather than turn
@@ -335,7 +323,6 @@ export default function SessionPage() {
     );
   }
 
-  const isNative = session.origin === "native";
   const density = densityClasses(settings.density);
 
   return (
@@ -351,10 +338,18 @@ export default function SessionPage() {
           <h1 className="min-w-0 flex-1 truncate text-sm font-semibold">
             {sessionLabel(session)}
           </h1>
-          {/* `sylph` is the unremarkable case and the badge is on every row; the
-              status badge already says "running". On a phone both are noise
-              competing with the title, so only the exceptional ones survive. */}
-          {session.origin === "native" && <OriginBadge origin={session.origin} />}
+          {/* Only the exceptional facts. A `stream` record and the only machine are
+              the ordinary cases and get no marker, for the reason the deleted origin
+              badge got wrong: on a phone these compete with the title, so a marker
+              that is on every session is pure noise. The status badge already says
+              "running". */}
+          <FidelityMarker value={session.fidelity} />
+          {environments.showEnvironment && (
+            <EnvironmentChip
+              name={session.environmentName}
+              reachableVia={relayName(session.environment, environments)}
+            />
+          )}
           {session.status === "running" && <SessionStatusBadge status={session.status} />}
           <div className="hidden shrink-0 items-center gap-1 md:flex">
             <Button variant="ghost" onClick={() => setExpandAll(expandAll === true ? null : true)}>
@@ -446,22 +441,13 @@ export default function SessionPage() {
         <FindBar value={find} onChange={setFind} onClose={() => setFind(null)} />
       )}
 
-      {isNative && (
-        <aside
-          className="shrink-0 border-b border-native-line bg-native-bg px-3 py-1.5 text-2xs text-native md:px-4"
-          aria-label="Native session policy"
-        >
-          <span className="font-medium">Native session — identity preserved.</span>
-          {/* The full policy statement is desktop-only. It is three lines on a phone,
-              and the headline already carries the fact that matters; the detail is in
-              the docs and in the badge's own tooltip. */}
-          <span className="hidden md:inline">
-            {" "}
-            Sylph does not inject an identity, reset, or compact it, and prompts pass
-            through unchanged.
-          </span>
-        </aside>
-      )}
+      {/* What Sylph can and cannot do with this session right now, when that is not
+          "everything". This replaces the native-session policy banner, which promised
+          Sylph would not reset or compact a session — a promise kept by construction,
+          since nothing ever reset anything, so it described an absence as a feature on
+          every one of those sessions forever. This says something that can actually
+          change and that the user can sometimes act on. */}
+      <DriveState control={agent.control} connecting={agent.connecting} />
 
       {/*
         `data-scroller` rather than being found by its utility class. `LiveTurn` needs
@@ -475,6 +461,7 @@ export default function SessionPage() {
           <ErrorBoundary label="the transcript">
             <Transcript
               history={history}
+              fidelity={session.fidelity}
               isPending={historyQuery.isPending}
               error={historyQuery.error}
               onRetry={() => void historyQuery.refetch()}
@@ -526,7 +513,7 @@ export default function SessionPage() {
 
       <Composer
         session={session}
-        agents={agentsQuery.data?.agents ?? []}
+        agents={environment?.agents ?? []}
         // Drives the agent lock: an empty session can still change runner, one
         // with history cannot.
         turnCount={history.length}
@@ -545,10 +532,11 @@ export default function SessionPage() {
         // rather than offering a command that may no longer exist.
         commands={agent.link?.capabilities?.commands ?? []}
         // Passed so `/` can explain itself instead of doing nothing. An empty
-        // command list has three causes needing three different responses, and
-        // the composer cannot tell them apart from the list alone.
+        // command list has several causes needing different responses, and the
+        // composer cannot tell them apart from the list alone — an empty surface
+        // means "Sylph cannot reach it", never "there is nothing there".
         agentConnecting={agent.connecting}
-        agentFailure={agent.failure}
+        control={agent.control}
         onReattach={() => agent.reattach()}
         // Typed config from the live agent, which is what a control command like
         // `/model` resolves against instead of being sent as prompt text.
@@ -579,6 +567,76 @@ export default function SessionPage() {
       />
 
     </>
+  );
+}
+
+/**
+ * What Sylph cannot do with this session, and why — when there is something to say.
+ *
+ * # Why the notice is about `control` alone
+ *
+ * The two facets fail for different reasons and only one of them is worth a banner. An
+ * unavailable `observe` means there is nothing to read, which the transcript states by
+ * being empty; an unavailable `control` means the transcript reads fine and the
+ * composer cannot send, and *that* is the state a user misreads as the app being
+ * broken. So this names the half that is surprising.
+ *
+ * # Why it renders nothing while connecting
+ *
+ * A handshake spawns an agent CLI and takes seconds, during which `control` reads
+ * unavailable because nothing has reached the machine yet. Announcing "this machine is
+ * offline" for that window would be wrong on every session open, so `connecting`
+ * outranks the reason — the composer's own status is where an in-flight handshake is
+ * reported, because that is where the user is looking.
+ *
+ * # Why `role="status"` and not `alert`
+ *
+ * None of these is an error. A session running in a terminal is working exactly as
+ * intended and simply is not ours to drive; a sleeping laptop is a machine to wake.
+ * `alert` interrupts a screen reader mid-sentence, which is for something gone wrong.
+ */
+function DriveState({ control, connecting }: { control: Facet; connecting: boolean }) {
+  if (control.available || connecting || !control.reason) return null;
+
+  // Exhaustive over the closed union, so a reason added to the protocol is a compile
+  // error here rather than a session silently rendering no explanation.
+  const said: Record<UnavailableReason, { headline: string; detail: string }> = {
+    environment_unreachable: {
+      headline: "That machine is not connected.",
+      detail:
+        "History reads from Sylph's own record, so the transcript is complete. Nothing can be sent until the machine is back.",
+    },
+    not_ours_to_drive: {
+      headline: "Running in a terminal.",
+      detail:
+        "This agent offers no channel to a second party, so Sylph can follow the session but cannot send to it.",
+    },
+    no_agent: {
+      headline: "That agent is not installed on this machine.",
+      detail:
+        "History reads normally. Installing the agent's CLI there is what makes the session continuable.",
+    },
+    handshake_failed: {
+      headline: "The agent would not start.",
+      detail: "History reads normally. Sending a message will try again.",
+    },
+  };
+  const { headline, detail } = said[control.reason];
+
+  return (
+    <aside
+      role="status"
+      aria-label="What Sylph can do with this session"
+      className="shrink-0 border-b border-line bg-sunken px-3 py-1.5 text-2xs text-ink-soft md:px-4"
+    >
+      <span className="font-medium">{headline}</span>
+      {/* Desktop-only detail, matching the header's own treatment: the headline
+          carries what matters and the detail is two lines on a phone. It is a
+          `<span>` rather than a second block so a screen reader reads one sentence
+          — the notice is one statement, and splitting it invites being heard as two
+          unrelated ones. */}
+      <span className="hidden md:inline"> {detail}</span>
+    </aside>
   );
 }
 
@@ -654,6 +712,7 @@ function turnAsText(entry: TurnWithEvents): string {
 
 function Transcript({
   history,
+  fidelity,
   isPending,
   error,
   onRetry,
@@ -665,6 +724,14 @@ function Transcript({
   filter,
 }: {
   history: TurnWithEvents[];
+  /**
+   * The session's, threaded to every `Timeline` below.
+   *
+   * A property of the *record*, so it is the same for every turn in the session — which
+   * is why it is read once here rather than per turn. It gates whether a delegation
+   * duration may be drawn at all; see `lib/timeline-waterfall.ts`.
+   */
+  fidelity: Fidelity;
   isPending: boolean;
   error: unknown;
   onRetry: () => void;
@@ -735,6 +802,7 @@ function Transcript({
         <TurnSection
           key={entry.turn.id}
           entry={entry}
+          fidelity={fidelity}
           onResend={onResend}
           disabled={isLive}
           onOpenFile={onOpenFile}
@@ -743,7 +811,19 @@ function Transcript({
       ))}
 
       {liveTurnId && !filtering && (
-        <LiveTurn turnId={liveTurnId} isLive={isLive} onOpenFile={onOpenFile} expandAll={expandAll} />
+        <LiveTurn
+          turnId={liveTurnId}
+          // A live turn is always `stream` in fact — it *is* the process's own stdio,
+          // which is the only thing that produces that fidelity — but the session's
+          // value is passed rather than hardcoded here. Two reasons: a hardcoded
+          // `"stream"` is a claim this component is not the authority on, and a watched
+          // session streams events from a *file* the vendor is flushing, where the
+          // record genuinely is coarse while the turn is genuinely live.
+          fidelity={fidelity}
+          isLive={isLive}
+          onOpenFile={onOpenFile}
+          expandAll={expandAll}
+        />
       )}
     </div>
   );
@@ -757,12 +837,14 @@ function Transcript({
  */
 function TurnSection({
   entry,
+  fidelity,
   onResend,
   disabled,
   onOpenFile,
   expandAll,
 }: {
   entry: TurnWithEvents;
+  fidelity: Fidelity;
   onResend: (text: string) => void;
   disabled: boolean;
   onOpenFile: (path: string, line?: number) => void;
@@ -807,7 +889,12 @@ function TurnSection({
         </p>
       )}
 
-      <Timeline events={entry.events} onOpenFile={onOpenFile} expandAll={expandAll} />
+      <Timeline
+        events={entry.events}
+        fidelity={fidelity}
+        onOpenFile={onOpenFile}
+        expandAll={expandAll}
+      />
 
       {entry.turn.errorMessage && (
         <p role="alert" className="mt-1 text-xs text-danger">
@@ -842,11 +929,13 @@ function TurnSection({
 
 function LiveTurn({
   turnId,
+  fidelity,
   isLive,
   onOpenFile,
   expandAll,
 }: {
   turnId: string;
+  fidelity: Fidelity;
   isLive: boolean;
   onOpenFile: (path: string, line?: number) => void;
   expandAll: boolean | null;
@@ -869,7 +958,12 @@ function LiveTurn({
 
   return (
     <section aria-label="Current turn" className="border-t border-line pt-1">
-      <Timeline events={events} onOpenFile={onOpenFile} expandAll={expandAll} />
+      <Timeline
+        events={events}
+        fidelity={fidelity}
+        onOpenFile={onOpenFile}
+        expandAll={expandAll}
+      />
 
       <div className="flex items-center gap-1.5 py-1 text-3xs">
         <span

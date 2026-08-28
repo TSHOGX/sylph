@@ -7,7 +7,7 @@
  * header is needed.
  *
  * The backend serializes every model with `#[serde(rename_all = "camelCase")]`,
- * so wire fields are `createdAtMs`, `identityMode`, `requestText` and so on.
+ * so wire fields are `createdAtMs`, `injectIdentity`, `requestText` and so on.
  * These interfaces mirror the wire shape exactly; do not "tidy" them into
  * snake_case, because that silently yields `undefined` at runtime rather than a
  * type error.
@@ -15,30 +15,57 @@
 
 const API_BASE = "/api/v1";
 
-export type SessionOrigin = "sylph" | "native";
 export type SessionStatus = "idle" | "running";
 
+/**
+ * How much resolution the record of a session has.
+ *
+ * Mirrors `Fidelity` in `crates/protocol/src/identity.rs`, whose wire spelling is
+ * `snake_case`. **A property of the record, not of who started the session**: a
+ * session Sylph launched, read back from the vendor's native store after the
+ * process died, is `messages` too. So this cannot be inferred from anything about a
+ * session's origin, and there is no origin field to infer it from.
+ *
+ * **A renderer reads this before drawing a duration.** `stream` means every delta
+ * and its arrival time was recorded; the other two mean the source recorded less,
+ * and no care downstream recovers a timing that was never written — see
+ * `lib/timeline-waterfall.ts`, which refuses to lay out an axis without it.
+ */
+export type Fidelity = "stream" | "blocks" | "messages";
+
 export interface Session {
+  /**
+   * The encoded identity triple, `<environment>:<agent>:<nativeId>`.
+   *
+   * **Opaque by contract** (`docs/api-design.md` § A session id in a path is the
+   * identity triple): echo it back, never parse it. The three parts are separate
+   * fields below precisely so nothing has to — reading them out of the id is how an
+   * encoding change breaks a client with no error at any layer. Note also that the
+   * delimiter is `:` and a native id may itself contain one, so a client that split
+   * this would be wrong even about the id it was handed.
+   */
   id: string;
-  origin: SessionOrigin;
-  /** Identity policy: `sylph` injects SOUL.md, `native` preserves the agent. */
-  identityMode: string;
-  /** Lifecycle policy: governs reset and compaction eligibility. */
-  lifecycleMode: string;
+  /** Opaque environment id, minted at pairing. Never a hostname. */
+  environment: string;
+  /**
+   * Display name for {@link environment}. Mutable and never a key: a rename must
+   * not destroy identity (`docs/environments.md` § Pairing).
+   */
+  environmentName: string;
   agent: string;
-  /** Agent-native id returned by the runner, when a turn has started. */
-  nativeSessionId?: string;
+  /** The vendor's own id for this session, unchanged. */
+  nativeId: string;
   workdir: string;
   /** Nullable: the backend stores title as an optional column. */
   title: string | null;
   /**
-   * TraceDB id this session was imported from, when it was.
+   * Whether `SOUL.md` was appended when this session started.
    *
-   * Present only for imported native sessions. The archive browser uses it to
-   * recognize that an archived row and a live session are one conversation, and
-   * list it once rather than twice.
+   * Settable at creation and refused by `PATCH`, because a transcript records what
+   * produced it — rewriting the flag would rewrite what the stored history means.
    */
-  traceSessionId?: string;
+  injectIdentity: boolean;
+  fidelity: Fidelity;
   flagsJson: string;
   status: SessionStatus;
   createdAtMs: number;
@@ -217,47 +244,121 @@ export interface SessionCapabilities {
 }
 
 /**
- * Whether a session has a live agent, and what it can do.
+ * Why one facet of a link is unavailable.
  *
- * `supports` is empty when detached, deliberately: capability is a property of a
- * live link, and reporting a remembered list would offer the user an interrupt
+ * **Closed, mirroring `UnavailableReason` in `crates/protocol/src/link.rs` exactly**
+ * (wire spelling `snake_case`). Leaving it open with `(string & {})` for "a newer
+ * server" — which there is no such thing as here — costs the two sites that branch
+ * on it their exhaustiveness, and both make a decision a wrong default gets wrong:
+ * `components/composer.tsx` decides retryability and what to say, and
+ * `lib/use-agent-session.ts` decides cache lifetime. A variant added to the protocol
+ * should fail the type check rather than silently fall to whichever arm handles the
+ * rest.
+ *
+ * Note what changed with the transport, because two of these names are new and one
+ * old name is gone. There is no adapter to be absent — adapters are linked into the
+ * envagent, and an agent's availability is whether its CLI is on that machine's
+ * `PATH` — so `no_adapter` is now `no_agent`. And the two old codes both described
+ * *our own spawn* failing, so neither could say "somebody else's process, running
+ * fine, not ours to drive", which is the common case now.
+ */
+export type UnavailableReason =
+  /** This agent's CLI is not on that machine's `PATH`. An install, not a retry. */
+  | "no_agent"
+  /**
+   * No envagent is connected for this session's environment.
+   *
+   * **Observe still answers from the server's store**, which is why the two facets
+   * are separate: history reads while nothing can be sent.
+   */
+  | "environment_unreachable"
+  /**
+   * The process is alive under someone else, and this vendor offers a second party
+   * no control channel. A terminal-born `pi` session is the measured case.
+   */
+  | "not_ours_to_drive"
+  /** The channel exists and would not come up. **The one reason a retry can fix.** */
+  | "handshake_failed";
+
+/**
+ * Whether trying again could change the answer.
+ *
+ * Mirrors `UnavailableReason::is_retryable` in `crates/protocol/src/link.rs`, which
+ * declares the rule so there is one answer rather than a condition buried inside a
+ * query's `staleTime` where a second consumer cannot read it. No retry installs a
+ * CLI, wakes a sleeping laptop, or teaches a vendor a new channel.
+ *
+ * Exhaustive by construction: the parameter is the closed union, so a variant added
+ * to the protocol fails the type check here rather than falling through as
+ * retryable.
+ */
+export function isRetryable(reason: UnavailableReason): boolean {
+  switch (reason) {
+    case "handshake_failed":
+      return true;
+    case "no_agent":
+    case "environment_unreachable":
+    case "not_ours_to_drive":
+      return false;
+  }
+}
+
+/**
+ * One facet of a link: available, or unavailable with a reason.
+ *
+ * Not a bare boolean, and that is the original defect rather than a refinement: the
+ * server logged the reason and returned `attached: false`, so a client could not
+ * distinguish a failed handshake from an agent that simply declares no commands, and
+ * the only honest thing it could render was nothing at all. That is how a stale
+ * install presented as a composer ignoring the `/` key.
+ *
+ * `reason` is populated exactly when `available` is false. A client reads
+ * `available` first and `reason` only on the false branch — the invariant is the
+ * server's (`Facet`'s constructors in `crates/protocol/src/link.rs`), not this
+ * type's, because this shape is what the wire carries.
+ */
+export interface Facet {
+  available: boolean;
+  reason?: UnavailableReason;
+}
+
+/**
+ * A link's two facets.
+ *
+ * **One state, two facets** — not three link states (`docs/architecture.md` § One
+ * link, two typed capability facets). The vendors do not sort into three buckets: a
+ * terminal `pi` is observable and undrivable, `codex` is both, `claude` is
+ * observable and semi-drivable behind an approval gate. A third state would have to
+ * pick one and misreport the others.
+ */
+export interface LinkFacets {
+  /** Can Sylph see what this session is doing. */
+  observe: Facet;
+  /** Can Sylph send this session a turn. */
+  control: Facet;
+}
+
+/**
+ * What Sylph can do with a session right now, and what it cannot.
+ *
+ * `supports` is empty when there is no live link, deliberately: capability is a
+ * property of a link, and reporting a remembered list would offer an interrupt
  * button for a session with no process to interrupt.
+ *
+ * **An empty `capabilities` means "Sylph cannot reach it", never "there is nothing
+ * there."** Those coincide for a session Sylph launched and are opposite for one
+ * running in a terminal, where the process is alive and simply not ours to drive —
+ * so a renderer must read {@link link} before concluding anything from the surface's
+ * emptiness. `components/composer.tsx`'s `SlashStatus` is the surface that has to
+ * get this right, because the two cases have different sentences and one of them has
+ * a retry button.
  */
 export interface LinkState {
-  attached: boolean;
+  link: LinkFacets;
   agent?: string;
   /** Closed vocabulary: `interrupt`, `steer`, `approval`, `subagent`, `slash`, … */
   supports: string[];
   capabilities?: SessionCapabilities;
-  /**
-   * Why there is no live link, when establishing one was tried and failed.
-   *
-   * Absent when a link is attached, and when nobody has asked for one yet. This
-   * exists because an empty capability surface was ambiguous in a way that
-   * mattered: an agent declaring no commands, an adapter that is not installed,
-   * and a handshake still in flight all arrived as `{attached: false}`, so the UI
-   * could only render nothing — which reads as a dead key rather than as a
-   * missing install.
-   */
-  failure?: LinkFailure;
-}
-
-/** Why a link could not be established. */
-export interface LinkFailure {
-  /**
-   * `no_adapter` — the session's agent was not discovered; a retry cannot fix it.
-   * `handshake_failed` — the adapter would not come up; a retry may.
-   *
-   * Closed, mirroring `LinkFailureCode` in `backend/src/links/mod.rs:108` exactly.
-   * The union was previously left open with `(string & {})` for "a newer server",
-   * which there is no such thing as here — and it cost the two callers that branch
-   * on the code (`components/composer.tsx:1119` decides retryability,
-   * `lib/use-agent-session.ts:108` decides cache lifetime) their exhaustiveness: a
-   * third variant added to the backend enum should fail the type check rather than
-   * silently fall to whichever arm handles the unknown.
-   */
-  code: "no_adapter" | "handshake_failed";
-  message: string;
 }
 
 /** One option an agent offered on a request. */
@@ -377,59 +478,117 @@ export function requestOptions(request: PendingRequest): RequestOption[] {
   return offered;
 }
 
-export interface AgentCommand {
-  description?: string;
-  args?: Record<string, { type: string; required?: boolean; description?: string }>;
-}
-
 /**
- * Runner descriptors are passed through from `--describe` verbatim, so unlike
- * the database models these keep the runner protocol's snake_case spelling.
+ * An agent CLI available on one environment.
+ *
+ * **There is no global agent list.** Which agents exist is decided per environment
+ * by what is on that machine's `PATH` (`docs/api-design.md` § Agents and
+ * environments), so a merged list would be true of nowhere — and a user picking an
+ * environment with no `codex` on it should learn that before creating the session
+ * rather than after. This type is therefore only ever reached through an
+ * {@link Environment}.
+ *
+ * There is likewise no `broken` map: availability is `PATH`, not a discovery pass
+ * that can half-succeed. "Why can I not use this agent" now has one answer with one
+ * fix, which is naming the CLI that was not found.
  */
 export interface Agent {
   name: string;
-  description?: string;
-  session_key?: string;
+  version: string;
+  /**
+   * The spawn-time option schema: what can be chosen *before* a session exists.
+   *
+   * Anything adjustable on a live session is a config facet instead, reported by
+   * `GET /sessions/{id}/capabilities` — which is also where a session's real slash
+   * commands arrive, because those depend on files the CLI reads at startup.
+   */
   flags?: Record<string, AgentFlag>;
-  commands?: Record<string, AgentCommand>;
+  /** Closed vocabulary, drives the UI directly. Same as {@link LinkState.supports}. */
+  supports: string[];
 }
 
 /**
- * `GET /agents` and `POST /agents`.
+ * How an envagent came to exist, which decides what AFK can promise.
  *
- * `broken` maps a runner directory name to why its `--describe` failed. Omitted
- * by the backend when empty, hence optional. It was previously absent from this
- * type, which is why a runner that failed to describe itself was invisible in the
- * settings panel — the one place a user looks to ask why their agent is missing.
+ * Closed for the same reason {@link UnavailableReason} is: it is protocol, and a
+ * value added upstream should fail the type check rather than render as an unlabelled
+ * environment.
  */
-export interface AgentsResponse {
+export type EnvironmentOrigin =
+  /** A user installed the envagent and paired it. A laptop, a build box. */
+  | "self-installed"
+  /** An existing envagent copied the binary to a host it can reach over SSH. */
+  | "ssh-bootstrapped"
+  /** The server asked Khora for a sandbox whose image contains an envagent. */
+  | "sandbox-provisioned";
+
+/** One paired environment: whether it is connected, and what it can run. */
+export interface Environment {
+  /** Opaque id, minted at pairing. Never a hostname, never rendered as one. */
+  id: string;
+  /** Display name. Mutable, and never a key. */
+  name: string;
+  connected: boolean;
+  origin: EnvironmentOrigin;
+  /**
+   * The environment relaying for this one, when it is not reachable directly.
+   *
+   * **Not decoration.** A non-null value means this environment is reachable only
+   * while the named one relays for it, so **control dies when that machine leaves**
+   * (`docs/environments.md` § SSH-bootstrapped). A UI rendering it identically to a
+   * directly-connected environment would promise AFK continuity it cannot keep,
+   * which is the whole reason the field is on the wire.
+   */
+  reachableVia: string | null;
   agents: Agent[];
-  broken?: Record<string, string>;
+}
+
+export interface EnvironmentsResponse {
+  environments: Environment[];
 }
 
 export interface CreateSessionRequest {
+  /** Which machine to run on. Required: a session has no default environment. */
+  environment: string;
   agent: string;
   workdir: string;
   title?: string;
-  origin?: SessionOrigin;
   /** Flag values (model, effort) applied to every turn in this session. */
   flags?: Record<string, string>;
-  /** TraceDB session id to adopt when importing a native session. */
-  traceSessionId?: string;
   /**
-   * Whether this session gets Sylph's identity: `sylph` appends `SOUL.md`,
-   * `preserve` runs the agent as it comes. Omitted means `sylph`, which is the
-   * backend's default.
+   * Whether `SOUL.md` is appended. Defaults to `true` server-side.
    *
-   * Only meaningful at creation. Identity describes what the stored transcript
-   * was produced by, so `PATCH /sessions` refuses it — see `settings.injectSoul`,
-   * which is the preference this is derived from.
+   * Only meaningful at creation, and **refused by `PATCH`**: identity describes what
+   * the stored transcript was produced by. See `settings.injectSoul`, the preference
+   * this is derived from.
    */
-  identityMode?: IdentityMode;
+  injectIdentity?: boolean;
 }
 
-/** Identity policy for a session. Mirrors the backend's closed enum. */
-export type IdentityMode = "sylph" | "preserve";
+/**
+ * Bring in a session an agent already has, from that agent's own native store.
+ *
+ * Identity is the triple, so all three parts are named rather than one archive id
+ * being handed over. Everything policy-relevant — the working directory, the title —
+ * is derived from the store by the backend rather than accepted here.
+ */
+export interface AdoptSessionRequest {
+  environment: string;
+  agent: string;
+  nativeId: string;
+  /**
+   * Follow the store as it grows, so a session running in a terminal right now
+   * appears and keeps updating. `false` parses one pass of what is already recorded.
+   */
+  watch?: boolean;
+  title?: string;
+  /**
+   * Defaults to **false** here, unlike on create: the transcript so far was produced
+   * without Sylph's identity. Settable, because adopting a terminal session and
+   * injecting from that point on is a coherent thing to want.
+   */
+  injectIdentity?: boolean;
+}
 
 /**
  * `GET /soul`.
@@ -474,45 +633,53 @@ export interface BestMatch {
 }
 
 /**
- * One lineage-collapsed TraceDB search hit.
+ * One search hit: a session, and why it matched.
  *
- * `id` is the TraceDB session id (`claude:uuid`), not a Sylph Web session id.
- * `sessionId` is set only when this archived session has already been imported,
- * which is what makes a hit navigable instead of merely importable.
+ * **One store, so a hit is a session rather than a foreign row.** This used to be
+ * archive-shaped — a TraceDB id, a `cwd`, and a `sessionId` set only when the
+ * archived row had already been imported, which is what made a hit *importable*
+ * rather than navigable. All of that is gone: the index is over the same rows the
+ * timeline renders (`docs/database-schema.md` § Search lives beside `history.db`), so
+ * every hit is openable and there is no second id space to translate through.
+ *
+ * The session is carried whole rather than flattened into a handful of fields, so a
+ * result row renders with the same `sessionLabel`, fidelity marker, and environment
+ * chip a listing row does — and gains whatever is added to {@link Session} without a
+ * change here.
  */
 export interface SearchResult {
-  id: string;
-  agent: string;
-  title?: string;
-  /** The opening user request: what makes a hit recognizable at a glance. */
-  ask?: string;
-  cwd?: string;
-  outcome?: string;
+  session: Session;
   bestMatch?: BestMatch;
-  /** How many events inside the session matched. */
+  /** How many blocks inside the session matched. */
   hits?: number;
-  startedAtMs?: number;
-  endedAtMs?: number;
-  lineageRootId?: string;
-  sessionId?: string;
 }
 
+/**
+ * `GET /search`.
+ *
+ * No `available` flag and no `detail`. Those existed because search ran against a
+ * separate process that could be absent, so "no matches" and "cannot search" had to
+ * be distinguishable; the store is owned in-process now and an unreachable index is
+ * not a state this endpoint has. It never 503s and answers an empty array for a
+ * query that finds nothing (`docs/api-design.md` § Search).
+ */
 export interface SearchResponse {
   results: SearchResult[];
-  /**
-   * False when the TraceDB archive could not be reached. The request still
-   * succeeds, so the UI distinguishes "no matches" from "cannot search".
-   */
-  available: boolean;
-  detail?: string;
 }
 
 /** Server-side filters for the session list. Omitted fields are no-ops. */
 export interface SessionFilters {
   limit?: number;
   agent?: string;
-  origin?: SessionOrigin;
-  /** Case-insensitive substring match on the working directory. */
+  /** Opaque environment id. */
+  environment?: string;
+  /**
+   * Working directory.
+   *
+   * **An exact match after normalizing trailing slashes, never a substring.** The
+   * store this replaced compiled it to `LIKE '%' || ? || '%'`, so asking for `/w/app`
+   * also returned `/w/app-old` and every subdirectory.
+   */
   workdir?: string;
   updatedAfterMs?: number;
   updatedBeforeMs?: number;
@@ -527,13 +694,6 @@ export interface Workspace {
   runningCount: number;
   lastUsedMs: number;
   isQuickStart: boolean;
-  /**
-   * Archived sessions TraceDB holds here.
-   *
-   * Zero unless the request passed `includeArchived`, so zero means "not
-   * counted" rather than "no history".
-   */
-  archivedCount: number;
 }
 
 export interface WorkspacesResponse {
@@ -568,20 +728,17 @@ export interface ConfigEntry {
   exists?: boolean;
 }
 
-/** One directory bundled-adapter resolution considered. */
-export interface ConfigCandidate {
-  path: string;
-  exists: boolean;
-  /** True for the one discovery actually reads. */
-  chosen: boolean;
-}
-
 /**
  * What configuration resolved to, and who said so.
  *
- * Read-only by design: see the backend's `api::config` for why a loopback HTTP
- * surface must not be able to rewrite `browse_roots` or `agents_dir`. The panel
- * shows these values and the path of the file to edit.
+ * Read-only by design: see the backend's `api::config` for why a loopback HTTP surface
+ * must not be able to rewrite `browse_roots`, which bounds where a spawned agent's
+ * `current_dir` may be and therefore where arbitrary code may run. The panel shows
+ * these values and the path of the file to edit.
+ *
+ * There is no `bundledAgentCandidates` any more, and no `tracedb` row: adapters are
+ * linked into the envagent rather than discovered in directories, and a setting naming
+ * an external archive binary is only meaningful while an external binary answers.
  */
 export interface ConfigReport {
   /** The one root everything else defaults under. */
@@ -590,7 +747,6 @@ export interface ConfigReport {
   /** False before a first run has seeded it, or after a user deletes it. */
   configPresent: boolean;
   entries: ConfigEntry[];
-  bundledAgentCandidates: ConfigCandidate[];
 }
 
 /** Which viewer a file wants. Absent means "read it as text". */
@@ -640,12 +796,6 @@ export interface FileContentResponse {
   content?: string;
   truncated: boolean;
   modifiedAtMs: number;
-}
-
-export interface ImportSessionRequest {
-  /** TraceDB session id, formatted `<agent>:<native-id>`. */
-  traceSessionId: string;
-  title?: string;
 }
 
 /** What kind of value a spreadsheet cell holds. Drives column alignment. */
@@ -749,81 +899,6 @@ export interface DocumentWindow {
   rows?: number;
 }
 
-/**
- * One archived session, as the sidebar and history browser list it.
- *
- * `id` is a TraceDB session id (`claude:uuid`), not a Sylph Web session id — and
- * for a subagent it carries a `/agent-...` suffix, so it must be
- * percent-encoded into a URL path.
- */
-export interface ArchiveSession {
-  id: string;
-  agent: string;
-  /** Title, else the opening typed message. Absent for ~2% of real sessions. */
-  label?: string;
-  cwd: string;
-  model?: string;
-  startedAtMs?: number;
-  endedAtMs?: number;
-  /** Events the archive holds: the only size signal available. */
-  events: number;
-  /** Subagent sessions folded into this row rather than listed separately. */
-  subagentCount: number;
-  /**
-   * The folded subagents themselves, so the count is reachable rather than trivia.
-   *
-   * Session-level: the archive records no event-level parent pointer, so this says
-   * a delegation happened, never where in the parent's transcript it happened.
-   * Absent rather than empty when there are none.
-   */
-  subagents?: ArchiveDelegate[];
-  /**
-   * Origin's TraceDB id when this session is a fork of another.
-   *
-   * A fork replays its origin's whole prefix, so the two read as one conversation
-   * and only one belongs in a list. The server drops the loser within a single
-   * response, but a pair can straddle two pages, so a client accumulating pages
-   * must suppress a row whose `forkOf` names a session it has already shown.
-   */
-  forkOf?: string;
-  /** Live session id when already imported, so the UI opens it instead. */
-  sessionId?: string;
-}
-
-/**
- * One delegated session, as its parent's archive row reports it.
- *
- * Thinner than {@link ArchiveSession} on purpose: this is a disclosure row under
- * its parent, not a listing of its own, and every field comes from the page the
- * server was already reading. `title` is only what the archive recorded — there is
- * no opening-ask fallback here, because that costs a request per child and one
- * measured parent has 193 of them.
- */
-export interface ArchiveDelegate {
-  id: string;
-  agent: string;
-  /** The archive's own title. `codex` and `pi` record none at all. */
-  title?: string;
-  /** Set only when this delegate ran somewhere other than its parent. */
-  cwd?: string;
-  events: number;
-  startedAtMs?: number;
-  endedAtMs?: number;
-}
-
-export interface ArchiveListResponse {
-  sessions: ArchiveSession[];
-  /** Cursor to continue from; absent on the last page. */
-  nextCursor?: string;
-  /**
-   * False when the TraceDB archive could not be reached. The request still
-   * succeeds, so a workspace with no archive reads as "live only" rather than
-   * as an error.
-   */
-  available: boolean;
-  detail?: string;
-}
-
 export interface BrowseRoot {
   /** Display label: the directory leaf, or `Home` for the home directory. */
   name: string;
@@ -883,52 +958,6 @@ export interface MkdirRequest {
 export interface MkdirResponse {
   path: string;
   absolutePath: string;
-}
-
-/** A read-only archived transcript, normalized into live timeline events. */
-export interface ArchiveTranscript {
-  id: string;
-  agent: string;
-  label?: string;
-  /** Absent for 19% of the archive, which is why a session may be unresumable. */
-  cwd?: string;
-  startedAtMs?: number;
-  events: StreamEvent[];
-  /**
-   * Sessions this one delegated to. Absent rather than empty when there are none.
-   *
-   * Complete for delegates whose id carries the parent as a prefix, which is 2104
-   * of 2316 in a real archive. The rest record only a parent the listing cannot
-   * see, and are reached from the parent's directory listing instead.
-   */
-  delegations?: ArchiveDelegate[];
-  /** True when the delegation scan stopped early, so the list may be short. */
-  delegationsTruncated: boolean;
-  /**
-   * The session that delegated this one, when it is delegated work.
-   *
-   * Half of a real archive is delegated, so without this a transcript opened from
-   * a search hit reads as a conversation someone started.
-   */
-  parentId?: string;
-  /**
-   * The session this one forked or resumed from. A different relationship from
-   * {@link parentId}: a fork replays its origin's whole prefix, which is what
-   * explains a transcript that appears to open mid-conversation.
-   */
-  forkedFrom?: string;
-  /**
-   * True when the archive records no event-level delegation structure — which is
-   * every agent measured, so this is always true today.
-   *
-   * Stated by the server rather than assumed here, because it decides the honest
-   * rendering: the events carry no `span`, so a delegation is a separate session
-   * to open, and the view must not draw its tool calls as hosting trajectories.
-   */
-  flat: boolean;
-  /** True when `limit` cut the stream short. */
-  truncated: boolean;
-  sessionId?: string;
 }
 
 /**
@@ -1062,11 +1091,38 @@ function queryString(params: Record<string, string | number | undefined>): strin
   return encoded ? `?${encoded}` : "";
 }
 
+/**
+ * A session id as one URL path segment.
+ *
+ * **Required, not tidiness.** The id is the encoded triple and its native part is a
+ * vendor's value: `claude` names a delegated session
+ * `<parent>/agent-a<name>-<hash>`, so a raw interpolation turns one segment into
+ * three and the request reaches a route that does not exist — or worse, a different
+ * one. The `:` delimiter also has meaning in the first segment of a relative
+ * reference. Encoding here rather than at each call site is what stops one of a dozen
+ * interpolations being forgotten.
+ *
+ * `encodeURIComponent` and never `encodeURI`: the latter deliberately leaves `/` and
+ * `:` alone, which are precisely the two characters this exists to escape.
+ */
+function segment(id: string): string {
+  return encodeURIComponent(id);
+}
+
 export const api = {
   sessions: {
     list: (filters: SessionFilters = {}) =>
       fetchAPI<{ sessions: Session[] }>(`/sessions${queryString({ ...filters })}`),
-    get: (id: string) => fetchAPI<{ session: Session }>(`/sessions/${id}`),
+    get: (id: string) => fetchAPI<{ session: Session }>(`/sessions/${segment(id)}`),
+    /**
+     * Start an agent in a directory.
+     *
+     * **This starts a process; it does not reserve a row.** A session has no identity
+     * until an agent has assigned one, so there is nothing to create in advance —
+     * which is what deleted the empty-draft class of session, the `DELETE` that
+     * cleaned them up, and the window in which a session existed with no native id
+     * and therefore could not be resumed.
+     */
     create: (req: CreateSessionRequest) =>
       fetchAPI<{ session: Session }>("/sessions", {
         method: "POST",
@@ -1074,26 +1130,25 @@ export const api = {
       }),
     /** Full durable history: every turn in the session with its events. */
     history: (id: string) =>
-      fetchAPI<{ turns: TurnWithEvents[] }>(`/sessions/${id}/turns`),
+      fetchAPI<{ turns: TurnWithEvents[] }>(`/sessions/${segment(id)}/turns`),
     /**
-     * Adopt an archived native session.
+     * Bring in a session an agent already has on some environment.
      *
-     * Agent and working directory are derived from the archive by the backend,
-     * so they are deliberately not accepted here.
+     * Replaces `POST /sessions/import`, which took one archive id. The working
+     * directory and title are derived from the vendor's own store by the backend, so
+     * they are deliberately not accepted here.
      */
-    import: (req: ImportSessionRequest) =>
-      fetchAPI<{ session: Session }>("/sessions/import", {
+    adopt: (req: AdoptSessionRequest) =>
+      fetchAPI<{ session: Session }>("/sessions/adopt", {
         method: "POST",
         body: JSON.stringify(req),
       }),
-    /** Change runner flags or the title of an existing session. */
+    /** Change agent flags or the title of an existing session. */
     update: (id: string, req: { flags?: Record<string, string>; title?: string }) =>
-      fetchAPI<{ session: Session }>(`/sessions/${id}`, {
+      fetchAPI<{ session: Session }>(`/sessions/${segment(id)}`, {
         method: "PATCH",
         body: JSON.stringify(req),
       }),
-    deleteEmpty: (id: string) =>
-      fetchAPI<void>(`/sessions/${id}`, { method: "DELETE" }),
     /**
      * What this session's agent can do, read from a live handshake.
      *
@@ -1101,18 +1156,22 @@ export const api = {
      * from a running agent — a project's command list depends on files the CLI
      * reads at startup. That makes this call slow the first time (seconds, while
      * the agent loads the project) and instant afterwards.
+     *
+     * **A failure here is a 200 with a reason, not a 5xx**, so the session stays
+     * readable when its agent is gone. `lib/use-agent-session.ts` owns what that
+     * means for caching.
      */
     capabilities: (id: string) =>
-      fetchAPI<LinkState>(`/sessions/${id}/capabilities`),
+      fetchAPI<LinkState>(`/sessions/${segment(id)}/capabilities`),
     /** Start the agent eagerly, before the user finishes typing. */
     attach: (id: string) =>
-      fetchAPI<LinkState>(`/sessions/${id}/link`, { method: "POST" }),
+      fetchAPI<LinkState>(`/sessions/${segment(id)}/link`, { method: "POST" }),
     /** Stop the agent without ending the session. */
     detach: (id: string) =>
-      fetchAPI<LinkState>(`/sessions/${id}/link`, { method: "DELETE" }),
+      fetchAPI<LinkState>(`/sessions/${segment(id)}/link`, { method: "DELETE" }),
     /** What the agent is currently blocked on. */
     requests: (id: string) =>
-      fetchAPI<PendingRequest[]>(`/sessions/${id}/requests`),
+      fetchAPI<PendingRequest[]>(`/sessions/${segment(id)}/requests`),
     /**
      * End the current turn but keep the agent loaded.
      *
@@ -1121,7 +1180,7 @@ export const api = {
      * UI should offer whichever the agent declares it supports.
      */
     interrupt: (id: string) =>
-      fetchAPI<{ interrupted: boolean }>(`/sessions/${id}/interrupt`, {
+      fetchAPI<{ interrupted: boolean }>(`/sessions/${segment(id)}/interrupt`, {
         method: "POST",
       }),
     /**
@@ -1132,7 +1191,7 @@ export const api = {
      * silently with the text in the wrong conversation. A mismatch is a 409.
      */
     steer: (id: string, text: string, turnId?: string) =>
-      fetchAPI<{ steered: boolean }>(`/sessions/${id}/steer`, {
+      fetchAPI<{ steered: boolean }>(`/sessions/${segment(id)}/steer`, {
         method: "POST",
         body: JSON.stringify({ text, turnId }),
       }),
@@ -1145,7 +1204,7 @@ export const api = {
      * rather than an optimistic local value.
      */
     setConfig: (id: string, configId: string, value: string | boolean) =>
-      fetchAPI<LinkState>(`/sessions/${id}/config`, {
+      fetchAPI<LinkState>(`/sessions/${segment(id)}/config`, {
         method: "POST",
         body: JSON.stringify({ configId, value }),
       }),
@@ -1169,9 +1228,9 @@ export const api = {
   },
   files: {
     tree: (sessionId: string, path = "") =>
-      fetchAPI<FileTreeResponse>(`/sessions/${sessionId}/files${queryString({ path })}`),
+      fetchAPI<FileTreeResponse>(`/sessions/${segment(sessionId)}/files${queryString({ path })}`),
     content: (sessionId: string, path: string) =>
-      fetchAPI<FileContentResponse>(`/sessions/${sessionId}/files/content${queryString({ path })}`),
+      fetchAPI<FileContentResponse>(`/sessions/${segment(sessionId)}/files/content${queryString({ path })}`),
     /**
      * Upload one file into the session's working directory.
      *
@@ -1179,14 +1238,14 @@ export const api = {
      * already writes to — and refuses to overwrite unless asked.
      */
     upload: (sessionId: string, req: UploadFileRequest) =>
-      fetchAPI<UploadFileResponse>(`/sessions/${sessionId}/files`, {
+      fetchAPI<UploadFileResponse>(`/sessions/${segment(sessionId)}/files`, {
         method: "POST",
         body: JSON.stringify(req),
       }),
     /** A spreadsheet, CSV, Word document, or deck as structure. */
     document: (sessionId: string, path: string, window: DocumentWindow = {}) =>
       fetchAPI<FileDocumentResponse>(
-        `/sessions/${sessionId}/files/document${queryString({
+        `/sessions/${segment(sessionId)}/files/document${queryString({
           path,
           sheet: window.sheet,
           row: window.row,
@@ -1202,13 +1261,13 @@ export const api = {
      * session cookie is sent.
      */
     rawUrl: (sessionId: string, path: string, options: { download?: boolean } = {}) =>
-      `${API_BASE}/sessions/${sessionId}/files/raw${queryString({
+      `${API_BASE}/sessions/${segment(sessionId)}/files/raw${queryString({
         path,
         download: options.download ? "true" : undefined,
       })}`,
     /** Create one directory. Reports a collision rather than succeeding quietly. */
     mkdir: (sessionId: string, req: MkdirRequest) =>
-      fetchAPI<MkdirResponse>(`/sessions/${sessionId}/files/directory`, {
+      fetchAPI<MkdirResponse>(`/sessions/${segment(sessionId)}/files/directory`, {
         method: "POST",
         body: JSON.stringify(req),
       }),
@@ -1221,7 +1280,7 @@ export const api = {
      */
     remove: (sessionId: string, path: string, options: { recursive?: boolean } = {}) =>
       fetchAPI<void>(
-        `/sessions/${sessionId}/files${queryString({
+        `/sessions/${segment(sessionId)}/files${queryString({
           path,
           recursive: options.recursive ? "true" : undefined,
         })}`,
@@ -1253,49 +1312,24 @@ export const api = {
    * What configuration resolved to, and which source supplied each value.
    *
    * Read-only, like `soul` above and for the same class of reason: `browseRoots`
-   * bounds what any client of this backend may enumerate, and `agentsDir` names
-   * directories the server executes programs from.
+   * bounds where a client of this backend may cause arbitrary code to run.
    */
   config: {
     get: () => fetchAPI<ConfigReport>("/config"),
   },
+  /**
+   * Directories that group sessions, and where Quick Start runs.
+   *
+   * One query, because there is one store. This used to take `includeArchived` to
+   * fold in directories that existed only in the separate archive, and there is no
+   * longer a second place a directory can be recorded.
+   */
   workspaces: {
-    /**
-     * `includeArchived` also reports directories that exist only in the TraceDB
-     * archive. Off by default because the sidebar polls this; surfaces where the
-     * user *picks* a directory pass it, since a directory they want to work in
-     * has no live session yet.
-     */
-    list: (options: { includeArchived?: boolean } = {}) =>
-      fetchAPI<WorkspacesResponse>(
-        `/workspaces${queryString({
-          includeArchived: options.includeArchived ? "true" : undefined,
-        })}`,
-      ),
-  },
-  archive: {
-    /**
-     * Archived sessions that ran in one directory, newest first.
-     *
-     * This is what makes a workspace's past visible: `search` only answers a
-     * question the user already knows how to ask.
-     */
-    list: (params: { workdir: string; limit?: number; cursor?: string }) =>
-      fetchAPI<ArchiveListResponse>(`/archive/sessions${queryString({ ...params })}`),
-    /**
-     * One archived transcript, read-only.
-     *
-     * The id is encoded whole rather than interpolated: a subagent id contains a
-     * `/`, which would otherwise be read as a path separator.
-     */
-    get: (traceId: string, limit?: number) =>
-      fetchAPI<ArchiveTranscript>(
-        `/archive/sessions/${encodeURIComponent(traceId)}${queryString({ limit })}`,
-      ),
+    list: () => fetchAPI<WorkspacesResponse>("/workspaces"),
   },
   turns: {
     create: (sessionId: string, req: CreateTurnRequest) =>
-      fetchAPI<{ turn: Turn }>(`/sessions/${sessionId}/turns`, {
+      fetchAPI<{ turn: Turn }>(`/sessions/${segment(sessionId)}/turns`, {
         method: "POST",
         body: JSON.stringify(req),
       }),
@@ -1303,21 +1337,29 @@ export const api = {
     stop: (turnId: string) =>
       fetchAPI<{ turn: Turn }>(`/turns/${turnId}/stop`, { method: "POST" }),
   },
-  agents: {
-    list: () => fetchAPI<AgentsResponse>("/agents"),
-    /**
-     * Re-run `--describe` against every runner script.
-     *
-     * Worth being precise about what this does and does not do: it re-executes
-     * the runner scripts, so a newly installed or newly fixed runner appears. It
-     * does not re-read the agent's own configuration — a runner that prints its
-     * model list as a literal in its `--describe` output keeps reporting the same
-     * models until that script changes, however many providers were added to the
-     * agent behind it. The settings panel says so, because otherwise "refreshed
-     * and nothing changed" reads as a broken button.
-     */
-    refresh: () => fetchAPI<AgentsResponse>("/agents", { method: "POST" }),
+  /**
+   * Every paired environment, whether it is connected, and what it can run.
+   *
+   * **This replaces `GET /agents`, and the replacement is not a rename.** There is
+   * no global agent list any more: which agents exist is decided per machine by what
+   * is on its `PATH`, so a merged list would be true of nowhere. Every consumer that
+   * used to read one list now has to say *which environment* it is asking about.
+   *
+   * There is likewise no `POST /agents` refresh. That re-ran a discovery pass over
+   * adapter directories; availability is now `PATH` plus a version, reported by the
+   * envagent that holds it, so there is no pass on this side to re-run.
+   */
+  environments: {
+    list: () => fetchAPI<EnvironmentsResponse>("/environments"),
   },
+  /**
+   * FTS5 over the server's own history.
+   *
+   * **Keep this off any polled path.** Measured against an equivalent store, every
+   * other read is microseconds to sub-millisecond while this is 174–260 ms — so
+   * gating it on a real query length is not politeness, it is the difference between
+   * a search box and a load generator.
+   */
   search: (query: string, limit?: number) =>
     fetchAPI<SearchResponse>(`/search${queryString({ q: query, limit })}`),
   health: () =>
@@ -1325,7 +1367,19 @@ export const api = {
       ok: boolean;
       apiVersion: string;
       schemaVersion: number;
-      /** Availability only: `/health` is unauthenticated, so it reports no counts. */
-      tracedb: { available: boolean };
+      /**
+       * Per environment, because "the agent will not start" has a different cause
+       * and a different fix per machine. This replaces a single `tracedb.available`
+       * boolean, which could not distinguish a missing CLI from a sleeping laptop.
+       *
+       * `/health` is unauthenticated, so it reports availability and never counts.
+       */
+      environments: {
+        id: string;
+        name: string;
+        connected: boolean;
+        disconnectedSinceMs?: number;
+        agents: { name: string; version: string }[];
+      }[];
     }>("/health"),
 };

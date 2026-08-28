@@ -12,7 +12,7 @@
  *
  * Every failure in this area has one shape: a path resolves somewhere nothing
  * lives, the server starts, health reports fine, and the symptom appears layers
- * away — an empty agent list, a dead slash key, an archive that returns nothing.
+ * away — a dead slash key, a Quick Start directory nothing can be created in.
  * The fix is trivial once you can see which path was used and who supplied it, and
  * the entire cost is in not being able to see it. `sylph-web-backend doctor` prints
  * this for a terminal; this renders the same report for someone who never opens
@@ -20,12 +20,12 @@
  *
  * # Why it is read-only
  *
- * There is deliberately no edit control. Two of these values are security
- * decisions — `browse_roots` bounds what any client of this backend may enumerate,
- * and `agents_dir` names directories the server executes programs from — and the
- * config file is the durable, reviewable record of them. So this shows the values
- * and the path of the file to open, which is also what keeps the file the single
- * source rather than one of two.
+ * There is deliberately no edit control. `browse_roots` is a security decision — it
+ * bounds not merely what a client may *enumerate* but what it may name as a session's
+ * workdir, which is the `current_dir` of a spawned agent, so it decides where arbitrary
+ * code may run — and the config file is the durable, reviewable record of it. So this
+ * shows the values and the path of the file to open, which is also what keeps the file
+ * the single source rather than one of two.
  */
 
 import { useQuery } from "@tanstack/react-query";
@@ -113,38 +113,17 @@ export function ConfigSection() {
         </div>
       </Field>
 
-      <Field label={t("settings.config.adapters.label")} hint={t("settings.config.adapters.hint")}>
-        <ul className="space-y-0.5">
-          {report.bundledAgentCandidates.map((candidate) => (
-            <li
-              key={candidate.path}
-              className={`flex items-baseline gap-1.5 font-mono text-2xs ${
-                candidate.chosen ? "text-ink" : "text-ink-muted"
-              }`}
-            >
-              {/*
-                Only the chosen row is marked, and only absence is annotated.
-                Ticking every present row turns the one line that needs attention
-                into one of four.
-              */}
-              <span aria-hidden="true" className="select-none">
-                {candidate.chosen ? "→" : "  "}
-              </span>
-              <span className="break-all">{candidate.path}</span>
-              {candidate.chosen && (
-                <span className="shrink-0 font-sans not-italic">
-                  {t("settings.config.adapters.inUse")}
-                </span>
-              )}
-              {!candidate.exists && (
-                <span className="shrink-0 font-sans text-ink-faint">
-                  {t("settings.config.adapters.absent")}
-                </span>
-              )}
-            </li>
-          ))}
-        </ul>
-      </Field>
+      {/* The "Bundled adapters" table is deleted rather than moved. It listed the
+          directories adapter discovery searched and marked which one was in use, and
+          that question no longer exists: adapters are linked into the envagent, so
+          there is no directory to search and no candidate to choose between. The
+          escape hatch for "a vendor changed faster than the shipped adapter" is
+          upgrading the envagent on that one machine, which touches no server, no
+          schema, and no other environment.
+
+          What answers the question the table existed for — "why can I not use this
+          agent" — is Settings → Machines & agents, which names the CLI that was not
+          found and the machine it was not found on. */}
     </div>
   );
 }

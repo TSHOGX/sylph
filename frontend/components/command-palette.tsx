@@ -19,7 +19,6 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
 import { useSettings, type ShortcutAction } from "@/lib/settings";
 import { formatCombo, useIsMac } from "@/lib/shortcuts";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
@@ -135,7 +134,7 @@ export function CommandPalette() {
         label: t("palette.cmd.browseHistory"),
         group: t("palette.group.navigation"),
         action: "browseWorkspaceHistory",
-        keywords: "past previous archive tracedb directory workdir",
+        keywords: "past previous history directory workdir",
         run: () => runAction("browseWorkspaceHistory"),
       },
       {
@@ -146,16 +145,6 @@ export function CommandPalette() {
         run: () => {
           closeOverlay();
           router.push("/");
-        },
-      },
-      {
-        id: "archive",
-        label: t("palette.cmd.archive"),
-        group: t("palette.group.navigation"),
-        keywords: "tracedb history import",
-        run: () => {
-          closeOverlay();
-          router.push("/search");
         },
       },
       {
@@ -240,16 +229,18 @@ export function CommandPalette() {
         run: () => runAction("openSettings"),
       },
       {
-        id: "refresh-agents",
-        label: t("palette.cmd.refreshAgents"),
+        id: "refresh-environments",
+        label: t("palette.cmd.refreshEnvironments"),
         group: t("palette.group.settings"),
-        keywords: "discover describe",
+        keywords: "machines agents connected reload",
         run: () => {
-          // Re-runs `--describe` discovery on the backend, then seeds the cache
-          // with the result so the create dialog sees new runners immediately.
-          void queryClient
-            .fetchQuery({ queryKey: ["agents"], queryFn: () => api.agents.refresh() })
-            .catch(() => {});
+          // Re-reads which machines are connected and what each can run. This used to
+          // be "refresh agent runners", which re-ran a `--describe` discovery pass on
+          // the backend — there is no such pass now: an agent is available when its CLI
+          // is on some machine's `PATH`, reported by that machine's envagent. So this
+          // is a plain refetch rather than a command that changes server state, and it
+          // is worth keeping because a laptop that just woke reports differently.
+          void queryClient.invalidateQueries({ queryKey: ["environments"] });
           closeOverlay();
         },
       },

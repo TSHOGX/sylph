@@ -44,7 +44,7 @@
 
 import dynamic from "next/dynamic";
 import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
-import type { StreamEvent } from "@/lib/api";
+import type { Fidelity, StreamEvent } from "@/lib/api";
 import { formatTime } from "@/lib/format";
 import {
   buildRows,
@@ -123,11 +123,21 @@ export type { TimelineRow, TimelineNode };
 
 export function Timeline({
   events,
+  fidelity,
   onOpenFile,
   /** Force every collapsible open or closed. Null means per-row defaults. */
   expandAll,
 }: {
   events: StreamEvent[];
+  /**
+   * The record's fidelity, from the session these events belong to.
+   *
+   * Read here only to hand to `DelegationOverview`, which must not draw a duration a
+   * `blocks` or `messages` record never measured. Threaded rather than defaulted at any
+   * point on the way down, because a default is indistinguishable from having forgotten
+   * it and the consequence is a chart of invented numbers.
+   */
+  fidelity: Fidelity;
   onOpenFile?: (path: string, line?: number) => void;
   expandAll?: boolean | null;
 }) {
@@ -189,7 +199,7 @@ export function Timeline({
           hundred trajectories of the whole turn. Above the rows because it is a map of
           them, and it renders nothing at all unless two delegations are in scope: one
           delegation compares to nothing, and the card already states its duration. */}
-      <DelegationOverview nodes={shown} onFocus={setFocus} />
+      <DelegationOverview nodes={shown} fidelity={fidelity} onFocus={setFocus} />
       {shown.map((node) => (
         <MemoizedNode
           key={node.key}

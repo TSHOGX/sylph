@@ -3,11 +3,10 @@
 /**
  * `/` — the start screen, shown when no session is open.
  *
- * This replaced an "All sessions" list with filters by agent, origin, workdir, and
- * date. That list was a second, weaker copy of navigation the shell already owns:
- * the sidebar groups every live session by the directory it runs in, `Cmd+K`
- * searches live sessions and the archive together, and `Cmd+Shift+K` pages one
- * workspace's history. A user arriving at `/` has not asked to filter sessions by
+ * This replaced an "All sessions" list with filters by agent, workdir, and date.
+ * That list was a second, weaker copy of navigation the shell already owns: the
+ * sidebar groups every session by the directory it runs in, `Cmd+K` searches all of
+ * them, and `Cmd+Shift+K` pages one workspace's history. A user arriving at `/` has not asked to filter sessions by
  * date — they have opened the app and need to start or resume work. The filter
  * form also cost two `GET /api/v1/sessions` requests on first paint, one of them
  * only to populate an agent dropdown.
@@ -34,9 +33,10 @@
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { Kbd } from "@/components/ui/button";
-import { OriginBadge } from "@/components/badges";
+import { EnvironmentChip, FidelityMarker } from "@/components/badges";
 import { api } from "@/lib/api";
 import { formatRelative, shortenHome } from "@/lib/format";
+import { relayName, useEnvironments, type Environments } from "@/lib/environments";
 import { liveSessionsQuery } from "@/lib/sessions-query";
 import { useShortcutHint } from "@/lib/shortcuts";
 import { selectStartState, type RecentWorkspace } from "@/lib/welcome";
@@ -49,6 +49,9 @@ export default function StartPage() {
 
   const sessions = useQuery(liveSessionsQuery());
   const state = selectStartState(sessions.data?.sessions, { pending: sessions.isPending });
+  // Only to decide whether a row should name its machine at all, and to turn a
+  // relaying id into a name. One machine means no chips — see `useEnvironments`.
+  const environments = useEnvironments();
 
   // Only to resolve the home prefix for display. Already in cache — the shell
   // fetches it for the Quick Start directory — so this is a cache read, not a
@@ -73,8 +76,8 @@ export default function StartPage() {
             rest of the UI assumes and never says. Without it, "New session" reads
             as "new chat" and the directory prompt that follows is a surprise. */}
         <p className="mt-1.5 text-sm text-ink-muted">
-          A session pairs a coding agent with a working directory. Your agents&rsquo; past
-          work is here too, read-only, for every directory they have ever run in.
+          A session pairs a coding agent with a working directory, on one of your
+          machines. Work your agents did elsewhere can be brought in and read here too.
         </p>
 
         <div className="mt-7 flex flex-wrap gap-2">
@@ -118,7 +121,11 @@ export default function StartPage() {
           ) : state.kind === "firstRun" ? (
             <FirstRun onBrowse={() => browseHistory()} />
           ) : (
-            <Recents rows={state.workspaces} home={workspaces.data?.home} />
+            <Recents
+                rows={state.workspaces}
+                home={workspaces.data?.home}
+                environments={environments}
+              />
           )}
         </div>
 
@@ -207,7 +214,15 @@ function Step({ n, title, children }: { n: number; title: string; children: stri
  * reason: the old page's four filter controls existed to make a truncated 50-row
  * listing navigable, which is not a problem a five-row list has.
  */
-function Recents({ rows, home }: { rows: RecentWorkspace[]; home?: string }) {
+function Recents({
+  rows,
+  home,
+  environments,
+}: {
+  rows: RecentWorkspace[];
+  home?: string;
+  environments: Environments;
+}) {
   return (
     <section aria-labelledby="recents">
       <h2 id="recents" className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
@@ -234,11 +249,19 @@ function Recents({ rows, home }: { rows: RecentWorkspace[]; home?: string }) {
                 </span>
               </span>
 
-              {/* Origin stays visible: it decides identity and lifecycle policy, so
-                  a native session must be recognizable before it is opened. `sylph`
-                  is unbadged — a marker on every row carries no information, and the
-                  sidebar distinguishes both cases anyway. */}
-              {session.origin === "native" && <OriginBadge origin={session.origin} />}
+              {/* Fidelity when it is not `stream`, and the machine when it is not
+                  this one. Both are properties of the row a reader needs *before*
+                  opening it: a coarse record cannot be timed, and a session on a
+                  sleeping laptop cannot be continued. `stream` is unmarked for the
+                  same reason `sylph` was — a marker on every row carries no
+                  information. */}
+              <FidelityMarker value={session.fidelity} />
+              {environments.showEnvironment && (
+                <EnvironmentChip
+                  name={session.environmentName}
+                  reachableVia={relayName(session.environment, environments)}
+                />
+              )}
               {session.status === "running" && (
                 <span className="shrink-0 text-xs font-medium text-info">running</span>
               )}
@@ -265,7 +288,7 @@ function Recents({ rows, home }: { rows: RecentWorkspace[]; home?: string }) {
 function ShortcutList({ hint }: { hint: (action: ShortcutAction) => string }) {
   const rows: [ShortcutAction, string][] = [
     ["newSession", "New session"],
-    ["search", "Search sessions and archive"],
+    ["search", "Search sessions"],
     ["browseWorkspaceHistory", "Browse this workspace's history"],
     ["commandPalette", "Command palette"],
     ["toggleLeftSidebar", "Toggle the workspaces sidebar"],
