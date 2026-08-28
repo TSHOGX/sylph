@@ -215,7 +215,7 @@ enumeration.
 **A turn ends on `agent_settled`, not `agent_end`.** `pi` can emit `agent_end` and then
 continue. Both events genuinely exist and are emitted (`agent_start` at
 `pi-agent-core/dist/agent-loop.js:49,67`, `agent_end` at `:110,157,172`, both reaching
-the wire through `dist/modes/rpc/rpc-mode.js:265`); an earlier claim here that they had
+the wire through `dist/modes/rpc/rpc-mode.js:266`); an earlier claim here that they had
 zero emit sites was **wrong**, measured against a minified bundle. An unbundled
 source-mapped install at `~/.local/lib/node_modules/@earendil-works/pi-coding-agent` is
 far better evidence and should be preferred.
@@ -231,15 +231,60 @@ not turn granularity.
 
 **It records no archived title**, so every row needs the opening-ask fallback.
 
+**Its native store has two field-spelling eras, cleanly split, and one unit bug that
+reads as a spelling bug.** *Measured 2026-08-28 over all 527 files in
+`~/.pi/agent/sessions/`, while scoping the parser port.*
+
+The store renamed every multi-word key from snake_case to camelCase at a point in time:
+`parent_id`→`parentId`, `model_id`→`modelId`, `stop_reason`→`stopReason`,
+`error_message`→`errorMessage`. The census is **111 files snake_case-only, 120
+camelCase-only, and zero files mixing the two** — so this is a clean cutover, not a
+gradual migration, and an era can be decided once per file rather than per field.
+Occurrences: `parentId` 4015 against `parent_id` 339. `toolCallId` and `isError` occur
+1751 times each with **no** snake_case counterpart, so a snake_case-era file cannot hold
+a tool result at all — the era check and the tool-result path are not independent.
+
+Reading one spelling silently drops the other era, which is the usual shape of this
+defect. **Do not answer it with dual-spelling lookup**: § Compatibility forbids the
+alias, and an alias is precisely what makes the *next* rename unobservable. Detect the
+era, and fail loudly on a file that mixes spellings — that would falsify the census
+above, and a parser that half-reads such a file silently is worse than one that stops.
+
+The unit bug is the more consequential half and belongs to the *reader*, not the vendor.
+`message.timestamp` is **epoch milliseconds**, verified by `1776416849330` on an entry
+whose sibling ISO stamp is `2026-04-17T17:07:29.330418` — equal to the millisecond, on
+3880 records. trace-db's parser divided an integer timestamp by 1000 while its string
+branch returned milliseconds, so every per-event time it produced decoded to 1970. Two
+things made it survivable: the session-level start and end come from the *entry's* ISO
+string and were therefore right, so only the finer-grained per-event times were wrong;
+and the 67 remaining integers are the literal `1` written by test sessions
+(`"model":"claude-test"`), which look like a second unit era and are not. Do not sniff
+magnitude to choose a divisor — the vendor writes milliseconds, so read milliseconds.
+
+**A fork pointer is a file path, not a session id.** The session header carries
+`parentSession`/`parent_session` naming another `.jsonl` on disk. Under an identity of
+`(environment, agent, native_id)` it cannot be stored as given: it has to be resolved by
+reading the target file's header for its id, or recorded as unresolvable. trace-db's
+parser hardcoded `parent_session_id: None` and never read the field under either
+spelling, so pi fork lineage was dropped entirely rather than partially.
+
 ## Reading a vendor payload
 
-This is the most-repeated defect class in the repo — seven instances, each one
+This is the most-repeated defect class in the repo — eight instances, each one
 compiling, each surfacing one or two layers from the cause. The instances are above,
 under their agents, because the *specific* keys are what a reader needs. The general
 rules:
 
 **Print one real payload rather than inferring field names.** Two of three guesses
 about `claude`'s shapes were wrong, and each one compiled.
+
+**The right key in the wrong unit fails the same way, and is harder to see.** The eighth
+instance was not a misspelling: `pi`'s `message.timestamp` was read from the correct key
+and divided as though it were microseconds, so it produced a plausible integer that
+decoded to 1970. A wrong key at least yields absent; a wrong unit yields a *value*, which
+passes any check for presence. So a payload's units are part of what "print one real
+payload" has to establish — compare the number against a sibling human-readable stamp
+rather than eyeballing its magnitude.
 
 **Ask the binary.** Grepping the 321 MB `claude` binary for a key is cheap and
 decisive: `selectedOptions` occurs nowhere in it, which would have caught that instance

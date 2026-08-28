@@ -336,13 +336,22 @@ opened, presenting as a UI bug in the composer's model control. When adapting a 
 shape, print one real payload rather than inferring field names — two of three guesses
 about this CLI's shapes were wrong, and each one compiled.
 
-This is the most-repeated defect in this file: **seven instances so far**, each one
+This is the most-repeated defect in this file: **eight instances so far**, each one
 compiling, each surfacing one or two layers from the cause. They are catalogued
 individually below (`pi`'s `set_model`, the invented `task_*` subtypes,
 `AskUserQuestion`'s `selectedOptions`, `requestedSchema` versus `requested_schema`,
-`pi`'s `agent_start` versus `agent_settled`, and reading `response` off an *error* envelope)
+`pi`'s `agent_start` versus `agent_settled`, reading `response` off an *error* envelope,
+and `pi`'s `message.timestamp` read in the wrong *unit* — `docs/agents.md` § `pi`)
 because the *specific* keys are what a reader needs. The general rule is the one above,
 plus three shapes worth knowing before writing any adapter:
+
+- **The right key in the wrong unit fails the same way, and is harder to catch.** The
+  eighth instance was not a misspelling: an integer timestamp read from the correct key
+  and divided as though it were microseconds yielded a plausible number that decoded to
+  1970, on 3880 records. A wrong key yields absent, which a presence check finds; a wrong
+  unit yields a *value*, which passes every such check. Establish a payload's units by
+  comparing the number against a sibling human-readable stamp, not by eyeballing its
+  magnitude.
 
 - **A type in a vendor's event union is not a promise that anything emits it.** Grep
   the implementation for emit sites, not the types for declarations — a declared-only
