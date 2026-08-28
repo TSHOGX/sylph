@@ -1,4 +1,9 @@
 # Rust
+#
+# The workspace root is where cargo puts build output now that `backend` is a member
+# rather than a standalone crate; `/backend/target/` stays because a bare
+# `cargo build` run from inside that directory still lands there.
+/target/
 /backend/target/
 
 # Next.js / Node.js (coming in Phase 2)
