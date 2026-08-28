@@ -231,24 +231,66 @@ not turn granularity.
 
 **It records no archived title**, so every row needs the opening-ask fallback.
 
-**Its native store has two field-spelling eras, cleanly split, and one unit bug that
-reads as a spelling bug.** *Measured 2026-08-28 over all 527 files in
-`~/.pi/agent/sessions/`, while scoping the parser port.*
+**Its native store has two field-spelling eras that landed field by field, plus two
+timestamp eras, and one unit bug that reads as a spelling bug.** *Measured 2026-08-28
+over all 527 files in `~/.pi/agent/sessions/`, while scoping the parser port.*
 
-The store renamed every multi-word key from snake_case to camelCase at a point in time:
-`parent_id`→`parentId`, `model_id`→`modelId`, `stop_reason`→`stopReason`,
-`error_message`→`errorMessage`. The census is **111 files snake_case-only, 120
-camelCase-only, and zero files mixing the two** — so this is a clean cutover, not a
-gradual migration, and an era can be decided once per file rather than per field.
-Occurrences: `parentId` 4015 against `parent_id` 339. `toolCallId` and `isError` occur
-1751 times each with **no** snake_case counterpart, so a snake_case-era file cannot hold
-a tool result at all — the era check and the tool-result path are not independent.
+The store renamed every multi-word key from snake_case to camelCase — `parent_id`→
+`parentId`, `model_id`→`modelId`, `stop_reason`→`stopReason`, `error_message`→
+`errorMessage`. **The rename was not atomic, and that is the fact a parser must be built
+around.** No file carries both spellings of the *same* field, but different fields flipped
+at different times, so 65 files hold snake `parent_id` beside camel `stopReason`. The
+switch points really are per field: `parent_id` is 111 files snake against 120 camel,
+`stop_reason` 25 against 185, `model_id` 46 against 120.
 
-Reading one spelling silently drops the other era, which is the usual shape of this
-defect. **Do not answer it with dual-spelling lookup**: § Compatibility forbids the
-alias, and an alias is precisely what makes the *next* rename unobservable. Detect the
-era, and fail loudly on a file that mixes spellings — that would falsify the census
-above, and a parser that half-reads such a file silently is worse than one that stops.
+So **resolve the spelling per field, never as one era per file.** A per-file era flag is
+unsound rather than merely coarse: for those 65 files no single era exists, and a reader
+choosing one spelling for the whole file gets `parent_id` right and `stopReason` wrong, or
+the reverse. Worth stating because the per-file shortcut is the obvious design and it
+passes on 462 of 527 files.
+
+Two traps around this same measurement. **The vendor's version field cannot
+discriminate** — `"version": 3` is on all 527 files in every era — so detection has to come
+from field presence, not from reading the header. And **take a key census by walking the
+parsed structure, never by grepping the serialized line**: these transcripts discuss field
+names, so a substring test matches words inside message *text* and reports keys a record
+does not have. That inflates exactly the count a port branches on, and it manufactured a
+phantom set of mixed files during this work.
+
+Do not answer any of it with dual-spelling lookup. § Compatibility forbids the alias, and
+an alias is what makes the *next* rename unobservable. Read field presence, and fail
+loudly on a record whose combination no known era emits.
+
+One shape fact falls out of the counts: `toolCallId`, `isError`, and `toolName` occur only
+in camelCase, on 63 files, with **no** snake_case counterpart — so a snake_case-era file
+cannot hold a tool result, and the spelling check is not independent of the tool-result
+path.
+
+The unit bug is the more consequential half and belongs to the *reader*, not the vendor.
+`message.timestamp` is **epoch milliseconds**, verified by `1776416849330` on an entry
+whose sibling ISO stamp is `2026-04-17T17:07:29.330418` — equal to the millisecond, on
+3880 records. trace-db's parser divided an integer timestamp by 1000 while its string
+branch returned milliseconds, so every per-event time it produced decoded to 1970. Two
+things made it survivable: the session-level start and end come from the *entry's* ISO
+string and were therefore right, so only the finer-grained per-event times were wrong;
+and the 67 remaining integers are the literal `1` written by test sessions
+(`"model":"claude-test"`), which look like a second unit era and are not. Do not sniff
+magnitude to choose a divisor — the vendor writes milliseconds, so read milliseconds.
+
+The second timestamp era compounds it. **746 of 4881 outer ISO stamps carry no UTC
+offset** (`2026-04-08T03:20:12.387333`), so an RFC3339 parse fails outright; and because
+the value is a string, an integer fallback never fires either, so those yield absent
+rather than a wrong number. This split *is* clean — 407 files naive-only, 120
+offset-aware-only, none mixing — but the naive window (2026-04-07 to 04-20) sits in the
+**middle** of the offset-aware range (2026-02-27 to 08-26), so a "before/after this date"
+heuristic gets it backwards. Parse both forms, and treat a missing offset as UTC.
+
+**A fork pointer is a file path, not a session id.** The session header carries
+`parentSession`/`parent_session` naming another `.jsonl` on disk. Under an identity of
+`(environment, agent, native_id)` it cannot be stored as given: it has to be resolved by
+reading the target file's header for its id, or recorded as unresolvable. trace-db's
+parser hardcoded `parent_session_id: None` and never read the field under either
+spelling, so pi fork lineage was dropped entirely rather than partially.
 
 The unit bug is the more consequential half and belongs to the *reader*, not the vendor.
 `message.timestamp` is **epoch milliseconds**, verified by `1776416849330` on an entry

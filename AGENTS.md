@@ -353,6 +353,22 @@ plus three shapes worth knowing before writing any adapter:
   comparing the number against a sibling human-readable stamp, not by eyeballing its
   magnitude.
 
+- **A census of a vendor's keys must walk the parsed structure, never grep the
+  serialized line.** Measured while scoping the `pi` parser port: a substring test for
+  `"parent_id"` over serialized records also matches those words appearing inside
+  message *text*, and agent transcripts discuss field names constantly — so the census
+  reported keys the records did not have, and inflated the very count the port branches
+  on. This is the defect class appearing in the *measurement* rather than in the code,
+  which is worth naming because a wrong measurement is harder to distrust than wrong
+  code: it produces a number, and a number reads as evidence.
+
+  The same pass showed why a vendor's own version field is not a shortcut. `pi` stamps
+  `"version": 3` on all 527 files across both spelling eras, so it discriminates
+  nothing; and because that store's rename landed *field by field*, there is no single
+  era per file to detect at all. Resolve such a spelling per field, and fail loudly on a
+  combination no known era emits — a per-file era flag is unsound rather than merely
+  coarse, and it passes on 462 of 527 files, which is exactly long enough to be believed.
+
 - **A type in a vendor's event union is not a promise that anything emits it.** Grep
   the implementation for emit sites, not the types for declarations — a declared-only
   event ships an adapter branch that never fires, and a branch that never fires is
