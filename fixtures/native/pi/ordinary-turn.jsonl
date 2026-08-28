@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"019f364f-c1e5-7e4f-a3e5-7c7ed13b17aa","timestamp":"2026-07-06T07:23:44.485Z","cwd":"/Users/hsw"}
+{"type":"model_change","id":"6ee4692f","parentId":null,"timestamp":"2026-07-06T07:23:44.502Z","provider":"huaweicloud","modelId":"glm-5.1"}
+{"type":"thinking_level_change","id":"77c493b5","parentId":"6ee4692f","timestamp":"2026-07-06T07:23:44.502Z","thinkingLevel":"off"}
+{"type":"model_change","id":"2223053d","parentId":"77c493b5","timestamp":"2026-07-06T07:23:48.362Z","provider":"huaweicloud","modelId":"glm-5.2"}
+{"type":"message","id":"1bd72215","parentId":"2223053d","timestamp":"2026-07-06T07:23:49.510Z","message":{"role":"user","content":[{"type":"text","text":"hi"}],"timestamp":1783322629508}}
+{"type":"message","id":"247354fd","parentId":"1bd72215","timestamp":"2026-07-06T07:23:51.332Z","message":{"role":"assistant","content":[{"type":"text","text":"Hi! How can I help you today?"}],"api":"openai-completions","provider":"huaweicloud","model":"glm-5.2","usage":{"input":1921,"output":11,"cacheRead":0,"cacheWrite":0,"totalTokens":1932,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1783322629556,"responseId":"2f64a5d66e64499193b0394f0d6b24d3"}}
