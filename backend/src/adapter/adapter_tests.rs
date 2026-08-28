@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use tokio::sync::mpsc::Receiver;
 
 use super::link::{Link, LinkConfig, LinkEvent};
-use super::wire::Capability;
+use sylph_protocol::{Capability, RequestKind, Risk};
 use crate::env::LocalEnvironment;
 
 /// Write an executable adapter from a Python body. Python rather than shell
@@ -99,14 +99,20 @@ async fn the_handshake_reports_the_agent_and_its_declared_capabilities() {
     assert_eq!(identity.agent_version.as_deref(), Some("9.9"));
     assert_eq!(identity.adapter, "fake/1.0.0");
     assert!(identity.can(Capability::Interrupt));
-    assert!(identity.can(Capability::Approval));
-    // Declared nothing about forking, so it must not be assumed capable.
-    assert!(!identity.can(Capability::Fork));
+    assert!(identity.can(Capability::Steer));
+    // Declared nothing about changing config, so it must not be assumed capable.
+    assert!(!identity.can(Capability::SetConfig));
     assert_eq!(identity.flags["model"].choices, vec!["fast", "slow"]);
 }
 
 /// One unmodelled capability name must not discard the ones beside it, or a
 /// newer adapter would lose abilities by mentioning a newer one.
+///
+/// The fixture declares five names of which **three** are unmodelled: the invented
+/// `unknown_future_thing`, plus `approval` and `slash`, which `Capability` deliberately
+/// no longer carries (`sylph_protocol::Capability` records why — measured, neither was
+/// ever read, and both are answered by the capability *surface* instead). So this now
+/// exercises the filtering against real retired names rather than only an invented one.
 #[tokio::test]
 async fn an_unknown_capability_name_does_not_discard_the_known_ones() {
     let tmp = TempDir::new().unwrap();
@@ -114,8 +120,8 @@ async fn an_unknown_capability_name_does_not_discard_the_known_ones() {
 
     let (link, _events) = establish(adapter, |_| {}).await;
 
+    assert!(link.identity().can(Capability::Interrupt));
     assert!(link.identity().can(Capability::Steer));
-    assert!(link.identity().can(Capability::Slash));
 }
 
 /// The payoff: a live command list from the agent, not from a descriptor an
@@ -275,9 +281,9 @@ async fn a_turn_can_raise_an_approval_be_answered_and_then_continue() {
     let LinkEvent::Request { id, request } = next_event(&mut events).await else {
         panic!("an approval must arrive as a request");
     };
-    assert_eq!(request.kind, "approval");
+    assert_eq!(request.kind, RequestKind::Approval);
     assert_eq!(request.tool.as_deref(), Some("Bash"));
-    assert_eq!(request.risk.as_deref(), Some("destructive"));
+    assert_eq!(request.risk, Some(Risk::Destructive));
     assert_eq!(request.detail.as_ref().unwrap()["command"], "rm -rf build");
 
     // Answered with edited input: "allow, but change the command" is a real

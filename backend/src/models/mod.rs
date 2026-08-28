@@ -1,4 +1,3 @@
-pub mod agent;
 pub mod event;
 pub mod incarnation;
 pub mod request;

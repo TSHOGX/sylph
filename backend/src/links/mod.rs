@@ -23,7 +23,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::adapter::link::{Link, LinkConfig, LinkEvent};
-use crate::adapter::wire::SessionCapabilities;
+use sylph_protocol::SessionCapabilities;
 use crate::db::JournalStore;
 use crate::env::Environment;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
@@ -74,11 +74,12 @@ pub struct LinkState {
     ///
     /// The distinction is not cosmetic: for an adopted session, what is reachable
     /// is decided by whatever second-party channel the vendor exposes, which is
-    /// per-agent and sometimes nothing at all. `docs/data-architecture.md` § One
-    /// link state, two typed capability facets is why that becomes two facets on
-    /// this struct rather than a third value of `attached` — the vendors do not
-    /// sort into three buckets, so a third variant would have to pick one of them
-    /// to represent and misreport the rest.
+    /// per-agent and sometimes nothing at all. `docs/architecture.md` § One link, two
+    /// typed capability facets is why that becomes two facets on this struct rather
+    /// than a third value of `attached` — the vendors do not sort into three buckets,
+    /// so a third variant would have to pick one of them to represent and misreport the
+    /// rest. `sylph_protocol::LinkFacets` is that shape, declared and not yet wired
+    /// here: `docs/roadmap.md` § Implementation order puts it in step 3.
     pub supports: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<SessionCapabilities>,
@@ -120,13 +121,20 @@ pub struct LinkFailure {
 #[error("No adapter registered for agent '{0}'; it was not discovered")]
 pub struct NoAdapter(pub String);
 
-/// Note what this vocabulary cannot yet say: both values describe *our own spawn*
-/// failing, so neither expresses "somebody else's process, running fine, not ours
-/// to drive" — the adopted session. That is a missing variant rather than a
-/// mislabelled one, and adding it is gated on the per-agent control table in
-/// `docs/data-architecture.md` § AFK is two capabilities, because the code a client
-/// acts on has to distinguish "no channel exists for this agent" from "a channel
-/// exists and the sitting human has not approved us".
+/// Note what this vocabulary cannot say: both values describe *our own spawn* failing,
+/// so neither expresses "somebody else's process, running fine, not ours to drive" — a
+/// session running in a terminal. That is a missing variant rather than a mislabelled
+/// one, and the per-agent control table it was gated on is now measured
+/// (`docs/architecture.md` § AFK degrades in a defined order, `docs/agents.md`
+/// § Capability matrix).
+///
+/// **Its replacement exists**: `sylph_protocol::UnavailableReason` carries `no_agent`,
+/// `environment_unreachable`, `not_ours_to_drive`, and `handshake_failed`, and
+/// `sylph_protocol::LinkFacets` splits the answer into `observe` and `control` so the
+/// observable-but-undrivable case is a state rather than a failure. This enum survives
+/// only until step 3 of `docs/roadmap.md` § Implementation order moves the server onto
+/// it, and it is not extended in the meantime — a fifth value here would be a second
+/// vocabulary for one fact.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkFailureCode {
@@ -797,7 +805,7 @@ impl LinkManager {
     /// Journaled first. An approval blocks the agent, so if the process dies
     /// between here and the publish, the record of what was being asked is what
     /// explains the stall — and it is answerable later from any frontend.
-    async fn absorb_request(&self, session_id: &str, adapter_id: &str, request: crate::adapter::AdapterRequest) {
+    async fn absorb_request(&self, session_id: &str, adapter_id: &str, request: sylph_protocol::Request) {
         let turn_id = self
             .store
             .running_turn_id(session_id)
@@ -811,7 +819,7 @@ impl LinkManager {
             session_id: session_id.to_string(),
             turn_id,
             adapter_request_id: adapter_id.to_string(),
-            kind: request.kind.clone(),
+            kind: request.kind.to_string(),
             tool: request.tool.clone(),
             tool_use_id: request.tool_use_id.clone(),
             title: request.title.clone(),
@@ -830,7 +838,7 @@ impl LinkManager {
                 .as_ref()
                 .and_then(|form| serde_json::to_string(form).ok()),
             default_option: request.default.clone(),
-            risk: request.risk.clone(),
+            risk: request.risk.map(|risk| risk.to_string()),
             allow_persistent: request.allow_persistent,
             expires_at_ms: request.expires_at_ms,
             status: "pending".to_string(),

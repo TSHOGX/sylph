@@ -22,9 +22,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, warn};
 
-use super::wire::{
-    parse_inbound, AdapterRequest, Capability, CapabilityFacets, FlagSpec, Inbound, Outbound,
-    SessionCapabilities,
+use super::wire::{parse_inbound, Inbound, Outbound};
+use sylph_protocol::{
+    AdapterError, Capability, CapabilityFacets, FlagSchema, Request, SessionCapabilities,
 };
 use crate::env::{Environment, ProcessSignal, ProcessSpec, Signal};
 
@@ -47,7 +47,7 @@ pub struct AdapterIdentity {
     pub agent_name: String,
     pub agent_version: Option<String>,
     pub supports: Vec<Capability>,
-    pub flags: HashMap<String, FlagSpec>,
+    pub flags: FlagSchema,
 }
 
 impl AdapterIdentity {
@@ -56,24 +56,30 @@ impl AdapterIdentity {
     }
 }
 
-/// An adapter refused a command, in its own words and with its own code.
+/// Turn a v3 refusal code off the wire into the typed one.
 ///
-/// A typed error rather than a formatted string because the two facts it carries have
-/// different audiences: `message` is for a person, and `code` decides which HTTP status
-/// and which UI affordance the refusal earns. `UNSUPPORTED_FIELD` means the control
-/// should not be offered; `INVALID_VALUE` means the control is fine and this one value
-/// is not — and answering the second with the first tells a user their agent cannot do
-/// something it does perfectly well.
+/// This is the *framing* half of the two-code rule and belongs here rather than in
+/// `sylph_protocol`: a string code exists only because an NDJSON boundary exists, and
+/// with adapters linked in an adapter constructs `sylph_protocol::AdapterError`
+/// directly and no parsing happens at all. So this function is transitional and goes
+/// away with the subprocess.
 ///
-/// Reached through `anyhow`'s `downcast_ref`, so the many layers between an adapter and
-/// an HTTP handler need no signature change to pass it along, and a caller that does
-/// not care keeps treating it as an opaque error.
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("{code}: {message}")]
-pub struct AdapterError {
-    /// The protocol's error code, as the adapter declared it.
-    pub code: String,
-    pub message: String,
+/// Note which direction the mapping is safe in. Anything that is not
+/// `INVALID_VALUE` becomes [`RefusalCode::UnsupportedField`], whose contract is "a
+/// client may disable the control" — deliberately, because that is what `ADAPTER_ERROR`
+/// and an unrecognized code already meant to the one call site that read them
+/// (`api/links.rs`). What is **not** acceptable is the reverse default: treating an
+/// unknown code as `InvalidValue` would report a genuinely missing option as a bad
+/// value, which leaves a user clicking a control that can never work.
+///
+/// The typed code is what travels from here on, recovered with `downcast_ref` rather
+/// than by parsing it back out of a message — the text is the adapter's and may be
+/// reworded, while the code is declared contract.
+fn refusal(code: &str, message: String) -> AdapterError {
+    match code {
+        "INVALID_VALUE" => AdapterError::invalid_value(message),
+        _ => AdapterError::unsupported_field(message),
+    }
 }
 
 /// Something that happened on a link, for whoever is driving the session.
@@ -82,7 +88,7 @@ pub enum LinkEvent {
     /// A normalized event to journal and publish.
     Event(serde_json::Value),
     /// The adapter is waiting on a human. Carries the id a resolve must echo.
-    Request { id: String, request: AdapterRequest },
+    Request { id: String, request: Request },
     /// The capability surface changed — a skill was edited, a plugin loaded.
     Capabilities(SessionCapabilities),
     /// The adapter exited. Terminal: no further events arrive on this link.
@@ -243,7 +249,7 @@ impl Link {
                                 // the text is the adapter's and may be reworded, while
                                 // the code is a declared part of the protocol.
                                 let _ = waiter.send(Err(anyhow::Error::new(
-                                    AdapterError { code, message },
+                                    refusal(&code, message),
                                 )));
                             } else {
                                 warn!("Adapter error for unknown command id {}: {}", id, message);
@@ -332,7 +338,7 @@ impl Link {
                 agent_name: String::new(),
                 agent_version: None,
                 supports: Vec::new(),
-                flags: HashMap::new(),
+                flags: FlagSchema::new(),
             },
             capabilities,
             native_session_id,
@@ -573,10 +579,6 @@ impl Link {
             input,
         })
         .await
-    }
-
-    pub async fn query(&self, what: &str) -> Result<serde_json::Value> {
-        self.call(Outbound::Query { what: what.to_string() }).await
     }
 
     /// Ask the adapter to exit, then make sure it did.

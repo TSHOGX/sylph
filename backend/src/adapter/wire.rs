@@ -1,665 +1,63 @@
-//! The `sylph.agent.v3` wire format.
+//! The `sylph.agent.v3` framing.
 //!
-//! NDJSON in both directions on a held-open duplex stream. See
-//! `docs/session-protocol.md`; this module is that document as types.
+//! NDJSON in both directions on a held-open duplex stream, and **nothing else**. The
+//! vocabulary this used to declare beside the framing now lives in `sylph-protocol`
+//! (`docs/session-protocol.md` § What changed): an adapter is a Rust trait, so a value
+//! describing an agent or a session is a type both sides link against, while a value
+//! describing how bytes are packed is this file.
 //!
-//! Two rules shape every declaration here, and both are what let an old server
-//! talk to a new adapter:
+//! This module is therefore **transitional**. `docs/roadmap.md` § Implementation order
+//! keeps it until step 4 gives the envagent `sylph.env.v1`, at which point framing
+//! belongs there — on the one boundary bytes genuinely cross — and this file goes away
+//! with the subprocess it frames.
+//!
+//! Two rules shape every declaration here, and both are what let an old server talk to
+//! a new adapter:
 //!
 //! * **Unknown message types are ignored, never fatal.** So the outer envelope
-//!   deserializes `t` first and the payload second, rather than as one closed
-//!   enum that would reject a line it merely does not recognize.
+//!   deserializes `t` first and the payload second, rather than as one closed enum that
+//!   would reject a line it merely does not recognize.
 //! * **Unknown fields are tolerated.** No `deny_unknown_fields` anywhere.
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use sylph_protocol::Request;
 
 /// The protocol version string exchanged in the handshake.
 pub const PROTOCOL: &str = "sylph.agent.v3";
 
 /// What this server can be asked to do by an adapter.
 ///
-/// Sent in `hello` so an adapter cannot raise a request kind nobody will answer.
-/// This is the one capability mismatch that would hang a session rather than
-/// degrade it: an agent blocked on an approval that no UI will ever render waits
-/// forever, so it is negotiated up front instead of discovered at raise time.
+/// Sent in `hello` so an adapter cannot raise a request kind nobody will answer. This
+/// is the one capability mismatch that would hang a session rather than degrade it: an
+/// agent blocked on an approval that no UI will ever render waits forever, so it is
+/// negotiated up front instead of discovered at raise time.
+///
+/// Its successor is the type system. `sylph_protocol::RequestKind` is a closed enum, so
+/// with adapters linked in an unanswerable kind is a compile error rather than a
+/// handshake field — which is why this constant does not move to the protocol crate.
 pub const SERVER_ACCEPTS: &[&str] = &["approval", "dialog", "elicitation", "choice"];
-
-/// Something an adapter says it can do. A closed vocabulary: unknown entries are
-/// ignored rather than rejected, so a newer adapter degrades to its known subset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Capability {
-    /// Can end a turn without ending the session.
-    Interrupt,
-    /// Accepts text mid-turn.
-    Steer,
-    /// Raises approval requests.
-    Approval,
-    /// Reports subagent trajectories.
-    Subagent,
-    /// Reports a live slash-command list.
-    Slash,
-    /// Accepts a typed config change on a live session.
-    SetConfig,
-    /// Answers context-usage queries.
-    Context,
-    /// Can fork a session.
-    Fork,
-}
-
-/// A flag an adapter declares, carried unchanged from the v1 `--describe`
-/// schema so an adapter declares its options in one place rather than two.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FlagSpec {
-    #[serde(default)]
-    pub choices: Vec<String>,
-    #[serde(default)]
-    pub description: String,
-}
-
-/// Whether a command is something the agent thinks about, or something the
-/// session *is*.
-///
-/// The distinction v2 lacked, and the reason `/model` answered with a paragraph:
-/// sent as prompt text to a headless CLI, a request to pick a model can only come
-/// back as prose, because there is no picker to open. A `Control` command instead
-/// names a [`ConfigOption`] the client renders directly.
-///
-/// Defaults to [`CommandKind::Prompt`], so an adapter that says nothing behaves
-/// exactly as it did before this field existed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CommandKind {
-    /// Delivered as a turn. Its output is durable history.
-    #[default]
-    Prompt,
-    /// Never a turn. Resolves against typed session config.
-    Control,
-}
-
-/// A slash command the agent itself reports.
-///
-/// On a real project the handshake returns dozens of these — skills, project
-/// commands, plugins — where v1's `--describe` returned the one or two an adapter
-/// author hand-wrote.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommandSpec {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    /// Free-form hint for what follows the command, e.g. `[target]`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arg_hint: Option<String>,
-    /// Where it came from: `skill`, `project`, `plugin`, `builtin`. Advisory,
-    /// used only for grouping in the UI.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    /// Prompt or control. Absent means prompt.
-    #[serde(default)]
-    pub kind: CommandKind,
-    /// For a control command, the [`ConfigOption`] it drives.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_id: Option<String>,
-    /// Other names the agent answers to for this command.
-    ///
-    /// Carried because agents ship them and a terminal honours them — `claude`
-    /// gives `/usage` the aliases `cost` and `stats`. A menu that ignores them
-    /// behaves unlike the terminal it is modelled on.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub aliases: Vec<String>,
-}
-
-/// One choice within a [`ConfigOption::Select`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigChoice {
-    pub value: String,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-/// Something adjustable on a live session.
-///
-/// The shape is ACP's `SessionConfigOption`, adopted rather than invented: it
-/// already covers `claude`'s model / effort / permission mode / output style,
-/// `pi`'s model / thinking level / queue modes, and `codex`'s approval policy.
-/// Two variants are enough for every knob those three actually expose.
-///
-/// `category` is advisory grouping — `model`, `effort`, `permission_mode`, or
-/// anything an agent invents — so a client groups by it without having to know the
-/// vocabulary. That openness is the point: the next agent's knobs render without a
-/// server or UI change.
-/// `rename_all_fields` is load-bearing, not tidiness: with only the container
-/// `rename_all`, the *variant names* are renamed but the fields inside them are
-/// not, so `currentValue` on the wire parses as `None` while everything still
-/// compiles and every other field works. A test caught it; review would not have.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
-pub enum ConfigOption {
-    Select {
-        id: String,
-        #[serde(default)]
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        category: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        current_value: Option<String>,
-        #[serde(default)]
-        options: Vec<ConfigChoice>,
-    },
-    Boolean {
-        id: String,
-        #[serde(default)]
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        category: Option<String>,
-        #[serde(default)]
-        current_value: bool,
-    },
-}
-
-impl ConfigOption {
-    pub fn id(&self) -> &str {
-        match self {
-            Self::Select { id, .. } | Self::Boolean { id, .. } => id,
-        }
-    }
-
-    /// Whether this option would accept `value`.
-    ///
-    /// A `select` accepts exactly the values it enumerated, and a `boolean` exactly a
-    /// JSON boolean. Checked for the same reason a request option is: an unrecognized
-    /// value reaches the vendor CLI, and what happens there is undefined — `pi`
-    /// answered a malformed model with `Model not found: undefined/undefined`, which
-    /// surfaced two layers away as a picker that appeared to do nothing.
-    ///
-    /// A `select` that enumerated nothing accepts anything, because that is an agent
-    /// declaring a free-form field rather than an empty choice — refusing every value
-    /// would make such an option unusable rather than safe.
-    pub fn accepts(&self, value: &serde_json::Value) -> bool {
-        match self {
-            Self::Select { options, .. } => {
-                if options.is_empty() {
-                    return value.is_string();
-                }
-                value
-                    .as_str()
-                    .is_some_and(|candidate| options.iter().any(|choice| choice.value == candidate))
-            }
-            Self::Boolean { .. } => value.is_boolean(),
-        }
-    }
-}
-
-/// A subagent definition the agent can delegate to.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubagentSpec {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-}
-
-/// The live capability surface of an open session.
-///
-/// Pushed rather than polled: a skill edited on disk or a plugin loading changes
-/// what the composer should offer, and a list the client refreshes on its own
-/// schedule is wrong for however long that schedule is.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionCapabilities {
-    #[serde(default)]
-    pub commands: Vec<CommandSpec>,
-    #[serde(default)]
-    pub subagents: Vec<SubagentSpec>,
-    /// Everything adjustable on this session, typed.
-    #[serde(default)]
-    pub config: Vec<ConfigOption>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_mode: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<i64>,
-}
-
-/// A capability update, addressed by facet.
-///
-/// Every field is an `Option` and **`None` means "not mentioned"**, which is the
-/// whole design. v2 carried the entire surface in one value and assigned it, so an
-/// adapter reporting a permission-mode change also declared that the session had no
-/// commands — and the symptom surfaced two layers away as a slash menu that would
-/// not open, long after the message that caused it.
-///
-/// Merging partial surfaces would have fixed that same bug at the same cost and
-/// left the hazard in place: a message about one part of the surface would still be
-/// *able* to speak for all of it, and the next adapter would rediscover it. Naming
-/// the facet is what makes silence mean silence.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CapabilityFacets {
-    #[serde(default)]
-    pub commands: Option<Vec<CommandSpec>>,
-    #[serde(default)]
-    pub subagents: Option<Vec<SubagentSpec>>,
-    #[serde(default)]
-    pub config: Option<Vec<ConfigOption>>,
-    #[serde(default)]
-    pub permission_mode: Option<String>,
-    #[serde(default)]
-    pub context_window: Option<i64>,
-}
-
-impl CapabilityFacets {
-    /// Whether this update mentions anything at all.
-    ///
-    /// An update naming no facet is a no-op rather than a clear, so a malformed or
-    /// empty payload cannot erase a surface by accident.
-    pub fn is_empty(&self) -> bool {
-        self.commands.is_none()
-            && self.subagents.is_none()
-            && self.config.is_none()
-            && self.permission_mode.is_none()
-            && self.context_window.is_none()
-    }
-
-    /// Apply the mentioned facets onto `surface`, leaving the rest alone.
-    pub fn apply_to(self, surface: &mut SessionCapabilities) {
-        if let Some(commands) = self.commands {
-            surface.commands = commands;
-        }
-        if let Some(subagents) = self.subagents {
-            surface.subagents = subagents;
-        }
-        if let Some(config) = self.config {
-            surface.config = config;
-        }
-        if let Some(mode) = self.permission_mode {
-            surface.permission_mode = Some(mode);
-        }
-        if let Some(window) = self.context_window {
-            surface.context_window = Some(window);
-        }
-    }
-}
-
-/// One choice within a [`FormField::Select`].
-///
-/// Separate from [`ConfigChoice`] despite the similar shape: a config choice names a
-/// setting's value and carries `name` for display, while this names an *answer* the
-/// agent authored. Merging them would tie the request vocabulary to the config
-/// vocabulary, and the two change for unrelated reasons.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FormChoice {
-    pub value: String,
-    /// Display text, when it differs from the value. Absent means render the value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    /// What choosing this means.
-    ///
-    /// Load-bearing rather than decorative on a question the agent authored:
-    /// "Tabs" and "Spaces" say far less than the sentences beside them, and that
-    /// difference is most of what makes a terminal's picker readable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-/// Whether a select takes one answer or several.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SelectMode {
-    One,
-    Many,
-}
-
-impl Default for SelectMode {
-    /// One, so a field that omits `mode` is single-select. The permissive default
-    /// matters in the safe direction: reading a single answer as a list would send
-    /// an agent an array where it expected a string.
-    fn default() -> Self {
-        Self::One
-    }
-}
-
-/// A free-text annotation a user may attach to an answer.
-///
-/// Distinct from the answer itself. `claude` carries these as `annotations[question]
-/// .notes` alongside the picked label, and the two are not interchangeable: a note
-/// explains or qualifies a pick, while replacing the pick with prose loses which
-/// option was chosen.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotesSpec {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placeholder: Option<String>,
-}
-
-/// One input a request wants collected.
-///
-/// `rename_all_fields` is required, not tidy: with only the container `rename_all`
-/// the *variant names* are renamed and the fields inside them are not, so
-/// `allowOther` on the wire parses as `false` while everything compiles and every
-/// non-variant field works. This is the same trap [`ConfigOption`] documents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
-pub enum FormField {
-    Select {
-        id: String,
-        #[serde(default)]
-        label: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-        #[serde(default)]
-        mode: SelectMode,
-        #[serde(default)]
-        choices: Vec<FormChoice>,
-        /// Whether an answer outside `choices` is allowed.
-        ///
-        /// `claude`'s question dialog always offers an "Other" row, and what a user
-        /// types there is the answer — not a note on one of the offered options. A
-        /// client must be able to send it, and the server must not refuse it.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        allow_other: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        other_label: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        notes: Option<NotesSpec>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        required: bool,
-    },
-    Text {
-        id: String,
-        #[serde(default)]
-        label: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        multiline: bool,
-        /// Text to start from, which the user edits. `pi` sends this for its
-        /// `editor` dialog, where discarding it would lose the draft being revised.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prefill: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        placeholder: Option<String>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        required: bool,
-    },
-}
-
-impl FormField {
-    pub fn id(&self) -> &str {
-        match self {
-            Self::Select { id, .. } | Self::Text { id, .. } => id,
-        }
-    }
-
-    fn is_required(&self) -> bool {
-        match self {
-            Self::Select { required, .. } | Self::Text { required, .. } => *required,
-        }
-    }
-
-    /// Whether this field accepts `value`, and why not when it does not.
-    ///
-    /// The error text names the field and what was wrong with the value rather than
-    /// saying the field is unknown: an error that names the wrong layer sends the
-    /// investigation to the wrong layer, which is exactly what made a refused config
-    /// write read as a dead control.
-    fn accepts(&self, value: &serde_json::Value) -> Result<(), String> {
-        match self {
-            Self::Select {
-                id,
-                mode,
-                choices,
-                allow_other,
-                ..
-            } => {
-                let offered = |candidate: &str| {
-                    *allow_other
-                        || choices.is_empty()
-                        || choices.iter().any(|choice| choice.value == candidate)
-                };
-
-                match mode {
-                    SelectMode::One => {
-                        let Some(candidate) = value.as_str() else {
-                            return Err(format!("'{id}' takes a single string answer"));
-                        };
-                        if !offered(candidate) {
-                            return Err(format!("'{candidate}' is not a choice '{id}' offered"));
-                        }
-                    }
-                    SelectMode::Many => {
-                        let Some(items) = value.as_array() else {
-                            return Err(format!("'{id}' takes a list of answers"));
-                        };
-                        for item in items {
-                            let Some(candidate) = item.as_str() else {
-                                return Err(format!("'{id}' takes a list of strings"));
-                            };
-                            if !offered(candidate) {
-                                return Err(format!("'{candidate}' is not a choice '{id}' offered"));
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Self::Text { id, .. } => {
-                if value.is_string() {
-                    Ok(())
-                } else {
-                    Err(format!("'{id}' takes text"))
-                }
-            }
-        }
-    }
-
-    /// Whether `value` counts as an answer for a `required` field.
-    ///
-    /// Empty is unanswered rather than answered-with-nothing: an agent that marked a
-    /// field required is blocked until it has something, and forwarding `""` would
-    /// report an answer it never received.
-    fn is_answered(value: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::String(text) => !text.trim().is_empty(),
-            serde_json::Value::Array(items) => !items.is_empty(),
-            serde_json::Value::Null => false,
-            _ => true,
-        }
-    }
-}
-
-/// The input a request wants collected, declared by the agent that raised it.
-///
-/// Declared rather than inferred, and that is the whole point. A client used to guess
-/// from `detail`'s field names, which cannot work: only the agent knows what it is
-/// asking for, so a question rendered with nowhere to type and an `elicitation`
-/// rendered as a read-only dump of its own placeholder. See
-/// `docs/session-protocol.md` § Request forms.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Form {
-    #[serde(default)]
-    pub fields: Vec<FormField>,
-}
-
-/// A client's answers to a [`Form`], as they travel on `resolve`'s `input`.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FormAnswer {
-    #[serde(default)]
-    pub values: std::collections::HashMap<String, serde_json::Value>,
-    #[serde(default)]
-    pub notes: std::collections::HashMap<String, String>,
-}
-
-impl Form {
-    pub fn field(&self, id: &str) -> Option<&FormField> {
-        self.fields.iter().find(|field| field.id() == id)
-    }
-
-    /// Whether `input` is a well-formed answer to this form.
-    ///
-    /// Validated here for the same reason `options` and a `set_config` value are: the
-    /// client renders whatever an agent it has never seen reported, so the server is
-    /// what keeps a malformed answer from reaching a vendor CLI whose handling of one
-    /// is undefined. Checked *before* the request is claimed, so a rejected answer
-    /// does not consume the single-winner UPDATE and leave the agent unanswerable.
-    pub fn validate(&self, input: Option<&serde_json::Value>) -> Result<(), String> {
-        let Some(input) = input else {
-            // No input at all is only an answer if nothing was required. A form whose
-            // fields are all optional is legitimately answerable by submitting it
-            // empty.
-            return match self.fields.iter().find(|field| field.is_required()) {
-                Some(field) => Err(format!("'{}' is required", field.id())),
-                None => Ok(()),
-            };
-        };
-
-        let answer: FormAnswer = serde_json::from_value(input.clone())
-            .map_err(|_| "the answer is not shaped like a form answer".to_string())?;
-
-        for (id, value) in &answer.values {
-            let Some(field) = self.field(id) else {
-                return Err(format!("'{id}' is not a field this request asked for"));
-            };
-            field.accepts(value)?;
-        }
-
-        for id in answer.notes.keys() {
-            match self.field(id) {
-                Some(FormField::Select { notes: Some(_), .. }) => {}
-                Some(_) => return Err(format!("'{id}' does not take notes")),
-                None => return Err(format!("'{id}' is not a field this request asked for")),
-            }
-        }
-
-        for field in self.fields.iter().filter(|field| field.is_required()) {
-            let answered = answer
-                .values
-                .get(field.id())
-                .is_some_and(FormField::is_answered);
-            if !answered {
-                return Err(format!("'{}' is required", field.id()));
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// An option offered on an adapter request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RequestOption {
-    pub id: String,
-    pub label: String,
-    /// Whether choosing this is a lasting decision rather than a one-off, so a
-    /// UI can mark "allow always" differently from "allow once".
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub persistent: bool,
-    /// What this option means, when the agent explained it.
-    ///
-    /// Load-bearing on a `choice`, where the agent authored the options and the
-    /// description is most of what makes them readable — "Tabs" and "Spaces" say far
-    /// less than the sentences beside them. Omitting the field here did not merely
-    /// fail to use it: the options are re-serialized from this struct on their way to
-    /// the journal, so a description the adapter sent was silently discarded before
-    /// any client could render it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-/// A question the agent needs a human to answer.
-///
-/// The inversion v1 could not express. Journaled rather than merely published,
-/// because a pending request is durable state: a client closing its laptop must
-/// not strand an agent forever.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdapterRequest {
-    /// `approval`, `dialog`, `elicitation`, `choice`.
-    pub kind: String,
-    /// The agent's own id for the tool call this concerns, when there is one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_use_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool: Option<String>,
-    #[serde(default)]
-    pub title: String,
-    /// What is actually being asked, shaped by `kind`. For an approval this is
-    /// the proposed tool input, which is also what an editing client sends back.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<serde_json::Value>,
-    #[serde(default)]
-    pub options: Vec<RequestOption>,
-    /// The input this request wants collected, when it declares one.
-    ///
-    /// Absent means the older behaviour, where a client renders `detail` and edits
-    /// whichever field it recognizes — which is right for an approval, whose whole
-    /// subject is one proposed tool input. See `docs/session-protocol.md`
-    /// § Request forms.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub form: Option<Form>,
-    /// Which option applies if the user declines to choose. Deliberately not
-    /// auto-applied by the server: a timeout that silently approves would remove
-    /// the user from the decision the protocol exists to give them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<String>,
-    /// `safe`, `destructive`, `network`. Advisory, for emphasis in the UI.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub risk: Option<String>,
-    /// Whether a lasting grant may be offered at all.
-    ///
-    /// `false` means a client must omit the "always allow" affordance entirely,
-    /// not merely de-emphasize it: `claude` sets it on asks where accepting always
-    /// would write a permission rule *broader than the ask itself*, so offering it
-    /// turns a narrow yes into a wide one the user never read. Defaults to `true`,
-    /// which keeps a minimal adapter correct.
-    #[serde(default = "default_true")]
-    pub allow_persistent: bool,
-    /// When the agent stops waiting, if it will.
-    ///
-    /// Advisory and never acted on by the server. `pi` auto-resolves a dialog when
-    /// its own timeout lapses, so a client with no deadline to show is racing a
-    /// clock it cannot see. The server does not apply a default when it passes —
-    /// that would remove the user from the decision this channel exists to give
-    /// them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at_ms: Option<i64>,
-}
-
-fn default_true() -> bool {
-    true
-}
 
 /// A line the adapter sent us.
 ///
-/// `t` is read as a string rather than matched by an untagged enum so an
-/// unrecognized type reaches [`Inbound::Unknown`] and is logged, instead of
-/// failing the whole line and taking the link down with it.
+/// `t` is read as a string rather than matched by an untagged enum so an unrecognized
+/// type reaches [`Inbound::Unknown`] and is logged, instead of failing the whole line
+/// and taking the link down with it.
 #[derive(Debug, Clone)]
 pub enum Inbound {
     /// A reply to one of our commands.
     Ok { id: String, body: serde_json::Value },
     /// A refusal of one of our commands.
-    Err { id: String, code: String, message: String },
+    Err {
+        id: String,
+        code: String,
+        message: String,
+    },
     /// The adapter is asking us something and is waiting.
-    Request { id: String, request: AdapterRequest },
+    Request { id: String, request: Request },
     /// A normalized event. Payload stays `Value` because the event vocabulary is
-    /// additive by design and this module must not be the thing that has to
-    /// learn a new kind.
+    /// additive by design and this module must not be the thing that has to learn a new
+    /// kind.
     Event { body: serde_json::Value },
     /// A recognized type we have no handling for, or one we do not know at all.
     Unknown { t: String },
@@ -667,8 +65,8 @@ pub enum Inbound {
 
 /// Parse one inbound NDJSON line.
 ///
-/// Returns `None` for a line that is not JSON at all — adapters may write
-/// diagnostics to stdout and the protocol tolerates it.
+/// Returns `None` for a line that is not JSON at all — adapters may write diagnostics
+/// to stdout and the protocol tolerates it.
 pub fn parse_inbound(line: &str) -> Option<Inbound> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     let t = value.get("t")?.as_str()?.to_string();
@@ -696,7 +94,7 @@ pub fn parse_inbound(line: &str) -> Option<Inbound> {
                 .to_string(),
         },
         "request" => {
-            let request = serde_json::from_value::<AdapterRequest>(value.clone()).ok()?;
+            let request = serde_json::from_value::<Request>(value.clone()).ok()?;
             Inbound::Request { id: id?, request }
         }
         "event" => Inbound::Event { body: value },
@@ -706,17 +104,16 @@ pub fn parse_inbound(line: &str) -> Option<Inbound> {
 
 /// A command we send to the adapter.
 ///
-/// Serialized by hand rather than derived, because `t` and `id` sit beside the
-/// payload's own fields at the top level of one flat object. A derived enum
-/// would nest them.
+/// Serialized by hand rather than derived, because `t` and `id` sit beside the payload's
+/// own fields at the top level of one flat object. A derived enum would nest them.
 #[derive(Debug, Clone)]
 pub enum Outbound {
     Hello,
     Open {
         workdir: String,
         session_id: Option<String>,
-        /// A path, or `""` for no injection. The empty string is meaningful:
-        /// it is how the native-session invariant is enforced server-side.
+        /// A path, or `""` for no injection. The empty string is meaningful: it is how
+        /// "no identity" is enforced server-side.
         soul: Option<String>,
         flags: HashMap<String, String>,
         permission_mode: Option<String>,
@@ -728,8 +125,8 @@ pub enum Outbound {
         command: Option<String>,
         args: HashMap<String, String>,
         /// Config overrides for this turn, sent with it rather than as separate
-        /// preceding calls: those were extra round trips with a window in between
-        /// where a turn could run under a mix of old and new settings.
+        /// preceding calls: those were extra round trips with a window in between where
+        /// a turn could run under a mix of old and new settings.
         config: HashMap<String, serde_json::Value>,
     },
     Interrupt,
@@ -737,24 +134,21 @@ pub enum Outbound {
         text: String,
         /// The turn this steer is meant for.
         ///
-        /// Without it, a steer racing a turn boundary is delivered into the *next*
-        /// turn: the message arrives, nothing errors, and it lands in the wrong
-        /// conversation. codex requires the same precondition.
+        /// Without it, a steer racing a turn boundary is delivered into the *next* turn:
+        /// the message arrives, nothing errors, and it lands in the wrong conversation.
+        /// codex requires the same precondition.
         expected_turn_id: Option<String>,
     },
     SetConfig {
         config_id: String,
         value: serde_json::Value,
     },
-    /// Answer an adapter request. `id` echoes the request's id, so this is the
-    /// one outbound message whose id is not ours to choose.
+    /// Answer an adapter request. `id` echoes the request's id, so this is the one
+    /// outbound message whose id is not ours to choose.
     Resolve {
         request_id: String,
         option: String,
         input: Option<serde_json::Value>,
-    },
-    Query {
-        what: String,
     },
     Close,
 }
@@ -762,8 +156,8 @@ pub enum Outbound {
 impl Outbound {
     /// Render as one NDJSON line, including the trailing newline.
     ///
-    /// `id` is supplied by the caller so correlation stays with whoever tracks
-    /// pending commands, rather than being minted here where it could collide.
+    /// `id` is supplied by the caller so correlation stays with whoever tracks pending
+    /// commands, rather than being minted here where it could collide.
     pub fn to_line(&self, id: &str) -> String {
         let mut object = serde_json::Map::new();
         object.insert("id".into(), serde_json::Value::String(id.to_string()));
@@ -848,18 +242,14 @@ impl Outbound {
                 option,
                 input,
             } => {
-                // Overwrites the caller's id on purpose: a resolve is addressed
-                // to the request it answers.
+                // Overwrites the caller's id on purpose: a resolve is addressed to the
+                // request it answers.
                 object.insert("id".into(), request_id.clone().into());
                 object.insert("option".into(), option.clone().into());
                 if let Some(input) = input {
                     object.insert("input".into(), input.clone());
                 }
                 "resolve"
-            }
-            Self::Query { what } => {
-                object.insert("what".into(), what.clone().into());
-                "query"
             }
             Self::Close => "close",
         };
@@ -874,7 +264,7 @@ impl Outbound {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use sylph_protocol::{Risk, SessionCapabilities};
 
     fn line_of(message: &Outbound, id: &str) -> serde_json::Value {
         let line = message.to_line(id);
@@ -889,17 +279,17 @@ mod tests {
         assert_eq!(value["t"], "hello");
         assert_eq!(value["id"], "h1");
         assert_eq!(value["protocol"], PROTOCOL);
-        // Advertising approval is what permits an adapter to raise one. An
-        // adapter that raises an unadvertised kind would block on a reply no UI
-        // produces, which is why this is asserted rather than assumed.
+        // Advertising approval is what permits an adapter to raise one. An adapter that
+        // raises an unadvertised kind would block on a reply no UI produces, which is
+        // why this is asserted rather than assumed.
         let accepts = value["accepts"].as_array().unwrap();
         assert!(accepts.iter().any(|a| a == "approval"));
     }
 
-    /// The empty string is a value, not an absence: it is how a native session
-    /// tells the adapter to inject nothing. Serializing it as a missing field
-    /// would let the adapter fall back to its default and inject an identity
-    /// into a preserved transcript.
+    /// The empty string is a value, not an absence: it is how a session with identity
+    /// injection off tells the adapter to inject nothing. Serializing it as a missing
+    /// field would let the adapter fall back to its default and inject an identity into
+    /// a preserved transcript.
     #[test]
     fn an_empty_soul_is_sent_as_an_empty_string_not_omitted() {
         let open = Outbound::Open {
@@ -917,8 +307,8 @@ mod tests {
 
     #[test]
     fn a_fresh_session_sends_an_explicit_null_rather_than_omitting_the_id() {
-        // Explicit null distinguishes "start fresh" from "field forgotten",
-        // which is the difference between a new context and a silent resume.
+        // Explicit null distinguishes "start fresh" from "field forgotten", which is
+        // the difference between a new context and a silent resume.
         let open = Outbound::Open {
             workdir: "/w".into(),
             session_id: None,
@@ -963,9 +353,9 @@ mod tests {
         assert!(value.get("config").is_none());
     }
 
-    /// Config rides along with the turn rather than arriving as separate calls
-    /// before it. The previous shape left a window where a turn could begin under a
-    /// mix of old and new settings.
+    /// Config rides along with the turn rather than arriving as separate calls before
+    /// it. The previous shape left a window where a turn could begin under a mix of old
+    /// and new settings.
     #[test]
     fn per_turn_config_travels_with_the_turn_that_needs_it() {
         let send = Outbound::Send {
@@ -979,8 +369,8 @@ mod tests {
         assert_eq!(value["config"]["model"], "sonnet");
     }
 
-    /// A resolve is addressed to the request it answers, so it must carry that
-    /// id even though every other outbound message uses the caller's.
+    /// A resolve is addressed to the request it answers, so it must carry that id even
+    /// though every other outbound message uses the caller's.
     #[test]
     fn a_resolve_is_addressed_to_the_request_not_to_a_new_command() {
         let resolve = Outbound::Resolve {
@@ -991,207 +381,33 @@ mod tests {
         let value = line_of(&resolve, "ignored-c12");
         assert_eq!(value["id"], "r4");
         assert_eq!(value["option"], "allow");
-        // Edited input is how "allow, but change the command" works — a real
-        // terminal affordance a yes/no dialog would drop.
+        // Edited input is how "allow, but change the command" works — a real terminal
+        // affordance a yes/no dialog would drop.
         assert_eq!(value["input"]["command"], "ls -la");
     }
 
+    /// The framing's job on a request is to hand off a whole `Request` to the
+    /// vocabulary's own parser. The vocabulary's tests pin its fields; this pins that
+    /// the envelope reaches it with its id intact.
     #[test]
-    fn an_approval_request_parses_with_its_options_and_proposed_input() {
+    fn a_request_line_parses_into_the_protocol_type() {
         let line = r#"{"t":"request","id":"r4","kind":"approval","toolUseId":"toolu_01",
             "tool":"Bash","title":"Run a shell command",
             "detail":{"command":"rm -rf build"},
-            "options":[{"id":"allow","label":"Allow once"},
-                       {"id":"allow_always","label":"Always","persistent":true}],
-            "default":"deny","risk":"destructive"}"#;
+            "options":[{"id":"allow","label":"Allow once"}],
+            "risk":"destructive"}"#;
         let Some(Inbound::Request { id, request }) = parse_inbound(line) else {
             panic!("must parse as a request");
         };
         assert_eq!(id, "r4");
-        assert_eq!(request.kind, "approval");
+        assert_eq!(request.id, "r4");
         assert_eq!(request.tool.as_deref(), Some("Bash"));
-        assert_eq!(request.tool_use_id.as_deref(), Some("toolu_01"));
-        assert_eq!(request.detail.unwrap()["command"], "rm -rf build");
-        assert_eq!(request.options.len(), 2);
-        assert!(request.options[1].persistent);
-        assert_eq!(request.risk.as_deref(), Some("destructive"));
+        assert_eq!(request.risk, Some(Risk::Destructive));
     }
 
-    /// A form is the input a request declares it wants, and every part of a field
-    /// has to survive the parse. `allowOther` is the one worth naming: it lives
-    /// inside an enum variant, where `rename_all` alone does not reach — it would
-    /// read as `false` while everything compiled, silently refusing the answer a
-    /// user typed into an "Other" row.
-    #[test]
-    fn a_request_form_parses_every_part_of_its_fields() {
-        let line = r#"{"t":"request","id":"r7","kind":"choice","title":"Two questions",
-            "form":{"fields":[
-              {"type":"select","id":"q:0","label":"Indentation?","mode":"one",
-               "choices":[{"value":"Tabs","description":"Tab characters"},
-                          {"value":"Spaces"}],
-               "allowOther":true,"notes":{"label":"Notes"}},
-              {"type":"select","id":"q:1","label":"Linters?","mode":"many",
-               "choices":[{"value":"ESLint"},{"value":"Clippy"}],"required":true},
-              {"type":"text","id":"why","label":"Why?","multiline":true,
-               "prefill":"because"}]},
-            "options":[{"id":"submit","label":"Submit"}]}"#;
-        let Some(Inbound::Request { request, .. }) = parse_inbound(line) else {
-            panic!("must parse as a request");
-        };
-        let form = request.form.expect("the form must parse");
-        assert_eq!(form.fields.len(), 3);
-
-        let FormField::Select {
-            mode,
-            allow_other,
-            choices,
-            notes,
-            ..
-        } = &form.fields[0]
-        else {
-            panic!("the first field is a select");
-        };
-        assert_eq!(*mode, SelectMode::One);
-        assert!(allow_other, "allowOther must survive the variant rename");
-        assert_eq!(choices[0].description.as_deref(), Some("Tab characters"));
-        assert!(choices[1].description.is_none());
-        assert!(notes.is_some());
-
-        let FormField::Select { mode, .. } = &form.fields[1] else {
-            panic!("the second field is a select");
-        };
-        assert_eq!(*mode, SelectMode::Many);
-
-        let FormField::Text {
-            multiline, prefill, ..
-        } = &form.fields[2]
-        else {
-            panic!("the third field is text");
-        };
-        assert!(multiline);
-        assert_eq!(prefill.as_deref(), Some("because"));
-    }
-
-    /// Absent means the older behaviour, which is what keeps every approval — and
-    /// every already-stored request — correct under the new code.
-    #[test]
-    fn a_request_without_a_form_declares_none() {
-        let line = r#"{"t":"request","id":"r8","kind":"approval","title":"x"}"#;
-        let Some(Inbound::Request { request, .. }) = parse_inbound(line) else {
-            panic!("must parse as a request");
-        };
-        assert!(request.form.is_none());
-    }
-
-    /// A field that omits `mode` is single-select. The default matters in the safe
-    /// direction: reading one answer as a list would hand an agent an array where it
-    /// expected a string.
-    #[test]
-    fn a_select_field_without_a_mode_takes_one_answer() {
-        let field: FormField =
-            serde_json::from_str(r#"{"type":"select","id":"q","choices":[{"value":"a"}]}"#)
-                .unwrap();
-        let FormField::Select { mode, .. } = &field else {
-            panic!("must parse as a select");
-        };
-        assert_eq!(*mode, SelectMode::One);
-    }
-
-    fn two_field_form() -> Form {
-        serde_json::from_str(
-            r#"{"fields":[
-                 {"type":"select","id":"q:0","mode":"one",
-                  "choices":[{"value":"Tabs"},{"value":"Spaces"}],
-                  "notes":{"label":"Notes"}},
-                 {"type":"select","id":"q:1","mode":"many",
-                  "choices":[{"value":"ESLint"},{"value":"Clippy"}]}]}"#,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn a_well_formed_answer_to_a_form_is_accepted() {
-        let form = two_field_form();
-        let answer = serde_json::json!({
-            "values": {"q:0": "Tabs", "q:1": ["ESLint", "Clippy"]},
-            "notes": {"q:0": "only for generated files"},
-        });
-        assert!(form.validate(Some(&answer)).is_ok());
-    }
-
-    /// The server refuses what the client should not have sent, for the same reason
-    /// it refuses an option the agent never offered: an unrecognized value reaching a
-    /// vendor CLI does something undefined, and the layer that is not at fault is the
-    /// one that gets debugged.
-    #[test]
-    fn an_answer_the_form_did_not_ask_for_is_refused() {
-        let form = two_field_form();
-
-        let unknown = serde_json::json!({"values": {"nope": "Tabs"}});
-        assert!(form.validate(Some(&unknown)).is_err());
-
-        // A single-select handed a list, and a multi-select handed a bare string.
-        // Either would reach the adapter as the wrong JSON type.
-        let listed = serde_json::json!({"values": {"q:0": ["Tabs"]}});
-        assert!(form.validate(Some(&listed)).is_err());
-        let scalar = serde_json::json!({"values": {"q:1": "ESLint"}});
-        assert!(form.validate(Some(&scalar)).is_err());
-
-        // A value outside `choices` on a field that did not permit one.
-        let invented = serde_json::json!({"values": {"q:0": "Semicolons"}});
-        assert!(form.validate(Some(&invented)).is_err());
-
-        // Notes on a field that never offered them.
-        let noted = serde_json::json!({"values": {}, "notes": {"q:1": "hmm"}});
-        assert!(form.validate(Some(&noted)).is_err());
-    }
-
-    /// `allowOther` is what the terminal's "Other" row sends, and it is an answer
-    /// rather than a note — so a value outside `choices` has to be accepted where the
-    /// agent said it may be.
-    #[test]
-    fn a_field_allowing_other_accepts_a_value_it_never_offered() {
-        let form: Form = serde_json::from_str(
-            r#"{"fields":[{"type":"select","id":"q","mode":"one",
-                 "choices":[{"value":"Tabs"}],"allowOther":true}]}"#,
-        )
-        .unwrap();
-        let answer = serde_json::json!({"values": {"q": "Tabs in Makefiles only"}});
-        assert!(form.validate(Some(&answer)).is_ok());
-    }
-
-    /// Empty is unanswered, not answered-with-nothing. An agent that marked a field
-    /// required is blocked until it has something, and forwarding `""` would report
-    /// an answer it never received.
-    #[test]
-    fn a_required_field_must_actually_be_answered() {
-        let form: Form = serde_json::from_str(
-            r#"{"fields":[{"type":"text","id":"why","required":true}]}"#,
-        )
-        .unwrap();
-
-        assert!(form.validate(None).is_err());
-        assert!(form
-            .validate(Some(&serde_json::json!({"values": {}})))
-            .is_err());
-        assert!(form
-            .validate(Some(&serde_json::json!({"values": {"why": "   "}})))
-            .is_err());
-        assert!(form
-            .validate(Some(&serde_json::json!({"values": {"why": "because"}})))
-            .is_ok());
-    }
-
-    /// A form whose fields are all optional is legitimately answerable by submitting
-    /// it empty, so no input at all cannot be a blanket refusal.
-    #[test]
-    fn an_all_optional_form_accepts_an_empty_answer() {
-        assert!(two_field_form().validate(None).is_ok());
-    }
-
-    /// The rule that makes version skew survivable: a message type this server
-    /// has never heard of is reported, not fatal. Rejecting the line would take
-    /// the whole link down over a field the adapter was free to add.
+    /// The rule that makes version skew survivable: a message type this server has
+    /// never heard of is reported, not fatal. Rejecting the line would take the whole
+    /// link down over a field the adapter was free to add.
     #[test]
     fn an_unknown_message_type_is_surfaced_rather_than_failing_the_line() {
         let Some(Inbound::Unknown { t }) = parse_inbound(r#"{"t":"telemetry","id":"x"}"#) else {
@@ -1220,8 +436,8 @@ mod tests {
         assert!(parse_inbound(r#"{"id":"x","text":"no type here"}"#).is_none());
     }
 
-    /// An `ok`/`err` with no id cannot be correlated to anything, so it is
-    /// dropped rather than matched against an arbitrary pending command.
+    /// An `ok`/`err` with no id cannot be correlated to anything, so it is dropped
+    /// rather than matched against an arbitrary pending command.
     #[test]
     fn a_reply_without_an_id_is_dropped_rather_than_mismatched() {
         assert!(parse_inbound(r#"{"t":"ok","adapter":"claude/1"}"#).is_none());
@@ -1240,33 +456,28 @@ mod tests {
         assert_eq!(message, "model unavailable");
     }
 
+    /// The whole-surface payload an `open` reply carries has to parse off the same flat
+    /// object the framing produced, which is what makes `open` two round trips rather
+    /// than one.
     #[test]
-    fn capabilities_default_to_empty_so_a_minimal_adapter_is_usable() {
-        let caps: SessionCapabilities = serde_json::from_str("{}").unwrap();
-        assert!(caps.commands.is_empty());
-        assert!(caps.config.is_empty());
-        assert!(caps.permission_mode.is_none());
-    }
-
-    #[test]
-    fn an_unrecognized_capability_string_is_ignored_not_a_parse_failure() {
-        // A newer adapter naming an ability we do not model degrades to its
-        // known subset instead of failing the handshake.
-        let declared: Vec<Capability> =
-            serde_json::from_str(r#"["interrupt","time_travel","steer"]"#)
-                .map(|v: Vec<serde_json::Value>| {
-                    v.into_iter()
-                        .filter_map(|item| serde_json::from_value(item).ok())
-                        .collect()
-                })
-                .unwrap();
-        assert_eq!(declared, vec![Capability::Interrupt, Capability::Steer]);
+    fn an_open_reply_parses_its_capability_surface_off_the_flat_envelope() {
+        let caps: SessionCapabilities = serde_json::from_str(
+            r#"{"t":"ok","id":"o1","sessionId":"native-abc",
+                "commands":[{"name":"verify","source":"skill"}],
+                "permissionMode":"default","contextWindow":200000}"#,
+        )
+        .unwrap();
+        assert_eq!(caps.commands[0].name, "verify");
+        assert_eq!(caps.context_window, Some(200_000));
     }
 
     #[test]
     fn a_set_config_command_names_the_option_and_its_value() {
         let value = line_of(
-            &Outbound::SetConfig { config_id: "model".into(), value: "opus-5".into() },
+            &Outbound::SetConfig {
+                config_id: "model".into(),
+                value: "opus-5".into(),
+            },
             "s1",
         );
         assert_eq!(value["t"], "set_config");
@@ -1274,223 +485,27 @@ mod tests {
         assert_eq!(value["value"], "opus-5");
     }
 
-    /// A value a `select` did not enumerate is refused.
-    ///
-    /// The reason this is validated at all: an unrecognized value reaches the vendor
-    /// CLI, and `pi` answered a malformed model with `Model not found:
-    /// undefined/undefined` — an error naming fields no user ever saw, three layers
-    /// from where anyone could read it. The approval path has always checked its
-    /// option against what was offered; this closes the same gap for config.
-    #[test]
-    fn a_select_accepts_only_the_values_it_enumerated() {
-        let option: ConfigOption = serde_json::from_str(
-            r#"{"type":"select","id":"model","currentValue":"a",
-                "options":[{"value":"a"},{"value":"b"}]}"#,
-        )
-        .unwrap();
-
-        assert!(option.accepts(&json!("a")));
-        assert!(option.accepts(&json!("b")));
-        assert!(!option.accepts(&json!("c")));
-        // Not a string at all: a client sending the wrong JSON type is as wrong as one
-        // sending an unknown name, and for the same reason.
-        assert!(!option.accepts(&json!(true)));
-        assert!(!option.accepts(&json!(null)));
-    }
-
-    /// An enumerated-nothing `select` is a free-form field, not an empty choice.
-    ///
-    /// Refusing every value there would make such an option unusable rather than safe.
-    #[test]
-    fn a_select_with_no_choices_accepts_any_string() {
-        let option: ConfigOption = serde_json::from_str(
-            r#"{"type":"select","id":"cwd","options":[]}"#,
-        )
-        .unwrap();
-
-        assert!(option.accepts(&json!("/tmp/anywhere")));
-        assert!(!option.accepts(&json!(7)));
-    }
-
-    #[test]
-    fn a_boolean_accepts_only_a_json_boolean() {
-        let option: ConfigOption =
-            serde_json::from_str(r#"{"type":"boolean","id":"fastMode"}"#).unwrap();
-
-        assert!(option.accepts(&json!(true)));
-        assert!(option.accepts(&json!(false)));
-        // Notably not the *strings* — a client sending "true" is sending something the
-        // adapter would have to guess about.
-        assert!(!option.accepts(&json!("true")));
-        assert!(!option.accepts(&json!(1)));
-    }
-
-    /// Two providers offering the same model are two distinct values.
-    ///
-    /// Measured on `pi` 0.84.3: `deepseek-v4-pro` and `glm-5.2` are each offered by two
-    /// providers, so a bare id was not a unique value — which is what made two rows
-    /// read as current at once. Whatever an adapter does to disambiguate, both spellings
-    /// have to survive validation independently, or one provider becomes unreachable.
-    #[test]
-    fn provider_qualified_values_are_each_accepted_on_their_own() {
-        let option: ConfigOption = serde_json::from_str(
-            r#"{"type":"select","id":"model","currentValue":"ikun-glm glm-5.2",
-                "options":[{"value":"ikun-glm glm-5.2"},
-                           {"value":"huaweicloud glm-5.2"}]}"#,
-        )
-        .unwrap();
-
-        assert!(option.accepts(&json!("ikun-glm glm-5.2")));
-        assert!(option.accepts(&json!("huaweicloud glm-5.2")));
-        // The bare id is now nobody's value, so it must not slip through.
-        assert!(!option.accepts(&json!("glm-5.2")));
-    }
-
-    fn prompt_command(name: &str) -> CommandSpec {
-        CommandSpec {
-            name: name.to_string(),
-            description: String::new(),
-            arg_hint: None,
-            source: None,
-            kind: CommandKind::Prompt,
-            config_id: None,
-            aliases: vec![],
-        }
-    }
-
-    /// The regression this protocol version exists for.
-    ///
-    /// A partial update used to be applied by assigning the whole surface, so an
-    /// adapter reporting only a permission-mode change also declared that the
-    /// session had no slash commands. On a real project that erased 46 of them, and
-    /// the symptom surfaced two layers away as a composer menu that would not open.
-    #[test]
-    fn a_facet_update_leaves_the_facets_it_does_not_mention_alone() {
-        let mut surface = SessionCapabilities {
-            commands: vec![prompt_command("verify")],
-            subagents: vec![SubagentSpec { name: "Explore".into(), description: String::new() }],
-            config: vec![],
-            permission_mode: Some("default".into()),
-            context_window: Some(1_000_000),
-        };
-
-        let facets: CapabilityFacets =
-            serde_json::from_str(r#"{"permissionMode":"plan"}"#).unwrap();
-        facets.apply_to(&mut surface);
-
-        assert_eq!(surface.permission_mode.as_deref(), Some("plan"));
-        assert_eq!(surface.commands.len(), 1, "commands must survive a mode-only update");
-        assert_eq!(surface.subagents.len(), 1);
-        assert_eq!(surface.context_window, Some(1_000_000));
-    }
-
-    /// An explicitly empty list is a real value: an agent whose plugins were
-    /// unloaded genuinely has no commands, and that must stay expressible.
-    #[test]
-    fn an_explicitly_empty_facet_does_clear_that_facet() {
-        let mut surface =
-            SessionCapabilities { commands: vec![prompt_command("verify")], ..Default::default() };
-        let facets: CapabilityFacets = serde_json::from_str(r#"{"commands":[]}"#).unwrap();
-        facets.apply_to(&mut surface);
-        assert!(surface.commands.is_empty());
-    }
-
-    /// Distinguishing "said nothing" from "said empty" is the whole mechanism, so it
-    /// is asserted directly rather than only through `apply_to`.
-    #[test]
-    fn a_facet_update_naming_nothing_is_a_no_op() {
-        let facets: CapabilityFacets = serde_json::from_str("{}").unwrap();
-        assert!(facets.is_empty());
-        let named: CapabilityFacets = serde_json::from_str(r#"{"commands":[]}"#).unwrap();
-        assert!(!named.is_empty(), "an empty list is still a statement about commands");
-    }
-
-    /// Absent `kind` means prompt, so an adapter that never heard of the field
-    /// behaves exactly as it did before the field existed.
-    #[test]
-    fn a_command_with_no_kind_is_a_prompt_command() {
-        let command: CommandSpec =
-            serde_json::from_str(r#"{"name":"verify","description":"check it"}"#).unwrap();
-        assert_eq!(command.kind, CommandKind::Prompt);
-        assert!(command.config_id.is_none());
-    }
-
-    #[test]
-    fn a_control_command_names_the_config_option_it_drives() {
-        let command: CommandSpec = serde_json::from_str(
-            r#"{"name":"model","kind":"control","configId":"model","aliases":["m"]}"#,
-        )
-        .unwrap();
-        assert_eq!(command.kind, CommandKind::Control);
-        assert_eq!(command.config_id.as_deref(), Some("model"));
-        assert_eq!(command.aliases, vec!["m"]);
-    }
-
-    #[test]
-    fn a_select_config_option_carries_its_choices_and_current_value() {
-        let option: ConfigOption = serde_json::from_str(
-            r#"{"type":"select","id":"model","name":"Model","category":"model",
-                "currentValue":"sonnet",
-                "options":[{"value":"sonnet","name":"Sonnet 5"}]}"#,
-        )
-        .unwrap();
-        assert_eq!(option.id(), "model");
-        let ConfigOption::Select { current_value, options, .. } = &option else {
-            panic!("must parse as a select");
-        };
-        assert_eq!(current_value.as_deref(), Some("sonnet"));
-        assert_eq!(options[0].name, "Sonnet 5");
-    }
-
-    /// Absent means allowed, so a minimal adapter that never sets it stays correct;
-    /// an explicit `false` is what forbids the affordance.
-    /// A `choice`'s options carry the agent's own explanations, and they must survive
-    /// the trip through this struct: the options are re-serialized from here into the
-    /// journal, so a field missing from the type is a field the client never sees.
-    /// That is how the descriptions on an AskUserQuestion were being dropped —
-    /// silently, with the adapter sending them correctly.
-    #[test]
-    fn an_option_keeps_the_explanation_the_agent_wrote_for_it() {
-        let line = r#"{"t":"request","id":"r7","kind":"choice","title":"Indentation?",
-            "options":[{"id":"option:0","label":"Tabs","description":"Use tab characters"},
-                       {"id":"option:1","label":"Spaces"}]}"#;
-        let Some(Inbound::Request { request, .. }) = parse_inbound(line) else {
-            panic!("must parse as a request");
-        };
-        assert_eq!(request.options[0].description.as_deref(), Some("Use tab characters"));
-        assert!(request.options[1].description.is_none());
-
-        // The round trip is the actual promise: this is what reaches the journal.
-        let json = serde_json::to_value(&request.options).unwrap();
-        assert_eq!(json[0]["description"], "Use tab characters");
-        assert!(json[1].get("description").is_none(), "an absent one stays absent");
-    }
-
-    #[test]
-    fn an_approval_may_forbid_offering_a_lasting_grant() {
-        let permissive: AdapterRequest =
-            serde_json::from_str(r#"{"kind":"approval","title":"x"}"#).unwrap();
-        assert!(permissive.allow_persistent);
-
-        let narrow: AdapterRequest =
-            serde_json::from_str(r#"{"kind":"approval","title":"x","allowPersistent":false}"#)
-                .unwrap();
-        assert!(!narrow.allow_persistent);
-    }
-
     /// A steer names the turn it was written for, so one racing a turn boundary is
     /// refused rather than delivered into the next conversation.
     #[test]
     fn a_steer_carries_the_turn_the_client_believed_was_running() {
         let value = line_of(
-            &Outbound::Steer { text: "actually, stop".into(), expected_turn_id: Some("t7".into()) },
+            &Outbound::Steer {
+                text: "actually, stop".into(),
+                expected_turn_id: Some("t7".into()),
+            },
             "c4",
         );
         assert_eq!(value["t"], "steer");
         assert_eq!(value["expectedTurnId"], "t7");
 
-        let unscoped =
-            line_of(&Outbound::Steer { text: "hi".into(), expected_turn_id: None }, "c5");
+        let unscoped = line_of(
+            &Outbound::Steer {
+                text: "hi".into(),
+                expected_turn_id: None,
+            },
+            "c5",
+        );
         assert!(unscoped.get("expectedTurnId").is_none());
     }
 
