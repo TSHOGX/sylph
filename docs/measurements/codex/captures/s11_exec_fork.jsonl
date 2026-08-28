@@ -1,0 +1,4 @@
+{"t": 0.171, "raw": "{\"type\":\"thread.started\",\"thread_id\":\"01a0462e-3725-7ab0-aac7-afeb2443fde8\"}"}
+{"t": 0.179, "raw": "{\"type\":\"turn.started\"}"}
+{"t": 4.458, "raw": "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"agent_message\",\"text\":\"forked\"}}"}
+{"t": 4.694, "raw": "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":42149,\"cached_input_tokens\":37888,\"cache_write_input_tokens\":0,\"output_tokens\":140,\"reasoning_output_tokens\":74}}"}

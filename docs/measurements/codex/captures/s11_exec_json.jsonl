@@ -1,0 +1,6 @@
+{"t": 3.301, "raw": "{\"type\":\"thread.started\",\"thread_id\":\"01a0462d-eee7-7ec1-96e3-2d9bb64f031d\"}"}
+{"t": 4.072, "raw": "{\"type\":\"turn.started\"}"}
+{"t": 9.918, "raw": "{\"type\":\"item.started\",\"item\":{\"id\":\"item_0\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'echo hello-exec'\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}"}
+{"t": 9.94, "raw": "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'echo hello-exec'\",\"aggregated_output\":\"hello-exec\\n\",\"exit_code\":0,\"status\":\"completed\"}}"}
+{"t": 12.803, "raw": "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"ok\"}}"}
+{"t": 13.619, "raw": "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":20983,\"cached_input_tokens\":17920,\"cache_write_input_tokens\":0,\"output_tokens\":74,\"reasoning_output_tokens\":24}}"}

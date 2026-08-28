@@ -434,6 +434,27 @@ only values it has watched the vendor apply as given. Writing the requested valu
 the adapter the authority on a fact only the vendor holds, and the surface then
 reported a policy the session was not running under.
 
+**A second vendor confirms it, and adds the worse case: a value outside the enum is
+accepted and quietly means "no".** Measured on `codex-cli` 0.150.1. Its approval decision
+enum is `accept` | `acceptForSession` | `decline` | `cancel`; sending `"approved"` — a
+plausible guess, and not in the enum — produced **no error at any layer**. The JSON-RPC
+reply was accepted, the turn reported `completed`, and the command silently did not run.
+Measured three ways: `accept` gave `status: completed` with `exitCode: 0` after 72 ms of
+real execution, `decline` gave `declined`, and the bogus token gave `failed` in 3 ms. So
+an adapter that guesses this token ships an approval channel that refuses **everything**
+while every observable layer reports success, and the only difference is a status two
+levels down inside an item. Read such an enum out of the vendor's schema; never infer the
+word from what it obviously ought to be.
+
+The same CLI is *inconsistent* about which fields it validates, which decides where
+validation lives. Enum-typed fields (`approvalPolicy`, `personality`) refuse a bad value
+and list the valid ones — those map to `INVALID_VALUE`. But `effort` is typed as a bare
+non-empty string, so `"banana"` is accepted, **echoed back as the current value**, and
+fails only when a turn runs; a nonexistent model behaves the same; and an unknown option
+name is accepted silently, so the vendor offers no `UNSUPPORTED_FIELD` signal at all.
+Anything not enum-typed in the schema must be validated adapter-side against what the
+vendor enumerates, or a refused write is indistinguishable from an applied one.
+
 **A launch flag gating a runtime-mutable value bets the user never changes it.**
 `--permission-prompt-tool stdio` can only be asked for on the command line, while the
 mode it serves changes through `set_permission_mode` — so gating it on the *launch*

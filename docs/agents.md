@@ -46,24 +46,35 @@ failures that mechanism produced.
 
 ## Capability matrix
 
-*Measured 2026-08-27 against `claude` 2.1.247, `codex`, `pi` 0.84.3.*
+*Measured against `claude` 2.1.247 and `pi` 0.84.3 on 2026-08-27, and `codex-cli`
+0.150.1 on 2026-08-28. Every row names a version, because a measurement without one
+goes stale invisibly.*
 
 | | `claude` | `codex` | `pi` |
 | --- | --- | --- | --- |
 | dictate session id | `--session-id <uuid>` | assigns its own, reports it | `--session-id <id>`, creates if missing |
-| resume | `-r <id>` | `resume <id>`, `exec resume` | `--session-id <id>` |
-| fork | — | `exec fork <id>` | — |
+| resume | `-r <id>` | `resume <id>`, `exec resume`, `thread/resume` | `--session-id <id>` |
+| fork | — | `exec fork <id>`, `thread/fork` | — |
 | native store | JSONL per session | `rollout-*.jsonl` | JSONL per session |
 | mid-turn flush | tool-call and content-block boundaries | item completion | every `message_end` |
-| second-party control | authenticated per-process UDS — **delivers, cannot drive** | app-server daemon: `remote-control pair`, `queue --thread` | **none** — stdio only |
+| second-party control | authenticated per-process UDS — **delivers, cannot drive** | app-server: **fully drivable**, 148 methods incl. interrupt and steer | **none** — stdio only |
+| second-party observe | — | explicit `thread/resume`; independent of control | — |
+| forwards delegate interior | only for built-in `Task` | **yes**, with the child's `threadId` | no delegation on the wire at all |
 | slash commands | yes, project-dependent | no command concept | yes |
-| typed config | model, effort, permission mode, output style | approval policy | model, thinking level, queue modes |
+| typed config | model, effort, permission mode, output style | model, effort, approval policy, personality, sandbox, cwd | model, thinking level, queue modes |
 
-Two things to read off this table rather than from prose. The control column is why
+Three things to read off this table rather than from prose. The control column is why
 `docs/architecture.md` makes control a facet that can report unavailable with a reason:
-one of three agents is fully drivable by a second party, one is not drivable at all,
-and one is in between. And the flush column is why `watch` is offerable at all — all
-three write mid-turn, so an observer sees progress rather than only outcomes.
+`codex` is fully drivable by a second party, `pi` is not drivable at all, and `claude`
+is in between — its socket delivers a message but cannot steer a turn. The flush column
+is why `watch` is offerable at all: all three write mid-turn, so an observer sees
+progress rather than only outcomes.
+
+The third is the observe row, and it is why the two facets are **separate** rather than
+one "reachable" flag. `codex` splits them natively — a second client must call
+`thread/resume` to receive events, and can drive a turn without ever subscribing. So
+observation and control are independently available in a real vendor, not just in
+Sylph's model of one.
 
 ## `claude`
 
@@ -162,12 +173,51 @@ is the point: the risk in reading a vendor store is not a crash, it is a plausib
 
 ## `codex`
 
+*Measured 2026-08-28 against `codex-cli 0.150.1`. The capture scripts and raw frames
+behind every claim in this section live in the parser-port measurement set; each numbered
+`sNN` probe is re-runnable.*
+
 **The strongest second-party surface of the three, and the reason the control facet is
-worth having.** A shared local app-server daemon, `remote-control start|stop|pair` with
-short-lived pairing codes, and `queue --thread <uuid> --message <text>` accepting
-`--remote ws://|wss://|unix://` with bearer auth. Sylph's own pairing flow
-(`docs/environments.md`) is modelled on this, which is evidence the shape works rather
-than a guess.
+worth having** — by a wider margin than this section used to claim. The app-server
+exposes **148 client request methods** in its own generated schema, including
+`turn/interrupt`, `turn/steer`, `thread/settings/update`, `thread/fork`, `thread/resume`,
+`thread/unsubscribe`, and `config/value/write`. Interrupt and steer were both measured
+driving a live turn, so **a codex `control` facet declares itself full**, not queue-only.
+
+`turn/steer` requires an `expectedTurnId` and refuses a stale one (`expected active turn
+id X but found Y`), which is the mid-turn precondition Sylph's own protocol asks for.
+`thread/queue/add` additionally requires an undocumented `clientUserMessageId`.
+
+**`remote-control` is not the door an envagent uses.** It is gated twice — `remote control
+requires ChatGPT authentication; API key auth is not supported`, plus a managed
+standalone install — while `app-server --listen unix://PATH` has neither gate. The pairing
+flow is still the shape `docs/environments.md` models itself on; it is just not the
+transport.
+
+**Observation requires an explicit subscribe, and control does not.** A second client
+attached to the same daemon sees **zero** `item/*` events until it calls `thread/resume`
+— including for a turn it started itself. After resuming, its event stream is identical
+to the first client's; `thread/unsubscribe` returns it to silence **while leaving control
+working**, and an unsubscribed client was measured interrupting the other's turn. That
+asymmetry is `docs/architecture.md`'s two facets implemented natively. A thread with no
+completed turn is unresumable (`no rollout found for thread id`), so observation depends
+on a persisted rollout.
+
+**Approvals fan out to every subscriber, arrival *and* departure.** A
+`item/commandExecution/requestApproval` reached both attached clients at the same
+timestamp, and `serverRequest/resolved` was published to both when one answered. That is
+the shape `AGENTS.md` records Sylph getting wrong in its own request handling — announcing
+arrival without announcing departure — already correct here.
+
+**An out-of-enum approval decision is accepted and silently denies the command.** The
+enum is `accept` | `acceptForSession` | `decline` | `cancel`. Sending `"approved"`
+returned **no error at any layer**: the JSON-RPC reply was accepted, the turn reported
+`completed`, and only the command's own `status` distinguished it. Measured three ways —
+`accept` → `completed` with `exitCode: 0` after 72 ms of real execution; `decline` →
+`declined`; `"approved"` → `failed` in 3 ms, having never run. So an adapter that guesses
+this token gets an approval channel that refuses everything while every layer reports
+success, and the only observable difference is a status two levels down. Read the enum
+from the schema; do not infer the word.
 
 **It assigns its own session id and reports it**, so Sylph keys on what came back
 rather than dictating. `exec fork <id>` exists, which is the vendor implementing the
@@ -207,17 +257,74 @@ over the other.
 
 **A subagent may record only a parent id with no id-suffix marker.** Measured from its
 own store: a rollout with `parent_thread_id` set and `thread_source: subagent`. So
-lineage cannot be recovered from an id-naming convention alone. Lineage is also recorded
-in more than one shape — nested under `session_meta`'s
-`source.subagent.thread_spawn.{parent_thread_id,depth,…}` far more often than as a
-top-level `parent_thread_id` — and a fork (`forked_from_id`) is a different relationship
-that can coexist with a parent, in which case the parent wins (`docs/architecture.md`
-§ Provenance is not identity).
+lineage cannot be recovered from an id-naming convention alone.
+
+**Lineage is nested, not flat, and reading only the flat key loses 96% of it.** Censused
+over all 1258 rollouts: the nested
+`session_meta.source.subagent.thread_spawn.parent_thread_id` appears on **182** files, a
+top-level `parent_thread_id` on **7**, and both on **20**. An earlier version of this
+section documented only the flat spelling, which is the one that covers 3.4% of the real
+population — so a parser written to it would have found almost nothing while erroring on
+nothing.
+
+**`forked_from_id` alone does not mean "fork".** On 0.150.1 a subagent carries it too,
+equal to its `parent_thread_id`. The discriminant for a real fork is `parentThreadId:
+null` with `forkedFromId` set. Where both a parent and a fork origin exist, the parent
+wins (`docs/architecture.md` § Provenance is not identity).
 
 **`SubAgentActivity` names a host call id and a child thread id in one record**, which
 makes codex the one agent of the three whose native store carries real delegation
 structure. That is what `span` can honestly be built from here; see § Reading a vendor
 payload for why a parser-synthesized pairing is not.
+
+**codex forwards a delegate's interior, and this is the opposite of `claude`.** A real
+`spawn_agent` delegation emitted `subAgentActivity` (`kind: started|interacted|
+interrupted|completed`, with `agentThreadId` and `agentPath`) and `collabAgentToolCall`
+(`senderThreadId`, `receiverThreadIds`, `agentsStates`) — **and the delegate's own
+`commandExecution` and `agentMessage` items arrived unprompted, carrying the child's
+`threadId`.** So `span` maps to `agentThreadId`, and a codex delegation card may claim a
+real, fillable interior.
+
+Do not carry `claude`'s conclusion across. There, `--forward-subagent-text` forwards only
+for the built-in `Task`, so a childless trajectory is a real terminal state and the card
+must say so. Here it is a loading state. The two agents need opposite defaults, which is
+exactly why `fidelity` and the capability facets are per-record rather than global.
+
+**There are three codex event vocabularies for the same concepts, and they are not
+interchangeable.** An adapter reading one while mapping names learned from another gets
+nothing, silently.
+
+| Source | Spelling | Example |
+| --- | --- | --- |
+| app-server | slash + camelCase | `item/completed`, `commandExecution` |
+| `exec --json` | dot + snake_case | `item.completed`, `command_execution` |
+| rollout JSONL | `type` / `payload` | `response_item` / `custom_tool_call` |
+
+Mapping the app-server's names onto Sylph's vocabulary: `reasoning`→`thinking`,
+`agentMessage`→`assistant`, `commandExecution`→ **both** `tool_call` and `tool_result`
+(one item carries the call and its outcome), `turn/started|completed`→`turn`,
+`thread/tokenUsage/updated`→`usage`, `thread/status/changed`→`status`,
+`contextCompaction`→`compact`.
+
+With no Sylph equivalent: `webSearch`, `imageGeneration`, `imageView`, `sleep`,
+`enteredReviewMode`/`exitedReviewMode`, `hookPrompt`, and `plan` — which Sylph reserves
+but does not implement (`docs/session-protocol.md` § Events). Of 18 declared `ThreadItem`
+variants only 6 appeared in real turns, and of 15 declared server-request kinds only 1
+did — § "A type in a vendor's event union is not a promise anything emits it" in its usual
+form. Write branches for what was observed and let an unknown variant through rather than
+dropping it.
+
+The rollout's tool-call shape has also moved: `custom_tool_call` named `exec` supersedes
+the older `function_call` the trace-db parsers were written against.
+
+**Mid-turn flush confirmed, so `watch` is genuinely offerable**: 18 distinct rollout
+appends over a 26.5 s turn, the first at 0.1 s, interleaving `response_item/reasoning`,
+`custom_tool_call`, and `event_msg/token_count`.
+
+**Identity is the vendor's, structurally.** `thread/start` has no `threadId` parameter at
+all — the id comes back at `result.thread.id` — so "assigns its own" follows from the shape
+of the API rather than from observation. Resume keeps the id and appends to the same
+rollout file; fork mints a new id with `forkedFromId` set.
 
 **`thread_history_*.sqlite` is a projection of the rollouts, not a replacement — read
 the JSONL.** *Measured 2026-08-28 against codex-cli 0.150.1.* The store also holds
@@ -237,8 +344,27 @@ where a thread is present, because it is the only place carrying turn-level `sta
 reconstruct — and it must fall back to walking the files for every thread the
 projection does not hold.
 
-**Model and thinking are read from `--describe`**, which is why `codex` correctly
-shows effort with no model selector — nothing in the UI hardcodes a model list.
+**Model and effort come from `model/list`, and a bad effort value is confirmed rather
+than refused.** `--describe` is **not a codex flag** — `codex --describe` errors and the
+string does not occur in the binary. It was Sylph's own v3 adapter handshake, and this
+sentence used to mis-attribute it to the vendor.
+
+The vendor's refusals are inconsistent, which decides where validation lives.
+`approvalPolicy: "sometimes"` and `personality: "grumpy"` are both refused with their
+valid variants listed — those are enum-typed in the schema, so they map to
+`INVALID_VALUE`. But `effort: "banana"` is **accepted**, echoed back by
+`thread/settings/updated` as the current value, and only fails when a turn runs (`level
+"banana" not supported, valid levels: low, medium, high, xhigh, max`); a nonexistent
+model behaves the same way, and an unknown option name is accepted silently. The schema
+types `ReasoningEffort` as a bare non-empty string, so **validation against
+`model/list`'s `supportedReasoningEfforts` is the adapter's job.** This is the
+"a vendor's `success` is not a promise it did what you asked" rule with a second vendor
+behind it — and note it also means codex offers no `UNSUPPORTED_FIELD` signal at all, so
+an unknown field must be caught adapter-side or it is lost.
+
+`config/value/write` is worth naming separately: it writes to `config.toml` with **no
+value validation whatsoever**, accepting both `model_reasoning_effort = "banana"` and an
+entirely invented key with `status: "ok"`. It is a file writer, not a settings API.
 
 ## `pi`
 
