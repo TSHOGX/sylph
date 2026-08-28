@@ -140,6 +140,26 @@ injects a turn into a live session of theirs. Probe only a throwaway child's own
 **Archived titles cover ~73% of sessions.** Any surface showing one needs the
 opening-ask fallback.
 
+**In the native store, a tool result's id and its error flag are both on the content
+block — nowhere else.** *Measured 2026-08-28 over 3226 files in `~/.claude/projects/`,
+while scoping the parser port, and worth stating because trace-db's parser looked in
+four other places and found none of them.*
+
+`tool_use_id` sits on the `tool_result` block inside `message.content[]`, on **23569 of
+23569** blocks. It is *not* on `toolUseResult` under either spelling, and not at the top
+level of the record — those four keys occur zero times in the whole store. A parser
+reading them pairs nothing: every tool result gets a null call id, and the pairing that
+`docs/session-protocol.md` § Keying rules depends on silently does not exist.
+
+`is_error` is on that same block, and **only** on records whose `message.role` is
+`user`: 46196 occurrences, 2100 of them true. It never appears on an assistant message.
+A parser reading it from the assistant branch classifies all 2100 real tool failures as
+successes — which is the shape this file's § Reading a vendor payload warns about, since
+`false` and "absent, defaulted to false" are indistinguishable downstream.
+
+Both bugs shipped in a parser that parses the whole store without a single error, which
+is the point: the risk in reading a vendor store is not a crash, it is a plausible value.
+
 ## `codex`
 
 **The strongest second-party surface of the three, and the reason the control facet is
@@ -159,9 +179,45 @@ present an empty slash menu as a failure. Its typed config is approval policy.
 **Native store is `rollout-*.jsonl`, flushed at item completion**, with
 `token_count` ticks proving mid-turn append.
 
+**The record vocabulary changed around cli_version 0.147, and the new dominant record
+is the one trace-db's parser discards.** *Measured 2026-08-28 over 1258 rollouts in
+`~/.codex/sessions/`; counts are from the newest 120.* `event_msg/item_completed` is now
+the second most common record after `response_item` — 11231 occurrences — and it carries
+the turn's actual content, keyed by `item.type`: Reasoning 4895, CommandExecution 3805,
+AgentMessage 1162, FileChange 1121, UserMessage 154, SubAgentActivity 42, McpToolCall 18,
+ContextCompaction 17, ImageView 15, CollabAgentToolCall 2. trace-db matches it in the
+same arm as `agent_message` and drops both on the floor, so an adapter that inherits
+that parser reads almost nothing from a current rollout.
+
+Note the older `event_msg/agent_message` has **not** disappeared — 453 in the same
+sample — so this is a shift in which record carries the content, not a clean cutover.
+Both must be read, which raises the duplication question below.
+
+**The two streams do overlap, and the obvious dedup does not work.** Assistant and user
+text appear both as `response_item` and inside `item_completed`, with matching `msg_…`
+ids — but the pair differs by 1–2 ms and by block type (`input_text` against `text`), so
+a key of `sha(text):timestamp` cannot match them. Deduplicating on content and time is
+therefore not sufficient; the vendor's own item id is.
+
+**`CommandExecution` is not redundant with the tool call, and cannot be dropped as a
+duplicate.** It is the only carrier of `exit_code`, `status`, and `duration`, it uses a
+disjoint `exec-` id space, and it carries **no** `call_id` — so it cannot be paired to
+the `function_call` it completes by id at all. Neither stream can simply be preferred
+over the other.
+
 **A subagent may record only a parent id with no id-suffix marker.** Measured from its
 own store: a rollout with `parent_thread_id` set and `thread_source: subagent`. So
-lineage cannot be recovered from an id-naming convention alone.
+lineage cannot be recovered from an id-naming convention alone. Lineage is also recorded
+in more than one shape — nested under `session_meta`'s
+`source.subagent.thread_spawn.{parent_thread_id,depth,…}` far more often than as a
+top-level `parent_thread_id` — and a fork (`forked_from_id`) is a different relationship
+that can coexist with a parent, in which case the parent wins (`docs/architecture.md`
+§ Provenance is not identity).
+
+**`SubAgentActivity` names a host call id and a child thread id in one record**, which
+makes codex the one agent of the three whose native store carries real delegation
+structure. That is what `span` can honestly be built from here; see § Reading a vendor
+payload for why a parser-synthesized pairing is not.
 
 **`thread_history_*.sqlite` is a projection of the rollouts, not a replacement — read
 the JSONL.** *Measured 2026-08-28 against codex-cli 0.150.1.* The store also holds

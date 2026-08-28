@@ -353,6 +353,19 @@ plus three shapes worth knowing before writing any adapter:
   comparing the number against a sibling human-readable stamp, not by eyeballing its
   magnitude.
 
+- **"It parses without error" is not evidence a parser reads a store correctly, and
+  measuring the wrong thing here is cheap comfort.** Measured 2026-08-28 while scoping
+  the parser port: trace-db's three parsers processed all 4986 real sessions across the
+  `claude`, `codex`, and `pi` stores with **zero** parse failures — while `claude`'s tool
+  results all carried a null call id (the id is on the content block, and the parser
+  looked in four other places that occur zero times in 3226 files), all 2100 real tool
+  failures parsed as successes (`is_error` is only ever on a `user`-role block, and the
+  parser read it on the assistant branch), and `codex`'s single most common current
+  record was discarded outright. A store-reading defect does not raise an error, because
+  a missing key is indistinguishable from a field the vendor omitted — it produces a
+  plausible record. So verify a parser by asserting on *values it should have found*
+  against a payload you have printed, never by observing that a run completed.
+
 - **A census of a vendor's keys must walk the parsed structure, never grep the
   serialized line.** Measured while scoping the `pi` parser port: a substring test for
   `"parent_id"` over serialized records also matches those words appearing inside
