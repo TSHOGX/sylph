@@ -9,7 +9,7 @@
 //! deployment where `HOME` differs from the user Next.js runs as.
 
 use axum::{
-    extract::{Query, State},
+    extract::State,
     Json,
 };
 use serde::Serialize;
@@ -32,11 +32,6 @@ pub struct Workspace {
     /// True for the Quick Start directory, which the sidebar lists separately
     /// and which is never offered for removal.
     pub is_quick_start: bool,
-    /// Archived sessions TraceDB holds for this directory.
-    ///
-    /// Always zero unless the request asked for archived directories, so a client
-    /// must not read zero as "no history" — only as "not counted".
-    pub archived_count: i64,
 }
 
 #[derive(Serialize)]
@@ -58,32 +53,23 @@ pub struct WorkspacesResponse {
 /// is worse than a slow one. The journal is local SQLite, so the scan is cheap.
 const AGGREGATE_LIMIT: i64 = 2000;
 
-/// Archived rows read per `list` page when including archive-only directories.
-const ARCHIVE_PAGE: usize = 1000;
-
-/// Cap on archive pages walked, so one request cannot run unbounded as the
-/// archive grows. At this page size the local 4700-session archive takes five.
-const ARCHIVE_MAX_PAGES: usize = 12;
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListQuery {
-    /// Also report directories that exist only in the TraceDB archive.
-    ///
-    /// Off by default because the sidebar polls this endpoint and only needs
-    /// live sessions to group; scanning the archive would add work to its hot
-    /// path. The settings panel and the history browser's workspace picker opt
-    /// in, because a directory a user wants to *start* working in has no live
-    /// session yet — and without this it could never be picked or pinned.
-    #[serde(default)]
-    include_archived: bool,
-}
-
-/// GET /api/v1/workspaces?includeArchived={bool}
-pub async fn list(
-    State(state): State<AppState>,
-    Query(params): Query<ListQuery>,
-) -> Result<Json<WorkspacesResponse>> {
+/// GET /api/v1/workspaces
+///
+/// # `includeArchived` is gone, and its absence is the point
+///
+/// The parameter existed because a directory whose only history sat in the *separate
+/// archive* was invisible to the journal — so without an opt-in archive scan a user
+/// could not pin it, pick it, or discover it had any history at all. With one store
+/// (`docs/architecture.md` § One authority) native history is parsed into the same
+/// journal, so **every directory with history is in the listing already** and the
+/// distinction has nothing left to draw.
+///
+/// That also deletes the paged bound the scan needed (`ARCHIVE_MAX_PAGES`), and with it
+/// the starvation hazard `AGENTS.md` records: because the archive's `cwd` filter was an
+/// unanchored substring, a parent directory's pattern matched everything beneath it,
+/// those sorted by recency rather than depth, and a directory with 88 sessions of its own
+/// reported empty because its first exact match landed ~1300 rows in.
+pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesResponse>> {
     // Both from configuration rather than the environment: `quick_start_dir` is a
     // setting, and `home` is the base the picker abbreviates paths against, which
     // must be the same one `browse_roots` was resolved with.
@@ -130,7 +116,6 @@ pub async fn list(
                 session_count: 0,
                 running_count: 0,
                 last_used_ms: 0,
-                archived_count: 0,
             });
             rows.len() - 1
         });
@@ -140,71 +125,6 @@ pub async fn list(
             row.running_count += 1;
         }
         row.last_used_ms = row.last_used_ms.max(session.updated_at_ms);
-    }
-
-    if params.include_archived {
-        // A directory whose only history is archived is invisible to the journal,
-        // so without this a user could not pin it, pick it, or discover that it
-        // has any history at all. An unreachable archive is not an error here:
-        // the live workspaces are still the answer to most of this question.
-        let mut cursor: Option<String> = None;
-        for _ in 0..ARCHIVE_MAX_PAGES {
-            let page = match state
-                .tracedb
-                .list(None, ARCHIVE_PAGE, cursor.as_deref())
-                .await
-            {
-                Ok(page) => page,
-                Err(detail) => {
-                    // Same discipline as the archive listing: an absent binary is
-                    // one fact about the run that the client has already announced,
-                    // and this endpoint is polled by the workspace picker, so a
-                    // warn per request rebuilds an unbounded stream one layer up.
-                    crate::api::archive::report_tracedb_failure(
-                        &state,
-                        "Archive workspace scan failed",
-                        &detail,
-                    );
-                    break;
-                }
-            };
-            let exhausted = page.next_cursor.is_none();
-            cursor = page.next_cursor;
-
-            for summary in page.sessions {
-                // Empty sessions and lineage children would inflate a directory's
-                // apparent history with rows the browser then filters out.
-                if summary.events == 0 || crate::tracedb::split_lineage(&summary.id).is_some() {
-                    continue;
-                }
-                let Some(path) = summary.cwd.as_deref().map(normalize) else {
-                    continue;
-                };
-                let at = *index.entry(path.clone()).or_insert_with(|| {
-                    rows.push(Workspace {
-                        name: leaf(&path).to_string(),
-                        is_quick_start: path == quick_start_dir,
-                        path,
-                        session_count: 0,
-                        running_count: 0,
-                        last_used_ms: 0,
-                        archived_count: 0,
-                    });
-                    rows.len() - 1
-                });
-                let row = &mut rows[at];
-                row.archived_count += 1;
-                // Ordering is by "when work last happened here", which archived
-                // history answers just as well as a live session does.
-                if let Some(ended) = summary.ended_at_ms.or(summary.started_at_ms) {
-                    row.last_used_ms = row.last_used_ms.max(ended);
-                }
-            }
-
-            if exhausted {
-                break;
-            }
-        }
     }
 
     // Quick Start is always present, even with no sessions: the sidebar section
@@ -217,7 +137,6 @@ pub async fn list(
             running_count: 0,
             last_used_ms: 0,
             is_quick_start: true,
-            archived_count: 0,
         });
     }
 

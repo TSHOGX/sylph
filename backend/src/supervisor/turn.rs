@@ -22,9 +22,8 @@ use crate::links::LinkManager;
 
 /// Everything needed to run one turn.
 pub struct TurnRequest {
-    pub session_id: String,
+    pub session_id: sylph_protocol::SessionId,
     pub turn_id: String,
-    pub incarnation_id: String,
     pub prompt: String,
     pub flags: HashMap<String, String>,
     pub attachments: Vec<String>,
@@ -166,7 +165,6 @@ impl LinkedSupervisor {
         let TurnRequest {
             session_id,
             turn_id,
-            incarnation_id,
             prompt,
             flags,
             attachments,
@@ -184,7 +182,7 @@ impl LinkedSupervisor {
         let (tx, rx) = oneshot::channel();
         self.waiters.lock().await.insert(turn_id.clone(), tx);
 
-        if !self.store.mark_turn_running(&turn_id, &incarnation_id).await? {
+        if !self.store.mark_turn_running(&turn_id).await? {
             // Already claimed, stopped, or interrupted before it began.
             debug!("Turn {} was no longer queued; skipping", turn_id);
             self.waiters.lock().await.remove(&turn_id);
@@ -265,7 +263,7 @@ impl LinkedSupervisor {
     /// makes it correct across a restart: a turn left `running` by a dead process
     /// is reconciled at startup, so the journal is the only place that knows the
     /// truth after one.
-    pub async fn session_busy(&self, session_id: &str) -> bool {
+    pub async fn session_busy(&self, session_id: &sylph_protocol::SessionId) -> bool {
         self.store
             .running_turn_id(session_id)
             .await
@@ -342,7 +340,7 @@ impl LinkedSupervisor {
     }
 
     /// Record a turn's terminal state and close its stream.
-    async fn settle(&self, session_id: &str, turn_id: &str, outcome: Outcome) {
+    async fn settle(&self, session_id: &sylph_protocol::SessionId, turn_id: &str, outcome: Outcome) {
         // Recorded before the waiter is released, and that order is load-bearing.
         //
         // Releasing the waiter drops the oneshot sender, which wakes whoever is parked
@@ -373,7 +371,7 @@ impl LinkedSupervisor {
 
     async fn emit(
         &self,
-        session_id: &str,
+        session_id: &sylph_protocol::SessionId,
         turn_id: &str,
         mut event: StreamEvent,
     ) -> crate::error::Result<()> {

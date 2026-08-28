@@ -65,8 +65,6 @@ pub struct FileConfig {
     #[serde(default)]
     pub paths: PathsSection,
     #[serde(default)]
-    pub tracedb: TraceDbSection,
-    #[serde(default)]
     pub log: LogSection,
 }
 
@@ -86,12 +84,6 @@ pub struct PathsSection {
     pub quick_start_dir: Option<String>,
     #[serde(default)]
     pub browse_roots: Vec<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TraceDbSection {
-    pub bin: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -160,7 +152,6 @@ pub fn env_snapshot() -> Env {
         "SYLPH_SOUL",
         "SYLPH_QUICK_START_DIR",
         "SYLPH_BROWSE_ROOTS",
-        "SYLPH_TRACEDB_BIN",
         "SYLPH_LOG",
         "RUST_LOG",
     ];
@@ -214,7 +205,6 @@ pub struct Resolved {
     pub soul: Origin<Option<PathBuf>>,
     pub quick_start_dir: Origin<PathBuf>,
     pub browse_roots: Origin<Vec<PathBuf>>,
-    pub tracedb_bin: Origin<PathBuf>,
     pub log_level: Origin<String>,
 }
 
@@ -362,16 +352,6 @@ impl Resolved {
             Source::Default
         };
 
-        // Bare `trace-db`, resolved on `PATH`, because TraceDB is a separate
-        // project with its own install and a normal one lands on `PATH`. The old
-        // default was an absolute path into one developer's checkout, which is
-        // wrong on every other machine and only ever right by coincidence.
-        let tracedb_bin = path(
-            "SYLPH_TRACEDB_BIN",
-            file.tracedb.bin.as_ref(),
-            PathBuf::from("trace-db"),
-        );
-
         // `RUST_LOG` is honoured after `SYLPH_LOG` because it is what the
         // ecosystem's tooling sets and what a developer already has in their
         // shell; dropping it would break every existing debugging habit for no
@@ -396,7 +376,6 @@ impl Resolved {
             soul,
             quick_start_dir,
             browse_roots: Origin::new(roots, roots_source),
-            tracedb_bin,
             log_level,
         }
     }
@@ -578,29 +557,6 @@ mod tests {
         assert_eq!(r.browse_roots.source, Source::File);
     }
 
-    /// TraceDB is a separate project with its own install, so the default is a
-    /// `PATH` lookup. The old absolute default was one developer's checkout path,
-    /// which is wrong on every other machine.
-    #[test]
-    fn tracedb_defaults_to_a_path_lookup_not_somebodys_checkout() {
-        let r = resolve(&[("HOME", "/home/u")], FileConfig::default());
-        assert_eq!(r.tracedb_bin.value, PathBuf::from("trace-db"));
-        assert_eq!(r.tracedb_bin.source, Source::Default);
-    }
-
-    #[test]
-    fn tracedb_can_be_pinned_to_a_checkout_build() {
-        let mut file = FileConfig::default();
-        file.tracedb.bin = Some("~/Workspace/trace-db/target/release/trace-db".into());
-
-        let r = Resolved::from_parts(&env(&[("HOME", "/home/u")]), &file, true);
-
-        assert_eq!(
-            r.tracedb_bin.value,
-            PathBuf::from("/home/u/Workspace/trace-db/target/release/trace-db")
-        );
-    }
-
     /// `RUST_LOG` keeps working: it is what the ecosystem's tooling sets and what
     /// a developer already has exported, so dropping it would break every existing
     /// debugging habit for nothing.
@@ -647,7 +603,6 @@ mod tests {
         // second copy of the defaults, free to drift from them.
         assert!(parsed.server.port.is_none());
         assert!(parsed.paths.data_dir.is_none());
-        assert!(parsed.tracedb.bin.is_none());
         assert!(parsed.log.level.is_none());
     }
 

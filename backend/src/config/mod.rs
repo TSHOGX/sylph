@@ -82,8 +82,6 @@ pub struct Config {
     /// lives in configuration, not in the request.
     pub browse_roots: Vec<PathBuf>,
 
-    pub tracedb_bin: PathBuf,
-
     pub cookie_secret: String,
 
     /// What resolved and who supplied it.
@@ -133,7 +131,6 @@ impl Config {
             soul_candidate: resolved.soul.value.clone(),
             quick_start_dir: resolved.quick_start_dir.value.clone(),
             browse_roots: resolved.browse_roots.value.clone(),
-            tracedb_bin: resolved.tracedb_bin.value.clone(),
             // Regenerated per process, which invalidates open browser sessions on
             // restart by design. Persisting it would turn a token that lives in
             // memory into one that lives on disk, for the sake of not reloading

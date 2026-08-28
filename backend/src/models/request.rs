@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::{FromRow, Row};
+use sylph_protocol::SessionId;
 
 /// A question an agent raised that a human has not answered.
 ///
@@ -7,11 +8,12 @@ use sqlx::FromRow;
 /// client instantly, but the agent is blocked until someone answers, so the
 /// answer has to be possible from a frontend that was not attached when it was
 /// raised — including one that connects an hour later.
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingRequest {
     pub id: String,
-    pub session_id: String,
+    #[serde(with = "crate::models::session_id_string")]
+    pub session_id: SessionId,
     pub turn_id: String,
     /// The adapter's own id, which a resolve must echo back to it.
     ///
@@ -61,6 +63,39 @@ pub struct PendingRequest {
     pub created_at_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_at_ms: Option<i64>,
+}
+
+impl FromRow<'_, sqlx::sqlite::SqliteRow> for PendingRequest {
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            session_id: crate::models::session::triple_from_row(
+                row,
+                "session_env",
+                "session_agent",
+                "session_native",
+            )?,
+            turn_id: row.try_get("turn_id")?,
+            adapter_request_id: row.try_get("adapter_request_id")?,
+            kind: row.try_get("kind")?,
+            tool: row.try_get("tool")?,
+            tool_use_id: row.try_get("tool_use_id")?,
+            title: row.try_get("title")?,
+            detail_json: row.try_get("detail_json")?,
+            options_json: row.try_get("options_json")?,
+            form_json: row.try_get("form_json")?,
+            default_option: row.try_get("default_option")?,
+            risk: row.try_get("risk")?,
+            allow_persistent: row.try_get("allow_persistent")?,
+            expires_at_ms: row.try_get("expires_at_ms")?,
+            status: row.try_get("status")?,
+            chosen_option: row.try_get("chosen_option")?,
+            resolved_input_json: row.try_get("resolved_input_json")?,
+            resolved_by: row.try_get("resolved_by")?,
+            created_at_ms: row.try_get("created_at_ms")?,
+            resolved_at_ms: row.try_get("resolved_at_ms")?,
+        })
+    }
 }
 
 impl PendingRequest {

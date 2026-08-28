@@ -37,21 +37,30 @@ pub enum Error {
     #[error("Attachment validation failed: {0}")]
     AttachmentInvalid(String),
 
-    #[error("TraceDB unavailable: {0}")]
-    TraceDbUnavailable(String),
+    /// The agent CLI could not be started, or started and reported no session id.
+    ///
+    /// **Reporting no id is a failure rather than a degraded success**: without one the
+    /// session can never be resumed, so every link death — the idle reaper, a restart,
+    /// an explicit detach — would make it permanently unlinkable
+    /// (`docs/api-design.md` § `POST /api/v1/sessions`).
+    #[error("Could not start the agent: {0:#}")]
+    AgentStartFailed(anyhow::Error),
 
-    #[error("Archived session not found: {0}")]
-    TraceSessionNotFound(String),
+    /// Two rows for one conversation, refused by the primary key.
+    ///
+    /// A `409` rather than an upsert: the triple *is* the session, so a second row
+    /// under one id is the state the key exists to prevent.
+    #[error("A session already exists with that identity")]
+    SessionAlreadyPresent,
 
-    #[error("Archived session already imported")]
-    SessionAlreadyImported,
-
-    /// The archive has the session but recorded no working directory for it,
-    /// so there is nothing to resume into. Distinct from `InvalidRequest`
-    /// because the request was well-formed: the gap is in the archive, and the
-    /// remedy is on the archive side, not the caller's.
-    #[error("Archived session has no recorded working directory: {0}")]
-    TraceSessionNotResumable(String),
+    /// A surface whose contract is settled and whose implementation is not.
+    ///
+    /// Deliberately its own variant rather than an `Internal`: an operation that
+    /// *cannot yet* be performed and one that failed unexpectedly call for opposite
+    /// responses from a client, and flattening them would have a UI offer a retry for
+    /// something no retry completes.
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
 
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
@@ -224,32 +233,23 @@ impl Error {
                 "ATTACHMENT_INVALID",
                 msg.clone(),
             ),
-            Error::TraceDbUnavailable(msg) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "TRACEDB_UNAVAILABLE",
-                msg.clone(),
+            // 502 rather than 500: the failure is in a process this server started,
+            // not in the server, and the distinction is what tells an operator whether
+            // to look at their agent install or at Sylph.
+            Error::AgentStartFailed(error) => (
+                StatusCode::BAD_GATEWAY,
+                "AGENT_START_FAILED",
+                format!("{error:#}"),
             ),
-            // The id is client-supplied and safe to echo, and seeing it is what
-            // makes a mistyped or stale archive id diagnosable.
-            Error::TraceSessionNotFound(id) => (
-                StatusCode::NOT_FOUND,
-                "TRACE_SESSION_NOT_FOUND",
-                format!("No archived session with id {id}"),
-            ),
-            Error::SessionAlreadyImported => (
+            Error::SessionAlreadyPresent => (
                 StatusCode::CONFLICT,
-                "SESSION_ALREADY_IMPORTED",
-                "This archived session has already been imported".to_string(),
+                "SESSION_ALREADY_PRESENT",
+                "A session with that identity is already recorded".to_string(),
             ),
-            // 422: understood and well-formed, but the archived session lacks a
-            // field import cannot proceed without.
-            Error::TraceSessionNotResumable(id) => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "TRACE_SESSION_NOT_RESUMABLE",
-                format!(
-                    "The archive recorded no working directory for {id}, \
-                     so there is no directory to resume it in."
-                ),
+            Error::NotImplemented(msg) => (
+                StatusCode::NOT_IMPLEMENTED,
+                "NOT_IMPLEMENTED",
+                msg.clone(),
             ),
             Error::InvalidRequest(msg) => {
                 (StatusCode::BAD_REQUEST, "INVALID_REQUEST", msg.clone())
@@ -349,21 +349,14 @@ mod tests {
             "ATTACHMENT_INVALID"
         );
         assert_eq!(
-            Error::TraceDbUnavailable("x".into()).code(),
-            "TRACEDB_UNAVAILABLE"
+            Error::AgentStartFailed(anyhow::anyhow!("x")).code(),
+            "AGENT_START_FAILED"
         );
         assert_eq!(
-            Error::TraceSessionNotFound("x".into()).code(),
-            "TRACE_SESSION_NOT_FOUND"
+            Error::SessionAlreadyPresent.code(),
+            "SESSION_ALREADY_PRESENT"
         );
-        assert_eq!(
-            Error::SessionAlreadyImported.code(),
-            "SESSION_ALREADY_IMPORTED"
-        );
-        assert_eq!(
-            Error::TraceSessionNotResumable("x".into()).code(),
-            "TRACE_SESSION_NOT_RESUMABLE"
-        );
+        assert_eq!(Error::NotImplemented("x".into()).code(), "NOT_IMPLEMENTED");
         assert_eq!(Error::InvalidRequest("x".into()).code(), "INVALID_REQUEST");
     }
 
@@ -439,10 +432,9 @@ mod tests {
             Error::Unauthorized,
             Error::Forbidden("x".into()),
             Error::AttachmentInvalid("x".into()),
-            Error::TraceDbUnavailable("x".into()),
-            Error::TraceSessionNotFound("x".into()),
-            Error::SessionAlreadyImported,
-            Error::TraceSessionNotResumable("x".into()),
+            Error::AgentStartFailed(anyhow::anyhow!("x")),
+            Error::SessionAlreadyPresent,
+            Error::NotImplemented("x".into()),
             Error::InvalidRequest("x".into()),
             Error::RouteNotFound,
             Error::MethodNotAllowed,
@@ -468,10 +460,9 @@ mod tests {
                 | Error::Unauthorized
                 | Error::Forbidden(_)
                 | Error::AttachmentInvalid(_)
-                | Error::TraceDbUnavailable(_)
-                | Error::TraceSessionNotFound(_)
-                | Error::SessionAlreadyImported
-                | Error::TraceSessionNotResumable(_)
+                | Error::AgentStartFailed(_)
+                | Error::SessionAlreadyPresent
+                | Error::NotImplemented(_)
                 | Error::InvalidRequest(_)
                 | Error::RouteNotFound
                 | Error::MethodNotAllowed
@@ -529,34 +520,55 @@ mod tests {
         }
     }
 
-    /// A mistyped archive id must be distinguishable from an archive that is
-    /// down, and from a session that was already imported.
+    /// Starting a session fails in ways that need distinct fixes, so they must not
+    /// share a status.
+    ///
+    /// This replaces `import_failures_have_distinct_statuses`, which pinned the four
+    /// archive-shaped variants. The shape of that test is what survives: a caller has to
+    /// be able to tell "the agent would not start" from "that session is already
+    /// recorded" from "this is not built yet", because the three have nothing in common
+    /// to do about them.
     #[test]
-    fn import_failures_have_distinct_statuses() {
+    fn starting_a_session_fails_with_distinct_statuses() {
+        // 502 rather than 500: the failure is in a process this server started, which is
+        // what tells an operator to look at their agent install rather than at Sylph.
         assert_eq!(
-            Error::TraceSessionNotFound("claude:abc".into()).status(),
-            StatusCode::NOT_FOUND
+            Error::AgentStartFailed(anyhow::anyhow!("claude exited 1")).status(),
+            StatusCode::BAD_GATEWAY
         );
+        // The primary key refused a second row for one conversation.
         assert_eq!(
-            // Well-formed request, unusable archive record: not a 400.
-            Error::TraceSessionNotResumable("claude:abc".into()).status(),
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-        assert_eq!(
-            Error::SessionAlreadyImported.status(),
+            Error::SessionAlreadyPresent.status(),
             StatusCode::CONFLICT
         );
+        // Distinct from 500 on purpose: no retry completes an unimplemented operation,
+        // so a client must not offer one.
         assert_eq!(
-            Error::TraceDbUnavailable("spawn failed".into()).status(),
-            StatusCode::SERVICE_UNAVAILABLE
+            Error::NotImplemented("adopt".into()).status(),
+            StatusCode::NOT_IMPLEMENTED
         );
+    }
 
-        // The client-supplied id is echoed, since that is what makes the
-        // failure diagnosable.
-        let body = Error::TraceSessionNotFound("claude:abc".into()).to_response();
+    /// A malformed session id is a 400, and a well-formed one naming nothing is a 404.
+    ///
+    /// The pair that keeps a client with a corrupted id from being told its session was
+    /// deleted — `api::sessions::decode_id` is what draws the line, and it reports the
+    /// decoder's own reason so the message names which part of the triple is wrong.
+    #[test]
+    fn a_malformed_session_id_is_refused_rather_than_reported_missing() {
+        let malformed = crate::api::sessions::decode_id("not-a-triple")
+            .expect_err("a bare string is not an encoded triple");
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(malformed.code(), "INVALID_REQUEST");
+
+        assert_eq!(Error::SessionNotFound.status(), StatusCode::NOT_FOUND);
+
+        // The decoder's reason is echoed, since that is what makes the failure
+        // diagnosable — a client sees which component was wrong, not just "invalid".
+        let body = malformed.to_response();
         assert!(
-            body.error.message.contains("claude:abc"),
-            "id missing from message: {}",
+            body.error.message.contains("not-a-triple"),
+            "the offending id is missing from the message: {}",
             body.error.message
         );
     }

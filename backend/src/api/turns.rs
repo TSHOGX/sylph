@@ -14,7 +14,7 @@ use crate::{
     attachments,
     error::{Error, Result},
     events::{Attachment, StreamEvent},
-    models::{CreateTurnRequest, Incarnation, Turn},
+    models::{CreateTurnRequest, Turn},
     AppState,
 };
 
@@ -33,6 +33,7 @@ pub async fn create(
     headers: axum::http::HeaderMap,
     Json(req): Json<CreateTurnRequest>,
 ) -> Result<(StatusCode, Json<TurnResponse>)> {
+    let session_id = crate::api::sessions::decode_id(&session_id)?;
     let session = state
         .store
         .get_session(&session_id)
@@ -88,30 +89,10 @@ pub async fn create(
         .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
         .collect();
 
-    let incarnation = match state.store.active_incarnation(&session_id).await? {
-        Some(inc) => inc,
-        None => {
-            let inc = Incarnation {
-                id: uuid::Uuid::new_v4().to_string(),
-                session_id: session_id.clone(),
-                agent: session.agent.clone(),
-                backend_session_id: None,
-                started_at_ms: chrono::Utc::now().timestamp_millis(),
-                ended_at_ms: None,
-                reset_reason: None,
-                source_trace_session_id: session.trace_session_id.clone(),
-                resulting_trace_session_id: None,
-                status: "active".to_string(),
-            };
-            state.store.create_incarnation(&inc).await?
-        }
-    };
-
     let now = chrono::Utc::now().timestamp_millis();
     let turn = Turn {
         id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
-        incarnation_id: Some(incarnation.id.clone()),
         status: "queued".to_string(),
         // This endpoint is the definition of a user turn: it exists because someone
         // posted. An agent's own turn is opened by the link manager instead.
@@ -121,7 +102,6 @@ pub async fn create(
         idempotency_key: idempotency_key.clone(),
         error_code: None,
         error_message: None,
-        runner_exit_code: None,
         created_at_ms: now,
         started_at_ms: None,
         completed_at_ms: None,
@@ -130,15 +110,11 @@ pub async fn create(
 
     let created = state.store.create_turn(&turn).await?;
 
-    // Every session runs on a link. The v1 supervisor below is still reachable
-    // only from the paths that have not moved yet, and `docs/session-protocol.md`
-    // records why it is being removed rather than kept as a fallback.
     state
         .turns
         .spawn(crate::supervisor::turn::TurnRequest {
             session_id: session_id.clone(),
             turn_id: created.id.clone(),
-            incarnation_id: incarnation.id.clone(),
             prompt: text,
             flags,
             attachments: staged_attachments

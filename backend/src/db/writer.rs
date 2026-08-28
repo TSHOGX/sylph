@@ -218,17 +218,14 @@ mod tests {
 
         let session = store
             .create_session(&crate::models::Session {
-                id: "s1".to_string(),
-                origin: "sylph".to_string(),
-                identity_mode: "sylph".to_string(),
-                lifecycle_mode: "sylph".to_string(),
-                agent: "mock".to_string(),
-                backend_session_id: None,
-                trace_session_id: None,
+                id: crate::fixtures::test_session_id("s1"),
                 workdir: dir.path().display().to_string(),
                 title: None,
+                inject_identity: true,
+                fidelity: sylph_protocol::Fidelity::Stream,
                 flags_json: "{}".to_string(),
                 status: "idle".to_string(),
+                parent_session: None,
                 created_at_ms: 1000,
                 updated_at_ms: 1000,
             })
@@ -239,7 +236,6 @@ mod tests {
             .create_turn(&crate::models::Turn {
                 id: "t1".to_string(),
                 session_id: session.id.clone(),
-                incarnation_id: None,
                 status: "running".to_string(),
                 origin: "user".to_string(),
                 request_text: "hello".to_string(),
@@ -247,7 +243,6 @@ mod tests {
                 idempotency_key: None,
                 error_code: None,
                 error_message: None,
-                runner_exit_code: None,
                 created_at_ms: 1000,
                 started_at_ms: None,
                 completed_at_ms: None,
@@ -261,7 +256,7 @@ mod tests {
     fn ephemeral(turn_id: &str, seq: i32, text: &str) -> Event {
         Event {
             id: None,
-            session_id: "s1".to_string(),
+            session_id: crate::fixtures::test_session_id("s1"),
             turn_id: Some(turn_id.to_string()),
             seq,
             kind: "assistant".to_string(),
@@ -274,7 +269,6 @@ mod tests {
             stability: "ephemeral".to_string(),
             source: "agent".to_string(),
             created_at_ms: 2000 + seq as i64,
-            reconciled_at_ms: None,
             // Root turn: these fixtures test batching, not delegation.
             span: None,
         }

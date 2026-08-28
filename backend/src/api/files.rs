@@ -771,7 +771,7 @@ fn read_prefix(path: &Path, limit: usize) -> Result<Vec<u8>> {
 async fn resolve(state: &AppState, session_id: &str, relative: &str) -> Result<(PathBuf, PathBuf)> {
     let session = state
         .store
-        .get_session(session_id)
+        .get_session(&crate::api::sessions::decode_id(session_id)?)
         .await?
         .ok_or(Error::SessionNotFound)?;
 

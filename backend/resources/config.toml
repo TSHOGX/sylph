@@ -70,15 +70,16 @@
 # browse_roots = ["/Volumes/work", "~/src"]
 
 
-[tracedb]
-
-# TraceDB is a separate project that Sylph reads durable cross-agent history
-# from. Found on PATH by default. Pin it when you run a build from a checkout.
+# There is no [tracedb] section, and no setting naming an archive binary.
 #
-# Sylph runs fine without it: live sessions work, and archive search and native
-# session import report themselves unavailable.
-#   env: SYLPH_TRACEDB_BIN
-# bin = "~/Workspace/trace-db/target/release/trace-db"
+# History is one store Sylph owns — history.db beside the journal — rather than a
+# separate project it reads from, so there is no external binary whose location
+# could be configured. A setting naming one is only meaningful while an external
+# binary answers, and keeping it would offer a lever that changes nothing.
+#
+# What replaced "is the archive reachable" is per-environment health, which is a
+# better question: it distinguishes a missing agent CLI from a sleeping laptop
+# from an exhausted sandbox node. See GET /api/v1/environments.
 
 
 [log]

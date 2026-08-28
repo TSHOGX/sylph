@@ -468,10 +468,15 @@ impl TestBackend {
     /// recover the id would leave an orphan session behind and make any
     /// session-counting assertion silently wrong.
     pub async fn create_session(&self, agent: &str) -> String {
+        // Read back from the server rather than hardcoded — see `environment_id`.
+        let environment = self.environment_id().await;
         let response = self
             .post_authed(
                 "/api/v1/sessions",
                 json!({
+                    // Required now: an agent's availability is decided per machine, so
+                    // there is no global default that would be true anywhere.
+                    "environment": environment,
                     "agent": agent,
                     "workdir": self.workdir.display().to_string(),
                     "title": "Test session",
@@ -491,6 +496,24 @@ impl TestBackend {
             .as_str()
             .expect("session id missing from response")
             .to_string()
+    }
+
+    /// The environment this harness's server reports.
+    ///
+    /// Read back from `GET /environments` rather than hardcoded: a test that hardcodes
+    /// what the code hardcodes proves only that the two agree, which `AGENTS.md` records
+    /// as having twice let a test and the endpoint be wrong about the product together.
+    pub async fn environment_id(&self) -> String {
+        let body = json_body(self.get_authed("/api/v1/environments").await).await;
+        body["environments"][0]["id"]
+            .as_str()
+            .expect("the server reports at least its own environment")
+            .to_string()
+    }
+
+    /// The typed form of a session id, for the store-level APIs.
+    pub fn session_id(encoded: &str) -> sylph_protocol::SessionId {
+        sylph_protocol::SessionId::decode(encoded).expect("the server issued this id")
     }
 
     /// Poll a turn until it reaches a terminal status, or panic on timeout.
@@ -743,7 +766,7 @@ impl MockRunner {
 
         format!(
             r#"#!/usr/bin/env python3
-import json, sys, time
+import json, sys, time, uuid
 
 NAME = {name:?}
 
@@ -778,7 +801,15 @@ for raw in sys.stdin:
         # has to answer with one, and the server rejects a null as an unresumable
         # session. The claude adapter got this wrong on the resume branch, which made
         # every session unlinkable once its first link died.
-        ok(mid, sessionId=msg.get("sessionId") or "mock-session-1",
+        #
+        # A *fresh* session gets a **unique** id rather than a constant one, which is
+        # now load-bearing rather than cosmetic. The id an adapter reports is the
+        # session's primary key (`docs/architecture.md` § Identity), so a fixture that
+        # answers the same string every time makes the second session in any test a
+        # `409` — the constraint correctly refusing two rows for one conversation. This
+        # was harmless only while the server minted a UUID of its own and this value was
+        # a detail hanging off it.
+        ok(mid, sessionId=msg.get("sessionId") or f"mock-session-{{uuid.uuid4()}}",
            commands=[{{"name": "noop", "description": "Does nothing"}},
                      {{"name": "model", "description": "Pick a model",
                        "kind": "control", "configId": "model"}}],

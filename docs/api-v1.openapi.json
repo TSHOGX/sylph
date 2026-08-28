@@ -86,38 +86,6 @@
         }
       }
     },
-    "/api/v1/agents": {
-      "get": {
-        "responses": {
-          "200": {
-            "description": "Discovered agent descriptors",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentsResponse"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "responses": {
-          "200": {
-            "description": "Discovered agent descriptors",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentsResponse"
-                }
-              }
-            }
-          }
-        },
-        "summary": "Re-run agent discovery",
-        "description": "Re-scan both adapter roots and re-handshake each one. This is the POST method on the collection, not a separate /agents/refresh path: this schema published that path for a release and it answers NOT_FOUND. See backend/src/lib.rs:303."
-      }
-    },
     "/api/v1/sessions": {
       "get": {
         "description": "Sessions newest-activity-first. Filters are applied in SQL, not by the client: the listing is capped by limit, so client-side filtering would only narrow the truncated page. A blank filter value means unfiltered.",
@@ -158,7 +126,7 @@
         }
       },
       "post": {
-        "description": "Create a Sylph-managed session. `workdir` is bounded by configuration: it must resolve inside paths.browse_roots or the Quick Start directory, checked on the canonical path so `..` and symlinks are resolved rather than pattern-matched. The bound exists because this field is the current_dir of a spawned agent process and a coding agent reads and writes the tree it is pointed at, so it decides where arbitrary code runs — existence, the only property it was previously checked for, says nothing about whether it should. The same root set /api/v1/fs/* browses, deliberately: that endpoint exists to name a workdir, so a second bound would be a second thing to keep equal. 403 POLICY_VIOLATION is a workdir that exists outside the permitted roots, distinct from 400 because the request is well-formed and the fix is in config.toml; the message lists what is permitted. The canonical path is journalled, so two spellings of one directory do not become two workspaces. A session already recorded outside the roots stays fully readable — nothing re-checks a journalled workdir, since narrowing configuration must not orphan history.",
+        "description": "This starts an agent. It does not reserve a row. A session has no identity until an agent has assigned one, so there is nothing to create in advance: the CLI is spawned, the id it reports becomes the session's primary key, and the insert follows. That ordering is a behavioural change no schema can express, which is why it is stated here. What it deletes: DELETE /api/v1/sessions/{id} for empties, the frontend probe that called it on unmount, and the window in which a session existed with no native id and therefore could not be resumed. A failed spawn now reports at the start screen instead of leaving a dead row behind. 502 AGENT_START_FAILED is the CLI not starting, or starting and reporting no id — the latter is a failure rather than a degraded success, because without an id the session could never be resumed and every link death would make it permanently unlinkable. 409 SESSION_ALREADY_PRESENT is the agent reporting an id that already names a session, which the primary key refuses: two rows for one conversation is the state it exists to prevent. `workdir` is bounded by configuration: it must resolve inside paths.browse_roots or the Quick Start directory, checked on the canonical path so `..` and symlinks are resolved rather than pattern-matched. The bound exists because this field is the current_dir of a spawned agent process and a coding agent reads and writes the tree it is pointed at, so it decides where arbitrary code runs — existence, the only property it was previously checked for, says nothing about whether it should. The same root set /api/v1/fs/* browses, deliberately: that endpoint exists to name a workdir, so a second bound would be a second thing to keep equal. With environments this check belongs in the envagent, because only the machine holding a path can canonicalize it. 403 POLICY_VIOLATION is a workdir that exists outside the permitted roots, distinct from 400 because the request is well-formed and the fix is in config.toml; the message lists what is permitted. The canonical path is journalled, so two spellings of one directory do not become two workspaces. A session already recorded outside the roots stays fully readable — nothing re-checks a journalled workdir, since narrowing configuration must not orphan history.",
         "requestBody": {
           "$ref": "#/components/requestBodies/CreateSession"
         },
@@ -178,44 +146,51 @@
           },
           "403": {
             "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "description": "SESSION_ALREADY_PRESENT: the agent reported an id that already names a session."
+          },
+          "502": {
+            "description": "AGENT_START_FAILED: the CLI could not be started, or started and reported no id."
+          },
+          "503": {
+            "description": "ENVIRONMENT_UNREACHABLE: no envagent is connected for that environment."
           }
         }
       }
     },
-    "/api/v1/sessions/import": {
+    "/api/v1/sessions/adopt": {
       "post": {
-        "description": "Adopt an archived native session. Policy-relevant fields are derived from the archive rather than the request: the agent from the id prefix, since it selects identity and lifecycle policy, and the working directory from the archive's session metadata, falling back to an early event carrying it as JSON for archives that report no metadata. The session is restored as recorded, with identityMode and lifecycleMode set to preserve. 422 means the archive has the session but recorded no working directory, so there is nothing to resume into; the request itself was valid. The archived working directory is bounded exactly like a created one, and not as belt-and-braces: the archive holds every session any agent ever ran on this machine, so an unbounded import is a general way to start an agent anywhere — find a row that ran in the target directory, adopt it, send a turn. That the path came from the archive rather than the request changes who chose it, not what happens next. 403 POLICY_VIOLATION therefore means the archived directory exists but sits outside the directories this install permits sessions to run in, and the message says what importing would enable so the refusal reads as policy rather than as a broken archive.",
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Adopt a session an agent already has",
+        "description": "Brings in a session from the vendor's own native store on some environment. Replaces POST /api/v1/sessions/import, which named a row in a separate archive that no longer exists — so this is a different operation rather than a rename: the id is the vendor's, on a named machine, and nothing has to have parsed it first. watch: true follows the store as it grows, so a session running in a terminal right now appears and keeps updating; false parses one pass of what is already recorded. Policy-relevant fields are derived from the store, not the request. The working directory comes from the session's own recorded context and is bounded exactly like a created one — not belt-and-braces: a machine's store holds every session any agent ever ran there, so an unbounded adopt is a general way to start an agent anywhere. That the path came from the store rather than the request changes who chose it, not what happens next. fidelity reflects what the vendor's store actually holds — blocks or messages, never stream. No care recovers a timing that was never written, so a renderer reads it before drawing a duration. injectIdentity defaults to false here, because the transcript so far was produced without it, but is settable: adopting a terminal session and injecting from that point on is a coherent thing to want. The derived title skips the agent's injected envelopes. The first user event is usually not what the user typed — agents prepend their own context as pseudo user turns — and taking it verbatim labels most sessions with boilerplate byte-identical across every session of that agent; skipping those raised recognizable labels from ~10% to 98% over 311 measured sessions. Not implemented yet: it needs the vendor-store parsers, and answers 501 rather than recording a session with no transcript, which a journal would make permanent.",
         "requestBody": {
-          "$ref": "#/components/requestBodies/ImportSession"
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdoptSession"
+              }
+            }
+          }
         },
         "responses": {
           "201": {
-            "$ref": "#/components/responses/SessionCreated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionEnvelope"
-                }
-              }
-            }
+            "description": "The session, with fidelity reflecting the store."
           },
           "400": {
-            "$ref": "#/components/responses/Error"
+            "description": "No such agent on that environment, or the recorded workdir no longer exists."
           },
           "403": {
-            "$ref": "#/components/responses/Error"
-          },
-          "404": {
-            "$ref": "#/components/responses/Error"
+            "description": "POLICY_VIOLATION: the recorded workdir is outside that environment’s roots."
           },
           "409": {
-            "$ref": "#/components/responses/Error"
+            "description": "SESSION_ALREADY_PRESENT: adopting twice would produce two rows for one conversation."
           },
-          "422": {
-            "$ref": "#/components/responses/Error"
-          },
-          "503": {
-            "$ref": "#/components/responses/Error"
+          "501": {
+            "description": "NOT_IMPLEMENTED: the vendor-store parsers have not landed."
           }
         }
       }
@@ -511,113 +486,6 @@
             }
           }
         ]
-      }
-    },
-    "/api/v1/archive/sessions": {
-      "get": {
-        "summary": "Archived sessions that ran in one directory",
-        "description": "Read-only browse of durable coding-agent history, newest first. /search answers \"which session mentioned X\", which needs a query the user may not have; this answers \"what happened in this directory before\", which is what an empty-looking workspace needs. Reading is not importing: this mutates nothing, while POST /sessions/import adopts a session for continuation and requires both a runner and a surviving workdir. TraceDB matches cwd as an unanchored substring and reports no lineage, so rows are re-filtered for exact directory equality and each candidate costs one cheap metadata show. Delegated sessions fold into their parent as subagentCount when that parent is in the same directory, and are listed on their own when it is not; a fork and its origin collapse to whichever ran more recently, with forkOf naming the other side. Empty sessions are dropped. Those filters shrink a page, so one request may walk several upstream pages, bounded by rows examined rather than pages -- a parent directory's substring also matches everything beneath it, and one real directory's first exact match sat ~1300 rows in. An unreachable archive answers 200 with available=false.",
-        "parameters": [
-          {
-            "name": "workdir",
-            "in": "query",
-            "required": true,
-            "description": "Absolute directory to list history for.",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
-              "default": 20
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "required": false,
-            "description": "nextCursor from a previous response.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "One page of archived sessions, or available=false",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ArchiveListResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/Error"
-          },
-          "401": {
-            "$ref": "#/components/responses/Error"
-          }
-        }
-      }
-    },
-    "/api/v1/archive/sessions/{traceId}": {
-      "get": {
-        "summary": "One archived transcript, read-only",
-        "description": "Events normalized into the live StreamEvent shape, so the conversation timeline renders archived history with no second code path. limit bounds the read because the largest session in a real archive is 8167 events and 20 MB of JSON. Unlike the listing, a single transcript has no useful degraded form, so an unreachable archive is reported rather than rendered empty.",
-        "parameters": [
-          {
-            "name": "traceId",
-            "in": "path",
-            "required": true,
-            "description": "TraceDB session id. Matched greedily: a subagent id contains a slash (claude:uuid/agent-name), which is 43% of the archive.",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 5000,
-              "default": 2000
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The archived transcript",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ArchiveTranscript"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/Error"
-          },
-          "401": {
-            "$ref": "#/components/responses/Error"
-          },
-          "404": {
-            "$ref": "#/components/responses/Error"
-          },
-          "503": {
-            "$ref": "#/components/responses/Error"
-          }
-        }
       }
     },
     "/api/v1/sessions/{sessionId}/files": {
@@ -1042,6 +910,20 @@
           },
           "500": {
             "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/environments": {
+      "get": {
+        "tags": [
+          "Environments"
+        ],
+        "summary": "Every paired environment, and what it can run",
+        "description": "Replaces GET /api/v1/agents. Which agents exist is per environment, not global: a user picking an environment with no codex on it should learn that before creating the session rather than after, and a merged list would be true of nowhere. Availability is PATH, not a handshake. An agent is available when its CLI is on that machine's PATH. There is no discovery pass, no adapter directory, and therefore no broken map — that mechanism produced two total silent failures in this repo's history, the worse being that zero discovered agents made / a dead keystroke three layers from the cause. “Why can I not use this agent” now has one answer with one fix. reachableVia is not decoration: a non-null value means this environment is reachable only while the named one relays for it, so control dies when that machine leaves. Rendering it identically to a directly-connected environment would promise AFK continuity it cannot keep. An empty agents array is a real answer — an envagent with no vendor CLI on its PATH — and a client must render it as “nothing installed here” rather than as a loading state.",
+        "responses": {
+          "200": {
+            "description": "Every paired environment, whether it is connected, and its agents."
           }
         }
       }
@@ -1727,29 +1609,6 @@
           }
         }
       },
-      "ImportSession": {
-        "required": true,
-        "content": {
-          "application/json": {
-            "schema": {
-              "type": "object",
-              "required": [
-                "traceSessionId"
-              ],
-              "properties": {
-                "traceSessionId": {
-                  "type": "string",
-                  "description": "Formatted <agent>:<native-id>, as TraceDB reports it."
-                },
-                "title": {
-                  "type": "string",
-                  "description": "Optional override; otherwise derived from the opening user turn."
-                }
-              }
-            }
-          }
-        }
-      },
       "CreateTurn": {
         "required": true,
         "content": {
@@ -1783,10 +1642,15 @@
       "CreateSession": {
         "type": "object",
         "required": [
+          "environment",
           "agent",
           "workdir"
         ],
         "properties": {
+          "environment": {
+            "type": "string",
+            "description": "Which environment runs the session, as the opaque id minted at pairing — never a hostname, because a name in a key means renaming destroys identity. Required rather than defaulted: which agents exist is per environment, decided by what is on that machine's PATH, so there is no global default that would be true anywhere. Restricted to base32 (a-z, 2-7), which is what lets the encoded session id be split on its first two delimiters unambiguously."
+          },
           "agent": {
             "type": "string"
           },
@@ -1802,14 +1666,10 @@
               "type": "string"
             }
           },
-          "identityMode": {
-            "type": "string",
-            "enum": [
-              "sylph",
-              "preserve"
-            ],
-            "default": "sylph",
-            "description": "Whether SOUL.md is appended to the agent's prompt. Defaults to sylph, so a client that omits it keeps the original behaviour. A closed enumeration so a misspelling is a 422 naming the field, rather than a journal row carrying a value nothing downstream matches — which would read as \"not sylph\" everywhere and silently disable injection. Separate from origin: opting out of injection does not make a session native. The WebApp created it, so Sylph lifecycle policy still applies and origin stays sylph."
+          "injectIdentity": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether SOUL.md is appended to the agent's prompt. Accepted here and refused by PATCH: a transcript records what produced it, so rewriting the flag would rewrite what the stored history means. This replaces identityMode and lifecycleMode, which were a pair of four-valued enumerations with exactly one behavioural read between them — the SOUL path choice. A boolean also keeps the property the closed enumeration existed for: a non-boolean is a 422 naming the field, rather than a value nothing downstream matches that would read as \"not sylph\" and silently disable injection."
           }
         }
       },
@@ -1852,15 +1712,11 @@
                   "TURN_INTERRUPTED",
                   "LINK_LOST",
                   "STOP_ALREADY_COMPLETED",
-                  "TRACEDB_UNAVAILABLE",
-                  "TRACE_SESSION_NOT_FOUND",
-                  "SESSION_ALREADY_IMPORTED",
                   "ATTACHMENT_INVALID",
                   "POLICY_VIOLATION",
                   "NOT_FOUND",
                   "METHOD_NOT_ALLOWED",
                   "INTERNAL_ERROR",
-                  "TRACE_SESSION_NOT_RESUMABLE",
                   "TURN_NOT_FOUND",
                   "UNAUTHORIZED",
                   "REQUEST_NOT_FOUND",
@@ -1868,7 +1724,10 @@
                   "LINK_GONE",
                   "LINK_FAILED",
                   "TURN_MOVED",
-                  "AGENT_UNSUPPORTED"
+                  "AGENT_UNSUPPORTED",
+                  "AGENT_START_FAILED",
+                  "SESSION_ALREADY_PRESENT",
+                  "NOT_IMPLEMENTED"
                 ]
               },
               "message": {
@@ -3747,6 +3606,41 @@
           },
           "input": {
             "description": "An edited version of what the agent proposed. This is what makes \"allow, but change the command\" work — a real terminal affordance a yes/no dialog drops. Absent means as proposed."
+          }
+        }
+      },
+      "AdoptSession": {
+        "type": "object",
+        "required": [
+          "environment",
+          "agent",
+          "nativeId"
+        ],
+        "properties": {
+          "environment": {
+            "type": "string",
+            "description": "The opaque environment id, base32."
+          },
+          "agent": {
+            "type": "string"
+          },
+          "nativeId": {
+            "type": "string",
+            "description": "The vendor's own id for the session, unchanged."
+          },
+          "watch": {
+            "type": "boolean",
+            "default": false,
+            "description": "Follow the store as it grows rather than parsing one pass."
+          },
+          "title": {
+            "type": "string",
+            "description": "Overrides the title derived from the opening ask."
+          },
+          "injectIdentity": {
+            "type": "boolean",
+            "default": false,
+            "description": "Defaults to false: the transcript so far was produced without it."
           }
         }
       }

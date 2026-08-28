@@ -7,6 +7,12 @@
 //! the old filename claimed exactly the property the invariant limits.
 
 pub mod store;
+/// Deriving a session's label from what its transcript actually says.
+///
+/// Beside the store rather than inside it because these are rules about
+/// transcripts, not about this table — see the module's own header for why they
+/// outlived the separate archive they arrived with.
+pub mod labels;
 /// Batching the journal's hot path. Separate from [`store`] because *when* a write
 /// commits is a different decision from *what* it writes, and only the first one
 /// depends on whether a reconnect can replay the event from anywhere else.

@@ -56,9 +56,10 @@ pub async fn replay(
     Path(session_id): Path<String>,
     Query(query): Query<ReplayQuery>,
 ) -> Result<impl IntoResponse> {
+    let session = crate::api::sessions::decode_id(&session_id)?;
     state
         .store
-        .get_session(&session_id)
+        .get_session(&session)
         .await?
         .ok_or(Error::SessionNotFound)?;
 
@@ -98,7 +99,7 @@ pub async fn replay(
 
     for row in state
         .store
-        .session_events_after(&session_id, query.from_seq)
+        .session_events_after(&session, query.from_seq)
         .await?
     {
         let event = StreamEvent::from_row(&row);

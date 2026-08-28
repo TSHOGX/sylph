@@ -23,12 +23,12 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::adapter::link::{Link, LinkConfig, LinkEvent};
-use sylph_protocol::SessionCapabilities;
+use sylph_protocol::{Facet, LinkFacets, SessionCapabilities, UnavailableReason};
 use crate::db::JournalStore;
 use crate::env::Environment;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::models::PendingRequest;
-use crate::agents::Registry;
+use sylph_protocol::{AgentName, EnvironmentId, Fidelity, NativeId, SessionId};
 
 /// How long a link may sit unused before it is torn down.
 ///
@@ -41,6 +41,30 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// How often the reaper looks for idle links.
 const REAP_INTERVAL: Duration = Duration::from_secs(60);
 
+/// What starting a session needs to know.
+///
+/// A struct rather than seven arguments because they travel together and four of them
+/// are `String` — the shape where swapping two compiles. `LinkConfig` is the adapter's
+/// half of the same information; this is the server's, and it carries what only the
+/// server decides (`inject_identity`, the parent) alongside what the client asked for.
+#[derive(Debug, Clone)]
+pub struct OpenSpec {
+    /// Which machine runs it. Typed, so an unvalidated string cannot reach a primary
+    /// key.
+    pub environment: EnvironmentId,
+    pub agent: String,
+    /// **Already contained by the caller.** `api::sessions` canonicalizes and bounds
+    /// this before it arrives, and the canonical spelling is what gets journalled —
+    /// anything that later groups or compares a workdir has to use the same one.
+    pub workdir: String,
+    pub title: Option<String>,
+    /// Whether to append `SOUL.md`. The server's decision, resolved before the spawn.
+    pub inject_identity: bool,
+    pub flags: HashMap<String, String>,
+    /// The delegation parent or fork origin, as an encoded triple.
+    pub parent_session: Option<String>,
+}
+
 /// A live link plus the bookkeeping the pool needs about it.
 struct Entry {
     link: Arc<Link>,
@@ -52,113 +76,92 @@ struct Entry {
 }
 
 /// What a client can be told about a session's link without holding one.
+///
+/// # Two typed facets, not a boolean
+///
+/// `docs/architecture.md` § One link, two typed capability facets. The previous shape was
+/// `attached: bool` plus an optional failure, and it had two defects that this replaces
+/// rather than refines.
+///
+/// **An unexplained `false` was the original bug.** The server logged the reason and
+/// returned a bare `attached: false`, so a client could not distinguish a failed handshake
+/// from an agent that simply declares no commands — and the only honest thing it could
+/// render was nothing at all. That is how a stale install presented as a composer ignoring
+/// the `/` key, three layers from the cause.
+///
+/// **And one boolean cannot describe a session running under someone else.** A Sylph-born
+/// session with no link has no process; a session a human started in a terminal has one
+/// that is alive and simply not ours. Both reported `attached: false`, so an empty
+/// capability surface meant "Sylph cannot reach it" and "there is nothing there"
+/// interchangeably — opposite facts. Splitting observe from control is what makes
+/// observable-but-undrivable a *state* rather than a failure, and a third value of
+/// `attached` could not have done it: *measured 2026-08-27*, the vendors do not sort into
+/// three buckets — a terminal `pi` is observable and undrivable, `codex` is both, `claude`
+/// is observable and semi-drivable behind a human approval gate — so a third variant would
+/// have to pick one and misreport the rest.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkState {
-    pub attached: bool,
+    /// Can Sylph see this session, and can it drive it.
+    pub link: LinkFacets,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    /// What this agent can actually do, so a UI never offers a control that
-    /// would fail. Empty when detached: capability is a property of a live link,
-    /// and reporting a remembered list would promise interrupt on a session that
-    /// Sylph holds no channel to.
+    /// What this agent can actually do, so a UI never offers a control that would fail.
     ///
-    /// # Why the reasoning here is narrower than it reads
-    ///
-    /// This used to say "no process to interrupt", which is true for every session
-    /// this type has ever described and false for the class being added. A
-    /// Sylph-born session with no link has no process; an *adopted* session — one a
-    /// human started in a terminal — has a process that is alive and simply not
-    /// ours. Both report `attached: false` and an empty `supports`, so the empty
-    /// surface means "Sylph cannot reach it", never "there is nothing there".
-    ///
-    /// The distinction is not cosmetic: for an adopted session, what is reachable
-    /// is decided by whatever second-party channel the vendor exposes, which is
-    /// per-agent and sometimes nothing at all. `docs/architecture.md` § One link, two
-    /// typed capability facets is why that becomes two facets on this struct rather
-    /// than a third value of `attached` — the vendors do not sort into three buckets,
-    /// so a third variant would have to pick one of them to represent and misreport the
-    /// rest. `sylph_protocol::LinkFacets` is that shape, declared and not yet wired
-    /// here: `docs/roadmap.md` § Implementation order puts it in step 3.
+    /// Empty when control is unavailable: capability is a property of a live link, and
+    /// reporting a remembered list would promise interrupt on a session Sylph holds no
+    /// channel to. Read alongside `link.control.reason`, which is what says *why* — the
+    /// two together are what the empty list could never say alone.
     pub supports: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<SessionCapabilities>,
-    /// Why there is no live link, when establishing one was tried and failed.
-    ///
-    /// An empty capability surface is ambiguous in a way that matters: an agent
-    /// that declares no commands, an adapter that does not exist, and a handshake
-    /// still in flight are three different situations needing three different
-    /// responses from the user, and they were indistinguishable to the client. The
-    /// server logged the reason and returned a bare `attached: false`, so the UI
-    /// could only show nothing — which is how a stale install presented as a
-    /// composer that ignored the `/` key.
-    ///
-    /// `None` means no attempt failed: either a link is attached, or nobody has
-    /// asked for one yet. A failure is not cached — the next read tries again.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure: Option<LinkFailure>,
 }
 
-/// Why a link could not be established, in a shape a client can act on.
+/// The session names an agent whose CLI is not on this machine.
 ///
-/// `code` is a closed vocabulary so the UI can choose its own words and offer the
-/// right recovery, and `message` carries the server's detail for the case where a
-/// human has to read it. A code the client does not recognize still renders,
-/// because the message is always populated.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LinkFailure {
-    pub code: LinkFailureCode,
-    pub message: String,
-}
-
-/// The session names an agent discovery did not find.
+/// A distinct error type rather than a message to match on, so classification survives the
+/// wording being edited — recovered by `downcast_ref`, never by parsing text back out.
 ///
-/// A distinct error type rather than a message to match on, so classification
-/// survives the wording being edited. It is the one link failure a retry cannot
-/// fix, which is exactly why the client has to be able to tell it apart.
+/// **Renamed from `NoAdapter` with the transport, and the rename is a narrowing of
+/// meaning.** There is no adapter to be absent: adapters are linked in, so availability is
+/// whether the vendor CLI is on that machine's `PATH` — one question, one answer, one fix.
+/// It is the link failure a retry cannot change, which is why a client must be able to
+/// tell it apart: `sylph_protocol::UnavailableReason::is_retryable` declares that rule so
+/// there is one answer rather than a condition buried in a query's `staleTime`.
 #[derive(Debug, thiserror::Error)]
-#[error("No adapter registered for agent '{0}'; it was not discovered")]
-pub struct NoAdapter(pub String);
-
-/// Note what this vocabulary cannot say: both values describe *our own spawn* failing,
-/// so neither expresses "somebody else's process, running fine, not ours to drive" — a
-/// session running in a terminal. That is a missing variant rather than a mislabelled
-/// one, and the per-agent control table it was gated on is now measured
-/// (`docs/architecture.md` § AFK degrades in a defined order, `docs/agents.md`
-/// § Capability matrix).
-///
-/// **Its replacement exists**: `sylph_protocol::UnavailableReason` carries `no_agent`,
-/// `environment_unreachable`, `not_ours_to_drive`, and `handshake_failed`, and
-/// `sylph_protocol::LinkFacets` splits the answer into `observe` and `control` so the
-/// observable-but-undrivable case is a state rather than a failure. This enum survives
-/// only until step 3 of `docs/roadmap.md` § Implementation order moves the server onto
-/// it, and it is not extended in the meantime — a fifth value here would be a second
-/// vocabulary for one fact.
-#[derive(Debug, Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinkFailureCode {
-    /// The session names an agent discovery did not find. Fixing this is an
-    /// install or configuration change, not a retry.
-    NoAdapter,
-    /// The adapter exists but would not come up: a crash, a timeout, a refused
-    /// handshake. Retrying can work.
-    HandshakeFailed,
-}
+#[error("Agent '{0}' is not available on this machine")]
+pub struct NoAgent(pub String);
 
 impl LinkState {
+    /// No link, and nobody has tried to establish one.
+    ///
+    /// **Observe is available**: history answers from the server's own store whether or
+    /// not a link exists, which is the entire reason the two facets are separate. Control
+    /// reports `environment_unreachable` — the honest answer for a session whose agent
+    /// this server is not currently holding.
     fn detached() -> Self {
         Self {
-            attached: false,
+            link: LinkFacets {
+                observe: Facet::available(),
+                control: Facet::unavailable(UnavailableReason::EnvironmentUnreachable),
+            },
             agent: None,
             supports: Vec::new(),
             capabilities: None,
-            failure: None,
         }
     }
 
-    fn failed(failure: LinkFailure) -> Self {
-        Self { failure: Some(failure), ..Self::detached() }
+    /// Establishing a link was tried and failed, for a stated reason.
+    fn failed(reason: UnavailableReason) -> Self {
+        Self {
+            link: LinkFacets {
+                // Still readable: the record is the server's, and a failure to reach the
+                // agent does not take the transcript with it.
+                observe: Facet::available(),
+                control: Facet::unavailable(reason),
+            },
+            ..Self::detached()
+        }
     }
 }
 
@@ -174,14 +177,25 @@ pub struct LinkManager {
     writer: crate::db::JournalWriter,
     hub: EventHub,
     environment: Arc<dyn Environment>,
-    /// Where an adapter actually is, according to the thing that found it.
+    /// Where to look for an `adapter.sh`, in precedence order.
     ///
-    /// Deliberately the registry rather than a directory to join a name onto.
-    /// Discovery searches several roots, so re-deriving the path here meant an
-    /// agent found in one root was listed as usable while every link to it failed
-    /// with "No adapter for agent 'claude' at <the other root>". One component
-    /// knows where adapters are, and this is not it.
-    registry: Arc<Mutex<Registry>>,
+    /// # This is a bridge, and it re-opens a hazard on purpose
+    ///
+    /// The field this replaced was the discovery `Registry`, and its comment said
+    /// exactly why: "deliberately the registry rather than a directory to join a
+    /// name onto", because discovery searched several roots and re-deriving the path
+    /// here meant an agent found in one root was listed as usable while every link
+    /// to it failed naming the other. One component knew where adapters were.
+    ///
+    /// Discovery is now deleted and `crates/adapters` — which makes an adapter a
+    /// linked-in Rust trait with no path at all — is step 2 and not yet available.
+    /// So for this one step the path is joined from configured roots, which is the
+    /// shape that bug had. Two things keep it honest rather than merely reintroduced:
+    /// every root is searched in precedence order and the error names **all** of
+    /// them, so a miss cannot claim the wrong directory; and the whole field
+    /// disappears when `sylph_adapters::for_agent` answers, because a trait object
+    /// has no path to get wrong. `crate::adapters` holds that seam.
+    adapter_roots: Vec<PathBuf>,
     soul_path: Option<PathBuf>,
     seq: SeqAllocator,
     /// Turns waiting to be told how they ended.
@@ -207,6 +221,13 @@ pub struct LinkManager {
     /// `closer` is because the two are wired at the same point for the same reason:
     /// the drain task is where these events land.
     reconciler: Arc<RwLock<Option<crate::supervisor::TrajectoryReconciler>>>,
+    /// Keyed by the **encoded** triple rather than by [`SessionId`].
+    ///
+    /// A `HashMap<SessionId, _>` would work and is worse here: every caller reaches
+    /// this map from a path segment that is already a string, so keying on the type
+    /// would mean decoding and re-encoding around each lookup. The encoding has one
+    /// producer and one reader (`SessionId::encode`), so the two spellings cannot
+    /// diverge.
     links: Arc<RwLock<HashMap<String, Entry>>>,
     /// Serializes establishment per session.
     ///
@@ -222,7 +243,7 @@ impl LinkManager {
         writer: crate::db::JournalWriter,
         hub: EventHub,
         environment: Arc<dyn Environment>,
-        registry: Arc<Mutex<Registry>>,
+        adapter_roots: Vec<PathBuf>,
         soul_path: Option<PathBuf>,
         seq: SeqAllocator,
     ) -> Self {
@@ -231,7 +252,7 @@ impl LinkManager {
             writer,
             hub,
             environment,
-            registry,
+            adapter_roots,
             soul_path,
             seq,
             waiters: Arc::new(RwLock::new(None)),
@@ -273,7 +294,12 @@ impl LinkManager {
     }
 
     /// Tell a waiting turn how it ended.
-    async fn settle_turn(&self, session_id: &str, turn_id: &str, outcome: crate::supervisor::turn::Outcome) {
+    async fn settle_turn(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+        outcome: crate::supervisor::turn::Outcome,
+    ) {
         // Cloned out from under the read guard, so the guard is not held across
         // the `lock().await` below — holding both would order two locks and
         // invite a deadlock the moment anything takes them the other way.
@@ -353,14 +379,24 @@ impl LinkManager {
                         .collect()
                 };
 
-                for session_id in idle {
-                    // A turn may have started between the scan and here, so the
-                    // busy check is repeated rather than trusted from the scan.
+                for encoded in idle {
+                    // The pool is keyed by the encoded triple, so reaching the store
+                    // needs a decode. A key that will not decode cannot name a row and
+                    // cannot be reaped through the store, so it is dropped from the
+                    // pool directly rather than left to accumulate — it is unreachable
+                    // either way, and leaving it would leak the process behind it.
+                    let Ok(session_id) = SessionId::decode(&encoded) else {
+                        error!("Dropping unparseable link key {}", encoded);
+                        manager.links.write().await.remove(&encoded);
+                        continue;
+                    };
+                    // A turn may have started between the scan and here, so the busy
+                    // check is repeated rather than trusted from the scan.
                     if manager.store.session_status(&session_id).await.as_deref() == Some("running")
                     {
                         continue;
                     }
-                    info!("Reaping idle link for session {}", session_id);
+                    info!("Reaping idle link for session {}", encoded);
                     manager.detach(&session_id, "idle").await;
                 }
             }
@@ -368,21 +404,24 @@ impl LinkManager {
     }
 
     /// The link for a session, or `None` if it is detached.
-    pub async fn get(&self, session_id: &str) -> Option<Arc<Link>> {
+    pub async fn get(&self, session_id: &SessionId) -> Option<Arc<Link>> {
         let mut links = self.links.write().await;
-        let entry = links.get_mut(session_id)?;
+        let entry = links.get_mut(&session_id.encode())?;
         entry.last_used_ms = now_ms();
         Some(entry.link.clone())
     }
 
-    pub async fn state(&self, session_id: &str) -> LinkState {
+    pub async fn state(&self, session_id: &SessionId) -> LinkState {
         let links = self.links.read().await;
-        let Some(entry) = links.get(session_id) else {
+        let Some(entry) = links.get(&session_id.encode()) else {
             return LinkState::detached();
         };
         let identity = entry.link.identity();
         LinkState {
-            attached: true,
+            link: LinkFacets {
+                observe: Facet::available(),
+                control: Facet::available(),
+            },
             agent: Some(entry.agent.clone()),
             supports: identity
                 .supports
@@ -391,7 +430,6 @@ impl LinkManager {
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect(),
             capabilities: Some(entry.link.capabilities().await),
-            failure: None,
         }
     }
 
@@ -402,22 +440,28 @@ impl LinkManager {
     /// fixed by installing an adapter, while a handshake that timed out may work on
     /// the next try. Collapsing both into one error would make the UI offer a retry
     /// button for a condition no retry can change.
-    pub async fn state_after_failure(&self, session_id: &str, error: &anyhow::Error) -> LinkState {
+    pub async fn state_after_failure(
+        &self,
+        session_id: &SessionId,
+        error: &anyhow::Error,
+    ) -> LinkState {
         // A link may have been established concurrently — by a turn, or by another
         // client — between the failure and this call. The live answer wins.
         let live = self.state(session_id).await;
-        if live.attached {
+        if live.link.control.available {
             return live;
         }
 
-        // Downcast rather than matching the message text: the reason a client sees
-        // must not depend on the wording of a log line, which is edited freely.
-        let code = if error.downcast_ref::<NoAdapter>().is_some() {
-            LinkFailureCode::NoAdapter
+        // Downcast rather than matching the message text: the reason a client sees must
+        // not depend on the wording of a log line, which is edited freely. Same rule as
+        // the adapter refusal codes — the text is the producer's and may be reworded,
+        // while the code is declared contract.
+        let reason = if error.downcast_ref::<NoAgent>().is_some() {
+            UnavailableReason::NoAgent
         } else {
-            LinkFailureCode::HandshakeFailed
+            UnavailableReason::HandshakeFailed
         };
-        LinkState::failed(LinkFailure { code, message: format!("{:#}", error) })
+        LinkState::failed(reason)
     }
 
     pub async fn attached_count(&self) -> usize {
@@ -429,7 +473,7 @@ impl LinkManager {
     /// This is the path every turn takes. Establishment is serialized per session,
     /// and the check is repeated inside the lock: the first caller through creates
     /// the link, and the second finds it rather than making a second one.
-    pub async fn ensure(&self, session_id: &str) -> Result<Arc<Link>> {
+    pub async fn ensure(&self, session_id: &SessionId) -> Result<Arc<Link>> {
         if let Some(link) = self.get(session_id).await {
             return Ok(link);
         }
@@ -437,7 +481,7 @@ impl LinkManager {
         let gate = {
             let mut establishing = self.establishing.lock().await;
             establishing
-                .entry(session_id.to_string())
+                .entry(session_id.encode())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
@@ -451,34 +495,35 @@ impl LinkManager {
         self.establish(session_id).await
     }
 
-    async fn establish(&self, session_id: &str) -> Result<Arc<Link>> {
+    /// Re-attach to a session the journal already holds.
+    ///
+    /// Distinct from [`Self::open_session`], and the difference is which way identity
+    /// flows. Here the id is **known** — it is the row's primary key — so the agent is
+    /// asked to resume it. There, no id exists yet and the agent's answer is what
+    /// creates one.
+    async fn establish(&self, session_id: &SessionId) -> Result<Arc<Link>> {
         let session = self
             .store
             .get_session(session_id)
             .await?
-            .ok_or_else(|| anyhow!("Unknown session {}", session_id))?;
+            .ok_or_else(|| anyhow!("Unknown session {}", session_id.encode()))?;
 
-        // Asked of the registry, which is what discovered it. An agent that is not
-        // there is genuinely unavailable, rather than merely absent from one of the
-        // roots discovery happens to search.
-        let adapter_path = {
-            let registry = self.registry.lock().await;
-            registry
-                .adapter_path(&session.agent)
-                .map(|path| path.to_path_buf())
-                .ok_or_else(|| anyhow::Error::new(NoAdapter(session.agent.clone())))?
-        };
+        let adapter_path = self.adapter_path(session.id.agent.as_str())?;
 
-        // Identity is the server's decision, and the empty string is how the
-        // protocol spells "inject nothing". A preserved session must send it
-        // explicitly: omitting the field means "resolve your default", which
-        // would inject into a transcript whose identity is already fixed.
-        let soul = match session.identity_mode.as_str() {
-            "preserve" => Some(String::new()),
-            _ => self
-                .soul_path
+        // Identity is the server's decision, and the empty string is how the protocol
+        // spells "inject nothing" — a value that is *meaningful rather than missing*,
+        // which is why it is sent explicitly. Omitting the field would mean "adapter,
+        // resolve your own default", and that would inject into a transcript whose
+        // identity is already fixed.
+        //
+        // This is the one behavioural branch the deleted `identity_mode` ever had
+        // (`docs/architecture.md` § One class of session), now a boolean.
+        let soul = if session.inject_identity {
+            self.soul_path
                 .as_ref()
-                .map(|p| p.to_string_lossy().into_owned()),
+                .map(|p| p.to_string_lossy().into_owned())
+        } else {
+            Some(String::new())
         };
 
         let flags: HashMap<String, String> = serde_json::from_str::<serde_json::Value>(
@@ -499,7 +544,8 @@ impl LinkManager {
 
         info!(
             "Establishing link for session {} ({})",
-            session_id, session.agent
+            session_id.encode(),
+            session.id.agent
         );
 
         let (link, events) = Link::establish(
@@ -507,7 +553,9 @@ impl LinkManager {
             LinkConfig {
                 adapter_path,
                 workdir: session.workdir.clone(),
-                session_id: session.backend_session_id.clone(),
+                // Resume the id the row is keyed by. There is no second id space to
+                // reconcile: the primary key *is* the vendor's own id.
+                session_id: Some(session.id.native_id.as_str().to_string()),
                 soul,
                 flags,
                 permission_mode: None,
@@ -515,58 +563,247 @@ impl LinkManager {
             },
         )
         .await
-        .with_context(|| format!("Failed to establish a link for session {}", session_id))?;
+        .with_context(|| {
+            format!(
+                "Failed to establish a link for session {}",
+                session_id.encode()
+            )
+        })?;
 
         let link = Arc::new(link);
 
-        // The agent may have assigned an id, or resumed the one we gave it.
-        // Persisting it is what makes the *next* link a continuation rather than
-        // a fresh conversation.
-        if let Some(native_id) = link.native_session_id().await {
-            if session.backend_session_id.as_deref() != Some(native_id.as_str()) {
-                let incarnation = self.store.active_incarnation(session_id).await.ok().flatten();
-                if let Err(error) = self
-                    .store
-                    .set_backend_session_id(
-                        session_id,
-                        incarnation.as_ref().map(|i| i.id.as_str()),
-                        &native_id,
-                    )
-                    .await
-                {
-                    error!("Failed to persist native session id: {}", error);
-                }
+        // **Nothing is persisted here any more, and that is the point of the
+        // rewrite.** This branch used to learn the agent-native id after the row
+        // existed and write it back — the whole purpose of the deleted
+        // `set_backend_session_id`. Under the identity triple the id is the primary
+        // key, so there is nothing to learn and nothing that could disagree.
+        //
+        // A vendor answering with a *different* id than the one asked for would be a
+        // resumed session becoming a different session, which the type system cannot
+        // catch and the journal must not absorb silently.
+        if let Some(reported) = link.native_session_id().await {
+            if reported != session.id.native_id.as_str() {
+                warn!(
+                    "Session {} asked agent {} to resume '{}' and it reported '{}'; \
+                     the journal keeps the id it was keyed by",
+                    session_id.encode(),
+                    session.id.agent,
+                    session.id.native_id,
+                    reported
+                );
             }
         }
 
+        self.insert(session_id, link.clone(), events).await;
+        Ok(link)
+    }
+
+    /// Where an `adapter.sh` for one agent is, or a failure naming every root tried.
+    ///
+    /// The error lists **all** roots rather than the last one, which is the half of
+    /// the deleted registry's warning that survives being a path lookup again: an
+    /// agent present in one root and reported missing from another is a message that
+    /// sends the reader to the wrong directory.
+    fn adapter_path(&self, agent: &str) -> Result<PathBuf> {
+        crate::adapters::adapter_path(&self.adapter_roots, agent)
+            .ok_or_else(|| anyhow::Error::new(NoAgent(agent.to_string())))
+    }
+
+    /// Register a live link and start draining it.
+    ///
+    /// Shared by [`Self::establish`] and [`Self::open_session`] so the pool insert and
+    /// the drain spawn cannot get out of step: a link in the map with nothing reading
+    /// it wedges the session, and a drain with no map entry publishes events for a
+    /// session nothing can find.
+    ///
+    /// The map write is awaited rather than spawned. A detached insert would return a
+    /// link the pool does not yet hold, so the caller's own next `get` — and every
+    /// concurrent one — could miss and establish a *second* adapter against one
+    /// session, which is two processes writing one native store.
+    async fn insert(
+        &self,
+        session_id: &SessionId,
+        link: Arc<Link>,
+        events: tokio::sync::mpsc::Receiver<LinkEvent>,
+    ) {
+        let encoded = session_id.encode();
         self.links.write().await.insert(
-            session_id.to_string(),
+            encoded.clone(),
             Entry {
-                link: link.clone(),
+                link,
                 last_used_ms: now_ms(),
-                agent: session.agent.clone(),
+                agent: session_id.agent.as_str().to_string(),
             },
         );
+        self.spawn_drain(encoded, events);
+    }
 
-        self.spawn_drain(session_id.to_string(), events);
+    /// Start an agent, learn the id it assigned, and journal the session.
+    ///
+    /// # This is `POST /sessions`, and the order is the whole design
+    ///
+    /// A session has no identity until an agent has given it one
+    /// (`docs/architecture.md` § Identity), so the row cannot come first. The previous
+    /// shape minted a `Uuid::new_v4()`, wrote a row, and left the agent unstarted —
+    /// which produced a **class of session with no work in it**, and three things go
+    /// away with it: `DELETE /sessions/{id}` for empties, the frontend probe that
+    /// called it on unmount, and the window in which a session existed with no native
+    /// id and therefore could not be resumed.
+    ///
+    /// So: spawn, read the id off the handshake, then insert. A failed spawn reports at
+    /// the start screen instead of leaving a dead row behind.
+    ///
+    /// # Why the insert can still fail, and why that is a conflict rather than a retry
+    ///
+    /// Two clients can ask for a session in the same directory at the same moment, and
+    /// a vendor that was handed an id it already holds will happily resume it. The
+    /// primary key is what refuses the second row, and the error is a genuine `409`:
+    /// two rows for one conversation is exactly the state it exists to prevent. The
+    /// link is closed on that path rather than leaked, because a process nobody holds
+    /// a row for cannot be reached again.
+    ///
+    /// # Ordering on the failure path
+    ///
+    /// The link is registered **after** the insert commits. Registering first would
+    /// leave a live entry in the pool keyed to a session the journal does not have, so
+    /// a caller could find a link, send a turn, and have every event dropped for
+    /// naming a session that does not exist.
+    pub async fn open_session(&self, spec: OpenSpec) -> Result<crate::models::Session> {
+        let adapter_path = self.adapter_path(&spec.agent)?;
 
-        Ok(link)
+        // `inject_identity` is the server's decision and travels as the resolved
+        // value, never as a policy for the adapter to interpret. The empty string is
+        // how the protocol spells "inject nothing".
+        let soul = if spec.inject_identity {
+            self.soul_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+        } else {
+            Some(String::new())
+        };
+
+        info!(
+            "Starting {} in {} to open a session",
+            spec.agent, spec.workdir
+        );
+
+        let (link, events) = Link::establish(
+            self.environment.as_ref(),
+            LinkConfig {
+                adapter_path,
+                workdir: spec.workdir.clone(),
+                // No id to resume: this is a new session, and the agent either accepts
+                // one it is handed or assigns its own and reports it. Which of the two
+                // is a per-vendor fact (`sylph_protocol::AgentInfo::dictates_native_id`)
+                // and neither is expressed here — the adapter answers with whatever it
+                // used, which is the only value this can trust.
+                session_id: None,
+                soul,
+                flags: spec.flags.clone(),
+                permission_mode: None,
+                env: HashMap::new(),
+            },
+        )
+        .await
+        .with_context(|| format!("Failed to start {} in {}", spec.agent, spec.workdir))?;
+
+        let link = Arc::new(link);
+
+        // **An `open` that reports no id is a failure, not a degraded success.**
+        // Without one the session can never be resumed, so every link death — the idle
+        // reaper, a restart, an explicit detach — would make it permanently
+        // unlinkable. Better to refuse now, with the process torn down, than to
+        // journal a row nothing can ever reach again.
+        let native = match link.native_session_id().await {
+            Some(native) if !native.trim().is_empty() => native,
+            _ => {
+                link.close().await;
+                return Err(anyhow!(
+                    "Agent '{}' started but reported no session id, so the session \
+                     could never be resumed",
+                    spec.agent
+                ));
+            }
+        };
+
+        let session_id = SessionId::new(
+            spec.environment.clone(),
+            AgentName::parse(spec.agent.clone())?,
+            NativeId::new(native),
+        );
+
+        let now = now_ms();
+        let record = crate::models::Session {
+            id: session_id.clone(),
+            workdir: spec.workdir,
+            title: spec.title,
+            inject_identity: spec.inject_identity,
+            // A live link holds the process's own stdio, which is the only source that
+            // carries every delta and its arrival time.
+            fidelity: Fidelity::Stream,
+            flags_json: serde_json::to_string(&spec.flags).unwrap_or_else(|_| "{}".to_string()),
+            status: "idle".to_string(),
+            parent_session: spec.parent_session,
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+
+        let stored = match self.store.create_session(&record).await {
+            Ok(stored) => stored,
+            Err(error) => {
+                // The row is what makes the process reachable, so a refused insert means
+                // this link can never be found again.
+                link.close().await;
+
+                // A duplicate triple is a **conflict, not a start failure**. The primary
+                // key refusing a second row for one conversation is the constraint doing
+                // its job, and it is reachable whenever a vendor is handed an id it
+                // already holds: two clients starting a session in one directory at the
+                // same moment, or an adapter that dictates a fixed id. Reported as a
+                // generic start failure it reads as "the agent is broken", which sends
+                // the investigation to the agent install rather than to the collision.
+                if let crate::error::Error::Database(sqlx::Error::Database(db)) = &error {
+                    if db.is_unique_violation() {
+                        return Err(anyhow::Error::new(
+                            crate::error::Error::SessionAlreadyPresent,
+                        ));
+                    }
+                }
+                return Err(error.into());
+            }
+        };
+
+        self.insert(&session_id, link, events).await;
+        info!("Opened session {}", session_id.encode());
+        Ok(stored)
     }
 
     /// Consume a link's output for as long as it lives.
     ///
     /// One task per link, and the only consumer: the channel is not a broadcast,
     /// so a second reader would steal messages rather than duplicate them.
-    fn spawn_drain(&self, session_id: String, mut events: tokio::sync::mpsc::Receiver<LinkEvent>) {
+    fn spawn_drain(&self, encoded: String, mut events: tokio::sync::mpsc::Receiver<LinkEvent>) {
         let manager = self.clone();
         tokio::spawn(async move {
+            // Decoded once, here, rather than per event. Every entry in the pool was
+            // keyed from a `SessionId::encode`, so a failure is a corrupt pool rather
+            // than a bad request — and draining a link whose session cannot be named
+            // would journal events against nothing.
+            let session_id = match SessionId::decode(&encoded) {
+                Ok(session_id) => session_id,
+                Err(error) => {
+                    error!("Cannot drain link for {}: {}", encoded, error);
+                    return;
+                }
+            };
+            let session_id = &session_id;
             while let Some(event) = events.recv().await {
                 match event {
                     LinkEvent::Event(body) => {
-                        manager.absorb_event(&session_id, body).await;
+                        manager.absorb_event(session_id, body).await;
                     }
                     LinkEvent::Request { id, request } => {
-                        manager.absorb_request(&session_id, &id, request).await;
+                        manager.absorb_request(session_id, &id, request).await;
                     }
                     LinkEvent::Capabilities(surface) => {
                         // Published rather than journaled: it is current state,
@@ -574,7 +811,7 @@ impl LinkManager {
                         // caches it for whoever asks later.
                         manager
                             .publish_session_event(
-                                &session_id,
+                                session_id,
                                 "capabilities",
                                 serde_json::to_value(&surface).unwrap_or_default(),
                             )
@@ -582,13 +819,13 @@ impl LinkManager {
                     }
                     LinkEvent::Closed { exit_code, stderr_tail } => {
                         manager
-                            .handle_close(&session_id, exit_code, stderr_tail)
+                            .handle_close(session_id, exit_code, stderr_tail)
                             .await;
                         break;
                     }
                 }
             }
-            debug!("Drain finished for session {}", session_id);
+            debug!("Drain finished for session {}", encoded);
         });
     }
 
@@ -597,7 +834,7 @@ impl LinkManager {
     /// A `turn` event with `phase: completed` is also the signal that settles the
     /// waiting turn, because on a link a turn's outcome is an event rather than a
     /// process exit.
-    async fn absorb_event(&self, session_id: &str, body: serde_json::Value) {
+    async fn absorb_event(&self, session_id: &SessionId, body: serde_json::Value) {
         let turn_id = match self.store.running_turn_id(session_id).await {
             Ok(Some(id)) => id,
             // No turn is running, and the agent is speaking anyway. That used to be
@@ -748,11 +985,10 @@ impl LinkManager {
     /// `None` means the turn could not be recorded, and the caller drops the event.
     /// That is the same outcome as before for a session whose row is gone — a link
     /// outliving its session — and it stays a drop rather than an unattributed write.
-    async fn open_agent_turn(&self, session_id: &str) -> Option<String> {
+    async fn open_agent_turn(&self, session_id: &SessionId) -> Option<String> {
         let turn = crate::models::Turn {
             id: uuid::Uuid::new_v4().to_string(),
-            session_id: session_id.to_string(),
-            incarnation_id: None,
+            session_id: session_id.clone(),
             status: "running".to_string(),
             origin: "agent".to_string(),
             // Empty by construction: there was no request. `origin` is what
@@ -762,7 +998,6 @@ impl LinkManager {
             idempotency_key: None,
             error_code: None,
             error_message: None,
-            runner_exit_code: None,
             created_at_ms: now_ms(),
             started_at_ms: Some(now_ms()),
             completed_at_ms: None,
@@ -805,7 +1040,12 @@ impl LinkManager {
     /// Journaled first. An approval blocks the agent, so if the process dies
     /// between here and the publish, the record of what was being asked is what
     /// explains the stall — and it is answerable later from any frontend.
-    async fn absorb_request(&self, session_id: &str, adapter_id: &str, request: sylph_protocol::Request) {
+    async fn absorb_request(
+        &self,
+        session_id: &SessionId,
+        adapter_id: &str,
+        request: sylph_protocol::Request,
+    ) {
         let turn_id = self
             .store
             .running_turn_id(session_id)
@@ -816,7 +1056,7 @@ impl LinkManager {
 
         let record = PendingRequest {
             id: uuid::Uuid::new_v4().to_string(),
-            session_id: session_id.to_string(),
+            session_id: session_id.clone(),
             turn_id,
             adapter_request_id: adapter_id.to_string(),
             kind: request.kind.to_string(),
@@ -866,8 +1106,13 @@ impl LinkManager {
     }
 
     /// A link died. Record why, and free anything waiting on it.
-    async fn handle_close(&self, session_id: &str, exit_code: Option<i32>, stderr_tail: String) {
-        self.links.write().await.remove(session_id);
+    async fn handle_close(
+        &self,
+        session_id: &SessionId,
+        exit_code: Option<i32>,
+        stderr_tail: String,
+    ) {
+        self.links.write().await.remove(&session_id.encode());
 
         // A turn still in flight will never hear from this agent again, so it is
         // settled here rather than left waiting on a channel whose sender is
@@ -913,8 +1158,8 @@ impl LinkManager {
     }
 
     /// Close a link deliberately.
-    pub async fn detach(&self, session_id: &str, reason: &str) {
-        let entry = self.links.write().await.remove(session_id);
+    pub async fn detach(&self, session_id: &SessionId, reason: &str) {
+        let entry = self.links.write().await.remove(&session_id.encode());
         let Some(entry) = entry else { return };
 
         entry.link.close().await;
@@ -939,7 +1184,7 @@ impl LinkManager {
     /// Used after a config change made through the API: the client that made it
     /// learns the outcome from its own response, but every other attached client
     /// would otherwise keep showing the previous value.
-    pub async fn announce_capabilities(&self, session_id: &str) {
+    pub async fn announce_capabilities(&self, session_id: &SessionId) {
         let Some(link) = self.get(session_id).await else {
             return;
         };
@@ -971,7 +1216,7 @@ impl LinkManager {
     /// One event per row rather than one per batch, even when a link death abandons
     /// several. A batch would make a client diff two sets to learn what changed, which
     /// is the work this event exists to save it.
-    pub async fn announce_request(&self, session_id: &str, request: &PendingRequest) {
+    pub async fn announce_request(&self, session_id: &SessionId, request: &PendingRequest) {
         self.publish_session_event(
             session_id,
             "request",
@@ -985,7 +1230,12 @@ impl LinkManager {
     /// Links, capability changes, and requests are properties of a session rather
     /// than of a turn, so a client watching only turns would miss an approval
     /// raised while it was idle.
-    async fn publish_session_event(&self, session_id: &str, kind: &str, data: serde_json::Value) {
+    async fn publish_session_event(
+        &self,
+        session_id: &SessionId,
+        kind: &str,
+        data: serde_json::Value,
+    ) {
         let event = StreamEvent {
             seq: self.seq.next(session_id).await.unwrap_or(0),
             kind: kind.to_string(),
@@ -1004,7 +1254,7 @@ impl LinkManager {
             // A live session fact is one arrival.
             started_at_ms: None,
         };
-        self.hub.publish_session(session_id, event).await;
+        self.hub.publish_session(&session_id.encode(), event).await;
     }
 }
 

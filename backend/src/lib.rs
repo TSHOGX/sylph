@@ -14,7 +14,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
 
 pub mod api;
@@ -38,26 +37,35 @@ pub mod events;
 pub mod middleware;
 pub mod models;
 pub mod paths;
-pub mod agents;
+/// Which agents this machine can run. A seam standing in for `crates/adapters`
+/// until that crate lands; see the module header for the one-line swap.
+pub mod adapters;
 /// Durable, replayable history: folded deltas, content-addressed blobs, and
 /// watermark-driven retention.
 pub mod storage;
 pub mod supervisor;
-pub mod tracedb;
 
 use crate::config::Config;
 use crate::error::Error;
 use crate::db::JournalStore;
 use crate::events::EventHub;
-use crate::agents::Registry;
-use crate::tracedb::Client as TraceDbClient;
+
+#[cfg(test)]
+mod fixtures;
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: JournalStore,
     pub config: Config,
-    pub registry: Arc<Mutex<Registry>>,
     pub hub: EventHub,
+    /// Where a session's work runs.
+    ///
+    /// One environment today, and it is held here rather than constructed per
+    /// caller so that pairing (step 4 of `docs/roadmap.md` § Implementation order)
+    /// replaces one field instead of reaching into every consumer. This is also what
+    /// `GET /environments` reports availability from — the surface that replaced
+    /// discovery's `agents.available` and `broken_adapters`.
+    pub environment: Arc<dyn crate::env::Environment>,
     /// Runs turns on live links.
     pub turns: crate::supervisor::turn::LinkedSupervisor,
     pub links: crate::links::LinkManager,
@@ -70,7 +78,6 @@ pub struct AppState {
     /// same reason as the consolidator: a test drives one pass instead of waiting
     /// five minutes for the interval.
     pub retention: crate::storage::RetentionScheduler,
-    pub tracedb: TraceDbClient,
 }
 
 impl AppState {
@@ -81,43 +88,33 @@ impl AppState {
 
     /// Assemble application state from configuration.
     ///
-    /// Runner discovery and the TraceDB probe are both non-fatal: a missing
-    /// adapters directory or a misconfigured TraceDB binary leaves the backend
-    /// serving what it can, with the failure visible in `/diagnostics`.
+    /// An install that can run no agents is **reported, not fatal**: history stays
+    /// readable and every other surface works, which is why the report has to be
+    /// loud rather than the startup being aborted.
     pub async fn build(config: Config) -> anyhow::Result<Self> {
         let store = JournalStore::new(&config.journal_path).await?;
         tracing::info!("Journal initialized at {}", config.journal_path);
 
-        // Bundled adapters first, so a user-installed one of the same name
-        // shadows rather than duplicates. Discovery handshakes with each, which
-        // is why it needs the environment.
-        let discovery_env: Arc<dyn crate::env::Environment> =
-            Arc::new(crate::env::LocalEnvironment::new());
-        let registry = Arc::new(Mutex::new(
-            Registry::new(config.agent_roots(), discovery_env).await?,
-        ));
-        {
-            let registry = registry.lock().await;
-            let usable = registry.list_agents().len();
-            tracing::info!(
-                "Agent discovery: {} usable, {} broken",
-                usable,
-                registry.broken_adapters().len()
+        // Zero runnable agents is not a quiet degradation: no session can be created
+        // and no existing one can offer a command, so every feature depending on a
+        // live link fails while the server reports healthy. Discovery logged that at
+        // the same level as success, one line among hundreds, which is how a stale
+        // install presented as a composer ignoring the `/` key.
+        //
+        // Availability is now per environment (`docs/environments.md`), so
+        // `GET /environments` is where a client learns *which* agent is missing on
+        // *which* machine. This line is the server-side half, and it stays at `error`
+        // for the same reason it was raised to `error` before: it names a total
+        // failure whose symptom appears three layers away.
+        let runnable = crate::adapters::available(&config.agent_roots());
+        if runnable.is_empty() {
+            tracing::error!(
+                "No agent adapters are linked into this build. Sessions cannot be \
+                 created and no slash commands will be offered. See \
+                 `GET /api/v1/environments` for what each environment reports."
             );
-            // Zero usable agents is not a quiet degradation: no session can be
-            // created and no existing one can offer a command, so every feature
-            // that depends on a live link fails while the server reports healthy.
-            // It was logged at the same level as success, one line among hundreds,
-            // which is how a stale binary with no adapters presented as a UI bug.
-            if usable == 0 {
-                tracing::error!(
-                    "No usable agents. Sessions cannot run and no slash commands will be \
-                     offered. Bundled adapters were looked for in {:?}; your own agents in \
-                     {:?}. Run `sylph-web doctor` to see what resolved.",
-                    config.bundled_agents_candidates,
-                    config.agents_dir,
-                );
-            }
+        } else {
+            tracing::info!("Agents this build can run: {}", runnable.join(", "));
         }
 
         // Child processes do not survive a restart, so anything the journal
@@ -207,8 +204,11 @@ impl AppState {
             store.clone(),
             writer.clone(),
             hub.clone(),
-            environment,
-            registry.clone(),
+            environment.clone(),
+            // Where to find an `adapter.sh`, bundled first so a user-installed adapter
+            // of the same name shadows rather than duplicates. This argument disappears
+            // when `crates/adapters` lands and an adapter has no path at all.
+            config.agent_roots(),
             soul_path,
             seq.clone(),
         );
@@ -241,31 +241,28 @@ impl AppState {
                 history.clone(),
             ))
             .await;
-        let tracedb = TraceDbClient::new(config.tracedb_bin.clone());
 
-        // Retention needs the archive client, so it is built after it. The
-        // environment kind is `local` because that is the only environment today;
-        // it is passed rather than assumed inside so a per-session environment
-        // later replaces an argument instead of reaching into the scheduler.
+        // Retention's authority is now the **envagent that holds the vendor's own
+        // native store** rather than a separate archive (`docs/storage.md` § Two
+        // retention classes). The environment is passed rather than assumed inside so
+        // a per-session environment later replaces an argument.
         let retention = crate::storage::RetentionScheduler::new(
             store.clone(),
             history.clone(),
-            tracedb.clone(),
-            crate::env::Environment::descriptor(&crate::env::LocalEnvironment::new()).kind,
+            environment.clone(),
         );
         retention.spawn();
 
         Ok(Self {
             store,
             config,
-            registry,
+            environment,
             hub,
             turns,
             links,
             history,
             consolidator,
             retention,
-            tracedb,
         })
     }
 }
@@ -297,20 +294,24 @@ pub fn router(state: AppState) -> Router {
         // Read-only: see `api::config` for why a loopback HTTP surface must not be
         // able to rewrite `browse_roots` or `agents_dir`.
         .route("/api/v1/config", get(api::config::get))
-        .route(
-            "/api/v1/agents",
-            get(api::agents::list).post(api::agents::refresh),
-        )
+        // Which environments are paired, whether they are reachable, and what each
+        // can run. This is what replaced `GET /agents`: availability is per machine,
+        // so a merged global list would be true of nowhere.
+        .route("/api/v1/environments", get(api::environments::list))
         .route(
             "/api/v1/sessions",
             get(api::sessions::list).post(api::sessions::create),
         )
-        .route("/api/v1/sessions/import", post(api::sessions::import))
+        // Bring in a session an agent already has, from that agent's own native
+        // store. Replaces `POST /sessions/import`, which named a row in a separate
+        // archive that no longer exists.
+        .route("/api/v1/sessions/adopt", post(api::sessions::adopt))
+        // No `DELETE`: there is no empty draft to discard, because `POST /sessions`
+        // now starts an agent and a row exists only once one has assigned an id
+        // (`docs/api-design.md` § `DELETE /api/v1/sessions/{id}` — removed).
         .route(
             "/api/v1/sessions/{id}",
-            get(api::sessions::get)
-                .patch(api::sessions::update)
-                .delete(api::sessions::delete_empty),
+            get(api::sessions::get).patch(api::sessions::update),
         )
         .route(
             "/api/v1/sessions/{id}/turns",
@@ -357,13 +358,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/soul", get(api::soul::get))
         .route("/api/v1/workspaces", get(api::workspaces::list))
         .route("/api/v1/search", get(api::search::search))
-        .route("/api/v1/archive/sessions", get(api::archive::list))
-        // Greedy capture, not `{id}`: a subagent session id contains a slash
-        // (`claude:uuid/agent-name`), which is 43% of the local archive.
-        .route(
-            "/api/v1/archive/sessions/{*trace_id}",
-            get(api::archive::transcript),
-        )
         // A session's live agent: what it can do, and what it is waiting on.
         .route(
             "/api/v1/sessions/{id}/capabilities",

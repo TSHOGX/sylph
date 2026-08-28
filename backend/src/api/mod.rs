@@ -1,6 +1,5 @@
-pub mod agents;
-pub mod archive;
 pub mod config;
+pub mod environments;
 pub mod files;
 pub mod fs;
 pub mod health;
