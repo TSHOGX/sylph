@@ -21,6 +21,9 @@
 //! gone rather than ported.
 
 pub mod native;
+pub mod requests;
+pub mod session;
+pub mod surface;
 pub mod translate;
 
 use anyhow::{anyhow, Result};
@@ -401,11 +404,8 @@ impl Adapter for ClaudeAdapter {
         })
     }
 
-    async fn run(&self, _spec: RunSpec) -> Result<Box<dyn Session>> {
-        Err(anyhow!(
-            "claude `run` is not wired yet: the live session holds the vendor's stdio and \
-             lands with the envagent in step 4 of docs/roadmap.md § Implementation order"
-        ))
+    async fn run(&self, spec: RunSpec) -> Result<Box<dyn Session>> {
+        session::run(spec).await
     }
 
     async fn adopt(&self, id: &NativeId) -> Result<EventStream> {
