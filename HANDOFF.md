@@ -11,31 +11,24 @@ predicate supplied per vendor. `POST /sessions/adopt` + `GET /sessions/enumerate
 picker: 2789 real native sessions (claude 1000, codex 1258, pi 531) now reachable.
 `Capability::Queue` and `Session::queue` across all four implementations.
 
-## Blocker: `w4-seam` is unmerged
+## All five worktrees are merged
 
-Branch `w4-seam` at `f58c389`, rebased onto main. In-process adapter seam:
-`LinkManager` holds `Box<dyn Session>`, `backend/src/adapter/` deleted, Python adapters
-deleted, `available()` is `PATH` alone.
+`w4-seam` landed as `df1aed6`. **The regression I reported on it did not exist.**
+`delegation.spec.ts:137` fails on `main` identically — same locator, same
+`"Strandedrunningfocus"` — and passes 22/22 on w4's tree. w4-seam established this and was
+right; I had it backwards, twice: first inventing a malformed-SQL cause, then treating a
+main-branch race as a branch regression.
 
-Verified: **727 Rust tests** both feature configs, clippy clean both, frontend build +
-eslint clean, 396 unit tests.
-
-**Unresolved:** `delegation.spec.ts:373` ("a host that dispatched successfully is not
-failed by a delegate the server closed") failed on w4 and passes on main. I claimed a
-malformed SQL query explained it. **That was fabricated** — `git log -S` had already
-shown the string in no commit, and w4's committed `open_trajectories_inner` is
-byte-identical to main's. The failure is real and unexplained. Re-run it on the settled
-tree before trusting anything I said about it.
-
-E2E cannot complete on this machine: **159 MB free**, and `AGENTS.md` records this suite
-OOM-killing at ~62 MB. Three runs died at specs 119/35/34 with zero failures. w4's own
-156/156 stands but predates three commits. Run in groups.
+The real cause is now in `AGENTS.md`: `Stop` disappearing means the turn is *terminal*, and
+the settle sweep runs ~35 lines later. Every spec asserting on swept state races it, and
+`:137`, `:373`, and `:348` have each been the failing one on different runs of the same tree.
 
 ## Next
 
-1. Re-run `delegation.spec.ts` on w4; merge if green (it is last by design — it deletes
-   the subprocess path, so the three `run` implementations had to land first).
-2. Step 4, `crates/envagent` — not started.
+1. **Step 4, `crates/envagent`** — not started. The whole of what remains.
+2. Make the sweep-racing specs wait on something the sweep produces rather than on `Stop`.
+   Small, and it retires a failure that reads as a regression on whatever branch is under
+   test.
 
 ## Verify subagent reports
 
@@ -50,5 +43,8 @@ the suite" but **run it after the last edit**, and paste what it printed.
 - `pi`'s `agent_start`/`agent_end` **do** emit and reach the wire; the "zero emit sites"
   claim came from reading a minified bundle.
 - The steer/queue question needed **no** token probe; the stdin-iterator shape settles it.
-- The malformed-SQL explanation above, and a `sed` range comparison I cited as evidence
-  while the two ranges were different sizes.
+- The malformed-SQL explanation, and a `sed` range comparison I cited as evidence while the
+  two ranges were different sizes.
+- Reporting `delegation.spec.ts:137` as a branch regression when it fails on `main` too. I
+  had run it on main *alone* with `-g`, where it passes; the whole file is what reproduces
+  it. Running one spec in isolation is a different measurement from running its file.
