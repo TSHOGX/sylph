@@ -362,6 +362,23 @@ pub trait Session: Send + Sync {
     /// client with no turn in view.
     async fn steer(&self, text: &str, expected_turn_id: Option<&str>) -> Result<()>;
 
+    /// Add text to run **after** the current turn.
+    ///
+    /// Distinct from [`Self::steer`] by *when the agent reads it*, which is the whole
+    /// difference: a steer is a correction and this is a follow-up. Refuses with
+    /// [`crate::AdapterError`] when [`crate::Capability::Queue`] is not offered.
+    ///
+    /// **No default implementation, deliberately.** A default that queued nothing and
+    /// answered `Ok` would be the silent-success failure this trait's own docs forbid, and a
+    /// default that refused would make a vendor's real capability invisible until someone
+    /// noticed. Every adapter states what it does.
+    ///
+    /// Note what a caller cannot assume: a vendor may accept the text and *report* nothing.
+    /// `pi` emits `queue_update` carrying `steering` and `followUp`, so a client can show
+    /// what is waiting; the other two do not, and there a queued message is only observable
+    /// when it runs.
+    async fn queue(&self, text: &str) -> Result<()>;
+
     /// Set one config option, and answer with the **refreshed array**.
     ///
     /// Not an acknowledgement, because setting one option can change another's choices:

@@ -60,8 +60,37 @@ pub enum Capability {
     /// Distinct from a stop signal, which kills the process. Conflating them loses one
     /// of two real intentions: "that is not what I meant" versus "stop everything".
     Interrupt,
-    /// Accepts text mid-turn.
+    /// Accepts text **into the running turn**, reaching the agent before its next model
+    /// call.
+    ///
+    /// A correction, and the timing is the whole capability: text that arrives after the
+    /// turn is a follow-up, which is [`Self::Queue`]. Offered only by a vendor with a native
+    /// steer — `codex`'s `turn/steer`, which requires an `expectedTurnId` and refuses a
+    /// stale one, and `pi`'s own `steer`, which delivers after the current tool calls and
+    /// before the next model call.
+    ///
+    /// **`claude` does not have one, and declaring it here was a shipped defect.** Measured
+    /// on 2.1.251: `"steer"` occurs zero times as a quoted token in the binary while the six
+    /// real control subtypes occur 12–56 times each. Its adapter wrote a second `user`
+    /// message to stdin — and `--input-format stream-json` reads stdin through one async
+    /// iterator the turn loop awaits, so such a write is not read until the turn ends. The
+    /// composer sends a steer whenever a turn is live and the agent claims this, so a user's
+    /// correction arrived *after* the thing it was meant to prevent, with every layer
+    /// reporting success.
     Steer,
+    /// Accepts text **for after the running turn**.
+    ///
+    /// A follow-up rather than a correction, and a distinct capability rather than a
+    /// degraded [`Self::Steer`], because a client renders them differently: a correction is
+    /// worth sending mid-turn and a follow-up is worth *showing as queued*. Collapsing them
+    /// is what let one vendor claim the wrong word for what it does.
+    ///
+    /// All three vendors have it and each spells it differently — `codex`'s
+    /// `thread/queue/add` (which needs an undocumented `clientUserMessageId`), `pi`'s
+    /// `follow_up`, and `claude`'s write to stdin. Note that `pi` also emits `queue_update`
+    /// with `steering` and `followUp` arrays: without forwarding it a queued message is
+    /// invisible until it runs, so the capability is only half-delivered by the verb.
+    Queue,
     /// Accepts a typed config change on a live session.
     SetConfig,
 }

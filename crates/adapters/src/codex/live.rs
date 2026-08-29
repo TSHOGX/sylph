@@ -1212,6 +1212,38 @@ impl Session for CodexSession {
         Ok(())
     }
 
+    /// Queue text for after the running turn: `thread/queue/add`.
+    ///
+    /// **`clientUserMessageId` is required and undocumented.** *Measured in
+    /// `docs/measurements/codex/captures/s03_control.jsonl`:* a `queue/add` carrying only
+    /// `threadId` and `input` is refused `-32600 Invalid request: missing field
+    /// `clientUserMessageId``. That is the good case for this vendor — it is one of the
+    /// enum-shaped refusals rather than one of the silent accepts — but the field appears in
+    /// no documentation, so the value is ours to choose.
+    ///
+    /// A fresh id per call, from the transport's own counter, rather than a hash of the text:
+    /// queueing the same sentence twice is a real thing to want, and an id derived from
+    /// content would make the second one look like a duplicate of the first to a vendor that
+    /// dedupes on it. `thread/queue/list` keys on this id, so it is also what a future
+    /// "unqueue that" would name.
+    ///
+    /// No turn-open precondition, unlike [`Self::steer`]: the queue is a property of the
+    /// thread rather than of a turn, and adding to it with nothing running is what makes the
+    /// next turn's opening text.
+    async fn queue(&self, text: &str) -> Result<()> {
+        request(
+            &self.child,
+            method::THREAD_QUEUE_ADD,
+            json!({
+                "threadId": self.thread.as_str(),
+                "clientUserMessageId": format!("sylph-{}", self.child.next_request_id()),
+                "input": [{"type": "text", "text": text}],
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Set one option, answering with the **refreshed array**.
     ///
     /// # Validation lives here for three of the five, because the vendor declines it

@@ -809,14 +809,42 @@ impl Session for ClaudeSession {
         Ok(())
     }
 
-    /// Add text to a running turn.
+    /// Refused: **this vendor has no steer.**
     ///
-    /// A second user message on the held-open stdin, which is what steering *is* on this
-    /// CLI. `expected_turn_id` is deliberately unused: the server has already checked it
-    /// against its own record, and this vendor has no steer-with-precondition of its own —
-    /// rechecking here would need state this adapter does not keep. The parameter stays in
-    /// the protocol so an agent that *can* enforce it does.
-    async fn steer(&self, text: &str, _expected_turn_id: Option<&str>) -> Result<()> {
+    /// *Measured on 2.1.251:* the control protocol's subtypes are `interrupt`, `initialize`,
+    /// `can_use_tool`, `set_permission_mode`, `set_model`, and `mcp_message`, each occurring
+    /// 12–56 times as a quoted token in the binary, while `"steer"` occurs **zero** times.
+    ///
+    /// The only mid-turn channel is a second `user` message on the held-open stdin, and that
+    /// is **queueing rather than steering** — decidable from the shape without a live probe:
+    /// `--input-format stream-json` reads stdin through a single async iterator that the turn
+    /// loop awaits, so a write during a turn is not read until the turn ends. See
+    /// [`Session::queue`], which is where that write now lives.
+    ///
+    /// Declaring [`Capability::Steer`] here was a shipped defect rather than a mislabelling.
+    /// The composer sends a steer whenever a turn is live and the agent claims the
+    /// capability, so a user's correction arrived *after* the thing it was meant to prevent,
+    /// with every layer reporting success. Refusing is what makes the composer fall back to
+    /// the behaviour the vendor can actually deliver.
+    async fn steer(&self, _text: &str, _expected_turn_id: Option<&str>) -> Result<()> {
+        Err(anyhow::Error::new(AdapterError::unsupported_field(
+            "claude has no steer: text sent mid-turn is not read until the turn ends, so it \
+             queues rather than corrects. Send it as a queued follow-up instead."
+                .to_string(),
+        )))
+    }
+
+    /// Queue text for after the running turn: a second `user` message on stdin.
+    ///
+    /// This is the write that used to be called steering, under the name that describes when
+    /// the agent reads it. Nothing about the mechanism changed — one async iterator, read
+    /// again once the turn loop comes back for it.
+    ///
+    /// **The vendor reports nothing about the queue**, so a client cannot show what is
+    /// waiting on this agent the way `pi`'s `queue_update` allows. That is a real difference
+    /// between two agents offering the same capability, and it belongs at the code rather
+    /// than in a client's assumption.
+    async fn queue(&self, text: &str) -> Result<()> {
         self.control
             .child
             .send(json!({"type": "user", "message": {"role": "user", "content": text}}))
@@ -2042,13 +2070,60 @@ done
         assert_eq!(peer.controls("interrupt").len(), 1);
     }
 
-    /// Steering is a second user message on the held-open stdin.
+    /// **Steering is refused, because this vendor has no steer.**
+    ///
+    /// This test previously asserted that steering wrote a second user message — which it
+    /// did, and which was the defect: that write is not read until the turn ends, so it
+    /// queued while the composer believed it was correcting. The refusal is
+    /// `UNSUPPORTED_FIELD` rather than `INVALID_VALUE` because no value makes this vendor
+    /// able to steer, and that code is what lets a client retire the control instead of
+    /// leaving it clickable.
     #[tokio::test]
-    async fn steering_writes_another_user_message() {
+    async fn steering_is_refused_because_this_vendor_has_no_steer() {
         let peer = peer("steer").await;
-        peer.session.steer("also check the tests", None).await.unwrap();
+        let error = match peer.session.steer("stop doing that", None).await {
+            Ok(()) => panic!("a vendor with no steer must not accept one"),
+            Err(error) => error,
+        };
+        let refusal = error
+            .downcast_ref::<AdapterError>()
+            .expect("the refusal travels typed, not as prose");
+        assert_eq!(refusal.code, RefusalCode::UnsupportedField);
+        assert!(
+            refusal.message.contains("queue"),
+            "the refusal must name what the caller should do instead: {}",
+            refusal.message
+        );
+    }
+
+    /// Queueing is the second user message on the held-open stdin.
+    ///
+    /// Same mechanism the old steer used, under the name that says when the agent reads it.
+    #[tokio::test]
+    async fn queueing_writes_another_user_message() {
+        let peer = peer("queue").await;
+        peer.session.queue("also check the tests").await.unwrap();
         let user = peer.user_message().await;
         assert_eq!(user["message"]["content"], json!("also check the tests"));
+    }
+
+    /// The declared surface matches what the methods do.
+    ///
+    /// A capability list and its methods are one fact with two derivations, and this vendor
+    /// is where they diverged: `Steer` was declared while the method queued. Asserted as a
+    /// pair so neither can drift alone.
+    #[tokio::test]
+    async fn the_declared_capabilities_match_what_the_session_accepts() {
+        use sylph_protocol::{Adapter, Capability};
+        let info = crate::claude::ClaudeAdapter::new()
+            .probe()
+            .await
+            .expect("claude is installed");
+        assert!(
+            !info.supports.contains(&Capability::Steer),
+            "declaring Steer is what delivered a correction after the thing it prevented"
+        );
+        assert!(info.supports.contains(&Capability::Queue));
     }
 
     /// The identity preamble arrives as **text** and this CLI wants a path, so `run` writes

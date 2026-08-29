@@ -296,6 +296,10 @@ impl Adapter for E2eAdapter {
             supports: vec![
                 Capability::Interrupt,
                 Capability::Steer,
+                // Both, so a spec can observe a client that conflates them. This fixture is
+                // the only agent offering `Steer` and `Queue` together besides `pi`, and it
+                // is the one the suite actually drives.
+                Capability::Queue,
                 Capability::SetConfig,
             ],
             // The server names the id, so identity is known before the first event —
@@ -566,6 +570,24 @@ impl Session for E2eSession {
                 Ev::new(EventKind::Assistant, Some(Phase::Completed))
                     .stream_id("blk-steered")
                     .text(format!("Steered: {text}"))
+                    .done(),
+            )
+            .await;
+        Ok(())
+    }
+
+    /// Queue text, observably.
+    ///
+    /// Emits a distinct block rather than reusing the steered one, so a spec can tell the two
+    /// apart — the whole reason `Queue` is a separate capability is that a client renders a
+    /// correction and a follow-up differently, and a fixture that answered both the same way
+    /// could not observe a client conflating them.
+    async fn queue(&self, text: &str) -> Result<()> {
+        self.emit
+            .event(
+                Ev::new(EventKind::Assistant, Some(Phase::Completed))
+                    .stream_id("blk-queued")
+                    .text(format!("Queued: {text}"))
                     .done(),
             )
             .await;

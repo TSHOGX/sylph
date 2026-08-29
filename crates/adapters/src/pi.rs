@@ -235,9 +235,16 @@ impl Adapter for PiAdapter {
             // current tool calls and before the next model call, which is what "change
             // course now" means — and `set_config` maps onto `set_model` and
             // `set_thinking_level`.
+            //
+            // **This vendor offers both `Steer` and `Queue`, which is what makes them two
+            // capabilities rather than one.** `steer` reaches the running turn and
+            // `follow_up` waits for it, and pi implements them as separate verbs with
+            // separate delivery disciplines — so a client offering only one of them is
+            // withholding something the session can do.
             supports: vec![
                 Capability::Interrupt,
                 Capability::Steer,
+                Capability::Queue,
                 Capability::SetConfig,
             ],
             // Measured 2026-08-27: `--session-id` uses an exact id and creates the
@@ -3633,6 +3640,22 @@ pub mod session {
                 ));
             }
             self.call("steer", json!({"message": text})).await?;
+            Ok(())
+        }
+
+        /// Queue text for after the running turn: this vendor's `follow_up`.
+        ///
+        /// **The verb is `follow_up`, not `queueUserMessage`.** That name occurs nowhere in
+        /// this vendor's tree and is an SDK-side spelling at best — recorded because grepping
+        /// for it finds nothing while the feature is plainly there, which reads as an absent
+        /// capability rather than as a wrong guess. `dist/modes/rpc/rpc-mode.js:325`.
+        ///
+        /// Same payload as [`Self::steer`], and the difference is entirely *when* the agent
+        /// reads it: pi delivers a follow-up once no tool calls and no steering messages
+        /// remain. No turn-open precondition, because queueing with nothing running is a
+        /// coherent ask — it is the next turn's opening text.
+        async fn queue(&self, text: &str) -> Result<()> {
+            self.call("follow_up", json!({"message": text})).await?;
             Ok(())
         }
 

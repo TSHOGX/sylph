@@ -355,9 +355,16 @@ impl Adapter for CodexAdapter {
             // existence — `AGENTS.md` § "A type in a vendor's event union is not a promise
             // that anything emits it" applies to methods as much as to events, which is why
             // only the measured three are claimed out of the declared 153.
+            //
+            // `Queue` is claimed on the same evidence standard: `thread/queue/add` was
+            // *measured*, and its refusal naming `clientUserMessageId` is what proves the
+            // vendor reached the handler rather than ignoring the method. Its five sibling
+            // verbs — `list`, `update`, `delete`, `reorder`, `start` — are declared and not
+            // claimed, because `Session` has one queueing operation.
             supports: vec![
                 Capability::Interrupt,
                 Capability::Steer,
+                Capability::Queue,
                 Capability::SetConfig,
             ],
             // *Measured:* `thread/start` has no `threadId` parameter, so this is structural

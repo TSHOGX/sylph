@@ -386,13 +386,23 @@ impl Adapter for ClaudeAdapter {
             name: AGENT_NAME.to_string(),
             version: version().await,
             flags: Self::flags(),
-            // Each gates exactly one method on `Session`. `claude` offers all three:
-            // `interrupt` ends a turn and keeps the session, steering is a second user
-            // message on the held-open stdin, and `set_config` maps onto its control
-            // requests.
+            // Each gates exactly one method on `Session`. `interrupt` ends a turn and keeps
+            // the session, `queue` is a second user message on the held-open stdin, and
+            // `set_config` maps onto its control requests.
+            //
+            // **`Capability::Steer` is deliberately absent: this vendor has no steer.**
+            // *Measured on 2.1.251:* `"steer"` occurs zero times as a quoted token while the
+            // six real control subtypes occur 12–56 times each. The stdin write that was
+            // claimed as steering is read only once the turn loop returns to its single
+            // async iterator — so it queues, and it is declared as what it is.
+            //
+            // This is the one place a wrong entry here is worse than a missing one: the
+            // composer sends a steer whenever a turn is live and the agent claims the
+            // capability, so the false claim delivered a user's correction *after* the thing
+            // it was meant to prevent while every layer reported success.
             supports: vec![
                 Capability::Interrupt,
-                Capability::Steer,
+                Capability::Queue,
                 Capability::SetConfig,
             ],
             // Measured 2026-08-27: takes `--session-id`, so identity is known before the

@@ -69,6 +69,14 @@ pub mod method {
     pub const TURN_INTERRUPT: &str = "turn/interrupt";
     /// Adds to a running turn. Requires `expectedTurnId`.
     pub const TURN_STEER: &str = "turn/steer";
+    /// Queue a message for after the running turn.
+    ///
+    /// **Requires an undocumented `clientUserMessageId`**, measured: without it the reply is
+    /// `-32600 Invalid request: missing field `clientUserMessageId``. The vendor has five more
+    /// verbs on this queue — `list`, `update`, `delete`, `reorder`, `start` — and none is
+    /// wired, because `Session` has one queueing operation and a declared-only branch is
+    /// indistinguishable from one whose condition is rare.
+    pub const THREAD_QUEUE_ADD: &str = "thread/queue/add";
     /// The model catalogue, which carries `supportedReasoningEfforts` per entry.
     pub const MODEL_LIST: &str = "model/list";
 }
