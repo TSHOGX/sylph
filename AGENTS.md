@@ -465,6 +465,29 @@ name is accepted silently, so the vendor offers no `UNSUPPORTED_FIELD` signal at
 Anything not enum-typed in the schema must be validated adapter-side against what the
 vendor enumerates, or a refused write is indistinguishable from an applied one.
 
+**The third vendor adds the third variant: it neither refuses nor accepts, it silently
+substitutes.** *Measured on `pi` 0.84.3, `agent-session.js:1290`.* `setThinkingLevel`
+answers `success: true` for a level the model does not support, having replaced it with
+the nearest one it does — the method's own doc comment says "Clamps to model
+capabilities". So the three vendors now cover every way a write can not-happen: refused
+outright, accepted-and-ignored, and honoured-as-something-else. Only the first is visible
+to a caller checking for an error.
+
+This is what makes a pre-flight check against the enumerated list **not** defensive
+duplication, which is how it reads until you know a vendor clamps: it is the only place
+the difference between "you asked for `high`" and "you got `medium`" can be caught, since
+the reply says success either way. Re-reading the surface afterwards catches it too, and
+both are worth having — the pre-flight names the value the user chose, while the re-read
+reports what is true now.
+
+**And a flag's argument may be interpreted, not just passed.** `pi`'s
+`--append-system-prompt` calls `resolvePromptInput` (`resource-loader.js:391`), which
+reads the argument **as a file** when the string names one. A one-line identity preamble
+that happened to be a real path would be silently replaced by that file's contents. So
+the preamble goes to a temp file whose path is passed — not because the flag requires one,
+but because passing text to a flag that may resolve it is a substitution nothing reports.
+Check what a vendor does with an argument before deciding a string is safe to hand it.
+
 **An adapter that writes a turn's outcome instead of reading it turns every vendor
 failure into a silent empty reply.** *Measured 2026-08-28 on `pi` 0.84.3.* Its configured
 model had reached the end of a testing period, so every request answered
@@ -494,6 +517,22 @@ Three rules follow, and the third is the one that generalizes:
   agent chose not to answer, or the adapter dropped the stream — three causes with three
   different fixes and one appearance. Any path that can end a turn without content has to
   say *why*, or the first question anyone asks has no answer in the record.
+
+**A reply that waits for the work to finish must not be awaited as an acknowledgement.**
+*Measured on `pi` 0.84.3:* `abort()` calls `await this.waitForIdle()` before answering
+(`agent-session.js:1171`), so its reply arrives when the turn has actually wound down —
+which for a running tool is however long that tool takes to notice. Treating it as a
+request/reply pair ties `interrupt` to that duration and, past the 30-second reply
+timeout, reports a **failure for an abort that worked**: the user sees their stop fail
+while the turn is stopping. Sent fire-and-forget instead, and no close is synthesized
+either, because the vendor emits `agent_settled` from the `finally` of its prompt loop
+(`:758`) — so the outcome is reported rather than assumed, and `aborted` stays
+distinguishable from a failure.
+
+The general rule, which applies to every control an adapter wires: read whether the
+vendor's reply means *accepted* or *done*. The two need opposite handling, and a reply
+that means "done" looks exactly like a slow acknowledgement until the timeout decides
+what it was.
 
 **A launch flag gating a runtime-mutable value bets the user never changes it.**
 `--permission-prompt-tool stdio` can only be asked for on the command line, while the
