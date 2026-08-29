@@ -65,7 +65,7 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"
-base64 = "0.22"
+base64 = { workspace = true }
 
 # Content addressing and compression for the durable history tier.
 #

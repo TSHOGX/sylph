@@ -31,6 +31,8 @@ uuid = { version = "1.11", features = ["v4"] }
 # `process::Child` signals a vendor's whole process group, so a stop reaches the
 # tool the CLI spawned rather than only the CLI. `killpg` is not in `std`.
 libc = "0.2"
+# One attachment path inlines an image as the vendor's own content block.
+base64 = { workspace = true }
 # One `debug!` on a benign signal race. The crate is a library, so it declares
 # the facade and never installs a subscriber.
 tracing = "0.1"
