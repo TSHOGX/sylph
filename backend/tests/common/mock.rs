@@ -580,6 +580,17 @@ impl Session for MockSession {
         Ok(())
     }
 
+    /// Accepted, so a test can drive the queued path.
+    ///
+    /// Distinct from [`Self::steer`] only in name here, which is deliberate: this mock exists
+    /// to exercise the *server's* routing, and a fixture that refused one of the two could
+    /// not observe a route that sent a queue where a steer was asked for. The vendors differ
+    /// in what they report afterwards — `pi` emits `queue_update`, the other two report
+    /// nothing — and that difference belongs in their own adapters' tests.
+    async fn queue(&self, _text: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Two refusals with two codes, which is the whole point of this method here.
     ///
     /// An option that does not exist is `UNSUPPORTED_FIELD` and justifies disabling a
