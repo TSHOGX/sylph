@@ -1946,15 +1946,45 @@ rewrite that pays for the same defects twice.
   at best, and grepping for it on this vendor finds nothing while the feature is plainly
   there — the RPC surface spells it `follow_up`.
 
+- **Nothing can say "the agent stopped talking, and here is why".** Four independent pieces
+  of work on 2026-08-29 arrived at one hole from four directions, which is what makes it a
+  protocol decision rather than four local fixes:
+
+  | Where | What cannot be distinguished |
+  | --- | --- |
+  | `claude` | a wedged CLI from one that simply had nothing more to say |
+  | `codex` | an ask retired by another subscriber from one still pending |
+  | `adopt`'s `watch` | a store that stopped growing because the vendor died from one that stopped because the session ended |
+  | the in-process seam | a session whose agent died mid-turn from a turn nobody closed |
+
+  Each is the failure `AGENTS.md` states as a rule — *a turn with no content and no error
+  says the same thing whether the model 404'd, the agent chose not to answer, or the adapter
+  dropped the stream* — and the fourth is the sharpest, because it **arrived through a
+  deletion rather than a wrong branch**: the subprocess link surfaced
+  `Closed { exit_code, stderr_tail }` as a terminal event, and a `Session::events` stream
+  merely *ending* carries no exit code, no stderr, and no way to tell a crash from a clean
+  close. A session dying mid-turn now becomes `abandoned` with no reason.
+
+  So `Session` needs a way to report a terminal condition, and the shape is the decision.
+  `EventKind::Notice` is a candidate and probably wrong on its own — a notice is
+  agent-originated, while "your vendor exited with status 1 and said `no API key`" is the
+  adapter's own observation about a process. `process::Child` already holds both facts
+  (`has_ended` and the stderr tail), so no measurement is missing; what is missing is the
+  vocabulary to carry them. Deciding it in one place is the point: four adapters inventing
+  four spellings is how one fact acquires four derivations, which `AGENTS.md` records
+  diverging the moment either grows a case.
+
 ### Implementation order
 
 Four of the six are done. The order held: each step did make the next mechanical.
 
 1. ✅ `crates/protocol` — the event vocabulary as types. 2932 lines; `wire.rs` fell from
    1502 to 517, keeping only what describes framing.
-2. ✅ `crates/adapters` — 14693 lines. `claude` and `pi` ported, `codex` written from the
-   measurement corpus, the three parsers absorbed **correctively** rather than faithfully,
-   and the E2E fixture agent compiled in behind a feature.
+2. ✅ `crates/adapters` — `claude` and `pi` ported, `codex` written from the measurement
+   corpus, the three parsers absorbed **correctively** rather than faithfully, and the E2E
+   fixture agent compiled in behind a feature. **All three now hold live sessions too**:
+   `Adapter::run` is real for each, over `process::Child` — one held process framed as lines
+   of JSON, with the reply predicate supplied per vendor because direction is a vendor fact.
 3. ⏳ `crates/server` — `tracedb/` and discovery are deleted and the identity triple is
    in, but **adapter calls are not yet in-process**: `adapter::Link::establish` still
    spawns `adapter.sh` and speaks NDJSON. See the open item below.
