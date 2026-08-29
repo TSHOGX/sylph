@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -69,6 +69,19 @@ pub struct Child {
     pgid: i32,
     /// stderr as it accumulated, for an error that has to say why.
     stderr: Arc<Mutex<String>>,
+    /// Whether the vendor's stdout has ended, so a later request fails instead of waiting.
+    ///
+    /// **A write to a dead process succeeds**, which is what makes this necessary rather
+    /// than tidy: the writer task is alive and the OS buffers a write to a pipe whose reader
+    /// is gone. So [`Self::request`] cannot learn from the write that nobody will answer.
+    ///
+    /// Without this the failure is a *timeout*: the reader task is what drains the pending
+    /// map on EOF, and it has already exited, so a request registered afterwards waits the
+    /// full [`REPLY_TIMEOUT`] and then reports "the vendor did not answer within 30s". That
+    /// is the wrong sentence for a process that is not running, and thirty seconds is a long
+    /// time to spend arriving at it — measured, a request after EOF blocked for the whole
+    /// budget. Any control after a session's process dies would pay it.
+    closed: Arc<AtomicBool>,
 }
 
 /// How to start one vendor process.
@@ -209,6 +222,8 @@ impl Child {
         let (line_tx, line_rx) = mpsc::channel::<Line>(256);
         let reply_id_of = spawn.reply_id;
         let routed = pending.clone();
+        let closed = Arc::new(AtomicBool::new(false));
+        let ended = closed.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             loop {
@@ -255,6 +270,9 @@ impl Child {
                     }
                 }
             }
+            // Set **before** draining, so a request racing the drain sees the closure
+            // rather than registering into a map nothing will read again.
+            ended.store(true, Ordering::SeqCst);
             // Every caller still waiting is woken by the drop, which surfaces as a
             // "vendor closed" error rather than as a hang.
             routed.lock().await.clear();
@@ -270,6 +288,7 @@ impl Child {
                 next_id: AtomicU64::new(1),
                 pgid,
                 stderr: tail,
+                closed,
             },
             line_rx,
         ))
@@ -304,6 +323,11 @@ impl Child {
     /// a fast vendor has already sent, which presents as an intermittent timeout on a
     /// correct implementation.
     pub async fn request(&self, build: impl FnOnce(u64) -> Value) -> Result<Value> {
+        // Checked first: after EOF nothing drains the pending map, so registering would
+        // buy a 30-second wait for an answer that cannot come ([`Self::closed`]).
+        if self.has_ended() {
+            return Err(self.error("the vendor process has exited").await);
+        }
         let id = self.next_request_id();
         let payload = build(id);
         let (tx, rx) = oneshot::channel();
@@ -316,17 +340,7 @@ impl Child {
 
         match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
             Ok(Ok(reply)) => Ok(reply),
-            Ok(Err(_)) => {
-                let tail = self.stderr_tail().await;
-                Err(anyhow!(
-                    "the vendor process closed without answering{}",
-                    if tail.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {tail}")
-                    }
-                ))
-            }
+            Ok(Err(_)) => Err(self.error("the vendor process closed without answering").await),
             Err(_) => {
                 self.pending.lock().await.remove(&id.to_string());
                 Err(anyhow!(
@@ -340,6 +354,29 @@ impl Child {
     /// What the vendor has written to stderr.
     pub async fn stderr_tail(&self) -> String {
         self.stderr.lock().await.trim().to_string()
+    }
+
+    /// Whether the vendor's stdout has ended. See [`Self::closed`].
+    pub fn has_ended(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    /// An error carrying whatever the vendor said on stderr.
+    ///
+    /// Offered so no adapter has to remember to reach for the tail. A vendor writes its
+    /// diagnostics there and nowhere else — a missing API key, an unwritable config, a
+    /// panic — so an error built without it reports "the process exited" for all three,
+    /// and the one message that could name the fix is the one discarded.
+    ///
+    /// Not `async` on the hot path by accident: it locks, so it belongs on a failure path
+    /// rather than inside a loop.
+    pub async fn error(&self, context: impl std::fmt::Display) -> anyhow::Error {
+        let tail = self.stderr_tail().await;
+        if tail.is_empty() {
+            anyhow!("{context}")
+        } else {
+            anyhow!("{context}: {tail}")
+        }
     }
 
     /// Ask the group to exit, then make sure it did.
@@ -665,6 +702,60 @@ mod tests {
         assert_eq!(reply["response"]["subtype"], json!("success"));
     }
 
+    /// **A request after the vendor has exited fails at once, not after the timeout.**
+    ///
+    /// The reader task is what drains the pending map on EOF, and it has already gone — so
+    /// a request registered afterwards would wait the full 30-second budget and then report
+    /// that the vendor "did not answer", which is the wrong sentence for a process that is
+    /// not running. Measured before the fix: the whole budget.
+    ///
+    /// A write cannot reveal this, which is why the flag exists rather than a check on the
+    /// send: the writer task is alive and the OS buffers a write to a pipe whose reader is
+    /// gone, so the write succeeds.
+    #[tokio::test]
+    async fn a_request_after_the_vendor_exits_fails_at_once() {
+        let (child, mut lines) = Child::spawn(spawn_sh("exit 0", flat_id())).await.unwrap();
+        while lines.recv().await.is_some() {}
+
+        let started = std::time::Instant::now();
+        let error = match child.request(|id| json!({"id": id})).await {
+            Ok(_) => panic!("an exited vendor cannot answer"),
+            Err(error) => error,
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "took {:?}; a dead vendor must not cost the reply timeout",
+            started.elapsed()
+        );
+        assert!(
+            error.to_string().contains("exited"),
+            "the error must name the exit rather than a timeout, got: {error}"
+        );
+    }
+
+    /// An error built by [`Child::error`] carries what the vendor said.
+    ///
+    /// A vendor writes its diagnostics to stderr and nowhere else, so an error built without
+    /// the tail reports "the process exited" for a missing credential, an unwritable config,
+    /// and a panic alike — discarding the one message that names the fix.
+    #[tokio::test]
+    async fn an_error_quotes_what_the_vendor_said_on_stderr() {
+        let (child, mut lines) = Child::spawn(spawn_sh("echo 'no API key' >&2; exit 1", flat_id()))
+            .await
+            .unwrap();
+        while lines.recv().await.is_some() {}
+
+        for _ in 0..50 {
+            let error = child.error("could not start a turn").await.to_string();
+            if error.contains("no API key") {
+                assert!(error.contains("could not start a turn"));
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the vendor's own words never reached the error");
+    }
+
     /// Ids are unique for the process's life.
     #[tokio::test]
     async fn request_ids_do_not_repeat() {
@@ -676,3 +767,4 @@ mod tests {
         assert_eq!(unique.len(), ids.len(), "{ids:?}");
     }
 }
+
