@@ -223,9 +223,6 @@ cannot disagree.
       "source": "env",
       "envVar": "SYLPH_PORT"
     }
-  ],
-  "bundledAgentCandidates": [
-    { "path": "/opt/sylph/adapters", "exists": true, "chosen": true }
   ]
 }
 ```
@@ -238,6 +235,12 @@ Four decisions:
   not require consulting a table elsewhere.
 - **`exists` is absent, not `false`, for anything that is not a path.** A log level
   rendered as missing reports a working setting as broken.
+- **No `bundledAgentCandidates`, and no `paths.agents_dir` entry.** Both are deleted
+  with the adapter directories: adapters are compiled in, so there is nothing to search
+  and no path that could be mistyped. What replaced the question they answered — "why can
+  this install run no agents" — is per-environment availability on
+  `GET /api/v1/environments`, which names the missing CLI rather than the directory it was
+  not found in.
 - **Read-only, with no `PUT`.** These values name filesystem paths, and an
   environment's `browse_roots` bounds where an agent may be spawned. A loopback HTTP
   surface that could rewrite that is a materially larger threat-model question than one

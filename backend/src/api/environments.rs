@@ -96,7 +96,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<EnvironmentsResp
     let descriptor = state.environment.descriptor();
     let health = state.environment.probe().await;
 
-    let agents: Vec<AgentAvailability> = crate::adapters::available(&state.config.agent_roots())
+    let agents: Vec<AgentAvailability> = state.adapters.available()
         .into_iter()
         .map(|name| AgentAvailability {
             name,

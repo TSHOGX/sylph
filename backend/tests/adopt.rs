@@ -70,25 +70,99 @@ async fn a_malformed_environment_id_is_a_bad_request() {
     assert_eq!(json_body(response).await["error"]["code"], "INVALID_REQUEST");
 }
 
-/// An agent with no native store to read is refused, and the message says which.
+/// Adopting a session the store holds records it and ingests its transcript.
 ///
-/// The harness's `mock` is an `adapter.sh` with no vendor CLI — exactly the shape the E2E
-/// fixture has — so it can run a live session and has nothing to adopt from. Refusing it
-/// is what keeps "adopted nothing" from being reported as a successful adopt of an empty
-/// session, which a journal would make permanent.
+/// **The `201` path had no test at all.** All 13 specs here asserted a refusal, because no
+/// fixture could answer `enumerate` — so ingestion, the fidelity check, the workdir
+/// containment on an adopted row, and the `fidelity` the row is journaled with were written
+/// and unobserved. That is the shape `AGENTS.md` records twice: a fixture too small cannot
+/// observe the defect, and a suite of refusals proves only that refusing works.
+#[tokio::test]
+async fn adopting_a_stored_session_records_it_and_reads_its_transcript() {
+    let backend = TestBackend::start().await;
+    let environment = backend.environment_id().await;
+    let native_id = common::MockAgents::stored_native_id();
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions/adopt",
+            json!({"environment": environment, "agent": "mock", "nativeId": native_id}),
+        )
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "{}",
+        common::body_string(response).await
+    );
+}
+
+/// An adopted row carries the store's fidelity, never `stream`.
+///
+/// `stream` is what a *live* link yields, because it holds the process's own stdio. A record
+/// read from a native store cannot hold per-delta timings, so journalling `stream` for one
+/// would promise a renderer a waterfall the data cannot support — which is why the frontend
+/// gates the waterfall on this field rather than on how the session was created.
+#[tokio::test]
+async fn an_adopted_row_reports_the_stores_fidelity_rather_than_stream() {
+    let backend = TestBackend::start().await;
+    let environment = backend.environment_id().await;
+    let native_id = common::MockAgents::stored_native_id();
+
+    let created = json_body(
+        backend
+            .post_authed(
+                "/api/v1/sessions/adopt",
+                json!({"environment": environment, "agent": "mock", "nativeId": native_id}),
+            )
+            .await,
+    )
+    .await;
+
+    let session = &created["session"];
+    assert_eq!(session["fidelity"], "blocks", "{session}");
+    assert_eq!(session["nativeId"], native_id, "{session}");
+    // The recorded directory, run through the same containment bound `POST /sessions` uses
+    // and journalled in the spelling the server canonicalized — which is what `/workspaces`
+    // groups by, so a second spelling would split the group.
+    assert_eq!(
+        session["workdir"].as_str(),
+        Some(backend.workdir().display().to_string().as_str()),
+        "{session}"
+    );
+}
+
+/// An agent with no native store to read answers "no such session", not "bad request".
+///
+/// # This test's mechanism changed, and the change is the finding
+///
+/// It used to name `mock` and expect a `400`, and it passed for a reason that has been
+/// deleted: `mock` was an `adapter.sh` with no vendor CLI, so it was absent from the
+/// compiled-in registry and `require_agents` refused it before any store was consulted.
+/// With adapters linked in and injected, `mock` is a real agent — so the refusal now comes
+/// from the *store* rather than from the lookup, and it is a `404`: the agent is real, and
+/// it holds no session by that id.
+///
+/// The distinction the original was defending still holds and is asserted below: "adopted
+/// nothing" must never be reported as a successful adopt of an empty session, which a
+/// journal would make permanent. What changed is only which layer says no.
 #[tokio::test]
 async fn an_agent_with_no_native_store_cannot_be_adopted_from() {
-    let backend = TestBackend::start().await;
+    let backend = TestBackend::start_with_runners(&[common::MockRunner::no_store("empty")]).await;
     let environment = backend.environment_id().await;
 
     let response = backend
         .post_authed(
             "/api/v1/sessions/adopt",
-            json!({"environment": environment, "agent": "mock", "nativeId": "abc"}),
+            json!({"environment": environment, "agent": "empty", "nativeId": "abc"}),
         )
         .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json_body(response).await["error"]["code"], "INVALID_REQUEST");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "NATIVE_SESSION_NOT_FOUND",
+        "a store-less agent holds no session by that id; it is not a malformed request"
+    );
 }
 
 /// An agent this build does not support is refused as unknown rather than as uninstalled.
@@ -199,22 +273,30 @@ async fn enumerate_requires_an_environment() {
 /// A machine with an agent installed and no sessions yet genuinely has none, and a client
 /// must render that as "nothing here" rather than as a loading state or a failure. This is
 /// the shape the E2E fixture agent always has, deliberately.
+///
+/// This inverted with the seam, and the inversion is deliberate rather than conceded. The
+/// test used to expect a `400`, on the argument that an empty answer from a store-less agent
+/// is *ambiguous* — and that argument was only available while such an agent could be
+/// filtered out by not being in the registry. It cannot be now, and the protocol already
+/// answers the question the other way: `Adapter::enumerate`'s contract is that an empty
+/// result is a real state and not an error, and a store-less agent is simply one that is
+/// always in it. The unambiguous signal lives on `adopt`, which refuses — asserted above.
 #[tokio::test]
 async fn enumerate_answers_an_empty_listing_rather_than_failing() {
-    let backend = TestBackend::start().await;
+    let backend = TestBackend::start_with_runners(&[common::MockRunner::no_store("empty")]).await;
     let environment = backend.environment_id().await;
 
-    // `mock` has no native store, so it is not a readable agent — asking for it names the
-    // one case where an empty answer would be ambiguous, and it is refused instead.
     let response = backend
         .get_authed(&format!(
-            "/api/v1/sessions/enumerate?environment={environment}&agent=mock"
+            "/api/v1/sessions/enumerate?environment={environment}&agent=empty"
         ))
         .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
     assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "an agent with no store must not answer an ambiguous empty list"
+        body["sessions"].as_array().map(Vec::len),
+        Some(0),
+        "an agent with no store lists nothing rather than failing: {body}"
     );
 }
 

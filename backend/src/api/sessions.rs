@@ -326,7 +326,7 @@ pub async fn create(
     // refuse an agent a link could start. `AGENTS.md` records the inverse of that
     // mismatch costing a release: discovery listed an agent as usable while every link
     // to it failed naming a different root.
-    let known = crate::adapters::available(&state.config.agent_roots());
+    let known = state.adapters.available();
     if !known.iter().any(|name| name == &req.agent) {
         return Err(Error::InvalidRequest(format!(
             "Unknown agent: {}. This build can run: {:?}. Availability is per \
@@ -430,7 +430,9 @@ pub async fn update(
         // A session whose agent this build cannot run has no schema to validate against,
         // so its flags cannot be changed. Failing is better than storing an unvalidated
         // value that would be dropped at turn time with nothing saying why.
-        if !crate::adapters::available(&state.config.agent_roots())
+        if !state
+            .adapters
+            .available()
             .iter()
             .any(|name| name == session.id.agent.as_str())
         {
@@ -452,7 +454,7 @@ pub async fn update(
         // the flag may be perfectly good, so this falls through to storing it rather than
         // turning an agent that is temporarily unreachable into a rejected user action.
         if let Ok(link) = state.links.ensure(&id).await {
-            let schema = &link.identity().flags;
+            let schema = &link.info().flags;
             for (key, value) in flags {
                 let Some(spec) = schema.get(key) else {
                     return Err(Error::InvalidRequest(format!(
@@ -520,28 +522,35 @@ fn require_environment(state: &AppState, requested: &str) -> Result<EnvironmentI
 /// two have different fixes. The message names what this machine can read, the same way
 /// `create` does — one wording for one class of mistake.
 ///
-/// # Why this reads `sylph_adapters` rather than [`crate::adapters::available`]
+/// # This reads the [`crate::adapters::AdapterSource`], and the argument for not doing so
+/// is gone
 ///
-/// That function answers the **union** of "the vendor CLI is on `PATH`" and "a directory
-/// holding an `adapter.sh` exists", because the live path still spawns a subprocess and a
-/// fixture agent has a script and no CLI. Reading a native store needs neither of those:
-/// it needs an `Adapter` implementation that can parse one, which is exactly what
-/// `for_agent` answers with. An `adapter.sh` proves a script exists, and a script has no
-/// store — so admitting one here would offer an agent whose `enumerate` cannot describe
-/// anything, and the E2E fixture is precisely that agent: it refuses `adopt` and
-/// enumerates empty, deliberately.
-fn require_agents(requested: Option<&str>) -> Result<Vec<String>> {
-    let installed: Vec<String> = sylph_adapters::known_agents()
-        .iter()
-        .filter(|name| sylph_adapters::for_agent(name).is_some())
-        .map(|name| name.to_string())
-        .collect();
+/// It used to read `sylph_adapters` directly, and the reason was sound while it held:
+/// `adapters::available` answered the **union** of "the vendor CLI is on `PATH`" and "a
+/// directory holding an `adapter.sh` exists", and reading a native store needs the former.
+/// An `adapter.sh` proved a script existed, and a script has no store, so the union would
+/// have offered an agent whose `enumerate` cannot describe anything.
+///
+/// **That union is deleted.** Availability is `PATH` alone, so the two answers are now the
+/// same question — and going around the source costs something real: the integration suite
+/// injects its agents there, so a direct call reaches the compiled-in registry instead and
+/// cannot see them. Nothing conflicted when these two changes met; the merged result was
+/// simply inconsistent, with `create` bounded by the source and `adopt` not.
+///
+/// What survives from the old reasoning is a property of the *adapter*, not of the lookup:
+/// the E2E fixture has no native store, and it says so by refusing `adopt` and enumerating
+/// empty rather than by being filtered out here.
+fn require_agents(
+    adapters: &dyn crate::adapters::AdapterSource,
+    requested: Option<&str>,
+) -> Result<Vec<String>> {
+    let installed = adapters.available();
 
     match requested {
         Some(agent) => {
             if installed.iter().any(|name| name == agent) {
                 Ok(vec![agent.to_string()])
-            } else if sylph_adapters::is_known(agent) {
+            } else if adapters.is_known(agent) {
                 // Known but absent: an install, which names a fix. Kept distinct from an
                 // unsupported agent for the reason `crate::adapters::is_known` exists.
                 Err(Error::InvalidRequest(format!(
@@ -551,7 +560,7 @@ fn require_agents(requested: Option<&str>) -> Result<Vec<String>> {
             } else {
                 Err(Error::InvalidRequest(format!(
                     "Unknown agent: {agent}. This build supports: {:?}.",
-                    sylph_adapters::known_agents()
+                    adapters.known_agents()
                 )))
             }
         }
@@ -707,7 +716,7 @@ pub async fn enumerate(
     Query(query): Query<EnumerateQuery>,
 ) -> Result<Json<EnumerateResponse>> {
     let environment = require_environment(&state, &query.environment)?;
-    let agents = require_agents(non_blank(query.agent).as_deref())?;
+    let agents = require_agents(state.adapters.as_ref(), non_blank(query.agent).as_deref())?;
 
     let limit = query
         .limit
@@ -747,7 +756,7 @@ pub async fn enumerate(
         std::collections::HashMap::new();
 
     for agent in &agents {
-        let Some(adapter) = sylph_adapters::for_agent(agent) else {
+        let Some(adapter) = state.adapters.for_agent(agent) else {
             // Raced an uninstall between the availability check and here. Skipping is
             // right: the other agents' sessions are still readable.
             continue;
@@ -942,9 +951,9 @@ pub async fn adopt(
     }
 
     // One agent, and it must be installed: the store to read is on this machine.
-    require_agents(Some(agent.as_str()))?;
+    require_agents(state.adapters.as_ref(), Some(agent.as_str()))?;
 
-    let adapter = sylph_adapters::for_agent(&agent).ok_or_else(|| {
+    let adapter = state.adapters.for_agent(&agent).ok_or_else(|| {
         // Raced an uninstall between the check above and here.
         Error::InvalidRequest(format!("'{agent}' is not installed on this environment."))
     })?;

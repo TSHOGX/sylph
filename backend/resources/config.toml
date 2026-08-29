@@ -37,12 +37,11 @@
 #   env: SYLPH_DATA_DIR
 # data_dir = "~/.sylph/data"
 
-# Your own agent adapters. Each is a directory holding an executable
-# `adapter.sh`. Adapters shipped with Sylph are found beside the binary and are
-# not here — they are replaced on upgrade. A name here shadows a bundled one,
-# which is how you run a fixed adapter before the next release.
-#   env: SYLPH_AGENTS_DIR
-# agents_dir = "~/.sylph/agents"
+# There is no adapter directory, and no setting names one. Adapters are compiled
+# into Sylph, so an agent is available exactly when its vendor CLI is on your
+# PATH — one question with one answer, and `sylph-web doctor` states it. The
+# escape hatch for "a vendor changed faster than the shipped adapter" is
+# upgrading Sylph on that one machine, which touches no configuration.
 
 # The identity preamble appended to a Sylph session's prompt. Edit it freely; it
 # is yours. Delete it and every session runs on the agent's own identity, which

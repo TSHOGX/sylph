@@ -181,7 +181,7 @@ describe("resultStatus", () => {
 
   it("reports a non-zero data.exitCode as failure", () => {
     // The only producer is the E2E fixture
-    // (`e2e/fixtures/adapters/e2e/adapter.py:176`); `components/timeline.tsx:942`
+    // (`crates/adapters/src/e2e.rs`, `tool`); `components/timeline.tsx:942`
     // renders "failed (exit N)" from it. Pending a protocol change declaring the
     // field, this pins the read that surface depends on.
     const status = resultStatus(event({ kind: "tool_result", data: { exitCode: 101 } }));

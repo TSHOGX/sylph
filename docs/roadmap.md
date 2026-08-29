@@ -1976,42 +1976,65 @@ rewrite that pays for the same defects twice.
 
 ### Implementation order
 
-Four of the six are done. The order held: each step did make the next mechanical.
+Five of the six are done — only the envagent is left. The order held: each step did make
+the next mechanical.
 
 1. ✅ `crates/protocol` — the event vocabulary as types. 2932 lines; `wire.rs` fell from
    1502 to 517, keeping only what describes framing.
 2. ✅ `crates/adapters` — `claude` and `pi` ported, `codex` written from the measurement
    corpus, the three parsers absorbed **correctively** rather than faithfully, and the E2E
-   fixture agent compiled in behind a feature. **All three now hold live sessions too**:
+   fixture agent compiled in behind a feature. **All three hold live sessions too**:
    `Adapter::run` is real for each, over `process::Child` — one held process framed as lines
    of JSON, with the reply predicate supplied per vendor because direction is a vendor fact.
-3. ⏳ `crates/server` — `tracedb/` and discovery are deleted and the identity triple is
-   in, but **adapter calls are not yet in-process**: `adapter::Link::establish` still
-   spawns `adapter.sh` and speaks NDJSON. See the open item below.
+3. ✅ `crates/server` — `tracedb/` and discovery are deleted, the identity triple is in,
+   and **adapter calls are in process**: the server holds a
+   `Box<dyn sylph_protocol::Session>` from `sylph_adapters::for_agent(name)?.run(spec)`.
+   `backend/src/adapter/` is gone (1631 lines of NDJSON framing, handshake, and reply
+   correlation), and with it `LinkConfig`, `AdapterIdentity`, the string→code refusal
+   mapping, `adapter_path`, `is_agent_dir`, and the adapter roots. `available()` is `PATH`
+   alone, so an agent can no longer be **listed and unstartable**.
 4. ⏳ `crates/envagent` — not started.
 5. ✅ Schema — `001` rewritten in place, `002`–`007` folded in and deleted.
 6. ✅ Frontend — origin badge and native banner gone, link facets and fidelity in, and
    the waterfall gated on fidelity.
 
-**What step 3 being half-done costs, stated because it is currently observable.**
-`backend/src/adapters.rs` answers availability as the **union** of two live mechanisms:
-the vendor CLI being on `PATH`, and an adapter directory existing. Both are genuinely
-live — the trait exists but the live path still spawns a subprocess — so the union is the
-truthful answer rather than compatibility code, and it collapses to `PATH` alone the
-moment `Link` becomes `Box<dyn Session>`.
+**What closing step 3 removed, beyond the transport.** Availability is `PATH` and nothing
+else, so an agent can no longer be **listed and unstartable** — the state that made
+`session-lifecycle.spec.ts:16` fail correctly, and which it now passes. Four things went
+with the adapter directories rather than being reconciled with them: `adapters/claude/`
+and `adapters/pi/` (the Python, with `verify.py` and `adapter_test.py`, ~6600 lines),
+`paths.agents_dir` / `SYLPH_AGENTS_DIR` / `SYLPH_BUNDLED_AGENTS_DIR`,
+`bundledAgentCandidates` on `GET /config`, and the install step that staged a directory of
+them. `Environment::spawn` lost its only caller and went too, with `ProcessSpec`,
+`ProcessHandle`, `ProcessSignal`, and the backend's `nix` dependency — an adapter owns
+whatever process its vendor CLI needs.
 
-The visible consequence is that an agent can be **listed and unstartable**: a machine
-with `claude` installed reports it, and a `POST /sessions` naming it fails
-`AGENT_START_FAILED` because no `adapters/claude` directory answers. That is what
-`session-lifecycle.spec.ts:16` currently fails on — it is the one spec that creates a
-session through the real UI rather than the API, so it takes the first agent the
-environment reports, which is `claude` rather than the compiled-in fixture. The spec is
-correct and the product is not yet; it goes green with step 3, and it is worth leaving
-red rather than pinning it to the fixture, because a spec that drives the real create
-path is exactly what should notice this.
+Three findings from the seam itself, each a behaviour nothing else provided:
 
-`adapters/*.py` and `adapter_path` are deleted in that same change — `scripts/install.sh`
-needs the directory today, so removing it before the trait is live breaks real installs.
+- **The server was dictating a native id unconditionally**, ignoring
+  `AgentInfo::dictates_native_id`. It worked by accident — an adapter that cannot accept one
+  ignores it and reports its own — but it put a value on the wire the agent was known not to
+  honour, and `codex` spells dictate and resume differently. `LinkManager::run` now builds
+  its `RunSpec` from the probe.
+- **An exit code is not a concept an in-process adapter has.** `Outcome::LinkLost` carried a
+  `stderr_tail` that only existed because a subprocess printed to stderr; it now carries an
+  `Option<String>` of the last `Err` the session's stream reported. Absent is the common
+  case and the honest one, which an empty string could not say.
+- **`StreamEvent::from_adapter` could fail, and its one call site dropped the event.** With a
+  typed `sylph_protocol::Event` that state is unreachable: an unmodelled kind lands in
+  `EventKind::Other` and reaches the journal verbatim.
+- **The handshake timeout had no successor, and only half of the pair was orphaned.**
+  `Link::establish` capped `hello` at ten seconds; `probe` spawns `<cli> --version` with no
+  deadline of its own, on the path `POST /sessions` takes, so a wedged vendor binary would
+  hang the request for as long as the client waited. The *per-command* 30s bound did survive
+  as `crates/adapters/src/process.rs::REPLY_TIMEOUT` — which is what made the missing half
+  easy to miss, since the obvious question ("did the timeouts survive?") answers yes.
+  `LinkManager::PROBE_TIMEOUT` restores it at the one call site with a caller waiting.
+
+The `e2e` cargo feature is now **exclusive**: under it the fixture is the only agent the
+build knows. That replaces what the deleted `SYLPH_AGENTS_DIR` pin did for the E2E suite,
+and replaces it somewhere it cannot be forgotten — an environment variable left unset let
+the suite run the developer's real `claude`.
 
 ## Data-architecture pass, 2026-08-27: what changed in the specs
 

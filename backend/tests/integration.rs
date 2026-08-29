@@ -2270,26 +2270,36 @@ async fn config_reports_whether_each_path_exists_and_omits_it_for_non_paths() {
     }
 }
 
-/// Bundled adapter resolution has to name every directory it tried and mark the
-/// one it took. Without that, a missing install and a mistyped path produce the
-/// same empty agent list and need opposite fixes.
+/// Configuration names no adapter directory, because there is none to name.
+///
+/// Asserted rather than merely deleted: the previous test required `bundledAgentCandidates`
+/// to list every directory tried with the winner marked, and it was right to — a missing
+/// install and a mistyped path produced the same empty agent list and needed opposite
+/// fixes. Adapters are linked in now, so there is nothing to search and the actionable
+/// question moved to `GET /environments`, which answers it per environment and per agent.
+///
+/// A settings panel reading a field the server still emitted would show a directory that
+/// decides nothing, which is the shape of a lever a user can pull with no effect.
 #[tokio::test]
-async fn config_names_every_bundled_adapter_directory_it_considered() {
+async fn config_names_no_adapter_directory_because_there_is_none() {
     let backend = TestBackend::start().await;
 
     let body = json_body(backend.get_authed("/api/v1/config").await).await;
-    let candidates = body["bundledAgentCandidates"].as_array().unwrap();
-
-    assert!(!candidates.is_empty());
-    assert_eq!(
-        candidates.iter().filter(|c| c["chosen"] == true).count(),
-        1,
-        "exactly one directory is the one discovery reads"
+    assert!(
+        body.get("bundledAgentCandidates").is_none(),
+        "adapters are linked in, so no directory is reported: {body}"
     );
-    for candidate in candidates {
-        assert!(candidate["path"].as_str().unwrap().starts_with('/'));
-        assert!(candidate["exists"].is_boolean());
-    }
+
+    let keys: Vec<&str> = body["entries"]
+        .as_array()
+        .expect("entries is an array")
+        .iter()
+        .filter_map(|entry| entry["key"].as_str())
+        .collect();
+    assert!(
+        !keys.iter().any(|key| key.contains("agents_dir")),
+        "no setting names an adapter directory: {keys:?}"
+    );
 }
 
 /// Authenticated, because every value is an absolute local filesystem path.

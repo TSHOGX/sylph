@@ -76,6 +76,8 @@ export interface AgentSession {
   staleAnswer: boolean;
   interrupt: () => void;
   steer: (text: string, turnId?: string) => void;
+  /** Add text to run after the turn in flight. */
+  queue: (text: string) => void;
   /** Set one typed config option; the response replaces the cached surface. */
   setConfig: (configId: string, value: string | boolean) => void;
   settingConfig: boolean;
@@ -275,6 +277,12 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
       api.sessions.steer(sessionId!, text, turnId),
   });
 
+  // No turn id, and that is the difference rather than an omission: a queued follow-up is
+  // *for* after the turn, so there is no precondition a boundary could invalidate.
+  const queueMutation = useMutation({
+    mutationFn: (text: string) => api.sessions.queue(sessionId!, text),
+  });
+
   // The response *is* the new surface, so it is written into the cache rather than
   // triggering a refetch. Setting one option can change another's choices — effort
   // levels depend on the selected model for both installed agents — so an optimistic
@@ -344,6 +352,7 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
       /already/i.test(String((resolveMutation.error as Error | null)?.message ?? "")),
     interrupt: () => interruptMutation.mutate(),
     steer: (text: string, turnId?: string) => steerMutation.mutate({ text, turnId }),
+    queue: (text: string) => queueMutation.mutate(text),
     setConfig: (configId: string, value: string | boolean) =>
       configMutation.mutate({ configId, value }),
     settingConfig: configMutation.isPending,

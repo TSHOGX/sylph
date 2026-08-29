@@ -374,6 +374,7 @@ export const en = {
   "composer.placeholder": "Send a message...",
   "composer.placeholderBusy": "Waiting for the current turn to finish...",
   "composer.placeholderSteer": "Add to what the agent is doing...",
+  "composer.placeholderQueue": "Queue this for after the current turn...",
   "composer.message": "Message",
   "composer.addToMessage": "Add to this message",
   "composer.saveFailed": "Could not save those files into the workspace.",

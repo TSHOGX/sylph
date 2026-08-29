@@ -50,6 +50,23 @@ pub mod e2e;
 /// installed genuinely has no agents, and the caller's job is to say which are missing
 /// rather than to treat the emptiness as a failure to discover something.
 pub fn registry() -> Vec<Box<dyn Adapter>> {
+    // The fixture **replaces** the three rather than joining them, and that exclusivity is
+    // the point of the feature. A build offering both would make "which agents exist"
+    // depend on which vendor CLIs the developer happens to have installed — so the E2E
+    // suite's own default-agent path would pick `claude` over `e2e` and spend real tokens,
+    // which is exactly what the deleted `SYLPH_AGENTS_DIR` pin was holding back.
+    #[cfg(feature = "e2e")]
+    return vec![Box::new(e2e::E2eAdapter::new())];
+
+    #[cfg(not(feature = "e2e"))]
+    {
+        real_agents()
+    }
+}
+
+/// The three supported agents, for the agents installed here.
+#[cfg(not(feature = "e2e"))]
+fn real_agents() -> Vec<Box<dyn Adapter>> {
     let mut found: Vec<Box<dyn Adapter>> = Vec::new();
     if claude::ClaudeAdapter::is_installed() {
         found.push(Box::new(claude::ClaudeAdapter::new()));
@@ -59,10 +76,6 @@ pub fn registry() -> Vec<Box<dyn Adapter>> {
     }
     if pi::PiAdapter::is_installed() {
         found.push(Box::new(pi::PiAdapter::new()));
-    }
-    #[cfg(feature = "e2e")]
-    if e2e::E2eAdapter::is_installed() {
-        found.push(Box::new(e2e::E2eAdapter::new()));
     }
     found
 }
@@ -78,6 +91,16 @@ pub fn registry() -> Vec<Box<dyn Adapter>> {
 /// unknown name and an uninstalled CLI are both "you cannot open a session with this",
 /// and a caller that needs to explain which reaches for [`is_known`].
 pub fn for_agent(name: &str) -> Option<Box<dyn Adapter>> {
+    // Exclusive, for the reason [`registry`] states: under this feature the binary *is* a
+    // test fixture, so a real agent resolving here would let a spec spend real tokens.
+    #[cfg(feature = "e2e")]
+    {
+        return (name == e2e::AGENT_NAME).then(|| {
+            Box::new(e2e::E2eAdapter::new()) as Box<dyn Adapter>
+        });
+    }
+
+    #[allow(unreachable_code)]
     match name {
         claude::AGENT_NAME if claude::ClaudeAdapter::is_installed() => {
             Some(Box::new(claude::ClaudeAdapter::new()))
@@ -86,10 +109,6 @@ pub fn for_agent(name: &str) -> Option<Box<dyn Adapter>> {
             Some(Box::new(codex::CodexAdapter::new()))
         }
         pi::AGENT_NAME if pi::PiAdapter::is_installed() => Some(Box::new(pi::PiAdapter::new())),
-        #[cfg(feature = "e2e")]
-        e2e::AGENT_NAME if e2e::E2eAdapter::is_installed() => {
-            Some(Box::new(e2e::E2eAdapter::new()))
-        }
         _ => None,
     }
 }
@@ -106,26 +125,17 @@ pub fn for_agent(name: &str) -> Option<Box<dyn Adapter>> {
 /// because a journal written under a build that knew four agents must stay readable under
 /// one that knows three (`sylph_protocol::AgentName`).
 pub fn is_known(name: &str) -> bool {
-    #[cfg(feature = "e2e")]
-    if name == e2e::AGENT_NAME {
-        return true;
-    }
-    matches!(
-        name,
-        claude::AGENT_NAME | codex::AGENT_NAME | pi::AGENT_NAME
-    )
+    known_agents().contains(&name)
 }
 
 /// Every agent name this build knows, whether or not its CLI is installed.
 pub fn known_agents() -> &'static [&'static str] {
+    // Only the fixture under the feature, so `is_known` — which a stored session's agent
+    // name is checked against — agrees with what can actually be resolved. Listing all four
+    // would report `claude` as known-but-absent in a build that would never run it.
     #[cfg(feature = "e2e")]
     {
-        &[
-            claude::AGENT_NAME,
-            codex::AGENT_NAME,
-            pi::AGENT_NAME,
-            e2e::AGENT_NAME,
-        ]
+        &[e2e::AGENT_NAME]
     }
     #[cfg(not(feature = "e2e"))]
     {
@@ -188,6 +198,7 @@ mod tests {
     /// depends on what is installed on the machine running the test — which is exactly
     /// the property that makes it unassertable.
     #[test]
+    #[cfg(not(feature = "e2e"))]
     fn the_three_supported_agents_are_known_and_the_dropped_two_are_not() {
         for supported in ["claude", "codex", "pi"] {
             assert!(is_known(supported), "{supported} must be known");
@@ -197,6 +208,31 @@ mod tests {
             assert!(!is_known(dropped), "{dropped} must not be known");
         }
         assert!(!is_known(""));
+    }
+
+    /// Under the `e2e` feature the fixture is the **only** agent, which is the property
+    /// that keeps a suite off the developer's real CLIs.
+    ///
+    /// Asserted rather than left implicit because the failure it prevents is expensive and
+    /// silent: a default-agent path picking `claude` over `e2e` spends real tokens and
+    /// passes or fails on what happens to be installed. The `SYLPH_AGENTS_DIR` pin that
+    /// used to hold that back is deleted with the adapter directories, so this is what
+    /// replaces it — in the build rather than in a fixture's environment, which is where
+    /// it cannot be forgotten.
+    #[test]
+    #[cfg(feature = "e2e")]
+    fn the_fixture_feature_offers_the_fixture_and_nothing_else() {
+        assert_eq!(known_agents(), &[e2e::AGENT_NAME]);
+        assert!(is_known(e2e::AGENT_NAME));
+        assert!(for_agent(e2e::AGENT_NAME).is_some());
+        for real in ["claude", "codex", "pi"] {
+            assert!(!is_known(real), "{real} must not be known to a fixture build");
+            assert!(
+                for_agent(real).is_none(),
+                "{real} must not resolve, however the PATH looks"
+            );
+        }
+        assert_eq!(registry().len(), 1);
     }
 
     /// An unknown name must never produce an adapter, however the `PATH` happens to look.

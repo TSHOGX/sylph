@@ -675,24 +675,48 @@ impl Session for E2eSession {
     }
 }
 
-/// Serialize with sorted keys, so an echoed answer is byte-stable.
+/// Serialize with sorted keys **and Python's spacing**, so an echoed answer is byte-stable
+/// and reads the way the specs assert on it.
 ///
 /// `serde_json` sorts object keys only under its `preserve_order` feature being *off*,
 /// which is the default here — but a `Value` built by a client may already hold an
 /// arbitrary order, so this rebuilds it rather than relying on that.
+///
+/// # The spacing is part of the contract, and the port got it wrong
+///
+/// The Python this replaced used `json.dumps(..., sort_keys=True)`, whose default
+/// separators are `", "` and `": "`. `serde_json::to_string` is compact — `{"q:0":"Tabs"}`
+/// against `{"q:0": "Tabs"}` — and five E2E specs assert on the spaced form, because this
+/// string is the *only* evidence a spec has that the agent received what the user picked.
+/// The bug the scenario exists for is exactly that: the panel closed, the turn resumed, and
+/// the answer had been dropped, so asserting on the echoed payload rather than on the
+/// dialog closing is the whole point.
+///
+/// So it is written out rather than delegated to a serializer setting: `serde_json`'s
+/// `PrettyFormatter` indents across lines, which is a third shape and not the one the
+/// specs read.
 fn canonical_json(value: &Value) -> String {
-    fn sorted(value: &Value) -> Value {
-        match value {
-            Value::Object(map) => {
-                let ordered: std::collections::BTreeMap<_, _> =
-                    map.iter().map(|(k, v)| (k.clone(), sorted(v))).collect();
-                json!(ordered)
-            }
-            Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
-            other => other.clone(),
+    match value {
+        Value::Object(map) => {
+            let ordered: std::collections::BTreeMap<_, _> = map.iter().collect();
+            let body: Vec<String> = ordered
+                .into_iter()
+                .map(|(key, value)| {
+                    format!(
+                        "{}: {}",
+                        Value::String(key.clone()),
+                        canonical_json(value)
+                    )
+                })
+                .collect();
+            format!("{{{}}}", body.join(", "))
         }
+        Value::Array(items) => {
+            let body: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", body.join(", "))
+        }
+        other => serde_json::to_string(other).unwrap_or_else(|_| "null".to_string()),
     }
-    serde_json::to_string(&sorted(value)).unwrap_or_else(|_| "null".to_string())
 }
 
 /// A receiver as a `Stream`, without pulling in `tokio-stream`.
@@ -2239,9 +2263,12 @@ mod tests {
         // answer into a vendor field that does not exist was silent at every layer: the
         // panel closed, the turn resumed, and the CLI told the model the user had not
         // answered.
+        // Spaced like `json.dumps`, which is what the E2E specs match on — see
+        // `an_echoed_answer_is_sorted_and_spaced_like_json_dumps`. This assertion pinned the
+        // compact form and so agreed with the port's own defect rather than catching it.
         assert_eq!(
             echoed.as_deref(),
-            Some(r#"Received: {"command":"rm -rf build"}"#),
+            Some(r#"Received: {"command": "rm -rf build"}"#),
             "the answer must reach the tool result the model reads"
         );
     }
@@ -2335,6 +2362,30 @@ mod tests {
     /// Separate from [`run`] because a blocking scenario has no terminal event, so the
     /// collector has to stop on the request instead — a shared helper waiting for a turn to
     /// settle would hang forever on exactly the four scenarios that matter here.
+    /// An echoed answer keeps Python's spacing, because five specs assert on it.
+    ///
+    /// This is the only evidence a spec has that the *agent* received what the user picked,
+    /// as opposed to the panel merely closing — which is the bug the question scenario
+    /// exists for. The port shipped `serde_json::to_string`, whose compact `{"a":1}` differs
+    /// from `json.dumps`'s `{"a": 1}` in exactly the character the assertions match on, and
+    /// it failed five E2E specs while every unit test here passed.
+    #[test]
+    fn an_echoed_answer_is_sorted_and_spaced_like_json_dumps() {
+        let answer = json!({
+            "values": {"q:1": ["ESLint", "Clippy"], "q:0": "Tabs"},
+            "notes": {"q:0": "only for generated files"},
+        });
+        assert_eq!(
+            canonical_json(&answer),
+            r#"{"notes": {"q:0": "only for generated files"}, "values": {"q:0": "Tabs", "q:1": ["ESLint", "Clippy"]}}"#
+        );
+        // Scalars stay exactly as `serde_json` writes them: there is no separator to space.
+        assert_eq!(canonical_json(&json!("x")), r#""x""#);
+        assert_eq!(canonical_json(&Value::Null), "null");
+        assert_eq!(canonical_json(&json!([])), "[]");
+        assert_eq!(canonical_json(&json!({})), "{}");
+    }
+
     async fn run_until_request(prompt: &str) -> Vec<SessionMessage> {
         let adapter = E2eAdapter::new();
         let mut session = adapter

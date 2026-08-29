@@ -1301,6 +1301,23 @@ export const api = {
         body: JSON.stringify({ text, turnId }),
       }),
     /**
+     * Add text to run **after** the turn in flight.
+     *
+     * No `turnId`, and its absence is the difference rather than an omission: a queued
+     * follow-up is *for* after the turn, so a boundary crossing underneath it changes
+     * nothing. A steer carries the precondition because it is a correction and text that
+     * misses its turn lands in the wrong conversation.
+     *
+     * Which of the two a session offers is `agent.can("steer")` against
+     * `agent.can("queue")`, and they are genuinely different per vendor: `claude` has only
+     * queueing — its stdin is read once the turn ends — while `pi` and `codex` have both.
+     */
+    queue: (id: string, text: string) =>
+      fetchAPI<{ queued: boolean }>(`/sessions/${segment(id)}/queue`, {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      }),
+    /**
      * Set one typed config option on a live session.
      *
      * Answers with the refreshed surface rather than an acknowledgement, because

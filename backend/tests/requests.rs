@@ -385,9 +385,9 @@ async fn interrupt_and_steer_report_a_missing_agent_once_its_link_is_gone() {
         .links
         .detach(&common::TestBackend::session_id(&session_id), "test")
         .await;
-    // Removed so `ensure` cannot transparently establish a fresh link, which is what
+    // Made absent so `ensure` cannot transparently establish a fresh link, which is what
     // every one of these routes does on demand.
-    std::fs::remove_dir_all(server.agents_dir().join("mock")).unwrap();
+    server.agents.uninstall("mock");
 
     let steered = server
         .post_authed(
@@ -455,13 +455,11 @@ async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
 
-    // Remove the adapter behind an already-created session, which is what an
-    // uninstalled agent looks like to a session that predates its removal. Asked
-    // of the harness rather than spelled out: a literal directory name here is a
-    // second place the layout is written down, and it silently stops removing
-    // anything the moment that layout changes — leaving a test that asserts the
-    // detached path while never producing it.
-    std::fs::remove_dir_all(server.agents_dir().join("mock")).unwrap();
+    // Make the agent absent behind an already-created session, which is what an
+    // uninstalled CLI looks like to a session that predates its removal. Asked of the
+    // harness rather than spelled out: availability is a fact the adapter source holds
+    // now, and there is no directory to delete.
+    server.agents.uninstall("mock");
     // Torn down as well as removed. `POST /sessions` starts an agent now, so this
     // session holds a *live* link that removing the adapter directory does not kill —
     // and a live link keeps answering, which is correct: the process is running. What
@@ -497,6 +495,46 @@ async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
     // Capability is a property of a live link. Reporting a remembered list would
     // promise interrupt on a session Sylph holds no channel to.
     assert!(body["capabilities"].is_null());
+}
+
+/// An installed CLI that will not say what it is fails the establish, distinguishably.
+///
+/// Two states the deleted transport told apart and nothing else did. `no_agent` means the
+/// binary is absent, which names a fix and which a client caches like a success because no
+/// retry installs a CLI. A CLI that *is* installed and will not answer is
+/// `handshake_failed`, which must stay retryable — it is a wedged process, a lock, or a
+/// login prompt, and all three can clear.
+///
+/// This covers `probe` failing. It does not cover `probe` *hanging*, which
+/// `LinkManager::PROBE_TIMEOUT` bounds at ten seconds and which is deliberately not
+/// asserted here: the assertion would cost the suite ten seconds of wall clock to observe a
+/// constant. The bound exists because deleting the subprocess deleted
+/// `HANDSHAKE_TIMEOUT` with it and `probe` spawns `<cli> --version` with no deadline of its
+/// own.
+#[tokio::test]
+async fn an_agent_that_will_not_report_itself_is_a_failed_handshake_not_a_missing_install() {
+    let server = TestBackend::start_with_runners(&[common::MockRunner::broken_describe("mute")])
+        .await;
+
+    let created = server
+        .post_authed(
+            "/api/v1/sessions",
+            json!({
+                "environment": server.environment_id().await,
+                "agent": "mute",
+                "workdir": server.workdir().display().to_string(),
+            }),
+        )
+        .await;
+
+    // A start failure rather than a bad request: the agent was offered, so asking for it is
+    // not the client's mistake.
+    assert_eq!(
+        created.status(),
+        StatusCode::BAD_GATEWAY,
+        "{}",
+        common::body_string(created).await
+    );
 }
 
 /// Typed session config: what a control command resolves against.

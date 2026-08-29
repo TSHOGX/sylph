@@ -22,9 +22,6 @@ pub mod config;
 pub mod db;
 /// Parsing spreadsheets, documents, and presentations. A library with no HTTP
 /// knowledge, so it sits beside `attachments` rather than inside `api`.
-/// The duplex agent-session protocol. A live adapter process is a *link*, and
-/// what it can do is negotiated rather than assumed.
-pub mod adapter;
 pub mod documents;
 /// Where a session's work happens: local today, a Khora sandbox or SSH next.
 /// The seam local fork/exec used to occupy implicitly.
@@ -37,8 +34,7 @@ pub mod events;
 pub mod middleware;
 pub mod models;
 pub mod paths;
-/// Which agents this machine can run. A seam standing in for `crates/adapters`
-/// until that crate lands; see the module header for the one-line swap.
+/// Which agents this machine can run, and where the server gets an adapter from.
 pub mod adapters;
 /// Durable, replayable history: folded deltas, content-addressed blobs, and
 /// watermark-driven retention.
@@ -66,6 +62,14 @@ pub struct AppState {
     /// `GET /environments` reports availability from — the surface that replaced
     /// discovery's `agents.available` and `broken_adapters`.
     pub environment: Arc<dyn crate::env::Environment>,
+    /// Where an adapter comes from, and what may be reported about them.
+    ///
+    /// Held beside `environment` and for the same reason: one implementation today, and
+    /// step 4 replaces it with a per-environment answer dialled in from an envagent, so
+    /// pairing replaces one field rather than reaching into `/health`, `/diagnostics`,
+    /// `GET /environments`, and the gate on `POST /sessions` — all of which read this one
+    /// object and therefore cannot disagree about which agents exist.
+    pub adapters: Arc<dyn crate::adapters::AdapterSource>,
     /// Runs turns on live links.
     pub turns: crate::supervisor::turn::LinkedSupervisor,
     pub links: crate::links::LinkManager,
@@ -107,6 +111,21 @@ impl AppState {
     /// readable and every other surface works, which is why the report has to be
     /// loud rather than the startup being aborted.
     pub async fn build(config: Config) -> anyhow::Result<Self> {
+        Self::build_with_adapters(config, crate::adapters::linked()).await
+    }
+
+    /// Assemble state against a given adapter source.
+    ///
+    /// Separate from [`Self::build`] because the integration suite needs an agent that is
+    /// deterministic, has no vendor CLI, and can be told to fail — and a *different* one
+    /// per test, since tests run concurrently in one process. A name-keyed global registry
+    /// cannot provide that, so the source is injected rather than discovered. It is the
+    /// same reason `environment` is a field: step 4 replaces the local source with a
+    /// per-environment one and this signature already accepts it.
+    pub async fn build_with_adapters(
+        config: Config,
+        adapters: Arc<dyn crate::adapters::AdapterSource>,
+    ) -> anyhow::Result<Self> {
         let store = JournalStore::new(&config.journal_path).await?;
         tracing::info!("Journal initialized at {}", config.journal_path);
 
@@ -121,12 +140,17 @@ impl AppState {
         // *which* machine. This line is the server-side half, and it stays at `error`
         // for the same reason it was raised to `error` before: it names a total
         // failure whose symptom appears three layers away.
-        let runnable = crate::adapters::available(&config.agent_roots());
+        let runnable = adapters.available();
         if runnable.is_empty() {
             tracing::error!(
-                "No agent adapters are linked into this build. Sessions cannot be \
-                 created and no slash commands will be offered. See \
-                 `GET /api/v1/environments` for what each environment reports."
+                "No agent CLI is on this machine's PATH, so this build can run nothing. \
+                 Sessions cannot be created and no slash commands will be offered. \
+                 Install one of {:?} and restart; see `GET /api/v1/environments` for what \
+                 each environment reports.",
+                // From the source, not from `sylph_adapters`: the two can disagree, and a
+                // line telling an operator to install one of three agents when this build
+                // knows a different set is worse than saying nothing.
+                adapters.known_agents()
             );
         } else {
             tracing::info!("Agents this build can run: {}", runnable.join(", "));
@@ -220,10 +244,7 @@ impl AppState {
             writer.clone(),
             hub.clone(),
             environment.clone(),
-            // Where to find an `adapter.sh`, bundled first so a user-installed adapter
-            // of the same name shadows rather than duplicates. This argument disappears
-            // when `crates/adapters` lands and an adapter has no path at all.
-            config.agent_roots(),
+            adapters.clone(),
             soul_path,
             seq.clone(),
         );
@@ -278,6 +299,7 @@ impl AppState {
             store,
             config,
             environment,
+            adapters,
             hub,
             turns,
             links,
@@ -409,6 +431,10 @@ pub fn router(state: AppState) -> Router {
             post(api::links::interrupt),
         )
         .route("/api/v1/sessions/{id}/steer", post(api::links::steer))
+        // Separate from `steer` because the two differ by *when the agent reads the text*,
+        // which decides what the request means: a steer carries a turn precondition and a
+        // queued follow-up cannot have one. See `api::links::queue`.
+        .route("/api/v1/sessions/{id}/queue", post(api::links::queue))
         // Typed session config: what `/model` and `/permissions` resolve to, so a
         // control command is a typed set rather than prose sent as a prompt.
         .route("/api/v1/sessions/{id}/config", post(api::links::set_config))

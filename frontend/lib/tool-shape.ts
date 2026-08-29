@@ -317,7 +317,7 @@ export function basename(path: string): string {
  * the protocol does not declare it. `components/timeline.tsx:942` renders
  * "failed (exit N)" from it, which is the most useful single fact about a failed
  * shell call, but today the only producer is the E2E fixture
- * (`e2e/fixtures/adapters/e2e/adapter.py:176`) — the adapters put `exitCode` on a
+ * (`crates/adapters/src/e2e.rs`, `tool`) — the adapters put `exitCode` on a
  * `status` event at process exit, which is a different event kind entirely. So
  * this read is ahead of its spec: it stays pending a `docs/session-protocol.md`
  * change declaring `data.exitCode` as an optional refinement of `isError`, and

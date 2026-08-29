@@ -179,7 +179,9 @@ export function Composer({
   canInterrupt = false,
   onInterrupt,
   canSteer = false,
+  canQueue = false,
   onSteer,
+  onQueue,
   blockedCount = 0,
   onShowBlocked,
 }: {
@@ -252,7 +254,10 @@ export function Composer({
   onInterrupt?: () => void;
   /** Whether the agent declared it accepts text mid-turn. */
   canSteer?: boolean;
+  /** Whether the agent accepts text for *after* the running turn. */
+  canQueue?: boolean;
   onSteer?: (text: string) => void;
+  onQueue?: (text: string) => void;
   /**
    * How many requests the agent is blocked on with their panel dismissed.
    *
@@ -328,11 +333,22 @@ export function Composer({
    * itself lives in `lib/slash.ts`, where it is unit-tested without a DOM.
    */
   function submit() {
-    // Mid-turn, text is steering. Routing it as a command would try to start a
-    // second turn, which the backend refuses one-per-session — so the message would
-    // simply be lost with an error the user did not cause.
-    if (steering && onSteer) {
+    // Mid-turn, text goes to whichever channel the agent actually has. Routing it as a
+    // command would try to start a second turn, which the backend refuses one-per-session,
+    // so the message would simply be lost with an error the user did not cause.
+    //
+    // **Steer is preferred where both exist, and the order is the whole point.** A steer
+    // reaches the running turn and a queued follow-up waits for it, so sending a correction
+    // to the queue delivers it after the thing it was meant to prevent — which is exactly
+    // what happened while `claude` declared a steer it does not have. Where only queueing
+    // exists the composer says so rather than silently doing the weaker thing.
+    if (isLive && canSteer && onSteer) {
       onSteer(text);
+      onTextChange("");
+      return;
+    }
+    if (isLive && canQueue && onQueue) {
+      onQueue(text);
       onTextChange("");
       return;
     }
@@ -383,8 +399,12 @@ export function Composer({
   // agent can actually accept mid-turn, and it is why the textarea is no longer
   // disabled for an agent that supports it. Queuing a second turn instead would be
   // refused by the backend, which allows one turn per session.
+  // Either channel keeps the textarea usable mid-turn; neither disables it. The two are
+  // distinguished at submit and in the placeholder, not here — what this decides is only
+  // whether the user may type at all.
   const steering = isLive && canSteer;
-  const disabled = (isLive && !steering) || sending;
+  const queueing = isLive && !canSteer && canQueue;
+  const disabled = (isLive && !steering && !queueing) || sending;
   const canSend = text.trim().length > 0 && !disabled;
 
   // The agent is fixed once the conversation has content. Switching it would
@@ -848,9 +868,14 @@ export function Composer({
             placeholder={
               steering
                 ? t("composer.placeholderSteer")
-                : isLive
-                  ? t("composer.placeholderBusy")
-                  : t("composer.placeholder")
+                : queueing
+                  ? // Says the text waits, because it does. Promising a correction the
+                    // vendor delivers after the turn is what made a user's "don't do that"
+                    // arrive too late while everything reported success.
+                    t("composer.placeholderQueue")
+                  : isLive
+                    ? t("composer.placeholderBusy")
+                    : t("composer.placeholder")
             }
             disabled={disabled}
             aria-describedby={problem ? problemId : undefined}

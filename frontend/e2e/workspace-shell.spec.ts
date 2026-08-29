@@ -353,7 +353,12 @@ test("Quick Sessions creates a session from its menu with no dialog", async ({ p
 
   // Straight to a usable conversation: no form, and never the create route.
   await expect(page.getByLabel("Message")).toBeVisible();
-  await expect(page).toHaveURL(/\/sessions\/(?!new)[0-9a-f-]{36}/);
+  // The **encoded triple**, not a bare UUID: a session's id is
+  // `(environment, agent, native_id)` (`docs/architecture.md` § Identity), so the route
+  // segment reads `local:e2e:<native id>`. The old pattern matched 36 hex-and-dash
+  // characters, which is what a Sylph-minted UUID used to look like — and it could not fail
+  // until a session could actually be created through this path.
+  await expect(page).toHaveURL(/\/sessions\/(?!new)local:e2e:[0-9a-f-]{36}/);
   await expect(page.getByLabel("Working directory")).toHaveCount(0);
 
   // Created in the fixed Quick Start directory, so it joins that group rather than
@@ -371,11 +376,19 @@ test("Quick Sessions creates a session from its menu with no dialog", async ({ p
   //
   // The identity check is what the test was actually for, and it does not depend on
   // how many times the suite has run before.
-  const created = page.url().split("/").pop()!;
+  // Decoded from the URL and re-encoded for the attribute match, because the two spellings
+  // differ: an id is the triple `local:e2e:<native id>`, the sidebar writes
+  // `encodeURIComponent(id)` into `href`, and `page.url()` hands back the decoded form. So a
+  // raw comparison looks for `local:e2e:…` in an attribute holding `local%3Ae2e%3A…` and
+  // matches nothing — which reads as "the session is not listed" rather than as an encoding
+  // mismatch. Invisible while an id was a bare UUID with nothing in it to escape.
+  const created = decodeURIComponent(page.url().split("/").pop()!);
   // The link itself carries the href, so this is an attribute match on the row rather
   // than `filter({ has })` — which searches *descendants* and therefore matches
   // nothing here.
-  await expect(rows.and(page.locator(`[href$="${created}"]`))).toHaveCount(1);
+  await expect(
+    rows.and(page.locator(`[href$="${encodeURIComponent(created)}"]`)),
+  ).toHaveCount(1);
 });
 
 test("a workspace group creates in its own directory, with one menu item and no form", async ({

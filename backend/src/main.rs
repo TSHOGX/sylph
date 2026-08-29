@@ -70,12 +70,7 @@ fn resolved_only() -> anyhow::Result<Resolved> {
 }
 
 fn report_for(resolved: &Resolved) -> Report {
-    let config = Config::from_resolved(resolved);
-    Report::build(
-        resolved,
-        &config.bundled_agents_candidates,
-        &config.bundled_agents_dir,
-    )
+    Report::build(resolved)
 }
 
 /// Print what resolved, then say whether the pieces it names are usable.
@@ -83,20 +78,24 @@ fn doctor() -> anyhow::Result<()> {
     let resolved = resolved_only()?;
     print!("{}", report_for(&resolved).render());
 
-    // Adapter discovery is a handshake per agent and needs a runtime, so it is
-    // deliberately not run here: `doctor` answers "what did configuration resolve
-    // to", and `/api/v1/diagnostics` answers "what did discovery find". Counting
-    // directories is the honest thing this command can do without starting agents.
-    let agents = &resolved.agents_dir.value;
-    let installed = std::fs::read_dir(agents)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|entry| entry.path().join("adapter.sh").is_file())
-                .count()
-        })
-        .unwrap_or(0);
-    println!("\nYour agents      {installed} with an adapter.sh in {}", agents.display());
+    // Availability is `PATH`, so this is a filesystem check per agent rather than a
+    // handshake — cheap enough to run here, unlike the discovery it replaces. What it
+    // deliberately does *not* do is spawn each CLI to read its version: that is a fact only
+    // the binary holds and `GET /api/v1/environments` is where it is reported, per
+    // environment, because "codex is not installed" is a fact about one machine.
+    //
+    // Each name is listed either way rather than only the present ones. An install that can
+    // run nothing is the failure worth naming, and a bare count of zero does not say which
+    // CLI to install.
+    println!("\nYour agents");
+    for name in sylph_adapters::known_agents() {
+        let present = sylph_adapters::for_agent(name).is_some();
+        println!(
+            "  {} {name}{}",
+            if present { "->" } else { "  " },
+            if present { "" } else { "  (CLI not on PATH)" }
+        );
+    }
 
     // Three states, not two: a resolved file, a path with nothing at it, and
     // identity declined outright. The last is a supported configuration rather than

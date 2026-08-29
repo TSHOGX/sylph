@@ -53,7 +53,7 @@
     "/api/v1/config": {
       "get": {
         "summary": "Read what configuration resolved to",
-        "description": "Returns every resolved setting with the source that supplied it, plus every bundled-adapter directory considered. The same report `sylph-web-backend doctor` renders, served so the terminal and the settings panel cannot disagree. It exists because every failure in this area has one shape: a path resolves somewhere nothing lives, the server starts, /health reports fine, and the symptom appears layers away as an empty agent list or a dead slash key. A resolved value alone cannot distinguish a wrong path from a path that is not being read, so each entry names its source and the variable that overrides it. Read-only, deliberately: paths.browse_roots bounds what any client of this backend may enumerate and paths.agents_dir names directories the server executes programs from, so a loopback HTTP surface able to rewrite either is a materially larger threat model than one that displays them — the config file stays the durable, reviewable record. Authenticated, since every value is an absolute local filesystem path.",
+        "description": "Returns every resolved setting with the source that supplied it,. The same report `sylph-web-backend doctor` renders, served so the terminal and the settings panel cannot disagree. It exists because every failure in this area has one shape: a path resolves somewhere nothing lives, the server starts, /health reports fine, and the symptom appears layers away as a dead slash key. There is no adapter directory to report: adapters are compiled in, so which agents exist is answered per environment by GET /environments. A resolved value alone cannot distinguish a wrong path from a path that is not being read, so each entry names its source and the variable that overrides it. Read-only, deliberately: paths.browse_roots bounds where a spawned agent's current_dir may be, and therefore where arbitrary code may run, so a loopback HTTP surface able to rewrite it is a materially larger threat model than one that displays it — the config file stays the durable, reviewable record. Authenticated, since every value is an absolute local filesystem path.",
         "responses": {
           "200": {
             "description": "The resolved configuration and its provenance",
@@ -2916,8 +2916,7 @@
           "home",
           "configPath",
           "configPresent",
-          "entries",
-          "bundledAgentCandidates"
+          "entries"
         ],
         "properties": {
           "home": {
@@ -2938,13 +2937,6 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ConfigEntry"
-            }
-          },
-          "bundledAgentCandidates": {
-            "type": "array",
-            "description": "Every directory bundled-adapter resolution tried, in order, with the one it took marked. Without it 'no agents' is unactionable: a missing install and a mistyped path give the same empty list and need opposite fixes.",
-            "items": {
-              "$ref": "#/components/schemas/ConfigCandidate"
             }
           }
         }
@@ -2984,26 +2976,6 @@
           "exists": {
             "type": "boolean",
             "description": "Whether the path is there. ABSENT rather than false for settings that are not paths — a log level rendered as missing reports a working setting as broken. A bare command name (the tracedb.bin default) is checked against PATH, since a filesystem check would call a working install absent."
-          }
-        }
-      },
-      "ConfigCandidate": {
-        "type": "object",
-        "required": [
-          "path",
-          "exists",
-          "chosen"
-        ],
-        "properties": {
-          "path": {
-            "type": "string"
-          },
-          "exists": {
-            "type": "boolean"
-          },
-          "chosen": {
-            "type": "boolean",
-            "description": "True for the one directory discovery actually reads."
           }
         }
       },
@@ -3443,7 +3415,6 @@
           "turns",
           "agents",
           "brokenAdapters",
-          "agentRoots",
           "activeTurns"
         ],
         "properties": {
@@ -3484,13 +3455,6 @@
             "additionalProperties": {
               "type": "string"
             }
-          },
-          "agentRoots": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Every directory bundled-adapter resolution considered, in order, plus the user's own agents directory. Present because a missing install and a mistyped `paths.agents_dir` give the same empty list and need opposite fixes."
           },
           "tracedb": {
             "$ref": "#/components/schemas/ArchiveCounts",
