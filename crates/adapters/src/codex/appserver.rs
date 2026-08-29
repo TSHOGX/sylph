@@ -98,12 +98,18 @@ pub mod notification {
 
 /// Why `set_config` cannot answer from its own reply.
 ///
-/// **Measured on 0.150.1 over all 13 `thread/settings/update` calls in
+/// **Measured on 0.150.1 over all 11 `thread/settings/update` calls in
 /// `docs/measurements/codex/captures/s04_settings.jsonl`: every accepted one answers
 /// `result: {}`.** The refreshed settings arrive separately, as a
-/// [`notification::SETTINGS_UPDATED`] carrying the whole `threadSettings` object — and
-/// `thread/read` does **not** carry them either (its `thread` object has no settings
-/// member at all, measured on the same capture).
+/// [`notification::SETTINGS_UPDATED`] carrying the whole `threadSettings` object.
+///
+/// **And `thread/read` *omits* the settings rather than reporting them null** — `model`,
+/// `reasoningEffort`, `approvalPolicy`, and `sandbox` are absent from `result.thread`
+/// entirely. That distinction is load-bearing, because `modelProvider` **is** present while
+/// `model` is not: a reader glancing at that object sees a settings-looking field and
+/// concludes the rest are there, so a presence test written to double-check this will
+/// confirm the wrong thing. There is no request that reads the current settings back; the
+/// notification is the only carrier.
 ///
 /// So the vendor's confirmation is a notification, which decides the shape of
 /// `set_config`: it registers for that notification *before* writing, then reads the
@@ -111,14 +117,19 @@ pub mod notification {
 /// adapter the authority on a fact only the vendor holds, which is the defect
 /// `AGENTS.md` records against `claude`'s `manual` → `default` normalization.
 ///
-/// **And a no-op write emits nothing.** Of the 10 accepted calls, 8 notified; the two
-/// silent ones are `noSuchOption` — accepted with `{}`, changing nothing — and a
-/// `personality` set to the value already current. So an absent notification cannot be
-/// read as failure, and the wait must fall back to the last known surface rather than
-/// erroring.
+/// **And a no-op write emits nothing, which is what makes an unknown option undetectable.**
+/// Measured: **11 writes, 8 accepted, 6 notified.** The two silent accepted writes are
+/// `noSuchOption: "x"` and `personality: "pragmatic"` when `pragmatic` was already current —
+/// an option name the vendor has never heard of answers success-and-silence *identically* to
+/// a legitimate no-op.
+///
+/// So there is no observation that separates them, in either the reply or the notification
+/// stream. That is why [`refuse_unknown`] is not defensive tidiness: it is the only thing
+/// standing between a typo'd option id and a reported success. And it is why an absent
+/// notification cannot be read as failure — the wait falls back to the last known surface.
 pub const SETTINGS_REPLY_IS_EMPTY: &str =
-    "thread/settings/update answers {}; the refreshed settings arrive as \
-     thread/settings/updated, and a no-op write emits nothing at all";
+    "thread/settings/update answers {}, thread/read omits the settings entirely, and a \
+     no-op write emits no notification — indistinguishably from an unknown option name";
 
 /// One approval decision, in the shape the vendor's schema actually declares.
 ///

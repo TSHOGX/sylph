@@ -42,11 +42,23 @@ use crate::process::{self, Child, Line};
 
 /// How long `set_config` waits for the vendor's confirming notification.
 ///
-/// Short, and a timeout is **not** a failure: a write that changes nothing emits no
-/// notification at all ([`appserver::SETTINGS_REPLY_IS_EMPTY`]), so the fallback is to
-/// answer from the last known surface rather than to report a refusal the vendor never
-/// made.
-const SETTINGS_ECHO_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// **A timeout here is an expected outcome, not a degradation**, and that is what sets the
+/// value. A write that changes nothing emits no notification at all
+/// ([`appserver::SETTINGS_REPLY_IS_EMPTY`]), so the fallback is the last known surface rather
+/// than a refusal the vendor never made.
+///
+/// *Measured over every notifying write in
+/// `docs/measurements/codex/captures/s04_settings.jsonl`, reply to notification:* **0.7, 1.0,
+/// 1.2, 1.9, 3.1, 5.4 ms** — local stdio, no network. 250 ms is 45× the worst observation and
+/// still imperceptible on the occasions it does elapse.
+///
+/// An earlier value of 5 s was ~1000× that maximum, and the reason it was wrong is the no-op
+/// rule above rather than the latency: because a no-op notifies nothing, the timeout is the
+/// path a user hits *every time they re-select the value already current*. It is the common
+/// case, so it cannot be sized for an exceptional one. [`CodexSession::set_config`] now also
+/// skips a write that cannot change anything, which removes the wait for that case rather
+/// than merely shortening it.
+const SETTINGS_ECHO_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// What the translator holds between frames.
 ///
@@ -107,8 +119,6 @@ pub struct CodexSession {
     /// Raised whenever a [`notification::SETTINGS_UPDATED`] has been folded into
     /// [`State::settings`], so `set_config` can answer from the vendor's confirmation.
     settings_echo: Arc<Notify>,
-    /// Reply correlation. See [`Correlator`] for why it is not [`Child`]'s here.
-    correlator: Arc<Correlator>,
 }
 
 /// Translate vendor frames into session messages, holding the state a frame needs.
@@ -291,7 +301,19 @@ fn delegation(
         let Some(child) = child else {
             return Vec::new();
         };
-        if Some(child) == own {
+        // **Undecidable without our own thread, so nothing is emitted.**
+        //
+        // `own` is `None` only in the window before the open reply lands, and a
+        // `subAgentActivity` cannot legitimately arrive there — a delegation needs a turn,
+        // and a turn needs an open thread. But the direction is what decides whether this
+        // record is a delegation at all, so guessing it would publish an inverted edge: a
+        // reversed pointer is still well-formed, and the tree it builds is wrong rather than
+        // broken. Emitting nothing is the honest answer to a question that cannot be
+        // answered yet.
+        let Some(own) = own else {
+            return Vec::new();
+        };
+        if child == own {
             // Our own thread named as the other party: this is a delegate's record of its
             // parent. Nothing to open.
             return Vec::new();
@@ -853,73 +875,9 @@ fn scripted_peer(script: &str) -> process::Spawn {
         args: vec!["-c".to_string(), script.to_string()],
         cwd: "/tmp".to_string(),
         env: HashMap::new(),
-        reply_id_field: None,
-    }
-}
-
-/// Reply correlation, held here rather than by [`Child`].
-///
-/// # Why this is not `process::Spawn::reply_id_field`
-///
-/// **`codex` numbers its *server* requests in the same space `Child::next_request_id`
-/// mints from.** Measured in `docs/measurements/codex/captures/s15_approval_decisions.jsonl`:
-/// the first approval of a session arrives as `"id": 0`, then `1`, then `2`.
-/// `process.rs` correlates on the `id` member alone, with no direction discriminant — so
-/// while a `thread/settings/update` with id 1 is outstanding, an approval raised as
-/// server-request id 1 is routed into that waiter and **never reaches the event stream**.
-/// Both failures are silent: `set_config` answers with an approval request, and the turn
-/// blocks forever on a human nobody was asked.
-///
-/// JSON-RPC's own discriminant is `method`: a frame carrying one is a request or a
-/// notification, and a frame with `result`/`error` and no `method` is a reply. That check
-/// is one line inside `process.rs`, which this worktree may not edit — so correlation
-/// lives here, keyed on that discriminant, and [`Child`] is spawned with
-/// `reply_id_field: None` so it does not also try.
-///
-/// **This whole type is deleted once `process.rs` carries the discriminant**, and nothing
-/// else in the module depends on its existence: the read loop would simply stop calling
-/// [`Self::route`]. Everything else `Child` owns — the process group, the single stdout
-/// reader, stderr retention, the shutdown escalation — is used as it stands.
-#[derive(Default)]
-struct Correlator {
-    waiting: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Value>>>,
-}
-
-impl Correlator {
-    /// Register before writing, then await.
-    ///
-    /// **The registration happens before the write**, for the reason `Child::request`
-    /// documents: registering afterwards loses a reply a fast vendor has already sent,
-    /// which presents as an intermittent timeout on a correct implementation.
-    async fn wait(&self, id: u64) -> tokio::sync::oneshot::Receiver<Value> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.waiting.lock().await.insert(id.to_string(), tx);
-        rx
-    }
-
-    async fn forget(&self, id: u64) {
-        self.waiting.lock().await.remove(&id.to_string());
-    }
-
-    /// Whether `frame` is a reply this consumed. `false` leaves it on the stream.
-    async fn route(&self, frame: &Value) -> bool {
-        // The discriminant. A server *request* carries both `method` and `id`, and routing
-        // it as a reply is the defect this type exists to avoid.
-        if frame.get("method").is_some() {
-            return false;
-        }
-        let Some(id) = frame.get("id").map(reply_key) else {
-            return false;
-        };
-        match self.waiting.lock().await.remove(&id) {
-            Some(waiter) => {
-                let _ = waiter.send(frame.clone());
-                true
-            }
-            // An uncorrelated reply — a caller that timed out. Dropped rather than passed
-            // on, because a reply is not an event.
-            None => true,
-        }
+        // The same predicate the real spawn uses, so these tests exercise the correlation
+        // the session actually runs with rather than a simplified stand-in.
+        reply_id: Some(Box::new(process::json_rpc_reply_id)),
     }
 }
 
@@ -946,9 +904,13 @@ pub async fn run(spec: RunSpec) -> Result<Box<dyn Session>> {
         args: vec!["app-server".to_string()],
         cwd: spec.workdir.clone(),
         env: HashMap::new(),
-        // Correlation is [`Correlator`]'s, because this vendor's server requests share the
-        // id space. See that type.
-        reply_id_field: None,
+        // **The predicate, not a field name.** codex numbers its *server* requests in the
+        // same space `next_request_id` mints from — measured at 0,1,2 against our 1.. — so a
+        // reader keyed on the presence of an `id` would route an approval into whichever
+        // caller was waiting, and the turn would block forever on a human nobody asked.
+        // `json_rpc_reply_id` answers `None` for any frame carrying `method`, which is
+        // JSON-RPC's own discriminant between a reply and a request.
+        reply_id: Some(Box::new(process::json_rpc_reply_id)),
     })
     .await?;
     Ok(Box::new(open(child, lines, spec).await?))
@@ -964,7 +926,6 @@ pub async fn run(spec: RunSpec) -> Result<Box<dyn Session>> {
 async fn open(child: Child, lines: mpsc::Receiver<Line>, spec: RunSpec) -> Result<CodexSession> {
     let (open_method, open_params) = appserver::thread_start_params(&spec)?;
     let child = Arc::new(child);
-    let correlator = Arc::new(Correlator::default());
     let state = Arc::new(Mutex::new(State::default()));
     let settings_echo = Arc::new(Notify::new());
 
@@ -977,7 +938,6 @@ async fn open(child: Child, lines: mpsc::Receiver<Line>, spec: RunSpec) -> Resul
     tokio::spawn(read_loop(
         lines,
         tx,
-        correlator.clone(),
         state.clone(),
         settings_echo.clone(),
         child.clone(),
@@ -988,7 +948,6 @@ async fn open(child: Child, lines: mpsc::Receiver<Line>, spec: RunSpec) -> Resul
     // requires experimentalApi capability`. Every probe that started a thread declared it.
     request(
         &child,
-        &correlator,
         method::INITIALIZE,
         json!({
             "clientInfo": {"name": "sylph", "title": "Sylph", "version": env!("CARGO_PKG_VERSION")},
@@ -1005,7 +964,9 @@ async fn open(child: Child, lines: mpsc::Receiver<Line>, spec: RunSpec) -> Resul
 
     // The catalogue, before the thread, because it is what validates a `model` or `effort`
     // write and the vendor validates neither.
-    let catalogue = request(&child, &correlator, method::MODEL_LIST, json!({}))
+    let catalogue = request(
+        &child,
+        method::MODEL_LIST, json!({}))
         .await
         .ok()
         .and_then(|reply| {
@@ -1017,7 +978,9 @@ async fn open(child: Child, lines: mpsc::Receiver<Line>, spec: RunSpec) -> Resul
         })
         .unwrap_or_default();
 
-    let opened = request(&child, &correlator, open_method, open_params)
+    let opened = request(
+        &child,
+        open_method, open_params)
         .await
         .with_context(|| {
             format!(
@@ -1072,7 +1035,6 @@ async fn open(child: Child, lines: mpsc::Receiver<Line>, spec: RunSpec) -> Resul
         state,
         stream: Mutex::new(Some(rx)),
         settings_echo,
-        correlator,
     })
 }
 
@@ -1181,7 +1143,9 @@ impl Session for CodexSession {
             }
         }
 
-        let reply = request(&self.child, &self.correlator, method::TURN_START, params).await?;
+        let reply = request(
+            &self.child,
+            method::TURN_START, params).await?;
         // **The turn id is read from the reply, not awaited on the notification.** A steer
         // sent immediately after `send` needs `expectedTurnId`, and `turn/started` arrives
         // 13 ms later — measured. Waiting for the notification would make a fast client's
@@ -1208,7 +1172,6 @@ impl Session for CodexSession {
         })?;
         request(
             &self.child,
-            &self.correlator,
             method::TURN_INTERRUPT,
             json!({"threadId": self.thread.as_str(), "turnId": turn}),
         )
@@ -1238,7 +1201,6 @@ impl Session for CodexSession {
         };
         request(
             &self.child,
-            &self.correlator,
             method::TURN_STEER,
             json!({
                 "threadId": self.thread.as_str(),
@@ -1363,12 +1325,34 @@ impl Session for CodexSession {
             other => return Err(appserver::refuse_unknown(other).into()),
         };
 
+        // **A write that cannot change anything is not sent**, which removes the wait for the
+        // case that hits it most.
+        //
+        // Placed *after* validation, deliberately: an invalid value must still be refused
+        // rather than shortcut, or a client would get a success for a value the vendor would
+        // have rejected. And it compares against the **vendor's** last reported surface, not
+        // against a remembered request — which is what makes it safe to skip at all.
+        //
+        // The gain is not merely latency. Because a no-op emits no notification, sending it
+        // means waiting out `SETTINGS_ECHO_WAIT` for a confirmation that is never coming, and
+        // that is precisely what re-selecting the current value does.
+        let already_current = self
+            .state
+            .lock()
+            .await
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.get(key).cloned())
+            .is_some_and(|current| current == wire);
+        if already_current {
+            return Ok(self.capabilities().await?.config);
+        }
+
         // **Registered before the write**, because the notification can arrive before the
-        // reply — the same ordering `Correlator::wait` needs and for the same reason.
+        // reply — the same ordering `Child::request` needs and for the same reason.
         let echo = self.settings_echo.notified();
         let outcome = request(
             &self.child,
-            &self.correlator,
             method::THREAD_SETTINGS_UPDATE,
             json!({"threadId": self.thread.as_str(), key: wire}),
         )
@@ -1515,47 +1499,21 @@ impl Session for CodexSession {
 
 /// Send one request and await its reply, failing on a JSON-RPC error.
 ///
-/// **A JSON-RPC `error` is a refusal, so it must never read as an empty success.** This is
-/// the `claude` defect `AGENTS.md` records: a reader that took `response.get("response")
-/// or {}` off an *error* envelope turned every refusal into the same empty value a
-/// successful no-payload control returns, so a refused permission mode was recorded as
-/// applied and rendered as current. Here the discriminant is read first and the error's own
-/// message is carried out.
-async fn request(
-    child: &Child,
-    correlator: &Correlator,
-    method: &str,
-    params: Value,
-) -> Result<Value> {
-    let id = child.next_request_id();
-    let waiter = correlator.wait(id).await;
-    let payload = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-    if let Err(error) = child.send(payload).await {
-        correlator.forget(id).await;
-        return Err(error);
-    }
-
-    let reply = match tokio::time::timeout(process::REPLY_TIMEOUT, waiter).await {
-        Ok(Ok(reply)) => reply,
-        Ok(Err(_)) => {
-            let tail = child.stderr_tail().await;
-            return Err(anyhow!(
-                "codex closed without answering {method}{}",
-                if tail.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {tail}")
-                }
-            ));
-        }
-        Err(_) => {
-            correlator.forget(id).await;
-            return Err(anyhow!(
-                "codex did not answer {method} within {}s",
-                process::REPLY_TIMEOUT.as_secs()
-            ));
-        }
-    };
+/// A thin wrapper over [`Child::request`], which owns the correlation, the timeout, and the
+/// "vendor closed without answering" diagnosis. What this adds is the one thing that is
+/// codex's rather than the transport's: **a JSON-RPC `error` is a refusal, so it must never
+/// read as an empty success.**
+///
+/// That is the `claude` defect `AGENTS.md` records, one vendor over: a reader that took
+/// `response.get("response") or {}` off an *error* envelope turned every refusal into the
+/// same empty value a successful no-payload control returns, so a refused permission mode
+/// was recorded as applied and rendered as the current one. Here the discriminant is read
+/// before the payload and the vendor's own sentence is carried out.
+async fn request(child: &Child, method: &str, params: Value) -> Result<Value> {
+    let reply = child
+        .request(|id| json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+        .await
+        .with_context(|| format!("codex did not answer {method}"))?;
 
     if let Some(error) = reply.get("error") {
         let message = error
@@ -1571,7 +1529,6 @@ async fn request(
 async fn read_loop(
     mut lines: mpsc::Receiver<Line>,
     tx: mpsc::Sender<Result<SessionMessage>>,
-    correlator: Arc<Correlator>,
     state: Arc<Mutex<State>>,
     settings_echo: Arc<Notify>,
     child: Arc<Child>,
@@ -1590,23 +1547,28 @@ async fn read_loop(
                 continue;
             }
         };
-        if correlator.route(&frame).await {
-            continue;
-        }
-        // Built on first use, because the thread id is not known until the open reply has
-        // been correlated — which happens above, on this same loop.
-        if translator.is_none() && state.lock().await.thread.is_some() {
-            translator = Some(Translator {
-                state: state.clone(),
-                settings_echo: settings_echo.clone(),
-            });
-        }
-        let Some(translator) = &translator else {
-            // Before the open completes there is nothing to attribute a frame to. The
-            // frames that arrive in that window are `remoteControl/status/changed` and
-            // `thread/started`, neither of which is an event.
-            continue;
-        };
+        // **Built once, and never gated on the thread id being known.**
+        //
+        // An earlier version waited for `State::thread` before translating anything, on the
+        // reasoning that a frame cannot be attributed to a thread until the open reports one.
+        // That was a race, and a *lost frame* rather than a late one: this loop and `open`
+        // run on different tasks, so a frame the vendor emits immediately after
+        // `thread/start`'s reply — which is exactly when an approval or a first `item/*`
+        // arrives — reaches here before `open` has stored the id, and was dropped with
+        // nothing reporting it.
+        //
+        // It presented as a *flaky* test rather than a broken one, because whether the
+        // vendor's next frame or the waiting task wins is timing: the collision test failed
+        // roughly one run in five alone, and every run under a loaded suite. Which is the
+        // shape `AGENTS.md` names — a defect whose only symptom is a race is invisible to
+        // whichever side happens to win it.
+        //
+        // Nothing in translation actually needs the id except the delegation edge, which
+        // takes it as an `Option` and says what it does when it is absent.
+        let translator = translator.get_or_insert_with(|| Translator {
+            state: state.clone(),
+            settings_echo: settings_echo.clone(),
+        });
         for message in translator.frame(&frame).await {
             if tx.send(message).await.is_err() {
                 // The server dropped the session. Nothing is left to report to, so the
@@ -2218,71 +2180,57 @@ mod tests {
         );
     }
 
-    /// **A server request is not a reply, even when it carries the same id.**
+    /// **An approval whose id collides with an outstanding request still reaches the
+    /// stream.**
     ///
-    /// This is the measured collision: codex numbers its server requests `0`, `1`, `2` — the
-    /// same space `Child::next_request_id` mints from. Routed by id alone, an approval
-    /// raised while a `set_config` is outstanding wakes that caller and never reaches the
-    /// stream, so the turn blocks forever on a human nobody was asked.
+    /// The transport half of this is `process.rs`'s own
+    /// `correlating_on_the_id_alone_swallows_a_vendor_request`. What is asserted here is the
+    /// consequence at *this* layer, because it is this vendor that makes the collision
+    /// reachable: codex numbers its server requests 0,1,2 in the same space
+    /// `next_request_id` mints from, so the ids genuinely overlap in an ordinary session.
     ///
-    /// Reverting the `method` check in [`Correlator::route`] fails this test on the first
-    /// assertion.
+    /// The peer answers a `thread/settings/update` **and** raises an approval carrying the
+    /// same id, in that order. Both must arrive: the caller gets its reply, and the approval
+    /// reaches the event stream as a `Request`. Swapping `reply_id` for a predicate that
+    /// reads any `id` puts the approval into the waiter instead, and the turn then blocks
+    /// forever on a human nobody was asked.
     #[tokio::test]
-    async fn a_server_request_is_never_routed_as_a_reply() {
-        let correlator = Correlator::default();
-        let waiter = correlator.wait(1).await;
+    async fn an_approval_sharing_an_id_with_a_reply_still_reaches_the_stream() {
+        // **The frame is written to a file and the peer `cat`s it, so no escaping is
+        // involved at all.**
+        //
+        // A real approval's `command` is `/bin/zsh -lc 'echo needs-approval'` — quotes and
+        // all — and getting that through a double-quoted `printf` nested in a single-quoted
+        // `format!` script took three attempts, each failing as a parse error that read as a
+        // product bug rather than as a quoting one. A file has no layers to survive, and it
+        // lets the test use the *measured* payload rather than a sanitized one.
+        let frame = std::env::temp_dir().join(format!("sylph-codex-approval-{}", std::process::id()));
+        std::fs::write(&frame, serde_json::to_string(&approval_frame(1)).unwrap()).unwrap();
 
-        // A server *request* whose id collides with our outstanding one.
-        let approval = approval_frame(1);
-        assert!(
-            !correlator.route(&approval).await,
-            "an approval must stay on the event stream, not wake a caller"
+        // Our first request is id 1, so the peer raises its approval as id 1 too — the
+        // collision this test exists for.
+        let script = SCRIPTED_APP_SERVER.replace(
+            "# COLLIDING_SERVER_REQUEST",
+            &format!("cat {}; printf '\\n'", frame.display()),
         );
-        // A notification, which carries no id at all.
-        assert!(!correlator.route(&json!({"method": "turn/started", "params": {}})).await);
 
-        // The real reply still correlates, and it is the one the caller receives.
-        assert!(correlator.route(&json!({"id": 1, "result": {"ok": true}})).await);
-        assert_eq!(waiter.await.unwrap()["result"]["ok"], json!(true));
+        let mut session = open_against(&script).await.expect("the peer opens");
+        let mut stream = session.events().expect("the stream is yielded once");
 
-        // A JSON-RPC error reply correlates too — it is a refusal, and a caller that never
-        // woke could not report it.
-        let waiter = correlator.wait(2).await;
-        assert!(
-            correlator
-                .route(&json!({"id": 2, "error": {"code": -32600, "message": "no"}}))
-                .await
-        );
-        assert!(waiter.await.unwrap()["error"]["message"] == json!("no"));
-    }
-
-    /// A `-32600` refusal is carried out as an error naming the vendor's own sentence, never
-    /// as an empty success.
-    ///
-    /// This is the `claude` defect one vendor over: a reader that took the payload off an
-    /// *error* envelope turned every refusal into the same empty value a successful
-    /// no-payload control returns, so a refused control was recorded as applied.
-    #[tokio::test]
-    async fn a_jsonrpc_error_reply_fails_the_request_rather_than_reading_as_empty() {
-        // Echoes the id back inside an `error` envelope, as codex does for a bad enum value.
-        let script = r#"read -r line; id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/'); printf '{"id":%s,"error":{"code":-32600,"message":"unknown variant `sometimes`, expected one of `untrusted`, `on-request`, `granular`, `never`"}}\n' "$id"; sleep 5"#;
-        let (child, lines) = Child::spawn(scripted_peer(script)).await.unwrap();
-        let correlator = Arc::new(Correlator::default());
-        let drain = correlator.clone();
-        tokio::spawn(async move {
-            let mut lines = lines;
-            while let Some(Ok(frame)) = lines.recv().await {
-                drain.route(&frame).await;
-            }
-        });
-
-        let error = request(&child, &correlator, method::THREAD_SETTINGS_UPDATE, json!({}))
-            .await
-            .expect_err("a -32600 is a refusal, not an empty result");
-        assert!(
-            error.to_string().contains("unknown variant"),
-            "the vendor's own sentence must survive: {error}"
-        );
+        // The approval is on the event stream, not in a caller's reply.
+        let message = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::StreamExt::next(&mut stream),
+        )
+        .await
+        .expect("the approval must arrive rather than being swallowed by a waiter")
+        .expect("the stream is open")
+        .expect("the approval is not an error");
+        match message {
+            SessionMessage::Request(request) => assert_eq!(request.id, "1"),
+            other => panic!("expected the approval as a Request, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&frame);
     }
 
     /// A full open over a scripted peer: handshake, catalogue, thread, and the id the
@@ -2353,7 +2301,13 @@ mod tests {
     /// number inside `params` instead of the request's own id.
     const SCRIPTED_APP_SERVER: &str = r#"
       while read -r line; do
-        id=$(printf '%s' "$line" | sed -n 's/^[^0-9]*"id":\([0-9][0-9]*\).*/\1/p')
+        # Anchored on the member and stopping at the comma, so it neither depends on
+        # serde_json's key order nor matches a number inside `params`.
+        id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\),.*/\1/p')
+        # **A notification carries no id, and must not be answered.** `initialized` is one,
+        # and answering it emitted `{"id":,...}` — a malformed line that surfaced as an
+        # unparsable-vendor-line error on the event stream, two layers from this arm.
+        if [ -z "$id" ]; then continue; fi
         case "$line" in
           *'"method":"initialize"'*)
             printf '{"id":%s,"result":{"codexHome":"/tmp","platformOs":"macos"}}\n' "$id"
@@ -2365,11 +2319,13 @@ mod tests {
           *'"method":"thread/start"'*|*'"method":"thread/resume"'*)
             printf '{"id":%s,"result":{"thread":{"id":"01a0460c-c359-7ed3-9e13-212c0a33d6c0"},"model":"gpt-5.6-sol","reasoningEffort":"high","approvalPolicy":"never","sandbox":{"type":"workspaceWrite"}}}\n' "$id"
             printf '{"method":"thread/started","params":{"thread":{"id":"01a0460c-c359-7ed3-9e13-212c0a33d6c0"}}}\n'
+            # COLLIDING_SERVER_REQUEST
             ;;
           *'"method":"turn/start"'*)
             printf '{"id":%s,"result":{"turn":{"id":"01a0460c-c3be-7850-8d27-cac444167b01","status":"inProgress"}}}\n' "$id"
             ;;
           *'"method":"thread/settings/update"'*)
+            # RECORD_SETTINGS_WRITE
             printf '{"id":%s,"result":{}}\n' "$id"
             printf '{"method":"thread/settings/updated","params":{"threadId":"01a0460c-c359-7ed3-9e13-212c0a33d6c0","threadSettings":{"model":"gpt-5.6-sol","effort":"low","approvalPolicy":"never","sandboxPolicy":{"type":"workspaceWrite"}}}}\n'
             ;;
@@ -2450,6 +2406,51 @@ mod tests {
             .find(|option| option.id == "effort")
             .expect("the refreshed array carries effort");
         assert_eq!(effort.current_value, Some(json!("low")));
+    }
+
+    /// **A write that cannot change anything is never sent.**
+    ///
+    /// Observed by counting what the peer received, not by timing: the peer appends every
+    /// `thread/settings/update` to a file, and after two identical `set_config` calls that
+    /// file holds exactly one. Timing could not distinguish these, because the scripted peer
+    /// notifies on every write while a real no-op notifies on none — which is the whole
+    /// reason the skip matters (`appserver::SETTINGS_REPLY_IS_EMPTY`).
+    #[tokio::test]
+    async fn a_write_that_cannot_change_anything_is_not_sent() {
+        let log = std::env::temp_dir().join(format!("sylph-codex-writes-{}", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+        let script = SCRIPTED_APP_SERVER.replace(
+            "# RECORD_SETTINGS_WRITE",
+            &format!("printf 'write\\n' >> {}", log.display()),
+        );
+
+        let session = open_against(&script).await.expect("the peer opens");
+        // The open reports `reasoningEffort: "high"`, so this one is a real change.
+        session.set_config("effort", json!("low")).await.expect("a real change is written");
+        let after_first = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(after_first.lines().count(), 1, "the first write reaches the vendor");
+
+        // The peer's notification reported `effort: "low"`, so this is now current.
+        let refreshed = session
+            .set_config("effort", json!("low"))
+            .await
+            .expect("a no-op still answers with the surface");
+        let after_second = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(
+            after_second.lines().count(),
+            1,
+            "a value already current must not be written again"
+        );
+
+        // And it still answers the refreshed array rather than an empty one, so a client
+        // re-rendering from the result sees the checkmark where it belongs.
+        let effort = refreshed
+            .iter()
+            .find(|option| option.id == "effort")
+            .expect("the answer carries effort");
+        assert_eq!(effort.current_value, Some(json!("low")));
+
+        let _ = std::fs::remove_file(&log);
     }
 
     /// A turn is accepted, and the turn id needed to steer it comes from the **reply**.
