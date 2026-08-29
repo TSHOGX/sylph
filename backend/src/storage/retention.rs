@@ -165,20 +165,28 @@ impl RetentionAuthority for TerminalAuthority {
 
 /// The environment holding a session's native store confirms what it still has.
 ///
-/// # Deriving a bound, and why it is not implemented yet
+/// # A bound needs a native-to-sequence correspondence, and nothing holds one
 ///
 /// An environment cannot report "I have ingested through event 400", because a vendor
-/// CLI has no such notion. What it *can* report is what its own store holds, and two
-/// measured properties make a bound derivable from that: a native store is written
-/// **whole-message**, so its last record is complete and everything before it is too;
-/// and a record's identity is the vendor's own, which the adapter translates into the
-/// sequence number of the Sylph event it produced.
+/// CLI has no such notion. It can report what its own store holds, and one measured
+/// property would make a bound derivable from that: a native store is written
+/// **whole-message**, so its last record is complete and everything before it is too.
 ///
-/// That translation needs `sylph_protocol::Adapter::enumerate`, which lands with
-/// `crates/adapters` (step 2 of `docs/roadmap.md` § Implementation order). Until then
-/// this answers [`WithheldReason::Ambiguous`] — **never a zero bound**, which would read
-/// as a completed check. So a pass records that it looked, keeps every block, and
-/// `/diagnostics` reports the withholding rather than a silent zero.
+/// What is missing is the other half — which Sylph event a given native record produced.
+/// That correspondence is not stored anywhere, and it cannot be recovered from
+/// `sylph_protocol::Adapter::enumerate`: a [`sylph_protocol::NativeSummary`] describes a
+/// session, not its events, and `event_count` is absent from all three adapters by
+/// measurement rather than by omission — counting is a full parse, which is the cost
+/// `enumerate` exists to avoid, and a record count is not an event count in any case
+/// (one assistant record can hold several content blocks). A count those adapters
+/// *estimated* would be worse than none: this is the one consumer that would subtract
+/// from it.
+///
+/// So this answers [`WithheldReason::Ambiguous`] — **never a zero bound**, which would
+/// read as a completed check. A pass records that it looked, keeps every block, and
+/// `/diagnostics` reports the withholding rather than a silent zero. Pruning stays
+/// unavailable until something durably records which event a native record produced;
+/// until then growth is the deliberate direction, per this module's header.
 pub struct EnvagentAuthority {
     environment: Arc<dyn Environment>,
 }
@@ -210,7 +218,7 @@ impl RetentionAuthority for EnvagentAuthority {
         }
 
         debug!(
-            "No native-store bound is derivable for {} yet; keeping every block",
+            "No native-to-sequence correspondence exists for {}, so no bound is derivable; keeping every block",
             session.encode()
         );
         Ok(Confirmation::nothing(

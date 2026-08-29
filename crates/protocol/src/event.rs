@@ -121,6 +121,21 @@ pub enum Phase {
     Completed,
 }
 
+impl Phase {
+    /// The wire spelling, and the journal's.
+    ///
+    /// Here rather than in the server for the same reason [`EventKind::as_str`] is: the
+    /// spelling is protocol vocabulary, and a `match` written at each storage boundary is
+    /// one copy per boundary to keep in step with this enum.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Delta => "delta",
+            Self::Completed => "completed",
+        }
+    }
+}
+
 /// Whether an event reaches the durable journal or is a transient projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

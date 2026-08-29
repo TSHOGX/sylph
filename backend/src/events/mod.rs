@@ -157,7 +157,7 @@ impl StreamEvent {
         }
     }
 
-    /// Build from an adapter's [`sylph_protocol::Event`].
+    /// Build from an adapter's [`sylph_protocol::Event`], for a **live** link.
     ///
     /// `seq` is left at zero for the caller to assign, because ordering is the
     /// server's to decide: an adapter numbering its own events could not
@@ -170,126 +170,89 @@ impl StreamEvent {
     /// `None` when `kind` was missing or not a string. With adapters linked in there is no
     /// such state: `EventKind` is an enum whose `Other` variant preserves a kind this
     /// build does not model, so an event that would have been dropped as unparseable now
-    /// arrives verbatim. The `warn!("Unparseable adapter event")` branch at the one call
-    /// site is deleted rather than made unreachable.
+    /// arrives verbatim.
     ///
-    /// `Stability` is deliberately **not** read off the protocol event even though it
-    /// declares the type. The rule below is the server's — it decides which tier a row
-    /// lands in — and an adapter that got it wrong could silently keep a delta out of the
-    /// journal or flood it with one. One fact, one producer.
+    /// # Stability is re-derived here, and read as given by [`Self::from_protocol`]
+    ///
+    /// Both call [`sylph_protocol::Event::derive_stability`], the protocol's single
+    /// producer, so there is one derivation of this fact and not two. The difference is
+    /// only *what it is derived from*. [`sylph_protocol::Event::stability`] is a public
+    /// field, so a live adapter can set it to anything after construction — and it decides
+    /// which tier a row lands in, so a wrong value silently keeps a delta out of the
+    /// journal or floods it with one. A parsed native record has no such author: its
+    /// stability came from `Event::new` in this process, one call earlier.
     pub fn from_event(event: &sylph_protocol::Event) -> Self {
-        let kind = event.kind.as_str().to_string();
-        let phase = event.phase.map(|phase| {
-            match phase {
-                sylph_protocol::Phase::Started => "started",
-                sylph_protocol::Phase::Delta => "delta",
-                sylph_protocol::Phase::Completed => "completed",
-            }
-            .to_string()
-        });
-
-        // Stability follows the phase, unchanged from v1: a `completed` event
-        // carries its block's whole stable value, and an event with no phase is
-        // server-authored and always stable.
-        //
-        // `subagent` is the documented exception, at every phase. It records
-        // *structure*, not content: its `started` phase is where a trajectory's
-        // id, name, and parent live. Dropped as an ephemeral projection, the
-        // journal would keep every child event pointing at a parent it never
-        // recorded, and a reload would flatten the whole delegated subtree into
-        // its parent's own work — the exact bug `span` exists to fix, reappearing
-        // via the storage tier instead of the protocol.
-        let stability = match phase.as_deref() {
-            Some("completed") | None => "stable",
-            _ if kind == "subagent" => "stable",
-            _ => "ephemeral",
-        };
-
-        Self {
-            seq: 0,
-            kind,
-            phase,
-            stream_id: event.stream_id.clone(),
-            // Empty is normalized to absent: an adapter setting `span` to `""` for a
-            // root event means the root, and a client comparing against a
-            // trajectory id would otherwise look for one named "".
-            span: event
-                .span
-                .as_deref()
-                .filter(|span| !span.is_empty())
-                .map(str::to_string),
-            name: event.name.clone(),
-            text: event.text.clone(),
-            data: event.data.clone().filter(|data| !data.is_null()),
-            is_error: event.is_error,
-            stability: stability.to_string(),
-            source: "agent".to_string(),
-            // **The server's own arrival time, not the adapter's.** An adapter stamps
-            // `created_at_ms` too, and reading it here would make a duration depend on a
-            // remote machine's clock — which for step 4's envagent is a different clock
-            // entirely. The fixture that emits its whole tree inside one millisecond is
-            // measurable only because this is stamped on arrival.
-            created_at_ms: chrono::Utc::now().timestamp_millis(),
+        // **The server's own arrival time, not the adapter's.** An adapter stamps
+        // `created_at_ms` too, and reading it here would make a duration depend on a
+        // remote machine's clock — which for step 4's envagent is a different clock
+        // entirely. The fixture that emits its whole tree inside one millisecond is
+        // measurable only because this is stamped on arrival.
+        Self::from_protocol_parts(
+            event,
+            sylph_protocol::Event::derive_stability(&event.kind, event.phase),
+            now_ms(),
             // Straight from an adapter: one arrival.
-            started_at_ms: None,
-        }
+            None,
+        )
     }
 
-    /// Build from an adapter's typed [`sylph_protocol::Event`].
-    ///
-    /// # Why this exists beside [`Self::from_adapter`]
-    ///
-    /// That one reads a JSON envelope off the NDJSON transport and is right for a live
-    /// link. This one takes the value an in-process adapter constructs, which is what
-    /// `adopt` and `watch` yield — so no field is recovered by string key and a rename
-    /// upstream is a compile error rather than a silent `None` (`AGENTS.md` § A
-    /// cross-process JSON boundary lets a spelling change read as `None`).
+    /// Build from the value an in-process adapter constructs for `adopt` and `watch`.
     ///
     /// **The vendor's own `created_at_ms` survives, and that is the load-bearing
-    /// difference.** `from_adapter` stamps `Utc::now()`, because a live event's arrival
-    /// *is* when it happened. An adopted event happened when the vendor recorded it,
-    /// possibly months ago, and stamping now would make every adopted transcript claim
-    /// to have occurred at the moment it was adopted — collapsing a session's whole
-    /// duration to zero and ordering it into the sidebar as the newest thing on the
-    /// machine. The parsers go to real trouble to recover these stamps
+    /// difference from [`Self::from_event`].** A live event's arrival *is* when it
+    /// happened. An adopted event happened when the vendor recorded it, possibly months
+    /// ago, and stamping now would make every adopted transcript claim to have occurred at
+    /// the moment it was adopted — collapsing a session's whole duration to zero and
+    /// ordering it into the sidebar as the newest thing on the machine. The parsers go to
+    /// real trouble to recover these stamps
     /// (`crates/adapters/src/native/timestamp.rs`), and this is where that work would
     /// have been discarded.
     ///
     /// `seq` is left at zero for the caller to assign, for the same reason as
-    /// [`Self::from_adapter`]: ordering is the server's.
+    /// [`Self::from_event`]: ordering is the server's.
     pub fn from_protocol(event: &sylph_protocol::Event) -> Self {
+        Self::from_protocol_parts(
+            event,
+            event.stability,
+            event.created_at_ms,
+            event.started_at_ms,
+        )
+    }
+
+    /// The shared body of [`Self::from_event`] and [`Self::from_protocol`].
+    ///
+    /// Every field is copied identically by both; the three that differ are arguments, so
+    /// a reader comparing the two paths sees exactly what a live event and an adopted one
+    /// disagree about and nothing else. Before this existed the two carried byte-identical
+    /// copies of the phase mapping and the span normalization, and disagreed about
+    /// stability in a way neither comment acknowledged.
+    fn from_protocol_parts(
+        event: &sylph_protocol::Event,
+        stability: sylph_protocol::Stability,
+        created_at_ms: i64,
+        started_at_ms: Option<i64>,
+    ) -> Self {
         Self {
             seq: 0,
             kind: event.kind.as_str().to_string(),
-            phase: event.phase.map(|phase| {
-                match phase {
-                    sylph_protocol::Phase::Started => "started",
-                    sylph_protocol::Phase::Delta => "delta",
-                    sylph_protocol::Phase::Completed => "completed",
-                }
-                .to_string()
-            }),
+            phase: event.phase.map(|phase| phase.as_str().to_string()),
             stream_id: event.stream_id.clone(),
-            // Same normalization as the wire path: an adapter emitting an empty span
-            // means the root, and a client comparing against a trajectory id would
-            // otherwise look for one named "".
+            // Empty is normalized to absent: an adapter setting `span` to `""` for a
+            // root event means the root, and a client comparing against a trajectory id
+            // would otherwise look for one named "".
             span: event.span.clone().filter(|span| !span.is_empty()),
             name: event.name.clone(),
             text: event.text.clone(),
             data: event.data.clone().filter(|data| !data.is_null()),
             is_error: event.is_error,
-            // Read from the field the adapter set rather than recomputed from the
-            // phase. One fact with two derivations diverges the moment either grows a
-            // case, which is exactly what happened when `subagent` became stable at
-            // every phase (`sylph_protocol::Event::stability`).
-            stability: match event.stability {
+            stability: match stability {
                 sylph_protocol::Stability::Stable => "stable",
                 sylph_protocol::Stability::Ephemeral => "ephemeral",
             }
             .to_string(),
             source: "agent".to_string(),
-            created_at_ms: event.created_at_ms,
-            started_at_ms: event.started_at_ms,
+            created_at_ms,
+            started_at_ms,
         }
     }
 
@@ -315,6 +278,15 @@ impl StreamEvent {
             started_at_ms: None,
         }
     }
+}
+
+/// Epoch milliseconds now.
+///
+/// Module-local rather than shared: `crates/protocol` deliberately carries no `chrono`
+/// (`sylph_protocol` § Not a runtime), so the one place both sides could hold this is the
+/// one place it may not live.
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 /// Live fan-out for one in-flight turn.
@@ -563,6 +535,39 @@ mod tests {
             created_at_ms: 1_700_000_000_000,
             started_at_ms: None,
         }
+    }
+
+    /// A live adapter's `stability` is re-derived, never trusted.
+    ///
+    /// [`sylph_protocol::Event::stability`] is a public field, so an adapter can set it to
+    /// anything after `Event::new` derived it — and the value decides which tier a row
+    /// lands in, so a wrong one keeps a delta out of the journal or floods it with one.
+    /// Written because the property had **no** coverage: replacing the `derive_stability`
+    /// call in [`StreamEvent::from_event`] with `event.stability` left the whole workspace
+    /// suite passing, so the rule its comment calls load-bearing could have been deleted
+    /// silently. Verified by making that substitution and watching this test fail.
+    ///
+    /// [`StreamEvent::from_protocol`] deliberately does the opposite — a parsed native
+    /// record has no author but this process — which is why this asserts on the live path
+    /// only.
+    #[test]
+    fn a_live_adapter_cannot_declare_a_delta_stable() {
+        let mut claimed = sylph_protocol::Event::new(
+            sylph_protocol::EventKind::Assistant,
+            Some(sylph_protocol::Phase::Delta),
+            1_700_000_000_000,
+        );
+        claimed.stability = sylph_protocol::Stability::Stable;
+
+        let wire = StreamEvent::from_event(&claimed);
+        assert!(
+            !wire.is_stable(),
+            "a delta must stay ephemeral however the adapter labelled it"
+        );
+
+        // The same value read as an adopted record keeps what the parser derived, so the
+        // two paths are genuinely different rather than one being dead.
+        assert!(StreamEvent::from_protocol(&claimed).is_stable());
     }
 
     #[test]
