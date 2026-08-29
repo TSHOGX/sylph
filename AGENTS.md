@@ -1367,6 +1367,37 @@ a turn is live, which means one thing and is the signal to use. Before asserting
 `toBeEnabled`/`toBeDisabled`, check every input to that boolean; prefer a control whose
 *presence* changes.
 
+**And `Stop` disappearing is still the wrong signal for anything the settle *sweep*
+produces, which is the same rule one layer out.** `Stop` is gone once the turn is
+**terminal**, and that is not the same claim as the turn being **fully settled**.
+`TurnCloser::close` writes the terminal status first (`closer.rs:58`) and closes open
+trajectories ~35 lines later (`:93`), with a session-status write between — deliberately,
+because the row that makes the next action legal must be written first. The client's
+`finished` polls turn status, so `Stop` vanishes the moment that first row commits, and a
+spec waiting on it resumes *before* the sweep has emitted anything.
+
+Every spec asserting on what the sweep produces — a stranded delegation closed, a
+descendant status escalated, a rollup counting a subtree — therefore races it, and under
+load whichever one loses is the one that fails: `:137`, `:373`, and `:348` in
+`delegation.spec.ts` have each been the failing one on different runs of the *same* tree.
+That is what makes it read as flakiness, and worse, as a regression on whichever branch
+happened to be under test. It was diagnosed as a branch's regression once here, and the
+branch was innocent: the spec fails on `main` identically.
+
+Wait on something the sweep itself produces, not on `Stop`. Moving the sweep before the
+status write is the other option and it is worse — it fights the ordering rule above, to
+fix a test-observability problem.
+
+**An OOM-killed suite is indistinguishable from an interrupted one, so the machine is the
+last thing anyone suspects.** A suite killed for memory reports **zero failures at the
+point of death** — exit 137 or 143, no summary line, every spec green up to the cut. The
+instinct is to blame the harness or the tree. Measured here across three runs that died at
+specs 119, 35, and 34 of 156 with 159 MB free, against this file's own record of this suite
+dying at ~62 MB: two of the three were self-inflicted (a `Monitor` until-loop SIGTERMing the
+run, and an `rm -rf .next` in the worktree the server was serving from), and the third was
+genuinely the machine. Check free pages before diagnosing anything else, and run in groups
+rather than raising a timeout.
+
 **A layout bug below a breakpoint is invisible to a suite that runs above it.**
 Three mobile failures survived 41 green specs because every one of them ran at
 1280px, where the same code is merely cramped. A viewport is an instrument, not
