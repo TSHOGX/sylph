@@ -80,6 +80,15 @@ pub trait AdapterSource: Send + Sync {
     /// a journal written under a build that knew four agents must stay readable under one
     /// that knows three.
     fn is_known(&self, name: &str) -> bool;
+
+    /// Every name this source knows, whether or not its CLI is installed.
+    ///
+    /// Here rather than read from `sylph_adapters` at the call site, so a message listing
+    /// what is supported cannot contradict [`Self::is_known`]. It could: a caller that
+    /// asked the source whether a name was known and then printed the *compiled-in* list
+    /// would answer "Unknown agent: claude. This build supports: [claude, codex, pi]" the
+    /// moment the two disagreed — which is exactly what an injected source makes true.
+    fn known_agents(&self) -> Vec<String>;
 }
 
 /// The adapters compiled into this binary, for the agents installed on this machine.
@@ -106,6 +115,13 @@ impl AdapterSource for LinkedAdapters {
 
     fn is_known(&self, name: &str) -> bool {
         sylph_adapters::is_known(name)
+    }
+
+    fn known_agents(&self) -> Vec<String> {
+        sylph_adapters::known_agents()
+            .iter()
+            .map(|name| name.to_string())
+            .collect()
     }
 }
 

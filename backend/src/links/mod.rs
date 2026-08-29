@@ -1380,6 +1380,38 @@ impl LinkManager {
     /// synonym for it: a tail was whatever the adapter happened to print, while this is a
     /// failure the adapter chose to report — so it is absent far more often, and absent is
     /// the honest answer for a session that simply ended.
+    ///
+    /// # UNRESOLVED: this is where "why did it end" is lost, and four subsystems arrive here
+    ///
+    /// **A `Stream` that ends says only that it ended.** `LinkEvent::Closed { exit_code,
+    /// stderr_tail }` carried two facts an in-process adapter has no equivalent for, and
+    /// `detail` recovers one of them only when the adapter chose to emit an `Err` before
+    /// dropping its sender. When it did not — the ordinary case — a client is told the turn
+    /// failed `LINK_LOST` with no reason, and **these three become indistinguishable**:
+    ///
+    /// - the vendor CLI crashed or was killed,
+    /// - the agent finished and closed its stdio normally,
+    /// - the adapter dropped the stream through a bug of its own.
+    ///
+    /// Three different fixes, one appearance — which is the shape `AGENTS.md` records as the
+    /// hardest outcome to debug, and the reason nothing may produce silence by default.
+    ///
+    /// **Deliberately not solved here, because a branch cannot settle it.** Four subsystems
+    /// have now reached the same hole from different directions: `claude`'s adapter cannot
+    /// tell a wedged CLI from a quiet one, `codex` has no message for an ask another
+    /// subscriber retired, `adopt`'s `watch` cannot tell a store that stopped growing
+    /// because the vendor died from one that stopped because the session ended, and this one
+    /// is a session dying mid-turn becoming `abandoned` with no reason. Four arrivals make it
+    /// a `sylph_protocol` decision — the vocabulary needs a way for a stream to say *why* it
+    /// is ending — and inventing a fourth local shape here would make the fix land four
+    /// times differently, which is exactly what a shared vocabulary exists to prevent.
+    ///
+    /// What is available to build on when it is taken up: `crates/adapters`'s
+    /// `process::Child::error(context)` already builds an error carrying the stderr tail, and
+    /// `has_ended()` answers whether the vendor's stdout has closed. So an adapter *can*
+    /// report the reason today; what is missing is anything in the protocol that obliges it
+    /// to, and any way for this function to tell "reported nothing" from "had nothing to
+    /// report".
     async fn handle_close(&self, session_id: &SessionId, detail: Option<String>) {
         self.links.write().await.remove(&session_id.encode());
 

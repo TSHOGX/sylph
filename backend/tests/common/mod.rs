@@ -193,6 +193,13 @@ impl TestBackend {
             .unwrap_or_else(|_| config.quick_start_dir.clone());
         let workdir = std::fs::canonicalize(&workdir).unwrap_or(workdir);
 
+        // Every stored session the mock enumerates reports this directory. Inside the
+        // harness tree deliberately: adopting runs the *recorded* path through the same
+        // containment bound `POST /sessions` uses, so a fixture reporting somewhere else
+        // would exercise the refusal rather than the adopt. Canonical, because that is the
+        // spelling the server journals and compares against.
+        agents.set_store_workdir(Some(workdir.display().to_string()));
+
         Self {
             router: router(state.clone()),
             temp,

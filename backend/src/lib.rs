@@ -147,7 +147,10 @@ impl AppState {
                  Sessions cannot be created and no slash commands will be offered. \
                  Install one of {:?} and restart; see `GET /api/v1/environments` for what \
                  each environment reports.",
-                sylph_adapters::known_agents()
+                // From the source, not from `sylph_adapters`: the two can disagree, and a
+                // line telling an operator to install one of three agents when this build
+                // knows a different set is worse than saying nothing.
+                adapters.known_agents()
             );
         } else {
             tracing::info!("Agents this build can run: {}", runnable.join(", "));

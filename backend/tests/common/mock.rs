@@ -76,6 +76,14 @@ enum Behavior {
     BackgroundedFlagged,
     /// Accept the turn and never finish it, so a stop or interrupt can arrive.
     Slow,
+    /// Declares no native store: `adopt` and `watch` refuse, `enumerate` answers empty.
+    ///
+    /// A real vendor state rather than a stub — the E2E fixture is exactly this agent, and
+    /// `pi` is this agent early in a turn, before persistence has written anything. It is
+    /// what the two "an agent with no native store" tests name, and it must stay
+    /// distinguishable from an agent whose store is merely *empty*: the first cannot ever
+    /// answer, the second may answer tomorrow.
+    NoStore,
     /// Fail `probe`, so the agent is present and unusable.
     ///
     /// The v3 equivalent was failing the `hello` handshake. `probe` is where that lands
@@ -122,12 +130,25 @@ impl MockRunner {
     pub fn broken_describe(name: &str) -> Self {
         Self { name: name.to_string(), behavior: Behavior::BrokenProbe }
     }
+
+    /// An agent with no native store to read.
+    pub fn no_store(name: &str) -> Self {
+        Self { name: name.to_string(), behavior: Behavior::NoStore }
+    }
 }
 
 /// The agents one [`super::TestBackend`] can run.
 #[derive(Clone, Default)]
 pub struct MockAgents {
     agents: Arc<RwLock<HashMap<String, Behavior>>>,
+    /// The workdir every stored session reports.
+    ///
+    /// Set by the harness to a directory inside its own tree, because adopting runs the
+    /// recorded path through the same containment bound `POST /sessions` uses — so a
+    /// fixture reporting a path outside the roots would be testing the refusal rather than
+    /// the adopt. `None` reports a session the store recorded no directory for, which is
+    /// the `NATIVE_SESSION_NOT_RESUMABLE` case.
+    store_workdir: Arc<RwLock<Option<String>>>,
 }
 
 impl MockAgents {
@@ -136,7 +157,23 @@ impl MockAgents {
             .iter()
             .map(|runner| (runner.name.clone(), runner.behavior))
             .collect();
-        Self { agents: Arc::new(RwLock::new(agents)) }
+        Self {
+            agents: Arc::new(RwLock::new(agents)),
+            store_workdir: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Point every stored session at `workdir`.
+    pub fn set_store_workdir(&self, workdir: Option<String>) {
+        *self
+            .store_workdir
+            .write()
+            .expect("the mock store workdir is not poisoned") = workdir;
+    }
+
+    /// The native id the mock's store holds, for a test that adopts it.
+    pub fn stored_native_id() -> &'static str {
+        STORED_NATIVE_ID
     }
 
     /// Make an agent absent, as uninstalling its CLI would.
@@ -161,7 +198,15 @@ impl AdapterSource for MockAgents {
             .read()
             .expect("the mock agent map is not poisoned")
             .get(name)?;
-        Some(Box::new(MockAdapter { name: name.to_string(), behavior }))
+        Some(Box::new(MockAdapter {
+            name: name.to_string(),
+            behavior,
+            store_workdir: self
+                .store_workdir
+                .read()
+                .expect("the mock store workdir is not poisoned")
+                .clone(),
+        }))
     }
 
     fn available(&self) -> Vec<String> {
@@ -182,11 +227,23 @@ impl AdapterSource for MockAgents {
             .expect("the mock agent map is not poisoned")
             .contains_key(name)
     }
+
+    /// The same set as [`Self::available`], because a mock agent has no CLI to be missing.
+    ///
+    /// The two differ in production — `codex` is known and may not be installed — and that
+    /// distinction is what lets a message name a fix. Here every agent this source knows is
+    /// one it can run, so collapsing them is honest rather than lossy.
+    fn known_agents(&self) -> Vec<String> {
+        self.available()
+    }
 }
 
 struct MockAdapter {
     name: String,
     behavior: Behavior,
+    /// Snapshotted at resolve time, so a test that sets it before creating a session and a
+    /// listing taken afterwards agree.
+    store_workdir: Option<String>,
 }
 
 #[async_trait]
@@ -254,20 +311,99 @@ impl Adapter for MockAdapter {
         Ok(Box::new(MockSession::new(native_id, self.behavior)))
     }
 
-    /// Refused: this agent writes no native store, so there is nothing to parse.
+    /// One session's worth of events, for the agents that declare a store.
     ///
-    /// Synthesizing one would make a test assert against records the harness itself wrote.
-    async fn adopt(&self, _id: &NativeId) -> Result<EventStream> {
-        Err(anyhow!("the mock agent has no native store"))
+    /// # A store-*less* agent is a separate behaviour, and both are needed
+    ///
+    /// This used to refuse unconditionally, on the reasoning that synthesizing a store
+    /// would make a test assert against records the harness itself wrote. That is right
+    /// about a *parser* and wrong about this endpoint: `POST /sessions/adopt` does not
+    /// parse a vendor file, it ingests whatever an adapter yields — so what a test needs
+    /// here is an adapter that yields something, and the parsers have their own corpus
+    /// tests in `crates/adapters`.
+    ///
+    /// The gap that hid: **all 13 adopt tests asserted a refusal**, because no mock could
+    /// answer. A `201` path existed in the handler and nothing exercised it, so ingestion,
+    /// the fidelity check, and the workdir containment on an adopted row were all
+    /// unobserved.
+    ///
+    /// [`Behavior::NoStore`] keeps the refusing shape, which is a real vendor state — the
+    /// E2E fixture is exactly that agent — and is what the two tests about "an agent with
+    /// no native store" now name.
+    async fn adopt(&self, id: &NativeId) -> Result<EventStream> {
+        if self.behavior == Behavior::NoStore {
+            return Err(anyhow!("the {} agent has no native store", self.name));
+        }
+        Ok(Box::pin(futures::stream::iter(stored_events(id))))
     }
 
-    async fn watch(&self, _id: &NativeId) -> Result<EventStream> {
-        Err(anyhow!("the mock agent has no native store"))
+    /// The same first pass as [`Self::adopt`], then nothing further.
+    ///
+    /// A real `watch` follows the store as it grows. This ends instead, and the difference
+    /// is worth stating rather than glossing: a test asserting that a watched session keeps
+    /// receiving events would pass vacuously here, so `watch` coverage belongs against a
+    /// real adapter. What this does support is the *shape* — a first pass that ingests.
+    async fn watch(&self, id: &NativeId) -> Result<EventStream> {
+        if self.behavior == Behavior::NoStore {
+            return Err(anyhow!("the {} agent has no native store", self.name));
+        }
+        Ok(Box::pin(futures::stream::iter(stored_events(id))))
     }
 
+    /// What this machine's store holds: one session, or none for a store-less agent.
+    ///
+    /// **Every field the vendor would not record is absent, not defaulted.** A synthesized
+    /// title or timestamp is a lie a journal makes permanent, and this row is what a picker
+    /// renders — so the only fields set are the ones a real store genuinely holds.
     async fn enumerate(&self, _filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
-        Ok(Vec::new())
+        if self.behavior == Behavior::NoStore {
+            return Ok(Vec::new());
+        }
+        Ok(vec![NativeSummary {
+            native_id: NativeId::new(STORED_NATIVE_ID),
+            // Set by the harness, because containment is the interesting part of adopting:
+            // a workdir is the `current_dir` of a spawned agent, so an adopted row's
+            // directory goes through the same bound `POST /sessions` does.
+            workdir: self.store_workdir.clone(),
+            title: Some("A session read from a store".to_string()),
+            started_at_ms: Some(1_700_000_000_000),
+            ended_at_ms: Some(1_700_000_060_000),
+            event_count: Some(2),
+            parent_native_id: None,
+            // **Never `Stream`.** No care recovers a timing that was never written, and the
+            // handler refuses `stream` from a store outright — so a fixture reporting it
+            // would be testing that refusal rather than the adopt path.
+            fidelity: Fidelity::Blocks,
+        }])
     }
+}
+
+/// The native id the mock's store holds.
+const STORED_NATIVE_ID: &str = "stored-session";
+
+/// What one stored session parses to: a user turn and an assistant reply.
+///
+/// Deliberately minimal, and `Blocks` fidelity by construction — there are no `delta`
+/// phases, because a native store does not hold them. A fixture that emitted deltas here
+/// would let a renderer's per-delta path pass against data no real store can produce.
+fn stored_events(id: &NativeId) -> Vec<Result<SessionMessage>> {
+    let _ = id;
+    vec![
+        Ok(SessionMessage::Event(
+            Ev::new(EventKind::Turn, Some(Phase::Started)).0,
+        )),
+        Ok(SessionMessage::Event(
+            Ev::new(EventKind::Assistant, Some(Phase::Completed))
+                .stream_id("stored-a1")
+                .text("read from the store")
+                .0,
+        )),
+        Ok(SessionMessage::Event(
+            Ev::new(EventKind::Turn, Some(Phase::Completed))
+                .text("read from the store")
+                .0,
+        )),
+    ]
 }
 
 /// The config surface, which is one option with one refusable value.
@@ -502,7 +638,7 @@ async fn run_turn(tx: mpsc::Sender<Result<SessionMessage>>, behavior: Behavior) 
         .await;
 
     match behavior {
-        Behavior::Success | Behavior::BrokenProbe => success(&tx).await,
+        Behavior::Success | Behavior::BrokenProbe | Behavior::NoStore => success(&tx).await,
         Behavior::Failure => {
             emit(
                 &tx,
