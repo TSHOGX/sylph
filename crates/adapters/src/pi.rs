@@ -3392,9 +3392,7 @@ pub mod session {
                 args: spawn_args(argv, preamble.as_deref()),
                 cwd: spec.workdir.clone(),
                 env: HashMap::new(),
-                // **pi echoes the string it was given**, so the correlation key is the
-                // decimal spelling of the id this adapter chose.
-                reply_id_field: Some("id"),
+                reply_id: Some(Box::new(reply_id)),
             };
             let attached = Self::attach(spawn, requested, preamble.clone()).await;
             if attached.is_err() {
@@ -3768,11 +3766,17 @@ pub mod session {
                     }
                     continue;
                 }
-                // A reply that reached the stream is one nothing was waiting for. That is
-                // **this adapter's bug rather than a fact about the session** — every
-                // command it sends carries an id and is awaited, except `abort`, whose reply
-                // is deliberately not — so it is logged and never published. Publishing it
-                // would put a `set_model` acknowledgement in the transcript as an event.
+                // A `response` reaching the pump is one [`reply_id`] declined to correlate,
+                // which after that predicate means exactly two things: it carried no `id`, or
+                // no waiter held the one it carried. Both are **this adapter's business rather
+                // than a fact about the session**, so it is logged and never published —
+                // publishing it would put a `set_model` acknowledgement in the transcript as
+                // an event.
+                //
+                // The reachable case is `abort`, which is deliberately sent without an id
+                // because its reply is gated on the turn winding down. pi omits `id` from a
+                // response when the command carried none, so its acknowledgement lands here by
+                // construction rather than by accident.
                 Some("response") => {
                     debug!(?payload, "pi answered a request nothing was waiting for");
                     continue;
@@ -3892,6 +3896,49 @@ pub mod session {
                 Err(error) => warn!("could not refresh pi's config surface: {error}"),
             }
         });
+    }
+
+    /// The id off a frame that is a **reply to something this side sent**, or `None`.
+    ///
+    /// # The `type` check is the whole function, and reading only `id` is a silent defect
+    ///
+    /// pi multiplexes both directions onto one stdout, and `extension_ui_request` is
+    /// **vendor-initiated** while carrying an `id` of its own. A predicate reading only `id`
+    /// would route one into whichever waiter happened to hold that number: the request would
+    /// never reach the event stream, so nobody is ever asked and the turn waits on a human
+    /// forever, while the caller that sent `get_state` receives a UI request as its answer.
+    /// Both directions fail, and neither reports anything.
+    ///
+    /// *Measured on `codex`*, whose server-request ids collide with ours outright — `0,1,2`
+    /// against `1..5`. pi's are `crypto.randomUUID()` (`rpc-mode.js:50`), so a collision
+    /// there is presently improbable rather than certain; the check does not depend on that,
+    /// because "improbable today" is a property of one vendor's id minting rather than of the
+    /// protocol, and a correlation that is right by coincidence is one nobody re-examines.
+    ///
+    /// `type: "response"` is pi's own direction marker — each vendor spells it differently,
+    /// which is why the knowledge lives here and not in [`crate::process`]. This is also what
+    /// now *enforces* [`translate::Correlation::translate`]'s rule that a `response` and an
+    /// `extension_ui_request` are the session half's business: the transport keeps replies off
+    /// the projection's input, rather than the split being only documented.
+    ///
+    /// # A string, and deliberately not "a string or a number"
+    ///
+    /// pi echoes the id **verbatim**, whatever JSON type it arrived as — `rpc-mode.js:31`
+    /// builds `{ id, type: "response", … }` from `command.id` with no coercion — and [`call`]
+    /// only ever sends `id.to_string()`. So the number case is unreachable from this adapter,
+    /// and accepting one would be tolerance for a shape this side does not produce: were pi
+    /// ever to answer a number, correlation would break outright and every request would time
+    /// out, which is the loud failure `AGENTS.md` § Compatibility asks for over a fallback
+    /// that silently absorbs the change.
+    fn reply_id(frame: &Value) -> Option<String> {
+        if frame.get("type").and_then(Value::as_str) != Some("response") {
+            return None;
+        }
+        frame
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
     }
 
     /// One RPC command, awaiting the reply that carries its id.
@@ -4138,9 +4185,15 @@ pub mod session {
         /// an image block it would read the last `"type"` in the line, `image`, and answer the
         /// wrong command. And `LEVEL` is mutated on `set_thinking_level` to a *different* value
         /// than the one requested, which is this vendor's measured clamping behaviour.
+        /// `$3`, when `collide`, makes the peer emit an `extension_ui_request` **carrying the
+        /// id of the command it is answering**, just before the real reply. That is the
+        /// one-directional hazard [`reply_id`]'s `type` check exists for, and it can only be
+        /// reproduced while a waiter is actually registered — an unsolicited request emitted
+        /// before any command would land on the stream even with a broken predicate.
         const PEER: &str = r#"
 LOG="$1"
 EVENTS="$2"
+COLLIDE="$3"
 if [ -n "$EVENTS" ] && [ -f "$EVENTS" ]; then cat "$EVENTS"; fi
 LEVEL=off
 MODEL='{"id":"claude-opus-5","provider":"anthropic","name":"Claude Opus 5","contextWindow":200000}'
@@ -4151,6 +4204,9 @@ while IFS= read -r line; do
   i=$(field id "$line")
   case "$t" in
     get_state)
+      if [ "$COLLIDE" = collide ]; then
+        printf '{"type":"extension_ui_request","id":"%s","method":"select","title":"Pick","options":["Allow","Block"]}\n' "$i"
+      fi
       printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"model":%s,"thinkingLevel":"%s","sessionId":"scripted"}}\n' "$i" "$MODEL" "$LEVEL" ;;
     get_available_models)
       printf '{"id":"%s","type":"response","command":"get_available_models","success":true,"data":{"models":[%s,{"id":"deepseek-v4-pro","provider":"deepseek","name":"DeepSeek V4 Pro"},{"id":"deepseek-v4-pro","provider":"openrouter","name":"DeepSeek V4 Pro"}]}}\n' "$i" "$MODEL" ;;
@@ -4188,7 +4244,7 @@ done
             dir
         }
 
-        fn spawn_peer(log: &Path, events: Option<&Path>) -> Spawn {
+        fn spawn_peer(log: &Path, events: Option<&Path>, collide: bool) -> Spawn {
             Spawn {
                 program: "sh".to_string(),
                 args: vec![
@@ -4199,15 +4255,31 @@ done
                     events
                         .map(|path| path.to_string_lossy().to_string())
                         .unwrap_or_default(),
+                    if collide { "collide" } else { "" }.to_string(),
                 ],
                 cwd: "/tmp".to_string(),
                 env: HashMap::new(),
-                reply_id_field: Some("id"),
+                // The production predicate, not a test-local one: a peer correlating by a
+                // rule the real session does not use would test the peer.
+                reply_id: Some(Box::new(reply_id)),
             }
         }
 
         /// A session over the scripted peer, plus its outbound log.
         async fn scripted(name: &str, events: &[&str]) -> (PiSession, PathBuf) {
+            scripted_peer(name, events, false).await
+        }
+
+        /// As [`scripted`], with the id-collision behaviour enabled. See [`PEER`].
+        async fn scripted_colliding(name: &str) -> (PiSession, PathBuf) {
+            scripted_peer(name, &[], true).await
+        }
+
+        async fn scripted_peer(
+            name: &str,
+            events: &[&str],
+            collide: bool,
+        ) -> (PiSession, PathBuf) {
             let dir = scratch(name);
             let log = dir.join("out.jsonl");
             std::fs::write(&log, "").unwrap();
@@ -4219,7 +4291,7 @@ done
                 Some(events_path.as_path())
             };
             let session = PiSession::attach(
-                spawn_peer(&log, path),
+                spawn_peer(&log, path, collide),
                 NativeId::new("scripted"),
                 None,
             )
@@ -4996,6 +5068,55 @@ done
             let _ = std::fs::remove_dir_all(&dir);
         }
 
+
+        /// **A vendor-initiated request whose id collides with an in-flight one must reach the
+        /// stream, not a waiter.**
+        ///
+        /// pi multiplexes both directions onto one stdout and `extension_ui_request` carries an
+        /// `id` of its own, so a predicate reading only `id` routes one into whichever waiter
+        /// holds that number. Both directions then fail silently: the request never reaches a
+        /// client, so nobody is asked and the turn waits on a human forever, while the caller
+        /// that sent `get_state` receives a UI request as its answer.
+        ///
+        /// The peer reproduces it exactly — the dialog carries the id of the command it is
+        /// answering — and both halves are asserted, because either alone passes on a broken
+        /// predicate: the caller must get its real reply, **and** the dialog must be published.
+        #[tokio::test]
+        async fn a_vendor_request_sharing_an_in_flight_id_reaches_the_stream_not_the_waiter() {
+            let (mut session, _log) = scripted_colliding("id-collision").await;
+            let mut stream = session.events().expect("the stream is yielded once");
+
+            // The caller's own reply, which a broken predicate hands to the dialog instead.
+            let surface = session
+                .capabilities()
+                .await
+                .expect("get_state's reply must reach the caller that sent it");
+            assert_eq!(
+                surface
+                    .config_option("model")
+                    .and_then(|option| option.current_value.as_ref())
+                    .and_then(Value::as_str),
+                Some("anthropic claude-opus-5")
+            );
+
+            // And the dialog, which a broken predicate swallows into that same waiter.
+            let mut published = None;
+            for _ in 0..10 {
+                match next_message(&mut stream, 2000).await {
+                    Some(SessionMessage::Request(request)) => {
+                        published = Some(request);
+                        break;
+                    }
+                    Some(_) => continue,
+                    None => break,
+                }
+            }
+            let published = published.expect(
+                "the dialog must be published; swallowed, pi waits on a human nobody asked",
+            );
+            assert_eq!(published.kind, sylph_protocol::RequestKind::Choice);
+            assert_eq!(published.title, "Pick");
+        }
         /// **Opening without a dictated id is refused rather than answered with an invented
         /// one.**
         ///
