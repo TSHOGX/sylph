@@ -19,7 +19,7 @@
  */
 
 import { useEffect, useMemo, useRef } from "react";
-import type { SessionCommand } from "@/lib/api";
+import type { SessionCommand } from "@/lib/api-types";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useT } from "@/lib/i18n";
 

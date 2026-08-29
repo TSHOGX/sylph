@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Cell, GridPayload } from "@/lib/api";
+import type { Cell, GridPayload } from "@/lib/api-types";
 import { translate, type Translate } from "@/lib/i18n/locale";
 import {
   alignmentFor,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Session } from "@/lib/api";
+import type { Session } from "@/lib/api-types";
 import { recentWorkspaces, selectStartState } from "@/lib/welcome";
 
 function session(id: string, updatedAtMs: number, workdir = "/tmp"): Session {

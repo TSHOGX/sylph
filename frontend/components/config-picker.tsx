@@ -17,7 +17,7 @@
  */
 
 import { useMemo } from "react";
-import type { ConfigOption } from "@/lib/api";
+import type { ConfigOption } from "@/lib/api-types";
 import { useT, type Translate } from "@/lib/i18n";
 import { MenuButton, type MenuItem } from "@/components/ui/menu";
 import { ChevronDownIcon } from "@/components/icons";

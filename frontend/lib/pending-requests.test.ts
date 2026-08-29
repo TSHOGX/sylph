@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { mergeRequestRow, parseRequestFrame } from "@/lib/pending-requests";
-import type { PendingRequest } from "@/lib/api";
+import type { PendingRequest } from "@/lib/api-types";
 
 /** A row with only the fields this module reads, so a schema change here is loud. */
 function row(over: Partial<PendingRequest> & { id: string }): PendingRequest {

@@ -15,7 +15,7 @@
  * to groups rather than rows) to be worth asserting directly.
  */
 
-import type { Session } from "@/lib/api";
+import type { Session } from "@/lib/api-types";
 
 /**
  * One row in the resume list: a directory, and the session to reopen in it.

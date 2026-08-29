@@ -44,7 +44,7 @@
 
 import dynamic from "next/dynamic";
 import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
-import type { Fidelity, StreamEvent } from "@/lib/api";
+import type { Fidelity, StreamEvent } from "@/lib/api-types";
 import { formatDuration, formatTime } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import {

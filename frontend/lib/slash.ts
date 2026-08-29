@@ -13,7 +13,7 @@
  * the client's job.
  */
 
-import type { SessionCommand } from "@/lib/api";
+import type { SessionCommand } from "@/lib/api-types";
 
 /** A leading slash and the command word, with whatever follows it. */
 const INVOCATION = /^\/([^\s]+)\s*([\s\S]*)$/;

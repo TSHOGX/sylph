@@ -35,7 +35,7 @@
  */
 
 import { useMemo, useState } from "react";
-import type { Fidelity } from "@/lib/api";
+import type { Fidelity } from "@/lib/api-types";
 import { formatDuration } from "@/lib/format";
 import { formatParts, useT } from "@/lib/i18n";
 import type { MessageKey, Translate } from "@/lib/i18n/locale";

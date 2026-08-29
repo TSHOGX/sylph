@@ -17,7 +17,7 @@
 import { describe, expect, it } from "vitest";
 import { slashMatches } from "@/components/slash-menu";
 import { commandRoute, findCommand } from "@/lib/slash";
-import type { SessionCommand } from "@/lib/api";
+import type { SessionCommand } from "@/lib/api-types";
 
 const COMMANDS: SessionCommand[] = [
   { name: "verify", description: "Verify a change end to end", kind: "prompt" },

@@ -34,7 +34,7 @@
  * maps it to an icon. This module stays free of React and testable in `node`.
  */
 
-import type { StreamEvent } from "@/lib/api";
+import type { StreamEvent } from "@/lib/api-types";
 
 /** Presentation category, chosen by tool name across agent vocabularies. */
 export type ToolKind = "read" | "edit" | "write" | "shell" | "search" | "task" | "other";

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildRows, buildTree } from "@/lib/timeline-tree";
 import { buildWaterfall, type WaterfallRow } from "@/lib/timeline-waterfall";
-import type { Fidelity, StreamEvent } from "@/lib/api";
+import type { Fidelity, StreamEvent } from "@/lib/api-types";
 
 /**
  * Sibling comparison over one time axis.

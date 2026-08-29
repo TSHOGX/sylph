@@ -28,7 +28,7 @@ import { useSettings } from "@/lib/settings";
 import { comboFromEvent, isTypingTarget } from "@/lib/shortcuts";
 import { useIsMobile } from "@/lib/viewport";
 import type { ShortcutAction } from "@/lib/settings";
-import type { PreviewKind } from "@/lib/api";
+import type { PreviewKind } from "@/lib/api-types";
 
 /**
  * At most one overlay is up at a time; they are all modal.

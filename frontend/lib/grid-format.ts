@@ -6,7 +6,7 @@
  * wrong at the Z→AA boundary.
  */
 
-import type { Cell, GridPayload } from "@/lib/api";
+import type { Cell, GridPayload } from "@/lib/api-types";
 import type { Translate } from "@/lib/i18n";
 
 /**

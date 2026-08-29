@@ -25,7 +25,7 @@
  */
 
 import { memo, useMemo } from "react";
-import type { Cell, GridPayload } from "@/lib/api";
+import type { Cell, GridPayload } from "@/lib/api-types";
 import { useT } from "@/lib/i18n";
 import {
   alignmentFor,

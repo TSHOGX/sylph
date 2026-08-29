@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { breadcrumbs, pathFromQuery } from "@/components/directory-picker";
 import { shortenHome } from "@/lib/format";
-import type { BrowseRoot } from "@/lib/api";
+import type { BrowseRoot } from "@/lib/api-types";
 
 const HOME = "/Users/hsw";
 const roots: BrowseRoot[] = [

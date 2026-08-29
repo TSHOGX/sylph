@@ -17,7 +17,7 @@ import {
   selectMode,
   type RequestForm,
 } from "@/lib/request-form";
-import type { PendingRequest } from "@/lib/api";
+import type { PendingRequest } from "@/lib/api-types";
 
 function request(formJson?: string): PendingRequest {
   return {

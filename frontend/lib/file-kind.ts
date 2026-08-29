@@ -8,7 +8,7 @@
  * context menu cannot disagree about what a file is.
  */
 
-import type { FileEntry, PreviewKind } from "@/lib/api";
+import type { FileEntry, PreviewKind } from "@/lib/api-types";
 // Type-only, so no runtime dependency on the catalogue and no cycle: `messages`
 // imports nothing from here.
 import type { MessageKey } from "@/lib/i18n/messages";

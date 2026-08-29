@@ -33,7 +33,7 @@
  * collapsing would be lossy rather than deferred.
  */
 
-import type { StreamEvent } from "@/lib/api";
+import type { StreamEvent } from "@/lib/api-types";
 
 /** A displayable row: an event, plus the result paired to it when it is a call. */
 export interface TimelineRow {

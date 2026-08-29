@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildRows } from "@/components/timeline";
-import type { StreamEvent } from "@/lib/api";
+import type { StreamEvent } from "@/lib/api-types";
 
 /**
  * Collapsing a raw event stream into timeline rows.

@@ -8,7 +8,7 @@ import {
   trajectoryReport,
   type TimelineNode,
 } from "@/lib/timeline-tree";
-import type { StreamEvent } from "@/lib/api";
+import type { StreamEvent } from "@/lib/api-types";
 
 /**
  * Assembling a turn's events into the tree of delegated trajectories it describes.

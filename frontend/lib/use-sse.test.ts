@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { StreamEvent } from "@/lib/api";
+import type { StreamEvent } from "@/lib/api-types";
 import { terminalStateOf } from "@/lib/use-sse";
 
 /**

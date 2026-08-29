@@ -1,4 +1,4 @@
-import type { Fidelity, TurnStatus } from "@/lib/api";
+import type { Fidelity, TurnStatus } from "@/lib/api-types";
 import { BlocksFidelityIcon, MessagesFidelityIcon, RelayIcon } from "@/components/icons";
 
 /**

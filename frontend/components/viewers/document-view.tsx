@@ -16,7 +16,7 @@
  */
 
 import { useMemo } from "react";
-import type { BlocksPayload, DocumentBlock, DocumentSection } from "@/lib/api";
+import type { BlocksPayload, DocumentBlock, DocumentSection } from "@/lib/api-types";
 import { useT } from "@/lib/i18n";
 
 export function DocumentView({

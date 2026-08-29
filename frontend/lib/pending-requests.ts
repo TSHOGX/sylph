@@ -28,7 +28,7 @@
  * not being waited on, which is the only distinction a client makes.
  */
 
-import type { PendingRequest } from "@/lib/api";
+import type { PendingRequest } from "@/lib/api-types";
 
 /** Whether a row is still something the agent is blocked on. */
 function isOpen(request: PendingRequest): boolean {

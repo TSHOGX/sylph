@@ -13,7 +13,7 @@
  * backend wants bare base64 while a thumbnail wants a full data URL.
  */
 
-import type { AttachmentPayload } from "@/lib/api";
+import type { AttachmentPayload } from "@/lib/api-types";
 import { formatBytes } from "@/lib/format";
 
 /**

@@ -23,7 +23,7 @@ import { Overlay } from "@/components/overlay";
 import { FileViewer } from "@/components/file-viewer";
 import { viewerKindOf } from "@/lib/file-kind";
 import { useT } from "@/lib/i18n";
-import type { PreviewKind } from "@/lib/api";
+import type { PreviewKind } from "@/lib/api-types";
 
 export function FileViewerOverlay({
   sessionId,

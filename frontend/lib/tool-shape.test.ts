@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { basename, describeTool, resultStatus } from "@/lib/tool-shape";
-import type { StreamEvent } from "@/lib/api";
+import type { StreamEvent } from "@/lib/api-types";
 
 /**
  * Tool interpretation across agent vocabularies.
