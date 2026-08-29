@@ -137,14 +137,36 @@ export default function SessionPage() {
     queryKey: ["turn", watchedTurnId],
     queryFn: () => api.turns.get(watchedTurnId!),
     enabled: Boolean(watchedTurnId),
-    // Poll only while the turn is unfinished: the SSE channel carries events,
-    // not turn state, so status is what tells us when to stop streaming.
+    // A backstop, not the signal. The turn's own stream announces its close — see
+    // `onLiveTurnSettled` below — so this exists for the cases the stream cannot cover:
+    // a turn already terminal when the page loads, and a stream that never delivered
+    // because the connection was down for the whole turn. At 1500ms it was ~40 requests
+    // a minute duplicating a pushed fact.
     refetchInterval: (query) =>
-      query.state.data && TERMINAL.has(query.state.data.turn.status) ? false : 1500,
+      query.state.data && TERMINAL.has(query.state.data.turn.status) ? false : 20_000,
   });
 
+  // What the live stream said, which is both earlier and stricter than the row: the
+  // `status` frame is emitted after the settle sweep has closed the turn's open
+  // trajectories, while the row commits before it (`AGENTS.md` § And `Stop` disappearing
+  // is still the wrong signal).
+  const [announcedSettle, setAnnouncedSettle] = useState<{
+    turnId: string;
+    state: string;
+  } | null>(null);
+
+  const onLiveTurnSettled = useCallback(
+    (state: string) => {
+      if (watchedTurnId) setAnnouncedSettle({ turnId: watchedTurnId, state });
+    },
+    [watchedTurnId],
+  );
+
+  // Tied to the turn it was announced for, so a stale value cannot settle the next one.
+  const streamSettled = announcedSettle?.turnId === watchedTurnId;
+
   const watchedStatus = watchedTurn.data?.turn.status;
-  const finished = Boolean(watchedStatus && TERMINAL.has(watchedStatus));
+  const finished = streamSettled || Boolean(watchedStatus && TERMINAL.has(watchedStatus));
 
   const absorbed = history.some((entry) => entry.turn.id === watchedTurnId);
   const liveTurnId = watchedTurnId && !(finished && absorbed) ? watchedTurnId : null;
@@ -468,6 +490,7 @@ export default function SessionPage() {
               error={historyQuery.error}
               onRetry={() => void historyQuery.refetch()}
               liveTurnId={liveTurnId}
+              onLiveTurnSettled={onLiveTurnSettled}
               isLive={isLive}
               onResend={(value) => sendTurn.mutate(value)}
               onOpenFile={openFile}
@@ -728,6 +751,7 @@ function Transcript({
   onOpenFile,
   expandAll,
   filter,
+  onLiveTurnSettled,
 }: {
   history: TurnWithEvents[];
   /**
@@ -747,6 +771,7 @@ function Transcript({
   onOpenFile: (path: string, line?: number) => void;
   expandAll: boolean | null;
   filter: string | null;
+  onLiveTurnSettled: (state: string) => void;
 }) {
   const past = useMemo(() => {
     const rows = history.filter((entry) => entry.turn.id !== liveTurnId);
@@ -829,6 +854,7 @@ function Transcript({
           isLive={isLive}
           onOpenFile={onOpenFile}
           expandAll={expandAll}
+          onSettled={onLiveTurnSettled}
         />
       )}
     </div>
@@ -939,14 +965,29 @@ function LiveTurn({
   isLive,
   onOpenFile,
   expandAll,
+  onSettled,
 }: {
   turnId: string;
   fidelity: Fidelity;
   isLive: boolean;
   onOpenFile: (path: string, line?: number) => void;
   expandAll: boolean | null;
+  /**
+   * Called with the turn's outcome the moment its own stream announces it.
+   *
+   * The stream is the earliest *and* most complete signal: `TurnCloser::close` emits the
+   * `status` frame after closing whatever trajectories the turn left open, so this fires
+   * once the sweep is done rather than when the turn row commits.
+   */
+  onSettled: (state: string) => void;
 }) {
-  const { events, status } = useSSE({ turnId, enabled: isLive });
+  const { events, status, settled } = useSSE({ turnId, enabled: isLive });
+
+  // Report the close upward. A genuine external-system sync: the stream is the external
+  // system, and the parent owns what a settled turn does to the rest of the page.
+  useEffect(() => {
+    if (settled) onSettled(settled);
+  }, [settled, onSettled]);
   const anchorRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
 

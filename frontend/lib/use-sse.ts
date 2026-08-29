@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { StreamEvent } from "@/lib/api";
 import { createSSEDecoder } from "@/lib/sse-parse";
 
@@ -38,6 +38,41 @@ const FLUSH_INTERVAL_MS = 16;
 interface Buffer {
   turnId: string | null;
   events: StreamEvent[];
+  /**
+   * The terminal state announced on this turn's stream, if it has settled.
+   *
+   * Held in the buffer rather than its own `useState` so it is reset by the same
+   * render-phase adjustment that empties `events` on a turn change. Separate state would
+   * survive that switch and report the previous turn's outcome for the new one.
+   */
+  settled: string | null;
+}
+
+/**
+ * The turn statuses that mean it will produce nothing further.
+ *
+ * Kept in step with `Outcome::as_status` in `backend/src/supervisor/turn.rs`, which emits
+ * only `completed`, `failed`, and `cancelled` — a narrower set than `TurnStatus`, since
+ * the rest describe a turn still in flight.
+ */
+const TERMINAL_STATES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
+
+/**
+ * The terminal state a `status` frame announces, or `null` for any other event.
+ *
+ * `TurnCloser::close` emits this frame **after** it has settled the turn, written the
+ * session back to idle, and closed whatever trajectories the turn left open. So it is the
+ * one signal that means "fully settled" rather than merely "terminal": the turn row commits
+ * ~35 lines earlier, which is why polling the row observes a finished turn while the sweep
+ * is still emitting (`AGENTS.md` § And `Stop` disappearing is still the wrong signal).
+ *
+ * The state travels in `data.state` and the frame's `text` is empty, which is why a
+ * text-rendering branch cannot see it.
+ */
+export function terminalStateOf(event: StreamEvent): string | null {
+  if (event.kind !== "status") return null;
+  const state = (event.data as { state?: unknown } | undefined)?.state;
+  return typeof state === "string" && TERMINAL_STATES.has(state) ? state : null;
 }
 
 /**
@@ -71,7 +106,7 @@ interface Buffer {
  * is load-bearing rather than belt-and-braces.
  */
 export function useSSE({ turnId, afterSeq = -1, enabled = true }: UseSSEOptions) {
-  const [buffer, setBuffer] = useState<Buffer>({ turnId, events: [] });
+  const [buffer, setBuffer] = useState<Buffer>({ turnId, events: [], settled: null });
   const [connection, setConnection] = useState<Exclude<SSEStatus, "closed">>(
     "connecting",
   );
@@ -84,7 +119,7 @@ export function useSSE({ turnId, afterSeq = -1, enabled = true }: UseSSEOptions)
   // events under the new turn's heading. Refs are untouchable during render,
   // so the cursor resets in the effect below instead.
   if (buffer.turnId !== turnId) {
-    setBuffer({ turnId, events: [] });
+    setBuffer({ turnId, events: [], settled: null });
     setConnection("connecting");
   }
 
@@ -108,8 +143,21 @@ export function useSSE({ turnId, afterSeq = -1, enabled = true }: UseSSEOptions)
       if (cancelled || queue.length === 0) return;
       const batch = queue;
       queue = [];
+      // Scanned here rather than in the reducer so a batch holding both a delta and the
+      // close still reports the close: `flush` is the only place the whole batch is
+      // visible at once.
+      const announced = batch.reduce<string | null>(
+        (found, event) => terminalStateOf(event) ?? found,
+        null,
+      );
       setBuffer((prev) =>
-        prev.turnId === turnId ? { turnId, events: [...prev.events, ...batch] } : prev,
+        prev.turnId === turnId
+          ? {
+              turnId,
+              events: [...prev.events, ...batch],
+              settled: announced ?? prev.settled,
+            }
+          : prev,
       );
     }
 
@@ -218,15 +266,15 @@ export function useSSE({ turnId, afterSeq = -1, enabled = true }: UseSSEOptions)
   // to connect to, so "closed" is a fact about the inputs.
   const status: SSEStatus = !turnId || !enabled ? "closed" : connection;
 
-  const clear = useCallback(
-    () => setBuffer((prev) => ({ turnId: prev.turnId, events: [] })),
-    [],
-  );
-
   return {
     events: buffer.turnId === turnId ? buffer.events : [],
     status,
-    isConnected: status === "open",
-    clear,
+    /**
+     * The turn's outcome as its own stream announced it, or `null` while it runs.
+     *
+     * Pushed, so a caller needs no poll to learn a turn ended — and it arrives *after*
+     * the settle sweep, which a poll of the turn row does not wait for.
+     */
+    settled: buffer.turnId === turnId ? buffer.settled : null,
   };
 }
