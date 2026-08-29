@@ -8,15 +8,22 @@
 //! to prefer** — `AGENTS.md` records an earlier claim about this vendor that was wrong
 //! precisely because it was measured against a minified bundle.
 //!
-//! # One file, three halves
+//! # One file, five parts, and only one of them touches a process
 //!
 //! [`rpc`] holds the command and config surface: what a value means, what `set_model`
-//! takes, which refusal a bad one earns. [`translate`] holds the vendor→Sylph event
-//! projection as pure functions over a [`translate::Correlation`], the same split
-//! `claude`'s module makes and for the same measured reason: `adapters/pi/verify.py`
-//! spends real tokens and only sees whatever shapes one live turn happens to produce, so
-//! a mistranslation does not raise — it produces a plausible timeline that misdescribes
-//! what the agent did. [`native`] reads `~/.pi/agent/sessions/`.
+//! takes, which refusal a bad one earns. [`ui`] projects pi's one inversion, an extension
+//! asking a human something. [`translate`] holds the vendor→Sylph event projection as pure
+//! functions over a [`translate::Correlation`], the same split `claude`'s module makes and
+//! for the same measured reason: `adapters/pi/verify.py` spends real tokens and only sees
+//! whatever shapes one live turn happens to produce, so a mistranslation does not raise —
+//! it produces a plausible timeline that misdescribes what the agent did. [`native`] reads
+//! `~/.pi/agent/sessions/`.
+//!
+//! [`session`] is the one part that holds stdio, and it is deliberately thin: it wires the
+//! other four to a [`crate::process::Child`] and owns only what genuinely needs a process —
+//! reply correlation against outbound traffic, and the answer path for a dialog. Every
+//! decision it makes about a *payload* is delegated, which is what keeps the expensive
+//! parts assertable without spending a token.
 //!
 //! # What this adapter does **not** emit, and why that is a report rather than a gap
 //!
@@ -48,6 +55,7 @@ use sylph_protocol::{
 };
 
 pub use rpc::{model_key, split_model_key, ConfigId, MODEL_KEY_SEPARATOR};
+pub use session::PiSession;
 pub use translate::{Correlation, Emission};
 
 /// The name this adapter answers to, and the `PATH` binary that decides availability.
@@ -149,9 +157,18 @@ impl PiAdapter {
             // `sylph_protocol::NativeId` forbids: the id would look like the vendor's and
             // be Sylph's.
             sylph_protocol::RequestedNativeId::New => {
+                // **Says what is true of the argv, and no more.** An earlier wording claimed
+                // this made the session "unresumable", which overstates its own reason: pi
+                // reports a `sessionId` from `get_state`, so an adapter *could* read one back
+                // — `codex` is built that way. What is actually the case is narrower and is
+                // the whole justification for `session::PiSession::open` refusing this
+                // variant: this vendor takes `--session-id`, `dictates_native_id` is true, so
+                // the server always names one and `New` is unreachable here rather than
+                // impossible in principle. A doc that overstates its reason is how the next
+                // reader concludes something stronger than what was measured.
                 warnings.push(
-                    "pi takes --session-id and creates the session if missing, so opening \
-                     without one would make the session unresumable"
+                    "pi takes --session-id and the server always names one, so opening \
+                     without an id is unreachable for this agent; no argv id was emitted"
                         .to_string(),
                 );
             }
@@ -233,14 +250,9 @@ impl Adapter for PiAdapter {
         })
     }
 
-    async fn run(&self, _spec: RunSpec) -> Result<Box<dyn Session>> {
-        // Deferred exactly as `claude::ClaudeAdapter::run` defers it, and with the same
-        // wording, because the blocker is the same: a live session holds the vendor's
-        // stdio, and there is nothing on this side of the tree to hold it yet.
-        Err(anyhow!(
-            "pi `run` is not wired yet: the live session holds the vendor's stdio and \
-             lands with the envagent in step 4 of docs/roadmap.md § Implementation order"
-        ))
+    async fn run(&self, spec: RunSpec) -> Result<Box<dyn Session>> {
+        let session = session::PiSession::open(spec).await?;
+        Ok(Box::new(session))
     }
 
     async fn adopt(&self, id: &NativeId) -> Result<EventStream> {
@@ -339,7 +351,21 @@ mod tests {
             "no id may be invented: {argv:?}"
         );
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("unresumable"));
+        // Asserted on the claim the warning is *entitled* to make. It used to say
+        // "unresumable", which overstates its reason — pi reports a `sessionId` from
+        // `get_state`, so an adapter could read one back and `codex` does. What is true is
+        // that the server always names an id for this agent, so the case is unreachable
+        // here rather than impossible in principle.
+        assert!(
+            warnings[0].contains("unreachable"),
+            "the warning must claim only what it can: {:?}",
+            warnings[0]
+        );
+        assert!(
+            !warnings[0].contains("unresumable"),
+            "reachability is the claim, not resumability: {:?}",
+            warnings[0]
+        );
     }
 
     /// A thinking level the CLI rejects exits before the RPC channel opens, so the
@@ -3241,6 +3267,1932 @@ pub mod native {
                 "a real session must not be filtered; without this the check above \
                  would pass for a filter that dropped everything"
             );
+        }
+    }
+}
+
+/// The live session: `pi --mode rpc`'s stdio, held for the session's lifetime.
+///
+/// # What this module owns, and why everything else is elsewhere
+///
+/// Exactly three things genuinely need a process, and they are the three that could not be
+/// tested without one anyway: **reply correlation** against traffic this adapter sent,
+/// **the answer path** for a dialog whose response routes back over the same stdin, and
+/// **the pump** that turns lines into [`sylph_protocol::SessionMessage`]s. Everything about
+/// a *payload* — which command a config change becomes, what a dialog looks like, what an
+/// event projects to — is [`super::rpc`], [`super::ui`], and [`super::translate`].
+///
+/// [`super::translate::Correlation`]'s own doc says why the two exceptions live here:
+/// a `response` has to wake the caller that sent it, and an `extension_ui_request` has to
+/// become a [`sylph_protocol::Request`] whose answer goes back out. Both are correlation
+/// against *outbound* traffic the projection never sees.
+///
+/// # Three vendor facts this module is shaped by, all measured on pi 0.84.3
+///
+/// - **`abort`'s reply is gated on the turn winding down.** `agent-session.js:1171`:
+///   `abort()` calls `waitForIdle()` before returning, so the `{"command":"abort"}`
+///   response arrives *after* `agent_settled`. Awaiting it would make
+///   [`sylph_protocol::Session::interrupt`] block for as long as a running tool takes to
+///   notice, and past [`crate::process::REPLY_TIMEOUT`] it would report a failure for an
+///   abort that worked. So the abort is sent without awaiting a reply, and the turn's close
+///   arrives on the stream where a client is already watching for it.
+/// - **`setThinkingLevel` clamps rather than refusing** (`agent-session.js:1290`): an
+///   unsupported level is silently replaced by the nearest supported one and answered
+///   `success: true`. This is the same shape as `claude` answering success for `manual`
+///   while confirming `default` (`AGENTS.md`), so a `success` here is not a promise the
+///   vendor did what was asked — which is why [`PiSession::set_config`] validates against
+///   what the vendor enumerated *and* re-reads the surface afterwards.
+/// - **A command is dispatched without being awaited** (`rpc-mode.js:626`, `void
+///   handleInputLine(line)`), so `get_state` answers while a turn streams. That is what
+///   makes reading the surface from the vendor mid-turn viable rather than a deadlock.
+pub mod session {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use anyhow::{anyhow, Context, Result};
+    use async_trait::async_trait;
+    use serde_json::{json, Value};
+    use sylph_protocol::{
+        AdapterError, ConfigOption, Event, EventKind, EventStream, NativeId, RequestedNativeId,
+        Resolution, RunSpec, Session, SessionCapabilities, SessionMessage, TurnInput,
+    };
+    use tokio::sync::{mpsc, Mutex};
+    use tracing::{debug, warn};
+
+    // `STANDARD` rather than one of the URL-safe or unpadded variants: pi's `ImageContent.data`
+    // is the same base64 a data URL carries, so `+`/`/` with padding is the alphabet the vendor
+    // decodes. A variant is not a style choice — `STANDARD_NO_PAD` produces a string the
+    // vendor's own decoder rejects.
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+
+    use crate::process::{self, Child, Spawn};
+
+    use super::{rpc, translate, ui};
+
+    /// What pi offered for one open dialog, keyed by the vendor's own request id.
+    ///
+    /// The value is `Some(options)` for a `select` and **`None` for every other dialog**,
+    /// and the distinction is load-bearing rather than tidiness: [`ui::response_for`] turns
+    /// an answer naming nothing in the offered list into a dismissal, so passing
+    /// `Some(&[])` for an `input` would turn every submitted string into a cancel. A
+    /// dialog that offered nothing has to be `None`, not empty.
+    type Dialogs = Arc<Mutex<HashMap<String, Option<Vec<String>>>>>;
+
+    /// One held `pi --mode rpc` process, as a [`Session`].
+    pub struct PiSession {
+        native_id: NativeId,
+        child: Arc<Child>,
+        /// Yielded **once** by [`Session::events`]. Two consumers of one vendor's stdio
+        /// would each see half the turn, which is the same reason
+        /// [`crate::process::Child`] reads stdout in exactly one task.
+        stream: Mutex<Option<mpsc::Receiver<Result<SessionMessage>>>>,
+        /// The catalogue, cached for the session's life.
+        ///
+        /// *Measured:* 372 entries on a real install, and it is a property of the user's
+        /// configured providers rather than of the session — so re-reading it per
+        /// `capabilities()` would pay for a listing that cannot have changed. **Only the
+        /// catalogue is cached.** Current values are read from the vendor every time
+        /// ([`PiSession::read_surface`]).
+        models: Arc<Mutex<Option<Value>>>,
+        /// Serializes surface refreshes, so the last publish is the one that read last.
+        ///
+        /// Two concurrent refreshes could otherwise interleave read-then-publish and leave
+        /// a client holding the *earlier* read. One lock held across both halves makes the
+        /// ordering a property of the code rather than of the scheduler.
+        refreshing: Arc<Mutex<()>>,
+        dialogs: Dialogs,
+        /// The turn state, shared with the pump.
+        ///
+        /// **Shared rather than mirrored.** [`translate::Correlation::turn_is_open`] exists
+        /// because the session half needs the answer, and a second copy of the flag here
+        /// would be a second answer to one question — the `is_stable()`-versus-`stability`
+        /// defect `AGENTS.md` records, one layer over.
+        correlation: Arc<Mutex<translate::Correlation>>,
+        /// The identity preamble's file, deleted on [`Session::close`].
+        preamble: Option<std::path::PathBuf>,
+    }
+
+    impl PiSession {
+        /// Spawn `pi --mode rpc` and hold it.
+        ///
+        /// Refuses [`RequestedNativeId::New`] rather than letting the vendor assign one:
+        /// [`sylph_protocol::AgentInfo::dictates_native_id`] is true for this agent, so the
+        /// server always names an id, and the alternative — minting one here — is the
+        /// synthesized-identity failure [`NativeId`] forbids and the Python original
+        /// committed (`adapter.py:257`, `uuid.uuid4()`).
+        pub async fn open(spec: RunSpec) -> Result<Self> {
+            let requested = match &spec.native_id {
+                RequestedNativeId::Dictate(id) | RequestedNativeId::Resume(id) => id.clone(),
+                RequestedNativeId::New => {
+                    return Err(anyhow!(
+                        "pi dictates its session id: open it with a Dictate or Resume id, \
+                         because an id this adapter minted would look like the vendor's and \
+                         be Sylph's"
+                    ))
+                }
+            };
+
+            if spec.permission_mode.is_some() {
+                // Reported rather than silently dropped. pi has no permission mode at all —
+                // a tool runs when the model calls it — so honouring this would promise a
+                // policy the session is not running under.
+                warn!("pi has no permission mode; ignoring the one the server asked for");
+            }
+
+            // Written before the argv is finalized, because the flag needs a path that
+            // exists: `resolvePromptInput` (`core/resource-loader.js:391`) reads its
+            // argument as a *file* when the string names one and as literal text otherwise.
+            // A file is what makes that unambiguous — a one-line preamble that happened to
+            // name a real path would otherwise be read as that file's contents.
+            let preamble = match (spec.inject_identity, spec.identity_preamble.as_deref()) {
+                (true, Some(text)) if !text.is_empty() => Some(write_preamble(text)?),
+                _ => None,
+            };
+
+            let (argv, warnings) = super::PiAdapter::argv_for(&spec);
+            for warning in warnings {
+                // Logged by the caller of `argv_for` rather than inside it: substituting
+                // something a user asked for silently is exactly the help an adapter must
+                // not give.
+                warn!("{warning}");
+            }
+            let spawn = Spawn {
+                program: super::AGENT_NAME.to_string(),
+                args: spawn_args(argv, preamble.as_deref()),
+                cwd: spec.workdir.clone(),
+                env: HashMap::new(),
+                reply_id: Some(Box::new(reply_id)),
+            };
+            let attached = Self::attach(spawn, requested, preamble.clone()).await;
+            if attached.is_err() {
+                // The file is this adapter's, and a failed launch is the one path where
+                // nothing else will ever delete it.
+                if let Some(path) = &preamble {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            attached
+        }
+
+        /// Hold an already-described process, and start the pump.
+        ///
+        /// Separate from [`Self::open`] so a test can hand it a **scripted stdin/stdout
+        /// peer** instead of the real CLI. That separation is the reason this half is
+        /// testable at all: a test that needs `pi` installed, configured, and answering is a
+        /// test that does not run — and every classification defect in this adapter's
+        /// history was invisible to `verify.py`, which spends real tokens and sees only the
+        /// shapes one live turn happens to produce.
+        pub async fn attach(
+            spawn: Spawn,
+            native_id: NativeId,
+            preamble: Option<std::path::PathBuf>,
+        ) -> Result<Self> {
+            let (child, lines) = Child::spawn(spawn).await?;
+            let child = Arc::new(child);
+
+            // Bounded, and generously: a turn's deltas arrive faster than a server folds
+            // them, and a channel small enough to block here would make this adapter's own
+            // backpressure part of what a streaming measurement measures.
+            let (messages, stream) = mpsc::channel(1024);
+            let session = Self {
+                native_id,
+                child: child.clone(),
+                stream: Mutex::new(Some(stream)),
+                models: Arc::new(Mutex::new(None)),
+                refreshing: Arc::new(Mutex::new(())),
+                dialogs: Arc::new(Mutex::new(HashMap::new())),
+                correlation: Arc::new(Mutex::new(translate::Correlation::new())),
+                preamble,
+            };
+
+            tokio::spawn(pump(Pump {
+                lines,
+                messages,
+                child,
+                correlation: session.correlation.clone(),
+                dialogs: session.dialogs.clone(),
+                models: session.models.clone(),
+                refreshing: session.refreshing.clone(),
+            }));
+
+            Ok(session)
+        }
+
+        /// One RPC command, awaiting the reply that carries its id.
+        ///
+        /// **Reads the discriminant before the payload.** pi answers a refusal with
+        /// `success: false` and an `error` string and *no* `data`, so a reader that went
+        /// straight for `data` would turn every refusal into the same empty value a
+        /// successful no-payload command returns — which is precisely the defect
+        /// `AGENTS.md` records against `claude`'s adapter, where selecting a refused
+        /// permission mode was recorded as applied and answered 200.
+        async fn call(&self, command: &str, fields: Value) -> Result<Value> {
+            call(&self.child, command, fields).await
+        }
+
+        /// The config surface, read from the vendor.
+        ///
+        /// **Every current value comes from this call and nothing caches one.** The Python
+        /// original answered `currentValue: self.current_model`, a field only one code path
+        /// populated, so a surface built by any other path — a re-attach, a `set_config`
+        /// reply — reported `null` while the session plainly had a model and the composer
+        /// chip fell back to "agent default" with the checkmark on no row. The vendor is
+        /// also the only thing that knows whether a set was *honoured*, and pi's own TUI can
+        /// steer a session besides.
+        async fn read_surface(&self) -> Result<rpc::ConfigSurface> {
+            read_surface(&self.child, &self.models).await
+        }
+    }
+
+    #[async_trait]
+    impl Session for PiSession {
+        fn native_id(&self) -> &NativeId {
+            &self.native_id
+        }
+
+        /// The whole surface, every field of it read from the vendor.
+        ///
+        /// `get_commands` is a fourth round trip beyond [`rpc::SURFACE_ROUND_TRIPS`] and is
+        /// **not** cached: pi has no "your commands changed" event — the list is polled, not
+        /// pushed — so a cache here would go stale the moment an extension loads and there
+        /// would be nothing to invalidate it.
+        async fn capabilities(&self) -> Result<SessionCapabilities> {
+            let surface = self.read_surface().await?;
+            let commands = match self.call("get_commands", json!({})).await {
+                Ok(payload) => rpc::command_specs(&payload),
+                Err(error) => {
+                    // Degraded rather than fatal: a session with no command list is usable,
+                    // and refusing to report a surface over it would take the model picker
+                    // down with the slash menu.
+                    warn!("pi did not answer get_commands: {error}");
+                    Vec::new()
+                }
+            };
+            Ok(surface.capabilities(commands))
+        }
+
+        /// Start a turn, returning once pi has **accepted** it.
+        ///
+        /// *Measured at `rpc-mode.js:298`:* `prompt` answers as soon as its preflight
+        /// succeeds, and a failure *after* acceptance is reported through the event stream
+        /// rather than as a second response for the same id. That is exactly the contract —
+        /// a turn outlives the call that started it — so the reply is awaited and nothing
+        /// waits for the turn.
+        async fn send(&self, turn: TurnInput) -> Result<()> {
+            // Applied before the prompt, which is why they travel *with* the turn: separate
+            // preceding calls left a window where a turn could run under a mix of old and
+            // new settings.
+            //
+            // **pi has no per-turn scope**, so these persist for the session. Recorded here
+            // rather than worked around: the vendor offers `set_model` and
+            // `set_thinking_level` and nothing narrower, and pretending otherwise would
+            // require restoring the previous value afterwards — which would then be wrong
+            // for anyone who changed it from pi's own TUI mid-turn.
+            for (id, value) in &turn.config {
+                if let Err(error) = self.set_config(id, value.clone()).await {
+                    // Not fatal: running the turn under the previous value beats losing the
+                    // turn over one setting, and the refusal is already the caller's to see
+                    // through `set_config` proper.
+                    warn!("could not apply {id}={value}: {error}");
+                }
+            }
+
+            // A command becomes prompt text, which is what pi's own input expansion reads:
+            // `/skill:name` and `/template` are expanded before sending, and an extension
+            // command runs immediately. A **control** command never reaches here — it is
+            // typed state and goes through `set_config` (`sylph_protocol::TurnInput`).
+            let text = match &turn.command {
+                Some(command) => {
+                    let args = turn
+                        .args
+                        .values()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!("/{command} {args}").trim().to_string()
+                }
+                None => turn.text.clone(),
+            };
+
+            let (message, images) = build_message(&text, &turn.attachments);
+            let mut fields = json!({"message": message});
+            if !images.is_empty() {
+                if let Some(object) = fields.as_object_mut() {
+                    object.insert("images".to_string(), Value::Array(images));
+                }
+            }
+            self.call("prompt", fields).await?;
+            Ok(())
+        }
+
+        /// End the turn with pi's `abort`, **without awaiting its reply**.
+        ///
+        /// *Measured at `agent-session.js:1171`:* `abort()` calls `waitForIdle()` before
+        /// returning, so the response lands *after* `agent_settled`. Awaiting it would tie
+        /// this call to however long a running tool takes to notice the abort, and past
+        /// [`process::REPLY_TIMEOUT`] it would report a failure for an abort that worked.
+        ///
+        /// Nothing is synthesized either: `_emitAgentSettled` sits in the `finally` of
+        /// `_runAgentPrompt` (`agent-session.js:758`), so an aborted turn emits
+        /// `agent_settled` carrying `stopReason: "aborted"` on the `AssistantMessage` before
+        /// it. A close written here would be this adapter asserting an outcome the vendor
+        /// reports — and `aborted` is a *user stopping a turn*, not a failure, so writing
+        /// one would also colour an interrupted turn as a broken one.
+        async fn interrupt(&self) -> Result<()> {
+            self.child
+                .send(json!({"type": "abort"}))
+                .await
+                .context("pi would not accept an abort")
+        }
+
+        /// Add text to a running turn, through pi's own `steer`.
+        ///
+        /// pi's steer is the discipline that means "change course now": it is delivered
+        /// after the current assistant turn finishes its tool calls and **before the next
+        /// model call**, rather than being queued for after the turn (which is `follow_up`,
+        /// deliberately not offered — Sylph has no word for it).
+        ///
+        /// # `expected_turn_id` can only be checked for presence here
+        ///
+        /// **pi puts no turn id on the wire at all** — its `turn_start`/`turn_end` carry
+        /// none, and neither does any command's reply — so there is nothing to compare a
+        /// caller's id against. What the precondition exists to prevent is a steer racing a
+        /// turn boundary and landing in the *next* conversation, and the half of that this
+        /// vendor can answer is whether a turn is open: a caller that named a turn is
+        /// refused when none is running, because the turn it named has ended and pi would
+        /// otherwise queue the text for whatever runs next.
+        ///
+        /// `None` means "whatever is running" and is forwarded as-is, which is a coherent ask
+        /// from a client with no turn in view. Stated rather than silently ignored, because a
+        /// weaker check presented as the real one is worse than a documented weaker check.
+        async fn steer(&self, text: &str, expected_turn_id: Option<&str>) -> Result<()> {
+            if expected_turn_id.is_some() && !self.correlation.lock().await.turn_is_open() {
+                return Err(anyhow!(
+                    "no turn is running, so this steer would be delivered into the next one"
+                ));
+            }
+            self.call("steer", json!({"message": text})).await?;
+            Ok(())
+        }
+
+        /// Set one option and answer with the **refreshed array**.
+        ///
+        /// Three things happen in order, and each is one of this vendor's measured hazards:
+        ///
+        /// 1. [`rpc::command_for`] decides the command **and the refusal code**. An unknown
+        ///    id is `UNSUPPORTED_FIELD`; a malformed value is `INVALID_VALUE`. The two are
+        ///    not interchangeable — one justifies disabling a control, the other must leave
+        ///    it usable — and answering a bad *value* with "no such option" sends the
+        ///    investigation to the layer that is not at fault.
+        /// 2. The value is validated against **what the vendor enumerated**, not against the
+        ///    launch flag's seven thinking levels, which are strictly wider than what a
+        ///    given model accepts. This is not defensive duplication: *measured at
+        ///    `agent-session.js:1290`*, `setThinkingLevel` **clamps** an unsupported level
+        ///    to the nearest supported one and answers `success: true`, so without this
+        ///    check a refused write would be indistinguishable from an applied one.
+        /// 3. The surface is re-read from the vendor afterwards, so what comes back is what
+        ///    was **confirmed** rather than what was requested — and re-reading is also what
+        ///    makes the answer an array rather than an acknowledgement, because setting the
+        ///    model changes which thinking levels exist
+        ///    ([`rpc::ConfigSurface::after_model_change`]).
+        async fn set_config(&self, id: &str, value: Value) -> Result<Vec<ConfigOption>> {
+            let command = rpc::command_for(id, &value).map_err(anyhow::Error::new)?;
+
+            let before = self.read_surface().await?;
+            if !before.accepts(id, &value) {
+                return Err(anyhow::Error::new(AdapterError::invalid_value(format!(
+                    "pi does not currently offer {value} for '{id}'"
+                ))));
+            }
+
+            let payload = command.as_value();
+            let command_type = payload
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let mut fields = payload.clone();
+            if let Some(object) = fields.as_object_mut() {
+                object.remove("type");
+            }
+            // A vendor refusal is `INVALID_VALUE`: `command_for` already established the
+            // option exists, so whatever pi objected to is about this value.
+            self.call(&command_type, fields).await.map_err(|error| {
+                anyhow::Error::new(AdapterError::invalid_value(error.to_string()))
+            })?;
+
+            Ok(self.read_surface().await?.options())
+        }
+
+        /// Answer an `extension_ui_request`, which is the only thing pi ever waits on a
+        /// human for.
+        ///
+        /// The three response shapes are not interchangeable — `value`, `confirmed`,
+        /// `cancelled` — and pi distinguishes "the user said no" from "the user dismissed
+        /// it", handing an extension `false` for the first and `undefined` for the second.
+        /// [`ui::response_for`] holds that mapping; what this method holds is the **offered
+        /// list**, which is why the pump remembers one per open dialog: pi matches a
+        /// `select` on the literal string it sent, so an answer naming something it never
+        /// offered is not an answer it can act on and becomes a dismissal rather than a
+        /// guess at the nearest row.
+        ///
+        /// An id this session has no record of is still answered. The alternative is worse:
+        /// pi blocks until its own timeout lapses, which presents as a session that stopped
+        /// for no reason, and the vendor validates the id anyway.
+        ///
+        /// # Answering retires the dialog, and the leak that leaves is deliberate
+        ///
+        /// The record is **removed**, which bounds the map over a long session. Two
+        /// consequences worth stating rather than discovering. A second answer to one id is
+        /// no longer filtered against the offered list — acceptable, because pi discards an
+        /// `extension_ui_response` whose id it has already resolved
+        /// (`rpc-mode.js:617`, `pendingExtensionRequests.get`), so the vendor is the one
+        /// enforcing single-answer and this adapter would only be duplicating it. And a
+        /// dialog pi **auto-resolved on its own timeout** is never answered here, so its entry
+        /// stays: pi does not announce that it timed out, so there is nothing to remove it on.
+        /// Bounded by the dialogs one session raises, which is why it is left rather than
+        /// swept — a sweep would need a deadline this side cannot observe the expiry of.
+        ///
+        /// **What a client observes when that happens**, since the sentence above describes the
+        /// map rather than the symptom: the dialog stays on screen. Nothing retracts a published
+        /// [`sylph_protocol::Request`], and its `expires_at_ms` is advisory — the server never
+        /// acts on it. Answering then still succeeds here and pi discards it, having already
+        /// resolved the dialog with its own default, so the user's answer is silently not the
+        /// one the extension received. The reading that follows for a client is to *render* the
+        /// deadline rather than to trust the row to disappear at it.
+        async fn resolve(&self, resolution: Resolution) -> Result<()> {
+            let offered = self.dialogs.lock().await.remove(&resolution.request_id);
+            let response = ui::response_for(&resolution, offered.flatten().as_deref());
+            self.child
+                .send(response)
+                .await
+                .context("pi would not accept a dialog answer")
+        }
+
+        fn events(&mut self) -> Option<EventStream> {
+            // `try_lock` because this is the one sync method on an otherwise async trait,
+            // and the lock is uncontended by construction: `&mut self` means nothing else
+            // holds this session. Taking the receiver is what makes a second call `None`.
+            let receiver = self.stream.try_lock().ok()?.take()?;
+            Some(Box::pin(futures::stream::unfold(
+                receiver,
+                |mut receiver| async move {
+                    receiver.recv().await.map(|item| (item, receiver))
+                },
+            )))
+        }
+
+        /// Ask the group to exit, then make sure it did.
+        ///
+        /// Idempotent and escalating unconditionally, because the idle reaper, an explicit
+        /// detach, and shutdown can all reach it — and a `close` the vendor ignores would
+        /// otherwise leak a process for the server's life.
+        /// [`crate::process::Child::close`] owns the escalation and the process *group*, so
+        /// a stop reaches the shell pi spawned for a tool call rather than only pi.
+        async fn close(&self) -> Result<()> {
+            self.child.close().await;
+            if let Some(path) = &self.preamble {
+                // Best effort by design: the file is in a temp directory and a failure to
+                // unlink it must not make a close report failure.
+                let _ = std::fs::remove_file(path);
+            }
+            Ok(())
+        }
+    }
+
+    /// Everything the pump task owns.
+    ///
+    /// A struct rather than eight arguments because they travel together and four of them
+    /// are the same `Arc<Mutex<…>>` shape, where a swapped pair compiles.
+    struct Pump {
+        lines: mpsc::Receiver<process::Line>,
+        messages: mpsc::Sender<Result<SessionMessage>>,
+        child: Arc<Child>,
+        correlation: Arc<Mutex<translate::Correlation>>,
+        dialogs: Dialogs,
+        models: Arc<Mutex<Option<Value>>>,
+        refreshing: Arc<Mutex<()>>,
+    }
+
+    /// Turn pi's lines into session messages, for the session's whole life.
+    ///
+    /// Ends when the vendor closes stdout or the server drops the session. A **parse failure
+    /// is forwarded and does not end the stream**: one malformed line must not fail a turn,
+    /// and `sylph_protocol::EventStream` documents an `Err` item as a failure *reading* the
+    /// session rather than a failure of it.
+    async fn pump(mut state: Pump) {
+        let mut last_model: Option<String> = None;
+        while let Some(line) = state.lines.recv().await {
+            let payload = match line {
+                Ok(payload) => payload,
+                Err(error) => {
+                    if state.messages.send(Err(error)).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let at_ms = now_ms();
+
+            match payload.get("type").and_then(Value::as_str) {
+                // An `extension_ui_request` is the session half's business, not the
+                // projection's: its answer routes back over this process's own stdin.
+                Some("extension_ui_request") => {
+                    if !handle_ui_request(&state, &payload, at_ms).await {
+                        break;
+                    }
+                    continue;
+                }
+                // A `response` reaching the pump is one [`reply_id`] declined to correlate,
+                // which after that predicate means exactly two things: it carried no `id`, or
+                // no waiter held the one it carried. Both are **this adapter's business rather
+                // than a fact about the session**, so it is logged and never published —
+                // publishing it would put a `set_model` acknowledgement in the transcript as
+                // an event.
+                //
+                // The reachable case is `abort`, which is deliberately sent without an id
+                // because its reply is gated on the turn winding down. pi omits `id` from a
+                // response when the command carried none, so its acknowledgement lands here by
+                // construction rather than by accident.
+                Some("response") => {
+                    debug!(?payload, "pi answered a request nothing was waiting for");
+                    continue;
+                }
+                _ => {}
+            }
+
+            let emission = {
+                // Scoped tightly: the lock must not be held across the send below, or
+                // backpressure from a slow consumer would block `steer`'s read of
+                // `turn_is_open` for as long as the channel stays full.
+                let mut correlation = state.correlation.lock().await;
+                correlation.translate(&payload, at_ms)
+            };
+
+            for message in emission.messages {
+                if state.messages.send(Ok(message)).await.is_err() {
+                    return;
+                }
+            }
+
+            // **The vendor reporting a different model is a capability change, so it is
+            // published rather than stored.** pi's own TUI can steer a session, and a
+            // `/model` typed as prose changes it too, so a client that only ever learns the
+            // model from its own `set_config` reply shows a stale one indefinitely — the
+            // announce-arrival-without-departure shape, applied to a value rather than to a
+            // set.
+            if let Some(observed) = emission.observed_model {
+                if last_model.as_deref() != Some(observed.as_str()) {
+                    last_model = Some(observed);
+                    refresh_config(&state);
+                }
+            }
+        }
+    }
+
+    /// One `extension_ui_request`, published or answered. `false` means the consumer is gone.
+    async fn handle_ui_request(state: &Pump, payload: &Value, at_ms: i64) -> bool {
+        match ui::inversion(payload, at_ms) {
+            ui::Inversion::Ask(request) => {
+                // Remembered **before** the request is published, because the answer can
+                // arrive on another task the instant a client sees it — and an offered list
+                // recorded afterwards would be missing for exactly the fastest answers.
+                //
+                // `Some` only for a dialog that genuinely offered options; see [`Dialogs`].
+                let offered = match payload.get("method").and_then(Value::as_str) {
+                    Some("select") => Some(ui::offered_options(payload)),
+                    _ => None,
+                };
+                state
+                    .dialogs
+                    .lock()
+                    .await
+                    .insert(request.id.clone(), offered);
+                state.messages.send(Ok(SessionMessage::Request(request))).await.is_ok()
+            }
+            ui::Inversion::Notice(text) => {
+                let mut event = Event::new(EventKind::Notice, None, at_ms);
+                event.text = text;
+                state
+                    .messages
+                    .send(Ok(SessionMessage::Event(event)))
+                    .await
+                    .is_ok()
+            }
+            ui::Inversion::Ignore => true,
+            // **Cancelled, never left parked.** An unknown dialog method still blocks pi, so
+            // silence stalls the turn until the vendor's own timeout lapses — which presents
+            // as a session that stopped for no reason. Reported as a `status` rather than a
+            // `notice`, because this is the adapter narrating its own limit rather than the
+            // agent saying something, and not as an error, because nothing failed: a build
+            // that has not been taught a method is a gap in Sylph, not in the session.
+            ui::Inversion::Unsupported { method, vendor_id } => {
+                let _ = state.child.send(ui::cancel_response(&vendor_id)).await;
+                let mut event = Event::new(EventKind::Status, None, at_ms);
+                event.text =
+                    format!("pi asked something this build cannot show ({method}); dismissed");
+                state
+                    .messages
+                    .send(Ok(SessionMessage::Event(event)))
+                    .await
+                    .is_ok()
+            }
+        }
+    }
+
+    /// Re-read the config surface and publish it as a `config`-only facet.
+    ///
+    /// # Why this is spawned, and why that is safe
+    ///
+    /// It costs round trips, and doing them inline would stall every event behind them —
+    /// including a `tool_result` a user is watching for. A spawned task cannot stall the
+    /// pump, and it cannot deadlock either: [`Child::request`] is woken by the reader task
+    /// that owns stdout, not by this pump.
+    ///
+    /// What a spawn *does* risk is two refreshes publishing out of order, which
+    /// [`PiSession::refreshing`] prevents by holding one lock across read **and** publish.
+    /// A stream position is not at stake the way it is for a request: a facet is idempotent
+    /// state a client reconciles against, not an event that means something different a few
+    /// rows earlier or later.
+    fn refresh_config(state: &Pump) {
+        let child = state.child.clone();
+        let models = state.models.clone();
+        let messages = state.messages.clone();
+        let refreshing = state.refreshing.clone();
+        tokio::spawn(async move {
+            let _order = refreshing.lock().await;
+            match read_surface(&child, &models).await {
+                Ok(surface) => {
+                    let facets =
+                        sylph_protocol::CapabilityFacets::config(surface.options());
+                    let _ = messages.send(Ok(SessionMessage::Capabilities(facets))).await;
+                }
+                // Degraded, not fatal, and said once per occurrence rather than retried: the
+                // surface a client already holds stays correct except for this one change,
+                // and `capabilities()` re-reads it on the next attach.
+                Err(error) => warn!("could not refresh pi's config surface: {error}"),
+            }
+        });
+    }
+
+    /// The id off a frame that is a **reply to something this side sent**, or `None`.
+    ///
+    /// # The `type` check is the whole function, and reading only `id` is a silent defect
+    ///
+    /// pi multiplexes both directions onto one stdout, and `extension_ui_request` is
+    /// **vendor-initiated** while carrying an `id` of its own. A predicate reading only `id`
+    /// would route one into whichever waiter happened to hold that number: the request would
+    /// never reach the event stream, so nobody is ever asked and the turn waits on a human
+    /// forever, while the caller that sent `get_state` receives a UI request as its answer.
+    /// Both directions fail, and neither reports anything.
+    ///
+    /// *Measured on `codex`*, whose server-request ids collide with ours outright — `0,1,2`
+    /// against `1..5`. pi's are `crypto.randomUUID()` (`rpc-mode.js:50`), so a collision
+    /// there is presently improbable rather than certain; the check does not depend on that,
+    /// because "improbable today" is a property of one vendor's id minting rather than of the
+    /// protocol, and a correlation that is right by coincidence is one nobody re-examines.
+    ///
+    /// `type: "response"` is pi's own direction marker — each vendor spells it differently,
+    /// which is why the knowledge lives here and not in [`crate::process`]. This is also what
+    /// now *enforces* [`translate::Correlation::translate`]'s rule that a `response` and an
+    /// `extension_ui_request` are the session half's business: the transport keeps replies off
+    /// the projection's input, rather than the split being only documented.
+    ///
+    /// # A string, and deliberately not "a string or a number"
+    ///
+    /// pi echoes the id **verbatim**, whatever JSON type it arrived as — `rpc-mode.js:31`
+    /// builds `{ id, type: "response", … }` from `command.id` with no coercion — and [`call`]
+    /// only ever sends `id.to_string()`. So the number case is unreachable from this adapter,
+    /// and accepting one would be tolerance for a shape this side does not produce: were pi
+    /// ever to answer a number, correlation would break outright and every request would time
+    /// out, which is the loud failure `AGENTS.md` § Compatibility asks for over a fallback
+    /// that silently absorbs the change.
+    fn reply_id(frame: &Value) -> Option<String> {
+        if frame.get("type").and_then(Value::as_str) != Some("response") {
+            return None;
+        }
+        frame
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    }
+
+    /// One RPC command, awaiting the reply that carries its id.
+    ///
+    /// A free function because the pump's refresh needs it and the session's methods do too,
+    /// and a containment rule — or a discriminant check — written twice is one that will
+    /// diverge.
+    ///
+    /// The reply's `data` is answered, or `{}` for a command that carries none. **`{}` is
+    /// only ever reachable from a success**: a refusal returns `Err`, because a shape that
+    /// two opposite outcomes can produce is how a refused control reports as applied.
+    async fn call(child: &Child, command: &str, fields: Value) -> Result<Value> {
+        let reply = child
+            .request(|id| {
+                let mut payload = json!({"id": id.to_string(), "type": command});
+                if let (Some(object), Some(extra)) = (payload.as_object_mut(), fields.as_object())
+                {
+                    for (key, value) in extra {
+                        object.insert(key.clone(), value.clone());
+                    }
+                }
+                payload
+            })
+            .await
+            .with_context(|| format!("pi did not answer `{command}`"))?;
+
+        // The discriminant first. A refusal carries `error` and no `data`.
+        if reply.get("success").and_then(Value::as_bool) != Some(true) {
+            let reason = reply
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("pi refused it and said nothing further");
+            return Err(anyhow!("pi refused `{command}`: {reason}"));
+        }
+        Ok(reply.get("data").cloned().unwrap_or_else(|| json!({})))
+    }
+
+    /// The three round trips [`rpc::SURFACE_ROUND_TRIPS`] names, in that order.
+    ///
+    /// Only the catalogue is cached. `get_state` and `get_available_thinking_levels` are read
+    /// every time, because the first holds every current value and the second answers for the
+    /// *currently selected model* — the model measured during this vendor's investigation
+    /// offered `off` and `high` against the launch flag's seven, so a cached list goes stale
+    /// the moment the model changes.
+    async fn read_surface(
+        child: &Child,
+        models: &Arc<Mutex<Option<Value>>>,
+    ) -> Result<rpc::ConfigSurface> {
+        let state = call(child, "get_state", json!({})).await?;
+
+        let catalogue = {
+            let mut held = models.lock().await;
+            match held.as_ref() {
+                Some(cached) => cached.clone(),
+                None => {
+                    let fetched = call(child, "get_available_models", json!({})).await?;
+                    *held = Some(fetched.clone());
+                    fetched
+                }
+            }
+        };
+
+        let levels = call(child, "get_available_thinking_levels", json!({})).await?;
+        Ok(rpc::ConfigSurface::from_vendor(&state, &catalogue, &levels))
+    }
+
+    /// [`super::PiAdapter::argv_for`]'s output as a [`Spawn::args`], with the preamble
+    /// placeholder resolved.
+    ///
+    /// A named function rather than a chain inside [`PiSession::open`], because the thing it
+    /// has to get right is invisible from above: [`super::IDENTITY_PREAMBLE_PLACEHOLDER`]
+    /// exists so that a caller which *forgets* to substitute fails visibly rather than
+    /// passing the marker to the vendor as prompt text — and the only way to observe that is
+    /// to look at the argv, which nothing downstream of a spawn can do.
+    fn spawn_args(argv: Vec<String>, preamble: Option<&std::path::Path>) -> Vec<String> {
+        argv.into_iter()
+            // The program name, which `Spawn` carries separately.
+            .skip(1)
+            .map(|part| match (preamble, part.as_str()) {
+                (Some(path), super::IDENTITY_PREAMBLE_PLACEHOLDER) => {
+                    path.to_string_lossy().to_string()
+                }
+                _ => part,
+            })
+            .collect()
+    }
+
+    /// Write the identity preamble where `--append-system-prompt` can read it.
+    ///
+    /// A file rather than the text itself, because that flag reads its argument as a *file*
+    /// when the string names one (`core/resource-loader.js:391`, `resolvePromptInput`) — so a
+    /// preamble that happened to name a real path would be silently replaced by that file's
+    /// contents. The name carries a fresh UUID, which is an identifier for a temporary file
+    /// and never a session id: minting one of those is what [`NativeId`] forbids.
+    fn write_preamble(text: &str) -> Result<std::path::PathBuf> {
+        let path = std::env::temp_dir().join(format!("sylph-pi-soul-{}.md", uuid::Uuid::new_v4()));
+        std::fs::write(&path, text)
+            .with_context(|| format!("could not write the identity preamble to {path:?}"))?;
+        Ok(path)
+    }
+
+    /// Epoch milliseconds now.
+    ///
+    /// **pi's RPC events carry no timestamp at all** — checked against `docs/rpc.md`, where
+    /// every event shape is listed and none holds one — so the adapter stamps arrival. That
+    /// is why [`translate::Correlation::translate`] takes the clock as an argument: a test
+    /// that cannot fix the stamps cannot assert on ordering.
+    fn now_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    /// One user message, with images inline and every other file named by path.
+    ///
+    /// pi takes images as `ImageContent` blocks and reads text files perfectly well with its
+    /// own `read` tool, so the split is not a convenience: inlining a text file bloats the
+    /// message with something the agent can fetch on demand, while a *path* to an image is
+    /// something the model cannot see at all.
+    ///
+    /// An unreadable or unrecognized file is **named rather than dropped**, because the user
+    /// attached it deliberately and a silently missing attachment is indistinguishable from
+    /// one the agent chose to ignore.
+    fn build_message(text: &str, attachments: &[String]) -> (String, Vec<Value>) {
+        let mut images = Vec::new();
+        let mut named = Vec::new();
+        for path in attachments {
+            match image_mime(path) {
+                Some(mime) => match std::fs::read(path) {
+                    Ok(bytes) => images.push(json!({
+                        "type": "image",
+                        "data": STANDARD.encode(&bytes),
+                        "mimeType": mime,
+                    })),
+                    Err(error) => {
+                        warn!("naming rather than inlining an unreadable image {path}: {error}");
+                        named.push(path.clone());
+                    }
+                },
+                None => named.push(path.clone()),
+            }
+        }
+
+        if named.is_empty() {
+            return (text.to_string(), images);
+        }
+        let mut body =
+            String::from("Files attached for this turn (absolute paths on local disk):\n");
+        for path in &named {
+            body.push_str("- ");
+            body.push_str(path);
+            body.push('\n');
+        }
+        body.push('\n');
+        body.push_str(text);
+        (body, images)
+    }
+
+    /// An image's MIME type from its **magic bytes**, or `None` for anything else.
+    ///
+    /// Sniffed rather than taken from the extension: a mislabelled `.png` sent as an image
+    /// block is a provider error a user cannot act on, while a correctly-typed file with the
+    /// wrong suffix is common. The four types are the ones pi's `ImageContent` accepts.
+    fn image_mime(path: &str) -> Option<&'static str> {
+        let mut head = [0u8; 12];
+        let read = {
+            use std::io::Read;
+            let mut file = std::fs::File::open(path).ok()?;
+            file.read(&mut head).ok()?
+        };
+        let head = &head[..read];
+        if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Some("image/png");
+        }
+        if head.starts_with(b"\xff\xd8\xff") {
+            return Some("image/jpeg");
+        }
+        if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+            return Some("image/gif");
+        }
+        if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
+            return Some("image/webp");
+        }
+        None
+    }
+
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::path::{Path, PathBuf};
+        use std::time::Duration;
+        use sylph_protocol::{Phase, RefusalCode};
+
+        /// A scripted `pi` peer: one `sh` process speaking the RPC surface.
+        ///
+        /// **Deliberately not the real CLI.** A test needing `pi` installed, configured, and
+        /// answering — rather than 404ing, which is the failure that prompted this work — is a
+        /// test that does not run. And a scripted peer is the only way to assert on the
+        /// *outbound* half: it appends every line it receives to `$1`, so a test can assert
+        /// that `set_model` carried `provider` and `modelId` rather than merely that the call
+        /// returned `Ok`.
+        ///
+        /// `$2`, when given, is a file of event lines emitted before the read loop, which is
+        /// how a test drives the pump.
+        ///
+        /// Two extraction rules matter. Both keys are read with `grep -o … | head -1` rather
+        /// than `sed`, because `sed`'s `.*"type":"` is **greedy** — against a `prompt` carrying
+        /// an image block it would read the last `"type"` in the line, `image`, and answer the
+        /// wrong command. And `LEVEL` is mutated on `set_thinking_level` to a *different* value
+        /// than the one requested, which is this vendor's measured clamping behaviour.
+        /// `$3`, when `collide`, makes the peer emit an `extension_ui_request` **carrying the
+        /// id of the command it is answering**, just before the real reply. That is the
+        /// one-directional hazard [`reply_id`]'s `type` check exists for, and it can only be
+        /// reproduced while a waiter is actually registered — an unsolicited request emitted
+        /// before any command would land on the stream even with a broken predicate.
+        const PEER: &str = r#"
+LOG="$1"
+EVENTS="$2"
+COLLIDE="$3"
+if [ -n "$EVENTS" ] && [ -f "$EVENTS" ]; then cat "$EVENTS"; fi
+LEVEL=off
+MODEL='{"id":"claude-opus-5","provider":"anthropic","name":"Claude Opus 5","contextWindow":200000}'
+field() { printf '%s' "$2" | grep -o "\"$1\":\"[^\"]*\"" | head -1 | sed 's/.*:"//;s/"$//'; }
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$LOG"
+  t=$(field type "$line")
+  i=$(field id "$line")
+  case "$t" in
+    get_state)
+      if [ "$COLLIDE" = collide ]; then
+        printf '{"type":"extension_ui_request","id":"%s","method":"select","title":"Pick","options":["Allow","Block"]}\n' "$i"
+      fi
+      printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"model":%s,"thinkingLevel":"%s","sessionId":"scripted"}}\n' "$i" "$MODEL" "$LEVEL" ;;
+    get_available_models)
+      printf '{"id":"%s","type":"response","command":"get_available_models","success":true,"data":{"models":[%s,{"id":"deepseek-v4-pro","provider":"deepseek","name":"DeepSeek V4 Pro"},{"id":"deepseek-v4-pro","provider":"openrouter","name":"DeepSeek V4 Pro"}]}}\n' "$i" "$MODEL" ;;
+    get_available_thinking_levels)
+      printf '{"id":"%s","type":"response","command":"get_available_thinking_levels","success":true,"data":{"levels":["off","low","high"]}}\n' "$i" ;;
+    get_commands)
+      printf '{"id":"%s","type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"review","description":"Review it","source":"prompt"}]}}\n' "$i" ;;
+    set_thinking_level)
+      LEVEL=low
+      printf '{"id":"%s","type":"response","command":"set_thinking_level","success":true}\n' "$i" ;;
+    set_model)
+      printf '{"id":"%s","type":"response","command":"set_model","success":true,"data":%s}\n' "$i" "$MODEL" ;;
+    prompt)
+      printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$i" ;;
+    steer)
+      printf '{"id":"%s","type":"response","command":"steer","success":true}\n' "$i" ;;
+    abort)
+      : ;;
+    extension_ui_response)
+      : ;;
+    *)
+      printf '{"id":"%s","type":"response","command":"%s","success":false,"error":"scripted peer has no %s"}\n' "$i" "$t" "$t" ;;
+  esac
+done
+"#;
+
+        /// A throwaway directory for one test's log and event files.
+        fn scratch(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "sylph-pi-session-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn spawn_peer(log: &Path, events: Option<&Path>, collide: bool) -> Spawn {
+            Spawn {
+                program: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    PEER.to_string(),
+                    "sh".to_string(),
+                    log.to_string_lossy().to_string(),
+                    events
+                        .map(|path| path.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    if collide { "collide" } else { "" }.to_string(),
+                ],
+                cwd: "/tmp".to_string(),
+                env: HashMap::new(),
+                // The production predicate, not a test-local one: a peer correlating by a
+                // rule the real session does not use would test the peer.
+                reply_id: Some(Box::new(reply_id)),
+            }
+        }
+
+        /// A session over the scripted peer, plus its outbound log.
+        async fn scripted(name: &str, events: &[&str]) -> (PiSession, PathBuf) {
+            scripted_peer(name, events, false).await
+        }
+
+        /// As [`scripted`], with the id-collision behaviour enabled. See [`PEER`].
+        async fn scripted_colliding(name: &str) -> (PiSession, PathBuf) {
+            scripted_peer(name, &[], true).await
+        }
+
+        async fn scripted_peer(
+            name: &str,
+            events: &[&str],
+            collide: bool,
+        ) -> (PiSession, PathBuf) {
+            let dir = scratch(name);
+            let log = dir.join("out.jsonl");
+            std::fs::write(&log, "").unwrap();
+            let events_path = dir.join("events.jsonl");
+            let path = if events.is_empty() {
+                None
+            } else {
+                std::fs::write(&events_path, format!("{}\n", events.join("\n"))).unwrap();
+                Some(events_path.as_path())
+            };
+            let session = PiSession::attach(
+                spawn_peer(&log, path, collide),
+                NativeId::new("scripted"),
+                None,
+            )
+            .await
+            .expect("the scripted peer must attach");
+            (session, log)
+        }
+
+        /// Every line the session sent, once at least `count` of them have arrived.
+        ///
+        /// Polled rather than slept on: a fixed sleep is either flaky or slow, and the
+        /// assertion a test wants is "this line was sent", not "it was sent within 20ms".
+        async fn sent(log: &Path, count: usize) -> Vec<Value> {
+            for _ in 0..200 {
+                let lines: Vec<Value> = std::fs::read_to_string(log)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .collect();
+                if lines.len() >= count {
+                    return lines;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!(
+                "only {:?} reached the peer, wanted {count}",
+                std::fs::read_to_string(log).unwrap_or_default()
+            );
+        }
+
+        /// The next message off the stream, or `None` if none arrives in `ms`.
+        ///
+        /// A timeout rather than an unbounded await, so a test asserting that **nothing** is
+        /// published can say so — which is what pins "a reply is not an event".
+        async fn next_message(
+            stream: &mut EventStream,
+            ms: u64,
+        ) -> Option<SessionMessage> {
+            use futures::StreamExt;
+            tokio::time::timeout(Duration::from_millis(ms), stream.next())
+                .await
+                .ok()
+                .flatten()
+                .map(|item| item.expect("the scripted peer emits no read failures here"))
+        }
+
+        /// **The surface's current values come from the vendor, not from what was set.**
+        ///
+        /// The named defect on this adapter: `config()` answered `currentValue:
+        /// self.current_model`, a field only one code path populated, so a surface built any
+        /// other way reported `null` while the session plainly had a model.
+        ///
+        /// Asserted on a session that has set **nothing** — so every value here can only have
+        /// come from `get_state`. A cached-what-we-set implementation answers `None` for both.
+        #[tokio::test]
+        async fn the_surface_reports_what_the_vendor_says_on_a_session_that_set_nothing() {
+            let (session, _log) = scripted("vendor-surface", &[]).await;
+            let surface = session.capabilities().await.unwrap();
+
+            let model = surface.config_option("model").expect("a model option");
+            assert_eq!(
+                model.current_value.as_ref().and_then(Value::as_str),
+                Some("anthropic claude-opus-5"),
+                "the current model must be the vendor's, provider-qualified"
+            );
+            let thinking = surface.config_option("thinking").expect("a thinking option");
+            assert_eq!(
+                thinking.current_value.as_ref().and_then(Value::as_str),
+                Some("off")
+            );
+            // The per-model window is real for this agent, and it comes from the *selected
+            // model's* catalogue entry rather than from a session-global field.
+            assert_eq!(surface.context_window, Some(200_000));
+            assert_eq!(surface.commands.len(), 1);
+            assert_eq!(surface.commands[0].name, "review");
+            // pi has no permission mode at all; publishing one would promise a policy the
+            // session is not running under.
+            assert_eq!(surface.permission_mode, None);
+            // And no delegation, which for this vendor is a report rather than a gap.
+            assert!(surface.subagents.is_empty());
+        }
+
+        /// **`set_model` carries `provider` and `modelId`, and never `model`.**
+        ///
+        /// *Measured on pi 0.84.3:* sending `model=` is answered `Model not found:
+        /// undefined/undefined`, pi interpolating the two fields it looked for and found
+        /// absent. The refusal came back as a failed RPC that nothing surfaced, so a correct
+        /// picker looked broken and the investigation went to the UI twice.
+        ///
+        /// Asserted on the **line that reached the vendor**, which is the only place this is
+        /// observable: every layer above returns `Ok` either way.
+        #[tokio::test]
+        async fn set_model_sends_provider_and_model_id_and_never_a_model_field() {
+            let (session, log) = scripted("set-model-fields", &[]).await;
+            session
+                .set_config("model", json!("anthropic claude-opus-5"))
+                .await
+                .expect("a value the catalogue offers must be accepted");
+
+            let lines = sent(&log, 1).await;
+            let set = lines
+                .iter()
+                .find(|line| line.get("type").and_then(Value::as_str) == Some("set_model"))
+                .expect("a set_model line must have been sent");
+            assert_eq!(set.get("provider").and_then(Value::as_str), Some("anthropic"));
+            assert_eq!(
+                set.get("modelId").and_then(Value::as_str),
+                Some("claude-opus-5")
+            );
+            assert!(
+                set.get("model").is_none(),
+                "a `model` field is the measured defect: {set}"
+            );
+        }
+
+        /// **A value is provider-qualified, and the separator is a space rather than a slash.**
+        ///
+        /// *Measured:* 350 of 372 real model ids already contain a `/`, so splitting on one
+        /// mis-parses the majority of the catalogue — and two providers offer the same id, so a
+        /// bare id marks two rows current and makes one of them unreachable.
+        #[tokio::test]
+        async fn a_duplicated_model_id_is_reachable_under_each_provider() {
+            let (session, _log) = scripted("duplicate-ids", &[]).await;
+            let surface = session.capabilities().await.unwrap();
+            let model = surface.config_option("model").unwrap();
+
+            let duplicates: Vec<&str> = model
+                .options
+                .iter()
+                .filter(|choice| choice.value.ends_with("deepseek-v4-pro"))
+                .map(|choice| choice.value.as_str())
+                .collect();
+            assert_eq!(
+                duplicates,
+                vec!["deepseek deepseek-v4-pro", "openrouter deepseek-v4-pro"],
+                "each provider's copy must carry its own reachable value"
+            );
+            // The display names are identical, so the provider is the only thing that tells
+            // the two rows apart on screen.
+            assert!(model
+                .options
+                .iter()
+                .filter(|choice| choice.name == "DeepSeek V4 Pro")
+                .all(|choice| choice.description.is_some()));
+
+            // And each is separately settable, which a by-id lookup cannot do.
+            for value in duplicates {
+                session
+                    .set_config("model", json!(value))
+                    .await
+                    .unwrap_or_else(|error| panic!("{value} must be settable: {error}"));
+            }
+        }
+
+        /// **A vendor `success` is not a promise it did what was asked, so the answer is
+        /// re-read.**
+        ///
+        /// *Measured at `agent-session.js:1290:* `setThinkingLevel` **clamps** an unsupported
+        /// level to the nearest supported one and answers `success: true`. The scripted peer
+        /// reproduces that exactly — asked for `high`, it confirms `low` — and this pins that
+        /// what comes back is the vendor's *confirmation* rather than the request.
+        ///
+        /// The same shape as `claude` answering success for `manual` while confirming
+        /// `default` (`AGENTS.md`): an adapter writing the requested value makes itself the
+        /// authority on a fact only the vendor holds, and the surface then reports a policy the
+        /// session is not running under.
+        #[tokio::test]
+        async fn a_clamped_set_answers_with_what_the_vendor_confirmed_not_what_was_asked() {
+            let (session, _log) = scripted("clamped-set", &[]).await;
+            let options = session
+                .set_config("thinking", json!("high"))
+                .await
+                .expect("`high` is offered, so the set is accepted");
+
+            let thinking = options
+                .iter()
+                .find(|option| option.id == "thinking")
+                .expect("the refreshed array must still carry thinking");
+            assert_eq!(
+                thinking.current_value.as_ref().and_then(Value::as_str),
+                Some("low"),
+                "the vendor clamped `high` to `low`; reporting `high` would be the adapter \
+                 asserting an outcome only the vendor knows"
+            );
+        }
+
+        /// **`UNSUPPORTED_FIELD` and `INVALID_VALUE` are not interchangeable.**
+        ///
+        /// One means "no such option" and justifies disabling a control; the other means "this
+        /// value, right now" and must leave it usable. Answering a malformed *value* with "'x'
+        /// is not settable on a pi session" says the option does not exist when the option was
+        /// fine — and the layer that is not at fault is then the one that gets debugged.
+        #[tokio::test]
+        async fn the_two_refusals_stay_distinct_and_travel_as_typed_codes() {
+            let (session, _log) = scripted("refusal-codes", &[]).await;
+
+            let unknown = session
+                .set_config("permissionMode", json!("plan"))
+                .await
+                .expect_err("pi has no permission mode");
+            // Recovered by **type**, never by parsing the message: the text is the adapter's
+            // and may be reworded, while the code is declared protocol.
+            assert_eq!(
+                unknown.downcast_ref::<AdapterError>().map(|error| error.code),
+                Some(RefusalCode::UnsupportedField)
+            );
+
+            // A real option whose value the vendor does not currently offer. `xhigh` is one of
+            // the launch flag's seven and is *not* in this model's three, which is exactly why
+            // validating against `LAUNCH_THINKING_LEVELS` would be wrong.
+            let bad_value = session
+                .set_config("thinking", json!("xhigh"))
+                .await
+                .expect_err("a level this model does not offer must be refused");
+            assert_eq!(
+                bad_value
+                    .downcast_ref::<AdapterError>()
+                    .map(|error| error.code),
+                Some(RefusalCode::InvalidValue),
+                "the control must stay usable: its other values work"
+            );
+
+            // A value shaped wrong for the option is also the value's fault, not the option's.
+            let unparsable = session
+                .set_config("model", json!("claude-opus-5"))
+                .await
+                .expect_err("a bare id names no provider");
+            assert_eq!(
+                unparsable
+                    .downcast_ref::<AdapterError>()
+                    .map(|error| error.code),
+                Some(RefusalCode::InvalidValue)
+            );
+        }
+
+        /// **A refused set must not reach the vendor at all when the surface can say so.**
+        ///
+        /// The companion to the test above: it asserts the *code*, this asserts that nothing
+        /// was sent. Forwarding a level the model does not offer would have pi clamp it, answer
+        /// success, and silently change the session to a third value nobody asked for.
+        #[tokio::test]
+        async fn a_value_the_vendor_does_not_offer_is_never_sent() {
+            let (session, log) = scripted("unoffered-not-sent", &[]).await;
+            let _ = session.set_config("thinking", json!("xhigh")).await;
+
+            // The surface read happened, so there is traffic to wait for before concluding
+            // nothing else was sent.
+            let lines = sent(&log, 1).await;
+            assert!(
+                !lines.iter().any(|line| line.get("type").and_then(Value::as_str)
+                    == Some("set_thinking_level")),
+                "a refused value must not be forwarded: {lines:?}"
+            );
+        }
+
+        /// **A turn's outcome is read from the vendor, never asserted by the adapter.**
+        ///
+        /// *Measured 2026-08-28 on pi 0.84.3:* the configured model 404'd on every request, and
+        /// the observable result was a turn that opened, closed `completed` with no error, and
+        /// produced no assistant block — a session that looks like it worked and simply said
+        /// nothing. One hardcoded `{"stopReason": "end_turn"}` asserted a clean finish over
+        /// every failure, and the Rust port inherited it because a constant compiles and reads
+        /// as a default.
+        ///
+        /// This drives the failure through the whole session half: the peer emits the real
+        /// event sequence, and the close must carry the vendor's `error` reason, the provider's
+        /// own sentence, and `is_error`.
+        #[tokio::test]
+        async fn a_vendor_failure_closes_the_turn_as_a_failure_with_its_own_sentence() {
+            let sentence = "404: Thank you for participating in the Stealth Ox Alpha testing period";
+            let events = [
+                r#"{"type":"agent_start"}"#,
+                r#"{"type":"message_start","message":{"role":"assistant"}}"#,
+                &format!(
+                    r#"{{"type":"message_end","message":{{"role":"assistant","stopReason":"error","errorMessage":"{sentence}"}}}}"#
+                ),
+                r#"{"type":"agent_settled"}"#,
+            ];
+            let (mut session, _log) = scripted("vendor-failure", &events).await;
+            let mut stream = session.events().expect("the stream is yielded once");
+
+            let mut closed = None;
+            while let Some(message) = next_message(&mut stream, 2000).await {
+                if let SessionMessage::Event(event) = message {
+                    if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed) {
+                        closed = Some(event);
+                        break;
+                    }
+                }
+            }
+            let closed = closed.expect("the turn must close");
+            assert!(
+                closed.is_error,
+                "`error` is a failure; a hardcoded reason reports it as a clean finish"
+            );
+            assert_eq!(
+                closed
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("stopReason"))
+                    .and_then(Value::as_str),
+                Some("error"),
+                "the reason must be the vendor's"
+            );
+            // Silence is the hardest outcome to debug, so the provider's sentence has to be
+            // somewhere a reader will find it.
+            assert!(
+                closed.text.contains("Stealth Ox Alpha"),
+                "the failure must be legible: {closed:?}"
+            );
+        }
+
+        /// **A reply is not an event.**
+        ///
+        /// A `set_model` acknowledgement in the transcript is a row nothing emitted.
+        /// [`Child`] removes a correlated reply from the stream; this pins the other half —
+        /// a `response` that reaches the pump *uncorrelated* is logged rather than published,
+        /// because it is this adapter's bug rather than a fact about the session.
+        #[tokio::test]
+        async fn an_uncorrelated_reply_is_not_published_as_an_event() {
+            let events = [
+                r#"{"type":"response","command":"abort","success":true}"#,
+                r#"{"type":"extension_error","error":"an extension threw"}"#,
+            ];
+            let (mut session, _log) = scripted("reply-not-event", &events).await;
+            let mut stream = session.events().unwrap();
+
+            // The *first* thing published must be the extension error, not the response above
+            // it — which is only observable because the peer emits them in that order.
+            let first = next_message(&mut stream, 2000)
+                .await
+                .expect("the extension error must be published");
+            let SessionMessage::Event(event) = first else {
+                panic!("expected an event, got {first:?}");
+            };
+            assert_eq!(event.kind, EventKind::Status);
+            assert!(event.is_error);
+            assert_eq!(event.text, "an extension threw");
+        }
+
+        /// **A malformed line is forwarded and does not end the stream.**
+        ///
+        /// One bad line must not fail a turn, and it must not be silently dropped either, or
+        /// the record cannot explain a gap. pi's own store is truncate-rewritten with no lock,
+        /// so a half-written payload is a real state rather than a hypothetical.
+        #[tokio::test]
+        async fn a_malformed_line_is_reported_and_the_stream_continues() {
+            let events = [
+                "not json at all",
+                r#"{"type":"extension_error","error":"still here"}"#,
+            ];
+            let (mut session, _log) = scripted("malformed", &events).await;
+            let mut stream = session.events().unwrap();
+
+            use futures::StreamExt;
+            let first = tokio::time::timeout(Duration::from_millis(2000), stream.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(first.is_err(), "the parse failure must be reported");
+
+            let second = next_message(&mut stream, 2000)
+                .await
+                .expect("the stream must continue past a bad line");
+            let SessionMessage::Event(event) = second else {
+                panic!("expected an event");
+            };
+            assert_eq!(event.text, "still here");
+        }
+
+        /// **The stream is yielded once**, because two consumers of one vendor's stdio would
+        /// each see half the turn. Fan-out is the server's job, which already does it.
+        #[tokio::test]
+        async fn the_event_stream_is_yielded_exactly_once() {
+            let (mut session, _log) = scripted("yield-once", &[]).await;
+            assert!(session.events().is_some());
+            assert!(
+                session.events().is_none(),
+                "a second subscription is a bug, not a second reader"
+            );
+        }
+
+        /// **An answer naming nothing pi offered becomes a dismissal, not a guess.**
+        ///
+        /// pi matches a `select` on the literal string it sent, so a value it never sent is not
+        /// an answer it can act on. This is the session half's job because the offered list has
+        /// to be *remembered* from the request — and the sibling hazard is the empty-slice one
+        /// [`Dialogs`] records: an `input` offered nothing, so passing `Some(&[])` for it would
+        /// turn every typed answer into a cancel.
+        #[tokio::test]
+        async fn an_answer_outside_the_offered_list_is_sent_as_a_dismissal() {
+            // Three distinct dialogs rather than two answers to one. A resolution *retires*
+            // its dialog — pi discards a second `extension_ui_response` for an id it has
+            // already resolved — so re-answering one would be testing double-answer
+            // semantics instead of the offered-list filter.
+            let events = [
+                r#"{"type":"extension_ui_request","id":"uuid-1","method":"select","title":"Pick","options":["Allow","Block"]}"#,
+                r#"{"type":"extension_ui_request","id":"uuid-2","method":"select","title":"Pick again","options":["Allow","Block"]}"#,
+                r#"{"type":"extension_ui_request","id":"uuid-3","method":"input","title":"Name it"}"#,
+            ];
+            let (mut session, log) = scripted("dialog-answers", &events).await;
+            let mut stream = session.events().unwrap();
+
+            // Every request must be published before answering, so the offered lists are
+            // recorded.
+            for expected in ["uuid-1", "uuid-2", "uuid-3"] {
+                let message = next_message(&mut stream, 2000)
+                    .await
+                    .unwrap_or_else(|| panic!("{expected} must be published"));
+                let SessionMessage::Request(request) = message else {
+                    panic!("expected a request, got {message:?}");
+                };
+                assert_eq!(request.id, expected);
+            }
+
+            // Offered → carried as `value`.
+            session
+                .resolve(Resolution {
+                    request_id: "uuid-1".to_string(),
+                    option: ui::SUBMIT.to_string(),
+                    input: Some(json!({"values": {ui::CHOICE_FIELD: "Allow"}})),
+                })
+                .await
+                .unwrap();
+            // Not offered → dismissed rather than guessed at.
+            session
+                .resolve(Resolution {
+                    request_id: "uuid-2".to_string(),
+                    option: ui::SUBMIT.to_string(),
+                    input: Some(json!({"values": {ui::CHOICE_FIELD: "Maybe"}})),
+                })
+                .await
+                .unwrap();
+            // An `input` offered nothing, so **any** text is a real answer.
+            session
+                .resolve(Resolution {
+                    request_id: "uuid-3".to_string(),
+                    option: ui::SUBMIT.to_string(),
+                    input: Some(json!({"values": {ui::TEXT_FIELD: "anything at all"}})),
+                })
+                .await
+                .unwrap();
+
+            let lines = sent(&log, 3).await;
+            let answers: Vec<&Value> = lines
+                .iter()
+                .filter(|line| {
+                    line.get("type").and_then(Value::as_str) == Some("extension_ui_response")
+                })
+                .collect();
+            assert_eq!(answers.len(), 3, "{lines:?}");
+            assert_eq!(answers[0].get("value").and_then(Value::as_str), Some("Allow"));
+            assert_eq!(
+                answers[1].get("cancelled").and_then(Value::as_bool),
+                Some(true),
+                "an unoffered pick is a dismissal: {:?}",
+                answers[1]
+            );
+            assert_eq!(
+                answers[2].get("value").and_then(Value::as_str),
+                Some("anything at all"),
+                "a dialog that offered nothing must not have its answers filtered away"
+            );
+        }
+
+        /// **An unknown dialog method is cancelled, never left parked.**
+        ///
+        /// It still blocks pi, so silence stalls the turn until the vendor's own timeout lapses
+        /// — which presents as a session that stopped for no reason. The dismissal is reported
+        /// as a `status` and **not** as an error: nothing failed, this build simply has not been
+        /// taught the method.
+        #[tokio::test]
+        async fn an_unknown_dialog_method_is_dismissed_and_narrated() {
+            let events =
+                [r#"{"type":"extension_ui_request","id":"uuid-9","method":"holograph","title":"?"}"#];
+            let (mut session, log) = scripted("unknown-dialog", &events).await;
+            let mut stream = session.events().unwrap();
+
+            let message = next_message(&mut stream, 2000).await.expect("narrated");
+            let SessionMessage::Event(event) = message else {
+                panic!("an unknown method is narrated, not raised as a request: {message:?}");
+            };
+            assert_eq!(event.kind, EventKind::Status);
+            assert!(!event.is_error, "a gap in Sylph is not a session failure");
+            assert!(event.text.contains("holograph"), "{event:?}");
+
+            let lines = sent(&log, 1).await;
+            assert_eq!(
+                lines[0].get("cancelled").and_then(Value::as_bool),
+                Some(true),
+                "pi must be released rather than left blocking: {lines:?}"
+            );
+            assert_eq!(lines[0].get("id").and_then(Value::as_str), Some("uuid-9"));
+        }
+
+        /// **`interrupt` does not await pi's reply, and synthesizes no close.**
+        ///
+        /// *Measured at `agent-session.js:1171`:* `abort()` awaits `waitForIdle()`, so its
+        /// response arrives after the turn settles. The scripted peer answers `abort` with
+        /// **nothing at all**, which is the worst case of that: a `request` here would block
+        /// until [`process::REPLY_TIMEOUT`] and then report a failure for an abort that worked.
+        ///
+        /// The close is the vendor's to report — `_emitAgentSettled` sits in the `finally` of
+        /// `_runAgentPrompt`, so an aborted turn does emit one — and `aborted` is a user
+        /// stopping a turn rather than a failure, so writing one here would also colour an
+        /// interrupted turn as a broken one.
+        #[tokio::test]
+        async fn interrupt_returns_without_a_reply_and_publishes_nothing_itself() {
+            let (mut session, log) = scripted("interrupt", &[]).await;
+            let mut stream = session.events().unwrap();
+
+            tokio::time::timeout(Duration::from_secs(2), session.interrupt())
+                .await
+                .expect("interrupt must not wait on a reply pi sends after settling")
+                .expect("the abort must be accepted");
+
+            let lines = sent(&log, 1).await;
+            assert_eq!(lines[0].get("type").and_then(Value::as_str), Some("abort"));
+            assert!(
+                next_message(&mut stream, 300).await.is_none(),
+                "the close is the vendor's to report; a synthesized one is a second record"
+            );
+        }
+
+        /// **`send` returns on acceptance, not on completion.**
+        ///
+        /// *Measured at `rpc-mode.js:298`:* `prompt` answers as soon as its preflight succeeds,
+        /// and a failure after acceptance is reported through the event stream rather than as a
+        /// second response. The peer emits no events at all here, so a `send` that waited for a
+        /// turn would hang — which is what makes this observable.
+        #[tokio::test]
+        async fn send_returns_once_the_turn_is_accepted() {
+            let (session, log) = scripted("send-accept", &[]).await;
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                session.send(TurnInput {
+                    text: "hello".to_string(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("send must not await the turn")
+            .expect("the prompt must be accepted");
+
+            let lines = sent(&log, 1).await;
+            assert_eq!(lines[0].get("type").and_then(Value::as_str), Some("prompt"));
+            assert_eq!(
+                lines[0].get("message").and_then(Value::as_str),
+                Some("hello")
+            );
+        }
+
+        /// **A steer that names a turn is refused when no turn is running.**
+        ///
+        /// pi puts no turn id on the wire, so the id itself cannot be compared — what the
+        /// precondition prevents is a steer racing a turn boundary and being delivered into the
+        /// *next* conversation, and presence is the half this vendor can answer. `None` means
+        /// "whatever is running" and is forwarded, which is a coherent ask from a client with no
+        /// turn in view.
+        #[tokio::test]
+        async fn a_steer_naming_a_turn_is_refused_when_none_is_open() {
+            let (session, log) = scripted("steer-precondition", &[]).await;
+
+            session
+                .steer("keep going", Some("turn-7"))
+                .await
+                .expect_err("naming a turn that is not running must not be delivered");
+            // Forwarded without an expectation, because "whatever is running" is answerable.
+            session
+                .steer("keep going", None)
+                .await
+                .expect("an unconditional steer is pi's to accept or refuse");
+
+            let lines = sent(&log, 1).await;
+            let steers: Vec<&Value> = lines
+                .iter()
+                .filter(|line| line.get("type").and_then(Value::as_str) == Some("steer"))
+                .collect();
+            assert_eq!(
+                steers.len(),
+                1,
+                "exactly the unconditional one reached pi: {lines:?}"
+            );
+        }
+
+        /// **A steer naming a turn is delivered once a turn is genuinely open.**
+        ///
+        /// The other half of the test above, and the one that stops the guard from being
+        /// satisfied by an implementation that refuses every named steer. The turn state is read
+        /// from the shared [`translate::Correlation`] rather than from a copy, which is what
+        /// makes one answer to "is a turn open" impossible to disagree with.
+        #[tokio::test]
+        async fn a_named_steer_is_delivered_while_a_turn_is_open() {
+            let (mut session, log) = scripted(
+                "steer-open",
+                &[r#"{"type":"agent_start"}"#],
+            )
+            .await;
+            let mut stream = session.events().unwrap();
+
+            // Drained so the pump has processed `agent_start` before the steer is attempted —
+            // otherwise this would pass or fail on scheduling rather than on the guard.
+            let opened = next_message(&mut stream, 2000)
+                .await
+                .expect("the turn must open");
+            let SessionMessage::Event(event) = opened else {
+                panic!("expected the turn open, got {opened:?}");
+            };
+            assert_eq!(event.kind, EventKind::Turn);
+            assert_eq!(event.phase, Some(Phase::Started));
+
+            session
+                .steer("change course", Some("turn-7"))
+                .await
+                .expect("a turn is open, so the steer belongs to it");
+            let lines = sent(&log, 1).await;
+            assert_eq!(lines[0].get("type").and_then(Value::as_str), Some("steer"));
+        }
+
+        /// **The vendor reporting a different model publishes a `config`-only facet.**
+        ///
+        /// pi's own TUI can steer a session and a `/model` typed as prose changes it too, so a
+        /// client that only ever learns the model from its own `set_config` reply shows a stale
+        /// one indefinitely — announcing arrival without announcing departure, applied to a
+        /// value. The update names **only** `config`: an unmentioned facet must not be
+        /// clearable, which is the 46-erased-commands defect `CapabilityFacets` exists for.
+        #[tokio::test]
+        async fn a_model_the_vendor_reports_publishes_a_config_only_facet() {
+            let events = [
+                r#"{"type":"message_start","message":{"role":"assistant","model":"claude-opus-5","provider":"anthropic"}}"#,
+            ];
+            let (mut session, _log) = scripted("model-observed", &events).await;
+            let mut stream = session.events().unwrap();
+
+            let mut facets = None;
+            for _ in 0..10 {
+                match next_message(&mut stream, 2000).await {
+                    Some(SessionMessage::Capabilities(update)) => {
+                        facets = Some(update);
+                        break;
+                    }
+                    Some(_) => continue,
+                    None => break,
+                }
+            }
+            let facets = facets.expect("a model change must be published");
+            assert!(facets.config.is_some(), "the config facet is what changed");
+            assert!(
+                facets.commands.is_none()
+                    && facets.subagents.is_none()
+                    && facets.permission_mode.is_none()
+                    && facets.context_window.is_none(),
+                "an unmentioned facet must not be clearable: {facets:?}"
+            );
+            let config = facets.config.unwrap();
+            let model = config
+                .iter()
+                .find(|option| option.id == "model")
+                .expect("the refreshed array carries the model");
+            assert_eq!(
+                model.current_value.as_ref().and_then(Value::as_str),
+                Some("anthropic claude-opus-5"),
+                "and its value is read back from the vendor, not taken from the event"
+            );
+        }
+
+        /// **No event this adapter emits carries a `span`.**
+        ///
+        /// pi reports no delegation on the RPC wire in any form, so a `span` here would be
+        /// invented structure the timeline would then render as real
+        /// ([`translate::SPAN_HAS_NO_VENDOR_SOURCE`]). Asserted over a whole turn rather than
+        /// per event, because the failure would be one branch quietly synthesizing one.
+        #[tokio::test]
+        async fn nothing_this_adapter_publishes_carries_a_span() {
+            let events = [
+                r#"{"type":"agent_start"}"#,
+                r#"{"type":"message_start","message":{"role":"assistant"}}"#,
+                r#"{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}"#,
+                r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"working"}}"#,
+                r#"{"type":"tool_execution_start","toolCallId":"call-1","toolName":"bash","args":{"cmd":"ls"}}"#,
+                r#"{"type":"tool_execution_end","toolCallId":"call-1","toolName":"bash","result":{"content":"a.txt"}}"#,
+                r#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}"#,
+                r#"{"type":"agent_settled"}"#,
+            ];
+            let (mut session, _log) = scripted("no-span", &events).await;
+            let mut stream = session.events().unwrap();
+
+            let mut seen = 0;
+            while let Some(message) = next_message(&mut stream, 2000).await {
+                if let SessionMessage::Event(event) = message {
+                    seen += 1;
+                    assert!(
+                        event.span.is_none(),
+                        "pi exposes no delegation; this span is invented: {event:?}"
+                    );
+                    if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed) {
+                        break;
+                    }
+                }
+            }
+            assert!(seen >= 6, "the whole turn must have been observed, saw {seen}");
+        }
+
+        /// **Which base64 variant an image is encoded with**, which is this adapter's choice
+        /// rather than the crate's behaviour.
+        ///
+        /// Deliberately not a re-test of RFC 4648 conformance — `base64 0.22` has its own vectors
+        /// for that, and asserting them here would only pin that the dependency still works.
+        /// What is ours to get wrong is the *engine*: `STANDARD_NO_PAD` and `URL_SAFE` are one
+        /// token away in the same namespace, both compile, and both produce a string pi's own
+        /// decoder rejects — a silently empty image rather than an error.
+        ///
+        /// So the two assertions are exactly the two things a variant changes: padding, and the
+        /// `+`/`/` pair. `0xfb 0xff` is chosen because it is the shortest input that reaches both
+        /// high alphabet indices, where `URL_SAFE` would answer `-_8=`.
+        #[test]
+        fn an_image_is_encoded_as_padded_standard_base64_and_not_a_url_safe_variant() {
+            assert_eq!(
+                STANDARD.encode([0xfb, 0xff]),
+                "+/8=",
+                "the standard alphabet and its padding are what pi's decoder expects"
+            );
+            // A one-byte tail, the other padding length, so a `NO_PAD` engine cannot pass on the
+            // case above alone.
+            assert_eq!(STANDARD.encode(b"f"), "Zg==");
+        }
+
+        /// **An image is inlined and every other file is named by path.**
+        ///
+        /// A path to an image is something the model cannot see, and an inlined text file bloats
+        /// the message with what pi's own `read` tool would fetch on demand. The type is sniffed
+        /// from **magic bytes** rather than the extension, so this fixture deliberately gives a
+        /// PNG the wrong suffix — a mislabelled image sent as an image block is a provider error
+        /// a user cannot act on.
+        #[tokio::test]
+        async fn an_image_is_inlined_by_magic_bytes_and_other_files_are_named() {
+            let dir = scratch("attachments");
+            let png = dir.join("screenshot.txt");
+            let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+            bytes.extend_from_slice(b"not really a png body");
+            std::fs::write(&png, &bytes).unwrap();
+            let notes = dir.join("notes.md");
+            std::fs::write(&notes, "# notes").unwrap();
+
+            let (message, images) = build_message(
+                "look at these",
+                &[
+                    png.to_string_lossy().to_string(),
+                    notes.to_string_lossy().to_string(),
+                ],
+            );
+
+            assert_eq!(images.len(), 1, "only the image is inlined");
+            assert_eq!(
+                images[0].get("mimeType").and_then(Value::as_str),
+                Some("image/png"),
+                "sniffed from magic bytes despite the .txt suffix"
+            );
+            assert_eq!(
+                images[0].get("data").and_then(Value::as_str),
+                Some(STANDARD.encode(&bytes).as_str())
+            );
+            assert!(
+                message.contains("notes.md") && !message.contains("# notes"),
+                "a text file is named, not inlined: {message}"
+            );
+            assert!(
+                !message.contains("screenshot.txt"),
+                "an inlined image must not also be named as a file: {message}"
+            );
+            assert!(message.ends_with("look at these"), "{message}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+
+        /// **A vendor-initiated request whose id collides with an in-flight one must reach the
+        /// stream, not a waiter.**
+        ///
+        /// pi multiplexes both directions onto one stdout and `extension_ui_request` carries an
+        /// `id` of its own, so a predicate reading only `id` routes one into whichever waiter
+        /// holds that number. Both directions then fail silently: the request never reaches a
+        /// client, so nobody is asked and the turn waits on a human forever, while the caller
+        /// that sent `get_state` receives a UI request as its answer.
+        ///
+        /// The peer reproduces it exactly — the dialog carries the id of the command it is
+        /// answering — and both halves are asserted, because either alone passes on a broken
+        /// predicate: the caller must get its real reply, **and** the dialog must be published.
+        #[tokio::test]
+        async fn a_vendor_request_sharing_an_in_flight_id_reaches_the_stream_not_the_waiter() {
+            let (mut session, _log) = scripted_colliding("id-collision").await;
+            let mut stream = session.events().expect("the stream is yielded once");
+
+            // The caller's own reply, which a broken predicate hands to the dialog instead.
+            let surface = session
+                .capabilities()
+                .await
+                .expect("get_state's reply must reach the caller that sent it");
+            assert_eq!(
+                surface
+                    .config_option("model")
+                    .and_then(|option| option.current_value.as_ref())
+                    .and_then(Value::as_str),
+                Some("anthropic claude-opus-5")
+            );
+
+            // And the dialog, which a broken predicate swallows into that same waiter.
+            let mut published = None;
+            for _ in 0..10 {
+                match next_message(&mut stream, 2000).await {
+                    Some(SessionMessage::Request(request)) => {
+                        published = Some(request);
+                        break;
+                    }
+                    Some(_) => continue,
+                    None => break,
+                }
+            }
+            let published = published.expect(
+                "the dialog must be published; swallowed, pi waits on a human nobody asked",
+            );
+            assert_eq!(published.kind, sylph_protocol::RequestKind::Choice);
+            assert_eq!(published.title, "Pick");
+        }
+        /// **Opening without a dictated id is refused rather than answered with an invented
+        /// one.**
+        ///
+        /// `dictates_native_id` is true for this agent, so the server always names an id. The
+        /// Python original minted one (`adapter.py:257`, `uuid.uuid4()`), which is the
+        /// synthesized-identity failure [`NativeId`] forbids: the id would look like the
+        /// vendor's and be Sylph's, and every comparison against the vendor's own store would
+        /// then be silently always false.
+        ///
+        /// Refused **before the spawn**, which is what makes this assertable without pi
+        /// installed — and is also the right order: a process started under an identity nobody
+        /// can resume is worse than one that never started.
+        #[tokio::test]
+        async fn opening_without_a_dictated_id_is_refused_before_anything_is_spawned() {
+            let spec = RunSpec {
+                workdir: "/tmp".to_string(),
+                native_id: RequestedNativeId::New,
+                inject_identity: false,
+                identity_preamble: None,
+                flags: Default::default(),
+                permission_mode: None,
+            };
+            let error = PiSession::open(spec)
+                .await
+                .err()
+                .expect("pi dictates its id; opening without one must fail");
+            assert!(
+                error.to_string().contains("Dictate") || error.to_string().contains("Resume"),
+                "the error must say what to open it with: {error}"
+            );
+        }
+
+        /// **The preamble placeholder is substituted with a file that exists.**
+        ///
+        /// `--append-system-prompt` reads its argument as a *file* when the string names one and
+        /// as literal text otherwise (`core/resource-loader.js:391`, `resolvePromptInput`), so a
+        /// one-line preamble that happened to name a real path would be silently replaced by
+        /// that file's contents. A file makes it unambiguous.
+        ///
+        /// Both halves are asserted, because either alone passes on a broken implementation:
+        /// the marker must be **gone** — otherwise the vendor is handed
+        /// `<sylph-identity-preamble>` as a system prompt, which is exactly what the marker
+        /// exists to make visible — and the path that replaced it must hold the text.
+        #[test]
+        fn the_preamble_placeholder_becomes_a_readable_file() {
+            let path = write_preamble("# Sylph\nYou are running inside Sylph.").unwrap();
+            let argv = vec![
+                "pi".to_string(),
+                "--mode".to_string(),
+                "rpc".to_string(),
+                "--append-system-prompt".to_string(),
+                crate::pi::IDENTITY_PREAMBLE_PLACEHOLDER.to_string(),
+            ];
+            let args = spawn_args(argv, Some(&path));
+
+            assert_eq!(args.first().map(String::as_str), Some("--mode"));
+            assert!(
+                !args
+                    .iter()
+                    .any(|part| part == crate::pi::IDENTITY_PREAMBLE_PLACEHOLDER),
+                "an unsubstituted marker reaches the vendor as prompt text: {args:?}"
+            );
+            let written = args.last().expect("the flag's value");
+            assert_eq!(written, &path.to_string_lossy().to_string());
+            assert_eq!(
+                std::fs::read_to_string(written).unwrap(),
+                "# Sylph\nYou are running inside Sylph."
+            );
+
+            // Nothing is substituted when the server asked for no identity, and the marker is
+            // then absent from `argv_for`'s output rather than left for this function to strip.
+            let plain = spawn_args(vec!["pi".to_string(), "--mode".to_string()], None);
+            assert_eq!(plain, vec!["--mode".to_string()]);
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
