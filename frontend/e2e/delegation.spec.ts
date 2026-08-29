@@ -16,6 +16,34 @@ import { createSession } from "./fixtures/session";
  * why they are separate rather than one walkthrough.
  */
 
+/**
+ * Wait for the turn-settle sweep, by waiting on something the sweep itself produces.
+ *
+ * `Stop` disappearing is the wrong signal and was the cause of this file reading as flaky:
+ * `TurnCloser::close` writes the terminal status, returns the session to idle, and only
+ * *then* closes whatever trajectories the turn left open. So `Stop` is gone — and a poll of
+ * the turn row answers terminal — while the sweep has emitted nothing yet. Specs asserting
+ * on swept state therefore raced it, and whichever lost was the one that failed: `:137`,
+ * `:348`, and `:373` have each been the failure on different runs of the same tree.
+ *
+ * The fixture leaves one delegation open on purpose, so *the sweep closing it* is the
+ * observable end of the sweep — the card reads "never finished" only once the server has
+ * closed it. That is a fact this file already asserts elsewhere, which is what makes it the
+ * right thing to wait on: no product surface exists solely for the test.
+ *
+ * Waiting on the closer's post-sweep `status` frame instead was tried and abandoned: the
+ * client cannot deliver it to a spec, because the page ends this tab's claim on a turn as
+ * soon as *history* holds it terminal — which is before the sweep, and which is load-bearing
+ * for adopting an agent-initiated turn. Measured with the sweep delayed 1500ms, no
+ * client-side settle signal appeared in 24.5s of sampling. `docs/roadmap.md` carries what
+ * that gap costs the product; this helper only needs a signal, and the swept card is one.
+ */
+async function sweptClosed(page: import("@playwright/test").Page) {
+  await expect(
+    page.getByRole("region", { name: "Stranded delegation" }),
+  ).toContainText("never finished", { timeout: 20000 });
+}
+
 async function runDelegation(page: import("@playwright/test").Page) {
   await createSession(page);
   await page.getByLabel("Message").fill("delegate this please");
@@ -33,13 +61,9 @@ async function runDelegation(page: import("@playwright/test").Page) {
   // different spec each time, which reads as flakiness rather than as one shared
   // dependency on a signal nobody waited for.
   //
-  // Send/Stop is that signal. Not `Send` being *enabled*: that also tracks whether
-  // the textarea holds text, so it is disabled on an idle empty composer and waiting
-  // for it waits for something that never happens. The composer renders Stop while a
-  // turn is live and Send once it is not, so the control's *presence* is the one fact.
-  await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0, {
-    timeout: 20000,
-  });
+  // And `Stop` disappearing is *not* that signal — see `sweptClosed` above. It means the
+  // turn is terminal, which happens before the sweep these specs assert on.
+  await sweptClosed(page);
 }
 
 test("each delegation is one card, named for the agent rather than the tool", async ({
@@ -217,19 +241,23 @@ async function runPromotion(page: import("@playwright/test").Page) {
   await page.getByLabel("Message").fill("promote this workflow");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
-  // Waits for the *settled* turn, not for the scenario's first line.
+  // Waits for the *settled* turn, not for the scenario's first line — and specifically for
+  // the turn-settle sweep, which is a later thing still. See `sweptClosed` above for why
+  // `Stop` disappearing is the wrong signal. This scenario emits four hosts and a
+  // backgrounded Bash, so the gap between its first line and its last is wide enough to
+  // lose a host count to.
   //
-  // `docs/roadmap.md` records why: every spec here asserts on state the turn-settle
-  // sweep produces, so waiting on an early card starts asserting while later events are
-  // still arriving — and the spec that fails is then whichever one raced, which reads
-  // as flakiness rather than as one shared dependency. This scenario emits four hosts
-  // and a backgrounded Bash, so the gap between its first line and its last is wide
-  // enough to lose a host count to.
+  // **Still `Stop`, deliberately, and this is the weaker of the two waits.** The swept
+  // signal `runDelegation` uses is not available here: this scenario's promoted host is
+  // closed by the sweep too, but *whether the client ever renders that close* is subject to
+  // the product race recorded in `docs/roadmap.md` § A swept trajectory close can be lost —
+  // the stream can be gone before the sweep's event arrives. Waiting on it therefore turned
+  // a latent bug into a red suite roughly one run in twenty-two, which is a worse trade than
+  // leaving the weaker wait and naming the gap.
   //
-  // Send/Stop is the observable end of the turn: the composer renders Stop while one is
-  // live and Send once it settles. Not `Send` being *enabled* — that also tracks
-  // whether the textarea has content, so it is disabled on an idle empty composer and
-  // asserting on it waits for something that never happens.
+  // So this waits for terminal and the specs below carry their own deadlines. When that
+  // client race is fixed, this should become the same `toContainText("never finished")` wait
+  // on `workflowHosting(page, "Stage A: A:item-1")` that `:367` already asserts.
   await expect(page.getByText("Running a workflow.")).toBeVisible({ timeout: 15000 });
   await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0, {
     timeout: 20000,

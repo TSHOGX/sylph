@@ -458,6 +458,16 @@ impl TestBackend {
     /// recover the id would leave an orphan session behind and make any
     /// session-counting assertion silently wrong.
     pub async fn create_session(&self, agent: &str) -> String {
+        let workdir = self.workdir.display().to_string();
+        self.create_session_in(agent, &workdir).await
+    }
+
+    /// [`Self::create_session`] in a named directory.
+    ///
+    /// For the filter tests, which need two sessions in *different* directories — and
+    /// specifically in sibling directories whose paths are prefixes of one another, since
+    /// that is the case a substring filter gets wrong.
+    pub async fn create_session_in(&self, agent: &str, workdir: &str) -> String {
         // Read back from the server rather than hardcoded — see `environment_id`.
         let environment = self.environment_id().await;
         let response = self
@@ -468,7 +478,7 @@ impl TestBackend {
                     // there is no global default that would be true anywhere.
                     "environment": environment,
                     "agent": agent,
-                    "workdir": self.workdir.display().to_string(),
+                    "workdir": workdir,
                     "title": "Test session",
                 }),
             )

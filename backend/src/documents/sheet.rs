@@ -204,6 +204,59 @@ mod tests {
         assert_eq!(number.t, crate::documents::grid::CellType::Number);
     }
 
+    /// Text interned in `sharedStrings.xml` reads as text, not as its index.
+    ///
+    /// The shape every real workbook has and no other fixture here had: a cell carrying
+    /// `t="s"` and an *index*, with the characters in a shared table. A reader that
+    /// mishandles the table returns `0` where the user wrote `Region` — on essentially
+    /// every file a user would open. The repeat at `A3` is load-bearing: interning means
+    /// two cells with the same text share one entry, so a reader consuming entries
+    /// positionally rather than by index drifts after the first duplicate.
+    #[test]
+    fn shared_strings_read_as_their_text_and_not_their_index() {
+        let file = testing::xlsx_shared_strings();
+        let grid = parse(file.path(), Window::new(None, None, None)).unwrap();
+
+        assert_eq!(grid.rows[0][0].as_ref().unwrap().v, "Region");
+        assert_eq!(grid.rows[0][1].as_ref().unwrap().v, "Revenue");
+        assert_eq!(grid.rows[1][0].as_ref().unwrap().v, "APAC");
+        assert_eq!(
+            grid.rows[2][0].as_ref().unwrap().v,
+            "APAC",
+            "a repeated string shares one table entry and must still resolve"
+        );
+        assert_eq!(
+            grid.rows[0][0].as_ref().unwrap().t,
+            crate::documents::grid::CellType::Text,
+            "an interned string is text, not the number its index looks like"
+        );
+    }
+
+    /// A date is a serial number plus a `numFmt`, and must arrive as a date.
+    ///
+    /// There is no date type in a cell. The value is a day count and the style decides
+    /// what it means, so a reader looking for a type renders `46112` where the user wrote
+    /// a date. `calamine`'s `dates` feature is in the manifest for exactly this and had
+    /// nothing exercising it — the only test that did read a spike directory that is not
+    /// in the repo.
+    #[test]
+    fn a_styled_serial_arrives_as_a_date_rather_than_a_number() {
+        let file = testing::xlsx_styled_date();
+        let grid = parse(file.path(), Window::new(None, None, None)).unwrap();
+
+        let cell = grid.rows[1][0].as_ref().expect("the styled cell");
+        assert_eq!(
+            cell.t,
+            crate::documents::grid::CellType::Date,
+            "serial 46112 under numFmtId 14 is a date, got {cell:?}"
+        );
+        assert!(
+            cell.v.starts_with("2026-03-31"),
+            "the serial must render as its calendar date, got {}",
+            cell.v
+        );
+    }
+
     #[test]
     fn empty_cells_are_null_rather_than_empty_strings() {
         let file = testing::xlsx_sparse();

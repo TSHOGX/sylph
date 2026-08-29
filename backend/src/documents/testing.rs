@@ -49,6 +49,20 @@ fn archive(parts: &[(&str, String)]) -> Vec<u8> {
 /// `sheets` is `(name, sheet_xml)`. The relationship ids are positional, which is
 /// all a synthetic fixture needs; real files are not required to be.
 fn xlsx(sheets: &[(&str, String)]) -> NamedTempFile {
+    xlsx_with_parts(sheets, &[], "")
+}
+
+/// [`xlsx`] plus extra package parts and extra `[Content_Types]` overrides.
+///
+/// Exists because two shapes every real workbook has cannot be expressed without one:
+/// a `sharedStrings.xml` part, and a `styles.xml` carrying the `numFmt` that makes a
+/// number a *date*. Both were previously reachable only through a checked-out spike
+/// directory, which meant three `#[ignore]`d tests and no coverage at all.
+fn xlsx_with_parts(
+    sheets: &[(&str, String)],
+    extra: &[(&str, String)],
+    extra_overrides: &str,
+) -> NamedTempFile {
     let sheet_entries = sheets
         .iter()
         .enumerate()
@@ -89,7 +103,7 @@ fn xlsx(sheets: &[(&str, String)]) -> NamedTempFile {
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
 <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-{overrides}
+{overrides}{extra_overrides}
 </Types>"#
             ),
         ),
@@ -125,6 +139,9 @@ fn xlsx(sheets: &[(&str, String)]) -> NamedTempFile {
     for (path, (_, body)) in sheet_paths.iter().zip(sheets) {
         parts.push((path.as_str(), body.clone()));
     }
+    for (path, body) in extra {
+        parts.push((path, body.clone()));
+    }
 
     write_temp_named(".xlsx", &archive(&parts))
 }
@@ -141,6 +158,11 @@ fn worksheet(rows: String) -> String {
 /// An inline string cell, avoiding a shared-strings part.
 fn text_cell(reference: &str, value: &str) -> String {
     format!(r#"<c r="{reference}" t="inlineStr"><is><t>{value}</t></is></c>"#)
+}
+
+/// A cell whose text is an *index* into `sharedStrings.xml`, as real tooling writes.
+fn shared_cell(reference: &str, index: usize) -> String {
+    format!(r#"<c r="{reference}" t="s"><v>{index}</v></c>"#)
 }
 
 fn number_cell(reference: &str, value: &str) -> String {
@@ -187,6 +209,72 @@ pub fn xlsx_typed() -> NamedTempFile {
         number_cell("B3", "980.5"),
     );
     xlsx(&[("Sales", worksheet(rows))])
+}
+
+/// A workbook whose text lives in `sharedStrings.xml`, as every real one does.
+///
+/// **This is the shape the other fixtures avoid.** `text_cell` writes `t="inlineStr"`
+/// with the characters in the cell, which is legal and is what a minimal fixture
+/// reaches for — and it is *not* what openpyxl, Excel, or Numbers emit. They intern
+/// every string into a shared table and leave `t="s"` with an *index* in the cell, so a
+/// reader that mishandles the table returns the index as the value, or nothing at all,
+/// on essentially every workbook a user would open.
+///
+/// The coverage this replaces was a `#[ignore]`d test reading a checked-out spike
+/// directory that no longer exists, so this property had gone from "tested elsewhere"
+/// to untested without anything reporting it.
+pub fn xlsx_shared_strings() -> NamedTempFile {
+    // Indices are positions in the `<sst>` below, and the duplicate is deliberate:
+    // interning means two cells with the same text share one entry, so a reader that
+    // consumes entries positionally rather than by index drifts after the first repeat.
+    let rows = format!(
+        r#"<row r="1">{}{}</row><row r="2">{}{}</row><row r="3">{}{}</row>"#,
+        shared_cell("A1", 0),
+        shared_cell("B1", 1),
+        shared_cell("A2", 2),
+        number_cell("B2", "1200"),
+        shared_cell("A3", 2),
+        number_cell("B3", "980.5"),
+    );
+    let sst = r#"<?xml version="1.0" encoding="UTF-8"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="6" uniqueCount="3">
+<si><t>Region</t></si><si><t>Revenue</t></si><si><t>APAC</t></si>
+</sst>"#
+        .to_string();
+    xlsx_with_parts(
+        &[("Sales", worksheet(rows))],
+        &[("xl/sharedStrings.xml", sst)],
+        r#"<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>"#,
+    )
+}
+
+/// A date that is a **number plus a style**, which is the only way Excel stores one.
+///
+/// There is no date type in a cell: the value is a serial day count and a `numFmt` on
+/// the referenced style is what makes it a date. So a reader that looks for a type
+/// renders `46112` where a user wrote `2026-03-31` — and `calamine`'s `dates` feature is
+/// in the manifest specifically to prevent that, with nothing exercising it until now.
+///
+/// `numFmtId="14"` is the built-in `mm-dd-yy`, so no custom format table is needed.
+pub fn xlsx_styled_date() -> NamedTempFile {
+    let rows = format!(
+        r#"<row r="1">{}</row><row r="2"><c r="A2" s="1"><v>46112</v></c></row>"#,
+        text_cell("A1", "When"),
+    );
+    let styles = r#"<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<numFmts count="0"/>
+<cellXfs count="2">
+<xf numFmtId="0" applyNumberFormat="0"/>
+<xf numFmtId="14" applyNumberFormat="1"/>
+</cellXfs>
+</styleSheet>"#
+        .to_string();
+    xlsx_with_parts(
+        &[("Dates", worksheet(rows))],
+        &[("xl/styles.xml", styles)],
+        r#"<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>"#,
+    )
 }
 
 /// A sheet with a hole in it, to prove empty cells serialize as null.

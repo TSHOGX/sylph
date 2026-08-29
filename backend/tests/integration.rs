@@ -1193,14 +1193,69 @@ async fn search_requires_auth() {
 
 
 
-// ------------------------------------------------------- archive browsing
+// ------------------------------------------------------- workdir filtering
 
+/// A `workdir` filter names **one** directory, never a prefix of several.
+///
+/// `JournalStore::list_sessions` compiles it to `rtrim(workdir,'/') = rtrim(?3,'/')`, and
+/// the rule is the one `docs/database-schema.md` carries: the store this replaced used
+/// `LIKE '%' || ? || '%'`, so asking for `/w/app` also answered `/w/app-old` and every
+/// subdirectory. Nothing asserted it — the only test in this area checked that a deleted
+/// `/api/v1/archive/sessions` route answered 401, which it did because *every* unmatched
+/// route is behind auth, so it exercised the auth fallback rather than any filter.
+///
+/// Both halves matter and fail differently: a sibling must not match (a substring filter's
+/// symptom) and a trailing slash must (the reason `rtrim` is there at all).
 #[tokio::test]
-async fn archive_listing_requires_auth() {
+async fn a_workdir_filter_names_one_directory_and_not_its_neighbours() {
     let backend = TestBackend::start().await;
+    let root = backend.workdir().to_path_buf();
 
-    let response = backend.get("/api/v1/archive/sessions?workdir=/w/app").await;
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // Two sibling directories where one's path is a prefix of the other's.
+    let app = root.join("app");
+    let app_old = root.join("app-old");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&app_old).unwrap();
+
+    let in_app = backend.create_session_in("mock", &app.display().to_string()).await;
+    let in_app_old = backend
+        .create_session_in("mock", &app_old.display().to_string())
+        .await;
+
+    let ids = |body: &Value| -> Vec<String> {
+        body["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let encoded = urlencoding(&app.display().to_string());
+    let exact = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions?workdir={encoded}"))
+            .await,
+    )
+    .await;
+    assert_eq!(
+        ids(&exact),
+        vec![in_app.clone()],
+        "a prefix sibling must not match: {exact}"
+    );
+    assert!(
+        !ids(&exact).contains(&in_app_old),
+        "`app-old` is a different directory from `app`"
+    );
+
+    // And a trailing slash is the same directory, which is what `rtrim` is for.
+    let trailing = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions?workdir={encoded}%2F"))
+            .await,
+    )
+    .await;
+    assert_eq!(ids(&trailing), vec![in_app], "a trailing slash is the same directory");
 }
 
 
