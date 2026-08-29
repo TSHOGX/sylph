@@ -34,6 +34,7 @@ pub mod claude;
 pub mod codex;
 pub mod native;
 pub mod pi;
+pub mod process;
 
 #[cfg(feature = "e2e")]
 pub mod e2e;

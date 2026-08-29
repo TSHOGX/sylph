@@ -28,6 +28,12 @@ chrono = { workspace = true }
 # command line. Never used to mint a *native* id the vendor then reports: that
 # would be the synthesized-identity failure `sylph_protocol::NativeId` forbids.
 uuid = { version = "1.11", features = ["v4"] }
+# `process::Child` signals a vendor's whole process group, so a stop reaches the
+# tool the CLI spawned rather than only the CLI. `killpg` is not in `std`.
+libc = "0.2"
+# One `debug!` on a benign signal race. The crate is a library, so it declares
+# the facade and never installs a subscriber.
+tracing = "0.1"
 
 [features]
 # The deterministic E2E agent. Behind a feature because it is a test fixture that
