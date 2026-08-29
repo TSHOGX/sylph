@@ -1,22 +1,23 @@
 # Sylph Web
 
-Local-first native UI for Sylph and coding-agent sessions archived by TraceDB.
+Local-first web interface for coding-agent sessions: `claude`, `codex`, and `pi`.
 
-Sylph Web can create Sylph-managed sessions, stream live tool/reasoning events, send
-local attachments, search stable cross-agent history, and resume sessions originally
-created in another agent without changing their identity policy.
+Sylph Web creates and runs sessions, streams tool and reasoning events as they happen,
+sends local attachments, searches every session it holds, and adopts sessions a vendor CLI
+created on this machine without changing their identity.
 
-Two adapters ship in the repo, `claude` and `pi` (`adapters/`). Reading and importing
-archived history is not limited to those: Claude Code, Codex, and Pi can all be browsed
-and searched. *Continuing* an imported session needs an adapter for its originating
-agent, so today that means `claude` or `pi`; `codex` opens read-only.
+The three agents are linked into the backend, so a checkout has agents with nothing to
+install beyond the vendor CLIs themselves. An agent is available when its CLI is on your
+`PATH`.
 
 ## Architecture
 
 - **Backend:** Rust + Axum + SQLx + Tokio
 - **Frontend:** Next.js 16 + React 19 + TypeScript + TanStack Query
-- **Database:** SQLite (live sessions) + TraceDB (stable history)
-- **API:** REST + SSE streaming on `http://127.0.0.1:4317`
+- **Store:** SQLite — `journal.db` for turns in flight, `history.db` for consolidated
+  blocks and the full-text index, `blobs/` beside them. One authoritative record, split
+  for SQLite's sake.
+- **API:** REST + SSE on `http://127.0.0.1:4317`
 
 ## Quick Start
 
@@ -31,16 +32,14 @@ cpolar tunnels or LAN access — use the development guide for those scenarios.
 
 ### Prerequisites
 
-- Rust 1.85+
+- Rust 1.88+
 - Node.js 22.5+
-- TraceDB, for archived cross-agent history. Optional and a separate project —
-  without it, live sessions still work and archive search reports itself
-  unavailable. Put `trace-db` on your `PATH`, or set `tracedb.bin` in
-  `~/.sylph/config.toml`.
+- At least one agent CLI on your `PATH`: `claude`, `codex`, or `pi`. Sylph reads each
+  vendor's own session store where it already lives, so there is nothing to import and
+  nothing to configure.
 
-Agent adapters ship with the repo under `adapters/`, so a checkout has agents with
-nothing to install. On first start Sylph creates `~/.sylph` with a commented
-`config.toml` and a `SOUL.md` you can edit.
+On first start Sylph creates `~/.sylph` with a fully commented `config.toml` and a
+`SOUL.md` you can edit or delete.
 
 ### First Run
 
@@ -53,23 +52,20 @@ cd backend
 cargo run
 ```
 
-It binds `http://127.0.0.1:4317` and creates its database on first start.
-Confirm it is up, and whether it found your archive:
+It binds `http://127.0.0.1:4317` and creates its store on first start.
+Confirm it is up:
 
 ```sh
 curl -s http://127.0.0.1:4317/api/v1/health
-# {"ok":true,"apiVersion":"1","schemaVersion":3,
-#  "tracedb":{"available":true},"agents":{"available":true}}
+# {"ok":true,"apiVersion":"1","schemaVersion":1,"agents":{"available":true}}
 ```
 
 `agents.available: false` *is* a failure, and the one worth checking first: with no
-adapter discovered, every other probe answers successfully while no session can be
-created. `/api/v1/diagnostics` names the directories searched and any adapter that
-failed its handshake.
-
-`tracedb.available: false` is not a failure. Live sessions work; only archive
-search and native import are unavailable. Put `trace-db` on your `PATH`, or set
-`tracedb.bin` in `~/.sylph/config.toml`.
+agent CLI found, every other probe answers successfully while no session can be created
+and the composer's slash menu cannot open. `cargo run -- doctor` lists which agents were
+found, and `GET /api/v1/environments` reports availability per machine — which is the
+better question once more than one machine is paired, since "codex is not installed on
+this laptop" is a fact about one environment.
 
 **Terminal 2 — frontend:**
 
@@ -93,25 +89,21 @@ The start screen walks a first run itself. In short:
    above the page's handlers and beyond `preventDefault`
    (`docs/keyboard-shortcuts-default-sessions-settings.md` § 1).
 2. Type a message and send. The agent is switchable until that first message; model
-   and reasoning effort are per-turn controls in the composer.
-
-If the agent list is empty, none were discovered. The backend logs
-`Agent discovery: N usable, M broken` at startup and names every directory it
-searched; `curl -s http://127.0.0.1:4317/api/v1/diagnostics` reports the same, plus
-any adapter that failed its handshake and why.
+   and reasoning effort are per-turn controls in the composer, populated from what the
+   live agent declares for itself.
 
 Events stream in as the agent works: thinking, tool calls, then the reply.
 Closing the tab mid-turn is safe — reopening resumes the stream from where it
 left off rather than replaying from the start.
 
-**Read what agents already did here** (needs TraceDB): press `Cmd+Shift+K` to page
-a directory's archived history, or `Cmd+K` to search every session and the archive
-together. Archived transcripts open read-only.
+**Read what agents already did here:** press `Cmd+Shift+K` to page a directory's
+history, or `Cmd+K` to search every session Sylph holds.
 
-**Import an archived session** (needs TraceDB): from **Search archive**, query for
-something you remember saying, and import a hit. The session is restored with
-its original agent identity and lifecycle. Sylph never injects `SOUL.md`,
-resets, or rewrites prompts for an imported native session.
+**Adopt an existing session:** `Cmd+P` → **Adopt an existing session** lists what the
+vendor CLIs on this machine have recorded, filterable by agent and path. Adopting one
+parses its native store into the same events a live turn emits, so it reads like any
+other session and can be continued. Sylph never injects `SOUL.md` into a session it did
+not create.
 
 ### Verifying a Checkout
 
@@ -121,31 +113,30 @@ cd frontend && npm test && npm run build && npx eslint .
 cd frontend && npm run e2e
 ```
 
-That is 322 backend unit + 207 backend integration + 381 frontend unit + 149 E2E,
-measured on `main` on 2026-08-26. These grow with every phase, so treat them as a
-sanity check rather than a target: the suites report their own totals, and
-`docs/roadmap.md` § Current State carries the figure that is maintained.
+The suites report their own totals; treat them as a sanity check rather than a target.
 `npm run build` type-checks, so it is the TypeScript gate — there is no separate
 `tsc` step. `cargo` is not on the default `PATH`; use `~/.cargo/bin/cargo` or export
 it first.
 
 `npm run e2e` starts its own backend and frontend on separate ports with a
-throwaway `SYLPH_HOME` and a mock adapter, so it does not touch your journal,
-your archive, or your real agents. It needs no servers running beforehand.
+throwaway `SYLPH_HOME` and a fixture agent, so it does not touch your store or your
+real agents. It needs no servers running beforehand, and refuses to run against a
+server left behind by an interrupted one — clear its ports if it complains:
+
+```sh
+for p in 4318 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done
+```
 
 ### Troubleshooting
 
-- **Agent dropdown empty** — none discovered. The startup log says
-  `Agent discovery: N usable, M broken` and names every directory searched;
-  `/api/v1/diagnostics` reports the same list plus any adapter that failed its
-  handshake, with the error. `cargo run -- doctor` answers a different question —
-  what *configuration* resolved to — and deliberately runs no handshake, so it
-  counts adapters in your own agents directory rather than discovering them.
+- **Agent dropdown empty** — no agent CLI was found on `PATH`. The startup log says so
+  at `error` level and names what it looked for; `cargo run -- doctor` lists the agents
+  it found, and `/api/v1/environments` reports availability per machine with a reason.
 - **Browser 401s after a backend restart** — the auth token is regenerated on
   every start. Reload the page to pick up a fresh one.
-- **Import fails with `TRACE_SESSION_NOT_RESUMABLE`** — the archive recorded no
-  working directory for that session, so there is nowhere to resume it. Older
-  `trace-db` versions did not record one.
+- **Adopting fails with `NATIVE_SESSION_NOT_RESUMABLE`** — the vendor recorded no
+  working directory for that session, so there is nowhere to run it. Its transcript
+  still reads.
 - **Port 4317 in use** — set `SYLPH_PORT`, and point the frontend at it
   with `SYLPH_WEB_BACKEND`. For a production build, set `SYLPH_WEB_BACKEND`
   for `npm run build` as well: Next compiles the proxy target into the route
@@ -161,10 +152,13 @@ Everything Sylph owns lives under `~/.sylph`, and everything you configure is in
 ~/.sylph/
 ├── config.toml      Your settings.
 ├── SOUL.md          The identity preamble. Yours to edit or delete.
-├── agents/          Agent adapters you add.
 ├── data/            Journal, history, blobs, attachments. Back this up.
 └── scratch/         Where Quick Start sessions run.
 ```
+
+Adapters are linked into the backend rather than loaded from a directory, so there is
+nothing to install under `~/.sylph` and no setting naming one. When a vendor changes
+faster than the shipped adapter, the fix is upgrading Sylph on that machine.
 
 To see what actually resolved, and who supplied each value:
 
@@ -178,12 +172,6 @@ An environment variable overrides the file — `SYLPH_HOME` relocates the whole
 install, `SYLPH_PORT` the backend port. Full reference:
 [**docs/configuration.md**](docs/configuration.md).
 
-Moving data from an older install:
-
-```sh
-cd backend && cargo run -- migrate --from ~/.agents/data/sylph/web
-```
-
 ## Documentation
 
 Comprehensive documentation lives in `docs/`. [**docs/README.md**](docs/README.md) is
@@ -192,16 +180,17 @@ reader wants.
 
 - [**Documentation Index**](docs/README.md) — every document, and which one owns a
   given question
-- [**Configuration**](docs/configuration.md) — `~/.sylph`, `config.toml`, and migration
+- [**Configuration**](docs/configuration.md) — `~/.sylph`, `config.toml`, and settings
 - [**Development**](docs/development.md) — herdr deployment, health checks, troubleshooting
 - [**Installation**](docs/installation.md) — Packaged install, upgrade, rollback
-- [**Architecture**](docs/architecture.md) — System design and data flow
-- [**Session Protocol**](docs/session-protocol.md) — `sylph.agent.v3`, the contract an
-  adapter speaks
+- [**Architecture**](docs/architecture.md) — System design, session model, identity
+- [**Environments**](docs/environments.md) — Where a session's work runs
+- [**Session Protocol**](docs/session-protocol.md) — The contract an adapter speaks
+- [**Agents**](docs/agents.md) — Per-vendor shapes, quirks, and control surfaces
 - [**Storage**](docs/storage.md) — Tiered history, replay, watermark-gated retention
 - [**Frontend Architecture**](docs/frontend-architecture.md) — How the frontend is built
 - [**UI Layout**](docs/ui-layout.md) — What the interface is: panes, surfaces, tokens
-- [**Roadmap**](docs/roadmap.md) — Project status and future enhancements
+- [**Roadmap**](docs/roadmap.md) — Project status and what is next
 - [**API Design**](docs/api-design.md) — REST endpoints and SSE streaming
 - [**Database Schema**](docs/database-schema.md) — SQLite schema and migrations
 
@@ -233,21 +222,24 @@ Artifacts pane, which previews Excel, Word, PowerPoint, CSV, images, HTML, and P
 alongside code and Markdown — parsed server-side, so no document parser runs in the
 browser.
 
-**Reads history that predates it.** The sidebar groups sessions by the directory they
-ran in and merges live rows with TraceDB's archive, so a directory shows what agents
-did there before this app existed. `Cmd+Shift+K` pages one directory's history;
-`Cmd+K` searches live sessions and the archive together. An archived session opens
-read-only and can be continued explicitly.
+**Renders delegated work as a tree.** A subagent is a card inside the turn that spawned
+it, to whatever depth the agent used, collapsed by default — and a failure three levels
+down is reported on the collapsed card above it, so nothing has to be opened to learn
+something broke.
 
-**Keeps native sessions native.** A session imported from another agent preserves
-that agent's identity and lifecycle. Sylph never injects `SOUL.md`, resets, or
-rewrites prompts for one — the backend sends the empty `SYLPH_SOUL` that
-`sylph.agent.v3` reserves for exactly that.
+**Reads history that predates it.** The sidebar groups sessions by the directory they
+ran in, so a directory shows what agents did there before this app existed. Native
+history is parsed by the same adapter that runs a live turn, into the same event
+vocabulary, so there is one record and one search over it.
+
+**Says how much resolution a record has.** `fidelity` is a property of the record —
+`stream`, `blocks`, or `messages` — because a waterfall drawn over message-granularity
+data would present equal-length bars as measurements. A surface reads it before drawing
+a duration.
 
 Deliberately absent, with reasons in [roadmap](docs/roadmap.md): session
-delete/move/export, native→Sylph conversion, "Open in Default App" / "Reveal in
-Finder", and any non-loopback access story. Dark mode shipped in Phase 9 and is no
-longer on this list.
+delete/move/export, "Open in Default App" / "Reveal in Finder", and any non-loopback
+access story.
 
 ## Contributing
 
