@@ -15,7 +15,7 @@
 //! and `archive_id` bridged two id spaces — a Sylph UUID and the archive's
 //! `<agent>:<native-id>` — and the identity triple deletes the second space
 //! outright (`docs/architecture.md` § Identity), so there is nothing left to
-//! translate between. [`Lineage`] survives because its *precedence* rule is a fact
+//! translate between. [`Lineage`](crate::db::labels::Lineage) survives because its *precedence* rule is a fact
 //! about vendors rather than about the archive.
 
 use sylph_protocol::SessionId;

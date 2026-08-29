@@ -99,7 +99,7 @@ pub struct TreeResponse {
     /// The requested directory, relative to the workdir.
     pub path: String,
     pub entries: Vec<FileEntry>,
-    /// True when the directory holds more than [`MAX_ENTRIES`] entries.
+    /// True when the directory holds more than `MAX_ENTRIES` entries.
     pub truncated: bool,
 }
 
@@ -477,7 +477,7 @@ pub struct RawQuery {
 ///
 /// # Why this is the "open in a new tab" route
 ///
-/// The pane's viewer is bounded on purpose — [`MAX_PREVIEW_BYTES`] and
+/// The pane's viewer is bounded on purpose — `MAX_PREVIEW_BYTES` and
 /// [`TRUNCATE_TO_BYTES`] keep a 40 MB log from being pushed through JSON into a
 /// 320px panel. But "the preview is truncated" should not mean "you cannot see
 /// this file", so the same file is reachable here in full, rendered by the
@@ -1040,7 +1040,7 @@ pub struct RemoveQuery {
 ///   one they meant, and the default answer here is the narrow one.
 /// - **Confirmation is the client's job, and it does it** — but the guards above
 ///   hold whether or not the caller is this project's UI.
-/// - **A symlink is unlinked, never followed.** See [`resolve_parent`] for why
+/// - **A symlink is unlinked, never followed.** See `resolve_parent` for why
 ///   that requires resolving the parent instead of the target.
 pub async fn remove(
     State(state): State<AppState>,

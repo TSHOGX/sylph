@@ -77,7 +77,7 @@ struct Entry {
     taken: Instant,
 }
 
-/// Per-(environment, agent, workdir) listings, each valid for [`TTL`].
+/// Per-(environment, agent, workdir) listings, each valid for `TTL`.
 ///
 /// Cheap to clone; every clone shares one map.
 #[derive(Clone, Default)]

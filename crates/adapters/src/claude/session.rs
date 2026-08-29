@@ -821,7 +821,8 @@ impl Session for ClaudeSession {
     /// loop awaits, so a write during a turn is not read until the turn ends. See
     /// [`Session::queue`], which is where that write now lives.
     ///
-    /// Declaring [`Capability::Steer`] here was a shipped defect rather than a mislabelling.
+    /// Declaring [`sylph_protocol::Capability::Steer`] here was a shipped defect rather than a
+    /// mislabelling.
     /// The composer sends a steer whenever a turn is live and the agent claims the
     /// capability, so a user's correction arrived *after* the thing it was meant to prevent,
     /// with every layer reporting success. Refusing is what makes the composer fall back to

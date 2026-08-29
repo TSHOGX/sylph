@@ -3,13 +3,13 @@
 //! `docs/storage.md` is the governing spec. Three tiers, because there are three
 //! workloads with opposite optimal shapes:
 //!
-//! * [`fold`] — a block's deltas as offsets and timings, so lossless replay costs
+//! * [`fold`](crate::storage::fold) — a block's deltas as offsets and timings, so lossless replay costs
 //!   ~8 bytes per delta rather than a row.
-//! * [`cas`] — content-addressed blobs, so a file an agent reads in twenty turns
+//! * [`cas`](crate::storage::cas) — content-addressed blobs, so a file an agent reads in twenty turns
 //!   is stored once.
-//! * [`history`] — the read-mostly store the journal consolidates into.
-//! * [`retention`] — watermark-driven pruning, never time-driven.
-//! * [`scheduler`] — when retention runs. Separate from the policy it invokes,
+//! * [`history`](crate::storage::history) — the read-mostly store the journal consolidates into.
+//! * [`retention`](crate::storage::retention) — watermark-driven pruning, never time-driven.
+//! * [`scheduler`](crate::storage::scheduler) — when retention runs. Separate from the policy it invokes,
 //!   because "what is safe to drop" and "when to ask" are independent decisions,
 //!   and the second one being absent is what left the first unreachable.
 

@@ -24,7 +24,7 @@ pub struct Turn {
     /// finishing. It is a real turn in every mechanical sense — it consolidates, it
     /// orders by sequence, its events journal normally.
     ///
-    /// Load-bearing in [`crate::links::LinkManager::settle_turn`]: an agent turn
+    /// Load-bearing in `LinkManager::settle_turn`: an agent turn
     /// never had a waiter, so this is what tells "no waiter, because there never was
     /// one" from "no waiter, because a deliberate stop already claimed it".
     /// Conflating them reported a user's stop as `LINK_LOST`, which

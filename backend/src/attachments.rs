@@ -153,7 +153,7 @@ fn safe_filename(name: &str, index: usize) -> String {
 
 /// Reduce a client-supplied filename to one safe path component, unprefixed.
 ///
-/// Split out from [`safe_filename`] because a workspace upload keeps the user's
+/// Split out from `safe_filename` because a workspace upload keeps the user's
 /// own filename — an index prefix is right for per-turn staging, where collisions
 /// between two attachments in one message are the hazard, and wrong for a file
 /// the user is placing in their own project by name.

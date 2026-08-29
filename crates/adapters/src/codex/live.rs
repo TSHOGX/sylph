@@ -19,7 +19,7 @@
 //!
 //! # What the live path has that the store does not
 //!
-//! Exactly one thing, and it is the whole reason `run` is [`Fidelity::Stream`]:
+//! Exactly one thing, and it is the whole reason `run` is [`sylph_protocol::Fidelity::Stream`]:
 //! [`appserver::notification::AGENT_MESSAGE_DELTA`] carries per-token text. Everything
 //! else this vendor reports live, it also writes to the rollout — measured at 18 distinct
 //! appends over a 26.5 s turn, the first at 0.1 s.

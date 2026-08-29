@@ -7,7 +7,7 @@
 //! sandbox differ only in how an envagent came to exist, and after it exists they are the
 //! same case. So this is scaffolding for step 4 rather than the design — it holds the two
 //! questions the server asks about a machine before it can talk to one, and
-//! [`local::LocalEnvironment`] answers them for the host the server runs on.
+//! [`LocalEnvironment`](crate::env::LocalEnvironment) answers them for the host the server runs on.
 //!
 //! What it is *not* is a process abstraction. A vendor CLI's process belongs to the
 //! adapter that knows how to talk to it (`crates/adapters/src/process.rs`), so nothing

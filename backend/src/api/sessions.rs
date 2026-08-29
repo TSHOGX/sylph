@@ -866,7 +866,7 @@ pub async fn enumerate(
 /// so an unbounded adopt is a **general way to start an agent anywhere**: find a session
 /// that ran in the target directory, adopt it, send a turn. That the path came from the
 /// store rather than from the request changes who chose it, not what happens next — so
-/// this goes through the same [`contain_workdir`] the create path uses, which
+/// this goes through the same `contain_workdir` the create path uses, which
 /// canonicalizes once and uses **that** variable. A containment check paired with a path
 /// it did not produce is not a bound, and that exact shape was two separate holes in this
 /// repo a day apart (`AGENTS.md` § A write cannot canonicalize its own target).

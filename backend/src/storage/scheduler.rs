@@ -1,6 +1,6 @@
 //! When retention runs, and why it is safe to run it often.
 //!
-//! [`retention`](crate::storage::retention) answers *what* is safe to drop; this
+//! [`crate::storage::retention`] answers *what* is safe to drop; this
 //! module decides *when* to ask. Without it the whole watermark design is
 //! unreachable — `history.db` grows without bound and the authorities that were
 //! written and tested confirm nothing, because nothing ever calls them. That was

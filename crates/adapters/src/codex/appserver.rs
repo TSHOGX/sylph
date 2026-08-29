@@ -61,7 +61,7 @@ pub mod method {
     /// Continues one, **and is also the subscribe**: a client sees no `item/*` events
     /// until it resumes, including for a turn it started itself.
     pub const THREAD_RESUME: &str = "thread/resume";
-    /// The real config surface. Answers `{}` — see [`SETTINGS_REPLY_IS_EMPTY`].
+    /// The real config surface. Answers `{}` — see [`crate::codex::appserver::SETTINGS_REPLY_IS_EMPTY`].
     pub const THREAD_SETTINGS_UPDATE: &str = "thread/settings/update";
     /// Starts a turn. Answers with the turn, whose `id` a steer needs.
     pub const TURN_START: &str = "turn/start";

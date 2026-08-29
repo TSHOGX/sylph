@@ -66,7 +66,7 @@ pub struct AgentInfo {
     pub dictates_native_id: bool,
     /// The best fidelity this agent's *native store* can yield.
     ///
-    /// `run` is always [`Fidelity::Stream`] because it holds the process's own stdio, so
+    /// `run` is always [`crate::Fidelity::Stream`] because it holds the process's own stdio, so
     /// this describes `adopt` and `watch` only. Per-vendor and measured
     /// (`docs/agents.md` § Capability matrix): `claude` flushes at tool-call and
     /// content-block boundaries, `codex` at item completion, `pi` at every
@@ -514,7 +514,7 @@ pub trait Adapter: Send + Sync {
     /// Parse what the vendor's native store already holds, **once**.
     ///
     /// The stream ends when the pass does. Yields [`Fidelity::Blocks`] or
-    /// [`Fidelity::Messages`], never [`Fidelity::Stream`]: no care recovers a timing
+    /// [`crate::Fidelity::Messages`], never [`crate::Fidelity::Stream`]: no care recovers a timing
     /// that was never written.
     async fn adopt(&self, id: &NativeId) -> Result<EventStream>;
 

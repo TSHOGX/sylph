@@ -1,6 +1,6 @@
 //! The pool of live agent sessions, and what happens to what they say.
 //!
-//! A [`LiveSession`] is one agent held open **in process**. This module owns the set of
+//! A [`LiveSession`](crate::links::LiveSession) is one agent held open **in process**. This module owns the set of
 //! them, keyed by Sylph session id, and is the only thing that establishes or tears one
 //! down.
 //!
@@ -28,14 +28,14 @@
 //!   its own to exit, so `LinkEvent::Closed { exit_code, stderr_tail }` has no port. The
 //!   stream simply ending is what a `Stream` already expresses, and a failure that needs
 //!   explaining arrives as an `Err` item before it does — which is what
-//!   [`Outcome::LinkLost`] now carries.
+//!   [`Outcome::LinkLost`](crate::supervisor::Outcome::LinkLost) now carries.
 //! - **A refusal travels typed.** An adapter constructs
 //!   [`sylph_protocol::AdapterError`] directly, so the `INVALID_VALUE`-versus-
 //!   `UNSUPPORTED_FIELD` distinction can no longer be lost in framing. The string→code
 //!   mapping that recovered it from a wire field is deleted, not moved.
 //! - **A capability facet is merged here rather than inside the transport.** The v3 link
 //!   applied facets before the server saw them; in-process that would put one rule in
-//!   three adapters, so the facets travel and [`LiveSession`] is the one place
+//!   three adapters, so the facets travel and [`LiveSession`](crate::links::LiveSession) is the one place
 //!   [`sylph_protocol::CapabilityFacets::apply_to`] is called.
 
 use std::collections::{BTreeMap, HashMap};

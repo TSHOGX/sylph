@@ -15,7 +15,7 @@
 //!
 //! # Why this is a trait rather than three free functions
 //!
-//! [`AdapterSource`] is a **test seam**, and its own documentation below is where that is
+//! [`AdapterSource`](crate::adapters::AdapterSource) is a **test seam**, and its own documentation below is where that is
 //! argued — including why it must not grow a third implementation. Holding it in
 //! [`crate::AppState`] is what lets `/health`, `/diagnostics`, `GET /environments`, the
 //! validation gate on `POST /sessions`, and the link manager read one object, so none of

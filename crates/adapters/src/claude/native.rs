@@ -5,7 +5,7 @@
 //! trace-db's `src/parsers/claude.rs`: two of its record mappings are measurably wrong
 //! against the real store while raising no error, and both are fixed here with a test
 //! asserting the value that should have been found. They are named at
-//! [`defect_tool_use_id`] and [`defect_is_error`] so a reader arriving from `AGENTS.md`
+//! `defect_tool_use_id` and `defect_is_error` so a reader arriving from `AGENTS.md`
 //! § Reading a vendor payload lands on the code rather than on prose.
 //!
 //! # There is one projection, not two

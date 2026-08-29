@@ -441,7 +441,7 @@ mod tests {
 ///
 /// Nothing here spawns anything or holds a socket. The three round trips a config surface
 /// needs — `get_state`, `get_available_models`, `get_available_thinking_levels` — are
-/// *described* by [`ConfigSurface`] and performed by the live session in step 4, so the
+/// *described* by [`rpc::ConfigSurface`] and performed by the live session in step 4, so the
 /// encoding, the validation, and the two refusal codes are all assertable today. The
 /// vendor-key defect this vendor is most famous for lives in exactly these functions.
 pub mod rpc {
@@ -1453,7 +1453,7 @@ pub mod translate {
     impl Outcome {
         /// Read an outcome off an `AssistantMessage`, or `None` when it states none.
         ///
-        /// Both spellings of both fields are read through [`native::defect_field_spelling`]'s
+        /// Both spellings of both fields are read through `native::defect_field_spelling`'s
         /// tables, so the live path and the store path resolve one field the same way.
         pub fn read(message: &Value) -> Option<Self> {
             let stop_reason = super::native::STOP_REASON
@@ -2030,8 +2030,8 @@ pub mod translate {
 /// `docs/agents.md` § `pi` governs, and this is a **corrective** port of trace-db's
 /// `src/parsers/pi.rs`: three of its record mappings are measurably wrong against the real
 /// store while raising no error, and each is fixed here with a test asserting the value that
-/// should have been found. They are named at [`defect_timestamp_unit`],
-/// [`defect_field_spelling`], and [`defect_fork_pointer`] so a reader arriving from
+/// should have been found. They are named at [`native::defect_timestamp_unit`],
+/// [`native::defect_field_spelling`], and [`native::defect_fork_pointer`] so a reader arriving from
 /// `AGENTS.md` § Reading a vendor payload lands on the code rather than on prose.
 ///
 /// # What the store holds, measured
@@ -2474,7 +2474,7 @@ pub mod native {
     ///
     /// # There is one vocabulary, and this is not a second projection
     ///
-    /// The kinds, phases and `stream_id`s below are the ones [`super::translate`] produces,
+    /// The kinds, phases and `stream_id`s below are the ones [`crate::pi::translate`] produces,
     /// because `docs/architecture.md` § One authority requires that the journal, the history
     /// fold, the timeline and search cannot tell which mode produced a row. The two halves
     /// are not *shared code* the way `claude`'s are, and that is a measured difference rather
@@ -3283,9 +3283,10 @@ pub mod native {
 /// **the answer path** for a dialog whose response routes back over the same stdin, and
 /// **the pump** that turns lines into [`sylph_protocol::SessionMessage`]s. Everything about
 /// a *payload* — which command a config change becomes, what a dialog looks like, what an
-/// event projects to — is [`super::rpc`], [`super::ui`], and [`super::translate`].
+/// event projects to — is [`crate::pi::rpc`], [`crate::pi::ui`], and
+/// [`crate::pi::translate`].
 ///
-/// [`super::translate::Correlation`]'s own doc says why the two exceptions live here:
+/// [`crate::pi::translate::Correlation`]'s own doc says why the two exceptions live here:
 /// a `response` has to wake the caller that sent it, and an `extension_ui_request` has to
 /// become a [`sylph_protocol::Request`] whose answer goes back out. Both are correlation
 /// against *outbound* traffic the projection never sees.

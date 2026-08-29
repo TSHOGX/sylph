@@ -77,22 +77,33 @@ comment beside the code.
 ## Running and Verifying
 
 ```sh
-# backend
+# rust — the whole workspace, not just the crate you edited
 cd backend && cargo run
-cd backend && cargo test && cargo clippy --all-targets
+cargo test --workspace && cargo clippy --workspace --all-targets
+cargo doc --workspace --no-deps      # warns on a doc link that resolves to nothing
 
 # frontend
 cd frontend && npm run dev
-cd frontend && npm run build && npx eslint . && npm run e2e
+cd frontend && npm run build && npx eslint . && npm test && npm run e2e
 ```
 
 `npm run build` type-checks, so it is the TypeScript gate; there is no separate
 `tsc` step.
 
-E2E starts both servers itself on offset ports with a throwaway `SYLPH_HOME` and a
-mock adapter, so it never touches your real journal, archive, or agents.
-Do not start servers by hand for it. It shells out to `cargo`, so the `PATH`
-caveat below applies to E2E too, and a cold run compiles the backend first.
+`cargo doc` is a gate too, and a cheap one: an intra-doc link that resolves to nothing is
+a pointer a reader cannot follow, and it fails silently — nothing else in the build
+mentions it. Two rules cover every instance this repo had. A private item cannot be linked
+at all, so bracketing one is a promise rustdoc will not keep — use a plain code span. And
+in an inner (`//!`) comment, paths resolve from the **crate root** rather than the module,
+so a bare `fold` link inside `storage/mod.rs` means `crate::fold` and finds nothing; write
+the absolute path.
+
+E2E starts both servers itself on offset ports, with a throwaway `SYLPH_HOME` and the
+`e2e` cargo feature, which compiles in a fixture agent *instead of* the three real ones —
+so it never touches your store or spends tokens. Do not start servers by hand for it. It
+shells out to `cargo`, so the `PATH` caveat below applies, and a cold run compiles the
+backend first. It refuses a port an interrupted run left behind; clear them with
+`for p in 4318 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done`.
 
 Run the checks for every part of the repo you touched, not only the one you
 edited most. Backend and frontend share a wire contract, so a change on either

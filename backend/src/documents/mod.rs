@@ -29,9 +29,9 @@
 //! An agent may have downloaded any of these files, so every parser here treats
 //! its input as hostile. Two independent limits, because one is only a guess:
 //!
-//! 1. The container is refused above [`MAX_DOCUMENT_BYTES`] before it is opened.
+//! 1. The container is refused above [`MAX_DOCUMENT_BYTES`](crate::documents::MAX_DOCUMENT_BYTES) before it is opened.
 //! 2. A zip member is refused when its *declared* size exceeds
-//!    [`MAX_PART_BYTES`], and the read is bounded anyway — the declaration comes
+//!    [`MAX_PART_BYTES`](crate::documents::MAX_PART_BYTES), and the read is bounded anyway — the declaration comes
 //!    from the archive header and an attacker writes it. A 199 KB archive
 //!    declaring a 200 MB part is the shape being defended against, and it was
 //!    measured, not imagined.
@@ -54,7 +54,7 @@ use crate::error::{Error, Result};
 
 /// Largest document accepted for parsing.
 ///
-/// [`crate::api::files::MAX_PREVIEW_BYTES`] (1 MiB) is the wrong bound here: a
+/// `api::files`'s own preview bound (1 MiB) is the wrong one here: a
 /// legitimate spreadsheet is routinely several MiB, and refusing those would
 /// make the feature useless for the files people most want to look at. This is
 /// instead sized so a parse cannot become a memory-exhaustion vector.
