@@ -1,6 +1,6 @@
 //! `claude`'s stdout payloads, projected onto [`sylph_protocol`] events.
 //!
-//! Ported from `adapters/claude/adapter.py`'s `_stream_event`, `_tool_results`,
+//! The vendor→Sylph projection: `_stream_event`, `_tool_results`,
 //! `_system`, `_delegate_of`, `_task_notification`, `_task_label` and `flatten`
 //! (roughly :993-1483). `docs/session-protocol.md` §§ Events and Delegated trajectories
 //! govern, and `AGENTS.md` § Pitfalls holds the story behind every quirk below.
@@ -8,13 +8,13 @@
 //! # Why this is a separate, process-free module
 //!
 //! **Every classification bug in this adapter's history lived in this projection, and
-//! every one of them compiled.** `verify.py` — the end-to-end check — could not see any
+//! every one of them compiled.** An end-to-end check that spends real tokens could not see any
 //! of them: it spends real tokens, needs a login, and only exercises whatever shapes one
 //! live turn happens to produce. A mistranslation does not raise; it produces a
 //! plausible timeline that misdescribes what the agent did.
 //!
 //! So the whole projection is pure functions over one [`Correlation`] value, with no
-//! process, no I/O, and no clock of its own. `adapters/claude/adapter_test.py`'s 13
+//! process, no I/O, and no clock of its own. The 13
 //! classes exist for that reason and are ported to the bottom of this file.
 //!
 //! # Time arrives as an argument
@@ -273,7 +273,7 @@ pub struct Correlation {
     /// A trajectory → its host. The inverse of [`Self::host_tasks`], and the reason a
     /// close can be placed in the tree at all.
     ///
-    /// **`task_updated` carries no `tool_use_id`** (measured; `adapter.py:1379`). Without
+    /// **`task_updated` carries no `tool_use_id`**, measured on a real payload. Without
     /// this the close lands at the root while the trajectory it closes sits inside a
     /// container, and the container is then never resolved — the same spinner one level
     /// up.
@@ -552,7 +552,7 @@ impl Correlation {
                 // notification path would find the trajectory unopened and emit a *second*
                 // `started` under it — the duplicate node its own "started only on first
                 // sighting" rule exists to prevent, arriving through the one path that rule
-                // did not cover. `adapters/claude/adapter_test.py`'s
+                // did not cover. The classification suite's
                 // `TaskDelegationKeepsOneIdentity` could not see it because it populated
                 // `subagent_tools` by hand instead of through a real block, so no
                 // block-level `started` was ever emitted in that test; driving the
@@ -1037,7 +1037,7 @@ impl Correlation {
         // events under it too. Minting a second id from `task_id` there splits one
         // delegation into two nodes: the work lands on the declared id and the minted one
         // stays empty, and since nothing ever closes it, it reads as running forever.
-        // Measured against a real delegated turn, which is what `verify.py` caught.
+        // Measured against a real delegated turn, which is what a live run caught.
         let declared_host = host
             .as_ref()
             .map(HostId::as_trajectory)
@@ -1804,7 +1804,7 @@ mod tests {
     /// claude forwards a `Task` delegate's events under the *spawning* id, so the block and
     /// the child's output share one identity. Minting a second id from `task_id` split one
     /// delegation into two nodes: the work landed on the declared id and the minted one
-    /// stayed empty, never closing — which `verify.py` caught as a trajectory that was
+    /// stayed empty, never closing — which a live run caught as a trajectory that was
     /// opened and then left with nothing in it.
     #[test]
     fn a_notification_for_a_declared_task_reuses_its_id() {

@@ -1,5 +1,5 @@
 //! The deterministic E2E agent, ported from
-//! `frontend/e2e/fixtures/adapters/e2e/adapter.py` (780 lines).
+//! the deterministic fixture the E2E suite drives.
 //!
 //! Real agents are non-deterministic and need credentials, so the suite runs against this
 //! instead and still exercises the production path end to end: a held-open session, a

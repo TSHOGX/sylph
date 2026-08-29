@@ -6,12 +6,13 @@
  * produced. So this module normalizes what the shipped adapters actually emit,
  * verified against their source:
  *
- * - **claude** (`adapters/claude/adapter.py:1108`): `data.input` is the parsed
+ * - **claude** (`crates/adapters/src/claude/translate.rs`): `data.input` is the parsed
  *   tool input object, or the raw string when the streamed partial JSON did not
  *   parse. `text` is that raw JSON.
- * - **pi** (`adapters/pi/adapter.py:493` and `:562`): `data.input` is the
- *   tool-call arguments object, from `args` on `tool_execution_start` and from
- *   `toolCall.arguments` on a delta.
+ * - **pi** (`crates/adapters/src/pi.rs`): `data.input` is the tool-call arguments
+ *   object, from `args` on `tool_execution_start` and from `toolCall.arguments`
+ *   on a delta.
+ * - **codex** (`crates/adapters/src/codex/`): the same `data.input` shape.
  *
  * The single shape is therefore `data.input` holding the tool's arguments, with
  * `text` as a stringified fallback. Nothing else is read off `data`: a spelling
@@ -140,7 +141,7 @@ export function describeTool(event: StreamEvent): ToolShape {
       // The keys `extractHunks` consumes, so a diff is not repeated verbatim
       // under "Arguments". snake_case only: these are `claude`'s own Edit,
       // MultiEdit, and Write inputs, forwarded unchanged by
-      // `adapters/claude/adapter.py:1108`.
+      // `crates/adapters/src/claude/translate.rs`.
       "old_string",
       "new_string",
       "edits",
@@ -155,7 +156,7 @@ export function describeTool(event: StreamEvent): ToolShape {
  *
  * Three shapes are accepted because the shipped adapters produce three:
  * `data.input` as an object (both adapters' happy path), `data.input` as a string
- * (`adapters/claude/adapter.py:1110`, when the streamed partial JSON did not
+ * (`crates/adapters/src/claude/translate.rs`, when the streamed partial JSON did not
  * parse), and `text` as raw JSON (`claude`'s `text` always holds it, and is the
  * only source when `data` is absent — which is the case for the `started` and
  * `delta` phases).
@@ -175,8 +176,8 @@ function extractArgs(event: StreamEvent): Record<string, unknown> {
       return { command: input };
     }
     // Nothing else on `data` is read. Every shipped adapter nests a tool's
-    // arguments under `input` (`adapters/claude/adapter.py:1108`,
-    // `adapters/pi/adapter.py:493`), so a top-level `data.command` read would be
+    // arguments under `input` (`crates/adapters/src/claude/translate.rs`,
+    // `crates/adapters/src/pi.rs`), so a top-level `data.command` read would be
     // tolerance for a producer that does not exist.
   }
 
@@ -236,7 +237,7 @@ function extractHunks(args: Record<string, unknown>, path?: string): EditHunk[] 
 
 function pair(source: Record<string, unknown>): { before: string; after: string } | null {
   // snake_case only: `claude` forwards its Edit/MultiEdit input verbatim
-  // (`adapters/claude/adapter.py:1108`), and that vendor spells these
+  // (`crates/adapters/src/claude/translate.rs`), and that vendor spells these
   // `old_string`/`new_string`.
   const before = source.old_string;
   const after = source.new_string;
@@ -308,8 +309,8 @@ export function basename(path: string): string {
  *
  * `isError` is the declared outcome of a `tool_result`
  * (`docs/session-protocol.md:663`), and both shipped adapters set it: from
- * `is_error` on the vendor block at `adapters/claude/adapter.py:1167`, and from
- * the tool-execution result at `adapters/pi/adapter.py:497`. No `status` string
+ * `is_error` on the vendor block at `crates/adapters/src/claude/translate.rs`, and from
+ * the tool-execution result at `crates/adapters/src/pi.rs`. No `status` string
  * is read off `data` — no producer writes one, so a branch on it was tolerance
  * for a producer that does not exist.
  *

@@ -224,7 +224,7 @@ untested.
 **Testing "it streams" needs a runner slower than one render.** Every E2E spec
 asserted final state against a mock runner that finished in well under a second,
 so a client that dropped every mid-turn event passed the entire suite. The `paced`
-scenario in `frontend/e2e/fixtures/adapters/e2e/adapter.py` spaces its stages a
+scenario in `crates/adapters/src/e2e.rs` spaces its stages a
 second apart, and `e2e/streaming.spec.ts` asserts an earlier stage is on screen
 while a later one has not been emitted yet. Asserting only the end state cannot
 distinguish streaming from batching.
@@ -306,28 +306,20 @@ place with the ordering this needs: one process, once, before Playwright is aske
 start anything. A genuinely fresh home starts clean, so a first-run database error is
 this bug and not a product one.
 
-**An E2E fixture that cannot be discovered fails the suite while looking like a
-product bug.** Discovery requires `adapter.sh`; after the v1 runner path was deleted,
-`frontend/e2e/fixtures/adapters/e2e/` still held only `runner.sh`, so the backend
-reported `Agent discovery: 0 usable, 0 broken` and every spec that created a session
-or ran a turn failed against an agent that did not exist. The failures read as broken
-features, not as a missing fixture. When a protocol version changes, the fixture is
-part of the protocol surface — check `Agent discovery: N usable` in the backend log
-before believing an E2E failure is about the UI.
+**Zero agents is a silent, total failure that reads as a UI bug.** With none available,
+no session can be created and every existing one reports `{"attached":false}` — so
+`commands` is `[]`, and the composer's slash menu, which required a non-empty list to
+open at all, made `/` a dead keystroke. The cause is three layers from the symptom.
+Three things make it legible: the startup log says so at `error` level, `/health`
+reports `agents.available`, and `LinkState` carries a typed `failure` so the composer can
+say *which* of "still connecting", "agent not installed", or "this agent has none" it is.
+Check `agents.available` before believing an empty composer is a frontend bug.
 
-**Zero discovered agents is a silent, total failure that reads as a UI bug.** With no
-adapters, `/api/v1/agents` is empty, no session can be created, and every existing
-session reports `{"attached":false}` — so `commands` is `[]` and the composer's slash
-menu, which required a non-empty list to open at all, made `/` a dead keystroke. The
-cause is three layers from the symptom and the server logs `0 usable` at the same
-level as success. Three things now make it legible: discovery logs at `error` and
-names every directory it searched, `/health` reports `agents.available`, and
-`LinkState` carries a typed `failure` so the composer can say *which* of "still
-connecting", "adapter not installed", or "this agent has none" it is. A stale
-`runners/` tree holding v1 `runner.sh` with no `adapter.sh` is now reported as broken
-rather than skipped, because such a directory is an agent that cannot be spoken to,
-not an absent one. Check `Agent discovery: N usable` before believing an empty
-composer is a frontend bug.
+The E2E fixture is a compiled-in adapter behind the `e2e` cargo feature, and the
+exclusivity is load-bearing: a build offering both it and the real three would let a spec
+pick `claude` and spend real tokens. So `Agents this build can run: e2e` in the backend
+log is what confirms the harness is testing the fixture — a suite failing every
+session-creating spec is worth checking there before reading it as a product bug.
 
 **A detached link is a 200, so caching it forever pins the failure.** `/capabilities`
 reports detached-with-reason rather than erroring, which keeps a session readable when
@@ -432,7 +424,7 @@ plus three shapes worth knowing before writing any adapter:
 
   What remains true is the *adapter's* choice: it closes a turn on `agent_settled`
   rather than `agent_end`, because pi can emit `agent_end` and then continue (see
-  `adapters/pi/adapter.py:509`). That is a real distinction between two events that
+  `crates/adapters/src/pi.rs`). That is a real distinction between two events that
   both exist, not evidence that one of them does not.
 - **An SDK object's attribute names and its JSON wire names are different
   namespaces.** The MCP spec says `requestedSchema`; the Python SDK's dataclass field
@@ -543,12 +535,13 @@ The observable result in Sylph was a turn that opened, closed `completed` with
 `error_code` NULL, and produced **no assistant block at all** — a session that looks like
 it worked and simply said nothing.
 
-The cause is one line: `adapters/pi/adapter.py:515` emits
+The cause was one line in the v1 adapter, inherited by the port: it emitted
 `data={"stopReason": "end_turn"}` on `agent_settled`, hardcoded, while pi's own record
 carries `stopReason: "error"` and an `errorMessage`. So the adapter asserted a clean
-finish over a failed one. **The Rust port inherited it** (`crates/adapters/src/pi.rs:1526`),
-which is the part worth noticing: a hardcoded constant survives a rewrite precisely
-because it compiles and reads as a default.
+finish over a failed one. **The Rust port inherited it**, which is the part worth
+noticing: a hardcoded constant survives a rewrite precisely because it compiles and reads
+as a default. Both are fixed — the close now reads the vendor's own `stopReason`, and
+`crates/adapters/src/pi.rs` pins it with a test that feeds a failing turn.
 
 Three rules follow, and the third is the one that generalizes:
 
@@ -714,14 +707,6 @@ misattributes on a collision — structure that is right for one delegation in e
 is worse than an honest flat view, because nothing on screen distinguishes them. So
 archived delegation is session-level in both directions (`parentId`, `delegations`),
 and the UI must say the archive records no link to the exact call.
-
-trace-db later grew `Event.span_id` and `Span.parent_span_id`, which look like they
-retire this and do not. `upsert_many` sets `span_id` **unconditionally** to
-`call:<call_id>` for every tool call and result (`model.rs:538`) — it is a
-parser-synthesized pairing, which is precisely the one use named above, not vendor
-delegation structure recovered from anywhere. The consequence runs the other way: a
-field a parser always overwrites would silently replace Sylph's own trajectory
-identity if Sylph's events were ever pushed through ingest.
 
 **`session_metadata` is 11.5 ms, not the 0.5 ms this file used to claim.**
 Re-measured over 300 sequential calls against a 4922-session archive: 11.5 ms and
@@ -1195,8 +1180,8 @@ card named `find / -maxdepth 8 -ipath "*workflows*" …`, whose error flag escal
 Bash call hosting it, so a turn that had done nothing wrong read `failed` from its
 first moment. Filter narrowly and let an unknown type through — guessing wrong that
 way costs a missing subtree, while the other way mislabels a tool call as an agent,
-which is what shipped. `adapters/claude/adapter_test.py` pins it, and exists because
-`verify.py` cannot: it spends real tokens and only sees whatever shapes one live turn
+which is what shipped. `crates/adapters/src/claude/translate.rs`'s unit tests pin it, and
+exist because a live run cannot: it spends real tokens and only sees whatever shapes one turn
 happens to produce, so every *classification* bug in this adapter's history was
 invisible to it.
 
@@ -1432,7 +1417,7 @@ a Chromium device profile and be explicit about what is therefore untested.
 `answers[question]`, found nothing there, and told the model *"The user did not answer
 the questions."* — so a correct pick, correctly rendered and correctly transported,
 presented as a UI that had lost the click. Nothing errored at any layer, and
-`verify-dialogs.py` passed throughout, because it asserted that a dialog *arrived* and
+A live dialog check passed throughout, because it asserted that a dialog *arrived* and
 that answering unblocked the turn — both true while the answer was being dropped.
 Grep the binary for the key and round-trip one real payload; and assert on the tool
 result the model actually reads, since "the panel closed" and "the answer arrived" are

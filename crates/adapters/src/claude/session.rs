@@ -1,6 +1,6 @@
 //! The live `claude` session: one held process, and turns both ways.
 //!
-//! Ported from `adapters/claude/adapter.py`'s `Session` plus its `serve` loop
+//! The session: the held process, its control protocol, and its turn loop
 //! (roughly :250-700, :1783-1945). [`crate::process::Child`] owns the process group, the
 //! single stdout reader, stderr retention and the shutdown escalation, so none of that is
 //! here. What is here is everything specific to this vendor's *control* channel.
@@ -998,7 +998,7 @@ mod tests {
     /// **`AGENTS.md`: a test needing the real CLI is a test that does not run.** It wants a
     /// login, spends tokens, and only produces whatever shapes one live turn happens to
     /// take — which is precisely how every classification bug in this adapter's history
-    /// stayed invisible to `verify.py`. So the peer answers the control protocol as the real
+    /// stayed invisible to a live run. So the peer answers the control protocol as the real
     /// CLI was measured answering it, **including where it lies**:
     ///
     /// - `manual` answers **success** and confirms `default`.

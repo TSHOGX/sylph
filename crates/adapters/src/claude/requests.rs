@@ -1,6 +1,6 @@
 //! `claude` asking a human something, and the human's answer going back.
 //!
-//! Ported from `adapters/claude/adapter.py`'s `_vendor_request`, `_forward_question`,
+//! The request surface: `_vendor_request`, `_forward_question`,
 //! `_forward_dialog`, `_risk` and `answer` (roughly :722-1000, :531-640).
 //! `docs/session-protocol.md` § Requests governs.
 //!
@@ -15,7 +15,7 @@
 //! nothing erroring at any layer.
 //!
 //! The lesson that shaped this module: **assert on the payload the vendor reads, not on
-//! whether the dialog closed.** `verify-dialogs.py` passed throughout the bug, because
+//! whether the dialog closed.** A live dialog check passed throughout the bug, because
 //! it asserted that a dialog arrived and that answering unblocked the turn — both true
 //! while the answer was being dropped. So [`answer_payload`] is a pure function over
 //! `(kind, resolution)` and the tests below assert its exact keys.
@@ -712,7 +712,7 @@ mod tests {
     /// CLI binary — re-grepped against 2.1.251 and still zero. The CLI reads
     /// `answers[question]` off the updated input, found nothing, and told the model *"The
     /// user did not answer the questions."* So this asserts the exact keys the vendor reads,
-    /// not that a payload was produced: `verify-dialogs.py` asserted a dialog arrived and
+    /// not that a payload was produced: a live check asserted a dialog arrived and
     /// that answering unblocked the turn — both true throughout the bug.
     #[test]
     fn a_question_answer_lands_under_answers_keyed_by_the_question_text() {

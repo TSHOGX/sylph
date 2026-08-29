@@ -6,7 +6,7 @@ import type { StreamEvent } from "@/lib/api";
  * Tool interpretation across agent vocabularies.
  *
  * The payloads here are the shapes the shipped adapters actually emit —
- * `adapters/claude/adapter.py` and `adapters/pi/adapter.py` — transcribed from
+ * the shipped Rust adapters — transcribed from
  * their source. That is the point of these tests: the session protocol leaves
  * `data` unspecified beyond `input`, so the only guarantee is what those two
  * adapters do, and a change in either should fail here rather than silently
@@ -25,7 +25,7 @@ function event(partial: Partial<StreamEvent>): StreamEvent {
 
 describe("describeTool", () => {
   it("reads claude's parsed tool input", () => {
-    // adapters/claude/adapter.py:1108: `data = {"input": json.loads(block["text"])}`
+    // crates/adapters/src/claude/translate.rs: `data = {"input": json.loads(block["text"])}`
     const shape = describeTool(
       event({
         name: "Read",
@@ -58,7 +58,7 @@ describe("describeTool", () => {
   });
 
   it("treats a non-JSON string input as a command", () => {
-    // adapters/claude/adapter.py:1110 falls back to the raw block text when the
+    // crates/adapters/src/claude/translate.rs falls back to the raw block text when the
     // streamed partial JSON did not parse, and a shell command is the commonest
     // thing that leaves behind.
     const shape = describeTool(
@@ -175,7 +175,7 @@ describe("describeTool", () => {
 describe("resultStatus", () => {
   it("treats isError as failure", () => {
     // The declared outcome of a `tool_result` (docs/session-protocol.md:663), set
-    // by adapters/claude/adapter.py:1167 and adapters/pi/adapter.py:497.
+    // by crates/adapters/src/claude/translate.rs and crates/adapters/src/pi.rs.
     expect(resultStatus(event({ kind: "tool_result", isError: true })).failed).toBe(true);
   });
 

@@ -1,4 +1,4 @@
-//! The `pi` adapter, ported from `adapters/pi/adapter.py` (944 lines) for the live RPC
+//! The `pi` adapter, for the live RPC
 //! surface, and correctively from trace-db's `src/parsers/pi.rs` for the native store.
 //!
 //! `docs/agents.md` § `pi` is the governing spec and holds the measurement behind every
@@ -14,7 +14,7 @@
 //! takes, which refusal a bad one earns. [`ui`] projects pi's one inversion, an extension
 //! asking a human something. [`translate`] holds the vendor→Sylph event projection as pure
 //! functions over a [`translate::Correlation`], the same split `claude`'s module makes and
-//! for the same measured reason: `adapters/pi/verify.py` spends real tokens and only sees
+//! for the same measured reason: an end-to-end check spends real tokens and only sees
 //! whatever shapes one live turn happens to produce, so a mistranslation does not raise —
 //! it produces a plausible timeline that misdescribes what the agent did. [`native`] reads
 //! `~/.pi/agent/sessions/`.
@@ -36,7 +36,7 @@
 //!
 //! # `describe` is deleted
 //!
-//! `adapter.py`'s `--serve` entry point and its NDJSON framing are gone with the
+//! The v1 `--serve` entry point and its NDJSON framing are gone with the
 //! subprocess transport, not ported. There is no v1 or v3 contract left to serve, and
 //! `AGENTS.md` § Compatibility forbids keeping one.
 
@@ -152,7 +152,7 @@ impl PiAdapter {
             // Unreachable for this vendor: `dictates_native_id` is true, so the server
             // always names an id. Handled rather than panicking because a protocol value
             // an adapter cannot honour is a refusal, not a crash — and **this adapter must
-            // not mint one itself**. The Python original did (`adapter.py:257`,
+            // not mint one itself**. The v1 adapter did (
             // `uuid.uuid4()`), which is the synthesized-identity failure
             // `sylph_protocol::NativeId` forbids: the id would look like the vendor's and
             // be Sylph's.
@@ -740,7 +740,7 @@ pub mod rpc {
         ///
         /// Takes the payloads rather than performing the calls, which is what makes the
         /// whole projection testable with no process — and the reason the surface bugs this
-        /// vendor produced were invisible to `verify.py`.
+        /// vendor produced were invisible to an end-to-end check.
         pub fn from_vendor(state: &Value, models: &Value, levels: &Value) -> Self {
             let models = models
                 .get("models")
@@ -1293,13 +1293,13 @@ pub mod ui {
 
 /// `pi`'s RPC events, projected onto [`sylph_protocol`] events.
 ///
-/// Ported from `adapters/pi/adapter.py`'s `_translate`, `_delta` and `flatten`
+/// The vendor→Sylph projection: `_translate`, `_delta` and `flatten`
 /// (:458-563). `docs/session-protocol.md` § Events governs.
 ///
 /// # Why this is a separate, process-free module
 ///
 /// The same reason `claude::translate` is: **a mistranslation does not raise.** It produces
-/// a plausible timeline that misdescribes what the agent did, and `adapters/pi/verify.py`
+/// a plausible timeline that misdescribes what the agent did, and an end-to-end check
 /// cannot see one — it spends real tokens and only exercises whatever shapes one live turn
 /// happens to produce. So the whole projection is pure functions over one [`Correlation`],
 /// with no process, no I/O, and no clock of its own.
@@ -1776,7 +1776,7 @@ pub mod translate {
     /// The `toolCallId` a tool event correlates on, or `None`.
     ///
     /// **Absent rather than a placeholder.** The Python original substituted the literal
-    /// `"pi-tool"` (`adapter.py:489,498`), which for two concurrent tool calls would make
+    /// `"pi-tool"` in v1, which for two concurrent tool calls would make
     /// both events share one `stream_id` and fold into one row — and for one call would pair
     /// a result to a call it does not belong to. `AGENTS.md`: a guess written into a journal
     /// is permanent, and `Option`/`null` is the only value that stays honest.
@@ -3383,7 +3383,7 @@ pub mod session {
         /// [`sylph_protocol::AgentInfo::dictates_native_id`] is true for this agent, so the
         /// server always names an id, and the alternative — minting one here — is the
         /// synthesized-identity failure [`NativeId`] forbids and the Python original
-        /// committed (`adapter.py:257`, `uuid.uuid4()`).
+        /// committed — v1 minted one with `uuid4()`.
         pub async fn open(spec: RunSpec) -> Result<Self> {
             let requested = match &spec.native_id {
                 RequestedNativeId::Dictate(id) | RequestedNativeId::Resume(id) => id.clone(),
@@ -3444,7 +3444,7 @@ pub mod session {
         /// peer** instead of the real CLI. That separation is the reason this half is
         /// testable at all: a test that needs `pi` installed, configured, and answering is a
         /// test that does not run — and every classification defect in this adapter's
-        /// history was invisible to `verify.py`, which spends real tokens and sees only the
+        /// history was invisible to an end-to-end check, which spends real tokens and sees only the
         /// shapes one live turn happens to produce.
         pub async fn attach(
             spawn: Spawn,
@@ -5114,7 +5114,7 @@ done
         /// one.**
         ///
         /// `dictates_native_id` is true for this agent, so the server always names an id. The
-        /// Python original minted one (`adapter.py:257`, `uuid.uuid4()`), which is the
+        /// v1 adapter minted one with `uuid4()`, which is the
         /// synthesized-identity failure [`NativeId`] forbids: the id would look like the
         /// vendor's and be Sylph's, and every comparison against the vendor's own store would
         /// then be silently always false.
