@@ -275,6 +275,53 @@ pub struct SteerRequest {
     pub turn_id: Option<String>,
 }
 
+/// Add text to run **after** the turn in flight.
+///
+/// # Why this is not `steer` with a flag
+///
+/// The two differ by *when the agent reads the text*, and that decides what the request
+/// means rather than how it is delivered. A steer is a correction, so it carries a turn
+/// precondition: text that misses its turn lands in the wrong conversation, and naming the
+/// turn is what turns that into a refusal. A queued follow-up has **no such precondition** —
+/// it is *for* after the turn, so a turn boundary crossing underneath it changes nothing, and
+/// queueing with nothing running is a coherent ask that becomes the next turn's opening text.
+///
+/// Collapsing them behind one endpoint would have meant a `turnId` that is required for one
+/// meaning and meaningless for the other, which is the shape that let one vendor declare the
+/// wrong word for what it does: `claude` claimed `Capability::Steer` while its only mid-turn
+/// channel is read after the turn ends, so a user's correction arrived after the thing it was
+/// meant to prevent with every layer reporting success.
+///
+/// The refusal path matters as much as the success one. An agent without
+/// [`sylph_protocol::Capability::Queue`] answers `UNSUPPORTED_FIELD`, which a client renders
+/// by retiring the control rather than leaving it clickable — and that is the code `claude`'s
+/// `steer` now returns, so a client asking the wrong one of these is told which.
+pub async fn queue(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<QueueRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let session_id = require_session(&state, &session_id).await?;
+
+    if body.text.trim().is_empty() {
+        return Err(Error::InvalidRequest("Queued text cannot be empty".into()));
+    }
+
+    let link = state.links.get(&session_id).await.ok_or(Error::LinkGone)?;
+
+    link.queue(&body.text)
+        .await
+        .map_err(|error| refusal_or(error, Error::Unsupported))?;
+
+    Ok(Json(serde_json::json!({"queued": true})))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueRequest {
+    pub text: String,
+}
+
 /// Set one typed config option on a live session.
 ///
 /// The response is the refreshed capability surface rather than an acknowledgement,

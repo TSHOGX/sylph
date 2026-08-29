@@ -193,6 +193,14 @@ impl LiveSession {
         self.session.steer(text, expected_turn_id).await
     }
 
+    /// Add text to run after the turn in flight.
+    ///
+    /// No turn precondition, unlike [`Self::steer`]: a queued follow-up is *for* after the
+    /// turn, so a boundary crossing underneath it changes nothing.
+    pub async fn queue(&self, text: &str) -> Result<()> {
+        self.session.queue(text).await
+    }
+
     /// Set one config option, and answer with the refreshed surface.
     ///
     /// The adapter answers with the refreshed **array** rather than an acknowledgement,

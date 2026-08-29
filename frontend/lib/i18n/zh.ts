@@ -234,6 +234,7 @@ export const zh: Dictionary = {
   "composer.placeholder": "输入消息……",
   "composer.placeholderBusy": "等待当前回合结束……",
   "composer.placeholderSteer": "补充说明，让 agent 调整方向……",
+  "composer.placeholderQueue": "排入队列，本轮结束后发送……",
   "composer.message": "消息",
   "composer.addToMessage": "添加到这条消息",
   "composer.saveFailed": "无法把这些文件保存到工作区。",

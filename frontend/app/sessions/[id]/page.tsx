@@ -557,9 +557,13 @@ export default function SessionPage() {
         canInterrupt={agent.can("interrupt")}
         onInterrupt={() => agent.interrupt()}
         canSteer={agent.can("steer")}
+        canQueue={agent.can("queue")}
         // The running turn is named as a precondition, so a steer that races the
         // turn boundary is refused rather than delivered into the next conversation.
         onSteer={(value) => agent.steer(value, liveTurnId ?? undefined)}
+        // No turn id: a queued follow-up is *for* after the turn, so a boundary crossing
+        // underneath it changes nothing and there is no precondition to state.
+        onQueue={(value) => agent.queue(value)}
         // Dismissing hides a panel without answering, so the agent stays blocked.
         // Reported here because with the panel gone nothing else on screen would
         // say so, and a blocked session that merely looks idle leaves the user

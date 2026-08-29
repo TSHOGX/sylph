@@ -431,6 +431,10 @@ pub fn router(state: AppState) -> Router {
             post(api::links::interrupt),
         )
         .route("/api/v1/sessions/{id}/steer", post(api::links::steer))
+        // Separate from `steer` because the two differ by *when the agent reads the text*,
+        // which decides what the request means: a steer carries a turn precondition and a
+        // queued follow-up cannot have one. See `api::links::queue`.
+        .route("/api/v1/sessions/{id}/queue", post(api::links::queue))
         // Typed session config: what `/model` and `/permissions` resolve to, so a
         // control command is a typed set rather than prose sent as a prompt.
         .route("/api/v1/sessions/{id}/config", post(api::links::set_config))
