@@ -59,6 +59,23 @@ use sylph_protocol::Adapter;
 /// is what lets a caller say **which** thing is wrong. `"codex"` on a machine without the
 /// CLI is a missing install, which names a fix; `"gemini"` is an unsupported agent, which
 /// does not (`AGENTS.md` § Product Invariants).
+///
+/// # This is a test seam, **not** a plug-in point
+///
+/// It has exactly two implementations and is meant to: [`LinkedAdapters`] in production and
+/// the integration suite's mock. **Do not add a third to load user-supplied adapters.**
+/// There is deliberately no adapter directory any more — the escape hatch for "a vendor
+/// changed faster than the shipped adapter" is upgrading the envagent on that one machine
+/// (`AGENTS.md` § Configuration) — and a trait shaped like an extension point is an
+/// invitation to put one back.
+///
+/// The reason it exists at all is that availability is `PATH`, which is **global process
+/// state a test cannot mutate per case**: `std::env::set_var` is process-wide and unsafe in
+/// a threaded test binary, so several tests running concurrently cannot each offer a
+/// different agent. `MockAgents::uninstall` needs somewhere to answer from, and the
+/// alternative was the filesystem-shaped fixture this replaced — which `AGENTS.md` records
+/// silently stopping to test anything the moment the harness layout moved, leaving a test
+/// that still asserted the detached path and no longer produced it.
 pub trait AdapterSource: Send + Sync {
     /// The adapter for one agent, or `None` when this machine cannot run it.
     ///
