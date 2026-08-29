@@ -656,18 +656,13 @@ in the client, not in each caller.
 The related rule: "cannot ask" must never be recorded as "asked, and nothing is
 safe", or a watermark claims a check that never happened.
 
-**A global "is the pipeline healthy" signal cannot replace a per-session bound.**
-*The archive this was measured against is gone; the shape of the mistake is not.* The
-archive's ingestion ack was It is one
-monotonic sequence per ingest *run*, committed after the data transaction so it is
-never a false positive — but it says nothing about which events of which session are
-covered, so it cannot replace a per-session coverage bound. Its only surfaces are a
-gRPC ingest response and `doctor --json`, measured at **2m34s** because doctor walks
-every agent's native store and verifies the archive; `trace-db api` does not expose
-it. Per-session facts are both cheaper and more precise: `ingestedAtMs` on a `list`
-row is a durable per-session commit marker (`upsert_many` writes the session row and
-its events in one transaction), and `show`'s `fingerprint` says which version of the
-native source was ingested.
+**A global "is the pipeline healthy" signal cannot replace a per-session bound.** A
+monotonic sequence per ingest *run*, committed after the data transaction, is never a false
+positive — and still says nothing about which events of which session are covered, so it
+cannot answer "is this session's history safe to drop". A per-session commit marker is both
+cheaper to obtain and more precise, and a fingerprint of the source it was derived from says
+*which version* of that source the marker covers. This is why retention's watermark is
+per-session (`docs/storage.md`) rather than a pass-level health flag.
 
 **Renaming a WAL-mode SQLite file means checkpoint-then-rename, not moving three
 files.** A crash between renaming `-wal` and renaming `.db` leaves committed data in
@@ -708,95 +703,49 @@ is worse than an honest flat view, because nothing on screen distinguishes them.
 archived delegation is session-level in both directions (`parentId`, `delegations`),
 and the UI must say the archive records no link to the exact call.
 
-**`session_metadata` is 11.5 ms, not the 0.5 ms this file used to claim.**
-Re-measured over 300 sequential calls against a 4922-session archive: 11.5 ms and
-~2.5 KB each. So a 20-row listing page spends ~230 ms on lineage alone and a
-whole-archive metadata scan costs **52.9 s** — which rules out "just ask every row"
-for anything a user waits on, and is why the lineage fold caches per parent. By
-contrast a *full unfiltered `list`* is 4922 rows in 10 pages at **164 ms**, so
-deriving what you can from the listing is ~300× cheaper per fact than asking per
-row. Finding one session's children uses that: an id-prefix test over one pass
-finds 2104 of 2316 delegates, while the rest record only a `parent_session_id` and
-would cost the 52.9 s scan, so they are reached from their parent's directory
-listing instead.
+**A count repeated in several places is several chances to drift, and nothing checks them
+against each other.** One population's size was carried in four passages here and two
+disagreed with the other two — a different figure *and* a different agent — so at least one
+pair had always been wrong while reading as measured fact. Neither could be re-derived,
+because the store they were measured against no longer exists. Three rules: state the
+*shape* a piece of code depends on rather than a ratio, since the shape is what stays true;
+where a number is worth quoting, cite it once and point at it from everywhere else; and **a
+measurement is only quotable while the thing it was measured against still exists.** This
+file's own vendor-key instance counter had drifted to five different values across five
+files before it was deleted rather than corrected.
 
-**A caller that logs a degraded dependency per request rebuilds the flood the
-client was fixed to prevent.** The client reported an absent binary once at
-`error` then at `debug` — but two API handlers each warned per
-request on top of that, and both were polled by the sidebar and workspace picker.
-Measured in one E2E run, which was such an install by construction: **2339
-identical failure lines**. The client therefore exposed a
-"did I already say this" flag so a caller can defer to what was already said, which is
-deliberately not the same as string-matching the error message — the text is
-the dependency's and may be reworded, while the flag is the client's own record of having
-spoken. This is the same pitfall as the one below, one layer up from where it
-was first fixed.
+**A path filter must be a path match, not a substring match.** A store that compiles one to
+`cwd LIKE '%' || ? || '%'` answers `/w/app-old` and every subdirectory when asked for
+`/w/app`. Anything meaning "this one directory" must compare for equality after normalizing
+trailing separators — `sylph_protocol::normalize_workdir` is that comparison, shared by the
+adapters and the server so the two cannot disagree, and `docs/database-schema.md` carries
+the rule for Sylph's own queries.
 
-**A path filter must be a path match, not a substring match.** *Measured against the
-former archive, and the rule now governs Sylph's own queries — `docs/database-schema.md`
-carries it.* There, `list` and
-`search` compile it to `cwd LIKE '%' || ? || '%'`, so asking for `/w/app` also
-returns `/w/app-old` and every subdirectory. Anything that means "this one
-directory" must re-filter for exact equality after normalizing trailing slashes —
-`api::archive` and `api::workspaces` share `normalize` for exactly this.
+Two consequences worth keeping, both measured against real stores and both still true of
+the native stores the adapters read:
 
-**`list` does not collapse fork lineage, but `search` does.** Delegated sessions
-are rows of their own and are half of a real local archive (2316 of 4606
-non-empty, re-censused after the archive grew to 4922 sessions; it was 2238 of
-4416, so the ratio is stable and worth trusting over either absolute), so a
-listing that does not fold them into their parent is half noise.
-`list` carries no parent column, so lineage costs one `show` per candidate —
-`Client::session_metadata` is the cheapest shape, but see the measurement above:
-11.5 ms and ~2.5 KB, not the ~0.5 ms once recorded here.
+- **An unanchored filter can starve a paged scan.** A parent directory's pattern matches
+  everything beneath it, and those sort by recency rather than depth — so a directory's
+  own first exact match can land a thousand rows in and an early page cap reports it
+  empty. Bound such a scan in rows examined, not pages.
+- **A subagent often runs in a different directory than its parent** — typically a
+  worktree or a subdirectory. Folding those into a parent that is not in the directory
+  being listed deletes them from the only listing that would show them: it emptied 42
+  directories, one holding 193 sessions. A cross-directory child is a row of its own,
+  because in its own directory it is not delegated work, it *is* the work.
 
-**The `/agent-` id suffix is not a reliable lineage signal.** It catches most
-subagents but misses those that record only a `parent_session_id` — `codex` among
-them, measured from its own store: a `rollout-…jsonl` with
-`parent_thread_id` set, `thread_source: subagent`, and no `/agent-` segment. Those
-sat at the top level of every listing until `TraceSession::lineage` started reading
-the archive's own record. The suffix survives as a fallback for when a metadata
+**`parent_session_id` and `forked_from` are different relationships**, and a listing that
+treats them alike is wrong in opposite directions. A subagent folds into its parent as a
+count. A fork replays its origin's whole prefix and continues past it, so the two share
+every early user turn and read as one conversation resumed — listing both shows it twice
+under one label. Which one should survive cannot be decided in advance: of two real cases,
+one had its later work in the fork and the other in the origin.
+
+**The `/agent-` id suffix is not a reliable lineage signal.** It catches most subagents and
+misses those recording only a parent id — `codex` among them, measured from its own store: a
+`rollout-…jsonl` with `parent_thread_id` set, `thread_source: subagent`, and no `/agent-`
+segment. Read the vendor's own recorded parent; the suffix is a fallback for when that
 lookup fails.
-
-**A count repeated in four places is four chances to drift, and nothing checks
-them against each other.** That population's size was carried in four separate
-passages and two of them disagreed with the other two — both a different figure and
-a different agent — so at least one pair had always been wrong while reading as
-measured fact. Neither could be re-derived, because the archive they were measured
-against no longer exists. Two rules: state the *shape* a piece of code depends on
-rather than a ratio, since the shape is what stays true; and where a number is
-genuinely worth quoting, cite it once and point at it from everywhere else. A
-measurement is only quotable while the thing it was measured against still exists.
-
-**A subagent often runs in a different directory than its parent.** 484 of 2238
-do — typically a worktree or a subdirectory. Folding those into a parent that is
-not in the directory being listed deletes them from the only listing that would
-ever show them: it emptied 42 directories, one holding 193 sessions. A
-cross-directory child is promoted to a row of its own, because in its own
-directory it is not delegated work, it *is* the work.
-
-**`parent_session_id` and `forked_from` are different relationships.** A subagent
-folds into its parent as a count. A fork replays its origin's entire prefix and
-continues past it, so the two share every early user turn and read as one
-conversation resumed — listing both shows it twice under one label. Only one
-survives, and which one cannot be fixed in advance: of the two real cases here,
-one has its later work in the fork (1108 events against 389) and the other in the
-origin (2459 against 649). `list` is ordered by `endedAtMs` descending, so the
-survivor is simply whichever is reached first.
-
-**An unanchored `cwd` filter can starve a paged scan.** Because the match is a
-substring, a parent directory's pattern also matches every path beneath it, and
-those sort by recency rather than depth. `/Users/x/Workspace/huawei` has 88
-sessions of its own whose first exact match lands ~1300 rows in; an 8-page cap
-gave up first and reported the directory empty. Bound such a scan in rows
-examined (`MAX_UPSTREAM_ROWS`), not pages. `trace-db` also caps a `list` page at
-500 rows however many are requested.
-
-**Unknown request fields are silently ignored by `trace-db api`.** Its handlers
-read named keys off a JSON object rather than deserializing a typed struct, so a
-misspelled field is dropped with no error and the operation runs unfiltered. `list`
-takes `since` as a *string*, not `since_ms` as an integer — passing the latter
-looks like it works and filters nothing. Verify a new field changes the result
-rather than assuming it was accepted.
 
 **The first `user` event is usually not what the user typed.** Agents inject their
 own context as leading pseudo user turns (`<permissions instructions>`,
