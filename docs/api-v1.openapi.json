@@ -343,20 +343,6 @@
             "$ref": "#/components/responses/Error"
           }
         }
-      },
-      "delete": {
-        "summary": "Discard an empty Sylph session",
-        "description": "Deletes the session only if it is `sylph` origin and has no turns, so this cannot destroy work: an imported native session and any session that has run a turn are both left untouched. It exists for the draft a user creates by picking a directory and then navigates away from without sending anything. Idempotent — a session that does not qualify, or does not exist, still answers 204, because the client's intent is 'do not leave a draft behind' rather than 'assert this row existed'.",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/SessionId"
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "The draft is gone, or was never eligible"
-          }
-        }
       }
     },
     "/api/v1/sessions/{sessionId}/turns": {
@@ -1049,7 +1035,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid"
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
             }
           }
         ],
@@ -1088,7 +1074,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid"
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
             }
           }
         ],
@@ -1134,7 +1120,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid"
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
             }
           }
         ],
@@ -1173,7 +1159,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid"
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
             }
           }
         ],
@@ -1231,7 +1217,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid"
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
             }
           }
         ],
@@ -1299,6 +1285,85 @@
         }
       }
     },
+    "/api/v1/sessions/{sessionId}/queue": {
+      "post": {
+        "summary": "Queue text to run after the turn in flight",
+        "description": "A follow-up, not a correction. `steer` reaches the agent *inside* the running turn; this is read after it ends, and queueing with nothing running is a coherent ask that becomes the next turn's opening text. So there is no `turnId` precondition: a turn boundary crossing underneath this changes nothing.\n\nRequires `Capability::Queue`. An agent without it answers 409 `UNSUPPORTED_FIELD`, which a client renders by retiring the control rather than leaving it clickable.",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueueRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The text was accepted for after the running turn",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/sessions/{sessionId}/config": {
       "post": {
         "summary": "Set a typed session config value",
@@ -1310,7 +1375,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid"
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
             }
           }
         ],
@@ -1389,7 +1454,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid"
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
             }
           }
         ],
@@ -1428,7 +1493,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid"
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
             }
           }
         ],
@@ -1467,7 +1532,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid"
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
             }
           }
         ],
@@ -1727,6 +1792,182 @@
       }
     },
     "schemas": {
+      "AdoptSession": {
+        "type": "object",
+        "required": [
+          "environment",
+          "agent",
+          "nativeId"
+        ],
+        "properties": {
+          "environment": {
+            "type": "string",
+            "description": "The opaque environment id, base32."
+          },
+          "agent": {
+            "type": "string"
+          },
+          "nativeId": {
+            "type": "string",
+            "description": "The vendor's own id for the session, unchanged."
+          },
+          "watch": {
+            "type": "boolean",
+            "default": false,
+            "description": "Follow the store as it grows rather than parsing one pass."
+          },
+          "title": {
+            "type": "string",
+            "description": "Overrides the title derived from the opening ask."
+          },
+          "injectIdentity": {
+            "type": "boolean",
+            "default": false,
+            "description": "Defaults to false: the transcript so far was produced without it."
+          }
+        }
+      },
+      "ArchiveCounts": {
+        "type": "object",
+        "description": "Archive-wide totals, or null when the archive is unreachable. Here rather than in /health because it is a count and /health is unauthenticated.",
+        "additionalProperties": true
+      },
+      "AuthTokenResponse": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BlockedReason": {
+        "type": "string",
+        "enum": [
+          "alreadyAdopted",
+          "noWorkdir",
+          "outsideRoots"
+        ],
+        "description": "Why this row cannot be adopted, absent when it can. Typed rather than prose so a client branches on it: alreadyAdopted navigates to the session Sylph already holds, outsideRoots names a configuration fix, and noWorkdir cannot be made adoptable at all. Each is one of the adopt errors decided before the request rather than after, so a picker cannot disagree with the endpoint."
+      },
+      "BlocksPayload": {
+        "type": "object",
+        "description": "Word and PowerPoint share this shape: a slide is a section whose blocks follow it, so one renderer serves both. A structured list rather than Markdown or HTML — Markdown would mean escaping prose containing * or _ or | on the way out and re-parsing it on the way in, and HTML would reintroduce an innerHTML path into a frontend built to avoid one.",
+        "required": [
+          "blocks",
+          "truncated"
+        ],
+        "properties": {
+          "sections": {
+            "type": "array",
+            "description": "Slides for pptx; empty for docx, which has no equivalent division.",
+            "items": {
+              "type": "object",
+              "required": [
+                "index"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "description": "From the shape whose placeholder type is title or ctrTitle."
+                },
+                "index": {
+                  "type": "integer",
+                  "description": "0-based position in presentation order, which comes from p:sldIdLst resolved through the presentation rels — not from sorting filenames, since slide10.xml sorts before slide2.xml."
+                },
+                "notes": {
+                  "type": "string",
+                  "description": "Speaker notes from the per-slide ppt/notesSlides part."
+                },
+                "firstBlock": {
+                  "type": "integer",
+                  "description": "Index into `blocks` where this section's content begins."
+                }
+              }
+            }
+          },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentBlock"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ConfigEntry": {
+        "type": "object",
+        "required": [
+          "key",
+          "value",
+          "source",
+          "envVar"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Dotted key as it appears in config.toml.",
+            "example": "paths.data_dir"
+          },
+          "value": {
+            "type": "string",
+            "example": "/Users/you/.sylph/data"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "env",
+              "file",
+              "default"
+            ],
+            "description": "Which source won. Precedence is environment, then file, then a default derived from the root."
+          },
+          "envVar": {
+            "type": "string",
+            "description": "The variable that overrides this setting, named here so acting on the row needs no table elsewhere.",
+            "example": "SYLPH_DATA_DIR"
+          },
+          "exists": {
+            "type": "boolean",
+            "description": "Whether the path is there. ABSENT rather than false for settings that are not paths — a log level rendered as missing reports a working setting as broken. A bare command name (the tracedb.bin default) is checked against PATH, since a filesystem check would call a working install absent."
+          }
+        }
+      },
+      "ConfigReport": {
+        "type": "object",
+        "required": [
+          "home",
+          "configPath",
+          "configPresent",
+          "entries"
+        ],
+        "properties": {
+          "home": {
+            "type": "string",
+            "description": "The one root every path defaults under.",
+            "example": "/Users/you/.sylph"
+          },
+          "configPath": {
+            "type": "string",
+            "description": "The file to edit. Shown so a user knows what to open.",
+            "example": "/Users/you/.sylph/config.toml"
+          },
+          "configPresent": {
+            "type": "boolean",
+            "description": "False before a first run seeds it, and after a user deletes it. Stated rather than implied, because a table of values needs to say when none of them came from a file."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConfigEntry"
+            }
+          }
+        }
+      },
       "CreateSession": {
         "type": "object",
         "required": [
@@ -1773,6 +2014,153 @@
           "attachments": {
             "type": "array",
             "maxItems": 5
+          }
+        }
+      },
+      "DiagnosticsResponse": {
+        "type": "object",
+        "description": "Authenticated: exposes counts, agent names, and local filesystem paths.",
+        "required": [
+          "ok",
+          "version",
+          "uptimeSeconds",
+          "sessions",
+          "turns",
+          "agents",
+          "brokenAdapters",
+          "activeTurns"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          },
+          "uptimeSeconds": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Count per status."
+          },
+          "turns": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Count per status."
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "brokenAdapters": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "tracedb": {
+            "$ref": "#/components/schemas/ArchiveCounts",
+            "nullable": true
+          },
+          "activeTurns": {
+            "type": "integer",
+            "description": "Turns the supervisor is running right now. Was `activeProcesses`, which named a process count and always held a turn count — harmless only while every process was one Sylph spawned."
+          },
+          "retention": {
+            "$ref": "#/components/schemas/RetentionPassReport",
+            "nullable": true
+          }
+        }
+      },
+      "DocumentBlock": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "heading",
+              "paragraph",
+              "listItem",
+              "table"
+            ]
+          },
+          "level": {
+            "type": "integer",
+            "description": "Heading level 1-6, or list nesting depth for listItem."
+          },
+          "text": {
+            "type": "string",
+            "description": "Plain text, for headings and list items."
+          },
+          "spans": {
+            "type": "array",
+            "description": "Runs of text with inline formatting, for paragraphs.",
+            "items": {
+              "type": "object",
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "bold": {
+                  "type": "boolean"
+                },
+                "italic": {
+                  "type": "boolean"
+                },
+                "code": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "ordered": {
+            "type": "boolean",
+            "description": "For listItem: numbered rather than bulleted."
+          },
+          "rows": {
+            "type": "array",
+            "description": "For table: rows of cell text, first row being the header.",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "EnumerateResponse": {
+        "type": "object",
+        "required": [
+          "sessions"
+        ],
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NativeSessionRow"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "description": "Pass as cursor for the next page. Absent when this page is the last."
           }
         }
       },
@@ -1830,6 +2218,849 @@
             }
           }
         }
+      },
+      "Event": {
+        "type": "object",
+        "required": [
+          "seq",
+          "kind",
+          "stability",
+          "source"
+        ],
+        "properties": {
+          "seq": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "status",
+              "user",
+              "thinking",
+              "assistant",
+              "tool_call",
+              "tool_result",
+              "usage",
+              "error",
+              "turn",
+              "subagent",
+              "plan",
+              "diff",
+              "compact",
+              "capabilities",
+              "notice"
+            ]
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "streamId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stable id for one logical block across its phases. A tool_result repeats its tool_call's id so the two group."
+          },
+          "span": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The delegated trajectory this event happened in; absent is the root turn. A subagent event's streamId is itself a trajectory id, so a nested delegation names another here. See docs/session-protocol.md, Delegated trajectories."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tool name for a tool_call, or the agent's own name for a subagent trajectory."
+          },
+          "text": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object"
+          },
+          "isError": {
+            "type": "boolean",
+            "description": "Set on a failed tool result, a failed trajectory, or an error event."
+          },
+          "stability": {
+            "type": "string",
+            "enum": [
+              "ephemeral",
+              "stable"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "server",
+              "tracedb",
+              "archive"
+            ]
+          }
+        },
+        "description": "A normalized stream or journal event. Kinds are additive by protocol, so a client must tolerate one it does not know rather than rejecting the stream."
+      },
+      "FileContentResponse": {
+        "type": "object",
+        "required": [
+          "path",
+          "absolutePath",
+          "size",
+          "encoding",
+          "mimeType",
+          "truncated",
+          "modifiedAtMs"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "absolutePath": {
+            "type": "string",
+            "description": "For \"Copy path\" in the UI."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Full size on disk, even when the body is truncated."
+          },
+          "encoding": {
+            "type": "string",
+            "enum": [
+              "text",
+              "image",
+              "binary"
+            ],
+            "description": "Derived from the bytes, not the extension."
+          },
+          "mimeType": {
+            "type": "string",
+            "description": "Extension-based guess. Advisory: selects a viewer, never access."
+          },
+          "content": {
+            "type": "string",
+            "description": "Text, or base64 for images. Absent for binary and oversized images."
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "modifiedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "FileDocumentResponse": {
+        "type": "object",
+        "description": "A parsed document. `kind` discriminates the payload: exactly one of `grid` or `blocks` is present, matching it.",
+        "required": [
+          "path",
+          "absolutePath",
+          "size",
+          "modifiedAtMs",
+          "kind"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "absolutePath": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "modifiedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "grid",
+              "blocks"
+            ]
+          },
+          "format": {
+            "type": "string",
+            "description": "The concrete container, so the header can say \"Excel workbook\" while the viewer switch stays a two-way branch.",
+            "enum": [
+              "xlsx",
+              "xlsm",
+              "xlsb",
+              "xls",
+              "ods",
+              "csv",
+              "tsv",
+              "docx",
+              "pptx"
+            ]
+          },
+          "grid": {
+            "$ref": "#/components/schemas/GridPayload"
+          },
+          "blocks": {
+            "$ref": "#/components/schemas/BlocksPayload"
+          }
+        }
+      },
+      "FileEntry": {
+        "type": "object",
+        "required": [
+          "path",
+          "name",
+          "isDir",
+          "modifiedAtMs"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the session workdir. The root itself is the empty string."
+          },
+          "name": {
+            "type": "string"
+          },
+          "isDir": {
+            "type": "boolean"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Files only; omitted for directories, where it means nothing."
+          },
+          "modifiedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "isSymlink": {
+            "type": "boolean",
+            "description": "A listed symlink always resolves inside the workdir; escaping ones are omitted."
+          }
+        }
+      },
+      "FileMkdir": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Parent directory relative to the workdir. Empty means the root."
+          },
+          "name": {
+            "type": "string",
+            "description": "New directory's name, one path component. Rejected rather than rewritten when unusable."
+          }
+        }
+      },
+      "FileMkdirResponse": {
+        "type": "object",
+        "required": [
+          "path",
+          "absolutePath"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the workdir, as the Artifacts pane addresses entries."
+          },
+          "absolutePath": {
+            "type": "string"
+          }
+        }
+      },
+      "FileTreeResponse": {
+        "type": "object",
+        "required": [
+          "root",
+          "path",
+          "entries",
+          "truncated"
+        ],
+        "properties": {
+          "root": {
+            "type": "string",
+            "description": "Absolute canonical path of the session workdir."
+          },
+          "path": {
+            "type": "string",
+            "description": "The directory listed, relative to the workdir."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileEntry"
+            }
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True past 2000 entries in one directory."
+          }
+        }
+      },
+      "FileUpload": {
+        "type": "object",
+        "required": [
+          "name",
+          "data"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Destination directory relative to the workdir. Empty means the root."
+          },
+          "name": {
+            "type": "string",
+            "description": "Filename; sanitized to one path component."
+          },
+          "data": {
+            "type": "string",
+            "format": "byte",
+            "description": "File bytes, base64, no `data:` prefix — the same encoding turn attachments use."
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false,
+            "description": "Replace an existing file. Absent or false refuses instead."
+          }
+        }
+      },
+      "FileUploadResponse": {
+        "type": "object",
+        "required": [
+          "path",
+          "absolutePath",
+          "size"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative to the workdir, as the Artifacts pane addresses files."
+          },
+          "absolutePath": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "FsBrowseResponse": {
+        "type": "object",
+        "required": [
+          "path",
+          "entries",
+          "truncated"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The directory listed, canonicalized."
+          },
+          "parent": {
+            "type": "string",
+            "description": "Absent when `path` is itself a configured root."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FsDirEntry"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "FsDirEntry": {
+        "type": "object",
+        "required": [
+          "path",
+          "name",
+          "modifiedAtMs"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute, because the client hands it back as a `workdir` or as the next directory to list."
+          },
+          "name": {
+            "type": "string"
+          },
+          "modifiedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "isSymlink": {
+            "type": "boolean",
+            "description": "Omitted when false."
+          }
+        }
+      },
+      "FsRoot": {
+        "type": "object",
+        "required": [
+          "name",
+          "path"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      },
+      "FsRootsResponse": {
+        "type": "object",
+        "required": [
+          "roots",
+          "home"
+        ],
+        "properties": {
+          "roots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FsRoot"
+            }
+          },
+          "home": {
+            "type": "string",
+            "description": "The resolved home directory."
+          }
+        }
+      },
+      "GridCell": {
+        "type": "object",
+        "required": [
+          "v",
+          "t"
+        ],
+        "properties": {
+          "v": {
+            "type": "string",
+            "description": "The string to display. Dates are already ISO-8601, never an Excel serial. Per-cell currency and percent formats are not reproduced: calamine folds the number format into the value and exposes no format string, so only date-vs-number survives."
+          },
+          "t": {
+            "type": "string",
+            "description": "Drives alignment — numbers and dates right, text left.",
+            "enum": [
+              "text",
+              "number",
+              "bool",
+              "date",
+              "formula",
+              "error"
+            ]
+          },
+          "n": {
+            "type": "number",
+            "description": "Raw value for a number cell, so the client need not re-parse a formatted string."
+          },
+          "f": {
+            "type": "string",
+            "description": "The formula expression, when t is formula."
+          }
+        }
+      },
+      "GridPayload": {
+        "type": "object",
+        "required": [
+          "sheets",
+          "sheet",
+          "row",
+          "rows",
+          "truncated"
+        ],
+        "properties": {
+          "sheets": {
+            "type": "array",
+            "description": "Every sheet with its true dimensions, so the client can report what it is not showing. A single entry for CSV and TSV.",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "rows",
+                "cols"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "rows": {
+                  "type": "integer"
+                },
+                "cols": {
+                  "type": "integer"
+                },
+                "exact": {
+                  "type": "boolean",
+                  "description": "False when the sheet declared no <dimension> element and the totals were counted rather than read."
+                }
+              }
+            }
+          },
+          "sheet": {
+            "type": "integer",
+            "description": "Index of the sheet actually served."
+          },
+          "row": {
+            "type": "integer",
+            "description": "First row of the window served, absolute within the sheet."
+          },
+          "rows": {
+            "type": "array",
+            "description": "The window. Each entry is one row of cells; a null cell is empty, which is most of a sparse sheet.",
+            "items": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/GridCell"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "hasHeaderRow": {
+            "type": "boolean",
+            "description": "Advisory: whether the first row of the sheet looks like headers."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the sheet holds rows beyond the window served."
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "description": "Unauthenticated, so it reports availability only — never counts, names, or paths. `agents.available` is here because a server with zero agents answers every other probe successfully while no session can run and no command can be offered, so liveness alone reports healthy for a process that cannot do its job.",
+        "required": [
+          "ok",
+          "apiVersion",
+          "schemaVersion",
+          "tracedb",
+          "agents"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "apiVersion": {
+            "type": "string",
+            "example": "1"
+          },
+          "schemaVersion": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Highest applied migration, read from `_sqlx_migrations`. It is not a hand-maintained number: an `app_meta` copy used to be bumped by migrations and four of them forgot, so the field answered its one question wrongly."
+          },
+          "tracedb": {
+            "type": "object",
+            "required": [
+              "available"
+            ],
+            "properties": {
+              "available": {
+                "type": "boolean",
+                "description": "Unreachable is a supported configuration, not a failure: live sessions work and archive features report themselves unavailable. Deleted when the archive becomes an embedded crate, since nothing external will answer."
+              }
+            }
+          },
+          "agents": {
+            "type": "object",
+            "required": [
+              "available"
+            ],
+            "properties": {
+              "available": {
+                "type": "boolean",
+                "description": "Whether any agent is usable at all. A boolean rather than a count, to keep this endpoint free of anything an unauthenticated caller should not learn."
+              }
+            }
+          }
+        }
+      },
+      "HistoryResponse": {
+        "type": "object",
+        "required": [
+          "turns"
+        ],
+        "properties": {
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TurnWithEvents"
+            }
+          }
+        }
+      },
+      "LinkFailure": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "no_adapter",
+              "handshake_failed"
+            ],
+            "description": "Closed vocabulary so a UI can choose its own words and offer the right recovery. `no_adapter` is the one a retry cannot fix. Both values describe *Sylph's own spawn* failing, so neither can yet express an adopted session — a process running fine that is not ours to drive."
+          },
+          "message": {
+            "type": "string",
+            "description": "Always populated, so an unrecognized code still renders."
+          }
+        }
+      },
+      "LinkState": {
+        "type": "object",
+        "required": [
+          "attached",
+          "supports"
+        ],
+        "description": "Live link state. An empty `supports` means Sylph cannot reach the agent, never that the agent has no capabilities — for an adopted session the process is alive and simply not ours.",
+        "properties": {
+          "attached": {
+            "type": "boolean"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "supports": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Empty when detached: capability is a property of a live link, and a remembered list would promise interrupt on a session Sylph holds no channel to."
+          },
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Commands, config, permission mode, context window. Facet-scoped by protocol: an unmentioned facet is never cleared."
+          },
+          "failure": {
+            "$ref": "#/components/schemas/LinkFailure",
+            "nullable": true,
+            "description": "Present only when establishing was tried and failed. Not cached — the next read tries again."
+          }
+        }
+      },
+      "NativeSessionRow": {
+        "type": "object",
+        "required": [
+          "agent",
+          "nativeId",
+          "fidelity",
+          "id"
+        ],
+        "description": "One native session an environment holds. Every field an adapter cannot answer is absent rather than defaulted: a synthesized title or timestamp is a lie a journal makes permanent, and this row is what a picker renders.",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "nativeId": {
+            "type": "string",
+            "description": "The vendor's own id, unchanged."
+          },
+          "workdir": {
+            "type": "string",
+            "description": "Where it ran. Absent means the store recorded none, which makes the session not resumable — adopt answers 422 rather than guessing a directory to run an agent in."
+          },
+          "title": {
+            "type": "string",
+            "description": "The vendor's own recorded title, when it keeps one. Measured: claude ~93% of sessions, codex and pi none."
+          },
+          "startedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "endedAtMs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last recorded activity. Absent while a session is still being written — an absent end is not an ended session."
+          },
+          "eventCount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many events one pass would yield, when the store can say cheaply."
+          },
+          "parentNativeId": {
+            "type": "string",
+            "description": "The session this one was delegated from or forked out of, as the vendor recorded it. Not derived from an id-naming convention: the /agent- suffix recovers 8.8% and misattributes on a collision."
+          },
+          "fidelity": {
+            "type": "string",
+            "enum": [
+              "blocks",
+              "messages"
+            ],
+            "description": "What parsing this session would actually yield. Per session rather than per agent, because a store can hold both. Never stream."
+          },
+          "id": {
+            "type": "string",
+            "description": "The encoded triple this row would adopt as. Always present, including on a blocked row — it is what a client navigates to for an already-adopted session."
+          },
+          "blocked": {
+            "$ref": "#/components/schemas/BlockedReason"
+          }
+        }
+      },
+      "PendingRequest": {
+        "type": "object",
+        "description": "Something the agent is waiting on. A resource rather than a stream message, because the agent blocks until answered — so it must outlive every client and be answerable from a frontend that attached an hour later. Note what is deliberately absent: the adapter's own request id. It is scoped to one link and means nothing to a client, and exposing it would invite a client to send it, which is a way to answer a request that was never raised.",
+        "required": [
+          "id",
+          "sessionId",
+          "turnId",
+          "kind",
+          "title",
+          "detailJson",
+          "optionsJson",
+          "allowPersistent",
+          "status",
+          "createdAtMs"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "How a client addresses this request."
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "turnId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "approval, question, elicitation."
+          },
+          "tool": {
+            "type": "string"
+          },
+          "toolUseId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "detailJson": {
+            "type": "string",
+            "description": "The proposed input, as a JSON string."
+          },
+          "optionsJson": {
+            "type": "string",
+            "description": "Offered options, as a JSON string."
+          },
+          "formJson": {
+            "type": "string",
+            "description": "The input this request declared it wants collected. Absent means an approval, whose subject is one proposed tool input rendered from `detailJson`. A client must not sniff `detailJson` for field names it recognizes — only the agent knows what it is asking for, which is why a form is declared rather than inferred."
+          },
+          "defaultOption": {
+            "type": "string"
+          },
+          "risk": {
+            "type": "string"
+          },
+          "allowPersistent": {
+            "type": "boolean",
+            "description": "When false the client must omit \"always allow\" entirely: the agent has said a lasting grant would be broader than this ask. Persisted rather than held on the link, because the dialog may be rendered by a client that attached long after the request was raised."
+          },
+          "expiresAtMs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Advisory. Nothing server-side acts on it."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "resolved",
+              "abandoned"
+            ],
+            "description": "Reconcile against this rather than against a vocabulary of verbs — a status added later then needs no client change."
+          },
+          "chosenOption": {
+            "type": "string"
+          },
+          "resolvedInputJson": {
+            "type": "string"
+          },
+          "resolvedBy": {
+            "type": "string"
+          },
+          "createdAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "resolvedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "QueueAccepted": {
+        "type": "object",
+        "required": [
+          "queued"
+        ],
+        "properties": {
+          "queued": {
+            "type": "boolean",
+            "description": "Always true; a refusal arrives as an error envelope rather than false."
+          }
+        }
+      },
+      "QueueRequest": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The follow-up to run after the current turn. Must not be blank."
+          }
+        }
+      },
+      "ResolveRequestBody": {
+        "type": "object",
+        "required": [
+          "option"
+        ],
+        "properties": {
+          "option": {
+            "type": "string"
+          },
+          "input": {
+            "description": "An edited version of what the agent proposed. This is what makes \"allow, but change the command\" work — a real terminal affordance a yes/no dialog drops. Absent means as proposed."
+          }
+        }
+      },
+      "RetentionPassReport": {
+        "type": "object",
+        "description": "The last retention pass. Reported because retention's correct behaviour is usually 'nothing was dropped', which is indistinguishable from a broken pass without the counts: `withheld` beside `terminal` separates a session that is supposed to keep everything from one the archive is not confirming, and an all-`unchanged` pass means ingestion has stopped advancing.",
+        "additionalProperties": true
       },
       "SearchHit": {
         "type": "object",
@@ -1944,1082 +3175,6 @@
           }
         }
       },
-      "Event": {
-        "type": "object",
-        "required": [
-          "seq",
-          "kind",
-          "stability",
-          "source"
-        ],
-        "properties": {
-          "seq": {
-            "type": "integer"
-          },
-          "kind": {
-            "type": "string",
-            "enum": [
-              "status",
-              "user",
-              "thinking",
-              "assistant",
-              "tool_call",
-              "tool_result",
-              "usage",
-              "error",
-              "turn",
-              "subagent",
-              "plan",
-              "diff",
-              "compact",
-              "capabilities",
-              "notice"
-            ]
-          },
-          "phase": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "streamId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Stable id for one logical block across its phases. A tool_result repeats its tool_call's id so the two group."
-          },
-          "span": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The delegated trajectory this event happened in; absent is the root turn. A subagent event's streamId is itself a trajectory id, so a nested delegation names another here. See docs/session-protocol.md, Delegated trajectories."
-          },
-          "name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Tool name for a tool_call, or the agent's own name for a subagent trajectory."
-          },
-          "text": {
-            "type": "string"
-          },
-          "data": {
-            "type": "object"
-          },
-          "isError": {
-            "type": "boolean",
-            "description": "Set on a failed tool result, a failed trajectory, or an error event."
-          },
-          "stability": {
-            "type": "string",
-            "enum": [
-              "ephemeral",
-              "stable"
-            ]
-          },
-          "source": {
-            "type": "string",
-            "enum": [
-              "agent",
-              "server",
-              "tracedb",
-              "archive"
-            ]
-          }
-        },
-        "description": "A normalized stream or journal event. Kinds are additive by protocol, so a client must tolerate one it does not know rather than rejecting the stream."
-      },
-      "Workspace": {
-        "type": "object",
-        "required": [
-          "path",
-          "name",
-          "sessionCount",
-          "runningCount",
-          "lastUsedMs",
-          "isQuickStart",
-          "archivedCount"
-        ],
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Absolute path. Display shortens it; API calls need the real value."
-          },
-          "name": {
-            "type": "string",
-            "description": "Directory leaf, precomputed for display."
-          },
-          "sessionCount": {
-            "type": "integer"
-          },
-          "runningCount": {
-            "type": "integer"
-          },
-          "lastUsedMs": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Newest updatedAtMs across the workspace's sessions. 0 when it has none."
-          },
-          "isQuickStart": {
-            "type": "boolean",
-            "description": "True for the configured Quick Start directory, which the sidebar lists separately."
-          },
-          "archivedCount": {
-            "type": "integer",
-            "description": "Archived sessions TraceDB holds for this directory. Always 0 unless the request passed includeArchived, so 0 means \"not counted\" rather than \"no history\"."
-          }
-        }
-      },
-      "WorkspacesResponse": {
-        "type": "object",
-        "required": [
-          "quickStartDir",
-          "dataDir",
-          "home",
-          "workspaces"
-        ],
-        "properties": {
-          "quickStartDir": {
-            "type": "string",
-            "description": "Absolute path of the Quick Start directory, resolved server-side: the browser can neither expand ~ nor know what paths.quick_start_dir was set to."
-          },
-          "dataDir": {
-            "type": "string",
-            "description": "Where the journal and attachments live."
-          },
-          "home": {
-            "type": "string",
-            "description": "Used client-side to abbreviate paths as ~/..."
-          },
-          "workspaces": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Workspace"
-            }
-          }
-        }
-      },
-      "FileEntry": {
-        "type": "object",
-        "required": [
-          "path",
-          "name",
-          "isDir",
-          "modifiedAtMs"
-        ],
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Relative to the session workdir. The root itself is the empty string."
-          },
-          "name": {
-            "type": "string"
-          },
-          "isDir": {
-            "type": "boolean"
-          },
-          "size": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Files only; omitted for directories, where it means nothing."
-          },
-          "modifiedAtMs": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "isSymlink": {
-            "type": "boolean",
-            "description": "A listed symlink always resolves inside the workdir; escaping ones are omitted."
-          }
-        }
-      },
-      "FileTreeResponse": {
-        "type": "object",
-        "required": [
-          "root",
-          "path",
-          "entries",
-          "truncated"
-        ],
-        "properties": {
-          "root": {
-            "type": "string",
-            "description": "Absolute canonical path of the session workdir."
-          },
-          "path": {
-            "type": "string",
-            "description": "The directory listed, relative to the workdir."
-          },
-          "entries": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/FileEntry"
-            }
-          },
-          "truncated": {
-            "type": "boolean",
-            "description": "True past 2000 entries in one directory."
-          }
-        }
-      },
-      "FileContentResponse": {
-        "type": "object",
-        "required": [
-          "path",
-          "absolutePath",
-          "size",
-          "encoding",
-          "mimeType",
-          "truncated",
-          "modifiedAtMs"
-        ],
-        "properties": {
-          "path": {
-            "type": "string"
-          },
-          "absolutePath": {
-            "type": "string",
-            "description": "For \"Copy path\" in the UI."
-          },
-          "size": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Full size on disk, even when the body is truncated."
-          },
-          "encoding": {
-            "type": "string",
-            "enum": [
-              "text",
-              "image",
-              "binary"
-            ],
-            "description": "Derived from the bytes, not the extension."
-          },
-          "mimeType": {
-            "type": "string",
-            "description": "Extension-based guess. Advisory: selects a viewer, never access."
-          },
-          "content": {
-            "type": "string",
-            "description": "Text, or base64 for images. Absent for binary and oversized images."
-          },
-          "truncated": {
-            "type": "boolean"
-          },
-          "modifiedAtMs": {
-            "type": "integer",
-            "format": "int64"
-          }
-        }
-      },
-      "ArchiveSession": {
-        "type": "object",
-        "required": [
-          "id",
-          "agent",
-          "cwd",
-          "events",
-          "subagentCount"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "TraceDB session id (claude:uuid), not a Sylph Web session id. A subagent id carries a /agent-... suffix."
-          },
-          "agent": {
-            "type": "string"
-          },
-          "label": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The archive's title when it recorded one, else the opening typed message with harness-injected envelopes skipped. Absent for ~2% of real project sessions."
-          },
-          "cwd": {
-            "type": "string",
-            "description": "Recorded working directory, normalized. Always equals the requested workdir."
-          },
-          "model": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "startedAtMs": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
-          },
-          "endedAtMs": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
-          },
-          "events": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Events the archive holds: the only size signal available."
-          },
-          "subagentCount": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Subagent sessions spawned by this one, folded in rather than listed as peers. Delegated sessions are 51% of a real archive. A subagent that ran in a different directory than its parent is NOT folded -- 484 of 2238 do, and folding those into an absent parent deleted them from the only directory that would show them."
-          },
-          "forkOf": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Origin's TraceDB id when this session is a fork of another. A fork replays its origin's whole prefix, so the two read as one conversation and only one belongs in a listing; the server drops the loser within a response, but a pair can straddle two pages (one measured pair sits 268 rows apart) and no state is kept between requests. A client accumulating pages must suppress a row whose forkOf names a session it already showed, and a row that an already-shown fork names."
-          },
-          "sessionId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Live session id when this archived session was already imported, so the UI opens the conversation instead of listing it twice."
-          },
-          "subagents": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ArchiveDelegate"
-            },
-            "description": "The folded subagents themselves; subagentCount is always its length. A count alone is a dead end, since half a real archive is delegated work and the client needs a way to open it. Session-level: the archive records no event-level parent pointer, so this says a delegation happened, never where in the parent's transcript. Omitted when there are none."
-          }
-        }
-      },
-      "ArchiveListResponse": {
-        "type": "object",
-        "required": [
-          "sessions",
-          "available"
-        ],
-        "properties": {
-          "sessions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ArchiveSession"
-            }
-          },
-          "nextCursor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Opaque cursor to continue from. Absent on the last page."
-          },
-          "available": {
-            "type": "boolean",
-            "description": "False when TraceDB could not be reached. The request still succeeds."
-          },
-          "detail": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why the archive is unavailable. Absent when available."
-          }
-        }
-      },
-      "ArchiveTranscript": {
-        "type": "object",
-        "required": [
-          "id",
-          "agent",
-          "events",
-          "truncated",
-          "flat",
-          "delegationsTruncated"
-        ],
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "agent": {
-            "type": "string"
-          },
-          "label": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "cwd": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Recorded working directory. Absent for 19% of the archive, and its absence is why such a session can be read but not continued."
-          },
-          "startedAtMs": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
-          },
-          "events": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Event"
-            },
-            "description": "Normalized into the live StreamEvent shape so one timeline renders both: every event is phase=completed and stability=stable with source=archive, agent-internal system events are dropped, tool arguments move from text into data.input, and a tool_result shares its tool_call's streamId."
-          },
-          "truncated": {
-            "type": "boolean",
-            "description": "True when limit cut the stream short."
-          },
-          "sessionId": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "delegations": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ArchiveDelegate"
-            },
-            "description": "Sessions this one delegated to. Complete for delegates whose id carries the parent as a prefix (2104 of 2316 measured); the rest record only a parent that only `show` reports, at 11.5 ms per row, and are reached from the parent's directory listing instead. Omitted when there are none."
-          },
-          "delegationsTruncated": {
-            "type": "boolean",
-            "description": "True when the delegation scan stopped at its row ceiling, so the list may be short. Distinguishes 'none' from 'did not finish looking'."
-          },
-          "parentId": {
-            "type": "string",
-            "description": "The session that delegated this one. Half of a real archive is delegated work, so without this a transcript opened from a search hit reads as a conversation someone started."
-          },
-          "forkedFrom": {
-            "type": "string",
-            "description": "The session this one forked or resumed from. A different relationship from parentId: a fork replays its origin's whole prefix, which is what explains a transcript that appears to open mid-conversation."
-          },
-          "flat": {
-            "type": "boolean",
-            "description": "True when the archive records no event-level delegation structure, which is every agent measured. No archived event carries a span: data_json is null on all 36308 events sampled, and parent_id is a per-agent conversation chain rather than a delegation pointer. Stated on the wire because it decides the honest rendering."
-          }
-        }
-      },
-      "FileDocumentResponse": {
-        "type": "object",
-        "description": "A parsed document. `kind` discriminates the payload: exactly one of `grid` or `blocks` is present, matching it.",
-        "required": [
-          "path",
-          "absolutePath",
-          "size",
-          "modifiedAtMs",
-          "kind"
-        ],
-        "properties": {
-          "path": {
-            "type": "string"
-          },
-          "absolutePath": {
-            "type": "string"
-          },
-          "size": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "modifiedAtMs": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "kind": {
-            "type": "string",
-            "enum": [
-              "grid",
-              "blocks"
-            ]
-          },
-          "format": {
-            "type": "string",
-            "description": "The concrete container, so the header can say \"Excel workbook\" while the viewer switch stays a two-way branch.",
-            "enum": [
-              "xlsx",
-              "xlsm",
-              "xlsb",
-              "xls",
-              "ods",
-              "csv",
-              "tsv",
-              "docx",
-              "pptx"
-            ]
-          },
-          "grid": {
-            "$ref": "#/components/schemas/GridPayload"
-          },
-          "blocks": {
-            "$ref": "#/components/schemas/BlocksPayload"
-          }
-        }
-      },
-      "GridPayload": {
-        "type": "object",
-        "required": [
-          "sheets",
-          "sheet",
-          "row",
-          "rows",
-          "truncated"
-        ],
-        "properties": {
-          "sheets": {
-            "type": "array",
-            "description": "Every sheet with its true dimensions, so the client can report what it is not showing. A single entry for CSV and TSV.",
-            "items": {
-              "type": "object",
-              "required": [
-                "name",
-                "rows",
-                "cols"
-              ],
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "rows": {
-                  "type": "integer"
-                },
-                "cols": {
-                  "type": "integer"
-                },
-                "exact": {
-                  "type": "boolean",
-                  "description": "False when the sheet declared no <dimension> element and the totals were counted rather than read."
-                }
-              }
-            }
-          },
-          "sheet": {
-            "type": "integer",
-            "description": "Index of the sheet actually served."
-          },
-          "row": {
-            "type": "integer",
-            "description": "First row of the window served, absolute within the sheet."
-          },
-          "rows": {
-            "type": "array",
-            "description": "The window. Each entry is one row of cells; a null cell is empty, which is most of a sparse sheet.",
-            "items": {
-              "type": "array",
-              "items": {
-                "oneOf": [
-                  {
-                    "$ref": "#/components/schemas/GridCell"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            }
-          },
-          "hasHeaderRow": {
-            "type": "boolean",
-            "description": "Advisory: whether the first row of the sheet looks like headers."
-          },
-          "truncated": {
-            "type": "boolean",
-            "description": "True when the sheet holds rows beyond the window served."
-          }
-        }
-      },
-      "GridCell": {
-        "type": "object",
-        "required": [
-          "v",
-          "t"
-        ],
-        "properties": {
-          "v": {
-            "type": "string",
-            "description": "The string to display. Dates are already ISO-8601, never an Excel serial. Per-cell currency and percent formats are not reproduced: calamine folds the number format into the value and exposes no format string, so only date-vs-number survives."
-          },
-          "t": {
-            "type": "string",
-            "description": "Drives alignment — numbers and dates right, text left.",
-            "enum": [
-              "text",
-              "number",
-              "bool",
-              "date",
-              "formula",
-              "error"
-            ]
-          },
-          "n": {
-            "type": "number",
-            "description": "Raw value for a number cell, so the client need not re-parse a formatted string."
-          },
-          "f": {
-            "type": "string",
-            "description": "The formula expression, when t is formula."
-          }
-        }
-      },
-      "BlocksPayload": {
-        "type": "object",
-        "description": "Word and PowerPoint share this shape: a slide is a section whose blocks follow it, so one renderer serves both. A structured list rather than Markdown or HTML — Markdown would mean escaping prose containing * or _ or | on the way out and re-parsing it on the way in, and HTML would reintroduce an innerHTML path into a frontend built to avoid one.",
-        "required": [
-          "blocks",
-          "truncated"
-        ],
-        "properties": {
-          "sections": {
-            "type": "array",
-            "description": "Slides for pptx; empty for docx, which has no equivalent division.",
-            "items": {
-              "type": "object",
-              "required": [
-                "index"
-              ],
-              "properties": {
-                "title": {
-                  "type": "string",
-                  "description": "From the shape whose placeholder type is title or ctrTitle."
-                },
-                "index": {
-                  "type": "integer",
-                  "description": "0-based position in presentation order, which comes from p:sldIdLst resolved through the presentation rels — not from sorting filenames, since slide10.xml sorts before slide2.xml."
-                },
-                "notes": {
-                  "type": "string",
-                  "description": "Speaker notes from the per-slide ppt/notesSlides part."
-                },
-                "firstBlock": {
-                  "type": "integer",
-                  "description": "Index into `blocks` where this section's content begins."
-                }
-              }
-            }
-          },
-          "blocks": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/DocumentBlock"
-            }
-          },
-          "truncated": {
-            "type": "boolean"
-          }
-        }
-      },
-      "DocumentBlock": {
-        "type": "object",
-        "required": [
-          "type"
-        ],
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": [
-              "heading",
-              "paragraph",
-              "listItem",
-              "table"
-            ]
-          },
-          "level": {
-            "type": "integer",
-            "description": "Heading level 1-6, or list nesting depth for listItem."
-          },
-          "text": {
-            "type": "string",
-            "description": "Plain text, for headings and list items."
-          },
-          "spans": {
-            "type": "array",
-            "description": "Runs of text with inline formatting, for paragraphs.",
-            "items": {
-              "type": "object",
-              "required": [
-                "text"
-              ],
-              "properties": {
-                "text": {
-                  "type": "string"
-                },
-                "bold": {
-                  "type": "boolean"
-                },
-                "italic": {
-                  "type": "boolean"
-                },
-                "code": {
-                  "type": "boolean"
-                }
-              }
-            }
-          },
-          "ordered": {
-            "type": "boolean",
-            "description": "For listItem: numbered rather than bulleted."
-          },
-          "rows": {
-            "type": "array",
-            "description": "For table: rows of cell text, first row being the header.",
-            "items": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          }
-        }
-      },
-      "UpdateSession": {
-        "type": "object",
-        "properties": {
-          "title": {
-            "type": "string",
-            "description": "Trimmed before storing."
-          },
-          "flags": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "description": "Per-turn agent flags, e.g. `model`, `effort`. Validated against the agent descriptor."
-          }
-        }
-      },
-      "FileUpload": {
-        "type": "object",
-        "required": [
-          "name",
-          "data"
-        ],
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Destination directory relative to the workdir. Empty means the root."
-          },
-          "name": {
-            "type": "string",
-            "description": "Filename; sanitized to one path component."
-          },
-          "data": {
-            "type": "string",
-            "format": "byte",
-            "description": "File bytes, base64, no `data:` prefix — the same encoding turn attachments use."
-          },
-          "overwrite": {
-            "type": "boolean",
-            "default": false,
-            "description": "Replace an existing file. Absent or false refuses instead."
-          }
-        }
-      },
-      "FileUploadResponse": {
-        "type": "object",
-        "required": [
-          "path",
-          "absolutePath",
-          "size"
-        ],
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Relative to the workdir, as the Artifacts pane addresses files."
-          },
-          "absolutePath": {
-            "type": "string"
-          },
-          "size": {
-            "type": "integer",
-            "format": "int64"
-          }
-        }
-      },
-      "FsRootsResponse": {
-        "type": "object",
-        "required": [
-          "roots",
-          "home"
-        ],
-        "properties": {
-          "roots": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/FsRoot"
-            }
-          },
-          "home": {
-            "type": "string",
-            "description": "The resolved home directory."
-          }
-        }
-      },
-      "FsRoot": {
-        "type": "object",
-        "required": [
-          "name",
-          "path"
-        ],
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          }
-        }
-      },
-      "FsBrowseResponse": {
-        "type": "object",
-        "required": [
-          "path",
-          "entries",
-          "truncated"
-        ],
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "The directory listed, canonicalized."
-          },
-          "parent": {
-            "type": "string",
-            "description": "Absent when `path` is itself a configured root."
-          },
-          "entries": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/FsDirEntry"
-            }
-          },
-          "truncated": {
-            "type": "boolean"
-          }
-        }
-      },
-      "FsDirEntry": {
-        "type": "object",
-        "required": [
-          "path",
-          "name",
-          "modifiedAtMs"
-        ],
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Absolute, because the client hands it back as a `workdir` or as the next directory to list."
-          },
-          "name": {
-            "type": "string"
-          },
-          "modifiedAtMs": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "isSymlink": {
-            "type": "boolean",
-            "description": "Omitted when false."
-          }
-        }
-      },
-      "AuthTokenResponse": {
-        "type": "object",
-        "required": [
-          "ok"
-        ],
-        "properties": {
-          "ok": {
-            "type": "boolean"
-          }
-        }
-      },
-      "FileMkdir": {
-        "type": "object",
-        "required": [
-          "name"
-        ],
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Parent directory relative to the workdir. Empty means the root."
-          },
-          "name": {
-            "type": "string",
-            "description": "New directory's name, one path component. Rejected rather than rewritten when unusable."
-          }
-        }
-      },
-      "FileMkdirResponse": {
-        "type": "object",
-        "required": [
-          "path",
-          "absolutePath"
-        ],
-        "properties": {
-          "path": {
-            "type": "string",
-            "description": "Relative to the workdir, as the Artifacts pane addresses entries."
-          },
-          "absolutePath": {
-            "type": "string"
-          }
-        }
-      },
-      "SoulResponse": {
-        "type": "object",
-        "required": [
-          "available"
-        ],
-        "description": "The identity text Sylph appends to an agent's prompt. Read from disk per request rather than cached at startup: SOUL.md is hand-edited between sessions, and a cached copy shown beside a toggle claiming to control the live file would be stale.",
-        "properties": {
-          "available": {
-            "type": "boolean",
-            "description": "A readable SOUL.md resolved. false means every session on this install runs on the agent's own identity whatever the client requests, which the UI needs to state plainly rather than offering a toggle over nothing."
-          },
-          "path": {
-            "type": "string",
-            "description": "Absolute path, so the user can go edit it."
-          },
-          "content": {
-            "type": "string",
-            "description": "The text as the agent receives it, absent when the file resolved but could not be read."
-          },
-          "bytes": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Size on disk, before any truncation."
-          },
-          "modifiedMs": {
-            "type": "integer",
-            "format": "int64",
-            "description": "mtime in epoch milliseconds."
-          },
-          "truncated": {
-            "type": "boolean",
-            "description": "Present only when true: content holds just the first 128 KiB, cut on a char boundary so the tail is not rendered as U+FFFD."
-          },
-          "error": {
-            "type": "string",
-            "description": "Why no content is present, when a path resolved but could not be read. Distinguishes \"there is no SOUL.md\" from \"there is one and it is unreadable\" — different problems with different fixes."
-          }
-        }
-      },
-      "ConfigReport": {
-        "type": "object",
-        "required": [
-          "home",
-          "configPath",
-          "configPresent",
-          "entries"
-        ],
-        "properties": {
-          "home": {
-            "type": "string",
-            "description": "The one root every path defaults under.",
-            "example": "/Users/you/.sylph"
-          },
-          "configPath": {
-            "type": "string",
-            "description": "The file to edit. Shown so a user knows what to open.",
-            "example": "/Users/you/.sylph/config.toml"
-          },
-          "configPresent": {
-            "type": "boolean",
-            "description": "False before a first run seeds it, and after a user deletes it. Stated rather than implied, because a table of values needs to say when none of them came from a file."
-          },
-          "entries": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ConfigEntry"
-            }
-          }
-        }
-      },
-      "ConfigEntry": {
-        "type": "object",
-        "required": [
-          "key",
-          "value",
-          "source",
-          "envVar"
-        ],
-        "properties": {
-          "key": {
-            "type": "string",
-            "description": "Dotted key as it appears in config.toml.",
-            "example": "paths.data_dir"
-          },
-          "value": {
-            "type": "string",
-            "example": "/Users/you/.sylph/data"
-          },
-          "source": {
-            "type": "string",
-            "enum": [
-              "env",
-              "file",
-              "default"
-            ],
-            "description": "Which source won. Precedence is environment, then file, then a default derived from the root."
-          },
-          "envVar": {
-            "type": "string",
-            "description": "The variable that overrides this setting, named here so acting on the row needs no table elsewhere.",
-            "example": "SYLPH_DATA_DIR"
-          },
-          "exists": {
-            "type": "boolean",
-            "description": "Whether the path is there. ABSENT rather than false for settings that are not paths — a log level rendered as missing reports a working setting as broken. A bare command name (the tracedb.bin default) is checked against PATH, since a filesystem check would call a working install absent."
-          }
-        }
-      },
-      "ArchiveDelegate": {
-        "type": "object",
-        "description": "One delegated session, as its parent reports it. Thinner than ArchiveSession on purpose: a disclosure row under its parent, built from the listing page the server was already reading. There is no opening-ask fallback for the title, because that costs a request per child and one measured parent has 193 of them.",
-        "required": [
-          "id",
-          "agent",
-          "events"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "TraceDB session id, including any /agent- suffix.",
-            "example": "claude:f1830315-5ce1-44e3-86c0-8f65ccbc961e/agent-a6e09e69b1b293ad2"
-          },
-          "agent": {
-            "type": "string",
-            "example": "claude"
-          },
-          "title": {
-            "type": "string",
-            "description": "The archive's own title. codex and pi record none."
-          },
-          "cwd": {
-            "type": "string",
-            "description": "Present only when this delegate ran somewhere other than its parent, which 484 of 2238 measured did."
-          },
-          "events": {
-            "type": "integer",
-            "format": "int64",
-            "example": 14
-          },
-          "startedAtMs": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "endedAtMs": {
-            "type": "integer",
-            "format": "int64"
-          }
-        }
-      },
       "Session": {
         "type": "object",
         "description": "A session as every session-returning endpoint serializes it. Mirrors `backend/src/models/session.rs`. Note `nativeSessionId`: the field is `backend_session_id` in Rust and renamed on the wire, so a reader looking for the Rust name in this document will not find it.",
@@ -3115,6 +3270,90 @@
           }
         }
       },
+      "SessionListResponse": {
+        "type": "object",
+        "required": [
+          "sessions"
+        ],
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            }
+          }
+        },
+        "description": "Capped server-side. Do not assert on a count against a shared home; assert on identity."
+      },
+      "SetConfigRequest": {
+        "type": "object",
+        "required": [
+          "configId",
+          "value"
+        ],
+        "properties": {
+          "configId": {
+            "type": "string"
+          },
+          "value": {
+            "description": "Opaque by contract — a token the agent enumerated and the client echoes back, never something to parse. This is what lets a composite encoding change with no client change."
+          }
+        }
+      },
+      "SoulResponse": {
+        "type": "object",
+        "required": [
+          "available"
+        ],
+        "description": "The identity text Sylph appends to an agent's prompt. Read from disk per request rather than cached at startup: SOUL.md is hand-edited between sessions, and a cached copy shown beside a toggle claiming to control the live file would be stale.",
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "A readable SOUL.md resolved. false means every session on this install runs on the agent's own identity whatever the client requests, which the UI needs to state plainly rather than offering a toggle over nothing."
+          },
+          "path": {
+            "type": "string",
+            "description": "Absolute path, so the user can go edit it."
+          },
+          "content": {
+            "type": "string",
+            "description": "The text as the agent receives it, absent when the file resolved but could not be read."
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size on disk, before any truncation."
+          },
+          "modifiedMs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "mtime in epoch milliseconds."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Present only when true: content holds just the first 128 KiB, cut on a char boundary so the tail is not rendered as U+FFFD."
+          },
+          "error": {
+            "type": "string",
+            "description": "Why no content is present, when a path resolved but could not be read. Distinguishes \"there is no SOUL.md\" from \"there is one and it is unreadable\" — different problems with different fixes."
+          }
+        }
+      },
+      "SteerRequest": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string",
+            "description": "The turn the client believes is running. Optional: a client with no turn in view is steering whatever is running, which is a coherent ask."
+          }
+        }
+      },
       "Turn": {
         "type": "object",
         "description": "A turn as the API serializes it. Mirrors `backend/src/models/turn.rs`. `origin` is the field that stops a client rendering an answer to a message the user never wrote: an `agent` turn is one nobody asked for, opened when an agent speaks after its previous turn settled, and its `requestText` is empty by construction.",
@@ -3204,103 +3443,6 @@
           }
         }
       },
-      "FlagSpec": {
-        "type": "object",
-        "properties": {
-          "choices": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "description": {
-            "type": "string"
-          }
-        }
-      },
-      "CommandSpecEntry": {
-        "type": "object",
-        "description": "A named command an agent reported at discovery. Usually absent — a project's real command list depends on files the CLI reads at startup, so it belongs to a session and comes from GET /sessions/{id}/capabilities.",
-        "additionalProperties": true
-      },
-      "AgentDescriptor": {
-        "type": "object",
-        "description": "An agent as discovery found it. `flags` and `commands` are maps keyed by name, not arrays. `supports` is what the adapter declared, and it is longer than prose elsewhere in these docs suggests — read the adapter, not the example.",
-        "required": [
-          "name"
-        ],
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "description": {
-            "type": "string"
-          },
-          "session_key": {
-            "type": "string",
-            "description": "Not camelCase: this struct predates the rename convention and is serialized as declared."
-          },
-          "flags": {
-            "type": "object",
-            "additionalProperties": {
-              "$ref": "#/components/schemas/FlagSpec"
-            }
-          },
-          "commands": {
-            "type": "object",
-            "additionalProperties": {
-              "$ref": "#/components/schemas/CommandSpecEntry"
-            }
-          },
-          "supports": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "version": {
-            "type": "string",
-            "description": "The agent CLI's own version, when it reported one."
-          }
-        }
-      },
-      "AgentsResponse": {
-        "type": "object",
-        "required": [
-          "agents"
-        ],
-        "description": "`broken` is omitted when empty. A directory holding an adapter that cannot be spoken to is reported here rather than skipped, because such an agent is unusable rather than absent — and zero discovered agents is a silent total failure that reads as a UI bug.",
-        "properties": {
-          "agents": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/AgentDescriptor"
-            }
-          },
-          "broken": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "description": "Adapter directory to the reason it is unusable."
-          }
-        }
-      },
-      "SessionListResponse": {
-        "type": "object",
-        "required": [
-          "sessions"
-        ],
-        "properties": {
-          "sessions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Session"
-            }
-          }
-        },
-        "description": "Capped server-side. Do not assert on a count against a shared home; assert on identity."
-      },
       "TurnEnvelope": {
         "type": "object",
         "required": [
@@ -3331,458 +3473,89 @@
         },
         "description": "Events oldest first. `delta` events are never included: they are transient by protocol and their text is already in the matching `completed` event, so replaying both would duplicate every token."
       },
-      "HistoryResponse": {
+      "UpdateSession": {
         "type": "object",
-        "required": [
-          "turns"
-        ],
         "properties": {
-          "turns": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/TurnWithEvents"
-            }
-          }
-        }
-      },
-      "HealthResponse": {
-        "type": "object",
-        "description": "Unauthenticated, so it reports availability only — never counts, names, or paths. `agents.available` is here because a server with zero agents answers every other probe successfully while no session can run and no command can be offered, so liveness alone reports healthy for a process that cannot do its job.",
-        "required": [
-          "ok",
-          "apiVersion",
-          "schemaVersion",
-          "tracedb",
-          "agents"
-        ],
-        "properties": {
-          "ok": {
-            "type": "boolean"
-          },
-          "apiVersion": {
+          "title": {
             "type": "string",
-            "example": "1"
+            "description": "Trimmed before storing."
           },
-          "schemaVersion": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Highest applied migration, read from `_sqlx_migrations`. It is not a hand-maintained number: an `app_meta` copy used to be bumped by migrations and four of them forgot, so the field answered its one question wrongly."
-          },
-          "tracedb": {
-            "type": "object",
-            "required": [
-              "available"
-            ],
-            "properties": {
-              "available": {
-                "type": "boolean",
-                "description": "Unreachable is a supported configuration, not a failure: live sessions work and archive features report themselves unavailable. Deleted when the archive becomes an embedded crate, since nothing external will answer."
-              }
-            }
-          },
-          "agents": {
-            "type": "object",
-            "required": [
-              "available"
-            ],
-            "properties": {
-              "available": {
-                "type": "boolean",
-                "description": "Whether any agent is usable at all. A boolean rather than a count, to keep this endpoint free of anything an unauthenticated caller should not learn."
-              }
-            }
-          }
-        }
-      },
-      "RetentionPassReport": {
-        "type": "object",
-        "description": "The last retention pass. Reported because retention's correct behaviour is usually 'nothing was dropped', which is indistinguishable from a broken pass without the counts: `withheld` beside `terminal` separates a session that is supposed to keep everything from one the archive is not confirming, and an all-`unchanged` pass means ingestion has stopped advancing.",
-        "additionalProperties": true
-      },
-      "ArchiveCounts": {
-        "type": "object",
-        "description": "Archive-wide totals, or null when the archive is unreachable. Here rather than in /health because it is a count and /health is unauthenticated.",
-        "additionalProperties": true
-      },
-      "DiagnosticsResponse": {
-        "type": "object",
-        "description": "Authenticated: exposes counts, agent names, and local filesystem paths.",
-        "required": [
-          "ok",
-          "version",
-          "uptimeSeconds",
-          "sessions",
-          "turns",
-          "agents",
-          "brokenAdapters",
-          "activeTurns"
-        ],
-        "properties": {
-          "ok": {
-            "type": "boolean"
-          },
-          "version": {
-            "type": "string"
-          },
-          "uptimeSeconds": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "sessions": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "integer",
-              "format": "int64"
-            },
-            "description": "Count per status."
-          },
-          "turns": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "integer",
-              "format": "int64"
-            },
-            "description": "Count per status."
-          },
-          "agents": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "brokenAdapters": {
+          "flags": {
             "type": "object",
             "additionalProperties": {
               "type": "string"
-            }
-          },
-          "tracedb": {
-            "$ref": "#/components/schemas/ArchiveCounts",
-            "nullable": true
-          },
-          "activeTurns": {
-            "type": "integer",
-            "description": "Turns the supervisor is running right now. Was `activeProcesses`, which named a process count and always held a turn count — harmless only while every process was one Sylph spawned."
-          },
-          "retention": {
-            "$ref": "#/components/schemas/RetentionPassReport",
-            "nullable": true
-          }
-        }
-      },
-      "LinkFailure": {
-        "type": "object",
-        "required": [
-          "code",
-          "message"
-        ],
-        "properties": {
-          "code": {
-            "type": "string",
-            "enum": [
-              "no_adapter",
-              "handshake_failed"
-            ],
-            "description": "Closed vocabulary so a UI can choose its own words and offer the right recovery. `no_adapter` is the one a retry cannot fix. Both values describe *Sylph's own spawn* failing, so neither can yet express an adopted session — a process running fine that is not ours to drive."
-          },
-          "message": {
-            "type": "string",
-            "description": "Always populated, so an unrecognized code still renders."
-          }
-        }
-      },
-      "LinkState": {
-        "type": "object",
-        "required": [
-          "attached",
-          "supports"
-        ],
-        "description": "Live link state. An empty `supports` means Sylph cannot reach the agent, never that the agent has no capabilities — for an adopted session the process is alive and simply not ours.",
-        "properties": {
-          "attached": {
-            "type": "boolean"
-          },
-          "agent": {
-            "type": "string"
-          },
-          "supports": {
-            "type": "array",
-            "items": {
-              "type": "string"
             },
-            "description": "Empty when detached: capability is a property of a live link, and a remembered list would promise interrupt on a session Sylph holds no channel to."
-          },
-          "capabilities": {
-            "type": "object",
-            "additionalProperties": true,
-            "description": "Commands, config, permission mode, context window. Facet-scoped by protocol: an unmentioned facet is never cleared."
-          },
-          "failure": {
-            "$ref": "#/components/schemas/LinkFailure",
-            "nullable": true,
-            "description": "Present only when establishing was tried and failed. Not cached — the next read tries again."
+            "description": "Per-turn agent flags, e.g. `model`, `effort`. Validated against the agent descriptor."
           }
         }
       },
-      "SteerRequest": {
+      "Workspace": {
         "type": "object",
         "required": [
-          "text"
+          "path",
+          "name",
+          "sessionCount",
+          "runningCount",
+          "lastUsedMs",
+          "isQuickStart",
+          "archivedCount"
         ],
         "properties": {
-          "text": {
-            "type": "string"
-          },
-          "turnId": {
+          "path": {
             "type": "string",
-            "description": "The turn the client believes is running. Optional: a client with no turn in view is steering whatever is running, which is a coherent ask."
-          }
-        }
-      },
-      "SetConfigRequest": {
-        "type": "object",
-        "required": [
-          "configId",
-          "value"
-        ],
-        "properties": {
-          "configId": {
-            "type": "string"
+            "description": "Absolute path. Display shortens it; API calls need the real value."
           },
-          "value": {
-            "description": "Opaque by contract — a token the agent enumerated and the client echoes back, never something to parse. This is what lets a composite encoding change with no client change."
-          }
-        }
-      },
-      "PendingRequest": {
-        "type": "object",
-        "description": "Something the agent is waiting on. A resource rather than a stream message, because the agent blocks until answered — so it must outlive every client and be answerable from a frontend that attached an hour later. Note what is deliberately absent: the adapter's own request id. It is scoped to one link and means nothing to a client, and exposing it would invite a client to send it, which is a way to answer a request that was never raised.",
-        "required": [
-          "id",
-          "sessionId",
-          "turnId",
-          "kind",
-          "title",
-          "detailJson",
-          "optionsJson",
-          "allowPersistent",
-          "status",
-          "createdAtMs"
-        ],
-        "properties": {
-          "id": {
+          "name": {
             "type": "string",
-            "description": "How a client addresses this request."
+            "description": "Directory leaf, precomputed for display."
           },
-          "sessionId": {
-            "type": "string",
-            "format": "uuid"
+          "sessionCount": {
+            "type": "integer"
           },
-          "turnId": {
-            "type": "string",
-            "format": "uuid"
+          "runningCount": {
+            "type": "integer"
           },
-          "kind": {
-            "type": "string",
-            "description": "approval, question, elicitation."
-          },
-          "tool": {
-            "type": "string"
-          },
-          "toolUseId": {
-            "type": "string"
-          },
-          "title": {
-            "type": "string"
-          },
-          "detailJson": {
-            "type": "string",
-            "description": "The proposed input, as a JSON string."
-          },
-          "optionsJson": {
-            "type": "string",
-            "description": "Offered options, as a JSON string."
-          },
-          "formJson": {
-            "type": "string",
-            "description": "The input this request declared it wants collected. Absent means an approval, whose subject is one proposed tool input rendered from `detailJson`. A client must not sniff `detailJson` for field names it recognizes — only the agent knows what it is asking for, which is why a form is declared rather than inferred."
-          },
-          "defaultOption": {
-            "type": "string"
-          },
-          "risk": {
-            "type": "string"
-          },
-          "allowPersistent": {
-            "type": "boolean",
-            "description": "When false the client must omit \"always allow\" entirely: the agent has said a lasting grant would be broader than this ask. Persisted rather than held on the link, because the dialog may be rendered by a client that attached long after the request was raised."
-          },
-          "expiresAtMs": {
+          "lastUsedMs": {
             "type": "integer",
             "format": "int64",
-            "description": "Advisory. Nothing server-side acts on it."
+            "description": "Newest updatedAtMs across the workspace's sessions. 0 when it has none."
           },
-          "status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "resolved",
-              "abandoned"
-            ],
-            "description": "Reconcile against this rather than against a vocabulary of verbs — a status added later then needs no client change."
-          },
-          "chosenOption": {
-            "type": "string"
-          },
-          "resolvedInputJson": {
-            "type": "string"
-          },
-          "resolvedBy": {
-            "type": "string"
-          },
-          "createdAtMs": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "resolvedAtMs": {
-            "type": "integer",
-            "format": "int64"
-          }
-        }
-      },
-      "ResolveRequestBody": {
-        "type": "object",
-        "required": [
-          "option"
-        ],
-        "properties": {
-          "option": {
-            "type": "string"
-          },
-          "input": {
-            "description": "An edited version of what the agent proposed. This is what makes \"allow, but change the command\" work — a real terminal affordance a yes/no dialog drops. Absent means as proposed."
-          }
-        }
-      },
-      "AdoptSession": {
-        "type": "object",
-        "required": [
-          "environment",
-          "agent",
-          "nativeId"
-        ],
-        "properties": {
-          "environment": {
-            "type": "string",
-            "description": "The opaque environment id, base32."
-          },
-          "agent": {
-            "type": "string"
-          },
-          "nativeId": {
-            "type": "string",
-            "description": "The vendor's own id for the session, unchanged."
-          },
-          "watch": {
+          "isQuickStart": {
             "type": "boolean",
-            "default": false,
-            "description": "Follow the store as it grows rather than parsing one pass."
+            "description": "True for the configured Quick Start directory, which the sidebar lists separately."
           },
-          "title": {
-            "type": "string",
-            "description": "Overrides the title derived from the opening ask."
-          },
-          "injectIdentity": {
-            "type": "boolean",
-            "default": false,
-            "description": "Defaults to false: the transcript so far was produced without it."
+          "archivedCount": {
+            "type": "integer",
+            "description": "Archived sessions TraceDB holds for this directory. Always 0 unless the request passed includeArchived, so 0 means \"not counted\" rather than \"no history\"."
           }
         }
       },
-      "NativeSessionRow": {
+      "WorkspacesResponse": {
         "type": "object",
         "required": [
-          "agent",
-          "nativeId",
-          "fidelity",
-          "id"
-        ],
-        "description": "One native session an environment holds. Every field an adapter cannot answer is absent rather than defaulted: a synthesized title or timestamp is a lie a journal makes permanent, and this row is what a picker renders.",
-        "properties": {
-          "agent": {
-            "type": "string"
-          },
-          "nativeId": {
-            "type": "string",
-            "description": "The vendor's own id, unchanged."
-          },
-          "workdir": {
-            "type": "string",
-            "description": "Where it ran. Absent means the store recorded none, which makes the session not resumable — adopt answers 422 rather than guessing a directory to run an agent in."
-          },
-          "title": {
-            "type": "string",
-            "description": "The vendor's own recorded title, when it keeps one. Measured: claude ~93% of sessions, codex and pi none."
-          },
-          "startedAtMs": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "endedAtMs": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Last recorded activity. Absent while a session is still being written — an absent end is not an ended session."
-          },
-          "eventCount": {
-            "type": "integer",
-            "format": "int64",
-            "description": "How many events one pass would yield, when the store can say cheaply."
-          },
-          "parentNativeId": {
-            "type": "string",
-            "description": "The session this one was delegated from or forked out of, as the vendor recorded it. Not derived from an id-naming convention: the /agent- suffix recovers 8.8% and misattributes on a collision."
-          },
-          "fidelity": {
-            "type": "string",
-            "enum": [
-              "blocks",
-              "messages"
-            ],
-            "description": "What parsing this session would actually yield. Per session rather than per agent, because a store can hold both. Never stream."
-          },
-          "id": {
-            "type": "string",
-            "description": "The encoded triple this row would adopt as. Always present, including on a blocked row — it is what a client navigates to for an already-adopted session."
-          },
-          "blocked": {
-            "$ref": "#/components/schemas/BlockedReason"
-          }
-        }
-      },
-      "BlockedReason": {
-        "type": "string",
-        "enum": [
-          "alreadyAdopted",
-          "noWorkdir",
-          "outsideRoots"
-        ],
-        "description": "Why this row cannot be adopted, absent when it can. Typed rather than prose so a client branches on it: alreadyAdopted navigates to the session Sylph already holds, outsideRoots names a configuration fix, and noWorkdir cannot be made adoptable at all. Each is one of the adopt errors decided before the request rather than after, so a picker cannot disagree with the endpoint."
-      },
-      "EnumerateResponse": {
-        "type": "object",
-        "required": [
-          "sessions"
+          "quickStartDir",
+          "dataDir",
+          "home",
+          "workspaces"
         ],
         "properties": {
-          "sessions": {
+          "quickStartDir": {
+            "type": "string",
+            "description": "Absolute path of the Quick Start directory, resolved server-side: the browser can neither expand ~ nor know what paths.quick_start_dir was set to."
+          },
+          "dataDir": {
+            "type": "string",
+            "description": "Where the journal and attachments live."
+          },
+          "home": {
+            "type": "string",
+            "description": "Used client-side to abbreviate paths as ~/..."
+          },
+          "workspaces": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/NativeSessionRow"
+              "$ref": "#/components/schemas/Workspace"
             }
-          },
-          "nextCursor": {
-            "type": "string",
-            "description": "Pass as cursor for the next page. Absent when this page is the last."
           }
         }
       }

@@ -914,6 +914,32 @@ the only turn running.
 `turnId` is optional, because a client with no turn in view is steering "whatever is
 running", which is a coherent ask rather than a missing field.
 
+#### `POST /api/v1/sessions/{id}/queue`
+
+```json
+{ "text": "then run the tests" }
+```
+
+Answers `{"queued": true}`. Requires `Capability::Queue`; an agent without it answers
+`UNSUPPORTED_FIELD`, which a client renders by retiring the control rather than leaving
+it clickable.
+
+**Not `steer` with a flag**, and the difference is *when the agent reads the text*
+rather than how it is delivered. A steer is a correction, so it carries a turn
+precondition: text that misses its turn lands in the wrong conversation, and naming the
+turn is what turns that into a refusal. A queued follow-up is *for* after the turn, so
+it has no such precondition — a turn boundary crossing underneath it changes nothing,
+and queueing with nothing running is a coherent ask that becomes the next turn's opening
+text. Hence no `turnId` here at all, where one endpoint serving both meanings would need
+a field that is required for one and meaningless for the other.
+
+That shape is what let a vendor claim the wrong word for what it does: `claude` declared
+`Steer` while its only mid-turn channel is stdin, which `--input-format stream-json`
+reads through one iterator the turn loop awaits — so the text is not read until the turn
+ends. A user's correction arrived after the thing it was meant to prevent, with every
+layer reporting success. All three agents have `Queue` and each spells it differently;
+only `codex` and `pi` also have a real steer (`docs/agents.md` § Capability matrix).
+
 #### `POST /api/v1/sessions/{id}/config`
 
 ```json
