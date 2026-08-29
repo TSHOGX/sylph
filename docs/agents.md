@@ -550,8 +550,8 @@ spelling, so pi fork lineage was dropped entirely rather than partially.
 
 ## Reading a vendor payload
 
-This is the most-repeated defect class in the repo — eight instances, each one
-compiling, each surfacing one or two layers from the cause. The instances are above,
+This is the most-repeated defect class in the repo, and every instance compiled and
+surfaced one or two layers from its cause. The instances are above,
 under their agents, because the *specific* keys are what a reader needs. The general
 rules:
 

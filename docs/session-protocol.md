@@ -34,8 +34,8 @@ structural rather than incidental. They are now one module per vendor
 (`docs/agents.md`).
 
 **A protocol boundary that made vendor-key defects survivable.** The most-repeated
-defect class in `AGENTS.md` is reading the wrong key off a vendor payload: seven
-instances, each one compiling, each surfacing one or two layers from the cause. A
+defect class in `AGENTS.md` is reading the wrong key off a vendor payload, and every
+instance compiled and surfaced one or two layers from its cause. A
 typed adapter does not prevent misreading a vendor's JSON, but it removes the JSON
 round trip *behind* the adapter, so a mismatch between adapter and server is a
 compile error rather than a field that parses as `None`.

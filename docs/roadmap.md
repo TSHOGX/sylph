@@ -1789,8 +1789,8 @@ against `claude` 2.1.246 rather than reasoned about:
    one value of six could never be applied.
 2. `control()` read `response.get("response") or {}` — and an error envelope has no
    `response` — so every refused vendor control returned the same empty value a
-   successful no-payload control does. The seventh instance of the vendor-payload family
-   in AGENTS.md.
+   successful no-payload control does. Another instance of the vendor-payload family in
+   AGENTS.md.
 3. `apply_config` recorded the **requested** mode rather than the confirmed one, so the
    chip read `bypassPermissions` while the session ran under `default`. That is the
    reported symptom exactly: 200 OK, UI updates, prompts keep arriving.

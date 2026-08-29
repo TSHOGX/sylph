@@ -35,16 +35,24 @@ those, and duplicating them here only creates a second copy to forget.
 
 ## Orientation
 
-- `backend/` — Rust, Axum, SQLx. HTTP and SSE on port 4317 by default. Becomes
-  `crates/{protocol,adapters,server,envagent}`; `docs/roadmap.md` has the order.
+- `crates/protocol/` — the event vocabulary and the adapter contract, as types. No
+  runtime: no `tokio`, no `sqlx`, no `axum`, and no `chrono`.
+- `crates/adapters/` — the three adapters. Each owns whatever process its vendor CLI
+  needs, and reads that vendor's native store.
+- `backend/` — Rust, Axum, SQLx. HTTP and SSE on port 4317 by default. Holds the store,
+  the supervisor, and the API; becomes `crates/server` when step 4 splits the envagent
+  out, which `docs/roadmap.md` § Implementation order sequences.
 - `frontend/` — Next.js App Router, React, TanStack Query, Tailwind.
 - `docs/` — the governing specs. Read the relevant section before implementing.
 - `scripts/` — install and deployment tooling.
 
-**`docs/` was rewritten from first principles on 2026-08-27, specs only — no code has
-moved yet.** So a disagreement between `docs/` and `backend/src` right now is expected
-and the document is the intent. `docs/roadmap.md` § Architecture rewrite names what
-changed, what was deliberately kept, and the implementation order.
+`docs/` was rewritten from first principles on 2026-08-27 and the code has since
+followed it through step 3: `protocol` and `adapters` exist, adapters are linked into
+the server rather than spawned, and `POST /sessions/adopt` reads native stores.
+`crates/envagent` (step 4) is not started, so anything describing a paired remote
+machine is still intent rather than description. Elsewhere, treat a disagreement
+between `docs/` and the code as a bug in one of them and read § Spec and Code Evolution
+before deciding which.
 
 | Question | Authoritative source |
 | --- | --- |
@@ -346,8 +354,8 @@ opened, presenting as a UI bug in the composer's model control. When adapting a 
 shape, print one real payload rather than inferring field names — two of three guesses
 about this CLI's shapes were wrong, and each one compiled.
 
-This is the most-repeated defect in this file: **eight instances so far**, each one
-compiling, each surfacing one or two layers from the cause. They are catalogued
+This is the most-repeated defect in this file, and every instance compiled and
+surfaced one or two layers from its cause. The instances are catalogued
 individually below (`pi`'s `set_model`, the invented `task_*` subtypes,
 `AskUserQuestion`'s `selectedOptions`, `requestedSchema` versus `requested_schema`,
 `pi`'s `agent_start` versus `agent_settled`, reading `response` off an *error* envelope,
@@ -356,7 +364,7 @@ because the *specific* keys are what a reader needs. The general rule is the one
 plus three shapes worth knowing before writing any adapter:
 
 - **The right key in the wrong unit fails the same way, and is harder to catch.** The
-  eighth instance was not a misspelling: an integer timestamp read from the correct key
+  `pi` timestamp instance was not a misspelling: an integer read from the correct key
   and divided as though it were microseconds yielded a plausible number that decoded to
   1970, on 3880 records. A wrong key yields absent, which a presence check finds; a wrong
   unit yields a *value*, which passes every such check. Establish a payload's units by
@@ -736,7 +744,7 @@ identical failure lines**. The client therefore exposed a
 "did I already say this" flag so a caller can defer to what was already said, which is
 deliberately not the same as string-matching the error message — the text is
 the dependency's and may be reworded, while the flag is the client's own record of having
-spoken. This is the second instance of the pitfall below, one layer up from where it
+spoken. This is the same pitfall as the one below, one layer up from where it
 was first fixed.
 
 **A path filter must be a path match, not a substring match.** *Measured against the
@@ -944,9 +952,9 @@ interpolating the two fields it looked for and found absent — and `provider=` 
 misspelled. The provider is not part of the value a client sends, so it has to be looked
 up from `get_available_models` (372 entries on a real install, so cache it); do not parse
 it out of the id, because ids like `stealth/ox-alpha` contain a slash that is not a
-provider separator. This is the third instance of the vendor-key pitfall above, and the
-most expensive: the refusal came back as a failed RPC that nothing surfaced, so a correct
-picker looked broken and the investigation went to the UI twice before reaching here.
+provider separator. The most expensive instance of the vendor-key pitfall above: the
+refusal came back as a failed RPC that nothing surfaced, so a correct picker looked
+broken and the investigation went to the UI twice before reaching here.
 
 **A config value must be unique, because `checked` is computed as a filter.** Every
 producer writes `checked: choice.value === currentValue`, which marks *every* match — so
@@ -1259,9 +1267,8 @@ never fired, and left every delegate open forever; the symptom was a spinning ca
 three layers from the missing branch. Worse, `task_updated` carries **no
 `tool_use_id`**, so the host has to be remembered from `task_started` or the close
 lands at the root while the trajectory it closes sits inside a container — which
-leaves the container open, the same spinner one level up. This is the fourth instance
-of the vendor-key pitfall in this file: print one real payload instead of inferring
-field names.
+leaves the container open, the same spinner one level up. Another instance of the
+vendor-key pitfall above: print one real payload instead of inferring field names.
 
 **One host multiplexes N delegates, so a trajectory id must be the delegate's.**
 `claude`'s `Workflow` fans out under a single `tool_use_id`. Keyed by the host, a
@@ -1429,8 +1436,8 @@ presented as a UI that had lost the click. Nothing errored at any layer, and
 that answering unblocked the turn — both true while the answer was being dropped.
 Grep the binary for the key and round-trip one real payload; and assert on the tool
 result the model actually reads, since "the panel closed" and "the answer arrived" are
-different claims and only the second is the feature. This is the fourth instance of
-the vendor-key family above.
+different claims and only the second is the feature. Another instance of the
+vendor-key family above.
 
 **A client cannot guess what input a request wants.** The approval dialog chose what
 to collect by sniffing `detail` for field names it knew (`command`, `file_path`,
@@ -1451,29 +1458,6 @@ rest unanswered, and the CLI's reply to the model differs by wording rather than
 error: all answered is *"Your questions have been answered … you can now continue with
 these answers in mind"*, while one of two is the weaker *"The user answered …"*. Both
 look like success from the outside.
-
-**A setting that carefully bounds one endpoint makes the unbounded one invisible.**
-`SYLPH_BROWSE_ROOTS` was documented in three places with 16 tests behind it, so
-containment read as solved — while `POST /sessions` called `Path::exists` and spawned
-an agent in any directory a client named. The *narrower* capability being visibly
-bounded is what kept the wider one from being looked at, and the roadmap's own note
-that enumeration "is the part that matters" was load-bearing in the wrong direction.
-When a bound exists, ask which operations it does *not* cover.
-
-**A write cannot canonicalize its own target, and a check on a resolved path does not
-govern an operation on an unresolved one.** Two holes of the same shape, found a day
-apart. An `overwrite: true` upload wrote *through* a pre-existing symlink out of the
-workdir, because the target does not exist yet — so containment sits on the parent and
-the final component is appended verbatim. And a read canonicalized for the check and
-then opened the original path, so a symlink *inside* the workdir pointing out of it
-passed and was followed.
-
-The rule that fixes both: **derive the path you operate on from the check itself** —
-canonicalize once, into one variable, and use that variable. A `contain_in_any` check
-paired with a path it did not produce is not a bound. Note also that `remove` was
-already correct and its doc comment stated the exact invariant `upload` violated, two
-hundred lines away: when one function documents an invariant about a shared idiom,
-every other user of that idiom needs checking against it.
 
 **Killing a subshell does not kill what it exec'd, and the survivor answers on the
 port.** `scripts/measure-bundle.sh` served a route to measure it, backgrounded
@@ -1564,7 +1548,12 @@ usually does not exist yet, so every write endpoint here contains the *parent* a
 appends the final name verbatim. That is correct and incomplete: a pre-existing
 symlink at that last component is inside the root by name, points wherever it
 likes, and `fs::write` follows it — so `overwrite` was a write outside the workdir,
-arriving through the one component the check could not see. `remove` was already
+arriving through the one component the check could not see. The same shape appeared on
+the read path a day apart: a handler canonicalized for the check and then opened the
+*original* path, so a symlink inside the workdir pointing out of it passed and was
+followed. The rule covering both is **derive the path you operate on from the check
+itself** — canonicalize once, into one variable, and use that variable; a
+`contain_in_any` result paired with a path it did not produce is not a bound. `remove` was already
 safe by construction (unlinking never touches a target) and its doc comment even
 asserted that a final escaping symlink is "only ever unlinked, never opened or
 written to" — an invariant that was true of `remove` and false of `upload` two
