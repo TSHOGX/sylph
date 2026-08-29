@@ -48,6 +48,7 @@
 //! capability surface means "Sylph cannot reach it" only where reaching is possible).
 
 pub mod appserver;
+pub mod live;
 pub mod native;
 
 use anyhow::{anyhow, Result};
@@ -222,19 +223,29 @@ impl CodexAdapter {
         flags
     }
 
-    /// The argv one `run` would use, split out from the spawn so it is assertable without a
-    /// process — the same reason `claude`'s is.
+    /// The argv `run` uses, split out from the spawn so it is assertable without a process —
+    /// the same reason `claude`'s is.
     ///
-    /// # `app-server --listen unix://` is the door, and `remote-control` is not
+    /// # `app-server` on stdio is what `run` speaks, and the socket is a different mode
     ///
-    /// *Measured on 0.150.1:* `remote-control` is gated twice — `remote control requires
+    /// **This function used to append `--listen unix://<placeholder>` unconditionally, and
+    /// that was wrong for `run`.** The two transports carry the same JSON-RPC vocabulary
+    /// under different framing: stdio is NDJSON, and the unix listener is WebSocket. `run`
+    /// owns the process it started, so it already has its stdio — reaching for the socket
+    /// would mean a hand-written RFC6455 upgrade (below) to talk to a child this adapter
+    /// spawned. So the socket belongs to the case where the daemon is *somebody else's*,
+    /// which is an `adopt`/`watch` concern and not this one.
+    ///
+    /// What the socket measurement settles for `run` is only the negative: **`remote-control`
+    /// is not the door.** *Measured on 0.150.1:* it is gated twice — `remote control requires
     /// ChatGPT authentication; API key auth is not supported`, **plus** a managed standalone
-    /// install — while `app-server --listen unix://PATH` has neither gate. Its pairing flow
-    /// is still the shape `docs/environments.md` models itself on; it is simply not the
-    /// transport.
+    /// install — so an envagent reaching for it would work on one class of account and fail
+    /// on another with a message about authentication rather than about the transport. Its
+    /// pairing flow is still the shape `docs/environments.md` models itself on.
     ///
-    /// Three constraints on that socket that belong here rather than in a probe's notes,
-    /// because each one closes the connection with no usable diagnosis:
+    /// Three constraints on that socket are kept here rather than in a probe's notes, for
+    /// whoever wires the second mode, because each one closes the connection with no usable
+    /// diagnosis:
     ///
     /// - **The unix listener speaks WebSocket; stdio speaks NDJSON.** Same JSON-RPC
     ///   vocabulary, different framing. An NDJSON frame on the socket gets the connection
@@ -253,7 +264,7 @@ impl CodexAdapter {
     /// Returns the argv **and** any warning worth logging, rather than logging inside:
     /// substituting a policy silently is exactly the help an adapter must not give.
     pub fn argv_for(spec: &RunSpec) -> (Vec<String>, Vec<String>) {
-        let mut argv: Vec<String> = vec![AGENT_NAME.to_string(), "app-server".to_string()];
+        let argv: Vec<String> = vec![AGENT_NAME.to_string(), "app-server".to_string()];
         let mut warnings = Vec::new();
 
         // Identity is the vendor's, **structurally**: `thread/start` has no `threadId`
@@ -303,17 +314,23 @@ impl CodexAdapter {
             );
         }
 
-        argv.push("--listen".into());
-        argv.push(LISTEN_PATH_PLACEHOLDER.into());
+        // Nothing further. Every other value this vendor takes is a `thread/start`
+        // parameter (`appserver::thread_start_params`), which is what keeps a launch flag
+        // and a runtime value from having two places to disagree.
         (argv, warnings)
     }
 }
 
-/// Where the socket path lands in an argv.
+/// Where a socket path would land in an argv, for the mode that attaches to a daemon
+/// somebody else started.
 ///
 /// A marker rather than an empty string, for the reason `claude`'s preamble placeholder is
 /// one: a caller that forgets to substitute fails visibly instead of asking the vendor to
 /// listen on `""`. The path itself must be canonical — see [`CodexAdapter::argv_for`].
+///
+/// **Not used by [`CodexAdapter::argv_for`]**, which builds the stdio argv `run` spawns.
+/// Kept because the constraints on that path are measured and would otherwise have to be
+/// rediscovered.
 pub const LISTEN_PATH_PLACEHOLDER: &str = "unix://<sylph-codex-socket>";
 
 #[async_trait]
@@ -352,15 +369,18 @@ impl Adapter for CodexAdapter {
         })
     }
 
-    async fn run(&self, _spec: RunSpec) -> Result<Box<dyn Session>> {
-        // Deferred exactly as `claude` and `pi` defer it, with the same wording, because
-        // the blocker is the same one: a live session holds the vendor's transport and
-        // there is nothing on this side of the tree to hold it yet.
-        Err(anyhow!(
-            "codex `run` is not wired yet: the live session holds the vendor's app-server \
-             socket and lands with the envagent in step 4 of docs/roadmap.md \
-             § Implementation order"
-        ))
+    /// Hold a live session over `codex app-server`.
+    ///
+    /// **This vendor reports its own id**, so the one thing this must not do is answer with
+    /// a session whose `native_id` Sylph chose or synthesized — see [`live::run`].
+    async fn run(&self, spec: RunSpec) -> Result<Box<dyn Session>> {
+        if !Self::is_installed() {
+            return Err(anyhow!(
+                "the `codex` CLI is not on this machine's PATH; install codex-cli to use \
+                 this agent"
+            ));
+        }
+        live::run(spec).await
     }
 
     async fn adopt(&self, id: &NativeId) -> Result<EventStream> {
@@ -397,4 +417,80 @@ async fn version() -> Option<String> {
         .split_whitespace()
         .next_back()
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sylph_protocol::NativeId;
+
+    fn spec(native_id: RequestedNativeId) -> RunSpec {
+        RunSpec {
+            workdir: "/w".into(),
+            native_id,
+            inject_identity: true,
+            identity_preamble: Some("I am Sylph.".into()),
+            flags: [
+                ("model".to_string(), "gpt-5.6-sol".to_string()),
+                ("effort".to_string(), "high".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            permission_mode: None,
+        }
+    }
+
+    /// **The argv is `codex app-server` and nothing else.**
+    ///
+    /// This pins the correction: the function used to append `--listen unix://…`
+    /// unconditionally, which is the WebSocket transport for attaching to a daemon somebody
+    /// else started. `run` owns the process it spawned and speaks NDJSON on its stdio, so a
+    /// `--listen` here would have made the vendor open a socket nothing connected to while
+    /// the handshake went to a stdout the daemon does not answer on.
+    #[test]
+    fn the_argv_is_the_stdio_app_server_and_carries_no_settings() {
+        let (argv, _) = CodexAdapter::argv_for(&spec(RequestedNativeId::New));
+        assert_eq!(argv, vec!["codex".to_string(), "app-server".to_string()]);
+
+        // Every value this vendor takes is a `thread/start` parameter, so none of them may
+        // also appear on the command line — that is the `claude`
+        // `--permission-prompt-tool` lesson, avoided here by there being one place each
+        // value is set.
+        for absent in ["--listen", "--model", "--effort", "-m", "resume"] {
+            assert!(
+                !argv.iter().any(|arg| arg == absent),
+                "{absent} must not be on the command line: {argv:?}"
+            );
+        }
+    }
+
+    /// Resume and dictate are both reported as warnings rather than silently dropped, and
+    /// they say different things — one is a method call after the handshake, the other is
+    /// impossible.
+    #[test]
+    fn a_resume_is_deferred_to_the_socket_and_a_dictated_id_is_reported_impossible() {
+        let id = NativeId::new("01a0460c-c359-7ed3-9e13-212c0a33d6c0");
+
+        let (argv, warnings) = CodexAdapter::argv_for(&spec(RequestedNativeId::Resume(id.clone())));
+        assert_eq!(argv, vec!["codex".to_string(), "app-server".to_string()]);
+        assert!(
+            warnings.iter().any(|warning| warning.contains("thread/resume")),
+            "a resume must name the method that performs it: {warnings:?}"
+        );
+
+        let (_, warnings) = CodexAdapter::argv_for(&spec(RequestedNativeId::Dictate(id)));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("dictates_native_id")),
+            "a dictated id must be reported as unhonourable, not ignored: {warnings:?}"
+        );
+
+        // Identity is reported as a thread parameter too, because it is additive there and
+        // `baseInstructions` would replace the agent's whole system prompt.
+        let (_, warnings) = CodexAdapter::argv_for(&spec(RequestedNativeId::New));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("developerInstructions")));
+    }
 }
