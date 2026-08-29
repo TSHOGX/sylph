@@ -81,11 +81,58 @@ pub struct Spawn {
     /// Added to the inherited environment rather than replacing it: a vendor CLI needs
     /// `HOME`, `PATH`, and its own credential variables to work at all.
     pub env: HashMap<String, String>,
-    /// Which member of a reply identifies the request it answers.
+    /// How to recognize a **reply** and read the id it answers.
     ///
-    /// `None` for a vendor whose stdout carries no replies, in which case
-    /// [`Child::request`] is not available and every line reaches the stream.
-    pub reply_id_field: Option<&'static str>,
+    /// Answers `Some(id)` only for a frame that is a reply to something this side sent,
+    /// and `None` for everything else — an event, or a request the *vendor* initiated.
+    /// `None` for the whole field means the vendor's stdout carries no replies, in which
+    /// case [`Child::request`] is unavailable and every line reaches the stream.
+    ///
+    /// # Why a closure and not a field name
+    ///
+    /// A field name cannot express either half of this, and both halves are defects that
+    /// were measured rather than imagined.
+    ///
+    /// **Direction is not in the id.** `codex` is JSON-RPC, and its server→client requests
+    /// are numbered in the *same* space as ours: measured in
+    /// `docs/measurements/codex/captures/s15_approval_decisions.jsonl`, approvals arrive as
+    /// `item/commandExecution/requestApproval` with ids `0, 1, 2` while our own requests hold
+    /// `1..5`. Correlating on the id alone therefore routes an **approval request** into
+    /// whichever waiter happens to hold that number: the request never reaches the event
+    /// stream, so nobody is asked, and `set_config` returns an approval as its reply. Both
+    /// directions of that failure are silent. JSON-RPC's own discriminant is `method` —
+    /// present on a request, absent on a reply — which is a fact about that protocol and
+    /// not about a field called `id`.
+    ///
+    /// **The id is not always at the top level.** `claude` nests it: a reply is
+    /// `{"type": "control_response", "response": {"request_id": …}}`, so any top-level
+    /// lookup finds nothing and *no* control on that vendor would ever correlate.
+    ///
+    /// Each vendor marks direction its own way — `codex` by `method`, `claude` by
+    /// `type: "control_response"`, `pi` by `type: "response"` — so the knowledge belongs in
+    /// the module that owns the vendor. Boxed rather than a generic parameter because the
+    /// adapters are held as `dyn Adapter` and one concrete `Child` type is what lets the
+    /// read loop be one implementation.
+    pub reply_id: Option<ReplyId>,
+}
+
+/// Reads the id off a frame that is a reply, or `None` for anything else.
+///
+/// See [`Spawn::reply_id`] for why this is a closure. `Sync` because the read loop holds it
+/// for the process's life on a task the caller does not own.
+pub type ReplyId = Box<dyn Fn(&Value) -> Option<String> + Send + Sync>;
+
+/// The id off a JSON-RPC reply: a frame carrying `id` and **no `method`**.
+///
+/// Offered here rather than written per-adapter because it is a property of JSON-RPC, and
+/// `codex` is not the last agent that will speak it. `id` may be a string or a number and
+/// both are read — the spec permits either, and a reader accepting one silently fails to
+/// correlate on the other.
+pub fn json_rpc_reply_id(frame: &Value) -> Option<String> {
+    if frame.get("method").is_some() {
+        return None;
+    }
+    frame.get("id").and_then(reply_id)
 }
 
 impl Child {
@@ -160,7 +207,7 @@ impl Child {
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let (line_tx, line_rx) = mpsc::channel::<Line>(256);
-        let reply_field = spawn.reply_id_field;
+        let reply_id_of = spawn.reply_id;
         let routed = pending.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
@@ -184,9 +231,11 @@ impl Child {
                         };
                         // A reply is not an event: it wakes its caller and leaves the
                         // stream, or a `set_model` acknowledgement would appear in the
-                        // transcript.
-                        if let Some(field) = reply_field {
-                            if let Some(id) = parsed.get(field).and_then(reply_id) {
+                        // transcript. Everything else continues on, **including a request
+                        // the vendor itself raised** — an approval routed into a waiter is
+                        // a question nobody is asked (see [`Spawn::reply_id`]).
+                        if let Some(read_id) = &reply_id_of {
+                            if let Some(id) = read_id(&parsed) {
                                 if let Some(waiter) = routed.lock().await.remove(&id) {
                                     let _ = waiter.send(parsed);
                                     continue;
@@ -342,14 +391,25 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn spawn_sh(script: &str, reply_id_field: Option<&'static str>) -> Spawn {
+    fn spawn_sh(script: &str, reply_id: Option<ReplyId>) -> Spawn {
         Spawn {
             program: "sh".to_string(),
             args: vec!["-c".to_string(), script.to_string()],
             cwd: "/tmp".to_string(),
             env: HashMap::new(),
-            reply_id_field,
+            reply_id,
         }
+    }
+
+    /// A flat top-level `id`, with no direction discriminant. What the first version of
+    /// this module did for every vendor.
+    fn flat_id() -> Option<ReplyId> {
+        Some(Box::new(|frame: &Value| frame.get("id").and_then(reply_id)))
+    }
+
+    /// JSON-RPC's own rule, which is what `codex` needs.
+    fn rpc_id() -> Option<ReplyId> {
+        Some(Box::new(json_rpc_reply_id))
     }
 
     /// Lines arrive parsed, in order.
@@ -396,7 +456,7 @@ mod tests {
     #[tokio::test]
     async fn a_correlated_reply_leaves_the_stream() {
         let script = r#"read -r line; printf '{"id":"1","ok":true}\n{"n":1}\n'"#;
-        let (child, mut lines) = Child::spawn(spawn_sh(script, Some("id"))).await.unwrap();
+        let (child, mut lines) = Child::spawn(spawn_sh(script, flat_id())).await.unwrap();
 
         let reply = child
             .request(|id| json!({"id": id.to_string(), "method": "ping"}))
@@ -418,7 +478,7 @@ mod tests {
         // Echoes back the id it was sent, as a JSON *number*, exactly as a JSON-RPC peer
         // does.
         let script = r#"read -r line; id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/'); printf '{"id":%s,"ok":true}\n' "$id""#;
-        let (child, _lines) = Child::spawn(spawn_sh(script, Some("id"))).await.unwrap();
+        let (child, _lines) = Child::spawn(spawn_sh(script, flat_id())).await.unwrap();
 
         let reply = child
             .request(|id| json!({"id": id, "method": "ping"}))
@@ -431,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn a_string_reply_id_correlates() {
         let script = r#"read -r line; id=$(printf '%s' "$line" | sed 's/.*"id":"\([^"]*\)".*/\1/'); printf '{"id":"%s","ok":true}\n' "$id""#;
-        let (child, _lines) = Child::spawn(spawn_sh(script, Some("id"))).await.unwrap();
+        let (child, _lines) = Child::spawn(spawn_sh(script, flat_id())).await.unwrap();
 
         let reply = child
             .request(|id| json!({"id": id.to_string(), "method": "ping"}))
@@ -443,7 +503,7 @@ mod tests {
     /// A vendor that exits without answering fails the request rather than hanging.
     #[tokio::test]
     async fn a_vendor_that_exits_without_answering_fails_the_request() {
-        let (child, _lines) = Child::spawn(spawn_sh("exit 0", Some("id"))).await.unwrap();
+        let (child, _lines) = Child::spawn(spawn_sh("exit 0", flat_id())).await.unwrap();
 
         let error = child
             .request(|id| json!({"id": id}))
@@ -481,7 +541,7 @@ mod tests {
             args: vec![],
             cwd: "/tmp".to_string(),
             env: HashMap::new(),
-            reply_id_field: None,
+            reply_id: None,
         })
         .await;
         let error = match outcome {
@@ -521,10 +581,94 @@ mod tests {
         panic!("the grandchild survived close, so the group was not signalled");
     }
 
+    /// **A request the vendor raised must not be routed into a waiter.**
+    ///
+    /// *Measured on `codex` in `docs/measurements/codex/captures/s15_approval_decisions.jsonl`:*
+    /// its server→client approvals are numbered `0, 1, 2` in the **same** space as our own
+    /// requests, which hold `1..5`. So while one of ours is outstanding, an approval
+    /// carrying that number is indistinguishable by id alone.
+    ///
+    /// Both directions of the failure are silent: the approval never reaches the event
+    /// stream, so nobody is asked and the turn waits on a human forever, while the caller
+    /// receives an approval request as its reply. JSON-RPC's discriminant is `method`.
+    #[tokio::test]
+    async fn a_vendor_initiated_request_is_not_mistaken_for_a_reply() {
+        // Emits an approval numbered 1 — colliding with our first request id — and only
+        // then the real reply.
+        let script = r#"read -r line; printf '{"id":1,"method":"item/commandExecution/requestApproval","params":{}}\n{"id":1,"result":{"ok":true}}\n'"#;
+        let (child, mut lines) = Child::spawn(spawn_sh(script, rpc_id())).await.unwrap();
+
+        let reply = child
+            .request(|id| json!({"id": id, "method": "thread/settings/update"}))
+            .await
+            .expect("the reply must reach the caller, not the approval");
+        assert_eq!(
+            reply["result"]["ok"],
+            json!(true),
+            "a `method`-bearing frame is a request and must never satisfy a waiter"
+        );
+
+        // And the approval reached the stream, where a client can answer it.
+        let event = lines.recv().await.unwrap().unwrap();
+        assert_eq!(
+            event["method"],
+            json!("item/commandExecution/requestApproval"),
+            "the vendor's request must be published, or nobody is asked"
+        );
+    }
+
+    /// The same collision, against the design that could not express the difference.
+    ///
+    /// Kept as a test rather than only as prose: it is the evidence that a bare field name
+    /// is not merely less general but *wrong* for a vendor that initiates requests, and it
+    /// fails loudly if anyone reintroduces one.
+    #[tokio::test]
+    async fn correlating_on_the_id_alone_swallows_a_vendor_request() {
+        let script = r#"read -r line; printf '{"id":1,"method":"item/commandExecution/requestApproval","params":{}}\n{"id":1,"result":{"ok":true}}\n'"#;
+        let (child, _lines) = Child::spawn(spawn_sh(script, flat_id())).await.unwrap();
+
+        let reply = child
+            .request(|id| json!({"id": id, "method": "thread/settings/update"}))
+            .await
+            .unwrap();
+        // The approval satisfied the waiter. Nothing errored anywhere.
+        assert_eq!(
+            reply["method"],
+            json!("item/commandExecution/requestApproval"),
+            "this is the defect: a request arrives as a reply and no layer reports it"
+        );
+    }
+
+    /// A reply whose id is nested rather than top-level still correlates.
+    ///
+    /// `claude` spells one `{"type":"control_response","response":{"request_id":…}}`, so a
+    /// top-level lookup finds nothing and **no** control on that vendor would correlate at
+    /// all — a second thing a bare field name cannot express.
+    #[tokio::test]
+    async fn a_nested_reply_id_correlates() {
+        let script = r#"read -r line; printf '{"type":"control_response","response":{"request_id":"1","subtype":"success"}}\n'"#;
+        let nested: Option<ReplyId> = Some(Box::new(|frame: &Value| {
+            if frame.get("type").and_then(Value::as_str) != Some("control_response") {
+                return None;
+            }
+            frame
+                .get("response")
+                .and_then(|body| body.get("request_id"))
+                .and_then(reply_id)
+        }));
+        let (child, _lines) = Child::spawn(spawn_sh(script, nested)).await.unwrap();
+
+        let reply = child
+            .request(|id| json!({"type": "control_request", "request_id": id.to_string()}))
+            .await
+            .expect("a nested id must correlate");
+        assert_eq!(reply["response"]["subtype"], json!("success"));
+    }
+
     /// Ids are unique for the process's life.
     #[tokio::test]
     async fn request_ids_do_not_repeat() {
-        let (child, _lines) = Child::spawn(spawn_sh("sleep 1", Some("id"))).await.unwrap();
+        let (child, _lines) = Child::spawn(spawn_sh("sleep 1", flat_id())).await.unwrap();
         let ids: Vec<u64> = (0..5).map(|_| child.next_request_id()).collect();
         let mut unique = ids.clone();
         unique.sort();
