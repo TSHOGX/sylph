@@ -157,9 +157,18 @@ impl PiAdapter {
             // `sylph_protocol::NativeId` forbids: the id would look like the vendor's and
             // be Sylph's.
             sylph_protocol::RequestedNativeId::New => {
+                // **Says what is true of the argv, and no more.** An earlier wording claimed
+                // this made the session "unresumable", which overstates its own reason: pi
+                // reports a `sessionId` from `get_state`, so an adapter *could* read one back
+                // — `codex` is built that way. What is actually the case is narrower and is
+                // the whole justification for `session::PiSession::open` refusing this
+                // variant: this vendor takes `--session-id`, `dictates_native_id` is true, so
+                // the server always names one and `New` is unreachable here rather than
+                // impossible in principle. A doc that overstates its reason is how the next
+                // reader concludes something stronger than what was measured.
                 warnings.push(
-                    "pi takes --session-id and creates the session if missing, so opening \
-                     without one would make the session unresumable"
+                    "pi takes --session-id and the server always names one, so opening \
+                     without an id is unreachable for this agent; no argv id was emitted"
                         .to_string(),
                 );
             }
@@ -342,7 +351,21 @@ mod tests {
             "no id may be invented: {argv:?}"
         );
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("unresumable"));
+        // Asserted on the claim the warning is *entitled* to make. It used to say
+        // "unresumable", which overstates its reason — pi reports a `sessionId` from
+        // `get_state`, so an adapter could read one back and `codex` does. What is true is
+        // that the server always names an id for this agent, so the case is unreachable
+        // here rather than impossible in principle.
+        assert!(
+            warnings[0].contains("unreachable"),
+            "the warning must claim only what it can: {:?}",
+            warnings[0]
+        );
+        assert!(
+            !warnings[0].contains("unresumable"),
+            "reachability is the claim, not resumability: {:?}",
+            warnings[0]
+        );
     }
 
     /// A thinking level the CLI rejects exits before the RPC channel opens, so the
@@ -3296,6 +3319,13 @@ pub mod session {
     use tokio::sync::{mpsc, Mutex};
     use tracing::{debug, warn};
 
+    // `STANDARD` rather than one of the URL-safe or unpadded variants: pi's `ImageContent.data`
+    // is the same base64 a data URL carries, so `+`/`/` with padding is the alphabet the vendor
+    // decodes. A variant is not a style choice — `STANDARD_NO_PAD` produces a string the
+    // vendor's own decoder rejects.
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+
     use crate::process::{self, Child, Spawn};
 
     use super::{rpc, translate, ui};
@@ -3683,6 +3713,14 @@ pub mod session {
         /// stays: pi does not announce that it timed out, so there is nothing to remove it on.
         /// Bounded by the dialogs one session raises, which is why it is left rather than
         /// swept — a sweep would need a deadline this side cannot observe the expiry of.
+        ///
+        /// **What a client observes when that happens**, since the sentence above describes the
+        /// map rather than the symptom: the dialog stays on screen. Nothing retracts a published
+        /// [`sylph_protocol::Request`], and its `expires_at_ms` is advisory — the server never
+        /// acts on it. Answering then still succeeds here and pi discards it, having already
+        /// resolved the dialog with its own default, so the user's answer is silently not the
+        /// one the extension received. The reading that follows for a client is to *render* the
+        /// deadline rather than to trust the row to disappear at it.
         async fn resolve(&self, resolution: Resolution) -> Result<()> {
             let offered = self.dialogs.lock().await.remove(&resolution.request_id);
             let response = ui::response_for(&resolution, offered.flatten().as_deref());
@@ -4071,7 +4109,7 @@ pub mod session {
                 Some(mime) => match std::fs::read(path) {
                     Ok(bytes) => images.push(json!({
                         "type": "image",
-                        "data": base64(&bytes),
+                        "data": STANDARD.encode(&bytes),
                         "mimeType": mime,
                     })),
                     Err(error) => {
@@ -4126,40 +4164,6 @@ pub mod session {
         None
     }
 
-    /// Standard base64 (RFC 4648 §4), with padding.
-    ///
-    /// Hand-written because this crate has no base64 dependency and one attachment path is
-    /// not a reason to add one to the workspace. It is thirty lines of a fully specified
-    /// encoding with published test vectors, which is the case where writing it beats
-    /// depending on it — and `base64_matches_the_rfc_vectors` pins it against those vectors
-    /// rather than against itself.
-    fn base64(bytes: &[u8]) -> String {
-        const ALPHABET: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-        for chunk in bytes.chunks(3) {
-            let b0 = chunk[0] as u32;
-            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-            let triple = (b0 << 16) | (b1 << 8) | b2;
-            out.push(ALPHABET[(triple >> 18) as usize & 0x3f] as char);
-            out.push(ALPHABET[(triple >> 12) as usize & 0x3f] as char);
-            // Padding is decided by how many *input* bytes this chunk held, which is the one
-            // place a hand-rolled encoder gets it wrong: a 1-byte tail has two `=`, a 2-byte
-            // tail has one, and a full chunk has none.
-            out.push(if chunk.len() > 1 {
-                ALPHABET[(triple >> 6) as usize & 0x3f] as char
-            } else {
-                '='
-            });
-            out.push(if chunk.len() > 2 {
-                ALPHABET[triple as usize & 0x3f] as char
-            } else {
-                '='
-            });
-        }
-        out
-    }
 
     #[cfg(test)]
     mod tests {
@@ -4995,30 +4999,28 @@ done
             assert!(seen >= 6, "the whole turn must have been observed, saw {seen}");
         }
 
-        /// Base64 against the **published RFC 4648 §10 vectors**, not against itself.
+        /// **Which base64 variant an image is encoded with**, which is this adapter's choice
+        /// rather than the crate's behaviour.
         ///
-        /// The padding is the part a hand-rolled encoder gets wrong, and it is decided by how
-        /// many *input* bytes the final chunk held rather than by the output length — so the
-        /// one-byte and two-byte tails are the cases that matter.
+        /// Deliberately not a re-test of RFC 4648 conformance — `base64 0.22` has its own vectors
+        /// for that, and asserting them here would only pin that the dependency still works.
+        /// What is ours to get wrong is the *engine*: `STANDARD_NO_PAD` and `URL_SAFE` are one
+        /// token away in the same namespace, both compile, and both produce a string pi's own
+        /// decoder rejects — a silently empty image rather than an error.
+        ///
+        /// So the two assertions are exactly the two things a variant changes: padding, and the
+        /// `+`/`/` pair. `0xfb 0xff` is chosen because it is the shortest input that reaches both
+        /// high alphabet indices, where `URL_SAFE` would answer `-_8=`.
         #[test]
-        fn base64_matches_the_rfc_vectors() {
-            for (input, expected) in [
-                ("", ""),
-                ("f", "Zg=="),
-                ("fo", "Zm8="),
-                ("foo", "Zm9v"),
-                ("foob", "Zm9vYg=="),
-                ("fooba", "Zm9vYmE="),
-                ("foobar", "Zm9vYmFy"),
-            ] {
-                assert_eq!(base64(input.as_bytes()), expected, "for {input:?}");
-            }
-            // Every byte value, so the alphabet's high indices and the `+`/`/` pair are covered
-            // rather than only the ASCII range the vectors above reach.
-            let all: Vec<u8> = (0u8..=255).collect();
-            let encoded = base64(&all);
-            assert_eq!(encoded.len(), 344);
-            assert!(encoded.contains('+') && encoded.contains('/'), "{encoded}");
+        fn an_image_is_encoded_as_padded_standard_base64_and_not_a_url_safe_variant() {
+            assert_eq!(
+                STANDARD.encode([0xfb, 0xff]),
+                "+/8=",
+                "the standard alphabet and its padding are what pi's decoder expects"
+            );
+            // A one-byte tail, the other padding length, so a `NO_PAD` engine cannot pass on the
+            // case above alone.
+            assert_eq!(STANDARD.encode(b"f"), "Zg==");
         }
 
         /// **An image is inlined and every other file is named by path.**
@@ -5054,7 +5056,7 @@ done
             );
             assert_eq!(
                 images[0].get("data").and_then(Value::as_str),
-                Some(base64(&bytes).as_str())
+                Some(STANDARD.encode(&bytes).as_str())
             );
             assert!(
                 message.contains("notes.md") && !message.contains("# notes"),
