@@ -6,10 +6,11 @@
 //!
 //! # Availability is `PATH`, and that is the whole check
 //!
-//! There is no discovery. [`registry`] answers with the agents whose vendor CLI is on
-//! this machine's `PATH`, and [`for_agent`] answers `None` when one is absent — which a
-//! caller renders as [`sylph_protocol::UnavailableReason::NoAgent`], the reason no retry
-//! can fix.
+//! There is no discovery. [`known_agents`] names the three this build supports and
+//! [`for_agent`] answers `None` when a vendor CLI is absent from this machine's `PATH` —
+//! which a caller renders as [`sylph_protocol::UnavailableReason::NoAgent`], the reason no
+//! retry can fix. Availability is therefore the same question as openability, rather than
+//! two mechanisms that can disagree.
 //!
 //! The mechanism this replaces produced two total failures, both in `AGENTS.md`: zero
 //! discovered agents made `/` a dead keystroke three layers from the cause, and a stale
@@ -39,47 +40,6 @@ pub mod process;
 #[cfg(feature = "e2e")]
 pub mod e2e;
 
-/// Every agent whose vendor CLI is present on this machine.
-///
-/// Ordered as `docs/agents.md` lists them — `claude`, `codex`, `pi` — because this order
-/// reaches a UI as the order agents are offered in, and an order that varies between
-/// calls reads as a bug. Under the `e2e` feature the deterministic test adapter is
-/// offered as well, last, so it can never displace a real agent in a default selection.
-///
-/// **An empty result is a real state and not an error.** A machine with none of the three
-/// installed genuinely has no agents, and the caller's job is to say which are missing
-/// rather than to treat the emptiness as a failure to discover something.
-pub fn registry() -> Vec<Box<dyn Adapter>> {
-    // The fixture **replaces** the three rather than joining them, and that exclusivity is
-    // the point of the feature. A build offering both would make "which agents exist"
-    // depend on which vendor CLIs the developer happens to have installed — so the E2E
-    // suite's own default-agent path would pick `claude` over `e2e` and spend real tokens,
-    // which is exactly what the deleted `SYLPH_AGENTS_DIR` pin was holding back.
-    #[cfg(feature = "e2e")]
-    return vec![Box::new(e2e::E2eAdapter::new())];
-
-    #[cfg(not(feature = "e2e"))]
-    {
-        real_agents()
-    }
-}
-
-/// The three supported agents, for the agents installed here.
-#[cfg(not(feature = "e2e"))]
-fn real_agents() -> Vec<Box<dyn Adapter>> {
-    let mut found: Vec<Box<dyn Adapter>> = Vec::new();
-    if claude::ClaudeAdapter::is_installed() {
-        found.push(Box::new(claude::ClaudeAdapter::new()));
-    }
-    if codex::CodexAdapter::is_installed() {
-        found.push(Box::new(codex::CodexAdapter::new()));
-    }
-    if pi::PiAdapter::is_installed() {
-        found.push(Box::new(pi::PiAdapter::new()));
-    }
-    found
-}
-
 /// One agent by name, or `None` when its CLI is absent.
 ///
 /// Takes `&str` rather than [`sylph_protocol::AgentName`] deliberately: that type's
@@ -91,8 +51,9 @@ fn real_agents() -> Vec<Box<dyn Adapter>> {
 /// unknown name and an uninstalled CLI are both "you cannot open a session with this",
 /// and a caller that needs to explain which reaches for [`is_known`].
 pub fn for_agent(name: &str) -> Option<Box<dyn Adapter>> {
-    // Exclusive, for the reason [`registry`] states: under this feature the binary *is* a
-    // test fixture, so a real agent resolving here would let a spec spend real tokens.
+    // Exclusive rather than additive: under this feature the binary *is* a test fixture,
+    // so a real agent resolving here would let a spec spend real tokens. `known_agents`
+    // holds the same rule, and `a_fixture_build_offers_only_the_fixture` pins both.
     #[cfg(feature = "e2e")]
     {
         return (name == e2e::AGENT_NAME).then(|| {
@@ -194,9 +155,9 @@ mod tests {
 
     /// The three supported agents, and the two deliberately unsupported ones.
     ///
-    /// Asserted on `is_known` rather than on `registry()`, because the registry's length
-    /// depends on what is installed on the machine running the test — which is exactly
-    /// the property that makes it unassertable.
+    /// Asserted on `is_known` rather than on what resolves, because which of the three
+    /// is *installed* depends on the machine running the test — which is exactly the
+    /// property that makes it unassertable.
     #[test]
     #[cfg(not(feature = "e2e"))]
     fn the_three_supported_agents_are_known_and_the_dropped_two_are_not() {
@@ -232,7 +193,11 @@ mod tests {
                 "{real} must not resolve, however the PATH looks"
             );
         }
-        assert_eq!(registry().len(), 1);
+        // The fixture *replaces* the three rather than joining them, which is the point
+        // of the feature: a build offering both would make "which agents exist" depend on
+        // which vendor CLIs the developer happens to have installed, and the E2E suite's
+        // default-agent path would pick `claude` and spend real tokens.
+        assert_eq!(known_agents(), &[e2e::AGENT_NAME]);
     }
 
     /// An unknown name must never produce an adapter, however the `PATH` happens to look.
@@ -244,19 +209,25 @@ mod tests {
         assert!(for_agent("claude ").is_none(), "no trimming: a name is exact");
     }
 
-    /// `registry()` and `for_agent` must agree, or a session can be created for an agent
-    /// that was never offered — or an offered agent cannot be opened.
+    /// Listing an agent and being able to open it are the same question.
+    ///
+    /// The state this rules out is the one the deleted directory-scanning discovery had:
+    /// an agent that was listed and unstartable, because availability came from one
+    /// mechanism and opening from another. With `for_agent` as the only mechanism, a name
+    /// that resolves is a name that opens — and this is asserted over *installed* agents
+    /// only, since which of the three that is depends on the machine running the test.
     #[test]
-    fn every_registered_adapter_is_reachable_by_name() {
-        for adapter in registry() {
-            // `probe` is async and spawns the CLI; the name is what the registry keyed on,
-            // so it is checked through the known-agent list instead.
-            let names = known_agents();
-            assert!(
-                names.iter().any(|name| for_agent(name).is_some()),
-                "a registered adapter must be reachable by one of {names:?}"
-            );
-            drop(adapter);
+    fn every_installed_agent_is_reachable_by_name() {
+        let installed: Vec<&str> = known_agents()
+            .iter()
+            .copied()
+            .filter(|name| for_agent(name).is_some())
+            .collect();
+        for name in installed {
+            assert!(is_known(name), "{name} resolves but is not known");
+            // Stable within one process: a caller renders this list, and an answer that
+            // varied between calls would read as a bug.
+            assert!(for_agent(name).is_some());
         }
     }
 

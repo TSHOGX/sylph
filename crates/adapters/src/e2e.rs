@@ -242,8 +242,8 @@ fn initial_surface() -> SessionCapabilities {
 /// The deterministic E2E agent.
 ///
 /// Behind the `e2e` feature because it is a test fixture that must never be reachable
-/// from a production build: `registry()` offering it would make "which agents exist"
-/// depend on how the server was compiled, and a fixture that can be discovered by
+/// from a production build: [`crate::known_agents`] offering it would make "which agents
+/// exist" depend on how the server was compiled, and a fixture that can be reached by
 /// accident is the failure `docs/session-protocol.md` § What changed records twice.
 #[derive(Debug, Clone, Default)]
 pub struct E2eAdapter;

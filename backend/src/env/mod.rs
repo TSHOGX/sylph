@@ -1,25 +1,19 @@
 //! Where a session's work happens.
 //!
-//! Local fork/exec used to be the interface rather than an implementation of
-//! one: the supervisor called `Command::new(path).current_dir(workdir)` directly.
-//! This module is the seam that makes local, a Khora sandbox, and SSH
-//! interchangeable — see `docs/environments.md` for why the trait has exactly
-//! these four operations and no more.
+//! # Transitional, and the spec says so
 //!
-//! # Three operations, and `spawn` is not one of them any more
+//! `docs/environments.md` § The envagent is the whole abstraction is explicit that there
+//! is **no** `Environment` trait with one implementation per substrate: local, SSH, and
+//! sandbox differ only in how an envagent came to exist, and after it exists they are the
+//! same case. So this is scaffolding for step 4 rather than the design — it holds the two
+//! questions the server asks about a machine before it can talk to one, and
+//! [`local::LocalEnvironment`] answers them for the host the server runs on.
 //!
-//! The shape used to be dictated by the adapter protocol: NDJSON over a duplex byte
-//! stream, plus a signal, plus files. That is gone with the subprocess — an adapter is a
-//! trait linked in, and a vendor CLI's process belongs to the adapter that knows how to
-//! talk to it (`crates/adapters/src/process.rs`). `spawn`, `ProcessSpec`, `ProcessHandle`,
-//! and `ProcessSignal` had exactly one caller between them and went with it.
-//!
-//! What is left is what an environment is *asked* rather than what it can be made to do:
-//! what it is called, whether a path is a directory inside it, and whether it can run work
-//! right now. All three are answerable over an RPC to another machine, which is what step 4
-//! needs — and none of them assumes the caller holds the process.
+//! What it is *not* is a process abstraction. A vendor CLI's process belongs to the
+//! adapter that knows how to talk to it (`crates/adapters/src/process.rs`), so nothing
+//! here spawns, signals, or holds stdio. Both remaining operations are answerable over an
+//! RPC to another machine, which is what step 4 needs.
 
-use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -69,13 +63,6 @@ impl Health {
 #[async_trait]
 pub trait Environment: Send + Sync {
     fn descriptor(&self) -> EnvironmentDescriptor;
-
-    /// Whether a path exists as a directory inside the environment.
-    ///
-    /// Session creation validates a workdir, and that check has to happen where
-    /// the work will run. Validating a sandbox path against the host filesystem
-    /// would accept paths that do not exist and reject ones that do.
-    async fn is_dir(&self, path: &str) -> Result<bool>;
 
     async fn probe(&self) -> Health;
 }

@@ -3,7 +3,7 @@
 mod common;
 
 use axum::http::{header, StatusCode};
-use common::{body_string, json_body, MockRunner, MockTraceDb, TestBackend};
+use common::{body_string, json_body, MockRunner, TestBackend};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -1219,42 +1219,14 @@ async fn archive_listing_requires_auth() {
 
 
 #[tokio::test]
-async fn workspaces_omit_archive_only_directories_by_default() {
-    // The sidebar polls this endpoint, so the archive scan must be opt-in: it
-    // needs live sessions only, and paying for an archive walk on every poll
-    // would put that cost on the hot path.
-    let backend = TestBackend::start_with_tracedb(MockTraceDb::with_listing(
-        json!([{"id": "claude:old", "agent": "claude", "cwd": "/w/archived-only",
-                "title": "Older work", "events": 30, "endedAtMs": 1700000000000_i64}]),
-        None,
-    ))
-    .await;
-
-    let body = json_body(backend.get_authed("/api/v1/workspaces").await).await;
-    let paths: Vec<&str> = body["workspaces"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|w| w["path"].as_str().unwrap())
-        .collect();
-
-    assert!(
-        !paths.contains(&"/w/archived-only"),
-        "archive scan must be opt-in: {body}"
-    );
-}
-
-
-#[tokio::test]
-async fn workspaces_still_answer_when_the_archive_is_unreachable() {
-    // The live workspaces are most of the answer, so an absent archive must
-    // degrade rather than fail the request.
+async fn workspaces_lists_the_directory_a_session_runs_in() {
+    // The sidebar groups by workdir and polls this endpoint, so a session's directory has
+    // to appear from the journal alone — there is no second source to merge and no scan to
+    // opt into (`api::workspaces::list`).
     let backend = TestBackend::start_with_runners(&[MockRunner::success("mock")]).await;
     backend.create_session("mock").await;
 
-    let response = backend
-        .get_authed("/api/v1/workspaces?includeArchived=true")
-        .await;
+    let response = backend.get_authed("/api/v1/workspaces").await;
 
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!json_body(response).await["workspaces"]
@@ -2365,6 +2337,54 @@ async fn fs_roots_lists_configured_browse_roots() {
     );
     // Absolute, because the client hands these straight back as a `workdir`.
     assert!(roots[0]["path"].as_str().unwrap().starts_with('/'));
+}
+
+/// The picker can reach the directory Quick Start sessions run in.
+///
+/// `/api/v1/fs/*` exists to name a workdir, so its root set has to be the one
+/// `POST /sessions` bounds a workdir against — `Config::session_roots()`, which includes
+/// `quick_start_dir` precisely because both `SYLPH_HOME` and `paths.quick_start_dir` can
+/// move it outside `$HOME`. Browsing used to build its own set from `browse_roots` alone,
+/// so an install that moved Quick Start could not browse to it; the failure was invisible
+/// while the default kept it under the home directory, which every test and most installs
+/// do. Verified by reverting to `browse_roots` and watching this fail.
+#[tokio::test]
+async fn fs_browsing_reaches_the_quick_start_directory() {
+    let mut backend = TestBackend::start().await;
+    // Outside every browse root, which is the only configuration where the Quick Start
+    // half of `session_roots()` is observable — and a real one, since `SYLPH_HOME` and
+    // `paths.quick_start_dir` both move it.
+    let quick_start = backend.restart_with_external_quick_start().await;
+
+    // Listed, so the picker offers it at all.
+    let body = json_body(backend.get_authed("/api/v1/fs/roots").await).await;
+    let listed: Vec<&str> = body["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|root| root["path"].as_str().unwrap())
+        .collect();
+    let quick_start_display = quick_start.display().to_string();
+    assert!(
+        listed
+            .iter()
+            .any(|path| quick_start_display == *path || quick_start.starts_with(path)),
+        "Quick Start must be reachable from some listed root, got {listed:?}"
+    );
+
+    // And traversable, which is the half that decides whether a workdir can be named.
+    let response = backend
+        .get_authed(&format!(
+            "/api/v1/fs/tree?path={}",
+            urlencoding(&quick_start_display)
+        ))
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "browsing the Quick Start directory must be permitted: {}",
+        body_string(response).await
+    );
 }
 
 #[tokio::test]

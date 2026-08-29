@@ -78,25 +78,28 @@ pub struct RootsResponse {
 pub async fn roots(State(state): State<AppState>) -> Result<Json<RootsResponse>> {
     let home = std::env::var("HOME").unwrap_or_default();
 
+    // `session_roots()`, not `browse_roots`: this endpoint exists to name a workdir, so
+    // offering a directory creation would refuse — or omitting one it would accept — is
+    // the picker disagreeing with the bound. That is the concrete failure the single-key
+    // decision was made to prevent, and it was live here: the Quick Start directory is in
+    // the session bound and was missing from this listing, so an install that moved it
+    // outside `$HOME` could not browse to the directory its own Quick Start sessions run
+    // in.
     let roots = state
         .config
-        .browse_roots
-        .iter()
-        .filter_map(|path| {
-            let canonical = std::fs::canonicalize(path).ok()?;
-            if !canonical.is_dir() {
-                return None;
-            }
+        .session_roots()
+        .into_iter()
+        .map(|canonical| {
             let display = canonical.display().to_string();
             let name = if display == home {
                 "Home".to_string()
             } else {
                 leaf(&display)
             };
-            Some(Root {
+            Root {
                 name,
                 path: display,
-            })
+            }
         })
         .collect();
 
@@ -144,7 +147,7 @@ pub async fn tree(
     State(state): State<AppState>,
     Query(query): Query<BrowseQuery>,
 ) -> Result<Json<BrowseResponse>> {
-    let allowed = canonical_roots(&state);
+    let allowed = state.config.session_roots();
     if allowed.is_empty() {
         return Err(Error::Internal(
             "No browsable directories are configured.".to_string(),
@@ -242,22 +245,13 @@ pub async fn tree(
     }))
 }
 
-/// Canonicalized, still-existing browse roots.
-fn canonical_roots(state: &AppState) -> Vec<PathBuf> {
-    state
-        .config
-        .browse_roots
-        .iter()
-        .filter_map(|path| std::fs::canonicalize(path).ok())
-        .filter(|path| path.is_dir())
-        .collect()
-}
-
-/// Require `candidate` to resolve inside at least one browse root.
+/// Require `candidate` to resolve inside at least one browsable root.
 ///
-/// A thin naming of [`paths::contain_in_any`], which is shared with the session
-/// workdir bound: browsing and naming a workdir are checked against the same root
-/// set by the same primitive, so one cannot drift into being laxer than the other.
+/// A thin naming of [`paths::contain_in_any`] over [`crate::config::Config::session_roots`],
+/// which is the *same* set `POST /sessions` bounds a workdir against — one primitive and
+/// one set, so browsing and naming a workdir cannot drift into disagreeing. There used to
+/// be a second, locally-built set here that omitted the Quick Start directory; two root
+/// sets that must agree are two that will not.
 fn contain_in_any(roots: &[PathBuf], candidate: &std::path::Path) -> Result<PathBuf> {
     paths::contain_in_any(roots, candidate, "the browsable roots")
 }

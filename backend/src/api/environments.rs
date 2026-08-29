@@ -89,9 +89,9 @@ pub struct EnvironmentsResponse {
 /// two products), so "the machine the server runs on" is not a privileged
 /// environment with its own code path. Until pairing lands (step 4), the only
 /// environment this can describe is the local one, and what it reports about that
-/// one is honest about the seam: an empty [`crate::adapters::registry`] yields an
-/// environment with no agents, which is exactly the state a client must be able to
-/// explain rather than render as empty chrome.
+/// one is honest about the seam: an [`crate::adapters::AdapterSource`] that lists nothing
+/// yields an environment with no agents, which is exactly the state a client must be able
+/// to explain rather than render as empty chrome.
 pub async fn list(State(state): State<AppState>) -> Result<Json<EnvironmentsResponse>> {
     let descriptor = state.environment.descriptor();
     let health = state.environment.probe().await;

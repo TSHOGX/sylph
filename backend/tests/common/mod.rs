@@ -63,36 +63,7 @@ impl TestBackend {
 
     /// Start a backend whose runners directory contains exactly `runners`.
     pub async fn start_with_runners(runners: &[MockRunner]) -> Self {
-        Self::start_with(runners, None, None, &[]).await
-    }
-
-    /// Start a backend wired to a stub `trace-db api` process.
-    ///
-    /// The stub speaks the real line protocol so the client stays on its
-    /// production path: one JSON request per line in, one response line out.
-    pub async fn start_with_tracedb(tracedb: MockTraceDb) -> Self {
-        Self::start_with(&[MockRunner::success("mock")], Some(tracedb), None, &[]).await
-    }
-
-    /// Start a backend that also permits sessions in `extra_roots`.
-    ///
-    /// Needed by the import tests, and the reason is the feature under test rather
-    /// than a harness quirk: an archived session's recorded working directory is
-    /// outside this install's tree, and importing it is refused unless the install
-    /// permits sessions there. Adding the directory as a browse root is exactly the
-    /// configuration that permits it — which is what makes these tests assert the
-    /// real bound rather than route around it.
-    pub async fn start_with_tracedb_permitting(
-        tracedb: MockTraceDb,
-        extra_roots: &[&Path],
-    ) -> Self {
-        Self::start_with(
-            &[MockRunner::success("mock")],
-            Some(tracedb),
-            None,
-            extra_roots,
-        )
-        .await
+        Self::start_with(runners, None, &[]).await
     }
 
     /// Start a backend whose resolved `SOUL.md` holds `text`.
@@ -101,12 +72,11 @@ impl TestBackend {
     /// requires a readable file — the same order production runs in, where
     /// `SOUL.md` predates the process.
     pub async fn start_with_soul(text: &str) -> Self {
-        Self::start_with(&[MockRunner::success("mock")], None, Some(text), &[]).await
+        Self::start_with(&[MockRunner::success("mock")], Some(text), &[]).await
     }
 
     async fn start_with(
         runners: &[MockRunner],
-        tracedb: Option<MockTraceDb>,
         soul: Option<&str>,
         extra_roots: &[&Path],
     ) -> Self {
@@ -142,15 +112,6 @@ impl TestBackend {
                     .chain(extra_roots.iter().map(|path| path.display().to_string()))
                     .collect::<Vec<_>>()
                     .join(":"),
-            ),
-            (
-                // Absent unless a test opts in, so TraceDB-dependent paths degrade
-                // rather than making every test need an external binary.
-                "SYLPH_TRACEDB_BIN",
-                match &tracedb {
-                    Some(stub) => stub.install(root).display().to_string(),
-                    None => root.join("nonexistent-trace-db").display().to_string(),
-                },
             ),
         ]
         .into_iter()
@@ -263,6 +224,27 @@ impl TestBackend {
         // Replaced too, or a test would keep querying the pre-restart store and
         // miss exactly the recovery it is asserting on.
         self.state = state;
+    }
+
+    /// Restart with the Quick Start directory *outside* every browse root.
+    ///
+    /// The configuration this expresses is a real one — `SYLPH_HOME` and
+    /// `paths.quick_start_dir` both move it, and `docs/configuration.md` says so — and it
+    /// is the only one in which the Quick Start half of `session_roots()` is observable.
+    /// With the default layout it sits under the harness root, so a bound built from
+    /// `browse_roots` alone coincides with `session_roots()` and a test cannot tell them
+    /// apart. Returns the new directory, canonicalized as the server resolves it.
+    pub async fn restart_with_external_quick_start(&mut self) -> PathBuf {
+        let external = self.temp.path().join("outside-the-roots").join("scratch");
+        std::fs::create_dir_all(&external).unwrap();
+        // `browse_roots` deliberately keeps only the workspace subtree, so the new Quick
+        // Start directory is reachable *only* through the unconditional permission.
+        self.config.browse_roots = vec![self.workdir.clone()];
+        self.config.quick_start_dir = external.clone();
+        self.restart().await;
+        let canonical = std::fs::canonicalize(&external).unwrap_or(external);
+        self.quick_start_dir = canonical.clone();
+        canonical
     }
 
     /// Restart against the same journal with the session roots narrowed to
@@ -555,218 +537,4 @@ pub async fn body_string(response: Response<Body>) -> String {
 pub async fn json_body(response: Response<Body>) -> Value {
     let text = body_string(response).await;
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("body was not JSON ({}): {}", e, text))
-}
-
-// ------------------------------------------------------------- mock TraceDB
-
-/// A stub `trace-db` binary for exercising archive-backed routes.
-///
-/// Payload shapes mirror the current `trace-db api` exactly, including its
-/// per-operation spelling: `search` answers camelCase, `show` answers
-/// snake_case. A mock that normalized the two would let a real spelling
-/// mismatch pass the suite.
-/// An archive holding no sessions for the requested filter.
-const EMPTY_LIST: &str = r#"{"sessions": []}"#;
-
-/// Wrap a payload as a POSIX single-quoted shell word, safe for any content.
-///
-/// The mock emits JSON from a `/bin/sh` script, so an apostrophe in test data —
-/// `"The directory's own work"` — would otherwise close the quote early and feed
-/// the client a truncated line, which surfaces as a JSON decoding error that looks
-/// like a protocol bug rather than a fixture bug. The standard escape is to end
-/// the quote, emit a quoted apostrophe, and reopen: `'\''`.
-fn shell_single_quote(payload: &str) -> String {
-    format!("'{}'", payload.replace('\'', r"'\''"))
-}
-
-pub struct MockTraceDb {
-    /// Emitted verbatim as the `result` of every `search` request.
-    search_result: String,
-    /// Emitted verbatim as the `result` of every `show` request.
-    show_result: String,
-    /// Emitted verbatim as the `result` of every `list` request.
-    ///
-    /// Separate from `search_result` because the two shapes differ: `search`
-    /// answers a bare array of hits, `list` answers
-    /// `{"sessions": [...], "nextCursor": ...}`. Sharing one field would let the
-    /// archive-browse endpoints pass their tests against a payload the real
-    /// `trace-db` never emits.
-    list_result: String,
-    /// Per-id `show` payloads, for tests where lineage or locality differs by
-    /// session. Keyed by TraceDB id; ids not listed fall back to `show_result`.
-    sessions: Vec<(String, String)>,
-    /// When true, answer `{"ok": false, ...}` instead of a result.
-    fails: bool,
-}
-
-impl MockTraceDb {
-    /// Returns `hits` (a JSON array literal) for any search query.
-    pub fn with_hits(hits: Value) -> Self {
-        Self {
-            search_result: hits.to_string(),
-            show_result: "null".to_string(),
-            list_result: EMPTY_LIST.to_string(),
-            sessions: Vec::new(),
-            fails: false,
-        }
-    }
-
-    /// Returns a `list` page for any archive listing request.
-    ///
-    /// `sessions` is a JSON array of `SessionSummary` rows in `list`'s camelCase
-    /// spelling. The same instance answers `show` with `show_session`, which the
-    /// listing path calls to derive a label for a row carrying no title.
-    pub fn with_listing(sessions: Value, next_cursor: Option<&str>) -> Self {
-        let mut page = json!({"sessions": sessions});
-        if let Some(cursor) = next_cursor {
-            page["nextCursor"] = json!(cursor);
-        }
-        Self {
-            search_result: "[]".to_string(),
-            show_result: "null".to_string(),
-            list_result: page.to_string(),
-            sessions: Vec::new(),
-            fails: false,
-        }
-    }
-
-    /// Answer `show` with this session, keeping whatever else is configured.
-    ///
-    /// Chained onto [`Self::with_listing`] when a test needs both a listing and
-    /// the transcript behind one of its rows.
-    pub fn and_session(mut self, metadata: Value, events: Value) -> Self {
-        let mut session = json!({"id": "mock:archived", "agent": "mock"});
-        for (key, value) in metadata.as_object().expect("metadata must be an object") {
-            session[key] = value.clone();
-        }
-        self.show_result =
-            json!({"session": session, "mode": "full", "events": events}).to_string();
-        self
-    }
-
-    /// Register the `show` payload for one specific id.
-    ///
-    /// Needed wherever behaviour depends on *which* session is asked about — the
-    /// lineage rollup reads each row's `parent_session_id`/`forked_from`, then asks
-    /// whether that parent lives in the directory being listed. `metadata` is the
-    /// session header; `id` is filled in from the key.
-    pub fn and_session_for(mut self, id: &str, metadata: Value) -> Self {
-        let mut session = json!({"id": id, "agent": "claude"});
-        for (key, value) in metadata.as_object().expect("metadata must be an object") {
-            session[key] = value.clone();
-        }
-        self.sessions.push((
-            id.to_string(),
-            json!({"session": session, "mode": "metadata", "events": []}).to_string(),
-        ));
-        self
-    }
-
-    /// Returns a `show` payload built from session metadata and events.
-    ///
-    /// `metadata` supplies the fields the import path reads; `id` and `agent`
-    /// are filled in because the real archive always reports them.
-    pub fn with_session(metadata: Value, events: Value) -> Self {
-        Self {
-            search_result: "[]".to_string(),
-            show_result: "null".to_string(),
-            list_result: EMPTY_LIST.to_string(),
-            sessions: Vec::new(),
-            fails: false,
-        }
-        .and_session(metadata, events)
-    }
-
-    /// Answers `show` with `null`, which is how the archive reports an id it
-    /// does not have.
-    pub fn without_session() -> Self {
-        Self {
-            search_result: "[]".to_string(),
-            show_result: "null".to_string(),
-            list_result: EMPTY_LIST.to_string(),
-            sessions: Vec::new(),
-            fails: false,
-        }
-    }
-
-    /// Answers every request with a protocol-level error.
-    pub fn failing() -> Self {
-        Self {
-            search_result: "[]".to_string(),
-            show_result: "null".to_string(),
-            list_result: EMPTY_LIST.to_string(),
-            sessions: Vec::new(),
-            fails: true,
-        }
-    }
-
-    fn install(&self, root: &Path) -> PathBuf {
-        let path = root.join("mock-trace-db");
-        std::fs::write(&path, self.script()).unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&path, perms).unwrap();
-        }
-
-        path
-    }
-
-    /// A line-protocol server: read a request line, write a response line.
-    /// Long-lived, because the client reuses the process across calls, and
-    /// branching on the request's `op` because one process serves every method.
-    fn script(&self) -> String {
-        if self.fails {
-            return r#"#!/bin/sh
-set -eu
-
-while IFS= read -r _line; do
-  printf '%s\n' '{"ok": false, "result": {"error": "index is locked"}}'
-done
-"#
-            .to_string();
-        }
-
-        let search = shell_single_quote(&format!(
-            r#"{{"ok": true, "result": {}}}"#,
-            self.search_result
-        ));
-        let show =
-            shell_single_quote(&format!(r#"{{"ok": true, "result": {}}}"#, self.show_result));
-        let list =
-            shell_single_quote(&format!(r#"{{"ok": true, "result": {}}}"#, self.list_result));
-        let stats = shell_single_quote(
-            r#"{"ok": true, "result": {"totalSessions": 2, "totalEvents": 9}}"#,
-        );
-
-        // Per-id `show` branches, matched before the catch-all. The real archive
-        // answers each id differently, and the lineage rollup asks about specific
-        // ids -- a mock that returned one canned session for every `show` would
-        // report every parent as living in no directory at all.
-        let mut per_id = String::new();
-        for (id, payload) in &self.sessions {
-            let body = shell_single_quote(&format!(r#"{{"ok": true, "result": {payload}}}"#));
-            per_id.push_str(&format!(
-                "    *'\"show\"'*'\"{id}\"'*) printf '%s\\n' {body} ;;\n"
-            ));
-        }
-
-        format!(
-            r#"#!/bin/sh
-set -eu
-
-while IFS= read -r line; do
-  case "$line" in
-{per_id}    *'"show"'*) printf '%s\n' {show} ;;
-    *'"list"'*) printf '%s\n' {list} ;;
-    *'"stats"'*) printf '%s\n' {stats} ;;
-    *) printf '%s\n' {search} ;;
-  esac
-done
-"#
-        )
-    }
 }
