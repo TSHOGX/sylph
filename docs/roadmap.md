@@ -1927,8 +1927,24 @@ rewrite that pays for the same defects twice.
   capability, so a user's "don't do that" arrives after the thing it was meant to prevent,
   with every layer reporting success. If it *is* steering, the vocabulary is fine and only
   this note is wrong. Either way the vocabulary is missing **queueing** as a distinct
-  operation — `codex` has `thread/queue/add` and `pi` has `queueUserMessage`, both separate
-  from their native steer — so there is no honest spelling for what this write does.
+  operation — `codex` has `thread/queue/add` and `pi` has `follow_up`
+  (`dist/modes/rpc/rpc-mode.js:325`), both separate from their native steer — so there is
+  no honest spelling for what this write does.
+
+  **The three sites `Capability::Queue` retires on `pi`**, each currently a deliberate
+  omission whose stated reason is that Sylph has no word for it. `follow_up` is the verb,
+  the direct analogue of `steer` — same shape, same images field, delivered once the agent
+  has no more tool calls or steering messages pending. `set_steering_mode` and
+  `set_follow_up_mode` each take `all` or `one-at-a-time`, which is the *discipline* rather
+  than the queue, so whether they become config options is a separate call. And
+  **`queue_update` is the site that matters most**: pi already emits it with `steering` and
+  `followUp` arrays, `translate` currently drops it, and without it a queued message is
+  invisible until it runs — a client cannot show what it is waiting on.
+
+  Note the naming trap, because this entry carried the wrong verb until it was checked:
+  **`queueUserMessage` occurs zero times in that vendor's tree.** It is an SDK-side name
+  at best, and grepping for it on this vendor finds nothing while the feature is plainly
+  there — the RPC surface spells it `follow_up`.
 
 ### Implementation order
 
