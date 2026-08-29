@@ -1653,14 +1653,22 @@ spends real tokens and only observes whatever shapes one live turn produces, so 
 
 ### Open items
 
-- ✅ **`pi` cannot report child trajectories, and the reason is in `pi`.** Measured on
-  0.84.4: it *declares* `agent_start` and `agent_end` in its event union and documents
-  them, and has **zero emit sites** in its shipped bundle — the `Task` tool builds a
-  nested agent whose events reach an internal callback that never touches the
-  transport. So this was never an adapter change waiting to be made: the data does not
-  leave the process. The adapter now marks `Task` with `delegates: true` so the call is
-  legible as delegation without implying a tree that can never fill, and says so in its
-  module docstring. Revisit if a release adds emit sites, not if one adds types.
+- ✅ **`pi` cannot report child trajectories, and the reason is in `pi`.** The conclusion
+  holds; **the evidence originally given for it was wrong and is corrected here**, because
+  a wrong measurement is harder to distrust than wrong code. This item claimed
+  `agent_start` and `agent_end` had *zero emit sites*. Re-measured against 0.84.3 from its
+  unbundled `dist/` tree, both are emitted — `agent_start` at
+  `pi-agent-core/dist/agent-loop.js:49,67`, `agent_end` at `:110,157,172` — and both reach
+  the RPC wire, because `dist/modes/rpc/rpc-mode.js:265` funnels every `session.subscribe`
+  event through `output(toJsonEvent(event))`. The original pass read a minified bundle;
+  "I grepped and found nothing" is a claim about the grep as much as about the vendor.
+
+  What is true, and is the actual reason, is narrower: `pi` exposes **no delegation
+  structure** on the wire in any form. Its event table carries no parent, span, or child
+  field — `toolCallId` is the only correlation anything has — and sub-agents exist only for
+  SDK embedders, whose inner session's events reach an in-process callback that never
+  touches the transport. So a flat `pi` transcript is a true report rather than a gap, and
+  `pi.rs`'s `SPAN_HAS_NO_VENDOR_SOURCE` states it at the code.
 - ✅ **A multiplexed host cannot attribute forwarded interior, and `_delegate_of` was
   also wrong for the ordinary case.** The count was taken across *all* hosts, so two
   concurrent delegations each labelled the other's delegate. Fixed to count per host.
@@ -1900,6 +1908,27 @@ rewrite that pays for the same defects twice.
 - **Horizontal scale.** The authority is SQLite and a link is stateful in one process, so
   growth means shard-by-session-and-route, or moving to Postgres. Nothing in the API
   forecloses either; the choice is not made.
+- **`claude` declares `Capability::Steer` and has no steer.** *Measured on 2.1.251:* the
+  control protocol's subtypes are `interrupt`, `initialize`, `can_use_tool`,
+  `set_permission_mode`, `set_model`, and `mcp_message` — appearing 12–56 times each as
+  quoted tokens in the binary — while `"steer"` appears **zero** times. The adapter's whole
+  implementation is writing a second `user` message to stdin, and its own comment says
+  "claude has no steer-with-precondition of its own".
+
+  What is *not* decided is whether that write is steering or queueing, and the difference
+  is the whole point: `Capability::Steer` promises the text reaches the agent **before its
+  next model call**, which is a correction, while a message read after the current turn is
+  a follow-up. Deciding it needs a live probe — the binary is Bun-compiled, so string
+  context around a token is runtime noise rather than evidence, and an exact-line grep
+  returns 1 for every token including ones that do not exist.
+
+  Both outcomes cost something real. If it is queueing, the capability is a false claim
+  the composer acts on: it sends a steer whenever a turn is live and the agent claims the
+  capability, so a user's "don't do that" arrives after the thing it was meant to prevent,
+  with every layer reporting success. If it *is* steering, the vocabulary is fine and only
+  this note is wrong. Either way the vocabulary is missing **queueing** as a distinct
+  operation — `codex` has `thread/queue/add` and `pi` has `queueUserMessage`, both separate
+  from their native steer — so there is no honest spelling for what this write does.
 
 ### Implementation order
 
