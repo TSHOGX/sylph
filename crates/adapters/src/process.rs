@@ -415,7 +415,19 @@ impl Child {
 /// JSON-RPC permits either and `codex` uses integers, while `pi` echoes the string it was
 /// given. A reader accepting only one silently fails to correlate on the other, and an
 /// uncorrelated reply looks like a vendor that never answered.
-fn reply_id(value: &Value) -> Option<String> {
+///
+/// Public because a [`Spawn::reply_id`] predicate is written per vendor, and one that finds
+/// its id somewhere other than the top level — `claude`'s is nested under `response` —
+/// still needs to read it once it has. Keeping this private left [`json_rpc_reply_id`]
+/// exported while the read it is built from was not, so the only reusable spelling was the
+/// one shape that happened to have a helper.
+///
+/// **Use the narrower read where a vendor's own shape makes a branch unreachable.** `pi`
+/// echoes `command.id` verbatim and this side only ever sends a string, so a number is not
+/// a shape that vendor produces — accepting one would be tolerance for something nothing
+/// emits, and `AGENTS.md` § Compatibility prefers the loud break. This exists for the
+/// vendors that genuinely span both.
+pub fn reply_id(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
         Value::Number(number) => Some(number.to_string()),
