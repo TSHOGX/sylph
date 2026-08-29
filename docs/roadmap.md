@@ -3,73 +3,46 @@
 ## Current State
 
 **Architecture:**
-- Backend: Rust + Axum + SQLx (Phase 1 complete)
-- Frontend: Next.js 16 + React 19 + TanStack Query (Phase 2 complete)
-- Database: SQLite, split into `journal.db` (hot, unconsolidated turns) and
-  `history.db` (warm, consolidated blocks, plus the FTS index) with `blobs/` beside
-  them. One authoritative record, split for SQLite's sake (`docs/storage.md`)
+- `crates/protocol` — the event vocabulary and the adapter contract as types. No runtime.
+- `crates/adapters` — `claude`, `codex`, `pi`, each owning its vendor process and reading
+  that vendor's native store. Linked into the server, not spawned.
+- `backend` — Rust + Axum + SQLx. HTTP and SSE on port 4317. Becomes `crates/server` when
+  step 4 splits the envagent out.
+- `frontend` — Next.js 16 + React 19 + TanStack Query.
+- Store: SQLite, split into `journal.db` (hot, unconsolidated turns) and `history.db`
+  (warm, consolidated blocks, plus the FTS index) with `blobs/` beside them. One
+  authoritative record, split for SQLite's sake (`docs/storage.md`).
 
-**Completed:**
-- Phase 1: backend core on port 4317 — 11 routes, LiveStore, TurnSupervisor,
-  EventHub, auth middleware, runner discovery, TraceDB client, integration tests
-- Phase 2: frontend foundation — session list, create dialog, SSE conversation
-  view, reconnection from `after_seq` (the list and the dialog are both gone: the
-  dialog in Phase 7, the list in Phase 8)
-- Phase 3: feature completion — attachments, TraceDB search, native import,
-  server-side filters, error boundaries
-- Phase 4: production readiness — 55 unit + 53 integration + 6 E2E tests,
-  accessibility audit, first-load JS measured at 190.4 KB gzipped
-- Phase 5: deployment — `scripts/install.sh`, standalone frontend bundle,
-  LaunchAgent, reversible rollback, `docs/installation.md`
-- Phase 6: frontend redesign — three-pane agent workspace, tool-first timeline
-  with inline diffs, file browser, `Cmd+K`/`Cmd+P`, settings panel
-- Phase 7 (Artifacts): file viewer taking the whole right pane, with fullscreen,
-  and previews for Excel, Word, PowerPoint, CSV, images, HTML, and PDF
-- Phase 9: design system, mobile layout, and PWA
-- Phase 10: the Artifacts pane manages files — new folder, upload, delete behind a
-  confirmation, and full-file reads in a browser tab past the preview limits
-- Phase 11: identity as a creation-time choice with `GET /api/v1/soul` to read it,
-  English/Chinese i18n, and shortcut defaults a browser does not intercept
+**What the system does.** Sessions run against the three agents and stream tool and
+reasoning events as they happen. A session's identity is `(environment, agent, native_id)`,
+so a vendor's own session can be adopted — parsed from its native store into the same
+events a live turn emits — with no second id space and no separate archive. Delegated work
+renders as a navigable tree, defined by *use* rather than declaration, so a vendor's new
+delegating tool needs no whitelist entry. Turns are server-side resources: closing a tab
+mid-turn and reopening resumes the stream. History is lossless and tiered, with replay over
+HTTP. Capability surfaces are facet-scoped, so a partial update cannot speak for the whole
+surface, and every control is typed rather than prose sent as a prompt.
 
-Every phase through 11 is complete, including 6.6 and 6.7 (archive browsing). Phase 7
-ran as two tracks — the interaction and composer redesign, and the Artifacts file
-viewer — both of which have landed, as has Phase 8 (the start screen); see the
-sections at the end of this file.
+**Phases 1–11 are complete.** Each has its own section at the end of this file with what it
+delivered and how each exit criterion was checked. Phase 12 (Native Sessions) is in
+progress; its section is authoritative for it, not this summary.
 
-**Phase 12 (Native Sessions) is in progress, and most of it is on `main`.** What has
-landed changes enough of the system that the summary above would mislead without it:
+**Step 4, `crates/envagent`, is what remains of the architecture rewrite** — the envagent
+that dials outward to the server, carrying the four capabilities `docs/environments.md`
+names. Steps 1–3 are done: the protocol crate, the adapters crate, and adapters running
+in-process. Until step 4 lands, anything describing a paired remote machine is intent
+rather than description, and retention withholds rather than prunes (`docs/storage.md`).
 
-- `sylph.agent.v3` — an adapter is a long-lived process and a turn is a message on
-  its link, replacing v1's process-per-turn contract, which is deleted rather than
-  kept behind a flag (`docs/session-protocol.md`)
-- Delegated trajectories render as a navigable tree, with a trajectory defined by
-  *use* rather than by declaration, so a vendor's new delegating tool needs no
-  whitelist entry
-- An agent may start a turn (`origin: "agent"`), so work that outlives the turn that
-  dispatched it can still report back
-- Lossless tiered history with replay over HTTP, pruned only on a downstream
-  authority's confirmation, plus a retention scheduler (`docs/storage.md`)
-- One home under `~/.sylph` and one file to configure it (`docs/configuration.md`)
-- A request declares the input it wants, rather than the client sniffing its detail
-  for field names it recognizes
-- Facet-scoped capability surfaces and typed control commands, so a partial update
-  cannot speak for the whole surface
-- One choice-list engine behind every picker (`lib/select-list.ts`)
+**Current test totals, measured on `main` on 2026-08-29:** 536 Rust unit (280
+`sylph-adapters`, 212 `sylph-web-backend`, 44 `sylph-protocol`), 197 Rust integration
+across five binaries (120 `integration`, 30 `requests`, 29 `storage`, 15 `adopt`, 3
+`openapi_coverage`, plus 3 ignored by default that parse files from real Office tooling),
+404 frontend unit in 25 files, and 156 E2E specs in 17 files.
 
-Its own section at the end of this file carries the reasoning, the measurements, and
-the open items — that section is authoritative for Phase 12, not this list.
-
-**Current test totals, measured on `main` on 2026-08-26:** 322 backend unit, 207
-backend integration across three binaries (158 `integration`, 26 `requests`, 23
-`storage`, plus 3 ignored by default that parse files from real Office tooling), 381
-frontend unit in 22 files, 149 E2E specs in 16 files across two projects (138
-`chromium`, 11 `mobile`).
-
-The per-phase counts below are what each phase measured on its own branch and are
-left as its record; they do not add up to these, because parallel tracks each
-counted only their own suite. Re-measure by running the suites, not by adding the
-sections — `cargo test`, `npm test`, and `npx playwright test --list` report all
-four numbers directly.
+The per-phase counts below are what each phase measured on its own branch and are left as
+its record; they do not add up to these, because parallel tracks each counted only their
+own suite. Re-measure by running the suites, not by adding the sections — `cargo test`,
+`npm test`, and `npx playwright test --list` report all four numbers directly.
 
 **Current first-load JS, measured by `scripts/measure-bundle.sh`:**
 
@@ -109,37 +82,26 @@ forward.
 
 ### Open Decisions
 
-Two decisions remaining:
+**One decision remaining: whether *reading* should be path-bounded too.**
 
-**Whether reading archived metadata should be path-bounded.** Creating a session is
-now bounded — a client-named `workdir` must canonicalize inside `browse_roots` plus
-the Quick Start directory, on create and on import. Reading is not:
-`GET /api/v1/archive/sessions?workdir=` accepts any absolute path behind only
-`starts_with('/')`, so a client can learn which archived sessions ran in any
-directory on the machine. This was deliberately left alone rather than half-fixed,
-because `/api/v1/search` and `GET /api/v1/archive/sessions/{trace_id}` reach the same
-content with no path bound at all — bounding one of three would read as a boundary
-without being one.
+Acting is bounded. A client-named `workdir` must canonicalize inside `browse_roots` plus
+the Quick Start directory, on `POST /sessions` and on `POST /sessions/adopt`, and
+`/api/v1/fs/*` is bounded by the same set through the same primitive — one root set, so
+the picker cannot offer a directory creation would refuse.
 
-The line that is now true and coherent: **reading archived metadata is
-authentication-bounded, acting on it is browse-root-bounded.** Under the loopback
-bind and the bootstrap cookie that is defensible, and it is the whole answer only for
-as long as both hold. The decision is whether reading should be bounded too, which is
-a threat-model call rather than an implementation gap — and it has to be answered for
-all three surfaces at once or not at all. Any move off loopback forces it.
+Reading is not. `GET /sessions?workdir=` takes any absolute path, `/search` has no path
+filter at all and reaches every transcript the store holds, and `/workspaces` lists every
+directory any session ever ran in. So a client can learn what ran where on this machine,
+anywhere on it.
 
-**Native→Sylph conversion endpoint shape:** `PATCH /api/v1/sessions/{id}`
-with `identityMode`/`lifecycleMode` fields vs. `POST
-/api/v1/sessions/{id}/convert`. The latter is recommended: conversion is the
-only legitimate way to inject `SOUL.md` into a native session, so it should be
-an explicit, auditable operation rather than a field on a general update. Not
-implemented either way yet.
-
-An entry describing the runner protocol used to sit here, and it was never a
-decision — it was a settled fact, which is how it went on describing
-`sylph.runner.v1` and `SYLPH_STREAM_FORMAT=ndjson-v1` for a release after Phase 12
-deleted that path. The agent seam is `sylph.agent.v3` and `docs/session-protocol.md`
-owns it.
+The line that is currently true and coherent: **reading a record is
+authentication-bounded, acting on one is browse-root-bounded.** Under the loopback bind
+and the bootstrap cookie that is defensible, and it is the whole answer only for as long
+as both hold. The decision is a threat-model call rather than an implementation gap, and
+it has to be answered for all three surfaces at once or not at all — bounding one would
+read as a boundary without being one. Any move off loopback forces it, and so does the
+envagent: a paired machine means "this server can read it" stops implying "the operator
+sitting at it can".
 
 ## Phase 1: Backend Core (Weeks 1-3) — Complete
 
@@ -1763,17 +1725,27 @@ spends real tokens and only observes whatever shapes one live turn produces, so 
   counted for every session holding it, which is the right attribution for "who is
   responsible" and the wrong number for "how full is my disk". Anything wanting the
   second has to measure the filesystem.
-- **`e2e/delegation.spec.ts` is timing-sensitive under full-suite load.** Measured
+- ✅ **`e2e/delegation.spec.ts` was timing-sensitive under full-suite load.** Measured
   over nine runs of the file after the four-worktree merge: three runs had one or two
-  failures and six were clean, and the failing spec was a *different* one each time
-  (`:122`, `:298`, `:321`, `:343`). Every one of them asserts on the turn-settle
-  sweep that closes trajectories an adapter left open, so they all wait on the same
-  two-write window `docs/roadmap.md` already describes — the row that makes the next
-  action legal, then the trajectory closes. Each passes 5/5 in isolation, which is
-  what makes it read as flakiness rather than as a shared dependency on one window.
-  Do not raise the timeout: the fix is for the specs to assert on the settled record
-  rather than on a rendered card appearing within a deadline. Note this is *not* the
-  `.e2e-home` accumulation pitfall — it reproduces on a freshly wiped fixture.
+  failures and six were clean, and the failing spec was a *different* one each time.
+  Every one asserts on the turn-settle sweep that closes trajectories an adapter left
+  open, so they all waited on the same two-write window — the row that makes the next
+  action legal, then the trajectories close. Each passed in isolation, which is what
+  made it read as flakiness rather than as a shared dependency on one window. It was
+  also diagnosed once as a branch regression and was not: the specs failed on `main`
+  identically, and running one spec with `-g` is a different measurement from running
+  its file.
+
+  The cause was that the client learned a turn had ended by *polling the turn row*,
+  which commits before the sweep. `TurnCloser::close` emits a `status` frame carrying
+  `{"state": …}` after the sweep, and the client discarded it — so `useSSE` now reads
+  it and the page settles on the pushed signal, with the poll demoted to a 20s
+  backstop. That also retired ~40 requests a minute per running turn. The full suite
+  passes 156/156.
+
+- **Native sessions reachable on this machine, measured 2026-08-29:** 2789 across the
+  three stores — `claude` 1000, `codex` 1258, `pi` 531 — through
+  `GET /sessions/enumerate` and the adopt picker.
 
 ### Two user-reported bugs: a permission mode that did nothing, and a dialog that would not leave
 

@@ -1659,6 +1659,21 @@ Name a test after the behavior it pins, so a failure reads as a broken promise
 rather than a broken function. Assert on observable contract — status, error
 code, ordering — not on incidental structure.
 
+**A new test is only proven by watching it fail.** Write it, then break the thing it
+covers and confirm it goes red, then restore. Otherwise it may be asserting something
+that was never in doubt — which is how a property with a comment calling it load-bearing
+can turn out to have no coverage at all, and how a test can be repaired into passing
+either way.
+
+**Run the suite after the last edit, and paste what it printed.** Not "run the suite" —
+after the *last* edit. Six subagent reports in one session claimed green against trees
+that did not compile, had a failing test, or were missing the changes the report
+described. The check that catches all six is the order.
+
+**Running one spec in isolation is a different measurement from running its file**, and
+running its file is different from running the suite. A spec that passes with `-g` and
+fails in its file is telling you about shared state or a shared window, not about itself.
+
 ## Language
 
 Code, documentation, and commit messages are English only: every `.rs`, `.ts`,

@@ -43,10 +43,6 @@ test-results/
 /frontend/.e2e-data/
 /frontend/test-results/
 
-# Python bytecode, from the adapters
-__pycache__/
-*.pyc
-
 # macOS
 .DS_Store
 
@@ -64,6 +60,3 @@ __pycache__/
 
 # Local agent worktrees and session metadata
 .claude/
-
-# Written by `adapters/claude/verify.py` to force a real approval, per-run.
-adapters/*/.verify-settings.json
