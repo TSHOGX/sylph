@@ -165,20 +165,18 @@ mkdir -p "$PREFIX.new/frontend" "$PREFIX.new/logs" "$BIN_DIR" "$DATA_DIR"
 cp "$REPO/backend/target/release/sylph-web-backend" "$PREFIX.new/sylph-web-backend"
 cp -R "$REPO/frontend/.next/standalone/." "$PREFIX.new/frontend/"
 
-# Bundled adapters. An adapter is versioned with the protocol it implements, so it
-# ships with the binary rather than being installed separately — and the backend
-# looks for them beside itself first, which is the only candidate that survives
-# this tree being moved or copied to another machine.
+# No adapters are staged, because there is no directory of them to stage. They are
+# compiled into the binary copied above, so an agent is available exactly when its
+# vendor CLI is on the PATH the server runs under.
 #
-# Staging them was missing, and the failure was silent in the worst way: with no
-# adapters here the backend fell through to a compile-time repo path, so an
-# install worked on the build machine and discovered zero agents anywhere else.
-# Zero agents means no session can be created and no slash command is offered,
-# while every health probe still reports the server up. Fail the install instead,
-# for the same reason `.next/static` is checked below.
-[ -d "$REPO/adapters" ] ||
-  die "No adapters/ in $REPO. The backend cannot run any agent without them."
-cp -R "$REPO/adapters" "$PREFIX.new/adapters"
+# This deletes a check that was load-bearing while it was needed, and the reason it
+# was is worth keeping: with no adapters staged the backend fell through to a
+# compile-time repo path, so an install worked on the build machine and found zero
+# agents anywhere else — and zero agents means no session can be created and no
+# slash command offered, while every health probe still reports the server up.
+# There is no equivalent failure to guard now: a missing CLI is reported per agent
+# by `sylph-web doctor` and per environment by `GET /api/v1/environments`, both of
+# which name the binary to install.
 # Standalone omits these two; without them every asset request 404s.
 mkdir -p "$PREFIX.new/frontend/.next"
 cp -R "$REPO/frontend/.next/static" "$PREFIX.new/frontend/.next/static"
@@ -320,10 +318,6 @@ else
   [ -x "$PREFIX/sylph-web-backend" ] || die "backend binary is missing or not executable"
   [ -f "$PREFIX/frontend/server.js" ] || die "frontend bundle is missing server.js"
   [ -d "$PREFIX/frontend/.next/static" ] || die "frontend bundle is missing .next/static"
-  # Checked after staging as well as before, because this is the artifact whose
-  # absence is invisible at runtime: the server starts, reports healthy, and can
-  # run nothing.
-  [ -d "$PREFIX/adapters" ] || die "no adapters/ staged; no agent could run"
   say "Installed. Start it with: sylph-web"
   say "Then open http://localhost:$FRONTEND_PORT"
 fi

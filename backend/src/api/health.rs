@@ -65,7 +65,7 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse
         api_version: "1".to_string(),
         schema_version,
         agents: AgentsHealth {
-            available: !crate::adapters::available(&state.config.agent_roots()).is_empty(),
+            available: !state.adapters.available().is_empty(),
         },
     }))
 }
@@ -135,7 +135,7 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         uptime_seconds: uptime_seconds(),
         sessions,
         turns,
-        agents: crate::adapters::available(&state.config.agent_roots()),
+        agents: state.adapters.available(),
         active_turns: state.turns.active_turn_count().await,
         retention: state.retention.last_pass().await,
     }))

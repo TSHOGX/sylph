@@ -77,8 +77,10 @@ base64 = { workspace = true }
 blake3 = "1.5"
 zstd = "0.13"
 
-# Process management
-nix = { version = "0.29", features = ["signal", "process"] }
+# No `nix`. Process groups and `killpg` were `env::LocalEnvironment::spawn`'s, and
+# it had one caller: the adapter subprocess. An adapter is linked in now and owns
+# whatever process its vendor CLI needs, so the signalling lives in
+# `crates/adapters` — which holds the `nix` dependency — rather than here.
 
 # The `Environment` seam is dyn-dispatched: the supervisor holds a
 # `dyn Environment` chosen per session at runtime, so its async methods need

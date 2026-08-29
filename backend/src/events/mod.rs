@@ -157,21 +157,36 @@ impl StreamEvent {
         }
     }
 
-    /// Build from a `sylph.agent.v3` event message.
+    /// Build from an adapter's [`sylph_protocol::Event`].
     ///
     /// `seq` is left at zero for the caller to assign, because ordering is the
     /// server's to decide: an adapter numbering its own events could not
     /// interleave correctly with the server's own (the user's message, status),
     /// which share one stream.
     ///
-    /// Returns `None` only when `kind` is missing. Every other field is optional
-    /// by protocol, so a sparse event is valid rather than malformed.
-    pub fn from_adapter(body: &serde_json::Value) -> Option<Self> {
-        let kind = body.get("kind")?.as_str()?.to_string();
-        let phase = body
-            .get("phase")
-            .and_then(|p| p.as_str())
-            .map(|s| s.to_string());
+    /// # Infallible, where the JSON version was not
+    ///
+    /// This replaces a `from_adapter(&serde_json::Value) -> Option<Self>` that answered
+    /// `None` when `kind` was missing or not a string. With adapters linked in there is no
+    /// such state: `EventKind` is an enum whose `Other` variant preserves a kind this
+    /// build does not model, so an event that would have been dropped as unparseable now
+    /// arrives verbatim. The `warn!("Unparseable adapter event")` branch at the one call
+    /// site is deleted rather than made unreachable.
+    ///
+    /// `Stability` is deliberately **not** read off the protocol event even though it
+    /// declares the type. The rule below is the server's — it decides which tier a row
+    /// lands in — and an adapter that got it wrong could silently keep a delta out of the
+    /// journal or flood it with one. One fact, one producer.
+    pub fn from_event(event: &sylph_protocol::Event) -> Self {
+        let kind = event.kind.as_str().to_string();
+        let phase = event.phase.map(|phase| {
+            match phase {
+                sylph_protocol::Phase::Started => "started",
+                sylph_protocol::Phase::Delta => "delta",
+                sylph_protocol::Phase::Completed => "completed",
+            }
+            .to_string()
+        });
 
         // Stability follows the phase, unchanged from v1: a `completed` event
         // carries its block's whole stable value, and an event with no phase is
@@ -190,42 +205,34 @@ impl StreamEvent {
             _ => "ephemeral",
         };
 
-        Some(Self {
+        Self {
             seq: 0,
             kind,
             phase,
-            stream_id: body
-                .get("streamId")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            // Empty is normalized to absent: an adapter emitting `"span":""` for a
+            stream_id: event.stream_id.clone(),
+            // Empty is normalized to absent: an adapter setting `span` to `""` for a
             // root event means the root, and a client comparing against a
             // trajectory id would otherwise look for one named "".
-            span: body
-                .get("span")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string()),
-            name: body
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            text: body
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            data: body.get("data").cloned().filter(|d| !d.is_null()),
-            is_error: body
-                .get("isError")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+            span: event
+                .span
+                .as_deref()
+                .filter(|span| !span.is_empty())
+                .map(str::to_string),
+            name: event.name.clone(),
+            text: event.text.clone(),
+            data: event.data.clone().filter(|data| !data.is_null()),
+            is_error: event.is_error,
             stability: stability.to_string(),
             source: "agent".to_string(),
+            // **The server's own arrival time, not the adapter's.** An adapter stamps
+            // `created_at_ms` too, and reading it here would make a duration depend on a
+            // remote machine's clock — which for step 4's envagent is a different clock
+            // entirely. The fixture that emits its whole tree inside one millisecond is
+            // measurable only because this is stamped on arrival.
             created_at_ms: chrono::Utc::now().timestamp_millis(),
-            // Straight from an adapter envelope: one arrival.
+            // Straight from an adapter: one arrival.
             started_at_ms: None,
-        })
+        }
     }
 
     /// Build from an adapter's typed [`sylph_protocol::Event`].
@@ -468,23 +475,46 @@ mod tests {
         // flattens the tree, and a serialize miss lets the server hold structure it
         // never sends — which looks like a frontend bug because the journal is
         // right and the client is empty.
-        let parsed = StreamEvent::from_adapter(&serde_json::json!({
-            "kind": "assistant", "phase": "completed",
-            "streamId": "b1", "span": "s1", "text": "hi"
-        }))
-        .expect("parses");
+        let mut source = sylph_protocol::Event::new(
+            sylph_protocol::EventKind::Assistant,
+            Some(sylph_protocol::Phase::Completed),
+            0,
+        );
+        source.stream_id = Some("b1".to_string());
+        source.span = Some("s1".to_string());
+        source.text = "hi".to_string();
+
+        let parsed = StreamEvent::from_event(&source);
         assert_eq!(parsed.span.as_deref(), Some("s1"));
 
         let wire = serde_json::to_value(&parsed).expect("serializes");
         assert_eq!(wire.get("span").and_then(|v| v.as_str()), Some("s1"));
 
         // A root event says nothing rather than saying "".
-        let root = StreamEvent::from_adapter(&serde_json::json!({
-            "kind": "assistant", "span": ""
-        }))
-        .expect("parses");
+        let mut empty =
+            sylph_protocol::Event::new(sylph_protocol::EventKind::Assistant, None, 0);
+        empty.span = Some(String::new());
+        let root = StreamEvent::from_event(&empty);
         assert_eq!(root.span, None);
         assert!(serde_json::to_value(&root).unwrap().get("span").is_none());
+    }
+
+    /// A kind this build does not model is preserved rather than dropped.
+    ///
+    /// The JSON constructor this replaced answered `None` for anything it could not read a
+    /// `kind` off, and its one call site logged and dropped the event. With a typed enum
+    /// that state is unreachable: an unrecognized spelling lands in `EventKind::Other` and
+    /// reaches the journal verbatim, which is what keeps the vocabulary additive.
+    #[test]
+    fn an_unmodelled_kind_survives_as_itself() {
+        let source = sylph_protocol::Event::new(
+            sylph_protocol::EventKind::Other("plan".to_string()),
+            Some(sylph_protocol::Phase::Completed),
+            0,
+        );
+        let event = StreamEvent::from_event(&source);
+        assert_eq!(event.kind, "plan");
+        assert!(event.is_stable(), "a completed event reaches the journal");
     }
 
     #[test]
@@ -492,20 +522,24 @@ mod tests {
         // `started` is where a trajectory's id, name, and parent live. Dropped as an
         // ephemeral projection, the journal keeps children pointing at a parent it
         // never recorded, and a reload flattens the subtree onto the root.
-        for phase in ["started", "delta", "completed"] {
-            let event = StreamEvent::from_adapter(&serde_json::json!({
-                "kind": "subagent", "phase": phase, "streamId": "s1"
-            }))
-            .expect("parses");
-            assert_eq!(event.stability, "stable", "subagent/{phase}");
-            assert!(event.is_stable(), "subagent/{phase} must reach the journal");
+        use sylph_protocol::Phase;
+        for phase in [Phase::Started, Phase::Delta, Phase::Completed] {
+            let mut source =
+                sylph_protocol::Event::new(sylph_protocol::EventKind::Subagent, Some(phase), 0);
+            source.stream_id = Some("s1".to_string());
+            let event = StreamEvent::from_event(&source);
+            assert_eq!(event.stability, "stable", "subagent/{phase:?}");
+            assert!(event.is_stable(), "subagent/{phase:?} must reach the journal");
         }
 
         // The exception is scoped to structure: content still projects.
-        let delta = StreamEvent::from_adapter(&serde_json::json!({
-            "kind": "assistant", "phase": "delta", "streamId": "b1"
-        }))
-        .expect("parses");
+        let mut source = sylph_protocol::Event::new(
+            sylph_protocol::EventKind::Assistant,
+            Some(Phase::Delta),
+            0,
+        );
+        source.stream_id = Some("b1".to_string());
+        let delta = StreamEvent::from_event(&source);
         assert_eq!(delta.stability, "ephemeral");
     }
 

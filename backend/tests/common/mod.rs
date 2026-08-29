@@ -12,7 +12,12 @@
 
 #![allow(dead_code)]
 
+pub mod mock;
+
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+pub use mock::{MockAgents, MockRunner};
 
 use axum::body::Body;
 use axum::http::{header, Request, Response, StatusCode};
@@ -40,6 +45,13 @@ pub struct TestBackend {
     /// has to seed one directly. Driving a real adapter to produce one would make
     /// these tests depend on a live agent process to exercise a store guarantee.
     pub state: AppState,
+    /// The agents this backend can run.
+    ///
+    /// Exposed so a test can make one **absent** ([`MockAgents::uninstall`]), which is what
+    /// `remove_dir_all(agents_dir().join(name))` used to express. There is no adapter
+    /// directory any more — an adapter is linked in — so availability is a fact the source
+    /// holds rather than one the filesystem does.
+    pub agents: MockAgents,
 }
 
 impl TestBackend {
@@ -105,18 +117,14 @@ impl TestBackend {
         // production resolves it — from one root — rather than being assembled
         // field by field here. A hand-built `Config` was how the harness came to
         // describe a layout the resolver no longer produced.
-        let agents_dir = root.join("agents");
         let workdir = root.join("workspace");
-        std::fs::create_dir_all(&agents_dir).unwrap();
         std::fs::create_dir_all(&workdir).unwrap();
 
         if let Some(text) = soul {
             std::fs::write(root.join("SOUL.md"), text).unwrap();
         }
 
-        for runner in runners {
-            runner.install(&agents_dir);
-        }
+        let agents = MockAgents::new(runners);
 
         // Resolved from an explicit environment rather than the process's own, so
         // tests run concurrently: `std::env::set_var` is process-global and unsafe
@@ -168,13 +176,11 @@ impl TestBackend {
 
         let mut config = Config::from_resolved(&resolved);
         config.port = 0;
-        // Only the harness tree, so a diagnostics assertion cannot pick up a path
-        // that depends on where this checkout happens to live.
-        config.bundled_agents_dir = agents_dir.clone();
-        config.bundled_agents_candidates = vec![agents_dir];
         config.cookie_secret = "test-secret-token".to_string();
 
-        let state = AppState::build(config.clone())
+        // Injected rather than discovered, which is what lets tests run concurrently while
+        // several of them offer an agent of the same name with different behaviour.
+        let state = AppState::build_with_adapters(config.clone(), Arc::new(agents.clone()))
             .await
             .expect("failed to build state");
         let cookie = format!("sylph_session={}", state.config.cookie_secret);
@@ -195,6 +201,7 @@ impl TestBackend {
             cookie,
             config,
             state,
+            agents,
         }
     }
 
@@ -237,9 +244,14 @@ impl TestBackend {
     /// process left mid-flight is gone. This is the only way to exercise the
     /// startup recovery that reconciles those rows.
     pub async fn restart(&mut self) {
-        let state = AppState::build(self.config.clone())
-            .await
-            .expect("failed to rebuild state");
+        // The same source, so a restart keeps whatever a test uninstalled — which is what
+        // a restart does to a machine whose CLI is gone.
+        let state = AppState::build_with_adapters(
+            self.config.clone(),
+            Arc::new(self.agents.clone()),
+        )
+        .await
+        .expect("failed to rebuild state");
         self.router = router(state.clone());
         // Replaced too, or a test would keep querying the pre-restart store and
         // miss exactly the recovery it is asserting on.
@@ -293,17 +305,6 @@ impl TestBackend {
     /// on demand and cleaned up with the returned guard.
     pub fn outside_the_roots(&self) -> TempDir {
         TempDir::new().expect("failed to create a directory outside the roots")
-    }
-
-    /// Where this backend's adapters live.
-    ///
-    /// Exposed for the tests that remove one to simulate an uninstalled agent.
-    /// Spelling the directory out at the call site puts the layout in two places,
-    /// and the copy in the test stops removing anything the moment the layout
-    /// moves — leaving a test that still asserts the detached path but no longer
-    /// produces it.
-    pub fn agents_dir(&self) -> &Path {
-        &self.config.agents_dir
     }
 
     /// The configured browse root — the throwaway tree's top level.
@@ -547,320 +548,6 @@ pub async fn body_string(response: Response<Body>) -> String {
 pub async fn json_body(response: Response<Body>) -> Value {
     let text = body_string(response).await;
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("body was not JSON ({}): {}", e, text))
-}
-
-/// A generated adapter conforming to `sylph.agent.v3`.
-///
-/// Python rather than bash: an adapter holds a duplex read loop and parses JSON,
-/// which bash does badly enough that a fixture written in it would be testing the
-/// fixture. Named `MockRunner` still, because every spec refers to it that way and
-/// renaming it would obscure a protocol change behind a diff of test churn.
-pub struct MockRunner {
-    name: String,
-    behavior: Behavior,
-}
-
-enum Behavior {
-    /// Stream a full turn, then report it completed.
-    Success,
-    /// Report the turn failed.
-    Failure,
-    /// Complete the turn with no assistant output at all.
-    ///
-    /// Under v1 this was "emit no final envelope", a protocol violation the
-    /// supervisor had to detect. v2 has no envelope to omit: the turn event *is*
-    /// the outcome. The nearest real failure is an agent that ends a turn having
-    /// produced nothing, which is what this now exercises.
-    NoOutput,
-    /// Dispatch a delegate, end the turn, then report the delegate's completion
-    /// *after* the turn has settled — and open a turn of its own to say so.
-    ///
-    /// What `claude` 2.x actually does with backgrounded work, measured: after a
-    /// turn's `result` it emits the delegate's completion and then an entire
-    /// exchange (`init`, assistant, `result`) reporting it, with stdout still open.
-    /// Every one of those events used to be dropped for arriving outside a turn.
-    Backgrounded,
-    /// The same shape, with the delegate declaring `is_backgrounded` on every phase.
-    ///
-    /// What a *cooperating* adapter sends: `claude` reports the flag only on
-    /// `task_started`, so its adapter re-attaches it to each later phase. The
-    /// turn-settle sweep skips such a trajectory, which is the branch
-    /// [`Behavior::Backgrounded`] cannot reach — that one exercises every adapter
-    /// that reports nothing, which is all of them except `claude`.
-    BackgroundedFlagged,
-    /// Accept the turn and never finish it, so a stop or interrupt can arrive.
-    Slow,
-    /// Fail the handshake, so the agent is unusable.
-    BrokenDescribe,
-}
-
-impl MockRunner {
-    pub fn success(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::Success }
-    }
-
-    pub fn failure(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::Failure }
-    }
-
-    pub fn no_envelope(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::NoOutput }
-    }
-
-    pub fn slow(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::Slow }
-    }
-
-    /// An adapter that reports a delegate finishing after its turn ended.
-    pub fn backgrounded(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::Backgrounded }
-    }
-
-    pub fn backgrounded_flagged(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::BackgroundedFlagged }
-    }
-
-    pub fn broken_describe(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::BrokenDescribe }
-    }
-
-    fn install(&self, agents_dir: &Path) {
-        let dir = agents_dir.join(&self.name);
-        std::fs::create_dir_all(&dir).unwrap();
-        let script_path = dir.join("adapter.sh");
-        std::fs::write(&script_path, self.script()).unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms).unwrap();
-        }
-    }
-
-    /// What this adapter does when a turn arrives.
-    fn on_send(&self) -> &'static str {
-        match self.behavior {
-            Behavior::Success | Behavior::BrokenDescribe => {
-                r#"
-        ok(mid)
-        # A per-turn capability update that speaks about ONE facet, which is what
-        # `claude` actually does: its `system/init` arrives once per turn and carries
-        # only the permission mode. This line is the fixture's whole reason for
-        # existing — without it the suite cannot observe a partial update erasing the
-        # facets it never mentioned, and that bug shipped once already.
-        ev("capabilities", facets={"permissionMode": "default"})
-        ev("thinking", "started", streamId="t1")
-        ev("thinking", "delta", streamId="t1", text="think")
-        ev("thinking", "completed", streamId="t1", text="thinking done")
-        ev("tool_call", "completed", streamId="c1", name="Read",
-           data={"path": "/tmp/x"})
-        # Deltas must concatenate to the completed text, exactly as a real agent's
-        # do — it builds the completed event by accumulating them. A fixture whose
-        # deltas disagree makes `fold` refuse, which is correct behaviour on bad
-        # input and useless as a test of the good path.
-        ev("assistant", "delta", streamId="a1", text="mock ")
-        ev("assistant", "delta", streamId="a1", text="reply")
-        ev("assistant", "completed", streamId="a1", text="mock reply")
-        ev("usage", "completed", data={"inputTokens": 10, "outputTokens": 3})
-        ev("turn", "completed", text="mock reply")
-"#
-            }
-            Behavior::Failure => {
-                r#"
-        ok(mid)
-        ev("turn", "completed", text="mock runner failed on purpose", isError=True)
-"#
-            }
-            Behavior::NoOutput => {
-                r#"
-        ok(mid)
-        sys.stderr.write("this adapter produced nothing\n")
-        sys.stderr.flush()
-        ev("turn", "completed", text="", isError=True)
-"#
-            }
-            Behavior::Backgrounded => {
-                r#"
-        ok(mid)
-        # A host that dispatches and returns. Its delegate outlives the turn.
-        ev("tool_call", "completed", streamId="bg-host", name="Workflow",
-           text='{"script": "background(worker)"}')
-        ev("subagent", "started", streamId="bg-task", span="bg-host",
-           name="Background: worker")
-        ev("tool_result", "completed", streamId="bg-host", name="Workflow",
-           text="dispatched")
-        ev("assistant", "completed", streamId="bg-a1", text="dispatched")
-        ev("turn", "completed", text="dispatched")
-
-        # Everything below arrives with the turn already settled. Before agent
-        # turns existed these were dropped, so the completion never reached a
-        # client and the delegate stayed abandoned forever.
-        time.sleep(0.4)
-        ev("subagent", "completed", streamId="bg-task", span="bg-host",
-           text="worker finished")
-        ev("turn", "started")
-        ev("assistant", "completed", streamId="bg-a2",
-           text="the background worker finished")
-        ev("turn", "completed", text="the background worker finished")
-"#
-            }
-            Behavior::BackgroundedFlagged => {
-                r#"
-        ok(mid)
-        ev("tool_call", "completed", streamId="bg-host", name="Workflow",
-           text='{"script": "background(worker)"}')
-        # The flag rides on `started` only, which is where the vendor reports it —
-        # `claude` sends `is_backgrounded` on `task_started` and on no later
-        # notification. The sweep therefore has to find it from whichever phase
-        # carried it, not from the phase it happens to be looking at.
-        ev("subagent", "started", streamId="bg-task", span="bg-host",
-           name="Background: worker", data={"is_backgrounded": True})
-        ev("tool_result", "completed", streamId="bg-host", name="Workflow",
-           text="dispatched")
-        ev("assistant", "completed", streamId="bg-a1", text="dispatched")
-        ev("turn", "completed", text="dispatched")
-
-        # The real outcome, on a turn of the agent's own, with the flag *absent* —
-        # exactly as the vendor sends a close.
-        time.sleep(0.4)
-        ev("subagent", "completed", streamId="bg-task", span="bg-host",
-           text="worker finished")
-        ev("turn", "started")
-        ev("assistant", "completed", streamId="bg-a2",
-           text="the background worker finished")
-        ev("turn", "completed", text="the background worker finished")
-"#
-            }
-            Behavior::Slow => {
-                r#"
-        ok(mid)
-        ev("status", "started", text="working")
-        # Never completes: the turn stays in flight until interrupted or the
-        # link is torn down, which is what a stop test needs.
-"#
-            }
-        }
-    }
-
-    fn script(&self) -> String {
-        // A broken agent fails at `hello`, which is where discovery learns it is
-        // unusable — the v2 equivalent of a failing `--describe`.
-        let hello = if matches!(self.behavior, Behavior::BrokenDescribe) {
-            r#"
-        sys.stderr.write("handshake is broken\n")
-        sys.exit(1)
-"#
-        } else {
-            r#"
-        ok(mid, adapter="mock/1.0.0",
-           agent={"name": NAME, "version": "0.0.0"},
-           supports=["interrupt", "steer", "approval", "slash", "set_config"],
-           flags={"model": {"choices": ["fast", "slow"], "description": "Mock model"},
-                  "effort": {"choices": ["low", "high"], "description": "Mock effort"}})
-"#
-        };
-
-        let on_send = self.on_send();
-
-        format!(
-            r#"#!/usr/bin/env python3
-import json, sys, time, uuid
-
-NAME = {name:?}
-
-
-def emit(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
-
-
-def ok(mid, **fields):
-    emit({{"t": "ok", "id": mid, **fields}})
-
-
-def ev(kind, phase=None, **fields):
-    body = {{"t": "event", "kind": kind}}
-    if phase:
-        body["phase"] = phase
-    body.update({{k: v for k, v in fields.items() if v is not None}})
-    emit(body)
-
-
-for raw in sys.stdin:
-    raw = raw.strip()
-    if not raw:
-        continue
-    msg = json.loads(raw)
-    t, mid = msg.get("t"), msg.get("id")
-
-    if t == "hello":{hello}
-    elif t == "open":
-        # Echo the id we were asked to resume, exactly as a real adapter must: `open`
-        # has to answer with one, and the server rejects a null as an unresumable
-        # session. The claude adapter got this wrong on the resume branch, which made
-        # every session unlinkable once its first link died.
-        #
-        # A *fresh* session gets a **unique** id rather than a constant one, which is
-        # now load-bearing rather than cosmetic. The id an adapter reports is the
-        # session's primary key (`docs/architecture.md` § Identity), so a fixture that
-        # answers the same string every time makes the second session in any test a
-        # `409` — the constraint correctly refusing two rows for one conversation. This
-        # was harmless only while the server minted a UUID of its own and this value was
-        # a detail hanging off it.
-        ok(mid, sessionId=msg.get("sessionId") or f"mock-session-{{uuid.uuid4()}}",
-           commands=[{{"name": "noop", "description": "Does nothing"}},
-                     {{"name": "model", "description": "Pick a model",
-                       "kind": "control", "configId": "model"}}],
-           config=[{{"type": "select", "id": "model", "name": "Model",
-                     "category": "model", "currentValue": "fast",
-                     "options": [{{"value": "fast", "name": "Fast"}},
-                                 {{"value": "slow", "name": "Slow"}},
-                                 {{"value": "refused", "name": "Refused"}}]}}],
-           subagents=[{{"name": "Explore", "description": "Search"}}],
-           permissionMode="default")
-    elif t == "set_config":
-        if msg.get("configId") != "model":
-            emit({{"t": "err", "id": mid, "code": "UNSUPPORTED_FIELD",
-                   "message": "no such option"}})
-            continue
-        # A real option refusing one real value, which is a different fact from an
-        # option that does not exist -- and the server classifies on the code, so both
-        # need a mock that can produce them. `refused` is *enumerated* below on purpose:
-        # the server validates a value against what the agent offered before forwarding
-        # it, so an unlisted value never reaches the adapter and could not exercise this.
-        if msg.get("value") == "refused":
-            emit({{"t": "err", "id": mid, "code": "INVALID_VALUE",
-                   "message": "that model is not available on this account"}})
-            continue
-        # The same three options as the handshake declared. A narrower list here would
-        # retract `refused` on the first successful set, so a test that set a value and
-        # then tried the refusable one would be refused by the *server* for offering an
-        # unknown value -- a refusal from the wrong layer, and one that would read as
-        # this classification working when it had not been reached.
-        ok(mid, facets={{"config": [
-            {{"type": "select", "id": "model", "name": "Model", "category": "model",
-              "currentValue": msg.get("value"),
-              "options": [{{"value": "fast", "name": "Fast"}},
-                          {{"value": "slow", "name": "Slow"}},
-                          {{"value": "refused", "name": "Refused"}}]}}]}})
-    elif t == "send":{on_send}
-    elif t == "interrupt":
-        ok(mid)
-        ev("turn", "completed", text="interrupted",
-           data={{"stopReason": "interrupted"}})
-    elif t == "close":
-        ok(mid)
-        break
-    else:
-        ok(mid)
-"#,
-            name = self.name,
-            hello = hello,
-            on_send = on_send,
-        )
-    }
 }
 
 // ------------------------------------------------------------- mock TraceDB

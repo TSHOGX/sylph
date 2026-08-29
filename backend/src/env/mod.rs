@@ -6,85 +6,26 @@
 //! interchangeable — see `docs/environments.md` for why the trait has exactly
 //! these four operations and no more.
 //!
-//! The shape is dictated by the adapter protocol: NDJSON over a duplex byte
-//! stream, plus a signal, plus files. Every candidate environment can provide
-//! that. Had the protocol needed a pty or a shared local path for correlation,
-//! this seam would leak — and it would only leak once the second implementation
-//! arrived, which is exactly when it is most expensive to discover.
-
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+//! # Three operations, and `spawn` is not one of them any more
+//!
+//! The shape used to be dictated by the adapter protocol: NDJSON over a duplex byte
+//! stream, plus a signal, plus files. That is gone with the subprocess — an adapter is a
+//! trait linked in, and a vendor CLI's process belongs to the adapter that knows how to
+//! talk to it (`crates/adapters/src/process.rs`). `spawn`, `ProcessSpec`, `ProcessHandle`,
+//! and `ProcessSignal` had exactly one caller between them and went with it.
+//!
+//! What is left is what an environment is *asked* rather than what it can be made to do:
+//! what it is called, whether a path is a directory inside it, and whether it can run work
+//! right now. All three are answerable over an RPC to another machine, which is what step 4
+//! needs — and none of them assumes the caller holds the process.
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncWrite};
 
 pub mod local;
 
 pub use local::LocalEnvironment;
-
-/// How to start one process in an environment.
-#[derive(Debug, Clone)]
-pub struct ProcessSpec {
-    pub program: PathBuf,
-    pub args: Vec<String>,
-    /// Working directory, interpreted inside the environment.
-    pub cwd: String,
-    pub env: HashMap<String, String>,
-}
-
-/// Signals a caller may send. A closed set rather than a raw integer, because
-/// only these three have a defined meaning across environments — Khora and SSH
-/// both preserve them, and an arbitrary signal number does not survive either.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Signal {
-    /// Ask to terminate. What a stop request sends first.
-    Term,
-    /// Force termination. The escalation after the grace period.
-    Kill,
-    /// Interrupt, as a terminal's Ctrl-C. Distinct from `Term` because an agent
-    /// CLI may treat it as "end this turn" rather than "exit".
-    Int,
-}
-
-/// The ability to signal a process, separated from ownership of its streams.
-///
-/// Stopping a turn arrives on a different HTTP request than the one draining the
-/// process's output, so the two capabilities have different owners and
-/// lifetimes. Folding `signal` into [`ProcessHandle`] would mean the stopper had
-/// to borrow the handle that the reader is already holding across an await.
-///
-/// It is also the truthful shape for a remote environment: in Khora signalling
-/// is `SendSignal`, an independent RPC addressed by id, not a method on a local
-/// process object.
-#[async_trait]
-pub trait ProcessSignal: Send + Sync {
-    /// Signal the process, and its children where the environment groups them.
-    ///
-    /// Reaching the whole group matters: an adapter usually `exec`s or spawns a
-    /// vendor CLI, and signalling only the wrapper leaves the CLI running.
-    async fn signal(&self, signal: Signal) -> Result<()>;
-}
-
-/// A running process, with its streams and its exit.
-#[async_trait]
-pub trait ProcessHandle: Send {
-    /// Taken once. `None` afterwards.
-    fn take_stdin(&mut self) -> Option<Box<dyn AsyncWrite + Send + Unpin>>;
-    fn take_stdout(&mut self) -> Option<Box<dyn AsyncRead + Send + Unpin>>;
-    fn take_stderr(&mut self) -> Option<Box<dyn AsyncRead + Send + Unpin>>;
-
-    /// A signal channel that outlives this borrow and can be held elsewhere.
-    fn signaler(&self) -> Arc<dyn ProcessSignal>;
-
-    /// Wait for exit. `None` exit code means killed by a signal.
-    async fn wait(&mut self) -> Result<Option<i32>>;
-
-    /// Process id where the environment exposes one, for diagnostics only.
-    fn id(&self) -> Option<u32>;
-}
 
 /// What an environment is, as reported to clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -128,8 +69,6 @@ impl Health {
 #[async_trait]
 pub trait Environment: Send + Sync {
     fn descriptor(&self) -> EnvironmentDescriptor;
-
-    async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>>;
 
     /// Whether a path exists as a directory inside the environment.
     ///

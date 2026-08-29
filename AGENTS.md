@@ -628,6 +628,20 @@ which is what it was doing. The watermark row is written even when nothing is
 confirmed, and `/diagnostics` reports confirmed/withheld/terminal/unchanged
 separately, because a single "pruned: 0" answers none of the questions that matter.
 
+**Deleting a layer orphans its bounds, and the surviving half is what hides the missing
+one.** The subprocess transport carried two timeouts: ten seconds for the handshake and
+thirty for any command. Removing it moved the *command* bound down into
+`crates/adapters/src/process.rs` — where a vendor RPC genuinely needs one — and dropped the
+handshake bound entirely, while `Adapter::probe` spawns `<cli> --version` and awaits it with
+no deadline. So a wedged vendor binary would hang `POST /sessions` for as long as the client
+waited, on a path that used to fail in ten seconds.
+
+What made it easy to miss is that the obvious check passes: *"did the timeouts survive the
+deletion?"* answers **yes**, because one of them did, in a file whose name suggests it owns
+process concerns. When a layer is deleted, enumerate the bounds it held **one at a time** and
+name the new owner of each; a bound with no owner is not a bound, and "the timeouts moved" is
+not an answer about any particular one.
+
 **A degraded dependency is one fact about the run, not one fault per item — and not
 one per attempt either.** With the dependency absent — a supported configuration — probing per
 session turned one missing binary into a warning per session per pass. Probe once per

@@ -44,20 +44,6 @@ pub struct Report {
     /// False on a first run before seeding, and after a user deletes the file.
     pub config_present: bool,
     pub entries: Vec<Entry>,
-    /// Bundled adapter directories, in the order they were tried, with the winner
-    /// marked. Present because "no agents" is otherwise unactionable: a missing
-    /// install and a mistyped path give the same empty list and need opposite
-    /// fixes.
-    pub bundled_agent_candidates: Vec<Candidate>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Candidate {
-    pub path: String,
-    pub exists: bool,
-    /// True for the one discovery will actually read.
-    pub chosen: bool,
 }
 
 /// Whether a path is a file, a directory, or absent.
@@ -66,12 +52,19 @@ fn exists(path: &Path) -> bool {
 }
 
 impl Report {
-    /// Build the report from a resolution and the bundled-adapter candidates.
+    /// Build the report from a resolution.
     ///
-    /// Takes the candidates rather than recomputing them: recomputing would let
-    /// the report describe a different directory than the registry searched, which
-    /// is precisely the class of disagreement this exists to catch.
-    pub fn build(resolved: &Resolved, bundled: &[std::path::PathBuf], chosen: &Path) -> Self {
+    /// # What this no longer takes, and why the removal is not a simplification
+    ///
+    /// It used to be handed the bundled-adapter candidates and the chosen one, and the
+    /// reason was sound: recomputing them here would let the report describe a different
+    /// directory than the registry searched, which is the class of disagreement this
+    /// surface exists to catch. Both arguments go with the directories themselves —
+    /// adapters are linked in, so there is nothing to search and nothing to disagree
+    /// about. The question that replaces "which directory answered" is "is the vendor CLI
+    /// on `PATH`", and it is answered per environment by `GET /environments` rather than
+    /// here, because it is a fact about a machine rather than about configuration.
+    pub fn build(resolved: &Resolved) -> Self {
         fn text(key: &str, env_var: &str, origin: &Origin<String>) -> Entry {
             Entry {
                 key: key.to_string(),
@@ -102,7 +95,6 @@ impl Report {
                 exists: None,
             },
             path_entry("paths.data_dir", "SYLPH_DATA_DIR", &resolved.data_dir),
-            path_entry("paths.agents_dir", "SYLPH_AGENTS_DIR", &resolved.agents_dir),
             // Identity has a third state the other paths do not: explicitly
             // declined, which the protocol spells as an empty value. Rendering that
             // as a missing path would report a deliberate choice as a broken
@@ -144,14 +136,6 @@ impl Report {
             config_path: resolved.config_path.display().to_string(),
             config_present: resolved.config_path.exists(),
             entries,
-            bundled_agent_candidates: bundled
-                .iter()
-                .map(|path| Candidate {
-                    exists: path.is_dir(),
-                    chosen: path == chosen,
-                    path: path.display().to_string(),
-                })
-                .collect(),
         }
     }
 
@@ -202,19 +186,6 @@ impl Report {
             ));
         }
 
-        out.push_str("\nBundled adapters\n");
-        for candidate in &self.bundled_agent_candidates {
-            // Only the chosen row is marked, and only absence is annotated. Ticking
-            // every present directory turns the one line that needs attention into
-            // one of four.
-            out.push_str(&format!(
-                "{} {}{}\n",
-                if candidate.chosen { "->" } else { "  " },
-                candidate.path,
-                if candidate.exists { "" } else { "  (absent)" }
-            ));
-        }
-
         out
     }
 }
@@ -223,7 +194,6 @@ impl Report {
 mod tests {
     use super::*;
     use crate::config::resolve::FileConfig;
-    use std::path::PathBuf;
 
     fn resolved(pairs: &[(&str, &str)]) -> Resolved {
         let env = pairs
@@ -234,13 +204,15 @@ mod tests {
     }
 
     fn report(pairs: &[(&str, &str)]) -> Report {
-        let r = resolved(pairs);
-        let bundled = vec![PathBuf::from("/nope/adapters")];
-        Report::build(&r, &bundled, &bundled[0])
+        Report::build(&resolved(pairs))
     }
 
     /// Every setting is reported, so `doctor` cannot be missing the one that is
     /// wrong. A key added to the resolver and not here is invisible.
+    ///
+    /// `paths.agents_dir` is deliberately absent, and its absence is asserted from the other
+    /// side by `frontend/e2e/settings-config.spec.ts`: adapters are linked in, so there is
+    /// no directory to name and a setting that named one would be a lever changing nothing.
     #[test]
     fn every_setting_appears_in_the_report() {
         let report = report(&[("HOME", "/home/u")]);
@@ -250,7 +222,6 @@ mod tests {
             "server.host",
             "server.port",
             "paths.data_dir",
-            "paths.agents_dir",
             "paths.soul",
             "paths.quick_start_dir",
             "paths.browse_roots",
@@ -299,29 +270,6 @@ mod tests {
         }
     }
 
-    /// The report must name the directory discovery *will* search, marked, and
-    /// every one it passed over — otherwise a mistyped path and a missing install
-    /// produce the same output.
-    #[test]
-    fn bundled_candidates_are_listed_in_order_with_the_winner_marked() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let real = tmp.path().join("adapters");
-        std::fs::create_dir_all(&real).unwrap();
-        let candidates = vec![PathBuf::from("/nope/adapters"), real.clone()];
-
-        let report = Report::build(&resolved(&[("HOME", "/home/u")]), &candidates, &real);
-
-        assert_eq!(report.bundled_agent_candidates.len(), 2);
-        assert!(!report.bundled_agent_candidates[0].chosen);
-        assert!(!report.bundled_agent_candidates[0].exists);
-        assert!(report.bundled_agent_candidates[1].chosen);
-        assert!(report.bundled_agent_candidates[1].exists);
-
-        let rendered = report.render();
-        assert!(rendered.contains("-> "), "the winner is marked: {rendered}");
-        assert!(rendered.contains("(absent)"));
-    }
-
     /// Identity declined is a supported configuration, not a broken path. Rendering
     /// it as `MISSING` would report a deliberate choice as a fault, and there is no
     /// path whose existence could be checked.
@@ -331,9 +279,7 @@ mod tests {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let resolved = Resolved::from_parts(&env, &FileConfig::default(), false);
-        let bundled = vec![PathBuf::from("/nope/adapters")];
-        let report = Report::build(&resolved, &bundled, &bundled[0]);
+        let report = Report::build(&Resolved::from_parts(&env, &FileConfig::default(), false));
 
         let soul = report.entries.iter().find(|e| e.key == "paths.soul").unwrap();
         assert_eq!(soul.exists, None, "there is no path to check");

@@ -79,7 +79,6 @@ pub struct ServerSection {
 #[serde(deny_unknown_fields)]
 pub struct PathsSection {
     pub data_dir: Option<String>,
-    pub agents_dir: Option<String>,
     pub soul: Option<String>,
     pub quick_start_dir: Option<String>,
     #[serde(default)]
@@ -194,7 +193,6 @@ pub struct Resolved {
     pub host: Origin<String>,
     pub port: Origin<u16>,
     pub data_dir: Origin<PathBuf>,
-    pub agents_dir: Origin<PathBuf>,
     /// Where `SOUL.md` was looked for, or `None` when identity was explicitly
     /// declined.
     ///
@@ -290,8 +288,6 @@ impl Resolved {
         };
 
         let data_dir = path("SYLPH_DATA_DIR", file.paths.data_dir.as_ref(), home.join("data"));
-        let agents_dir =
-            path("SYLPH_AGENTS_DIR", file.paths.agents_dir.as_ref(), home.join("agents"));
         // Note the default is the root, not the data directory: `SOUL.md` is
         // hand-edited configuration, and burying it inside the directory whose
         // documented purpose is "machine state you back up and never open" is how
@@ -372,7 +368,6 @@ impl Resolved {
             host,
             port,
             data_dir,
-            agents_dir,
             soul,
             quick_start_dir,
             browse_roots: Origin::new(roots, roots_source),
@@ -422,7 +417,6 @@ mod tests {
         assert_eq!(r.home, PathBuf::from("/home/u/.sylph"));
         assert_eq!(r.config_path, PathBuf::from("/home/u/.sylph/config.toml"));
         assert_eq!(r.data_dir.value, PathBuf::from("/home/u/.sylph/data"));
-        assert_eq!(r.agents_dir.value, PathBuf::from("/home/u/.sylph/agents"));
         assert_eq!(r.soul.value, Some(PathBuf::from("/home/u/.sylph/SOUL.md")));
         assert_eq!(r.quick_start_dir.value, PathBuf::from("/home/u/.sylph/scratch"));
     }
@@ -434,7 +428,6 @@ mod tests {
         let r = resolve(&[("HOME", "/home/u"), ("SYLPH_HOME", "/opt/inst")], FileConfig::default());
 
         assert_eq!(r.data_dir.value, PathBuf::from("/opt/inst/data"));
-        assert_eq!(r.agents_dir.value, PathBuf::from("/opt/inst/agents"));
         assert_eq!(r.soul.value, Some(PathBuf::from("/opt/inst/SOUL.md")));
         assert_eq!(r.quick_start_dir.value, PathBuf::from("/opt/inst/scratch"));
         assert_eq!(r.config_path, PathBuf::from("/opt/inst/config.toml"));
@@ -614,7 +607,6 @@ mod tests {
             "host",
             "port",
             "data_dir",
-            "agents_dir",
             "soul",
             "quick_start_dir",
             "browse_roots",

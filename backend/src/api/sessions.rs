@@ -326,7 +326,7 @@ pub async fn create(
     // refuse an agent a link could start. `AGENTS.md` records the inverse of that
     // mismatch costing a release: discovery listed an agent as usable while every link
     // to it failed naming a different root.
-    let known = crate::adapters::available(&state.config.agent_roots());
+    let known = state.adapters.available();
     if !known.iter().any(|name| name == &req.agent) {
         return Err(Error::InvalidRequest(format!(
             "Unknown agent: {}. This build can run: {:?}. Availability is per \
@@ -430,7 +430,9 @@ pub async fn update(
         // A session whose agent this build cannot run has no schema to validate against,
         // so its flags cannot be changed. Failing is better than storing an unvalidated
         // value that would be dropped at turn time with nothing saying why.
-        if !crate::adapters::available(&state.config.agent_roots())
+        if !state
+            .adapters
+            .available()
             .iter()
             .any(|name| name == session.id.agent.as_str())
         {
@@ -452,7 +454,7 @@ pub async fn update(
         // the flag may be perfectly good, so this falls through to storing it rather than
         // turning an agent that is temporarily unreachable into a rejected user action.
         if let Ok(link) = state.links.ensure(&id).await {
-            let schema = &link.identity().flags;
+            let schema = &link.info().flags;
             for (key, value) in flags {
                 let Some(spec) = schema.get(key) else {
                     return Err(Error::InvalidRequest(format!(

@@ -47,7 +47,16 @@ pub enum Outcome {
     /// The link died mid-turn. The turn's fate is unknown rather than known-bad,
     /// and saying so is more honest than calling it a failure the agent caused.
     LinkLost {
-        stderr_tail: String,
+        /// The last failure the session's stream reported, when it reported one.
+        ///
+        /// This replaces `stderr_tail`, and the change is not a rename. A tail was
+        /// whatever an adapter *subprocess* happened to print before exiting; an
+        /// in-process adapter has no stderr of its own, so what there is instead is an
+        /// `Err` item it deliberately emitted. `Option` because absent is now the common
+        /// case, and an empty string could not say that — a session that simply ended has
+        /// no diagnostic, and inventing one ("the agent exited during this turn: ") reads
+        /// as a truncated message rather than as no message.
+        detail: Option<String>,
     },
 }
 
@@ -62,13 +71,12 @@ impl Outcome {
                 Some("TURN_INTERRUPTED"),
                 "Interrupted by user".to_string(),
             ),
-            Self::LinkLost { stderr_tail } => (
+            Self::LinkLost { detail } => (
                 "failed",
                 Some("LINK_LOST"),
-                if stderr_tail.is_empty() {
-                    "The agent exited during this turn".to_string()
-                } else {
-                    format!("The agent exited during this turn: {}", stderr_tail)
+                match detail {
+                    Some(detail) => format!("The agent stopped during this turn: {detail}"),
+                    None => "The agent stopped during this turn".to_string(),
                 },
             ),
         }
@@ -235,11 +243,18 @@ impl LinkedSupervisor {
             .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
             .collect();
 
-        link.send(prompt, attachments, command, command_args, config)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("The agent would not accept this turn: {:#}", error)
-            })?;
+        link.send(sylph_protocol::TurnInput {
+            text: prompt,
+            attachments,
+            command,
+            // `BTreeMap` rather than `HashMap`, so an argv built from these is
+            // deterministic: two launches of one spec producing different command lines
+            // makes a reproduction depend on hash iteration order.
+            args: command_args.into_iter().collect(),
+            config: config.into_iter().collect(),
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("The agent would not accept this turn: {:#}", error))?;
 
         // No timeout: an agent thinking for an hour is normal, and the escape
         // hatches are interrupt and stop. A deadline here would kill exactly the
@@ -248,9 +263,7 @@ impl LinkedSupervisor {
             Ok(outcome) => outcome,
             // The sender was dropped without settling, which means the link died
             // and its drain task went with it.
-            Err(_) => Outcome::LinkLost {
-                stderr_tail: String::new(),
-            },
+            Err(_) => Outcome::LinkLost { detail: None },
         };
 
         self.settle(&session_id, &turn_id, outcome).await;

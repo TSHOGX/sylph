@@ -558,7 +558,7 @@ mod tests {
             Outcome::Completed { stop_reason: None },
             Outcome::Failed { message: "x".into() },
             Outcome::Interrupted,
-            Outcome::LinkLost { stderr_tail: String::new() },
+            Outcome::LinkLost { detail: None },
         ];
         for outcome in &outcomes {
             match outcome {

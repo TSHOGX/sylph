@@ -42,23 +42,6 @@ pub struct Config {
     /// Root of the content-addressed blob store.
     pub blobs_dir: PathBuf,
 
-    /// Where the user's own `<agent>/adapter.sh` trees live.
-    ///
-    /// Distinct from [`Self::bundled_agents_dir`] because the two answer different
-    /// questions. A bundled adapter is versioned with the protocol it implements
-    /// and is replaced on upgrade; this directory is the user's, survives upgrades,
-    /// and shadows a bundled adapter of the same name — the escape hatch for a
-    /// vendor change the shipped adapter has not caught up with.
-    pub agents_dir: PathBuf,
-    /// Where adapters that ship with the binary live.
-    pub bundled_agents_dir: PathBuf,
-    /// Every directory bundled-adapter resolution considered, in order.
-    ///
-    /// Kept so "zero agents discovered" can name where it looked. Without it a
-    /// missing install and a mistyped path produce the identical message and need
-    /// opposite fixes.
-    pub bundled_agents_candidates: Vec<PathBuf>,
-
     /// The identity preamble, when a readable one exists.
     ///
     /// `None` means either that no `SOUL.md` was found or that identity was
@@ -113,7 +96,6 @@ impl Config {
     /// Build from an already-resolved set of paths, with no filesystem writes.
     pub fn from_resolved(resolved: &Resolved) -> Self {
         let data_dir = resolved.data_dir.value.clone();
-        let (bundled_agents_dir, bundled_agents_candidates) = bundled_agents_dir();
 
         Self {
             host: resolved.host.value.clone(),
@@ -124,9 +106,6 @@ impl Config {
             history_path: data_dir.join("history.db").display().to_string(),
             blobs_dir: data_dir.join("blobs"),
             data_dir,
-            agents_dir: resolved.agents_dir.value.clone(),
-            bundled_agents_dir,
-            bundled_agents_candidates,
             soul_path: resolved.soul.value.as_deref().and_then(readable_soul),
             soul_candidate: resolved.soul.value.clone(),
             quick_start_dir: resolved.quick_start_dir.value.clone(),
@@ -146,19 +125,7 @@ impl Config {
     /// filesystem fact, and a cached report would keep telling a user their data
     /// directory is missing after they created it.
     pub fn report(&self) -> Report {
-        Report::build(
-            &self.provenance,
-            &self.bundled_agents_candidates,
-            &self.bundled_agents_dir,
-        )
-    }
-
-    /// Directories agent discovery searches, bundled first.
-    ///
-    /// Bundled first so a user-installed adapter of the same name *shadows* rather
-    /// than duplicates — first root wins in the registry.
-    pub fn agent_roots(&self) -> Vec<PathBuf> {
-        vec![self.bundled_agents_dir.clone(), self.agents_dir.clone()]
+        Report::build(&self.provenance)
     }
 
     /// Where a client may name a session's working directory.
@@ -213,72 +180,6 @@ impl Config {
 fn readable_soul(candidate: &Path) -> Option<PathBuf> {
     candidate.is_file().then(|| candidate.to_path_buf())
 }
-/// Where adapters shipped with the binary live, and everywhere that was tried.
-///
-/// The binary's own directory is authoritative, and is the only candidate that
-/// stays correct when an install tree is moved or copied to another machine. The
-/// compile-time repo path is last on purpose: it is a path on whichever machine
-/// ran `cargo build`, right for `cargo run` and meaningless anywhere else.
-///
-/// `SYLPH_BUNDLED_AGENTS_DIR` overrides the search, and is deliberately
-/// environment-only rather than a `config.toml` key. It exists for a test suite
-/// and a packager — E2E has to pin this root or bundled resolution finds the
-/// repo's real adapters and the suite runs the developer's actual agent CLIs — and
-/// it is not a choice a user makes: which adapters ship with a binary is decided
-/// by whoever built it. Offering it in the file would invite pointing a supported
-/// setting at adapters versioned against another protocol release.
-fn bundled_agents_dir() -> (PathBuf, Vec<PathBuf>) {
-    if let Some(pinned) = std::env::var("SYLPH_BUNDLED_AGENTS_DIR")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        let path = PathBuf::from(pinned);
-        return (path.clone(), vec![path]);
-    }
-
-    let mut candidates = Vec::new();
-
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-    {
-        // An install stages adapters beside the binary.
-        candidates.push(dir.join("adapters"));
-        // `backend/target/{debug,release}/<bin>` in a dev checkout: three levels
-        // up is the repo.
-        if let Some(repo) = dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
-            candidates.push(repo.join("adapters"));
-        }
-    }
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("the backend crate has a parent directory")
-            .join("adapters"),
-    );
-
-    // In a dev checkout the exe-relative walk and the compile-time path are the
-    // *same* directory, which listed it twice and — since the report marks the
-    // chosen path by equality — showed two rows both claiming to be in use. A
-    // reader cannot act on a list that contradicts itself about which directory is
-    // being read.
-    //
-    // Order-preserving, and not `Vec::dedup`, which only collapses *adjacent*
-    // duplicates: the two spellings that coincide are not always neighbours.
-    let mut seen = std::collections::HashSet::new();
-    candidates.retain(|path| seen.insert(path.clone()));
-    let chosen = candidates
-        .iter()
-        .find(|path| path.is_dir())
-        .cloned()
-        // Nothing exists: name the first candidate, so the error points at where
-        // an install is expected to put them rather than at the last fallback.
-        .unwrap_or_else(|| candidates[0].clone());
-
-    (chosen, candidates)
-}
-
 /// Create the root and seed what a first run needs, returning what was written.
 ///
 /// Idempotent, and never overwrites.
@@ -294,13 +195,12 @@ pub fn seed(resolved: &Resolved) -> anyhow::Result<Vec<String>> {
     let first_run = !resolved.config_path.exists();
     let mut notes = Vec::new();
 
-    // Only the directories this install owns. A `data_dir` or `agents_dir` pointed
-    // outside the root is still created, because a configured path that the server
-    // then fails to write to is a worse outcome than a created directory.
+    // Only the directories this install owns. A `data_dir` pointed outside the root is
+    // still created, because a configured path that the server then fails to write to is a
+    // worse outcome than a created directory.
     for dir in [
         &resolved.home,
         &resolved.data_dir.value,
-        &resolved.agents_dir.value,
         &resolved.quick_start_dir.value,
     ] {
         std::fs::create_dir_all(dir)
@@ -387,7 +287,6 @@ mod tests {
 
         assert!(resolved.home.is_dir());
         assert!(resolved.data_dir.value.is_dir());
-        assert!(resolved.agents_dir.value.is_dir());
         assert!(resolved.quick_start_dir.value.is_dir());
         assert!(resolved.config_path.is_file());
         assert!(soul_of(&resolved).is_file());
@@ -526,46 +425,4 @@ mod tests {
         assert!(config.blobs_dir.starts_with(&config.data_dir));
     }
 
-    /// Bundled first, so a user adapter of the same name shadows rather than
-    /// duplicates — the registry takes the first root that answers.
-    #[test]
-    fn agent_roots_search_bundled_adapters_before_the_users_own() {
-        let tmp = TempDir::new().unwrap();
-        let config = Config::from_resolved(&resolved_in(tmp.path()));
-
-        let roots = config.agent_roots();
-        assert_eq!(roots[0], config.bundled_agents_dir);
-        assert_eq!(roots[1], config.agents_dir);
-        assert!(
-            config.agents_dir.starts_with(&config.home),
-            "the user's agents live inside the one root"
-        );
-    }
-
-    /// A dev checkout must find the repo's `adapters/`, which is what makes
-    /// `cargo run` work with nothing configured.
-    #[test]
-    fn bundled_adapters_are_found_in_a_dev_checkout() {
-        let (chosen, candidates) = bundled_agents_dir();
-        assert!(chosen.is_dir(), "chose {chosen:?} out of {candidates:?}");
-        assert!(chosen.ends_with("adapters"));
-    }
-
-    /// One directory, one row.
-    ///
-    /// In a dev checkout the exe-relative walk and the compile-time path resolve to
-    /// the same place, so the list held it twice — and because the report marks the
-    /// chosen entry by equality, both rows claimed to be the one in use. A
-    /// diagnostic that contradicts itself about which directory is read is worse
-    /// than none.
-    #[test]
-    fn bundled_candidates_are_listed_once_each() {
-        let (_, candidates) = bundled_agents_dir();
-        let unique: std::collections::HashSet<_> = candidates.iter().collect();
-        assert_eq!(
-            unique.len(),
-            candidates.len(),
-            "duplicate candidates: {candidates:?}"
-        );
-    }
 }

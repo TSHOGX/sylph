@@ -176,9 +176,18 @@ pub async fn resolve(
     // would overwrite the first's decision.
     match state.links.get(&request.session_id).await {
         Some(link) => {
-            link.resolve(&request.adapter_request_id, &body.option, body.input)
-                .await
-                .map_err(|error| Error::LinkFailed(format!("{:#}", error)))?;
+            link.resolve(sylph_protocol::Resolution {
+                // The agent's own id, not the journal row's. A client addresses the row
+                // and the adapter only knows what it raised, so this is the one hop where
+                // the two id spaces meet — and it is a field read off the row rather than
+                // anything a client supplies, which is what stops an answer to a request
+                // that was never raised.
+                request_id: request.adapter_request_id.clone(),
+                option: body.option.clone(),
+                input: body.input,
+            })
+            .await
+            .map_err(|error| Error::LinkFailed(format!("{:#}", error)))?;
         }
         None => {
             // The row is already marked resolved, which is correct: the user did
@@ -208,9 +217,12 @@ pub async fn interrupt(
 
     link.interrupt()
         .await
-        // The link refuses locally when the adapter never declared interrupt, so
-        // this is a capability answer rather than a transport failure.
-        .map_err(|error| Error::Unsupported(format!("{:#}", error)))?;
+        // The **adapter** refuses when it never declared interrupt, so this is a capability
+        // answer rather than a transport failure. It used to be refused by the server from
+        // its own copy of `supports`, and moving it is not a simplification: the adapter is
+        // the only thing that knows whether the vendor accepted, and two derivations of one
+        // fact diverge the moment either grows a case.
+        .map_err(|error| refusal_or(error, Error::Unsupported))?;
 
     Ok(Json(serde_json::json!({"interrupted": true})))
 }
@@ -246,9 +258,9 @@ pub async fn steer(
 
     let link = state.links.get(&session_id).await.ok_or(Error::LinkGone)?;
 
-    link.steer(body.text, running)
+    link.steer(&body.text, running.as_deref())
         .await
-        .map_err(|error| Error::Unsupported(format!("{:#}", error)))?;
+        .map_err(|error| refusal_or(error, Error::Unsupported))?;
 
     Ok(Json(serde_json::json!({"steered": true})))
 }
@@ -321,12 +333,7 @@ pub async fn set_config(
     // last investigation to the picker.
     link.set_config(&body.config_id, body.value)
         .await
-        .map_err(|error| match error.downcast_ref::<sylph_protocol::AdapterError>() {
-            Some(refusal) if refusal.code == sylph_protocol::RefusalCode::InvalidValue => {
-                Error::InvalidRequest(refusal.message.clone())
-            }
-            _ => Error::Unsupported(format!("{:#}", error)),
-        })?;
+        .map_err(|error| refusal_or(error, Error::Unsupported))?;
 
     // Published so every other attached client sees the change rather than only the
     // one that made it — the same reason a capability update is pushed at all.
@@ -340,6 +347,37 @@ pub async fn set_config(
 pub struct SetConfigRequest {
     pub config_id: String,
     pub value: serde_json::Value,
+}
+
+/// Classify an adapter's refusal, falling back to `otherwise` for anything else.
+///
+/// # The two codes are not interchangeable, and one status erases the difference
+///
+/// `UNSUPPORTED_FIELD` means "no such option" and justifies **disabling** a control;
+/// `INVALID_VALUE` means "this value, right now" and must leave it usable, since the other
+/// five values may well be fine. Both adapters already drew that line and this module used
+/// to flatten every adapter error into [`Error::Unsupported`] — whose own doc comment says
+/// a client may disable the control over it — so one refused permission mode would have
+/// retired a picker most of whose values work.
+///
+/// # Recovered by `downcast_ref`, never by parsing the message
+///
+/// The text is the adapter's and may be reworded; the code is declared protocol. That
+/// distinction is why the error travels as a typed [`sylph_protocol::AdapterError`] through
+/// `anyhow` rather than as a `"{code}: {message}"` string — and with adapters linked in it
+/// is constructed as that type at the source, so the transitional `refusal()` that mapped
+/// a v3 wire string back into it is deleted rather than moved.
+///
+/// One helper rather than three copies of the match, because `interrupt`, `steer`, and
+/// `set_config` are all refusable and a rule written three times is one that will diverge.
+fn refusal_or(error: anyhow::Error, otherwise: fn(String) -> Error) -> Error {
+    match error.downcast_ref::<sylph_protocol::AdapterError>() {
+        Some(refusal) if refusal.code == sylph_protocol::RefusalCode::InvalidValue => {
+            Error::InvalidRequest(refusal.message.clone())
+        }
+        Some(refusal) => otherwise(refusal.message.clone()),
+        None => otherwise(format!("{error:#}")),
+    }
 }
 
 /// Session-scoped facts, as SSE.
