@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use sylph_protocol::{EnvironmentId, SessionId};
+use sylph_protocol::{AgentName, EnvironmentId, NativeId, SessionId};
 
 use crate::{
     db::store::SessionFilter,
@@ -488,41 +488,610 @@ pub async fn update(
     Ok(Json(SessionResponse { session: updated }))
 }
 
+/// Resolve an environment id to the adapter set that answers for it, or refuse.
+///
+/// # Why this is a `503` and not a `400`
+///
+/// A well-formed environment id naming a machine no envagent is connected for is not a
+/// malformed request — it may be exactly right, and the fix is to bring the machine
+/// online (`docs/api-design.md`: "bring the machine online" is one of the six distinct
+/// adopt fixes). Answering `400` would send a reader to their own request.
+///
+/// Only the local environment exists until pairing lands (step 4 of
+/// `docs/roadmap.md` § Implementation order), so anything else is unreachable by
+/// construction rather than by a connection check. That is the honest answer *now* and
+/// stays the honest answer afterwards, when the check becomes "is that envagent's
+/// connection live".
+fn require_environment(state: &AppState, requested: &str) -> Result<EnvironmentId> {
+    let environment = EnvironmentId::parse(requested.trim())
+        .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+
+    let local = state.environment.descriptor().id;
+    if environment.as_str() != local {
+        return Err(Error::EnvironmentUnreachable(environment.to_string()));
+    }
+    Ok(environment)
+}
+
+/// Which agents to read a native store from, for a request that named one or none.
+///
+/// Naming an agent whose CLI is absent is a `400` rather than an empty listing: an
+/// empty result is indistinguishable from "that agent has no sessions here", and the
+/// two have different fixes. The message names what this machine can read, the same way
+/// `create` does — one wording for one class of mistake.
+///
+/// # Why this reads `sylph_adapters` rather than [`crate::adapters::available`]
+///
+/// That function answers the **union** of "the vendor CLI is on `PATH`" and "a directory
+/// holding an `adapter.sh` exists", because the live path still spawns a subprocess and a
+/// fixture agent has a script and no CLI. Reading a native store needs neither of those:
+/// it needs an `Adapter` implementation that can parse one, which is exactly what
+/// `for_agent` answers with. An `adapter.sh` proves a script exists, and a script has no
+/// store — so admitting one here would offer an agent whose `enumerate` cannot describe
+/// anything, and the E2E fixture is precisely that agent: it refuses `adopt` and
+/// enumerates empty, deliberately.
+fn require_agents(requested: Option<&str>) -> Result<Vec<String>> {
+    let installed: Vec<String> = sylph_adapters::known_agents()
+        .iter()
+        .filter(|name| sylph_adapters::for_agent(name).is_some())
+        .map(|name| name.to_string())
+        .collect();
+
+    match requested {
+        Some(agent) => {
+            if installed.iter().any(|name| name == agent) {
+                Ok(vec![agent.to_string()])
+            } else if sylph_adapters::is_known(agent) {
+                // Known but absent: an install, which names a fix. Kept distinct from an
+                // unsupported agent for the reason `crate::adapters::is_known` exists.
+                Err(Error::InvalidRequest(format!(
+                    "'{agent}' is not installed on this environment, so it has no native \
+                     store to read. Installed here: {installed:?}."
+                )))
+            } else {
+                Err(Error::InvalidRequest(format!(
+                    "Unknown agent: {agent}. This build supports: {:?}.",
+                    sylph_adapters::known_agents()
+                )))
+            }
+        }
+        None => Ok(installed),
+    }
+}
+
+/// One native session an environment holds, as a picker renders it.
+///
+/// Flatter than [`sylph_protocol::NativeSummary`] by two additions the server is the
+/// only holder of: whether Sylph already has this session, and whether its recorded
+/// directory is one this environment permits.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeSessionRow {
+    pub agent: String,
+    pub native_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_native_id: Option<String>,
+    pub fidelity: sylph_protocol::Fidelity,
+    /// The encoded triple this row *would* adopt as, always present.
+    ///
+    /// Sent even when adoption is refused, because it is what a client navigates to for
+    /// an already-adopted row — showing the session rather than offering a duplicate.
+    pub id: String,
+    /// Why this row cannot be adopted, absent when it can.
+    ///
+    /// **A row is shown rather than hidden, and this is what makes that defensible.** A
+    /// picker that silently omitted already-adopted sessions would leave a user hunting
+    /// for a session that is plainly on the machine, and one that offered them would
+    /// hand out a `409` nobody can act on. `docs/api-design.md` § `GET
+    /// /api/v1/sessions/enumerate`: "A session already adopted is marked as such, so a
+    /// picker can show it rather than offering a duplicate that would `409`."
+    ///
+    /// Typed rather than prose so a client branches on it — an `alreadyAdopted` row
+    /// navigates, an `outsideRoots` row explains a configuration fix, and a `noWorkdir`
+    /// row cannot be made adoptable at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<Blocked>,
+}
+
+/// Why a native session is not offerable.
+///
+/// Each variant is one of the adopt errors, decided *before* the request rather than
+/// after — same classification, so a picker cannot disagree with the endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Blocked {
+    /// Sylph already has a row for this triple. Adopting again is `409`.
+    AlreadyAdopted,
+    /// The store recorded no directory. Adopting is `422` and no configuration fixes it.
+    NoWorkdir,
+    /// The recorded directory is outside this environment's roots. Adopting is `403`,
+    /// and widening `paths.browse_roots` is the fix.
+    OutsideRoots,
+}
+
+/// Whether a recorded workdir is one this environment permits, and if not, why.
+///
+/// Uses the same [`crate::paths::contain_in_any`] primitive `adopt` and both file APIs
+/// use, shared rather than reimplemented — a containment rule written twice is one that
+/// will diverge.
+///
+/// **Only the classification is taken; the resolved path is deliberately discarded.** The
+/// path this listing *shows* is the vendor's own recorded spelling, because that is what a
+/// user recognizes, and `adopt` re-derives its own canonical path from its own check
+/// rather than trusting one this function produced. A containment check paired with a path
+/// it did not produce is not a bound (`AGENTS.md`), so the two must not share one — this
+/// answers "would adopt refuse this", and adopt answers "where does it run".
+fn classify_workdir(roots: &[std::path::PathBuf], recorded: &str) -> Option<Blocked> {
+    match crate::paths::contain_in_any(
+        roots,
+        std::path::Path::new(recorded),
+        "the directories sessions may run in",
+    ) {
+        Ok(_) => None,
+        // The directory is gone. Not `outsideRoots`: widening configuration would not
+        // bring it back, and adopt answers `400` rather than `403` for it.
+        Err(Error::FileNotFound) => Some(Blocked::NoWorkdir),
+        Err(_) => Some(Blocked::OutsideRoots),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnumerateQuery {
+    environment: String,
+    agent: Option<String>,
+    workdir: Option<String>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnumerateResponse {
+    sessions: Vec<NativeSessionRow>,
+    /// Pass as `cursor` for the next page. Absent when this page is the last.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+/// How many rows one page holds by default, and at most.
+///
+/// A picker renders a filterable list, and the measured stores hold 1000 / 1258 / 531
+/// sessions — so a whole-store page would be a megabyte of JSON to render a list whose
+/// first screen is twenty rows.
+const ENUMERATE_DEFAULT_LIMIT: usize = 50;
+const ENUMERATE_MAX_LIMIT: usize = 200;
+
+/// GET /api/v1/sessions/enumerate
+///
+/// What native sessions an environment holds, without adopting any of them
+/// (`docs/api-design.md` § `GET /api/v1/sessions/enumerate`). This is what makes adopt
+/// offerable in a UI rather than requiring a user to know a vendor id.
+///
+/// # Paging is server-side, because `StoreFilter` has no cursor
+///
+/// The spec names a `cursor` parameter and the adapter contract offers `workdir`,
+/// `since_ms`, and `limit` — no cursor and no offset. `since_ms` cannot serve as one: it
+/// selects activity *at or after* a mark while a listing runs newest-first, so paging
+/// with it walks the wrong way.
+///
+/// So the cursor is an opaque offset into this listing, and the cost is stated rather
+/// than hidden: each page re-enumerates from the top. That is affordable **because of
+/// what `enumerate` is required to be** — a listing pass over `codex`'s 1258 rollouts is
+/// one short header read each and measured at 164 ms, against 52.9 s for the
+/// per-session-metadata shape it replaced (`sylph_protocol::Adapter::enumerate`). Paging
+/// against the cheap operation is what that requirement buys.
+///
+/// It is opaque by contract — a base32-ish decimal string a client echoes back, never
+/// parses — so it can become a real per-adapter cursor without a client change.
+///
+/// # Ordering across agents
+///
+/// Each adapter answers newest-first for its own store, and a listing that named no
+/// agent has to merge them: rows are re-sorted on the best timestamp each carries. A
+/// session with **no** timestamp sorts last rather than first, because an absent stamp is
+/// a store that has not settled, not a session from 1970 — and `Option`'s natural
+/// ordering would put every one of them at the top of the first page.
+pub async fn enumerate(
+    State(state): State<AppState>,
+    Query(query): Query<EnumerateQuery>,
+) -> Result<Json<EnumerateResponse>> {
+    let environment = require_environment(&state, &query.environment)?;
+    let agents = require_agents(non_blank(query.agent).as_deref())?;
+
+    let limit = query
+        .limit
+        .unwrap_or(ENUMERATE_DEFAULT_LIMIT)
+        .clamp(1, ENUMERATE_MAX_LIMIT);
+    let offset: usize = match non_blank(query.cursor) {
+        Some(cursor) => cursor.parse().map_err(|_| {
+            // A cursor a client did not get from this endpoint. Refused rather than
+            // treated as zero, because silently restarting a paged scan is how a client
+            // loops forever over page one.
+            Error::InvalidRequest("That cursor did not come from this endpoint.".to_string())
+        })?,
+        None => 0,
+    };
+
+    // Normalized here so an exact match compares the same spelling the workspace
+    // grouping and the session listing use. `StoreFilter::workdir` is an **exact match
+    // after normalizing trailing slashes, never a substring** — the store this replaced
+    // compiled it to `LIKE '%…%'`, so `/w/app` also matched `/w/app-old`.
+    let workdir = non_blank(query.workdir).map(|path| crate::api::workspaces::normalize(&path));
+
+    let filter = sylph_protocol::StoreFilter {
+        workdir: workdir.clone(),
+        since_ms: None,
+        // Deliberately unbounded per adapter rather than `Some(limit)`. The page is cut
+        // after merging, and a per-adapter bound would silently drop a newer `pi` session
+        // because `claude` happened to fill the page — a listing that is wrong in a way
+        // nothing on screen explains.
+        limit: None,
+    };
+
+    let mut rows: Vec<NativeSessionRow> = Vec::new();
+    let roots = state.config.session_roots();
+    // Distinct workdir → its classification. Held across agents because a directory is
+    // frequently worked in by more than one of them.
+    let mut containment: std::collections::HashMap<String, Option<Blocked>> =
+        std::collections::HashMap::new();
+
+    for agent in &agents {
+        let Some(adapter) = sylph_adapters::for_agent(agent) else {
+            // Raced an uninstall between the availability check and here. Skipping is
+            // right: the other agents' sessions are still readable.
+            continue;
+        };
+        // A snapshot, for two reasons that are both load-bearing — see
+        // `api::native_index`. Enumerating this machine costs ~5.6 s measured, so paging
+        // would re-pay it per page; and an offset cursor into a *live* store silently
+        // skips and duplicates rows as sessions gain activity and move to the front.
+        let key = crate::api::native_index::NativeIndex::key(
+            environment.as_str(),
+            agent,
+            workdir.as_deref(),
+        );
+        let summaries = match state.native_index.get(&key).await {
+            Some(cached) => cached,
+            None => match adapter.enumerate(&filter).await {
+                Ok(summaries) => {
+                    let summaries = std::sync::Arc::new(summaries);
+                    state.native_index.put(key, std::sync::Arc::clone(&summaries)).await;
+                    summaries
+                }
+                Err(error) => {
+                    // One unreadable store must not empty the listing. Reported at `warn`
+                    // once per request rather than per session, which is the
+                    // degraded-dependency shape `AGENTS.md` records at 2339 lines.
+                    tracing::warn!("Could not enumerate {}'s native store: {:#}", agent, error);
+                    continue;
+                }
+            },
+        };
+
+        // One query per agent rather than one per row. Measured: the per-row shape cost
+        // 4.26 s for `codex`'s 1258 rollouts, which is the round-trip count and not the
+        // query — and it hands back exactly the affordability that `Adapter::enumerate`
+        // being a cheap listing pass was supposed to buy.
+        let adopted = state.store.adopted_native_ids(&environment, agent).await?;
+
+        for summary in summaries.iter() {
+            let id = SessionId::new(
+                environment.clone(),
+                AgentName::parse(agent.clone())
+                    .map_err(|error| Error::Internal(error.to_string()))?,
+                summary.native_id.clone(),
+            );
+
+            let blocked = if adopted.contains(summary.native_id.as_str()) {
+                Some(Blocked::AlreadyAdopted)
+            } else {
+                match &summary.workdir {
+                    None => Some(Blocked::NoWorkdir),
+                    // Memoized per distinct path, because a real store repeats them
+                    // heavily — one project directory holds hundreds of sessions — and
+                    // each miss is a `canonicalize` syscall per configured root.
+                    Some(recorded) => *containment
+                        .entry(recorded.clone())
+                        .or_insert_with(|| classify_workdir(&roots, recorded)),
+                }
+            };
+
+            rows.push(NativeSessionRow {
+                agent: agent.clone(),
+                native_id: summary.native_id.as_str().to_string(),
+                workdir: summary.workdir.clone(),
+                title: summary.title.clone(),
+                started_at_ms: summary.started_at_ms,
+                ended_at_ms: summary.ended_at_ms,
+                event_count: summary.event_count,
+                parent_native_id: summary
+                    .parent_native_id
+                    .as_ref()
+                    .map(|parent| parent.as_str().to_string()),
+                fidelity: summary.fidelity,
+                id: id.encode(),
+                blocked,
+            });
+        }
+    }
+
+    // Newest first, on whichever stamp the store carried. `i64::MIN` for a row with
+    // neither, so an unsettled store sorts last rather than first.
+    rows.sort_by_key(|row| {
+        std::cmp::Reverse(row.ended_at_ms.or(row.started_at_ms).unwrap_or(i64::MIN))
+    });
+
+    let total = rows.len();
+    let page: Vec<NativeSessionRow> = rows.into_iter().skip(offset).take(limit).collect();
+    let next = offset + page.len();
+    Ok(Json(EnumerateResponse {
+        sessions: page,
+        next_cursor: (next < total).then(|| next.to_string()),
+    }))
+}
+
 /// POST /api/v1/sessions/adopt
 ///
 /// Bring in a session an agent already has, from that agent's own native store.
 ///
-/// # Not yet implemented, and refused rather than faked
+/// # What is derived from the store rather than from the request
 ///
-/// This needs [`sylph_protocol::Adapter::adopt`] and `enumerate` — the parse of a
-/// vendor's native store — which is step 2 of `docs/roadmap.md` § Implementation order
-/// and is being written concurrently. Every *other* part of the endpoint is decided and
-/// recorded here, because the shape is what the next change needs:
+/// The **workdir**, the **fidelity**, and the fallback **title**. A client supplies the
+/// triple, `watch`, and two settable preferences, and nothing else it sends decides
+/// where an agent may run.
 ///
-/// - The workdir comes from the **store's own record**, not the request, and is bounded
-///   exactly like a created one. That is not belt-and-braces: a machine's store holds
-///   every session any agent ever ran there, so an unbounded adopt is a general way to
-///   start an agent anywhere — find a session that ran in the target directory, adopt
-///   it, send a turn. That the path came from the store rather than the request changes
-///   who chose it, not what happens next.
-/// - `fidelity` is what the vendor's store actually holds — `blocks` or `messages`,
-///   **never `stream`**. No care recovers a timing that was never written.
-/// - `injectIdentity` defaults to false, because the transcript so far was produced
-///   without it.
-/// - The title falls back to the opening ask through [`crate::db::labels`], whose rule
-///   skips the agent's injected envelopes.
+/// # The recorded workdir is bounded exactly like a created one
 ///
-/// Answering `501` is deliberate: a stub that created a row with an empty transcript
-/// would be a session claiming to hold history it never read, and a journal makes that
-/// permanent.
+/// Not belt-and-braces. A machine's store holds every session any agent ever ran there,
+/// so an unbounded adopt is a **general way to start an agent anywhere**: find a session
+/// that ran in the target directory, adopt it, send a turn. That the path came from the
+/// store rather than from the request changes who chose it, not what happens next — so
+/// this goes through the same [`contain_workdir`] the create path uses, which
+/// canonicalizes once and uses **that** variable. A containment check paired with a path
+/// it did not produce is not a bound, and that exact shape was two separate holes in this
+/// repo a day apart (`AGENTS.md` § A write cannot canonicalize its own target).
+///
+/// # `fidelity` is what the vendor's store holds, never `stream`
+///
+/// Read per session from the adapter's own summary rather than per agent, because a
+/// store can hold both: a session truncated mid-write, or one whose early turns predate a
+/// vendor's flush change, yields less than the agent's headline fidelity promises
+/// (`sylph_protocol::NativeSummary::fidelity`). No care recovers a timing that was never
+/// written.
+///
+/// # What the title fallback can and cannot reach, measured
+///
+/// The spec says the title "falls back to the opening user turn" through
+/// [`crate::db::labels`]. That rule is implemented here and it **cannot see the opening
+/// ask for two of the three agents**, which is a disagreement between the spec and the
+/// parsers rather than a gap in this handler:
+///
+/// | Agent | Vendor title | The user's own text |
+/// | --- | --- | --- |
+/// | `claude` | ~93% of sessions | dropped by its parser |
+/// | `codex` | never | dropped by its parser |
+/// | `pi` | never | arrives as a `status` event |
+///
+/// Both parsers drop it citing the same reason — the vocabulary has no `user` kind and
+/// "the server owns a turn's `request_text`" — but `SessionMessage` has three variants and
+/// none of them carries user text, so there is nothing for the server to own it *from*.
+/// The consequence is larger than a title: an adopted `claude` or `codex` transcript holds
+/// the agent's half of the conversation and not the user's, and every turn's
+/// `request_text` is empty. `crate::db::ingest` records the same finding from the
+/// ingestion side.
+///
+/// So this reaches, in order: the client's override, the vendor's own recorded title, then
+/// the opening phase-less `status` event through [`crate::db::labels::summarize_line`] —
+/// which applies the envelope rule, because an agent's injected context arrives as leading
+/// pseudo user turns and taking one verbatim labels most sessions with boilerplate that is
+/// byte-identical across every session of that agent. The rule stays **narrow**: an earlier
+/// version also treated a leading `You are ` as boilerplate and discarded 44 genuine
+/// labels, because subagent briefs legitimately open that way.
+///
+/// # Ingestion, and why `watch` does not block the response
+///
+/// `watch: false` is drained **before** the `201`, so a client that reads the transcript
+/// the moment it gets a response finds it there. `watch: true` follows the store as it
+/// grows and has no end to wait for, so it is spawned onto a task that outlives the
+/// request — the same shape `links::LinkManager::spawn_drain` gives a live link, for the
+/// same reason.
 pub async fn adopt(
-    State(_state): State<AppState>,
-    Json(_req): Json<AdoptSessionRequest>,
+    State(state): State<AppState>,
+    Json(req): Json<AdoptSessionRequest>,
 ) -> Result<(StatusCode, Json<SessionResponse>)> {
-    Err(Error::NotImplemented(
-        "Adopting a native session needs the vendor-store parsers, which land with \
-         `crates/adapters`. Nothing is recorded rather than recording a session with \
-         no transcript."
-            .to_string(),
-    ))
+    let environment = require_environment(&state, &req.environment)?;
+    let agent = req.agent.trim().to_string();
+
+    let native_raw = req.native_id.trim();
+    if native_raw.is_empty() {
+        return Err(Error::InvalidRequest(
+            "Adopting a session needs the agent's own session id.".to_string(),
+        ));
+    }
+    let native_id = NativeId::new(native_raw);
+    let session_id = SessionId::new(
+        environment,
+        AgentName::parse(agent.clone()).map_err(|error| Error::InvalidRequest(error.to_string()))?,
+        native_id.clone(),
+    );
+
+    // # Already-present is checked before the agent is, and the order is a decision
+    //
+    // Both are refusals, and this one is **more specific and cheaper**: it is a fact about
+    // this exact request that no configuration changes. Checking the agent first means a
+    // session Sylph already holds, on an agent whose CLI has since been uninstalled,
+    // answers *"install that CLI"* — sending a reader to their `PATH` when the true answer
+    // is "already done, open it". The reverse mistake does not exist: an agent that cannot
+    // be read has no session to already hold.
+    //
+    // The primary key would refuse the insert regardless; checking first is what makes the
+    // answer a `409` about this request rather than a database error two layers down.
+    if state.store.get_session(&session_id).await?.is_some() {
+        return Err(Error::SessionAlreadyPresent);
+    }
+
+    // One agent, and it must be installed: the store to read is on this machine.
+    require_agents(Some(agent.as_str()))?;
+
+    let adapter = sylph_adapters::for_agent(&agent).ok_or_else(|| {
+        // Raced an uninstall between the check above and here.
+        Error::InvalidRequest(format!("'{agent}' is not installed on this environment."))
+    })?;
+
+    // # Why a listing pass rather than a lookup
+    //
+    // The adapter contract has no "describe one session" call, and adding one would be
+    // the 11.5 ms per-session shape `Adapter::enumerate` exists to avoid. A filtered
+    // listing answers the same question with one short header read per file — 164 ms
+    // over `codex`'s 1258 rollouts — and it is the *same* call the picker made, so the
+    // workdir this bounds is the one the picker showed.
+    let summary = adapter
+        .enumerate(&sylph_protocol::StoreFilter::default())
+        .await
+        .map_err(|error| {
+            // Reading the store failed, which is not the same as the session being
+            // absent: a `404` here would tell a user their id was wrong when the store
+            // was unreadable.
+            Error::Internal(format!("Could not read {agent}'s native store: {error:#}"))
+        })?
+        .into_iter()
+        .find(|candidate| candidate.native_id == native_id)
+        .ok_or_else(|| Error::NativeSessionNotFound(native_id.as_str().to_string()))?;
+
+    // A session the store recorded no directory for. `422`: the id is real and nothing
+    // the caller can change makes it adoptable, because a workdir is the `current_dir` of
+    // a spawned agent and guessing one decides where arbitrary code runs.
+    let recorded = summary
+        .workdir
+        .as_deref()
+        .ok_or(Error::NativeSessionNotResumable)?;
+
+    // The canonical path, produced *by* the containment check, and the one that gets
+    // journalled. `400` when the directory is gone, `403` when it resolves outside the
+    // roots — [`contain_workdir`] already draws that line for the create path.
+    let workdir = contain_workdir(&state, recorded)?;
+
+    // `stream` is unreachable here by protocol: no care recovers a timing that was never
+    // written. Refused rather than silently downgraded, because a `stream` record would
+    // promise a renderer per-delta timings the store does not hold.
+    if summary.fidelity == sylph_protocol::Fidelity::Stream {
+        return Err(Error::Internal(format!(
+            "{agent}'s store reported `stream` fidelity for a session read from disk, \
+             which a native store cannot hold"
+        )));
+    }
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let record = crate::models::Session {
+        id: session_id.clone(),
+        workdir,
+        // The vendor's own title, or the client's override. The opening-ask fallback
+        // needs the transcript, so it runs after ingestion — a title is a label, and
+        // labelling a session before reading it would mean reading the store twice.
+        title: req
+            .title
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty())
+            .or_else(|| summary.title.clone()),
+        inject_identity: req.inject_identity,
+        fidelity: summary.fidelity,
+        flags_json: "{}".to_string(),
+        status: "idle".to_string(),
+        // The vendor's own recorded lineage, as the triple it names on this environment.
+        // **Not derived from an id-naming convention**: the `/agent-` suffix recovers 8.8%
+        // and misattributes on a collision, which is worse than an honest flat view.
+        parent_session: summary.parent_native_id.as_ref().map(|parent| {
+            SessionId::new(
+                session_id.environment.clone(),
+                session_id.agent.clone(),
+                parent.clone(),
+            )
+            .encode()
+        }),
+        // The store's own stamps where it kept them, so an adopted session sorts by when
+        // the work happened rather than by when it was adopted.
+        created_at_ms: summary.started_at_ms.unwrap_or(now),
+        updated_at_ms: summary.ended_at_ms.or(summary.started_at_ms).unwrap_or(now),
+    };
+
+    let stored = match state.store.create_session(&record).await {
+        Ok(stored) => stored,
+        Err(crate::error::Error::Database(sqlx::Error::Database(db)))
+            if db.is_unique_violation() =>
+        {
+            // Two adopts of one id, racing. The pre-check above lost.
+            return Err(Error::SessionAlreadyPresent);
+        }
+        Err(error) => return Err(error),
+    };
+
+    if req.watch {
+        // Follows the store as it grows, so there is no end to await. Spawned rather than
+        // joined, which is the same shape a live link's drain has: the response reports
+        // the session exists, and the transcript fills in as the vendor writes it.
+        let ingest = state.ingest.clone();
+        let watched = session_id.clone();
+        let stream = adapter.watch(&native_id).await.map_err(|error| {
+            Error::Internal(format!("Could not watch {agent}'s native session: {error:#}"))
+        })?;
+        tokio::spawn(async move {
+            let report = ingest.drain(&watched, stream).await;
+            tracing::info!(
+                "Watched {}: {} event(s) in {} turn(s), {} read error(s)",
+                watched,
+                report.events,
+                report.turns,
+                report.read_errors
+            );
+        });
+        return Ok((StatusCode::CREATED, Json(SessionResponse { session: stored })));
+    }
+
+    // One pass, awaited: a `201` means the transcript is readable, not that a task was
+    // started. A client refetching history on the response would otherwise race it.
+    let stream = adapter.adopt(&native_id).await.map_err(|error| {
+        Error::Internal(format!("Could not read {agent}'s native session: {error:#}"))
+    })?;
+    let report = state.ingest.drain(&session_id, stream).await;
+    tracing::info!(
+        "Adopted {}: {} event(s) in {} turn(s), {} read error(s)",
+        session_id,
+        report.events,
+        report.turns,
+        report.read_errors
+    );
+
+    // The opening-ask fallback, for the sessions no vendor titled. Runs on what the pass
+    // recovered rather than on a second read of the store, and `set_session_title_if_empty`
+    // is what keeps it from overwriting a title the vendor or the client gave.
+    if let Some(opening) = &report.opening_status {
+        let label = crate::db::labels::summarize_line(opening);
+        if !label.is_empty() {
+            state
+                .store
+                .set_session_title_if_empty(&session_id, &label)
+                .await?;
+        }
+    }
+
+    // Re-read, so the response carries the title the fallback may have just written
+    // rather than the one the insert had.
+    let session = state
+        .store
+        .get_session(&session_id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+
+    Ok((StatusCode::CREATED, Json(SessionResponse { session })))
 }

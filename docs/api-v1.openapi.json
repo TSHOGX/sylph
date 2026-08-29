@@ -165,7 +165,7 @@
           "Sessions"
         ],
         "summary": "Adopt a session an agent already has",
-        "description": "Brings in a session from the vendor's own native store on some environment. Replaces POST /api/v1/sessions/import, which named a row in a separate archive that no longer exists — so this is a different operation rather than a rename: the id is the vendor's, on a named machine, and nothing has to have parsed it first. watch: true follows the store as it grows, so a session running in a terminal right now appears and keeps updating; false parses one pass of what is already recorded. Policy-relevant fields are derived from the store, not the request. The working directory comes from the session's own recorded context and is bounded exactly like a created one — not belt-and-braces: a machine's store holds every session any agent ever ran there, so an unbounded adopt is a general way to start an agent anywhere. That the path came from the store rather than the request changes who chose it, not what happens next. fidelity reflects what the vendor's store actually holds — blocks or messages, never stream. No care recovers a timing that was never written, so a renderer reads it before drawing a duration. injectIdentity defaults to false here, because the transcript so far was produced without it, but is settable: adopting a terminal session and injecting from that point on is a coherent thing to want. The derived title skips the agent's injected envelopes. The first user event is usually not what the user typed — agents prepend their own context as pseudo user turns — and taking it verbatim labels most sessions with boilerplate byte-identical across every session of that agent; skipping those raised recognizable labels from ~10% to 98% over 311 measured sessions. Not implemented yet: it needs the vendor-store parsers, and answers 501 rather than recording a session with no transcript, which a journal would make permanent.",
+        "description": "Brings in a session from the vendor's own native store on some environment. Replaces POST /api/v1/sessions/import, which named a row in a separate archive that no longer exists — so this is a different operation rather than a rename: the id is the vendor's, on a named machine, and nothing has to have parsed it first. watch: true follows the store as it grows, so a session running in a terminal right now appears and keeps updating and the 201 is answered before the transcript is complete; false parses one pass and is awaited, so a 201 means the transcript is readable. Policy-relevant fields are derived from the store, not the request. The working directory comes from the session's own recorded context and is bounded exactly like a created one — not belt-and-braces: a machine's store holds every session any agent ever ran there, so an unbounded adopt is a general way to start an agent anywhere. That the path came from the store rather than the request changes who chose it, not what happens next. The check produces the path that is journalled: a containment check paired with a path it did not produce is not a bound. fidelity reflects what the vendor's store actually holds — blocks or messages, never stream, read per session because a store can hold both. No care recovers a timing that was never written, so a renderer reads it before drawing a duration. injectIdentity defaults to false here, because the transcript so far was produced without it, but is settable: adopting a terminal session and injecting from that point on is a coherent thing to want. The derived title skips the agent's injected envelopes. The first user event is usually not what the user typed — agents prepend their own context as pseudo user turns — and taking it verbatim labels most sessions with boilerplate byte-identical across every session of that agent; skipping those raised recognizable labels from ~10% to 98% over 311 measured sessions. Measured limit on that fallback: no adapter carries the user's typed text for claude or codex, so their opening ask is not in the stream at all — claude is titled by its own recorded title (~93% of sessions) and codex adopts untitled. Errors are six and deliberately distinct, because the fixes are: 400 nothing to do, 403 widen configuration, 404 wrong id, 409 already done, 422 unusable source, 503 bring the machine online. Collapsing any pair sends a reader to the wrong layer.",
         "requestBody": {
           "required": true,
           "content": {
@@ -178,19 +178,107 @@
         },
         "responses": {
           "201": {
-            "description": "The session, with fidelity reflecting the store."
+            "description": "The session, with fidelity reflecting the store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionEnvelope"
+                }
+              }
+            }
           },
           "400": {
             "description": "No such agent on that environment, or the recorded workdir no longer exists."
           },
           "403": {
-            "description": "POLICY_VIOLATION: the recorded workdir is outside that environment’s roots."
+            "description": "POLICY_VIOLATION: the recorded workdir is outside that environment’s roots. The message lists what is permitted."
+          },
+          "404": {
+            "description": "NATIVE_SESSION_NOT_FOUND: that environment's store has no such session. Distinct from SESSION_NOT_FOUND, which is about Sylph's own store — the code is what says which store to look in."
           },
           "409": {
-            "description": "SESSION_ALREADY_PRESENT: adopting twice would produce two rows for one conversation."
+            "description": "SESSION_ALREADY_PRESENT: adopting twice would produce two rows for one conversation. Checked before the agent is, so a session already held on a since-uninstalled agent reports “already done” rather than “install that CLI”."
           },
-          "501": {
-            "description": "NOT_IMPLEMENTED: the vendor-store parsers have not landed."
+          "422": {
+            "description": "NATIVE_SESSION_NOT_RESUMABLE: the store recorded no working directory, so there is nowhere to run it. Guessing one is not available as a fallback, because a workdir is the current_dir of a spawned agent."
+          },
+          "503": {
+            "description": "ENVIRONMENT_UNREACHABLE: no envagent is connected for that environment."
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/enumerate": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "What native sessions an environment holds",
+        "description": "Answers “what is on this machine” without adopting anything, which is what makes adopt offerable in a UI rather than requiring a user to know a vendor id. Answered from the envagent's local stores. A session already adopted is marked as such rather than hidden or offered: hiding it leaves a user hunting for a session plainly on the machine, and offering it hands out a 409 nobody can act on. The same applies to a session whose recorded workdir is outside the permitted roots or absent — blocked carries which, so a picker shows the row and says why instead of failing on click. Rows are newest-first on whichever stamp the store carried; a session with neither sorts last, because an absent stamp is a store that has not settled rather than a session from 1970. Paging: cursor is opaque and must be echoed back unparsed, never constructed. It indexes into a snapshot held for 30 seconds, which is what makes a walk self-consistent — these files are being written while a user pages, so an offset into the live store would silently skip rows that moved to the front and serve others twice. Measured cost of one listing pass on a real machine: pi 531 rows in 90 ms, claude 1000 in 1.81 s, codex 1258 in 3.51 s, so ~5.6 s for the machine and 29 ms per page thereafter. Two of the three read more than a header per file on purpose — claude a 32 KB head for its own title, codex a 256 KB tail for the last stamp — which is why the figure is not the 164 ms a header-only pass costs.",
+        "parameters": [
+          {
+            "name": "environment",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required: there is no privileged machine, not even the one the server runs on."
+          },
+          {
+            "name": "agent",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "One agent, or every readable one when omitted. Naming an agent with no native store is a 400 rather than an empty list, because an empty list is indistinguishable from “that agent has no sessions here” and the two have different fixes."
+          },
+          {
+            "name": "workdir",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "An exact path match after normalizing trailing slashes, never a substring: the store this replaced compiled it to LIKE '%…%', so /w/app also matched /w/app-old and every subdirectory."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque. Echo back nextCursor unparsed. A cursor this endpoint did not issue is refused rather than treated as zero, because silently restarting a paged scan is how a client loops forever over page one."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What that environment holds, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnumerateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed environment id, an agent with no native store, or a foreign cursor."
+          },
+          "503": {
+            "description": "ENVIRONMENT_UNREACHABLE: no envagent is connected for that environment."
           }
         }
       }
@@ -1727,7 +1815,10 @@
                   "AGENT_UNSUPPORTED",
                   "AGENT_START_FAILED",
                   "SESSION_ALREADY_PRESENT",
-                  "NOT_IMPLEMENTED"
+                  "NOT_IMPLEMENTED",
+                  "NATIVE_SESSION_NOT_FOUND",
+                  "NATIVE_SESSION_NOT_RESUMABLE",
+                  "ENVIRONMENT_UNREACHABLE"
                 ]
               },
               "message": {
@@ -3641,6 +3732,93 @@
             "type": "boolean",
             "default": false,
             "description": "Defaults to false: the transcript so far was produced without it."
+          }
+        }
+      },
+      "NativeSessionRow": {
+        "type": "object",
+        "required": [
+          "agent",
+          "nativeId",
+          "fidelity",
+          "id"
+        ],
+        "description": "One native session an environment holds. Every field an adapter cannot answer is absent rather than defaulted: a synthesized title or timestamp is a lie a journal makes permanent, and this row is what a picker renders.",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "nativeId": {
+            "type": "string",
+            "description": "The vendor's own id, unchanged."
+          },
+          "workdir": {
+            "type": "string",
+            "description": "Where it ran. Absent means the store recorded none, which makes the session not resumable — adopt answers 422 rather than guessing a directory to run an agent in."
+          },
+          "title": {
+            "type": "string",
+            "description": "The vendor's own recorded title, when it keeps one. Measured: claude ~93% of sessions, codex and pi none."
+          },
+          "startedAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "endedAtMs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last recorded activity. Absent while a session is still being written — an absent end is not an ended session."
+          },
+          "eventCount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many events one pass would yield, when the store can say cheaply."
+          },
+          "parentNativeId": {
+            "type": "string",
+            "description": "The session this one was delegated from or forked out of, as the vendor recorded it. Not derived from an id-naming convention: the /agent- suffix recovers 8.8% and misattributes on a collision."
+          },
+          "fidelity": {
+            "type": "string",
+            "enum": [
+              "blocks",
+              "messages"
+            ],
+            "description": "What parsing this session would actually yield. Per session rather than per agent, because a store can hold both. Never stream."
+          },
+          "id": {
+            "type": "string",
+            "description": "The encoded triple this row would adopt as. Always present, including on a blocked row — it is what a client navigates to for an already-adopted session."
+          },
+          "blocked": {
+            "$ref": "#/components/schemas/BlockedReason"
+          }
+        }
+      },
+      "BlockedReason": {
+        "type": "string",
+        "enum": [
+          "alreadyAdopted",
+          "noWorkdir",
+          "outsideRoots"
+        ],
+        "description": "Why this row cannot be adopted, absent when it can. Typed rather than prose so a client branches on it: alreadyAdopted navigates to the session Sylph already holds, outsideRoots names a configuration fix, and noWorkdir cannot be made adoptable at all. Each is one of the adopt errors decided before the request rather than after, so a picker cannot disagree with the endpoint."
+      },
+      "EnumerateResponse": {
+        "type": "object",
+        "required": [
+          "sessions"
+        ],
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NativeSessionRow"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "description": "Pass as cursor for the next page. Absent when this page is the last."
           }
         }
       }

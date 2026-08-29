@@ -103,6 +103,17 @@ export function CommandPalette() {
         run: () => runAction("newSession"),
       },
       {
+        id: "adopt-session",
+        label: t("palette.cmd.adoptSession"),
+        group: t("palette.group.session"),
+        action: "adoptSession",
+        // `import` because that is what a user coming from another tool calls this, and
+        // the endpoint it replaced was literally `POST /sessions/import`; `existing`
+        // and `terminal` because the common case is a session started in a terminal.
+        keywords: "import existing terminal native attach",
+        run: () => runAction("adoptSession"),
+      },
+      {
         id: "quick-start",
         // No directory in the label. It is configurable (`paths.quick_start_dir`),
         // so naming one here would be wrong for anyone who set it — and the label

@@ -161,6 +161,9 @@ export const en = {
   // No directory in `quickStart`: it is configurable, so naming one would be wrong
   // for anyone who changed it, and Settings → Configuration reports what resolved.
   "palette.cmd.newSession": "New session",
+  // Named for what it does rather than for the endpoint: "adopt" is the product word,
+  // and `import` is a keyword so anyone looking for the old name still finds it.
+  "palette.cmd.adoptSession": "Adopt an existing session",
   "palette.cmd.quickStart": "Quick Start session",
   "palette.cmd.stopTurn": "Stop the running turn",
   "palette.cmd.search": "Search sessions and archive",
@@ -226,6 +229,41 @@ export const en = {
   "workspacePicker.browse": "Browse folders...",
   "workspacePicker.browseTitle": "Browse for a folder",
   "workspacePicker.sessions": "{count} sessions",
+
+  // Adopting a session an agent already has, from that agent's own native store.
+  // Its own namespace because it is a distinct act rather than a variant of creating
+  // one: nothing is started, and the transcript already exists.
+  "adopt.title": "Adopt an existing session",
+  "adopt.filterName": "native sessions",
+  // Names both columns the filter reaches, because neither is obvious from a row: the
+  // visible label is a title the vendor recorded, and the second line is the path.
+  "adopt.filterPlaceholder": "Filter by title or path...",
+  "adopt.agentFilterLabel": "Filter by agent",
+  "adopt.allAgents": "All agents",
+  // Says seconds rather than showing a bare spinner. A cold listing genuinely takes
+  // them — two of the three adapters read more than a header per file so they never
+  // report an absent title or an absent end stamp — and a spinner that sits for four
+  // seconds reads as a hang.
+  "adopt.loading": "Reading what this machine holds...",
+  "adopt.loadingMore": "Loading...",
+  "adopt.loadMore": "Load more",
+  "adopt.loadFailed": "Could not read this machine's sessions",
+  // Distinct from "no match": an install with the CLIs present and no sessions yet has
+  // nothing to adopt, and saying so is the difference between a dead end and an answer.
+  "adopt.empty": "No sessions found on this machine.",
+  "adopt.adopting": "Adopting...",
+  "adopt.failed": "Could not adopt that session",
+  // The honest label for a session no vendor titled. `codex` and `pi` record none at
+  // all, and their transcripts carry no user text for a fallback to read, so a short id
+  // is what is actually known — anything friendlier would be a guess shown as a fact.
+  "adopt.untitled": "Untitled session {id}",
+  "adopt.events": "{count} events",
+  // Why a row cannot be adopted. Three reasons because three fixes: open it, widen
+  // configuration, and nothing.
+  "adopt.blocked.alreadyAdopted": "Already added — open it",
+  "adopt.blocked.noWorkdir": "No recorded directory",
+  "adopt.blocked.outsideRoots": "Outside permitted directories",
+
   // The history browser's own verb for the filesystem fallback, which is where a
   // chosen folder lands when it was reached by browsing rather than by picking.
   "history.showHistory": "Show its history",
@@ -606,6 +644,7 @@ export const en = {
   "shortcut.commandPalette": "Command palette",
   "shortcut.browseWorkspaceHistory": "Browse workspace history",
   "shortcut.newSession": "New session",
+  "shortcut.adoptSession": "Adopt an existing session",
   "shortcut.quickStart": "Quick Start session",
   "shortcut.toggleLeftSidebar": "Toggle workspaces sidebar",
   "shortcut.toggleRightSidebar": "Toggle artifacts sidebar",
