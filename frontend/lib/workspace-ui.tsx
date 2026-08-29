@@ -38,7 +38,23 @@ import type { PreviewKind } from "@/lib/api";
  * model and effort are composer controls for every turn — so the only question
  * worth asking at creation time is "where".
  */
-export type Overlay = "none" | "search" | "palette" | "settings" | "history" | "newSession";
+export type Overlay =
+  | "none"
+  | "search"
+  | "palette"
+  | "settings"
+  | "history"
+  | "newSession"
+  /**
+   * Adopt a session an agent already has, picked from what the machine's native stores
+   * hold.
+   *
+   * A member of this union rather than a route, for the same reason `newSession` is: it is
+   * one modal question with one answer, and the surface behind it is where the user
+   * already was. Distinct from `newSession` because nothing is started — the transcript
+   * exists and is being brought in.
+   */
+  | "adopt";
 
 /** A file the Artifacts pane should show, addressed inside a session. */
 export interface ArtifactTarget {
@@ -332,6 +348,9 @@ export function WorkspaceUIProvider({
           return;
         case "newSession":
           setOverlay("newSession");
+          return;
+        case "adoptSession":
+          setOverlay("adopt");
           return;
         default:
           setOverlay("none");

@@ -89,6 +89,10 @@ const WorkspacePicker = dynamic(
   () => import("@/components/workspace-picker").then((m) => m.WorkspacePicker),
   { ssr: false },
 );
+const AdoptPicker = dynamic(
+  () => import("@/components/adopt-picker").then((m) => m.AdoptPicker),
+  { ssr: false },
+);
 
 /**
  * The mobile surfaces, split for the same reason as the overlays above — with one
@@ -276,6 +280,7 @@ function ShellFrame({
       {overlay === "settings" && <SettingsPanel />}
       {overlay === "history" && <HistoryOverlay />}
       {overlay === "newSession" && <NewSessionPicker />}
+      {overlay === "adopt" && <AdoptPickerSurface />}
     </div>
   );
 }
@@ -400,6 +405,18 @@ function TopBar() {
  * and the rare case no faster. `WorkspacePicker` keeps the filesystem one click
  * away for a directory that has genuinely never been used.
  */
+/**
+ * Adopting a session an agent already has.
+ *
+ * A one-line wrapper for the same reason `NewSessionPicker` is one: the shell owns
+ * dismissal, and the picker owns everything else. It navigates on its own, because where
+ * an adopted session lands is a property of the session rather than of the shell.
+ */
+function AdoptPickerSurface() {
+  const { closeOverlay } = useWorkspaceUI();
+  return <AdoptPicker onClose={closeOverlay} />;
+}
+
 function NewSessionPicker() {
   const { closeOverlay, createSessionIn } = useWorkspaceUI();
   const t = useT();

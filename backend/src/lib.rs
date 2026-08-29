@@ -78,6 +78,21 @@ pub struct AppState {
     /// same reason as the consolidator: a test drives one pass instead of waiting
     /// five minutes for the interval.
     pub retention: crate::storage::RetentionScheduler,
+    /// Writes an adapter's parse of a native store into the journal.
+    ///
+    /// Held here, sharing the **one** sequence allocator and the **one** batching
+    /// writer, because that sharing is the correctness property rather than a
+    /// convenience: a second allocator over one session would hand out numbers a live
+    /// link is also handing out and `UNIQUE(session, seq)` would refuse one of the two
+    /// writes, intermittently and under concurrency (`crate::events::seq`). A second
+    /// writer would leave the fold reading a buffer nobody flushed.
+    pub ingest: crate::db::NativeIngest,
+    /// A short-lived snapshot of what this machine's native stores hold.
+    ///
+    /// Both reasons it exists are measured and neither is a micro-optimization: listing
+    /// this machine's stores costs ~5.6 s, and an offset cursor into a store being
+    /// written silently skips and duplicates rows. See `api::native_index`.
+    pub native_index: crate::api::native_index::NativeIndex,
 }
 
 impl AppState {
@@ -216,6 +231,12 @@ impl AppState {
         // Turns on a live link. The two reference each other — the supervisor
         // asks for a link, the manager settles the supervisor's turns — so the
         // waiter registry is handed over after both exist.
+        // Adopting a native session writes through the same three collaborators the live
+        // drain path uses, which is what makes an adopted row indistinguishable from a
+        // live one downstream (`docs/architecture.md` § One authority).
+        let ingest =
+            crate::db::NativeIngest::new(store.clone(), writer.clone(), seq.clone());
+
         let turns = crate::supervisor::turn::LinkedSupervisor::new(
             store.clone(),
             writer.clone(),
@@ -263,6 +284,8 @@ impl AppState {
             history,
             consolidator,
             retention,
+            ingest,
+            native_index: crate::api::native_index::NativeIndex::new(),
         })
     }
 }
@@ -306,6 +329,12 @@ pub fn router(state: AppState) -> Router {
         // store. Replaces `POST /sessions/import`, which named a row in a separate
         // archive that no longer exists.
         .route("/api/v1/sessions/adopt", post(api::sessions::adopt))
+        // What native sessions an environment holds, without adopting any. This is what
+        // makes adopt offerable in a UI rather than requiring a user to know a vendor
+        // id. A literal path, so it is declared beside `adopt` and above
+        // `/sessions/{id}` — axum prefers a static segment over a capture, but keeping
+        // the two literals together is what makes that visible to a reader.
+        .route("/api/v1/sessions/enumerate", get(api::sessions::enumerate))
         // No `DELETE`: there is no empty draft to discard, because `POST /sessions`
         // now starts an agent and a row exists only once one has assigned an id
         // (`docs/api-design.md` § `DELETE /api/v1/sessions/{id}` — removed).

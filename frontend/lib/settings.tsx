@@ -36,6 +36,8 @@ export type ShortcutAction =
   | "commandPalette"
   | "browseWorkspaceHistory"
   | "newSession"
+  /** Adopt a session an agent already has, from its own native store. */
+  | "adoptSession"
   | "quickStart"
   | "toggleLeftSidebar"
   | "toggleRightSidebar"

@@ -17,6 +17,13 @@ pub mod labels;
 /// commits is a different decision from *what* it writes, and only the first one
 /// depends on whether a reconnect can replay the event from anywhere else.
 pub mod writer;
+/// Writing an adapter's parse of a vendor's native store into this journal.
+///
+/// Beside the store rather than in `api::sessions` because it is a *storage* decision:
+/// the one question an adapter cannot answer is which turn row an event belongs to,
+/// and `turns` is Sylph's schema rather than any vendor's.
+pub mod ingest;
 
+pub use ingest::{IngestReport, NativeIngest};
 pub use store::JournalStore;
 pub use writer::JournalWriter;

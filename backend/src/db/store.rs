@@ -148,6 +148,47 @@ impl JournalStore {
         Ok(session)
     }
 
+    /// Which native ids of one agent on one environment are already recorded.
+    ///
+    /// # Why this exists rather than a `get_session` per candidate
+    ///
+    /// `api::sessions::enumerate` marks each native session the store holds with whether
+    /// Sylph already has it, and it has to answer that for **every** row: a picker that
+    /// silently omitted adopted sessions would leave a user hunting for one plainly on
+    /// the machine, and one that offered them would hand out a `409` nobody can act on.
+    ///
+    /// Asked per row, that is one indexed lookup each — correct, and **measured at 4.26 s**
+    /// for `codex`'s 1258 rollouts against 232 ms for `pi`'s 531, which is the round-trip
+    /// count rather than the query. It also inverts the requirement the adapter contract
+    /// puts on `enumerate`: the listing pass is deliberately one short header read per
+    /// file (164 ms measured) precisely so a whole-store listing is affordable, and paying
+    /// a database round trip per row hands that back one layer up.
+    ///
+    /// One statement, projecting the single column the caller compares. Deliberately **not**
+    /// [`Self::list_sessions`]: that returns whole rows, hydrates every title, and is
+    /// capped at a page — so a client filtering its response would filter the truncated
+    /// page and silently miss older matches.
+    ///
+    /// Unbounded on purpose. It is one `TEXT` column per adopted session of one agent, and
+    /// a `LIMIT` here would make an already-adopted row read as adoptable past the cap —
+    /// which is the `409`-nobody-can-act-on this exists to prevent, reappearing only for
+    /// users with enough history to hit it.
+    pub async fn adopted_native_ids(
+        &self,
+        environment: &sylph_protocol::EnvironmentId,
+        agent: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT native_id FROM sessions WHERE environment = ? AND agent = ?",
+        )
+        .bind(environment.as_str())
+        .bind(agent)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::Database)?;
+        Ok(rows.into_iter().map(|(native,)| native).collect())
+    }
+
     /// List sessions newest-activity-first, narrowed by `filter`.
     ///
     /// Filtering belongs in SQL rather than in the client: the query is capped
@@ -543,6 +584,31 @@ impl JournalStore {
         error_code: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<bool> {
+        self.finish_turn_at(turn_id, status, error_code, error_message, now_ms())
+            .await
+    }
+
+    /// Record a terminal turn state at a stated time.
+    ///
+    /// Same first-writer-wins guard as [`Self::finish_turn`], which delegates here so
+    /// there is one implementation of the guard rather than two that can drift.
+    ///
+    /// # Why the timestamp is a parameter
+    ///
+    /// A live turn ends *now*, so [`Self::finish_turn`] reading the clock is right. An
+    /// **adopted** turn ended whenever the vendor recorded it, possibly months ago
+    /// (`crate::db::ingest`), and stamping it `now()` would report every adopted turn as
+    /// having finished at the moment somebody clicked adopt — giving a whole transcript
+    /// one timestamp, a duration of zero, and a position at the top of every
+    /// recency-ordered listing.
+    pub async fn finish_turn_at(
+        &self,
+        turn_id: &str,
+        status: &str,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+        completed_at_ms: i64,
+    ) -> Result<bool> {
         let result = sqlx::query(
             r#"
             UPDATE turns
@@ -553,9 +619,50 @@ impl JournalStore {
             "#,
         )
         .bind(status)
-        .bind(now_ms())
+        .bind(completed_at_ms)
         .bind(error_code)
         .bind(error_message)
+        .bind(turn_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Close an adopted turn, recording both of its stamps from the vendor's own record.
+    ///
+    /// # Why this is not [`Self::finish_turn_at`] plus [`Self::mark_turn_running`]
+    ///
+    /// `mark_turn_running` requires a `queued` or `starting` status and stamps
+    /// `started_at_ms` with `now()`. An adopted turn is neither — `crate::db::ingest`
+    /// creates it `running`, because there is no queue and nothing to start — and `now()`
+    /// is the wrong value twice over: the turn began whenever the vendor recorded its
+    /// first event, and stamping it now gives every adopted turn in a months-old
+    /// transcript the same start.
+    ///
+    /// So both stamps are known at close time and neither is the clock's. One statement
+    /// rather than two, so a reader never observes a turn with an end and no beginning —
+    /// which is the state a duration is computed from, and computing one from a null start
+    /// is how `AGENTS.md`'s publishing-gap defect presented.
+    ///
+    /// Same first-writer-wins guard as its siblings, so a terminal state stays final.
+    pub async fn close_adopted_turn(
+        &self,
+        turn_id: &str,
+        status: &str,
+        started_at_ms: i64,
+        completed_at_ms: i64,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE turns
+            SET status = ?, started_at_ms = ?, completed_at_ms = ?
+            WHERE id = ?
+              AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
+            "#,
+        )
+        .bind(status)
+        .bind(started_at_ms)
+        .bind(completed_at_ms)
         .bind(turn_id)
         .execute(&self.pool)
         .await?;

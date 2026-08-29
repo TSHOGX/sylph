@@ -467,6 +467,7 @@ const ACTION_KEYS: Record<ShortcutAction, MessageKey> = {
   commandPalette: "shortcut.commandPalette",
   browseWorkspaceHistory: "shortcut.browseWorkspaceHistory",
   newSession: "shortcut.newSession",
+  adoptSession: "shortcut.adoptSession",
   quickStart: "shortcut.quickStart",
   toggleLeftSidebar: "shortcut.toggleLeftSidebar",
   toggleRightSidebar: "shortcut.toggleRightSidebar",

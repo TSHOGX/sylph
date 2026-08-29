@@ -228,6 +228,64 @@ impl StreamEvent {
         })
     }
 
+    /// Build from an adapter's typed [`sylph_protocol::Event`].
+    ///
+    /// # Why this exists beside [`Self::from_adapter`]
+    ///
+    /// That one reads a JSON envelope off the NDJSON transport and is right for a live
+    /// link. This one takes the value an in-process adapter constructs, which is what
+    /// `adopt` and `watch` yield — so no field is recovered by string key and a rename
+    /// upstream is a compile error rather than a silent `None` (`AGENTS.md` § A
+    /// cross-process JSON boundary lets a spelling change read as `None`).
+    ///
+    /// **The vendor's own `created_at_ms` survives, and that is the load-bearing
+    /// difference.** `from_adapter` stamps `Utc::now()`, because a live event's arrival
+    /// *is* when it happened. An adopted event happened when the vendor recorded it,
+    /// possibly months ago, and stamping now would make every adopted transcript claim
+    /// to have occurred at the moment it was adopted — collapsing a session's whole
+    /// duration to zero and ordering it into the sidebar as the newest thing on the
+    /// machine. The parsers go to real trouble to recover these stamps
+    /// (`crates/adapters/src/native/timestamp.rs`), and this is where that work would
+    /// have been discarded.
+    ///
+    /// `seq` is left at zero for the caller to assign, for the same reason as
+    /// [`Self::from_adapter`]: ordering is the server's.
+    pub fn from_protocol(event: &sylph_protocol::Event) -> Self {
+        Self {
+            seq: 0,
+            kind: event.kind.as_str().to_string(),
+            phase: event.phase.map(|phase| {
+                match phase {
+                    sylph_protocol::Phase::Started => "started",
+                    sylph_protocol::Phase::Delta => "delta",
+                    sylph_protocol::Phase::Completed => "completed",
+                }
+                .to_string()
+            }),
+            stream_id: event.stream_id.clone(),
+            // Same normalization as the wire path: an adapter emitting an empty span
+            // means the root, and a client comparing against a trajectory id would
+            // otherwise look for one named "".
+            span: event.span.clone().filter(|span| !span.is_empty()),
+            name: event.name.clone(),
+            text: event.text.clone(),
+            data: event.data.clone().filter(|data| !data.is_null()),
+            is_error: event.is_error,
+            // Read from the field the adapter set rather than recomputed from the
+            // phase. One fact with two derivations diverges the moment either grows a
+            // case, which is exactly what happened when `subagent` became stable at
+            // every phase (`sylph_protocol::Event::stability`).
+            stability: match event.stability {
+                sylph_protocol::Stability::Stable => "stable",
+                sylph_protocol::Stability::Ephemeral => "ephemeral",
+            }
+            .to_string(),
+            source: "agent".to_string(),
+            created_at_ms: event.created_at_ms,
+            started_at_ms: event.started_at_ms,
+        }
+    }
+
     /// Rebuild the wire form from a journal row.
     ///
     /// No `started_at_ms`: a journal row is one arrival, so its `created_at_ms` is

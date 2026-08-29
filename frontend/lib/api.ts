@@ -591,6 +591,88 @@ export interface AdoptSessionRequest {
 }
 
 /**
+ * Why a native session cannot be adopted, absent when it can.
+ *
+ * **Typed so the picker branches rather than guesses**, and each value is one of the
+ * adopt errors decided *before* the request rather than after — so a row's reason and
+ * the endpoint's refusal cannot disagree.
+ *
+ * - `alreadyAdopted` — Sylph has it. The row navigates to the session instead of
+ *   offering a duplicate that would `409`.
+ * - `noWorkdir` — the store recorded no directory, or it is gone. Nothing fixes this:
+ *   a workdir is the `current_dir` of a spawned agent, so guessing one is not an option.
+ * - `outsideRoots` — the directory is real and outside `paths.browse_roots`. The fix is
+ *   configuration, which is why it is distinct from the above.
+ */
+export type BlockedReason = "alreadyAdopted" | "noWorkdir" | "outsideRoots";
+
+/**
+ * One native session an environment holds, as `GET /sessions/enumerate` reports it.
+ *
+ * **Every optional field is absent rather than defaulted**, because a synthesized title
+ * or timestamp is a lie a journal makes permanent and this row is what a picker renders.
+ * Measured per agent: `claude` records its own title for ~93% of sessions, `codex` and
+ * `pi` for none.
+ */
+export interface NativeSessionRow {
+  agent: string;
+  /** The vendor's own id, unchanged. */
+  nativeId: string;
+  /** Where it ran. Absent means the store recorded none, which makes it unadoptable. */
+  workdir?: string;
+  /** The vendor's own recorded title, when it keeps one. */
+  title?: string;
+  startedAtMs?: number;
+  /**
+   * Last recorded activity.
+   *
+   * Absent while a session is still being written: **an absent end is not an ended
+   * session**, so a client must not render it as "never finished".
+   */
+  endedAtMs?: number;
+  eventCount?: number;
+  /** Delegation parent or fork origin, as the vendor recorded it. */
+  parentNativeId?: string;
+  /**
+   * What parsing this session would yield. Never `stream` — no care recovers a timing
+   * that was never written, and a renderer reads this before drawing a duration.
+   */
+  fidelity: "blocks" | "messages";
+  /**
+   * The encoded triple this row would adopt as.
+   *
+   * Present even on a blocked row, because it is what an `alreadyAdopted` row navigates
+   * to.
+   */
+  id: string;
+  blocked?: BlockedReason;
+}
+
+/** One page of `GET /sessions/enumerate`. */
+export interface EnumerateResponse {
+  sessions: NativeSessionRow[];
+  /**
+   * Pass back as `cursor` for the next page; absent on the last.
+   *
+   * **Opaque by contract — echo it, never parse or construct it.** It indexes a snapshot
+   * the server holds briefly, which is what makes a walk self-consistent: these files are
+   * being written while a user pages, so an offset into the live store would silently skip
+   * rows that moved to the front and serve others twice.
+   */
+  nextCursor?: string;
+}
+
+/** Narrowing for `GET /sessions/enumerate`. */
+export interface EnumerateFilters {
+  environment: string;
+  agent?: string;
+  /** An exact path match after normalizing trailing slashes, never a substring. */
+  workdir?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+/**
  * `GET /soul`.
  *
  * `available: false` means no readable `SOUL.md` was resolved, so every session
@@ -1151,6 +1233,21 @@ export const api = {
         method: "POST",
         body: JSON.stringify(req),
       }),
+    /**
+     * What native sessions an environment holds, without adopting any.
+     *
+     * This is what makes {@link adopt} offerable at all: without it a user would have to
+     * know a vendor's session id. A row already adopted arrives **marked** rather than
+     * omitted — see {@link BlockedReason}.
+     *
+     * Slow on a first call and fast thereafter, and the asymmetry is worth knowing before
+     * building a surface on it. Measured on a real machine: `pi` 531 rows in 90 ms,
+     * `claude` 1000 in 1.81 s, `codex` 1258 in 3.51 s — then 29 ms per page while the
+     * server's snapshot lives. So a picker should render its loading state honestly rather
+     * than assume a listing is instant.
+     */
+    enumerate: (filters: EnumerateFilters) =>
+      fetchAPI<EnumerateResponse>(`/sessions/enumerate${queryString({ ...filters })}`),
     /** Change agent flags or the title of an existing session. */
     update: (id: string, req: { flags?: Record<string, string>; title?: string }) =>
       fetchAPI<{ session: Session }>(`/sessions/${segment(id)}`, {

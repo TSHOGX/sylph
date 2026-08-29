@@ -62,6 +62,36 @@ pub enum Error {
     #[error("Not implemented: {0}")]
     NotImplemented(String),
 
+    /// That environment's store holds no session under the given native id.
+    ///
+    /// A `404` about the *vendor's* store rather than about Sylph's, which is why it is
+    /// not [`Self::SessionNotFound`]: the fix is a different id, and a client that
+    /// cannot tell the two apart would look for the session in the wrong store.
+    #[error("No such session in that agent's native store: {0}")]
+    NativeSessionNotFound(String),
+
+    /// The store holds the session and recorded no working directory for it.
+    ///
+    /// `422` rather than `400`: the request is well-formed and the id is real, so
+    /// nothing the caller can change makes this succeed — the *source* is unusable.
+    /// Answering `400` would send a reader to their own request, and answering `404`
+    /// would claim a session that demonstrably exists is absent.
+    ///
+    /// **Guessing a directory is not available as a fallback.** A workdir is the
+    /// `current_dir` of a spawned agent, so inventing one decides where arbitrary code
+    /// runs (`docs/api-design.md` § `POST /api/v1/sessions/adopt`).
+    #[error("That native session recorded no working directory, so it cannot be resumed")]
+    NativeSessionNotResumable,
+
+    /// No envagent is connected for the named environment.
+    ///
+    /// `503` and not `400`: the environment id is well-formed and may be correct, and
+    /// the fix is to bring a machine online rather than to edit the request. Distinct
+    /// from [`Self::LinkFailed`], which is an agent that would not start on a machine
+    /// that *is* reachable.
+    #[error("No environment is connected for '{0}'")]
+    EnvironmentUnreachable(String),
+
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
@@ -251,6 +281,30 @@ impl Error {
                 "NOT_IMPLEMENTED",
                 msg.clone(),
             ),
+            // The id is echoed because it is the client's own input and the whole fix:
+            // a wrong native id is indistinguishable from a store that has been
+            // pruned, and the message is where a user checks what they pasted.
+            Error::NativeSessionNotFound(id) => (
+                StatusCode::NOT_FOUND,
+                "NATIVE_SESSION_NOT_FOUND",
+                format!("That agent's native store on this environment holds no session '{id}'"),
+            ),
+            Error::NativeSessionNotResumable => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "NATIVE_SESSION_NOT_RESUMABLE",
+                "That native session recorded no working directory, so there is nowhere \
+                 to run it. Adopting it would mean choosing a directory for an agent to \
+                 write in, which only the recorded one can answer."
+                    .to_string(),
+            ),
+            Error::EnvironmentUnreachable(id) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ENVIRONMENT_UNREACHABLE",
+                format!(
+                    "No environment is connected for '{id}'. Sessions can only be read \
+                     from a machine whose envagent is reachable."
+                ),
+            ),
             Error::InvalidRequest(msg) => {
                 (StatusCode::BAD_REQUEST, "INVALID_REQUEST", msg.clone())
             }
@@ -435,6 +489,9 @@ mod tests {
             Error::AgentStartFailed(anyhow::anyhow!("x")),
             Error::SessionAlreadyPresent,
             Error::NotImplemented("x".into()),
+            Error::NativeSessionNotFound("x".into()),
+            Error::NativeSessionNotResumable,
+            Error::EnvironmentUnreachable("x".into()),
             Error::InvalidRequest("x".into()),
             Error::RouteNotFound,
             Error::MethodNotAllowed,
@@ -463,6 +520,9 @@ mod tests {
                 | Error::AgentStartFailed(_)
                 | Error::SessionAlreadyPresent
                 | Error::NotImplemented(_)
+                | Error::NativeSessionNotFound(_)
+                | Error::NativeSessionNotResumable
+                | Error::EnvironmentUnreachable(_)
                 | Error::InvalidRequest(_)
                 | Error::RouteNotFound
                 | Error::MethodNotAllowed
@@ -546,6 +606,64 @@ mod tests {
         assert_eq!(
             Error::NotImplemented("adopt".into()).status(),
             StatusCode::NOT_IMPLEMENTED
+        );
+    }
+
+    /// Adopting fails six ways, and **collapsing any pair sends a reader to the wrong
+    /// layer** (`docs/api-design.md` § `POST /api/v1/sessions/adopt`).
+    ///
+    /// The six fixes are: nothing to do, widen configuration, wrong id, already done,
+    /// unusable source, bring the machine online. Asserted as a set of distinct
+    /// `(status, code)` pairs rather than one assertion each, because the property is
+    /// that no two *share* an answer — which per-variant assertions cannot express and
+    /// which is the thing that would actually regress.
+    #[test]
+    fn the_six_adopt_failures_are_distinguishable_from_each_other() {
+        let failures = [
+            // 400: the recorded workdir is gone, or the agent is not one this build runs.
+            Error::InvalidRequest("no such agent".into()),
+            // 403: well-formed, and refused by policy. The fix is `config.toml`.
+            Error::Forbidden("outside the roots".into()),
+            // 404: the vendor's store has no such session.
+            Error::NativeSessionNotFound("9bdacb6e".into()),
+            // 409: already adopted. Two rows for one conversation is what the key refuses.
+            Error::SessionAlreadyPresent,
+            // 422: the source is unusable — real session, no recorded directory.
+            Error::NativeSessionNotResumable,
+            // 503: the machine is not there. Nothing about the request is wrong.
+            Error::EnvironmentUnreachable("env7fk2".into()),
+        ];
+
+        let mut seen = std::collections::HashSet::new();
+        for failure in &failures {
+            let (status, code, _) = failure.parts();
+            assert!(
+                seen.insert((status, code)),
+                "`{code}` ({status}) is shared with another adopt failure, so a client \
+                 cannot tell which of two fixes applies"
+            );
+        }
+
+        // And the statuses are the ones the spec names, since a client branches on them.
+        assert_eq!(
+            Error::NativeSessionNotFound("x".into()).status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            Error::NativeSessionNotResumable.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            Error::EnvironmentUnreachable("x".into()).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // A native-store miss must not be reported as a Sylph-store miss: same status,
+        // different code, and the code is what says which store to look in.
+        assert_eq!(Error::SessionNotFound.status(), StatusCode::NOT_FOUND);
+        assert_ne!(
+            Error::SessionNotFound.code(),
+            Error::NativeSessionNotFound("x".into()).code()
         );
     }
 
