@@ -392,6 +392,19 @@ plus three shapes worth knowing before writing any adapter:
   combination no known era emits — a per-file era flag is unsound rather than merely
   coarse, and it passes on 462 of 527 files, which is exactly long enough to be believed.
 
+- **A reproduction is a second implementation, and a second implementation of the thing
+  under test is not evidence about it.** *Measured while chasing a scripted-peer failure in
+  `codex`'s tests:* the peer was reproduced in Python to inspect it, where `json.dumps`
+  preserves insertion order while `serde_json` sorts keys — so the reproduction disagreed
+  with the artifact it was reproducing, and three wrong diagnoses followed from trusting it.
+  Printing the actual bytes settled it in one step.
+
+  This is the sibling of the census rule above, and the same reason applies: the defect is in
+  the *measuring* instrument, so it produces a confident answer rather than an error. When a
+  reproduction and the real thing disagree, the reproduction is the more likely to be wrong,
+  because it was written from an understanding of the artifact rather than from the artifact.
+  Read the bytes, the payload, or the file before building a model of it.
+
 - **A type in a vendor's event union is not a promise that anything emits it.** Grep
   the implementation for emit sites, not the types for declarations — a declared-only
   event ships an adapter branch that never fires, and a branch that never fires is
@@ -464,6 +477,32 @@ fails only when a turn runs; a nonexistent model behaves the same; and an unknow
 name is accepted silently, so the vendor offers no `UNSUPPORTED_FIELD` signal at all.
 Anything not enum-typed in the schema must be validated adapter-side against what the
 vendor enumerates, or a refused write is indistinguishable from an applied one.
+
+**And the silence is ambiguous, which is what makes adapter-side validation load-bearing
+rather than defensive.** *Measured over all 11 `thread/settings/update` calls in
+`docs/measurements/codex/captures/s04_settings.jsonl`:* 8 were accepted, and only **6**
+produced the `thread/settings/updated` notification that carries the refreshed surface.
+The two silent ones are `noSuchOption: "x"` and a `personality` already current — so an
+option name the vendor has never heard of answers exactly like a legitimate no-op: empty
+reply, no notification, no error. A caller cannot tell them apart at any layer, so a
+typo'd option id would be reported as applied. The adapter refusing an id outside its own
+enum is the only thing that catches it.
+
+The reply itself carries nothing to fall back on: `thread/settings/update` answers `{}`,
+and the refreshed surface arrives *only* as that notification. **`thread/read` is not the
+escape hatch, and its shape is a trap.** Its `result.thread` **omits** `model`,
+`reasoningEffort`, `approvalPolicy`, and `sandbox` entirely — absent, not null — while
+`modelProvider` *is* present. So a reader glancing at that object sees a settings-looking
+field and concludes the rest are there, and a presence check written to confirm it
+confirms the wrong thing.
+
+Two consequences for how such a wait is built. The notification is fast — measured at
+**0.7 to 5.4 ms** on local stdio across every notifying write — so a multi-second timeout
+is a thousandfold overestimate. And because a no-op notifies nothing, **the timeout is the
+expected path** rather than a degradation: it is what a user re-selecting the current value
+hits every time. A wait sized for a network round trip therefore charges that user the
+whole of it, and code that treats the timeout as an error reports a failure for a write
+that was correctly a no-op.
 
 **The third vendor adds the third variant: it neither refuses nor accepts, it silently
 substitutes.** *Measured on `pi` 0.84.3, `agent-session.js:1290`.* `setThinkingLevel`
@@ -1036,6 +1075,30 @@ Two harder forms, both of which pass indefinitely first:
   the agent's prose the whole time, so the spec named the thing and never observed
   it. A locator that passes for the wrong reason is worse than one that fails,
   because it retires the question.
+
+**A test that catches a race by luck stops catching it silently, and a later fix to that
+test is the likeliest thing to retire it.** Measured on `codex`: a test landed a frame in a
+window where the read loop dropped it, failing roughly one run in five. The fix to the
+*defect* was right; then the test's own shell escaping was fixed by moving its payload to a
+file — which removed the timing that made it fire. Re-measured afterwards with the defect
+deliberately restored: the test passed 8 of 8, the whole suite 3 of 3, and 3 of 3 again
+under concurrent load. Coverage of that property had gone from intermittent to **zero**, and
+the commit that did it cited 15 consecutive passes as evidence. The passes were real and
+evidence of nothing.
+
+Two rules, and the second is the general one:
+
+- **A property observable only through timing needs the window opened on purpose.** The
+  replacement peer emits the frame, *sleeps*, and only then answers the open, so the loop
+  provably sees it in the bad state. It fails 10 of 10 with the defect restored, and its
+  failure message names the cause. Same rule as "testing it streams needs a runner slower
+  than one render", one layer down.
+- **Before changing the mechanism a test depends on, ask which property each assertion is
+  standing on.** Two assertions in one test can rest on two different mechanisms, and
+  repairing one can retire the other with the suite staying green throughout. Split them so
+  they fail for different reasons — verified here by restoring the defect and watching the
+  new test fail 10/10 while the one beside it passed 6/6, which is what proves neither is
+  standing in for the other.
 
 **A collapsed subtree must report what it hides, or collapsing is lossy.** Hiding
 a delegation's work by default is only defensible if a failure three levels down is
