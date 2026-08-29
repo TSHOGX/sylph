@@ -220,6 +220,7 @@ export const zh: Dictionary = {
   "composer.slash.unavailable": "无法连接 agent，因此没有可用命令。",
   "composer.slash.none": "此 agent 没有可用的斜杠命令。",
   "composer.slash.noMatch": "没有匹配的命令。",
+  "composer.slash.regionLabel": "Agent 命令",
   "composer.slash.retry": "重试",
   "composer.agentDefault": "Agent 默认值",
   "composer.configureEllipsis": "配置……",
@@ -459,4 +460,83 @@ export const zh: Dictionary = {
   "shortcut.expandAll": "展开全部块",
   "shortcut.collapseAll": "折叠全部块",
   "shortcut.findInSession": "在会话中查找",
+
+  // 委派总览：把一个回合内所有委派放在同一条时间轴上比较。
+  //
+  // `overview.row.*` 是 `describe()` 拼装可访问名称时用的句子片段，以「，」连接。
+  // 英文用 ", "，中文用全角逗号——这是本地化而不是逐字翻译。
+  "overview.label": "委派总览",
+  "overview.hide": "收起 {count} 项委派",
+  "overview.compare": "比较 {count} 项委派",
+  "overview.list": "列出 {count} 项委派",
+  "overview.unrecorded":
+    "这个会话是从 agent 自己的文件里读出来的，那些文件不记录逐事件的时间——所以这里没有可计时或可比较的数据。下面的结构是完整的。",
+  "overview.orderLabel": "委派排序方式",
+  "overview.order.structure": "按结构",
+  "overview.order.duration": "最慢在前",
+  "overview.boundedAll":
+    "每一行都只是下界（{atLeast}）——回合结束时只保留了各委派的收尾时间，所以时长是按它转发出来的工作量算的。",
+  "overview.boundedSome":
+    "{count} 行中有 {bounded} 行只是下界（{atLeast}）——回合结束时只保留了各委派的收尾时间，所以时长是按它转发出来的工作量算的。",
+  "overview.boundedOne":
+    "{count} 行中有 {bounded} 行只是下界（{atLeast}）——回合结束时只保留了各委派的收尾时间，所以时长是按它转发出来的工作量算的。",
+  "overview.atLeast": "至少",
+  "overview.untimed": "{count} 项中有 {untimed} 项完全无法计时：没有任何转发事件可供测量。",
+  "overview.axisStart": "回合开始",
+  "overview.noAxis": "这个回合里没有任何委派同时报告了开始和结束，因此没有可比较的时间轴。",
+  "overview.depth": "第 {depth} 层",
+  "overview.slowest": "最慢",
+  "overview.timing.running": "进行中",
+  "overview.timing.untimed": "未计时",
+
+  // 状态词。「没有报告结束」是对被服务器关掉的委派的诚实说法：没人说它失败，
+  // 只是没人说过结果。
+  "overview.status.running": "进行中",
+  "overview.status.done": "已完成",
+  "overview.status.failed": "失败",
+  "overview.status.abandoned": "没有报告结束",
+
+  // 可访问名称的片段，顺序与 `describe()` 的输出一致。
+  "overview.row.took": "耗时 {elapsed}",
+  "overview.row.ranAtLeastBeforeTurnEnd": "在回合结束前至少运行了 {elapsed}",
+  "overview.row.ranAtLeastForwarded": "至少运行了 {elapsed}，按它转发出来的工作量计算",
+  "overview.row.instant": "时长未知，只记录了收尾时间",
+  "overview.row.longest": "这里最长的一项",
+  "overview.row.startedIn": "在第 {offset} 处开始",
+  "overview.row.startedWithTurn": "与回合同时开始",
+  "overview.row.nested": "嵌套 {depth} 层",
+  "overview.row.noInterior": "没有转发自己的任何事件",
+  // 「暂时」是关键：迟到的结果会写在拥有该轨迹的那个回合上，所以这一行之后仍
+  // 可能拿到结果。只有重启才让它成为终态。
+  "overview.row.unreported": "比它的回合活得更久，暂时还没有结果报告",
+  "overview.row.activate": "激活以聚焦",
+  "overview.row.separator": "，",
+
+  // 当 Sylph 无法驱动这个会话时，告诉用户它还能做什么。
+  "drive.label": "Sylph 对这个会话能做什么",
+  "drive.environmentUnreachable.headline": "那台机器没有连接。",
+  "drive.environmentUnreachable.detail":
+    "历史记录读的是 Sylph 自己的记录，所以完整的对话都在。但在那台机器回来之前，什么都发不出去。",
+  "drive.notOursToDrive.headline": "正在终端里运行。",
+  "drive.notOursToDrive.detail":
+    "这个 agent 不向第二方开放通道，所以 Sylph 只能跟随这个会话，无法向它发送内容。",
+  "drive.noAgent.headline": "这台机器上没有安装那个 agent。",
+  "drive.noAgent.detail": "历史记录照常可读。在那台机器上装好该 agent 的 CLI，会话就能继续。",
+  "drive.handshakeFailed.headline": "agent 没能启动。",
+  "drive.handshakeFailed.detail": "历史记录照常可读。发送消息会再试一次。",
+
+  "find.label": "筛选回合",
+  "timeline.delegationPath": "委派路径",
+  "timeline.toolResult": "工具结果",
+  "timeline.currentTurn": "当前回合",
+
+  "session.expandAll": "全部展开",
+  "session.collapseAll": "全部折叠",
+  "session.expandAllBlocks": "展开全部块",
+  "session.collapseAllBlocks": "折叠全部块",
+  "session.actions": "会话操作",
+  "session.filterTurnsEllipsis": "筛选回合……",
+  "session.copyWorkspacePath": "复制工作区路径",
+  "session.refreshTranscript": "刷新对话记录",
+  "sidebar.browseAllHistory": "浏览全部历史",
 };

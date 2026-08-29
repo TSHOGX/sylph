@@ -336,7 +336,7 @@ function TopBar() {
           className="focus-ring tap-target hidden w-full max-w-md items-center gap-2 rounded-lg border border-line bg-sunken px-2.5 py-1 text-left text-2xs text-ink-muted transition-colors hover:border-line-strong hover:bg-raised md:flex"
         >
           <SearchIcon size={14} />
-          <span className="flex-1">Search sessions and archive</span>
+          <span className="flex-1">{t("shell.search")}</span>
           {hint("search") && <Kbd>{hint("search")}</Kbd>}
         </button>
         <IconButton

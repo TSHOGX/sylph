@@ -358,6 +358,8 @@ export const en = {
   "composer.slash.unavailable": "The agent could not be reached, so it reports no commands.",
   "composer.slash.none": "This agent reports no slash commands.",
   "composer.slash.noMatch": "No command matches.",
+  // The menu's own region name, announced when a screen reader enters it.
+  "composer.slash.regionLabel": "Agent commands",
   "composer.slash.retry": "Retry",
   "composer.agentDefault": "Agent default",
   "composer.configureEllipsis": "Configure...",
@@ -654,6 +656,112 @@ export const en = {
   "shortcut.expandAll": "Expand all blocks",
   "shortcut.collapseAll": "Collapse all blocks",
   "shortcut.findInSession": "Find in session",
+
+  // The delegation overview: one time axis across every delegation in a turn.
+  //
+  // `overview.row.*` are fragments of one sentence assembled by `describe()` and joined
+  // with ", " — the row's accessible name. Fragments rather than one key because the
+  // sentence's *parts* are conditional, and each is an independent clause in both
+  // languages; `describe()`'s own comment fixes their order (identity, outcome, cost,
+  // position) and that order holds in Chinese too.
+  "overview.label": "Delegation overview",
+  "overview.hide": "Hide {count} delegations",
+  "overview.compare": "Compare {count} delegations",
+  // "Compare" promises durations, so a record that measures none must not make it.
+  // Opening is still worth it — the structure is there — so the verb changes.
+  "overview.list": "List {count} delegations",
+  "overview.unrecorded":
+    "This session was read from the agent\u2019s own files, which record no per-event timing \u2014 so there is nothing here to time or compare. The structure below is complete.",
+  "overview.orderLabel": "Order delegations by",
+  "overview.order.structure": "structure",
+  "overview.order.duration": "slowest first",
+  // Two counted caveats, kept apart because "no figure" and "a weak figure" send a
+  // reader to different places: the first looks like a bug, the second is read off the
+  // ≥ sign.
+  "overview.boundedAll":
+    "Every row is a lower bound ({atLeast}) \u2014 a settled turn keeps each delegation\u2019s closing time, so its span is measured from the work it forwarded.",
+  "overview.boundedSome":
+    "{bounded} of {count} rows are a lower bound ({atLeast}) \u2014 a settled turn keeps each delegation\u2019s closing time, so its span is measured from the work it forwarded.",
+  "overview.boundedOne":
+    "{bounded} of {count} rows is a lower bound ({atLeast}) \u2014 a settled turn keeps each delegation\u2019s closing time, so its span is measured from the work it forwarded.",
+  "overview.atLeast": "at least",
+  "overview.untimed":
+    "{untimed} of {count} cannot be timed at all: nothing was forwarded to measure from.",
+  "overview.axisStart": "turn start",
+  "overview.noAxis":
+    "No delegation in this turn reports both a start and an end, so there is no time axis to compare against.",
+  "overview.depth": "depth {depth}",
+  "overview.slowest": "slowest",
+  // The trailing figure on a row.
+  "overview.timing.running": "running",
+  "overview.timing.untimed": "untimed",
+
+  // Status words. Not `turn.*`: these describe a trajectory, and "never finished" is
+  // the honest reading of a delegation the server closed — nobody said it failed,
+  // only that nobody said.
+  "overview.status.running": "running",
+  "overview.status.done": "finished",
+  "overview.status.failed": "failed",
+  "overview.status.abandoned": "never finished",
+
+  // Accessible-name fragments, in the order `describe()` emits them.
+  "overview.row.took": "took {elapsed}",
+  "overview.row.ranAtLeastBeforeTurnEnd": "ran at least {elapsed} before its turn ended",
+  "overview.row.ranAtLeastForwarded":
+    "ran at least {elapsed}, measured from the work it forwarded",
+  "overview.row.instant": "duration unknown, only its closing time was recorded",
+  "overview.row.longest": "the longest here",
+  "overview.row.startedIn": "started {offset} in",
+  "overview.row.startedWithTurn": "started with the turn",
+  "overview.row.nested": "nested {depth} deep",
+  "overview.row.noInterior": "forwarded none of its own events",
+  // "Yet" is load-bearing: a late outcome is written against the turn that owns the
+  // trajectory, so this row can still acquire one. Only a restart makes it terminal.
+  "overview.row.unreported": "outlived its turn, no outcome reported yet",
+  "overview.row.activate": "activate to focus",
+  // The separator between those fragments. In the catalogue because punctuation is a
+  // locale property: Chinese uses a full-width comma, and a hardcoded ", " would put
+  // an ASCII comma and a space into a Chinese sentence.
+  "overview.row.separator": ", ",
+
+  // What Sylph can do with this session, when it cannot drive it. Exhaustive over
+  // `UnavailableReason`, so a reason added to the protocol is a compile error at the
+  // component rather than a session rendering no explanation. Separate from
+  // `composer.slash.*`, which answers the narrower "why is the slash menu empty" —
+  // same causes, but that surface explains a missing list and this one explains a
+  // session that cannot be sent to.
+  "drive.label": "What Sylph can do with this session",
+  "drive.environmentUnreachable.headline": "That machine is not connected.",
+  "drive.environmentUnreachable.detail":
+    "History reads from Sylph\u2019s own record, so the transcript is complete. Nothing can be sent until the machine is back.",
+  "drive.notOursToDrive.headline": "Running in a terminal.",
+  "drive.notOursToDrive.detail":
+    "This agent offers no channel to a second party, so Sylph can follow the session but cannot send to it.",
+  "drive.noAgent.headline": "That agent is not installed on this machine.",
+  "drive.noAgent.detail":
+    "History reads normally. Installing the agent\u2019s CLI there is what makes the session continuable.",
+  "drive.handshakeFailed.headline": "The agent would not start.",
+  "drive.handshakeFailed.detail": "History reads normally. Sending a message will try again.",
+
+  // The in-session filter (`Cmd+F`). Filters turns rather than highlighting matches.
+  "find.label": "Filter turns",
+  // Region names a screen reader announces. Not decorative: these are how a
+  // non-visual reader tells one part of a turn from another.
+  "timeline.delegationPath": "Delegation path",
+  "timeline.toolResult": "Tool result",
+  "timeline.currentTurn": "Current turn",
+
+  // Session header actions. The desktop pair and the phone menu name the same two
+  // actions, so they share keys — a second spelling would let the two surfaces drift.
+  "session.expandAll": "Expand all",
+  "session.collapseAll": "Collapse all",
+  "session.expandAllBlocks": "Expand all blocks",
+  "session.collapseAllBlocks": "Collapse all blocks",
+  "session.actions": "Session actions",
+  "session.filterTurnsEllipsis": "Filter turns...",
+  "session.copyWorkspacePath": "Copy workspace path",
+  "session.refreshTranscript": "Refresh transcript",
+  "sidebar.browseAllHistory": "Browse all history",
 } as const;
 
 /** Every key in the catalogue. Derived from English, which is the source. */

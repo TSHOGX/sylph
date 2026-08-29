@@ -102,7 +102,7 @@ export function SlashMenu({
     <ul
       id={listboxId}
       role="listbox"
-      aria-label="Agent commands"
+      aria-label={t("composer.slash.regionLabel")}
       className="max-h-64 overflow-y-auto overscroll-contain rounded-lg border border-line bg-raised py-1 shadow-lg"
     >
       {matches.map((command, index) => {

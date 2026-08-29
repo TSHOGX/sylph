@@ -273,7 +273,7 @@ export function WorkspaceSidebar() {
           icon={<PlusIcon size={14} />}
           className="w-full justify-start"
         >
-          New Workspace...
+          {t("sidebar.newWorkspaceEllipsis")}
         </Button>
       </div>
 
@@ -434,7 +434,7 @@ function GroupSection({
         </span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
         {pinned && (
-          <span aria-label="pinned" title={t("sidebar.pinned")} className="shrink-0 text-ink-muted">
+          <span aria-label={t("sidebar.pinned")} title={t("sidebar.pinned")} className="shrink-0 text-ink-muted">
             <PinIcon size={11} />
           </span>
         )}
@@ -501,7 +501,7 @@ function GroupSection({
                 className="tap-row flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-2xs text-ink-muted hover:bg-hover hover:text-ink focus-ring"
               >
                 <ArchiveIcon size={13} />
-                Browse all history
+                {t("sidebar.browseAllHistory")}
               </button>
             </li>
           )}

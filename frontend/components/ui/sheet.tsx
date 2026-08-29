@@ -29,6 +29,7 @@
  * re-render the whole subtree at touch-sampling rate.
  */
 
+import { useT } from "@/lib/i18n";
 import { useCallback, useRef, type ReactNode } from "react";
 import { useDialog } from "@/lib/use-dialog";
 import { IconButton } from "@/components/ui/button";
@@ -58,6 +59,7 @@ export function Sheet({
   children: ReactNode;
   actions?: ReactNode;
 }) {
+  const t = useT();
   const { ref, onKeyDown } = useDialog<HTMLDivElement>({ onClose });
   const panelRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ startY: number; startTime: number; offset: number } | null>(null);
@@ -116,7 +118,7 @@ export function Sheet({
     <div className="fixed inset-0 z-40 flex flex-col justify-end">
       <button
         type="button"
-        aria-label="Close"
+        aria-label={t("action.close")}
         onClick={onClose}
         className="animate-scrim absolute inset-0 cursor-default bg-ink/35 backdrop-blur-[1px]"
         tabIndex={-1}
@@ -182,6 +184,7 @@ export function Drawer({
   onClose: () => void;
   children: ReactNode;
 }) {
+  const t = useT();
   const { ref, onKeyDown } = useDialog<HTMLDivElement>({ onClose });
 
   return (
@@ -202,7 +205,7 @@ export function Drawer({
       </div>
       <button
         type="button"
-        aria-label="Close"
+        aria-label={t("action.close")}
         onClick={onClose}
         className="animate-scrim flex-1 cursor-default bg-ink/35 backdrop-blur-[1px]"
         tabIndex={-1}

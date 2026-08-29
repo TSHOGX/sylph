@@ -46,6 +46,7 @@ import dynamic from "next/dynamic";
 import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
 import type { Fidelity, StreamEvent } from "@/lib/api";
 import { formatTime } from "@/lib/format";
+import { useT } from "@/lib/i18n";
 import {
   buildRows,
   buildTree,
@@ -230,9 +231,10 @@ function FocusTrail({
   onFocus: (id: string) => void;
   onClear: () => void;
 }) {
+  const t = useT();
   const here = trail[trail.length - 1];
   return (
-    <nav aria-label="Delegation path" className="sticky top-0 z-10 bg-canvas/95 py-1.5 backdrop-blur">
+    <nav aria-label={t("timeline.delegationPath")} className="sticky top-0 z-10 bg-canvas/95 py-1.5 backdrop-blur">
       <ol className="flex flex-wrap items-center gap-1 text-2xs">
         <li>
           <button
@@ -995,12 +997,13 @@ function OrphanResult({
   // default still applies; once they toggle, their choice is what is remembered.
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const isOpen = expandAll ?? userOpen ?? status.failed;
+  const t = useT();
 
   if (!event.text) return null;
 
   return (
     <section
-      aria-label="Tool result"
+      aria-label={t("timeline.toolResult")}
       className={`border-l-2 pl-2.5 ${status.failed ? "border-danger-line" : "border-line"}`}
     >
       <div className="flex items-baseline gap-1.5 py-0.5 text-xs">

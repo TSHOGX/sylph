@@ -28,6 +28,7 @@ import {
 } from "@/lib/api";
 import { useSessionIdParam } from "@/lib/use-session-id-param";
 import { useT } from "@/lib/i18n";
+import type { MessageKey, Translate } from "@/lib/i18n/locale";
 import { ErrorBoundary } from "@/lib/error-boundary";
 import { formatTimestamp, sessionLabel } from "@/lib/format";
 import { densityClasses, useSettings } from "@/lib/settings";
@@ -377,13 +378,13 @@ export default function SessionPage() {
           {session.status === "running" && <SessionStatusBadge status={session.status} />}
           <div className="hidden shrink-0 items-center gap-1 md:flex">
             <Button variant="ghost" onClick={() => setExpandAll(expandAll === true ? null : true)}>
-              Expand all
+              {t("session.expandAll")}
             </Button>
             <Button
               variant="ghost"
               onClick={() => setExpandAll(expandAll === false ? null : false)}
             >
-              Collapse all
+              {t("session.collapseAll")}
             </Button>
           </div>
           {/* The same two actions plus the ones that had no home, folded into one
@@ -392,24 +393,24 @@ export default function SessionPage() {
               they were unreachable rather than merely inconvenient. */}
           <div className="shrink-0 md:hidden">
             <MenuButton
-              label="Session actions"
+              label={t("session.actions")}
               align="end"
               items={[
-                { label: "Expand all blocks", onSelect: () => setExpandAll(true) },
-                { label: "Collapse all blocks", onSelect: () => setExpandAll(false) },
+                { label: t("session.expandAllBlocks"), onSelect: () => setExpandAll(true) },
+                { label: t("session.collapseAllBlocks"), onSelect: () => setExpandAll(false) },
                 {
-                  label: "Filter turns...",
+                  label: t("session.filterTurnsEllipsis"),
                   separated: true,
                   onSelect: () => setFind((current) => (current === null ? "" : current)),
                 },
                 {
-                  label: "Copy workspace path",
+                  label: t("session.copyWorkspacePath"),
                   icon: <CopyIcon size={14} />,
                   onSelect: () =>
                     void navigator.clipboard.writeText(session.workdir).catch(() => {}),
                 },
                 {
-                  label: "Refresh transcript",
+                  label: t("session.refreshTranscript"),
                   icon: <RefreshIcon size={14} />,
                   onSelect: () => {
                     void queryClient.invalidateQueries({
@@ -420,7 +421,7 @@ export default function SessionPage() {
               ]}
             >
               {(trigger) => (
-                <IconButton label="Session actions" size={20} {...trigger}>
+                <IconButton label={t("session.actions")} size={20} {...trigger}>
                   <MoreIcon size={20} />
                 </IconButton>
               )}
@@ -462,7 +463,7 @@ export default function SessionPage() {
       </header>
 
       {find !== null && (
-        <FindBar value={find} onChange={setFind} onClose={() => setFind(null)} />
+        <FindBar value={find} onChange={setFind} onClose={() => setFind(null)} t={t} />
       )}
 
       {/* What Sylph can and cannot do with this session right now, when that is not
@@ -471,7 +472,7 @@ export default function SessionPage() {
           since nothing ever reset anything, so it described an absence as a feature on
           every one of those sessions forever. This says something that can actually
           change and that the user can sometimes act on. */}
-      <DriveState control={agent.control} connecting={agent.connecting} />
+      <DriveState control={agent.control} connecting={agent.connecting} t={t} />
 
       {/*
         `data-scroller` rather than being found by its utility class. `LiveTurn` needs
@@ -624,38 +625,34 @@ export default function SessionPage() {
  * intended and simply is not ours to drive; a sleeping laptop is a machine to wake.
  * `alert` interrupts a screen reader mid-sentence, which is for something gone wrong.
  */
-function DriveState({ control, connecting }: { control: Facet; connecting: boolean }) {
+function DriveState({
+  control,
+  connecting,
+  t,
+}: {
+  control: Facet;
+  connecting: boolean;
+  t: Translate;
+}) {
   if (control.available || connecting || !control.reason) return null;
 
   // Exhaustive over the closed union, so a reason added to the protocol is a compile
-  // error here rather than a session silently rendering no explanation.
-  const said: Record<UnavailableReason, { headline: string; detail: string }> = {
-    environment_unreachable: {
-      headline: "That machine is not connected.",
-      detail:
-        "History reads from Sylph's own record, so the transcript is complete. Nothing can be sent until the machine is back.",
-    },
-    not_ours_to_drive: {
-      headline: "Running in a terminal.",
-      detail:
-        "This agent offers no channel to a second party, so Sylph can follow the session but cannot send to it.",
-    },
-    no_agent: {
-      headline: "That agent is not installed on this machine.",
-      detail:
-        "History reads normally. Installing the agent's CLI there is what makes the session continuable.",
-    },
-    handshake_failed: {
-      headline: "The agent would not start.",
-      detail: "History reads normally. Sending a message will try again.",
-    },
+  // error here rather than a session silently rendering no explanation. The map holds
+  // catalogue key *stems* rather than sentences: the pair is always `.headline` and
+  // `.detail`, so one entry per reason cannot drift into naming two unrelated keys.
+  const stem: Record<UnavailableReason, string> = {
+    environment_unreachable: "drive.environmentUnreachable",
+    not_ours_to_drive: "drive.notOursToDrive",
+    no_agent: "drive.noAgent",
+    handshake_failed: "drive.handshakeFailed",
   };
-  const { headline, detail } = said[control.reason];
+  const headline = t(`${stem[control.reason]}.headline` as MessageKey);
+  const detail = t(`${stem[control.reason]}.detail` as MessageKey);
 
   return (
     <aside
       role="status"
-      aria-label="What Sylph can do with this session"
+      aria-label={t("drive.label")}
       className="shrink-0 border-b border-line bg-sunken px-3 py-1.5 text-2xs text-ink-soft md:px-4"
     >
       <span className="font-medium">{headline}</span>
@@ -681,10 +678,12 @@ function FindBar({
   value,
   onChange,
   onClose,
+  t,
 }: {
   value: string;
   onChange: (value: string) => void;
   onClose: () => void;
+  t: Translate;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => ref.current?.focus(), []);
@@ -692,7 +691,7 @@ function FindBar({
   return (
     <div className="flex shrink-0 items-center gap-2 border-b border-line bg-sunken px-4 py-1">
       <label htmlFor="find-in-session" className="text-3xs font-medium text-ink-muted">
-        Filter turns
+        {t("find.label")}
       </label>
       <input
         id="find-in-session"
@@ -981,6 +980,7 @@ function LiveTurn({
    */
   onSettled: (state: string) => void;
 }) {
+  const t = useT();
   const { events, status, settled } = useSSE({ turnId, enabled: isLive });
 
   // Report the close upward. A genuine external-system sync: the stream is the external
@@ -1004,7 +1004,7 @@ function LiveTurn({
   }, [events]);
 
   return (
-    <section aria-label="Current turn" className="border-t border-line pt-1">
+    <section aria-label={t("timeline.currentTurn")} className="border-t border-line pt-1">
       <Timeline
         events={events}
         fidelity={fidelity}
