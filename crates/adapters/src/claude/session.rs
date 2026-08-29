@@ -62,6 +62,7 @@ use super::requests::{ask_from, answer_payload, AskKind};
 use super::surface::{capabilities_from, config_from, models_from};
 use super::{Correlation, SETTABLE_PERMISSION_MODES, SUPPORTED_DIALOG_KINDS};
 use crate::process::{Child, Line, Spawn};
+use crate::now_ms;
 
 /// The vendor refused a control it understood.
 ///
@@ -300,13 +301,6 @@ pub struct ClaudeSession {
 /// `claude`'s `stream_event` envelopes carry **no timestamp at all** — printed and checked
 /// — so the adapter stamps arrival. [`Correlation::translate`] takes it as an argument
 /// rather than calling this, which is what keeps the projection a pure function.
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 /// Read the vendor's stdout forever, routing each line to the one thing that wants it.
 ///
 /// Three destinations, and the split is what keeps [`super::translate`] process-free:

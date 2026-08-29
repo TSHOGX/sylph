@@ -53,6 +53,7 @@ use crate::db::JournalStore;
 use crate::env::Environment;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::models::PendingRequest;
+use crate::models::now_ms;
 use sylph_protocol::{
     AgentInfo, AgentName, CapabilityFacets, EnvironmentId, EventStream, Facet, Fidelity,
     LinkFacets, NativeId, RequestedNativeId, Resolution, RunSpec, Session, SessionCapabilities,
@@ -1567,8 +1568,4 @@ impl LinkManager {
         };
         self.hub.publish_session(&session_id.encode(), event).await;
     }
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }

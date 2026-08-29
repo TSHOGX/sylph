@@ -26,6 +26,7 @@ use crate::models::Event;
 use crate::supervisor::TrajectoryOutcome;
 use crate::storage::cas::{self, BlobStore, Payload};
 use crate::storage::fold::{self, Delta, Folded};
+use crate::models::now_ms;
 
 /// One block as stored: a completed event plus how it streamed.
 #[derive(Debug, Clone)]
@@ -601,7 +602,7 @@ impl HistoryStore {
         .bind(session_id)
         .bind(authority)
         .bind(confirmation.safe_to_drop)
-        .bind(chrono::Utc::now().timestamp_millis())
+        .bind(now_ms())
         .bind(
             confirmation
                 .source
@@ -829,7 +830,7 @@ impl HistoryStore {
     /// meaningful however often passes run.
     pub async fn record_session_bytes(&self, session_id: &str) -> Result<SessionBytes> {
         let (bytes, blocks) = self.measure_session_bytes(session_id).await?;
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = now_ms();
 
         sqlx::query(
             "INSERT INTO session_bytes (

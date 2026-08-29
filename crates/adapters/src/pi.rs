@@ -54,6 +54,7 @@ use sylph_protocol::{
     Session, StoreFilter,
 };
 
+
 pub use rpc::{model_key, split_model_key, ConfigId, MODEL_KEY_SEPARATOR};
 pub use session::PiSession;
 pub use translate::{Correlation, Emission};
@@ -3310,6 +3311,7 @@ pub mod native {
 ///   handleInputLine(line)`), so `get_state` answers while a turn streams. That is what
 ///   makes reading the surface from the vendor mid-turn viable rather than a deadlock.
 pub mod session {
+    use crate::now_ms;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -4104,13 +4106,6 @@ pub mod session {
     /// every event shape is listed and none holds one — so the adapter stamps arrival. That
     /// is why [`translate::Correlation::translate`] takes the clock as an argument: a test
     /// that cannot fix the stamps cannot assert on ordering.
-    fn now_ms() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_millis() as i64)
-            .unwrap_or(0)
-    }
-
     /// One user message, with images inline and every other file named by path.
     ///
     /// pi takes images as `ImageContent` blocks and reads text files perfectly well with its

@@ -39,6 +39,7 @@ use tokio::sync::{mpsc, Mutex, Notify};
 
 use super::appserver::{self, method, notification, Decision};
 use crate::process::{self, Child, Line};
+use crate::now_ms;
 
 /// How long `set_config` waits for the vendor's confirming notification.
 ///
@@ -853,13 +854,6 @@ fn reply_key(id: &Value) -> String {
         Value::String(text) => text.clone(),
         other => other.to_string(),
     }
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// A scripted peer, for the tests below.

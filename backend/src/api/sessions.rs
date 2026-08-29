@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sylph_protocol::{AgentName, EnvironmentId, NativeId, SessionId};
+use crate::models::now_ms;
 
 use crate::{
     db::store::SessionFilter,
@@ -1001,7 +1002,7 @@ pub async fn adopt(
         )));
     }
 
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = now_ms();
     let record = crate::models::Session {
         id: session_id.clone(),
         workdir,

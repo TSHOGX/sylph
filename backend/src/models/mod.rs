@@ -8,6 +8,18 @@ pub use request::*;
 pub use session::*;
 pub use turn::*;
 
+/// Epoch milliseconds now, as every row in this module stores time.
+///
+/// `chrono` rather than `SystemTime`, matching what the store binds. The crate has it
+/// already, and it is the only clock the journal's `*_at_ms` columns ever see.
+///
+/// One copy. It was written out three times in this crate and inlined at seven more sites,
+/// which is ten places to change if the clock ever has to be injectable — and a test that
+/// wants to control time cannot, today, for exactly that reason.
+pub fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 /// Serialize a [`sylph_protocol::SessionId`] as its encoded string, and read it back.
 ///
 /// Used by every child row that names its session — [`Turn`], [`Event`],

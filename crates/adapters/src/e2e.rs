@@ -58,6 +58,7 @@ use sylph_protocol::{
     SubagentSpec, TurnInput,
 };
 use tokio::sync::{mpsc, Mutex};
+use crate::now_ms;
 
 /// The name this adapter answers to.
 ///
@@ -468,13 +469,6 @@ impl Ev {
 }
 
 /// Epoch milliseconds now.
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 impl E2eSession {
     fn new(native_id: NativeId) -> Self {
         // Bounded, and generously: `bulk` emits 1000 events as fast as it can, and a

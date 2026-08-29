@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::time::Duration;
 use tokio_stream::{self as stream, StreamExt};
+use crate::models::now_ms;
 
 use crate::{
     attachments,
@@ -89,7 +90,7 @@ pub async fn create(
         .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
         .collect();
 
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = now_ms();
     let turn = Turn {
         id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),

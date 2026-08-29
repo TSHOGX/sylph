@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
 
 use crate::models::Event;
+use crate::models::now_ms;
 
 pub mod seq;
 
@@ -278,15 +279,6 @@ impl StreamEvent {
             started_at_ms: None,
         }
     }
-}
-
-/// Epoch milliseconds now.
-///
-/// Module-local rather than shared: `crates/protocol` deliberately carries no `chrono`
-/// (`sylph_protocol` § Not a runtime), so the one place both sides could hold this is the
-/// one place it may not live.
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 /// Live fan-out for one in-flight turn.

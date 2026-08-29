@@ -40,6 +40,22 @@ pub mod process;
 #[cfg(feature = "e2e")]
 pub mod e2e;
 
+/// Epoch milliseconds now.
+///
+/// `SystemTime` rather than `chrono`, because this crate has no `chrono` and does not need
+/// one: every timestamp the protocol carries is an `i64` of epoch millis
+/// (`sylph_protocol` § Not a runtime). A pre-1970 clock yields `0` rather than a negative
+/// stamp, which is a state nothing here can do anything useful about.
+///
+/// One copy. It was written out four times — once per adapter plus the fixture,
+/// byte-identical — which is four places to look when a stamp is wrong and four to fix.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// One agent by name, or `None` when its CLI is absent.
 ///
 /// Takes `&str` rather than [`sylph_protocol::AgentName`] deliberately: that type's

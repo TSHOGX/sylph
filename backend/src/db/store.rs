@@ -7,6 +7,7 @@ use crate::error::{Error, Result};
 use crate::events::data_from_column;
 use crate::models::{Event, PendingRequest, Session, Turn};
 use sylph_protocol::SessionId;
+use crate::models::now_ms;
 
 #[derive(Clone)]
 pub struct JournalStore {
@@ -1488,12 +1489,6 @@ impl JournalStore {
         .map_err(Error::Database)?;
         Ok(result.rows_affected())
     }
-}
-
-/// Current wall-clock time in milliseconds, the unit used by every `*_at_ms`
-/// column in the schema.
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 #[cfg(test)]

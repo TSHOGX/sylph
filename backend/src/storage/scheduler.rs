@@ -34,6 +34,7 @@ use crate::env::Environment;
 use crate::storage::history::HistoryStore;
 use crate::storage::retention::{self, Resolved};
 use sylph_protocol::SessionId;
+use crate::models::now_ms;
 
 /// How many sessions one pass examines.
 ///
@@ -204,7 +205,7 @@ impl RetentionScheduler {
         };
 
         let mut report = PassReport {
-            ran_at_ms: chrono::Utc::now().timestamp_millis(),
+            ran_at_ms: now_ms(),
             ..PassReport::default()
         };
 

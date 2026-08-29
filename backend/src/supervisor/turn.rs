@@ -19,6 +19,7 @@ use tracing::{debug, error, info, warn};
 use crate::db::JournalStore;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::links::LinkManager;
+use crate::models::now_ms;
 
 /// Everything needed to run one turn.
 pub struct TurnRequest {
@@ -422,7 +423,7 @@ pub(crate) fn server_event(kind: &str, text: String, data: Option<serde_json::Va
         is_error: false,
         stability: "stable".to_string(),
         source: "server".to_string(),
-        created_at_ms: chrono::Utc::now().timestamp_millis(),
+        created_at_ms: now_ms(),
         // Server-authored, so it happens once, now.
         started_at_ms: None,
     }
