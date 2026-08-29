@@ -2209,9 +2209,14 @@ mod tests {
 
         // Our first request is id 1, so the peer raises its approval as id 1 too — the
         // collision this test exists for.
+        // **Emitted *after* the open reply, and after a delay**, so the thread id is
+        // provably stored by the time this frame is read. That decoupling is deliberate:
+        // this test is about the *id space* colliding, and the sibling test below is about
+        // the *timing* window. One test was covering both properties and silently stopped
+        // covering the second one when the payload moved to a file.
         let script = SCRIPTED_APP_SERVER.replace(
-            "# COLLIDING_SERVER_REQUEST",
-            &format!("cat {}; printf '\\n'", frame.display()),
+            "# AFTER_OPEN_REPLY",
+            &format!("sleep 0.2; cat {}; printf '\\n'", frame.display()),
         );
 
         let mut session = open_against(&script).await.expect("the peer opens");
@@ -2230,6 +2235,74 @@ mod tests {
             SessionMessage::Request(request) => assert_eq!(request.id, "1"),
             other => panic!("expected the approval as a Request, got {other:?}"),
         }
+        let _ = std::fs::remove_file(&frame);
+    }
+
+    /// **A frame arriving before the open reply is published, not dropped.**
+    ///
+    /// The peer emits the approval **first**, then sleeps, and only then answers
+    /// `thread/start`. So the read loop provably sees it while `State::thread` is still
+    /// `None` — the window is opened on purpose rather than raced into, which is what makes
+    /// this deterministic where its sibling was luck.
+    ///
+    /// That distinction is the whole reason this test exists. `read_loop` used to build its
+    /// `Translator` only once the thread id was known, and the frame was dropped with nothing
+    /// reporting it. The collision test caught that about one run in five, then stopped
+    /// catching it at all once the payload moved to a file — a test that catches a race by
+    /// luck stops catching it the moment anything nearby changes, and nothing reports that it
+    /// stopped. `AGENTS.md` states the rule one layer up: testing "it streams" needs a runner
+    /// slower than one render, so testing "a frame arrives before the id is stored" needs a
+    /// peer that emits into that window on purpose.
+    ///
+    /// **Asserts the frame is published, not merely late.** Ordering alone would pass against
+    /// a version that deferred it forever, which is the same failure the defect had.
+    #[tokio::test]
+    async fn a_frame_arriving_before_the_open_reply_is_published() {
+        let frame = std::env::temp_dir().join(format!("sylph-codex-early-{}", std::process::id()));
+        std::fs::write(&frame, serde_json::to_string(&approval_frame(0)).unwrap()).unwrap();
+
+        // The order is the test: frame, then delay, then the reply `open` is waiting on.
+        let script = SCRIPTED_APP_SERVER.replace(
+            "# BEFORE_OPEN_REPLY",
+            &format!("cat {}; printf '\\n'; sleep 0.3", frame.display()),
+        );
+
+        let mut session = open_against(&script)
+            .await
+            .expect("the open still succeeds; the reply is late, not absent");
+        let mut stream = session.events().expect("the stream is yielded once");
+
+        let message = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::StreamExt::next(&mut stream),
+        )
+        .await
+        .expect(
+            "a frame emitted before the open reply must still be published — `read_loop` \
+             gating its translator on `State::thread` drops it silently, and the session \
+             then waits forever on an ask no client ever saw",
+        )
+        .expect("the stream is open")
+        .expect("the frame is not an error");
+
+        match message {
+            SessionMessage::Request(request) => {
+                assert_eq!(request.id, "0");
+                // Published *whole*, not as a husk: the approval is unanswerable without the
+                // decisions the vendor offered, so a frame that arrived stripped would be as
+                // useless as one that never arrived.
+                let offered: Vec<&str> = request.options.iter().map(|o| o.id.as_str()).collect();
+                assert_eq!(offered, ["accept", "acceptWithExecpolicyAmendment", "cancel"]);
+            }
+            other => panic!("expected the early approval as a Request, got {other:?}"),
+        }
+
+        // And the session is usable afterwards, so recovering the frame did not cost the
+        // open: the thread id landed even though a frame overtook it.
+        assert_eq!(
+            session.native_id().as_str(),
+            "01a0460c-c359-7ed3-9e13-212c0a33d6c0"
+        );
         let _ = std::fs::remove_file(&frame);
     }
 
@@ -2317,9 +2390,11 @@ mod tests {
             printf '{"id":%s,"result":{"data":[{"id":"gpt-5.6-sol","displayName":"GPT-5.6-Sol","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"high"}]}]}}\n' "$id"
             ;;
           *'"method":"thread/start"'*|*'"method":"thread/resume"'*)
+            # BEFORE_OPEN_REPLY — emits into the window where `State::thread` is still
+            # `None`, on purpose. See `a_frame_arriving_before_the_open_reply_is_published`.
             printf '{"id":%s,"result":{"thread":{"id":"01a0460c-c359-7ed3-9e13-212c0a33d6c0"},"model":"gpt-5.6-sol","reasoningEffort":"high","approvalPolicy":"never","sandbox":{"type":"workspaceWrite"}}}\n' "$id"
             printf '{"method":"thread/started","params":{"thread":{"id":"01a0460c-c359-7ed3-9e13-212c0a33d6c0"}}}\n'
-            # COLLIDING_SERVER_REQUEST
+            # AFTER_OPEN_REPLY
             ;;
           *'"method":"turn/start"'*)
             printf '{"id":%s,"result":{"turn":{"id":"01a0460c-c3be-7850-8d27-cac444167b01","status":"inProgress"}}}\n' "$id"
