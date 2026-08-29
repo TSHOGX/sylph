@@ -1725,6 +1725,34 @@ spends real tokens and only observes whatever shapes one live turn produces, so 
   counted for every session holding it, which is the right attribution for "who is
   responsible" and the wrong number for "how full is my disk". Anything wanting the
   second has to measure the filesystem.
+- **A swept trajectory close can be lost by a client that stops listening at terminal.**
+  *Measured on the wire 2026-08-29, and this is a product bug rather than a test one.*
+  `TurnCloser::close` commits the turn row, returns the session to idle, then closes
+  whatever trajectories the turn left open, then emits its terminal `status` frame. On a
+  real turn those last two are **seq 22 and seq 23** — the sweep's own
+  `subagent`/`completed` arrives *before* the frame that announces the turn is over.
+
+  The client ends this tab's claim on a turn as soon as *history* reports it terminal,
+  which happens on the turn row — before the sweep. So `LiveTurn` unmounts, the stream
+  closes, and seq 22 is dropped. Reproduced by delaying the sweep 1500ms: a stranded
+  delegation rendered **running** for the full 20s deadline, and the history refetch could
+  not repair it because it fires on the same early signal and reads a journal the sweep has
+  not written yet. At natural speed seq 22 wins the race, which is why this has never been
+  seen — the delegation specs pass 156/156 with the bug present.
+
+  A fix was attempted and reverted as out of scope. Keying the claim, the connection
+  lifetime, and the history refetch on the stream's own announcement took 11 of 22 specs
+  from failing to passing under the delay, but it cascaded: `watchedTurnId` also nulls from
+  the same history signal, the turn-status query ended up with no consumer at all, and the
+  change reached 108 lines rewriting the page's whole turn-lifecycle model. It also needs a
+  bounded grace, because a connection down for the whole turn produces no frame and a claim
+  waiting for one would never expire — which would stop an agent-initiated turn from ever
+  being adopted, the failure the claim's expiry exists to prevent.
+
+  What the fix has to satisfy, for whoever takes it: hold the stream open across the gap
+  between "history says terminal" and "the sweep has finished"; expire the claim anyway when
+  no frame arrives; and leave the turn-status poll a real backstop rather than dead code.
+
 - ✅ **`e2e/delegation.spec.ts` was timing-sensitive under full-suite load.** Measured
   over nine runs of the file after the four-worktree merge: three runs had one or two
   failures and six were clean, and the failing spec was a *different* one each time.
@@ -1736,12 +1764,19 @@ spends real tokens and only observes whatever shapes one live turn produces, so 
   identically, and running one spec with `-g` is a different measurement from running
   its file.
 
-  The cause was that the client learned a turn had ended by *polling the turn row*,
-  which commits before the sweep. `TurnCloser::close` emits a `status` frame carrying
-  `{"state": …}` after the sweep, and the client discarded it — so `useSSE` now reads
-  it and the page settles on the pushed signal, with the poll demoted to a 20s
-  backstop. That also retired ~40 requests a minute per running turn. The full suite
-  passes 156/156.
+  Two changes, and the first is smaller than it first looked. The client learned a turn had
+  ended by *polling the turn row* every 1500ms; `TurnCloser::close` emits a `status` frame
+  after the sweep, and the client discarded it, so `useSSE` now reads it and the page
+  settles on the pushed signal with the poll demoted to a 20s backstop — retiring ~40
+  requests a minute per running turn. That is worth having on its own and it did **not**
+  close the race: the client still ends its claim on the turn at terminal, so the pushed
+  signal can arrive after nothing is listening. The entry above this one records what
+  remains.
+
+  What removed the flakiness from these specs is the second change: they now wait on
+  something the sweep *produces* — the stranded delegation reading "never finished" — rather
+  than on `Stop` disappearing, which means terminal. That is a fact the specs already assert
+  elsewhere, so no product surface exists for the test's benefit.
 
 - **Native sessions reachable on this machine, measured 2026-08-29:** 2789 across the
   three stores — `claude` 1000, `codex` 1258, `pi` 531 — through
