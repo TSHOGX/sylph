@@ -120,8 +120,8 @@ success. That last one has its own paragraph in § A refused set because it ship
 
 **Dictating the id is the preferred path and is already how it works.** *Measured
 2026-08-27:* `claude`'s adapter mints a UUID and passes `--session-id`
-(`adapters/claude/adapter.py:425`); `claude`, `pi`, and `gemini` accept the flag;
-`codex` assigns its own and reports it. Dictating means the server knows a session's
+(`crates/adapters/src/claude/mod.rs`); `claude` and `pi` accept the flag, and `codex`
+assigns its own and reports it. Dictating means the server knows a session's
 identity before the first event, so nothing has to correlate afterwards.
 
 An adapter that cannot dictate reports the vendor's id on `open`, and the server

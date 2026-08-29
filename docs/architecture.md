@@ -159,9 +159,9 @@ present equal-length bars as measurements.
 *Decision.* A session's id is the triple, and there is no Sylph-minted UUID.
 
 The evidence is better than the previous design assumed. *Measured 2026-08-27:*
-`claude`'s adapter already mints a UUID and hands it to the vendor with
-`--session-id` (`adapters/claude/adapter.py:425`); `claude`, `pi`, and `gemini` all
-accept `--session-id`; `codex` and `opencode` assign their own and report it. So the
+`claude`'s adapter mints a UUID and hands it to the vendor with `--session-id`
+(`crates/adapters/src/claude/mod.rs`); `claude` and `pi` both accept the flag, and
+`codex` assigns its own and reports it. So the
 native id is available to Sylph for every agent, either by dictation or on the first
 frame, and a second Sylph id is pure redundancy — plus a permanent invitation to
 compare ids from two spaces, which is silently always false (`AGENTS.md` records the
