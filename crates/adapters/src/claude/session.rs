@@ -940,7 +940,7 @@ fn build_content(text: &str, attachments: &[String]) -> Value {
     let mut images: Vec<(&String, &'static str)> = Vec::new();
     let mut others: Vec<&String> = Vec::new();
     for path in attachments {
-        match image_mime(path) {
+        match crate::native::image_mime(std::path::Path::new(path)) {
             Some(mime) => images.push((path, mime)),
             None => others.push(path),
         }
@@ -984,34 +984,6 @@ fn prefix_paths(paths: &[&String], text: &str) -> String {
     lines.push(String::new());
     lines.push(text.to_string());
     lines.join("\n")
-}
-
-/// Sniff the magic bytes.
-///
-/// **The header, not the extension.** A file's name is what a user typed and a wrong guess
-/// here sends a binary blob as text — or worse, base64-encodes a text file as an image the
-/// model cannot read.
-fn image_mime(path: &str) -> Option<&'static str> {
-    let head = {
-        use std::io::Read;
-        let mut file = std::fs::File::open(path).ok()?;
-        let mut head = [0u8; 12];
-        let read = file.read(&mut head).ok()?;
-        head[..read].to_vec()
-    };
-    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Some("image/png");
-    }
-    if head.starts_with(b"\xff\xd8\xff") {
-        return Some("image/jpeg");
-    }
-    if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
-        return Some("image/gif");
-    }
-    if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
-        return Some("image/webp");
-    }
-    None
 }
 
 #[cfg(test)]

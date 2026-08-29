@@ -36,6 +36,7 @@
 
 import { useMemo, useState } from "react";
 import type { Fidelity } from "@/lib/api";
+import { formatDuration } from "@/lib/format";
 import { formatParts, useT } from "@/lib/i18n";
 import type { MessageKey, Translate } from "@/lib/i18n/locale";
 import {
@@ -481,18 +482,4 @@ function describe(row: WaterfallRow, name: string, t: Translate): string {
   // The separator comes from the catalogue: Chinese uses a full-width comma, so a
   // hardcoded ", " would render an ASCII comma and a stray space mid-sentence.
   return parts.join(t("overview.row.separator"));
-}
-
-/**
- * Duration, at the precision a reader can act on.
- *
- * Kept local rather than imported from the timeline: this one has to render a *span*
- * of an axis as well as an elapsed time, and 0ms is a legitimate value here where in
- * the timeline it would mean a missing measurement.
- */
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const minutes = Math.floor(ms / 60_000);
-  return `${minutes}m ${Math.round((ms % 60_000) / 1000)}s`;
 }

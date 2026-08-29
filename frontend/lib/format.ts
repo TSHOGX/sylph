@@ -32,6 +32,27 @@ export function formatRelative(ms: number | null | undefined): string {
 }
 
 /** Human-readable byte size for attachment rows. */
+/**
+ * An elapsed duration, at the precision a reader can act on.
+ *
+ * Sub-second is rounded to whole milliseconds. The two copies this replaces differed by
+ * exactly that — one rendered `1.5ms` where the other rendered `2ms` — and they were the
+ * timeline card and the delegation overview, the two surfaces that describe *one*
+ * delegation's duration. So the same node read differently depending on which one you
+ * looked at.
+ *
+ * `0ms` is a legitimate value: a delegation whose start and close land in the same
+ * millisecond really did take under one. Whether a duration is *knowable* is a separate
+ * question, decided before this is called — `lib/timeline-waterfall.ts` holds that gate,
+ * and this function never sees an unmeasurable span.
+ */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  return `${minutes}m ${Math.round((ms % 60_000) / 1000)}s`;
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;

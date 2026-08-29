@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use sylph_protocol::{
-    Event, EventKind, EventStream, Fidelity, NativeId, NativeSummary, Phase, SessionMessage,
-    StoreFilter,
+    normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeId, NativeSummary, Phase,
+    SessionMessage, StoreFilter,
 };
 
 use crate::native::{candidates, epoch_millis_from_iso, for_each_json_line, SessionCandidate};
@@ -1493,7 +1493,7 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
             let Some(actual) = &header.workdir else {
                 continue;
             };
-            if normalize(actual) != normalize(wanted) {
+            if normalize_workdir(actual) != normalize_workdir(wanted) {
                 continue;
             }
         }
@@ -1547,10 +1547,6 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
 }
 
 /// A trailing slash is not a different directory.
-fn normalize(path: &str) -> &str {
-    path.trim_end_matches('/')
-}
-
 /// One listing row's worth of header, from the file's first line.
 ///
 /// # The header is one line, and reading a second would be reading the parent's

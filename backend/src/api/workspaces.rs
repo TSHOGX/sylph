@@ -152,19 +152,17 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
 
 /// Drop trailing separators so `/tmp` and `/tmp/` are one workspace.
 ///
-/// Grouping is by string, not by inode: two spellings of the same directory
-/// would otherwise appear as two spaces in the sidebar. Root is preserved.
+/// Grouping is by string, not by inode: two spellings of the same directory would
+/// otherwise appear as two rows in the sidebar. Root is preserved.
 ///
-/// Shared with the archive endpoints, which compare an archived session's
-/// recorded `cwd` against a requested workspace path. Both sides must normalize
-/// identically or a trailing slash would silently hide a directory's history.
+/// [`sylph_protocol::normalize_workdir`] is the rule, and it is shared with the adapters
+/// for a reason this function used to demonstrate: the adapters compare a session's
+/// recorded workdir against a requested one when enumerating a native store, so the two
+/// sides must normalize identically or a trailing slash silently hides a directory's
+/// history. There were four copies and the adapters' three disagreed with this one about
+/// the filesystem root.
 pub fn normalize(workdir: &str) -> String {
-    let trimmed = workdir.trim_end_matches('/');
-    if trimmed.is_empty() {
-        "/".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    sylph_protocol::normalize_workdir(workdir).to_string()
 }
 
 /// Last path component, for display.

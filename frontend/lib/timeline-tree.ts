@@ -649,7 +649,14 @@ function ownTokens(event: StreamEvent): { input: number; output: number } | null
   return { input: input ?? 0, output: output ?? 0 };
 }
 
-function numeric(source: Record<string, unknown>, keys: string[]): number | undefined {
+/**
+ * The first finite number among `keys`, or `undefined`.
+ *
+ * Exported because the timeline renders the same token counts this module folds, and a
+ * second copy read the same payloads by the same keys — so a vendor spelling added to one
+ * would be missing from the other, which reads as a missing figure rather than as a bug.
+ */
+export function numeric(source: Record<string, unknown>, keys: string[]): number | undefined {
   for (const key of keys) {
     const value = source[key];
     if (typeof value === "number" && Number.isFinite(value)) return value;

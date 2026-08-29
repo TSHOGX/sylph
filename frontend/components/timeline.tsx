@@ -45,11 +45,12 @@
 import dynamic from "next/dynamic";
 import { memo, useCallback, useMemo, useState, type ReactElement } from "react";
 import type { Fidelity, StreamEvent } from "@/lib/api";
-import { formatTime } from "@/lib/format";
+import { formatDuration, formatTime } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import {
   buildRows,
   buildTree,
+  numeric,
   pathTo,
   trajectoryName,
   trajectoryReport,
@@ -651,13 +652,6 @@ function RollupSummary({ node }: { node: TimelineNode }) {
 // overview's `aria-label` would then stop matching the card's region name — a
 // divergence no type checks and no test would report.
 
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const minutes = Math.floor(ms / 60_000);
-  return `${minutes}m ${Math.round((ms % 60_000) / 1000)}s`;
-}
-
 
 function TimelineRowView({
   row,
@@ -1071,14 +1065,6 @@ function StatusLine({ event }: { event: StreamEvent }) {
       {event.text}
     </p>
   );
-}
-
-function numeric(source: Record<string, unknown>, keys: string[]): number | undefined {
-  for (const key of keys) {
-    const value = source[key];
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-  }
-  return undefined;
 }
 
 function compact(value: number): string {

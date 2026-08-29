@@ -195,6 +195,28 @@ pub struct StoreFilter {
     pub limit: Option<usize>,
 }
 
+/// Normalize a workdir for comparison: trailing separators dropped, root preserved.
+///
+/// One function because [`StoreFilter::workdir`] states one rule, and it was written out
+/// three times — once per adapter, byte-identical — plus a fourth time in the server with
+/// a **different** root case. That divergence is why this preserves `/`: an adapter's copy
+/// trimmed it to `""`, so a session whose workdir is the filesystem root compared equal to
+/// one with no workdir at all. Harmless while both sides of a comparison used the same
+/// copy, and exactly the kind of thing that stops being harmless when only one of four is
+/// changed.
+///
+/// Comparison only. This is not a containment check and not a canonicalization — a path
+/// reaching an adapter has already been bounded by the envagent
+/// ([`RunSpec::workdir`]), and only the machine holding a path can resolve it.
+pub fn normalize_workdir(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/"
+    } else {
+        trimmed
+    }
+}
+
 /// One row of "what is on this machine", cheap enough to list without parsing.
 ///
 /// [`Adapter::enumerate`] is what makes adopt and watch offerable in a UI rather than
@@ -518,4 +540,33 @@ pub trait Adapter: Send + Sync {
     /// fact. An adapter that implements this by parsing each session has not implemented
     /// it.
     async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Trailing separators are dropped and the filesystem root survives.
+    ///
+    /// The root case is the reason this function exists rather than four copies. Three of
+    /// those trimmed `/` to `""`, which made a session whose workdir *is* the root compare
+    /// equal to one that recorded no workdir at all — invisible while both sides of a
+    /// comparison used the same copy, and a silent mismatch the moment one of four changed.
+    #[test]
+    fn normalizing_a_workdir_drops_trailing_slashes_and_keeps_the_root() {
+        assert_eq!(normalize_workdir("/w/app/"), "/w/app");
+        assert_eq!(normalize_workdir("/w/app"), "/w/app");
+        assert_eq!(normalize_workdir("/w/app///"), "/w/app");
+        // The divergence this replaced.
+        assert_eq!(normalize_workdir("/"), "/");
+        assert_eq!(normalize_workdir("///"), "/");
+        assert_eq!(normalize_workdir(""), "/");
+    }
+
+    /// A prefix is not a match, which is the substring bug `StoreFilter::workdir` records.
+    #[test]
+    fn normalizing_does_not_make_a_sibling_directory_equal() {
+        assert_ne!(normalize_workdir("/w/app-old"), normalize_workdir("/w/app"));
+        assert_ne!(normalize_workdir("/w/app/sub"), normalize_workdir("/w/app"));
+    }
 }

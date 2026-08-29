@@ -2060,8 +2060,8 @@ pub mod native {
     use anyhow::{anyhow, Context, Result};
     use serde_json::{json, Value};
     use sylph_protocol::{
-        Event, EventKind, EventStream, Fidelity, NativeId, NativeSummary, Phase, SessionMessage,
-        StoreFilter,
+        normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeId, NativeSummary, Phase,
+        SessionMessage, StoreFilter,
     };
 
     use crate::native::{
@@ -2973,7 +2973,7 @@ pub mod native {
                 let Some(actual) = &header.workdir else {
                     continue;
                 };
-                if normalize(actual) != normalize(wanted) {
+                if normalize_workdir(actual) != normalize_workdir(wanted) {
                     continue;
                 }
             }
@@ -3023,10 +3023,6 @@ pub mod native {
     }
 
     /// A trailing slash is not a different directory.
-    fn normalize(path: &str) -> &str {
-        path.trim_end_matches('/')
-    }
-
     /// The last timestamped record in a file, from its tail.
     ///
     /// A window rather than a parse, for the reason [`enumerate`] states. The first line of
@@ -4128,7 +4124,7 @@ pub mod session {
         let mut images = Vec::new();
         let mut named = Vec::new();
         for path in attachments {
-            match image_mime(path) {
+            match crate::native::image_mime(std::path::Path::new(path)) {
                 Some(mime) => match std::fs::read(path) {
                     Ok(bytes) => images.push(json!({
                         "type": "image",
@@ -4157,34 +4153,6 @@ pub mod session {
         body.push('\n');
         body.push_str(text);
         (body, images)
-    }
-
-    /// An image's MIME type from its **magic bytes**, or `None` for anything else.
-    ///
-    /// Sniffed rather than taken from the extension: a mislabelled `.png` sent as an image
-    /// block is a provider error a user cannot act on, while a correctly-typed file with the
-    /// wrong suffix is common. The four types are the ones pi's `ImageContent` accepts.
-    fn image_mime(path: &str) -> Option<&'static str> {
-        let mut head = [0u8; 12];
-        let read = {
-            use std::io::Read;
-            let mut file = std::fs::File::open(path).ok()?;
-            file.read(&mut head).ok()?
-        };
-        let head = &head[..read];
-        if head.starts_with(b"\x89PNG\r\n\x1a\n") {
-            return Some("image/png");
-        }
-        if head.starts_with(b"\xff\xd8\xff") {
-            return Some("image/jpeg");
-        }
-        if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
-            return Some("image/gif");
-        }
-        if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
-            return Some("image/webp");
-        }
-        None
     }
 
 

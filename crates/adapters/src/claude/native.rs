@@ -45,8 +45,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use sylph_protocol::{
-    Event, EventKind, EventStream, Fidelity, NativeId, NativeSummary, Phase, SessionMessage,
-    StoreFilter,
+    normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeId, NativeSummary, Phase,
+    SessionMessage, StoreFilter,
 };
 
 use super::translate::Correlation;
@@ -109,7 +109,7 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
             let Some(actual) = &summary.workdir else {
                 continue;
             };
-            if normalize(actual) != normalize(wanted) {
+            if normalize_workdir(actual) != normalize_workdir(wanted) {
                 continue;
             }
         }
@@ -135,10 +135,6 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
 }
 
 /// A trailing slash is not a different directory.
-fn normalize(path: &str) -> &str {
-    path.trim_end_matches('/')
-}
-
 /// Whether this path is a session's own transcript, as opposed to a delegate's.
 ///
 /// A delegate is **not** a session and must not be enumerated as one. That is measured
@@ -1929,11 +1925,11 @@ mod tests {
     /// also returned `/w/app-old` and every subdirectory.
     #[test]
     fn the_workdir_filter_does_not_match_a_sibling_directory() {
-        assert_eq!(normalize("/w/app/"), "/w/app");
-        assert_eq!(normalize("/w/app"), "/w/app");
+        assert_eq!(normalize_workdir("/w/app/"), "/w/app");
+        assert_eq!(normalize_workdir("/w/app"), "/w/app");
         // The failure the substring match produced, as a direct comparison.
-        assert_ne!(normalize("/w/app-old"), normalize("/w/app"));
-        assert_ne!(normalize("/w/app/sub"), normalize("/w/app"));
+        assert_ne!(normalize_workdir("/w/app-old"), normalize_workdir("/w/app"));
+        assert_ne!(normalize_workdir("/w/app/sub"), normalize_workdir("/w/app"));
     }
 
     /// An assistant record's blocks arrive as their own kinds, with a tool call's input parsed.
