@@ -49,6 +49,29 @@ pub struct Block {
     pub created_at_ms: i64,
 }
 
+/// Quote a user's text as a single FTS5 phrase.
+///
+/// **A user's query is not an FTS5 query.** FTS5 reads punctuation as *syntax*, so an
+/// ordinary search string is parsed as an expression: `needle-one` becomes `needle NOT
+/// one`, which answers `no such column: one` — an error naming a column, three layers from
+/// the text box that typed it. Hyphens are the common case, because identifiers and flags
+/// are exactly what someone searches a transcript for.
+///
+/// **Binding the value as a parameter is not sufficient**, which is the trap here: binding
+/// protects against SQL injection, and the bound value still reaches FTS5's expression
+/// parser. Quoting is what makes the text literal.
+///
+/// Inside a double-quoted phrase FTS5 treats everything but `"` as ordinary text, and an
+/// embedded `"` is escaped by doubling it.
+///
+/// The cost is worth stating: a multi-word query is a phrase match rather than an implicit
+/// AND, so `foo bar` finds "foo bar" and not a block mentioning both apart. That is the
+/// safe direction — it never errors and never silently inverts a term — and supporting
+/// operators means *parsing* the user's text rather than escaping it.
+fn fts5_phrase(query: &str) -> String {
+    format!("\"{}\"", query.replace('"', "\"\""))
+}
+
 /// One session that matched a full-text query, with its best block.
 ///
 /// Carries the session and sequence rather than a rowid, because `blocks_fts` stores
@@ -130,6 +153,35 @@ impl HistoryStore {
 
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
+            // **The `jieba` tokenizer is registered per connection, and a failure here is
+            // fatal rather than a fallback.**
+            //
+            // Registration is bound to one `sqlite3*`, so every connection the pool opens
+            // needs it — including the one migrations run on, which is why this is set
+            // before `connect_with` rather than after.
+            //
+            // Linked into the binary rather than loaded as a `.dylib`: there is no file to
+            // locate, no per-platform artifact to install, and no "extension missing"
+            // runtime state to degrade into. Degrading is what makes this worth stating —
+            // an index built with one tokenizer and queried with another silently returns
+            // nothing for CJK, so falling back to `unicode61` would answer *wrongly*
+            // rather than answering worse. `docs/storage.md` § Tokenization.
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    let mut handle = conn.lock_handle().await?;
+                    // SAFETY: the handle is a live `sqlite3*` held for this call, and
+                    // registration lasts as long as that connection.
+                    let rc = unsafe { fts5jieba::register_on_connection(handle.as_raw_handle().as_ptr().cast()) };
+                    rc.map_err(|code| {
+                        sqlx::Error::Configuration(
+                            format!(
+                                "could not register the `jieba` FTS5 tokenizer                                  (SQLite code {code}); the full-text index cannot be                                  read or written without it"
+                            )
+                            .into(),
+                        )
+                    })
+                })
+            })
             .connect_with(options)
             .await
             .with_context(|| format!("Could not open the history store at {}", db_path))?;
@@ -451,14 +503,14 @@ impl HistoryStore {
     /// Ordering by recency was rejected: a search for a rare term should surface it
     /// wherever it is, and a client that wants recency can sort what it receives.
     ///
-    /// **This is the one read that must stay off any polled path.** Measured, FTS5 search
-    /// is 174–260 ms while every other operation here is microseconds to sub-millisecond,
-    /// and owning the store makes FTS5 work no cheaper.
+    /// **This is the one read that must stay off any polled path.** Measured, a full-text
+    /// query is orders of magnitude slower than every other operation here, and owning the
+    /// store makes FTS5 work no cheaper.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        // Bound as a *parameter*, never interpolated: this string is a user's, and FTS5
-        // has its own query syntax in which unbalanced quotes are a syntax error. A
-        // malformed query is therefore a database error carrying FTS5's own message
-        // rather than something this function has to re-implement a parser to detect.
+        // **A user's query is not an FTS5 query**, so it is quoted into a phrase by
+        // [`fts5_phrase`] rather than passed through. Binding it as a parameter is not
+        // enough on its own: the value still reaches FTS5's *expression* parser, which
+        // reads punctuation as syntax (`docs/storage.md` § `blocks_fts` is standalone).
         //
         // **`snippet()` cannot appear inside the subquery**, which is what forces this
         // into two statements rather than one. FTS5's auxiliary functions are only
@@ -483,7 +535,7 @@ impl HistoryStore {
               ORDER BY ranked.score
               LIMIT ?",
         )
-        .bind(query)
+        .bind(fts5_phrase(query))
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
@@ -503,7 +555,7 @@ impl HistoryStore {
                     AND blocks_fts.seq = ?
                   LIMIT 1",
             )
-            .bind(query)
+            .bind(fts5_phrase(query))
             .bind(&session_id)
             .bind(seq)
             .fetch_optional(&self.pool)
@@ -653,9 +705,10 @@ impl HistoryStore {
 
     /// The highest sequence number whose block completed at or before `at_ms`.
     ///
-    /// This is how a TraceDB watermark becomes a sequence number: the archive
-    /// reports a timestamp for what it holds, and retention needs the position in
-    /// this session's stream that corresponds to it.
+    /// This is how a downstream authority's timestamp becomes a sequence number. An
+    /// environment reports how far its native store extends as a time, and retention needs
+    /// the position in this session's stream that corresponds to it
+    /// (`docs/storage.md` § Deriving a native-source bound).
     pub async fn max_seq_at_or_before(
         &self,
         session_id: &str,

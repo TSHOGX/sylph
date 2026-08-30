@@ -169,9 +169,8 @@ CREATE TABLE events (
   -- flattened on reload.
   stability TEXT NOT NULL DEFAULT 'stable'
     CHECK (stability IN ('ephemeral', 'stable')),
-  -- A closed set, because it has exactly three producers and a fourth would be a
-  -- design change rather than an adapter's choice. `'tracedb'` is gone with the
-  -- separate archive: it named a producer that store supplied and nothing writes.
+  -- A closed set, unlike `kind`, because it has exactly two producers and a third would
+  -- be a design change rather than an adapter's choice.
   source TEXT NOT NULL DEFAULT 'server'
     CHECK (source IN ('agent', 'server')),
   created_at_ms INTEGER NOT NULL,
