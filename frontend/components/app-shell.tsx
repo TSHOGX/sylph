@@ -37,7 +37,7 @@ import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
 import { useCallback, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { workspacesQuery } from "@/lib/workspaces-query";
 import { useQuickCreateSession } from "@/lib/create-session";
 import { WorkspaceUIProvider, useWorkspaceUI } from "@/lib/workspace-ui";
 import { WorkspaceSidebar } from "@/components/workspace-sidebar";
@@ -129,11 +129,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   // The Quick Start directory is resolved server-side; `~` cannot be expanded in
   // a browser, and the backend runs as the user whose home directory is correct.
-  const workspaces = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: () => api.workspaces.list(),
-    staleTime: 30_000,
-  });
+  const workspaces = useQuery(workspacesQuery());
   const quickStartDir = workspaces.data?.quickStartDir;
 
   const createSession = creator.create;

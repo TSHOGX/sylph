@@ -26,9 +26,10 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Session } from "@/lib/api";
+import { type Session } from "@/lib/api";
 import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
 import { liveSessionsQuery } from "@/lib/sessions-query";
+import { workspacesQuery } from "@/lib/workspaces-query";
 import { relayName, useEnvironments, type Environments } from "@/lib/environments";
 import { useSessionIdParam } from "@/lib/use-session-id-param";
 import { useT } from "@/lib/i18n";
@@ -86,18 +87,14 @@ export function WorkspaceSidebar() {
   // to navigate. One declaration, so the two mount together on `/` as one request.
   const sessionsQuery = useQuery(liveSessionsQuery());
 
-  const workspacesQuery = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: () => api.workspaces.list(),
-    staleTime: 30_000,
-  });
+  const workspacesResult = useQuery(workspacesQuery());
 
   // Only to decide whether a row names its machine at all, and to resolve a relaying
   // id into a name. One machine means no chips anywhere — see `useEnvironments`.
   const environments = useEnvironments();
 
-  const quickStartDir = workspacesQuery.data?.quickStartDir;
-  const home = workspacesQuery.data?.home;
+  const quickStartDir = workspacesResult.data?.quickStartDir;
+  const home = workspacesResult.data?.home;
 
   // Destructured before the memo so its dependencies are the two fields actually
   // read. Referencing `settings.pinnedWorkspaces` inside the callback makes the

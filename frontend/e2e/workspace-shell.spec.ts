@@ -17,6 +17,50 @@ import { createSession } from "./fixtures/session";
  * the Cmd and Ctrl bindings without branching on the runner's OS.
  */
 
+/**
+ * Every surface listing workspaces shares one request.
+ *
+ * Eight surfaces read this list and several mount together, so a per-surface query key is
+ * a per-surface request. TanStack dedupes by key — but only while every declaration
+ * agrees, and hand-written literals had already drifted into two `staleTime` values with
+ * four of them dead, since `AppShell` keeps a shorter-lived observer mounted on every
+ * route. `lib/workspaces-query.ts` is the single declaration.
+ *
+ * Counted over the network rather than asserted structurally: a refactor that *looks*
+ * shared still fans out if one key differs by a character, and that failure is invisible
+ * on screen — it costs requests, not correctness.
+ */
+test("the surfaces that list workspaces share one request", async ({ page }) => {
+  let requests = 0;
+  await page.route("**/api/v1/workspaces*", async (route) => {
+    requests += 1;
+    await route.fallback();
+  });
+
+  await page.goto("/");
+  // The start screen and the sidebar both list workspaces, and the shell reads the same
+  // response for `quickStartDir` — so first paint is where a fan-out would show up.
+  await expect(page.getByRole("navigation", { name: "Sessions by workspace" })).toBeVisible();
+  const afterFirstPaint = requests;
+  expect(
+    afterFirstPaint,
+    "the shell, sidebar, and start screen must share one workspaces request",
+  ).toBe(1);
+
+  // Opening two more consumers must read the cache rather than refetch: both are well
+  // inside the shared `staleTime`.
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("ControlOrMeta+Shift+k");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  expect(requests, "an overlay inside the stale window must not refetch").toBe(
+    afterFirstPaint,
+  );
+});
+
 test("both sidebars toggle by keyboard and the state persists across navigation", async ({
   page,
 }) => {

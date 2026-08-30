@@ -25,16 +25,14 @@
  * row would be filtered away by the very query that failed to match anything, which
  * is exactly the moment it is needed.
  *
- * The query key matches the sidebar's and the history overlay's, so all three share
- * one cache entry. It used to be a *distinct* key carrying `includeArchived: true`,
- * because folding in directories that existed only in the separate archive would
- * otherwise have leaked them into the sidebar's poll. One store, one listing, one key.
+ * The listing comes from `lib/workspaces-query.ts`, shared with every other surface that
+ * lists workspaces: one store, one listing, one request.
  */
 
 import { useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { workspacesQuery } from "@/lib/workspaces-query";
 import { shortenHome } from "@/lib/format";
 import { useT, type Translate } from "@/lib/i18n";
 import { Overlay } from "@/components/overlay";
@@ -80,20 +78,15 @@ export function WorkspacePicker({
   const t = useT();
   const [browsing, setBrowsing] = useState(false);
 
-  const workspacesQuery = useQuery({
-    // Shared with the sidebar and the history overlay deliberately: same request,
-    // same shape, and one surface having a colder cache than another is a difference
-    // the user feels as an inconsistent wait.
-    queryKey: ["workspaces"],
-    queryFn: () => api.workspaces.list(),
-    staleTime: 60_000,
-  });
+  // Shared deliberately (`lib/workspaces-query.ts`): one surface having a colder cache
+  // than another is a difference the user feels as an inconsistent wait.
+  const workspacesResult = useQuery(workspacesQuery());
 
-  const workspaces = workspacesQuery.data?.workspaces;
-  const home = workspacesQuery.data?.home;
+  const workspaces = workspacesResult.data?.workspaces;
+  const home = workspacesResult.data?.home;
 
   const items = useMemo<SelectChoice[]>(() => {
-    // Depends on `workspacesQuery.data` rather than a `?? []` fallback, which
+    // Depends on `workspacesResult.data` rather than a `?? []` fallback, which
     // would allocate a fresh array while the query is pending and rebuild every
     // row on every keystroke.
     if (!workspaces) return [];
@@ -151,16 +144,16 @@ export function WorkspacePicker({
       />
 
       <SelectScroll list={list} label={title} fill>
-        {workspacesQuery.isPending ? (
+        {workspacesResult.isPending ? (
           <output aria-live="polite" className="block px-3 py-6 text-center text-xs text-ink-muted">
             {t("workspacePicker.loading")}
           </output>
-        ) : workspacesQuery.error ? (
+        ) : workspacesResult.error ? (
           <div role="alert" className="px-3 py-6 text-center text-xs">
             <p className="font-medium text-danger">{t("workspacePicker.loadFailed")}</p>
             <button
               type="button"
-              onClick={() => void workspacesQuery.refetch()}
+              onClick={() => void workspacesResult.refetch()}
               className="mt-1.5 rounded border border-danger-line px-2 py-1 font-medium text-danger hover:bg-danger-bg focus-ring"
             >
               {t("app.retry")}

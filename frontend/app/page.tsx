@@ -34,10 +34,10 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { Kbd } from "@/components/ui/button";
 import { EnvironmentChip, FidelityMarker } from "@/components/badges";
-import { api } from "@/lib/api";
 import { formatRelative, shortenHome } from "@/lib/format";
 import { relayName, useEnvironments, type Environments } from "@/lib/environments";
 import { liveSessionsQuery } from "@/lib/sessions-query";
+import { workspacesQuery } from "@/lib/workspaces-query";
 import { useShortcutHint } from "@/lib/shortcuts";
 import { selectStartState, type RecentWorkspace } from "@/lib/welcome";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
@@ -56,11 +56,7 @@ export default function StartPage() {
   // Only to resolve the home prefix for display. Already in cache — the shell
   // fetches it for the Quick Start directory — so this is a cache read, not a
   // request, and `undefined` simply means paths render unabbreviated.
-  const workspaces = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: () => api.workspaces.list(),
-    staleTime: 30_000,
-  });
+  const workspaces = useQuery(workspacesQuery());
 
   return (
     <div className="min-h-0 flex-1 pane">

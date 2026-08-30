@@ -39,6 +39,7 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type BlockedReason, type NativeSessionRow } from "@/lib/api";
+import { workspacesQuery } from "@/lib/workspaces-query";
 import { defaultEnvironment, useEnvironments } from "@/lib/environments";
 import { shortenHome } from "@/lib/format";
 import { useT, type Translate } from "@/lib/i18n";
@@ -151,11 +152,7 @@ export function AdoptPicker({ onClose }: { onClose: () => void }) {
   // read one cache entry. Only `home` is wanted here — a native session's workdir is
   // frequently under it, and an unshortened absolute path is what makes a row unreadable
   // at a picker's width.
-  const workspaces = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: () => api.workspaces.list(),
-    staleTime: 60_000,
-  });
+  const workspaces = useQuery(workspacesQuery());
 
   const rows = listing.data?.sessions;
   const home = workspaces.data?.home;

@@ -38,6 +38,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, type Session } from "@/lib/api";
 import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
 import { liveSessionsQuery } from "@/lib/sessions-query";
+import { workspacesQuery } from "@/lib/workspaces-query";
 import { relayName, useEnvironments } from "@/lib/environments";
 import { fuzzyRank } from "@/lib/fuzzy";
 import { useDebounced } from "@/lib/use-debounced";
@@ -89,11 +90,7 @@ export function SearchOverlay() {
   // happened to agree.
   const sessionsQuery = useQuery(liveSessionsQuery());
 
-  const workspacesQuery = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: () => api.workspaces.list(),
-    staleTime: 60_000,
-  });
+  const workspacesResult = useQuery(workspacesQuery());
 
   const environments = useEnvironments();
 
@@ -135,7 +132,7 @@ export function SearchOverlay() {
     return [...local, ...indexed];
   }, [sessionsQuery.data, indexQuery.data, query]);
 
-  const home = workspacesQuery.data?.home;
+  const home = workspacesResult.data?.home;
 
   const items = useMemo<SelectChoice[]>(
     () =>

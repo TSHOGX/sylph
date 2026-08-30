@@ -32,6 +32,7 @@ import dynamic from "next/dynamic";
 import { useCallback, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { workspacesQuery } from "@/lib/workspaces-query";
 import { useT } from "@/lib/i18n";
 import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
 import { relayName, useEnvironments } from "@/lib/environments";
@@ -77,22 +78,16 @@ export function HistoryOverlay() {
    */
   const [mode, setMode] = useState<"list" | "switch">("list");
 
-  const workspacesQuery = useQuery({
-    // The same key the sidebar uses, and that is now correct rather than a hazard: it
-    // used to be deliberately distinct because this surface asked for
-    // `includeArchived` and sharing a key would have leaked archive-only directories
-    // into the sidebar's poll. There is one workspace listing now, so one key.
-    queryKey: ["workspaces"],
-    queryFn: () => api.workspaces.list(),
-    staleTime: 60_000,
-  });
+  // Shared with every other surface that lists workspaces (`lib/workspaces-query.ts`):
+  // there is one workspace listing, so one key and one request.
+  const workspacesResult = useQuery(workspacesQuery());
 
   // Falls back to the most recently used workspace when nothing set a scope —
   // opening the browser from the start screen should still show something useful
   // rather than an empty picker.
-  const workspaces = workspacesQuery.data?.workspaces ?? [];
+  const workspaces = workspacesResult.data?.workspaces ?? [];
   const workdir = activeWorkdir ?? workspaces[0]?.path ?? null;
-  const home = workspacesQuery.data?.home;
+  const home = workspacesResult.data?.home;
 
   const environments = useEnvironments();
 

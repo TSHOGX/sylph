@@ -13,7 +13,8 @@
 
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api, type Agent } from "@/lib/api";
+import { type Agent } from "@/lib/api";
+import { workspacesQuery } from "@/lib/workspaces-query";
 import {
   DEFAULT_SHORTCUTS,
   useSettings,
@@ -419,11 +420,7 @@ function WorkspacesSection() {
   const { settings } = useSettings();
   const isMac = useIsMac();
   const t = useT();
-  const { data } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: () => api.workspaces.list(),
-    staleTime: 30_000,
-  });
+  const { data } = useQuery(workspacesQuery());
 
   // Read from the live bindings, not written out: shortcuts are rebindable, and a
   // hardcoded combo in a hint becomes a lie the first time one is changed.
