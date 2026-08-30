@@ -87,7 +87,7 @@ The start screen walks a first run itself. In short:
    directory. That is the only thing a session needs — the agent runs there and can
    read and write nothing outside it. Not `Cmd+N`: a browser answers that itself,
    above the page's handlers and beyond `preventDefault`
-   (`docs/keyboard-shortcuts-default-sessions-settings.md` § 1).
+   (`docs/ui-layout.md` § Keyboard model).
 2. Type a message and send. The agent is switchable until that first message; model
    and reasoning effort are per-turn controls in the composer, populated from what the
    live agent declares for itself.
@@ -193,12 +193,6 @@ reader wants.
 - [**Roadmap**](docs/roadmap.md) — Project status and what is next
 - [**API Design**](docs/api-design.md) — REST endpoints and SSE streaming
 - [**Database Schema**](docs/database-schema.md) — SQLite schema and migrations
-
-Two further files — [agent-ui-design-analysis.md](docs/agent-ui-design-analysis.md)
-and
-[keyboard-shortcuts-default-sessions-settings.md](docs/keyboard-shortcuts-default-sessions-settings.md)
-— are pre-implementation design arguments, kept for *why*. Where they differ from what
-shipped, `frontend-architecture.md`, `ui-layout.md`, and `roadmap.md` win.
 
 See [**AGENTS.md**](AGENTS.md) for the project's development rules and conventions.
 
