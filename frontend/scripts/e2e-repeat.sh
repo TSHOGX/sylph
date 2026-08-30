@@ -8,11 +8,17 @@
 # single run cannot answer it: a defect fails the same spec every time, while
 # contention fails whichever spec happens to be nearest its timeout budget.
 #
-# `.e2e-data/` is wiped before every run, deliberately. The journal is never
-# cleared otherwise, and each spec's `mkdtemp` workdir becomes a permanent sidebar
-# group — so run 4 would render hundreds of dead groups that run 1 did not, and the
-# runs would not be comparable. Wiping is free: the directory is gitignored and the
-# backend recreates `journal.db` on start.
+# The suite's home is wiped before every run, deliberately, and through
+# `e2e/reset-home.mjs` rather than an `rm -rf` of its own — one owner for the path, so a
+# rename cannot leave this script wiping a directory that no longer exists. It did exactly
+# that once: the home was renamed `.e2e-data` -> `.e2e-home` and this line was not updated,
+# so every run here accumulated state and the summary reported a **4/4 DEFECT** for a spec
+# that passes on a clean home. A comparison harness that silently stops resetting produces
+# confident, wrong answers about the code.
+#
+# Wiping matters because the journal is never cleared otherwise, and each spec's `mkdtemp`
+# workdir becomes a permanent sidebar group — so run 4 would render hundreds of dead groups
+# that run 1 did not, and the runs would not be comparable.
 #
 # Results go to /tmp/e2e-repeat/, one JSON per run plus a summary.
 
@@ -30,8 +36,9 @@ for i in $(seq 1 "$RUNS"); do
   echo "=== run $i/$RUNS starting $(date +%H:%M:%S) — load $(uptime | sed 's/.*averages*: //') ===" \
     | tee -a "$OUT/summary.txt"
 
-  # Comparable starting state for every run.
-  rm -rf .e2e-data
+  # Comparable starting state for every run. The same wipe `npm run e2e` performs, from
+  # the one module that owns the path.
+  node e2e/reset-home.mjs
 
   # Any orphaned server from a previous iteration would make `reuseExistingServer:
   # false` fail the whole run rather than one spec.
