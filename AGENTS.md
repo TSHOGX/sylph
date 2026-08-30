@@ -332,6 +332,26 @@ state a spec is in right after sending. 33 specs once failed on their deadline w
 wrong in the code under test. **Prefer a control whose *presence* changes** — the composer
 swaps Send for Stop while a turn is live.
 
+**A one-shot `isVisible()` is a race wherever an auto-retrying assertion belongs, and the `if`
+around it is what hides the race.** `answerReceived` in `requests.spec.ts` probed a `more`
+toggle once and clicked it only if already present; the region mounts a beat before the toggle
+inside it, so losing that race meant no click, no expansion, and a caller burning its whole
+10s against the collapsed line. Measured A/B, that file six runs each: 2 of 6 failed with the
+probe, 0 of 6 with `await expect(more).toBeVisible()` before the click.
+
+Two things generalize past the fix. **The error accuses the wrong layer**: it read as *the
+answer never arrived*, pointing at the request pipeline, when the answer had arrived every
+time and only the expansion was missing — so read what the received string actually *is*
+before believing what its absence implies. And **a race in a shared helper distributes itself
+across that helper's callers**, so four specs took turns failing and none of them was wrong.
+When failures rotate within one file, look at what the file shares before looking at any spec
+in it. (Same shape one tier up: `docs/database-schema.md` § A terminal status means the record
+is finished, where a rotating set of specs shared one conflated signal.)
+
+An `if` guarding an optional element is still sometimes right — but only when absence is a
+real, expected state. Here every caller asserted on a payload that exists only when expanded,
+so absence was never valid and tolerating it converted a loud failure into four quiet ones.
+
 **`Stop` disappearing once meant `terminal` but not `settled`, and that gap is now closed — the
 lesson it taught is not.** The terminal row used to commit *before* open trajectories were
 closed, so every spec asserting on what the sweep produces raced it, and under load whichever
