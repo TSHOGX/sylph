@@ -66,9 +66,9 @@ export function mergeRequestRow(
  * Parse an announced row, or `null` when the frame cannot be trusted.
  *
  * Deliberately strict about `id` and `status`, and deliberately silent on failure.
- * The invalidate that follows every application is the reconciler, so a frame this
- * rejects costs one refetch — whereas a half-parsed row applied to the cache would
- * show a dialog with no id to answer, which is worse than showing it a moment late.
+ * Returning `null` is what routes the caller to a refetch instead, so a frame this rejects
+ * costs one round trip — whereas a half-parsed row applied to the cache would show a
+ * dialog with no id to answer, which is worse than showing it a moment late.
  */
 export function parseRequestFrame(data: string): PendingRequest | null {
   try {

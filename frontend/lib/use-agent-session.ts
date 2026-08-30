@@ -211,24 +211,27 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
 
           for (const frame of frames.push(decoder.decode(value, { stream: true }))) {
             if (frame.event === "request") {
-              // Applied, not merely invalidated. The frame carries the whole row, so
-              // the set this client is blocked on is recomputed from it with no round
-              // trip — which matters most in the case that motivated it: an answer
-              // given on a phone should retire the panel on a laptop as fast as the
-              // frame arrives, and a refetch adds a request the server has already
-              // answered. The invalidate still follows as the reconciler, so a frame
-              // that is somehow stale or unparseable degrades to the old behaviour
-              // rather than to a wrong list.
+              // Applied, not invalidated. The frame carries the whole row, so the set
+              // this client is blocked on is recomputed from it with **no round trip** —
+              // which is the point: an answer given on a phone should retire the panel on
+              // a laptop as fast as the frame arrives, and a refetch adds a request the
+              // server has already answered.
+              //
+              // The invalidate is the fallback for a frame this client could not parse,
+              // so it is in the `else`. Running it unconditionally performs exactly the
+              // round trip `setQueryData` exists to avoid, which reads as a belt-and-braces
+              // reconciler and is really the cost the optimisation was meant to remove.
               const row = parseRequestFrame(frame.data);
               if (row) {
                 queryClient.setQueryData<PendingRequest[]>(
                   ["session", sessionId, "requests"],
                   (current) => mergeRequestRow(current, row),
                 );
+              } else {
+                void queryClient.invalidateQueries({
+                  queryKey: ["session", sessionId, "requests"],
+                });
               }
-              void queryClient.invalidateQueries({
-                queryKey: ["session", sessionId, "requests"],
-              });
             }
             if (frame.event === "capabilities" || frame.event === "link") {
               void queryClient.invalidateQueries({
