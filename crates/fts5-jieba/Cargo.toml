@@ -1,0 +1,26 @@
+[package]
+name = "fts5-jieba"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+description = "SQLite FTS5 tokenizer: jieba for Chinese + folding/stemming for English"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "fts5jieba"
+# `rlib` is what the server links against: the tokenizer is registered in-process
+# (`sqlite3_auto_extension`), so there is no `.dylib` to locate, install per platform,
+# or fail to find at runtime. `cdylib` stays so the same source can still be built as a
+# loadable extension for `sqlite3` on the command line, which is useful for inspecting
+# an index by hand.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libc = "0.2"
+jieba-rs = "=0.7.0"
+unicode-normalization = "0.1"
+rust-stemmers = "1.2"
+
+[dev-dependencies]
+# bundled: compile a known SQLite with FTS5; load_extension: allow .load in tests.
+rusqlite = { version = "0.32", features = ["bundled", "load_extension"] }

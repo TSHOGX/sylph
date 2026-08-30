@@ -10,7 +10,7 @@
 # would be a wire mismatch nobody declared.
 [workspace]
 resolver = "2"
-members = ["backend", "crates/protocol", "crates/adapters"]
+members = ["backend", "crates/protocol", "crates/adapters", "crates/fts5-jieba"]
 
 # Pins every member inherits with `.workspace = true`.
 #
