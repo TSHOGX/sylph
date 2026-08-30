@@ -1,22 +1,22 @@
 //! What is safe to drop, and who gets to say.
 //!
-//! Retention asks exactly one question and never asks how old anything is. A
-//! time-based rule deletes data because a clock advanced, which is precisely the case
-//! where the data may not exist anywhere else yet.
+//! Retention asks one question — what has a downstream authority confirmed for this
+//! session — and never asks how old anything is. `docs/storage.md` § Retention is
+//! watermark-driven carries the argument.
 //!
-//! The discipline is a Postgres replication slot's `restart_lsn` or a Kafka consumer
-//! offset: the upstream keeps whatever any consumer might still need, so a lagging
-//! consumer causes *growth* rather than loss. Growth is visible and fixable; loss is
-//! neither.
+//! The only downstream copy is the **vendor's own native store**, so only the environment
+//! holding it can answer, and a session with no reachable native source is *terminal*:
+//! this record is the only copy, and nothing is ever dropped from it.
 //!
-//! # The authority changed with the rewrite, and it changed in Sylph's favour
+//! Two rules this module exists to enforce, both of which an obvious implementation gets
+//! wrong:
 //!
-//! Retention used to ask a *separate* archive whether it had ingested a session,
-//! because that archive was a second copy fed by parsing native stores. With one store
-//! and one vocabulary (`docs/architecture.md` § One authority) there is no second
-//! Sylph-side copy to wait for — so the only remaining downstream copy is the
-//! **vendor's own native store**, and only the environment holding it can say what it
-//! still has.
+//! - **"Cannot ask" is not "asked, and nothing is safe".** An unreachable environment
+//!   means the question was never put, so it is recorded as withheld with a reason rather
+//!   than as a zero bound — a watermark row is a claim that a check happened.
+//! - **Report what happened even when nothing did.** Keeping every block is correct for a
+//!   terminal session and a symptom for a backed one, and both look identical to never
+//!   having run at all.
 
 use std::sync::Arc;
 
@@ -101,10 +101,6 @@ impl WithheldReason {
 /// a source, recorded beside a state read at another moment, would be a watermark that
 /// cannot be checked against anything.
 ///
-/// `archive_id` and `source_fingerprint` are gone with the separate archive. The first
-/// held that store's own id for a session — the second id space the identity triple
-/// deletes — and the second held its `file-v2:<sha256>:<bytes>:<mtime_ns>` over a
-/// native file, read from a response nothing answers any more.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Confirmation {
     /// Highest sequence number safe to drop. `None` means drop nothing.

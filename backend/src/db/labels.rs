@@ -11,12 +11,10 @@
 //! [`crate::db::JournalStore::set_session_title_if_empty`], and the adopt path in
 //! `api::sessions`.
 //!
-//! Two helpers that came with them are deliberately **not** here. `split_lineage`
-//! and `archive_id` bridged two id spaces — a Sylph UUID and the archive's
-//! `<agent>:<native-id>` — and the identity triple deletes the second space
-//! outright (`docs/architecture.md` § Identity), so there is nothing left to
-//! translate between. [`Lineage`](crate::db::labels::Lineage) survives because its *precedence* rule is a fact
-//! about vendors rather than about the archive.
+//! **Nothing here translates an id.** Identity is one space throughout
+//! (`docs/architecture.md` § Identity), so a helper bridging two of them has nothing to
+//! bridge. [`Lineage`](crate::db::labels::Lineage) belongs here because its *precedence*
+//! rule — a recorded parent outranks a fork origin — is a fact about vendors.
 
 use sylph_protocol::SessionId;
 

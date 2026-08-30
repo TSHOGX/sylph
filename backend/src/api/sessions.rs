@@ -523,24 +523,14 @@ fn require_environment(state: &AppState, requested: &str) -> Result<EnvironmentI
 /// two have different fixes. The message names what this machine can read, the same way
 /// `create` does — one wording for one class of mistake.
 ///
-/// # This reads the [`crate::adapters::AdapterSource`], and the argument for not doing so
-/// is gone
+/// **Read the [`crate::adapters::AdapterSource`], never the registry directly.** Both
+/// answer the same question — availability is `PATH` alone — but the integration suite
+/// injects its agents into the source, so a direct call reaches the compiled-in registry
+/// and cannot see them. `create` and `adopt` must agree on this or one is bounded and the
+/// other is not.
 ///
-/// It used to read `sylph_adapters` directly, and the reason was sound while it held:
-/// `adapters::available` answered the **union** of "the vendor CLI is on `PATH`" and "a
-/// directory holding an `adapter.sh` exists", and reading a native store needs the former.
-/// An `adapter.sh` proved a script existed, and a script has no store, so the union would
-/// have offered an agent whose `enumerate` cannot describe anything.
-///
-/// **That union is deleted.** Availability is `PATH` alone, so the two answers are now the
-/// same question — and going around the source costs something real: the integration suite
-/// injects its agents there, so a direct call reaches the compiled-in registry instead and
-/// cannot see them. Nothing conflicted when these two changes met; the merged result was
-/// simply inconsistent, with `create` bounded by the source and `adopt` not.
-///
-/// What survives from the old reasoning is a property of the *adapter*, not of the lookup:
-/// the E2E fixture has no native store, and it says so by refusing `adopt` and enumerating
-/// empty rather than by being filtered out here.
+/// An agent with no readable native store says so by refusing `adopt` and enumerating
+/// empty, which is a property of the adapter rather than of this lookup.
 fn require_agents(
     adapters: &dyn crate::adapters::AdapterSource,
     requested: Option<&str>,
@@ -676,9 +666,9 @@ pub struct EnumerateResponse {
 
 /// How many rows one page holds by default, and at most.
 ///
-/// A picker renders a filterable list, and the measured stores hold 1000 / 1258 / 531
-/// sessions — so a whole-store page would be a megabyte of JSON to render a list whose
-/// first screen is twenty rows.
+/// A picker renders a filterable list, and a real store holds sessions in the thousands —
+/// so a whole-store page would be a megabyte of JSON to render a list whose first screen is
+/// twenty rows.
 const ENUMERATE_DEFAULT_LIMIT: usize = 50;
 const ENUMERATE_MAX_LIMIT: usize = 200;
 
@@ -696,11 +686,11 @@ const ENUMERATE_MAX_LIMIT: usize = 200;
 /// with it walks the wrong way.
 ///
 /// So the cursor is an opaque offset into this listing, and the cost is stated rather
-/// than hidden: each page re-enumerates from the top. That is affordable **because of
-/// what `enumerate` is required to be** — a listing pass over `codex`'s 1258 rollouts is
-/// one short header read each and measured at 164 ms, against 52.9 s for the
-/// per-session-metadata shape it replaced (`sylph_protocol::Adapter::enumerate`). Paging
-/// against the cheap operation is what that requirement buys.
+/// than hidden: each page re-enumerates from the top. That is affordable **because of what
+/// `enumerate` is required to be** — one short bounded read per file rather than a parse,
+/// which is orders of magnitude cheaper than reading each session's metadata
+/// (`sylph_protocol::Adapter::enumerate`). Paging against the cheap operation is what that
+/// requirement buys.
 ///
 /// It is opaque by contract — a base32-ish decimal string a client echoes back, never
 /// parses — so it can become a real per-adapter cursor without a client change.
@@ -789,10 +779,10 @@ pub async fn enumerate(
             },
         };
 
-        // One query per agent rather than one per row. Measured: the per-row shape cost
-        // 4.26 s for `codex`'s 1258 rollouts, which is the round-trip count and not the
-        // query — and it hands back exactly the affordability that `Adapter::enumerate`
-        // being a cheap listing pass was supposed to buy.
+        // One query per agent rather than one per row. Measured, the per-row shape costs
+        // seconds on a real store — the round-trip count, not the query — and it hands back
+        // exactly the affordability that `Adapter::enumerate` being a cheap listing pass was
+        // supposed to buy.
         let adopted = state.store.adopted_native_ids(&environment, agent).await?;
 
         for summary in summaries.iter() {
@@ -961,11 +951,10 @@ pub async fn adopt(
 
     // # Why a listing pass rather than a lookup
     //
-    // The adapter contract has no "describe one session" call, and adding one would be
-    // the 11.5 ms per-session shape `Adapter::enumerate` exists to avoid. A filtered
-    // listing answers the same question with one short header read per file — 164 ms
-    // over `codex`'s 1258 rollouts — and it is the *same* call the picker made, so the
-    // workdir this bounds is the one the picker showed.
+    // The adapter contract has no "describe one session" call, and adding one would be the
+    // per-session-metadata shape `Adapter::enumerate` exists to avoid. A filtered listing
+    // answers the same question with one short header read per file, and it is the *same*
+    // call the picker made — so the workdir this bounds is the one the picker showed.
     let summary = adapter
         .enumerate(&sylph_protocol::StoreFilter::default())
         .await

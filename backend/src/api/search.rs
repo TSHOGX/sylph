@@ -1,18 +1,19 @@
 //! Cross-session full-text search over consolidated history.
 //!
-//! # Search is the one capability this rewrite takes from working to absent
+//! Backed by one FTS5 table beside `history.db`, over the same rows the timeline renders
+//! (`docs/database-schema.md` § Search lives beside `history.db`). **Coverage is a
+//! contract**: everything the server holds is searchable, including sessions read out of
+//! an agent's native files, so a client may present this as "search my history" without
+//! qualification.
 //!
-//! `/api/v1/search` was entirely `state.tracedb.search()`. Deleting the separate archive
-//! deleted the only implementation, and nothing in this repo has ever held an FTS index —
-//! so this is net-new work rather than a port (`docs/database-schema.md` § Search lives
-//! beside `history.db`).
+//! Two properties a caller depends on, both owned by `docs/storage.md`:
 //!
-//! **It now covers everything the server holds, and that is what the rewrite bought.**
-//! Search used to run against a store fed by parsing native files, so it covered only
-//! what a parser had read: a session whose environment had gone away was searchable
-//! nowhere, and one whose vendor file happened to be local was searchable by coincidence.
-//! The index is over the same rows the timeline renders, so the old caveat — "a client
-//! must not present this as *search my history*" — is retired rather than relocated.
+//! - **A user's query is not an FTS5 query.** Punctuation is syntax there, so a hyphenated
+//!   search string parses as a NOT and answers with an error naming a column. The query is
+//!   quoted into a phrase rather than interpolated.
+//! - **This read stays off any polled path.** It is orders of magnitude more expensive than
+//!   every other read against this store, so it is user-initiated and gated on a real
+//!   query.
 
 use axum::extract::{Query, State};
 use axum::Json;

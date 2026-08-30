@@ -14,29 +14,24 @@
 //! they die with the server, and a turn on a detached session establishes a fresh
 //! one by resuming the agent's native session id.
 //!
-//! # What the subprocess transport took with it
+//! # An adapter is a trait, not a subprocess
 //!
-//! This module used to hold an `adapter::Link`: a spawned `adapter.sh` speaking NDJSON on
-//! stdio, with a handshake, correlation ids, and a reply timeout. All of that is gone —
-//! an adapter is a Rust trait ([`sylph_protocol::Adapter`]) obtained from
-//! [`crate::adapters::AdapterSource`], and what is left here is the pool and the drain.
+//! An adapter is [`sylph_protocol::Adapter`], obtained from
+//! [`crate::adapters::AdapterSource`]; this module is the pool and the drain around it.
+//! Three consequences shape the code here:
 //!
-//! Three consequences worth naming, because each was a real behaviour rather than
-//! plumbing:
-//!
-//! - **An exit code is not a concept an in-process adapter has.** There is no process of
-//!   its own to exit, so `LinkEvent::Closed { exit_code, stderr_tail }` has no port. The
-//!   stream simply ending is what a `Stream` already expresses, and a failure that needs
-//!   explaining arrives as an `Err` item before it does — which is what
-//!   [`Outcome::LinkLost`](crate::supervisor::Outcome::LinkLost) now carries.
+//! - **There is no exit code.** An in-process adapter has no process of its own to exit,
+//!   so a stream simply ending is the close — which is what `Stream` already expresses.
+//!   A failure that needs explaining arrives as an `Err` item first, and
+//!   [`Outcome::LinkLost`](crate::supervisor::Outcome::LinkLost) carries it.
 //! - **A refusal travels typed.** An adapter constructs
 //!   [`sylph_protocol::AdapterError`] directly, so the `INVALID_VALUE`-versus-
-//!   `UNSUPPORTED_FIELD` distinction can no longer be lost in framing. The string→code
-//!   mapping that recovered it from a wire field is deleted, not moved.
-//! - **A capability facet is merged here rather than inside the transport.** The v3 link
-//!   applied facets before the server saw them; in-process that would put one rule in
-//!   three adapters, so the facets travel and [`LiveSession`](crate::links::LiveSession) is the one place
-//!   [`sylph_protocol::CapabilityFacets::apply_to`] is called.
+//!   `UNSUPPORTED_FIELD` distinction cannot be lost in framing and must never be
+//!   recovered by parsing a message (`docs/session-protocol.md` § A refused set).
+//! - **Capability facets are merged here, in one place.** Applying them per adapter would
+//!   put one rule in three implementations, so the facets travel and
+//!   [`LiveSession`](crate::links::LiveSession) is the sole caller of
+//!   [`sylph_protocol::CapabilityFacets::apply_to`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -349,12 +344,11 @@ pub struct LinkManager {
     environment: Arc<dyn Environment>,
     /// Where an adapter comes from.
     ///
-    /// The field this replaces held **adapter roots** — a list of directories to join an
-    /// agent name onto in search of an `adapter.sh`. That was the shape of a bug this repo
-    /// had already paid for once (an agent found in one root, reported missing from
-    /// another), and it is gone rather than fixed: a trait object has no path to get
-    /// wrong. `crate::adapters` holds the seam, and step 4 replaces this one field with a
-    /// per-environment source dialled in from an envagent.
+    /// A trait object rather than a search path: availability is "is the vendor CLI on this
+    /// machine's `PATH`", one question with one answer, so there is no directory list an
+    /// agent can be found in and reported missing from. `crate::adapters` holds the seam,
+    /// and the envagent will replace this field with a per-environment source dialled in
+    /// from that machine (`docs/environments.md`).
     adapters: Arc<dyn AdapterSource>,
     soul_path: Option<PathBuf>,
     seq: SeqAllocator,

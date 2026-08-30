@@ -97,18 +97,12 @@ pub enum Capability {
 
 /// A spawn-time option an agent declares: model, effort, and whatever else.
 ///
-/// # Three declarations collapsed to one
+/// **This crate is the one declaration of the shape.** Three copies of it is one shape
+/// that diverges on the first case anyone adds to only one of them, and nothing compares
+/// the copies.
 ///
-/// This existed three times before this crate: `adapter/wire.rs:55`,
-/// `agents/mod.rs:62`, and `models/agent.rs:15`. The first two were byte-identical;
-/// the third was the dead v1 `--describe` shape and carried a `default` field nothing
-/// read. Three copies of one shape is one shape that diverges on the first case anyone
-/// adds to only one of them.
-///
-/// `ArgSpec` went with it, and is not moved here at all: it only ever appeared in the
-/// two v1 shapes, whose `CommandSpec` took a map of typed arguments. The surviving
-/// [`CommandSpec`] carries a free-form `arg_hint` instead, because that is what agents
-/// actually report.
+/// [`CommandSpec`] carries a free-form `arg_hint` rather than a map of typed arguments,
+/// because that is what agents actually report.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlagSpec {
     #[serde(default)]
@@ -190,12 +184,11 @@ pub struct SubagentSpec {
 pub struct ConfigChoice {
     /// **Opaque to the client by contract** — a token to echo back, never to parse.
     ///
-    /// That contract is what lets an encoding change without a server or UI change,
-    /// and it is why a composite value is delimited with a **space**. *Measured on
-    /// `pi` 0.84.3:* 350 of 372 model ids already contain a `/`
-    /// (`anthropic/claude-opus-5`, `stealth/ox-alpha`), so splitting on the first or
-    /// last slash mis-parses the majority of the catalogue. No provider and no id
-    /// contains a space.
+    /// That contract is what lets an encoding change without a server or UI change, and it
+    /// is why a composite value is delimited with a **space**. Most of `pi`'s model ids
+    /// already contain a `/` (`anthropic/claude-opus-5`, `stealth/ox-alpha`), so splitting
+    /// on the first or last slash mis-parses the majority of a real catalogue. No provider
+    /// and no id contains a space.
     ///
     /// **It must be unique within its option.** `checked` is computed as a filter —
     /// every producer writes `value == current_value` — so the moment two choices

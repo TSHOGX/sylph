@@ -4,7 +4,7 @@
 //!
 //! Skeleton. [`adopt`], [`watch`], and [`enumerate`] are what `codex/mod.rs` calls, and
 //! their bodies are the parser. What is already settled — and is the expensive part —
-//! is *what the store actually contains*, measured over all 1258 rollouts on this
+//! is *what the store actually contains*, measured over every rollout on this
 //! machine rather than read off `docs/agents.md`, which was written from a second-hand
 //! description and is wrong in several places. Each measurement below is stated where
 //! the code that acts on it will go, because each one is a branch a reader would
@@ -68,7 +68,7 @@ pub const REASONING_IS_MOSTLY_ENCRYPTED: &str =
 ///
 /// **The discriminant is `session_meta.payload.history_mode`, not `cli_version`.**
 /// `docs/agents.md` says the vocabulary changed "around cli_version 0.147"; measured
-/// over 1258 rollouts, 0.147.0 appears as `paginated` on 42 files and as `legacy` on
+/// over every rollout, 0.147.0 appears as `paginated` on some files and as `legacy` on
 /// 21, and there is a 0.150.1 file — the newest version in the store — writing
 /// `history_mode: "legacy"` with zero `item_completed`. A version comparison therefore
 /// picks the wrong parser on a file the vendor is still producing today.
@@ -135,7 +135,7 @@ pub const BRIEF_IS_CIPHERTEXT: &str =
 /// incomplete but backwards, and nothing downstream can detect that.
 ///
 /// **`kind` is `started` or `interacted` only.** `docs/agents.md` lists `interrupted`
-/// and `completed`; both occur **zero** times in 1258 rollouts (measured: `started` 9,
+/// and `completed`; both occur **zero** times across the whole store (measured: `started` 9,
 /// `interacted` 33). That is the declared-only-event trap in its usual form, and the
 /// consequence is concrete: **a codex delegation has no close record in the store**, so
 /// a parsed delegation's end has to come from the turn that contains it rather than
@@ -316,7 +316,7 @@ fn parse_rollout(path: &Path) -> Result<ParsedRollout> {
         match kind {
             "session_meta" => {
                 // **The first one is this file's own thread; a later one is the parent's,
-                // replayed.** Measured: 44 of 1258 files carry two, and in every one the
+                // replayed.** Measured: a minority of files carry two, and in every one the
                 // second is the *parent* session's header copied into a forked delegate. A
                 // reader that let the last one win would report a delegate's id, cwd, and
                 // era as its parent's — and since both are real headers, nothing would
@@ -370,10 +370,10 @@ fn parse_rollout(path: &Path) -> Result<ParsedRollout> {
         ));
     }
     if parsed.header.is_none() {
-        // Measured: 1258 of 1258 rollouts open with `session_meta`. A file without one
+        // Measured: **every** rollout opens with `session_meta`. A file without one
         // names no session, so it cannot be adopted and must not be silently empty.
         return Err(anyhow!(
-            "no `session_meta` record in {}; every one of 1258 measured rollouts opens \
+            "no `session_meta` record in {}; every measured rollout opens \
              with one, so this is not a shape any known `codex` version writes",
             path.display()
         ));
@@ -462,7 +462,7 @@ impl Header {
     /// Read one `session_meta` payload.
     fn read(payload: &Value) -> Self {
         Self {
-            // **`id`, not `session_id`.** Measured over all 1258 rollouts: `id` equals the
+            // **`id`, not `session_id`.** Measured over every rollout: `id` equals the
             // filename's uuid on every single file, while `session_id` is present on 152 and
             // on 25 of those names a *different* thread — the parent's. So reading
             // `session_id` would give 25 sessions their parent's identity, which is the
@@ -490,7 +490,7 @@ impl Header {
     ///
     /// # Three spellings for one relationship, and they agree
     ///
-    /// *Measured over 1258 rollouts:* `parent_thread_id` on 27, `forked_from_id` on 76, and
+    /// *Measured over the whole store:* `parent_thread_id` on 27 files, `forked_from_id` on 76, and
     /// `source.subagent.thread_spawn.parent_thread_id` on 202 — and **they never disagree**
     /// where two are present, which is what makes a fallback chain sound here rather than the
     /// dual-spelling tolerance `AGENTS.md` § Compatibility forbids. That rule is about
@@ -1276,7 +1276,7 @@ fn response_item(
 ///
 /// # ~92% of reasoning in this store is unrecoverable, and the honest projection is silence
 ///
-/// *Re-measured over all 1258 rollouts:* 33211 reasoning records, **every one** carrying
+/// *Re-measured over the whole store:* every reasoning record carries
 /// `encrypted_content`, and only **4008** also carrying a plaintext `summary` — 12.1%, and all
 /// 4008 in the legacy era. The paginated era's 4905 records carry a summary **zero** times, and
 /// its `Reasoning` items carry `summary_text: []` and `raw_content: []` on all 4895.
@@ -1340,8 +1340,8 @@ fn flatten_content(content: Option<&Value>) -> String {
 /// # The filename carries the id, and that is measured rather than assumed
 ///
 /// A rollout is `sessions/<yyyy>/<mm>/<dd>/rollout-<iso>-<uuid>.jsonl`, and the uuid equals
-/// the header's `id` on **1258 of 1258** files. So the store can be narrowed by name before
-/// anything is opened, which is what keeps `locate` from reading 1258 headers — the walk is
+/// the header's `id` on **every** file. So the store can be narrowed by name before
+/// anything is opened, which is what keeps `locate` from reading every header — the walk is
 /// already ordered newest-first by `candidates`, and a name test is one string comparison.
 ///
 /// The header is nevertheless still read on the candidate that matched, because the name is a
@@ -1373,7 +1373,7 @@ fn locate(id: &NativeId) -> Result<PathBuf> {
 
 /// Whether this path is a rollout.
 ///
-/// Both halves are needed and both are measured: **1258 of 1258** files under the store are
+/// Both halves are needed and both are measured: **every** file under the store is
 /// `rollout-*.jsonl` and there is nothing else there at all — no sidecars, no index, no
 /// per-delegate directory. The `thread_history_*.sqlite` projection lives one level *up*, in
 /// `~/.codex`, so it is not reachable by this walk even by accident.
@@ -1429,9 +1429,9 @@ pub fn watch(id: &NativeId) -> Result<EventStream> {
 ///
 /// # The rollouts are authoritative, and the SQLite projection is deliberately not read
 ///
-/// *Measured 2026-08-28:* 1258 `rollout-*.jsonl` files against **73** threads in
-/// `~/.codex/thread_history_1.sqlite`, so a reader that consulted only the projection would
-/// miss 94% of the sessions on this machine. `thread_history_projection_state` names it
+/// *Measured 2026-08-28:* the rollout files outnumbered the threads projected into
+/// `~/.codex/thread_history_1.sqlite` by more than an order of magnitude, so a reader that
+/// consulted only the projection would miss the large majority of sessions on this machine. `thread_history_projection_state` names it
 /// outright — it is an incrementally-built *index over* the rollouts, tracking a
 /// `next_rollout_byte_offset` into each one.
 ///
@@ -1462,7 +1462,7 @@ pub fn watch(id: &NativeId) -> Result<EventStream> {
 /// # One header read per file, not one parse
 ///
 /// `sylph_protocol::Adapter::enumerate` makes this a requirement rather than an optimization.
-/// The whole header is on the **first line** of all 1258 files, so a listing is one short read
+/// The whole header is on the **first line** of every file, so a listing is one short read
 /// each; a full parse of the store is 344k records.
 pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
     let Some(root) = store_root() else {
@@ -1514,9 +1514,9 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
             native_id,
             workdir: header.workdir,
             // **`codex` records no session title, and that is verified rather than
-            // inherited from `docs/agents.md`.** Measured over 1258 rollouts: exactly **one**
+            // inherited from `docs/agents.md`.** Measured over the whole store: exactly **one**
             // file carries a `thread_name_updated` and 15 carry a `thread_goal_updated`
-            // objective — so 1242 of 1258 have nothing that could serve, and reading the 16
+            // objective — so almost none have anything that could serve, and reading those few
             // would mean scanning whole files to title 1.3% of a listing. The server's
             // opening-ask fallback owns this (`NativeSummary::title`), which is also where
             // the injected-envelope rule lives — and this store needs it badly, since its
@@ -1551,7 +1551,7 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
 ///
 /// # The header is one line, and reading a second would be reading the parent's
 ///
-/// Measured: **1258 of 1258** rollouts open with `session_meta`, so one line is the whole
+/// Measured: **every** rollout opens with `session_meta`, so one line is the whole
 /// header. That is also what makes the *first* one the right one — 44 files carry a second
 /// `session_meta` further in, which is the **parent's** header replayed into a forked delegate
 /// (see [`parse_rollout`]). A reader taking the last would give those 44 sessions their
@@ -1903,7 +1903,7 @@ mod tests {
     /// The era discriminant, and why it is not the version.
     #[test]
     fn an_absent_history_mode_is_legacy_rather_than_an_error() {
-        // 1154 of 1258 files carry no `history_mode` at all.
+        // The large majority of files carry no `history_mode` at all.
         assert_eq!(Era::of(None), Era::Legacy);
         assert_eq!(Era::of(Some("legacy")), Era::Legacy);
         assert_eq!(Era::of(Some("paginated")), Era::Paginated);

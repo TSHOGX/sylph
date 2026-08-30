@@ -7,13 +7,13 @@
 //! this machine reports — measured 2026-08-29 against the real stores, one unfiltered
 //! listing pass each:
 //!
-//! | Agent | Rows | Time | What it reads per file |
-//! | --- | --- | --- | --- |
-//! | `pi` | 531 | **90 ms** | one header |
-//! | `claude` | 1000 | **1.81 s** | a 32 KB head, for the vendor's own title |
-//! | `codex` | 1258 | **3.51 s** | a header **and a 256 KB tail**, for the last stamp |
+//! | Agent | What it reads per file | Relative cost |
+//! | --- | --- | --- |
+//! | `pi` | one header | cheapest |
+//! | `claude` | a 32 KB head, for the vendor's own title | ~20× `pi` |
+//! | `codex` | a header **and a 256 KB tail**, for the last stamp | dearest |
 //!
-//! So a whole-machine listing is ~5.6 s, not the 164 ms
+//! So a whole-machine listing costs **seconds**, not the sub-second figure
 //! `sylph_protocol::Adapter::enumerate` quotes. That figure is not wrong about the shape
 //! — every one of these is a bounded read per file rather than a parse, which is the
 //! requirement — it is describing the header read alone, and two of the three adapters
@@ -67,7 +67,8 @@ const TTL: Duration = Duration::from_secs(30);
 ///
 /// Small on purpose: the keys are (environment, agent, workdir filter) and a user pages
 /// through one at a time. This bounds memory to a few listings rather than to every
-/// filter a client has ever sent — 2789 summaries measured at ~736 KiB serialized, so an
+/// filter a client has ever sent — a whole machine's summaries measure well under a
+/// megabyte serialized, so an
 /// unbounded map is a real leak on a machine with a large store and a busy filter input.
 const MAX_ENTRIES: usize = 8;
 
@@ -92,7 +93,7 @@ impl NativeIndex {
 
     /// The cached listing for this key, or `None` when there is none fresh enough.
     ///
-    /// Returns an `Arc` rather than a clone of the vector: a 1258-row listing is copied
+    /// Returns an `Arc` rather than a clone of the vector: a listing of that size is copied
     /// per page otherwise, which is the cost this exists to avoid reappearing as an
     /// allocation.
     pub async fn get(&self, key: &str) -> Option<Arc<Vec<NativeSummary>>> {

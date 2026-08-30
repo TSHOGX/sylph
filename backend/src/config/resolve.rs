@@ -161,9 +161,9 @@ pub fn env_snapshot() -> Env {
 
 /// Expand a leading `~`, and nothing else.
 ///
-/// A hand-edited file is the reason this exists: `~/Workspace/trace-db/...` is
-/// what a person types, and rejecting it would make the file worse to edit than
-/// the environment variables it replaces. Only a leading `~` is expanded — `~user`
+/// A hand-edited file is the reason this exists: `~/Workspace/project` is what a person
+/// types, and rejecting it would make the file worse to edit than the environment
+/// variables it replaces. Only a leading `~` is expanded — `~user`
 /// is another user's home and resolving it would need passwd lookups for a case
 /// that never arises for a single-user loopback app, so it is left alone rather
 /// than half-supported.

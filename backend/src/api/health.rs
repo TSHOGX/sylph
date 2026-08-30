@@ -41,8 +41,9 @@ pub struct HealthResponse {
     /// machine is `GET /environments`, and that is the better question — it distinguishes
     /// a missing CLI from a sleeping laptop from an exhausted sandbox node.
     ///
-    /// The `tracedb` block that used to sit beside this is gone: there is no separate
-    /// archive to be reachable, so a field reporting its health could only ever be true.
+    /// Whether any agent is usable, which is the one health fact a client cannot infer.
+    /// Zero agents is a silent total failure three layers from its symptom, so it is
+    /// reported here explicitly (`AGENTS.md` § Rules that keep costing time).
     agents: AgentsHealth,
 }
 

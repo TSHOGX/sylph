@@ -1,26 +1,22 @@
 //! Which environments are paired, whether they are reachable, and what they can run.
 //!
-//! # This is what replaces agent discovery's reporting, and the replacement matters
-//!
-//! Deleting discovery deleted `GET /api/v1/agents`, `broken_adapters`, and the loud
-//! zero-agents error. Those existed for a reason worth keeping: zero usable agents
-//! was a **silent, total failure** — every session reported `attached: false`, the
-//! composer's slash menu would not open, and `/` was a dead keystroke three layers
-//! from the cause. `AGENTS.md` records it.
-//!
-//! Availability now reduces to "is the vendor CLI on that machine's `PATH`", but
-//! "codex is not installed on this machine" still needs somewhere to be said, and
-//! **this is that place** (`docs/environments.md` § Health is per environment).
-//!
 //! # Why there is no top-level agent list
 //!
 //! Which agents exist is **per environment, not global** (`docs/api-design.md`
-//! § `GET /api/v1/environments`). A user picking an environment with no `codex` on
-//! it should learn that before creating the session rather than after, and a merged
-//! list would be true of nowhere. That is a better question than the one it
-//! replaces: it distinguishes a missing CLI from a sleeping laptop from an exhausted
-//! sandbox node, where `tracedb.available` could only say "the archive is
-//! unreachable".
+//! § `GET /api/v1/environments`), so a merged list would be true of nowhere. A user
+//! picking an environment with no `codex` on it should learn that before creating the
+//! session rather than after.
+//!
+//! Availability reduces to "is the vendor CLI on that machine's `PATH`", but **"codex is
+//! not installed on this machine" still needs somewhere to be said, and this is that
+//! place** (`docs/environments.md` § Health is per environment). Per-environment health
+//! also distinguishes a missing CLI from a sleeping laptop from an exhausted sandbox node,
+//! which one global boolean cannot.
+//!
+//! Reporting this is not optional: **zero usable agents is a silent, total failure** —
+//! every session reports `attached: false`, the composer's slash menu will not open, and
+//! `/` is a dead keystroke three layers from the cause (`AGENTS.md` § Rules that keep
+//! costing time).
 
 use axum::{extract::State, Json};
 use serde::Serialize;

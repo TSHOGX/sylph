@@ -58,11 +58,9 @@ fn fidelity_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Fidelity, sqlx::Er
 /// One session.
 ///
 /// **There is no Sylph-minted id** (`docs/architecture.md` § Identity): [`Self::id`]
-/// *is* the identity, and a row exists only once an agent has assigned one. What used
-/// to sit here and does not any more — `origin`, `identity_mode`, `lifecycle_mode`,
-/// `trace_session_id`, `backend_session_id` — is recorded in
-/// `docs/database-schema.md`; measured, they had four write sites and one behavioural
-/// branch between them, and that branch is now [`Self::inject_identity`].
+/// *is* the identity, and a row exists only once an agent has assigned one. Nothing here
+/// records who started the session — there is one class of session — so the only
+/// behavioural flag is [`Self::inject_identity`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -165,10 +163,9 @@ pub struct CreateSessionRequest {
     pub title: Option<String>,
     /// Whether to append `SOUL.md`. Defaults to **true** for a session Sylph starts.
     ///
-    /// Accepted here and nowhere else: `PATCH` refuses it, because a transcript
-    /// records what produced it and rewriting the flag would rewrite what the stored
-    /// history means. This is the one behavioural remnant of the deleted
-    /// `identity_mode`, which was a four-valued pair of enums with exactly one read.
+    /// Accepted here and nowhere else: `PATCH` refuses it, because a transcript records
+    /// what produced it and rewriting the flag would rewrite what the stored history
+    /// means. **A default, not a policy.**
     #[serde(default = "inject_identity_default")]
     pub inject_identity: bool,
     pub flags: Option<serde_json::Value>,

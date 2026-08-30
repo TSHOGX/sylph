@@ -21,13 +21,10 @@ use crate::{
 
 /// What the local CLI reports about itself, plus what this module knows about it.
 ///
-/// # A rename, not a new name
-///
-/// `AgentInfo` already existed as a **private** struct in `backend/src/agents/mod.rs`,
-/// holding a discovery descriptor and the path of the `adapter.sh` that answered. That
-/// meaning is gone with discovery — there is no adapter to find a path to — so this is
-/// the name being reused for the thing `probe` returns, not a collision to resolve.
-/// The public `AgentDescriptor` it wrapped collapses into this too.
+/// This is what [`Adapter::probe`] returns: the answer to "is this agent usable here, and
+/// what does it offer". Availability itself is just whether the vendor CLI is on this
+/// machine's `PATH` (`docs/agents.md`), so there is no descriptor to discover and no path
+/// to record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentInfo {
@@ -534,11 +531,10 @@ pub trait Adapter: Send + Sync {
     /// Which native sessions this machine's store holds.
     ///
     /// Answers "what is on this machine" **without parsing every session**, which is the
-    /// requirement rather than an optimization: a per-session metadata call on a real
-    /// store measured 11.5 ms, so a whole-store scan that way cost 52.9 s, while one
-    /// unfiltered listing pass over the same data was 164 ms — about 300× cheaper per
-    /// fact. An adapter that implements this by parsing each session has not implemented
-    /// it.
+    /// requirement rather than an optimization: measured against a real store, asking per
+    /// session costs two orders of magnitude more per fact than one bounded read per file,
+    /// which is the difference between a listing that is affordable and one that is not.
+    /// **An adapter that implements this by parsing each session has not implemented it.**
     async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>>;
 }
 

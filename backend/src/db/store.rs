@@ -158,12 +158,11 @@ impl JournalStore {
     /// silently omitted adopted sessions would leave a user hunting for one plainly on
     /// the machine, and one that offered them would hand out a `409` nobody can act on.
     ///
-    /// Asked per row, that is one indexed lookup each — correct, and **measured at 4.26 s**
-    /// for `codex`'s 1258 rollouts against 232 ms for `pi`'s 531, which is the round-trip
-    /// count rather than the query. It also inverts the requirement the adapter contract
-    /// puts on `enumerate`: the listing pass is deliberately one short header read per
-    /// file (164 ms measured) precisely so a whole-store listing is affordable, and paying
-    /// a database round trip per row hands that back one layer up.
+    /// Asked per row, that is one indexed lookup each — correct, and measured at **seconds**
+    /// on a real store, which is the round-trip count rather than the query. It also inverts
+    /// the requirement the adapter contract puts on `enumerate`: that listing pass is
+    /// deliberately one short bounded read per file precisely so a whole-store listing is
+    /// affordable, and paying a database round trip per row hands that back one layer up.
     ///
     /// One statement, projecting the single column the caller compares. Deliberately **not**
     /// [`Self::list_sessions`]: that returns whole rows, hydrates every title, and is
@@ -462,9 +461,9 @@ impl JournalStore {
         Ok(())
     }
 
-    /// Set the opening title once, without changing activity ordering. This is
-    /// used when a turn starts so live and archived rows acquire the same label
-    /// before TraceDB ingestion catches up.
+    /// Set the opening title once, without changing activity ordering. Called when a turn
+    /// starts, so a row is recognisable from its first message — most agents record no title
+    /// of their own (`docs/agents.md`).
     pub async fn set_session_title_if_empty(&self, id: &SessionId, title: &str) -> Result<()> {
         let title = summarize_line(title);
         if title.is_empty() {
@@ -951,14 +950,13 @@ impl JournalStore {
     /// Reported by `/health` so a client can detect that it is talking to a
     /// backend whose journal shape it does not understand.
     ///
-    /// # Why this reads `_sqlx_migrations` rather than `app_meta`
+    /// # Why this reads `_sqlx_migrations` rather than a stored key
     ///
-    /// It used to read an `app_meta.schema_version` key that migrations bumped by
-    /// hand. `001` wrote `1`, `003` wrote `3`, and `004` through `007` forgot — so a
-    /// fully-migrated journal published `3` while seven migrations had run, and the
-    /// one question the field exists to answer was answered wrongly. A number the
-    /// migration runner already maintains must not have a second hand-written copy:
-    /// the copy is what drifts, and it drifts silently because nothing compares them.
+    /// **A number the migration runner already maintains must not have a second
+    /// hand-written copy.** A hand-bumped `app_meta.schema_version` drifts the first time a
+    /// migration forgets to bump it, and it drifts *silently* because nothing compares the
+    /// two — so the one question this field exists to answer, whether a client understands
+    /// this journal's shape, is answered wrongly with nothing reporting it.
     pub async fn schema_version(&self) -> Result<i64> {
         let value: Option<i64> =
             sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")

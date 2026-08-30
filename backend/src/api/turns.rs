@@ -66,9 +66,9 @@ pub async fn create(
 
     let text = req.text.unwrap_or_default();
     if session.title.as_deref().is_none_or(|title| title.trim().is_empty()) {
-        // The opening ask is the one title source available before TraceDB
-        // ingestion. Persisting it here keeps a live row recognisable and makes
-        // its later archived counterpart use the same label.
+        // Most agents record no title of their own, so the opening ask is the only label
+        // available (`docs/agents.md`). Persisting it here means a row stays recognisable
+        // whether it is read live or folded into history later.
         state.store.set_session_title_if_empty(&session_id, &text).await?;
     }
     let attachments = req.attachments.unwrap_or_default();
@@ -80,8 +80,9 @@ pub async fn create(
     )
     .await?;
 
-    // Session flags may contain a model or effort choice, but `--describe`'s
-    // `flags` schema is the source of truth: unknown keys are silently dropped.
+    // Session flags may carry a model or effort choice. Only string values are forwarded;
+    // anything else is dropped rather than guessed at, and the adapter validates the value
+    // against what the vendor enumerated (`docs/session-protocol.md` § Session config).
     let flags = serde_json::from_str::<serde_json::Value>(&session.flags_json)
         .ok()
         .and_then(|v| v.as_object().cloned())

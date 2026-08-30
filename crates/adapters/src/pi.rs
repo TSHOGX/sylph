@@ -1,5 +1,4 @@
-//! The `pi` adapter, for the live RPC
-//! surface, and correctively from trace-db's `src/parsers/pi.rs` for the native store.
+//! The `pi` adapter: the live RPC surface, and the reader for its native store.
 //!
 //! `docs/agents.md` § `pi` is the governing spec and holds the measurement behind every
 //! quirk below. The vendor's own protocol is documented in the installed package at
@@ -1335,9 +1334,9 @@ pub mod translate {
     /// even in principle.
     ///
     /// So a flat `pi` transcript is a **true report** rather than a gap. Synthesizing a
-    /// `span` out of a token total, or out of trace-db's downstream `call:<call_id>` pairing
-    /// — which is a parser-invented tool-call/result link and not delegation structure —
-    /// would put a shape in the timeline that nothing in the session corresponds to.
+    /// `span` out of a token total, or out of a parser-invented `call:<call_id>` pairing —
+    /// which is a tool-call/result link rather than delegation structure — would put a shape
+    /// in the timeline that nothing in the session corresponds to.
     pub const SPAN_HAS_NO_VENDOR_SOURCE: &str =
         "pi exposes no delegation on the RPC wire; a span here would be invented";
 
@@ -2028,12 +2027,11 @@ pub mod translate {
 
 /// Reading `pi`'s native store: one JSONL file per session under `~/.pi/agent/sessions/`.
 ///
-/// `docs/agents.md` § `pi` governs, and this is a **corrective** port of trace-db's
-/// `src/parsers/pi.rs`: three of its record mappings are measurably wrong against the real
-/// store while raising no error, and each is fixed here with a test asserting the value that
-/// should have been found. They are named at [`native::defect_timestamp_unit`],
-/// [`native::defect_field_spelling`], and [`native::defect_fork_pointer`] so a reader arriving from
-/// `AGENTS.md` § Reading a vendor payload lands on the code rather than on prose.
+/// `docs/agents.md` § `pi` governs. Three record mappings here are the ones a reader is most
+/// likely to get wrong, because each wrong version raises no error and yields a plausible
+/// record: [`native::defect_timestamp_unit`], [`native::defect_field_spelling`], and
+/// [`native::defect_fork_pointer`] name the tests that pin them, each asserting **the value
+/// that should have been found** (`AGENTS.md` § Reading a vendor payload).
 ///
 /// # What the store holds, measured
 ///
@@ -2052,9 +2050,8 @@ pub mod translate {
 /// emits it, and a declared-only branch is indistinguishable from one whose condition is
 /// merely rare.
 ///
-/// The root is hardcoded, as trace-db had it at `facade.rs:2080-2084`: a native store's
-/// location is a vendor fact with no configuration key, and inventing one would offer a
-/// lever that cannot be right.
+/// The root is hardcoded: a native store's location is a vendor fact with no configuration
+/// key, and inventing one would offer a lever that cannot be right.
 pub mod native {
     use std::path::{Path, PathBuf};
 
@@ -2094,10 +2091,10 @@ pub mod native {
     /// **Defect 1, fixed: `message.timestamp` is epoch milliseconds and was divided by
     /// 1000.**
     ///
-    /// trace-db's `ts()` (`parsers/pi.rs:19-24`) parsed a string as RFC3339 and returned
-    /// milliseconds, then fell back to `as_i64().map(|x| x / 1_000)` for an integer. So every
-    /// per-event time it produced decoded to **1970**, on all 3947 integer stamps in the
-    /// store, while the file parsed without a single error.
+    /// `message.timestamp` is epoch **milliseconds**. Divide it as though it were
+    /// microseconds — the shape of a reader whose string branch returns milliseconds while its
+    /// integer branch falls back to `/ 1_000` — and every per-event time decodes to **1970**
+    /// on every integer stamp in the store, while the file parses without a single error.
     ///
     /// Two things made it survivable and therefore invisible: the session-level start and end
     /// come from the *entry's* ISO string and were right, so only the finer-grained per-event
@@ -2115,9 +2112,9 @@ pub mod native {
 
     /// **Defect 2, fixed: field spelling is resolved per field, never per file.**
     ///
-    /// trace-db read only camelCase — `modelId`, `parentId`, `stopReason`, `toolCallId` — so
-    /// every snake_case-era record silently lost those fields. *Re-measured 2026-08-28 over
-    /// all 527 files:*
+    /// Read only camelCase — `modelId`, `parentId`, `stopReason`, `toolCallId` — and every
+    /// snake_case-era record silently loses those fields. *Measured 2026-08-28 over the whole
+    /// store, by file count per spelling:*
     ///
     /// | field | snake files | camel files |
     /// | --- | --- | --- |
@@ -2156,10 +2153,9 @@ pub mod native {
     /// **Defect 3, fixed: a fork pointer is a file path, not a session id.**
     ///
     /// The header carries `parentSession`/`parent_session` naming another `.jsonl` on disk.
-    /// trace-db hardcoded `parent_session_id: None` (`parsers/pi.rs:183`) and never read the
-    /// field under either spelling, so pi fork lineage was dropped **entirely** rather than
-    /// partially — which is the better failure of the two available, but still a whole
-    /// relationship missing from every listing.
+    /// Hardcoding a `None` parent here — or reading only one spelling of the field — drops pi
+    /// fork lineage **entirely** rather than partially. That is the better failure of the two
+    /// available, and still a whole relationship missing from every listing.
     ///
     /// Under an identity of `(environment, agent, native_id)` the path cannot be stored as
     /// given: it is not an id, and comparing it against one is the two-id-spaces failure
@@ -2343,9 +2339,8 @@ pub mod native {
         ///
         /// **`None` is a real state and must not be enumerated.** Measured: one file,
         /// `None.jsonl`, carries `"id": null`, and it is a placeholder pi wrote rather than a
-        /// session. trace-db skipped it by *filename* (`parsers/pi.rs:215`), which is a
-        /// coincidence of how that file was named; the null id is the actual fact, so that is
-        /// what is read. A row with no id names no session, cannot be adopted, and cannot be
+        /// session. Skipping it by *filename* keys on a coincidence of how that file was
+        /// named; the null id is the actual fact, so that is what is read. A row with no id names no session, cannot be adopted, and cannot be
         /// resumed.
         pub native_id: Option<NativeId>,
         /// Where it ran, from the header's `cwd`.
@@ -2408,9 +2403,10 @@ pub mod native {
             native_id: string_at(&record, "id").map(NativeId::new),
             workdir: string_at(&record, "cwd"),
             // The header's outer ISO stamp. **Not an integer here** — the outer `timestamp`
-            // is a string on every record in the store, which is exactly why the integer
-            // fallback in trace-db's `ts()` never fired on it and the session-level times
-            // stayed right while every per-event time was wrong ([`defect_timestamp_unit`]).
+            // is a string on every record in the store, so an integer fallback never fires on
+            // it. That is why a session-level time can stay right while every *per-event* time
+            // is wrong, which is what made the unit defect survivable
+            // ([`defect_timestamp_unit`]).
             started_at_ms: record
                 .get("timestamp")
                 .and_then(Value::as_str)
@@ -2545,9 +2541,8 @@ pub mod native {
                 Some("model_change") => {
                     // The last one wins, because a session can be re-modelled mid-run and
                     // measurably is — `ordinary-turn.jsonl` changes model between the header
-                    // and the first user message. trace-db used `set_if_none`
-                    // (`parsers/pi.rs:48-49`), so it reported the *first* model a session
-                    // ever had, which for that file is not the one that answered.
+                    // and the first user message. Setting this only when absent reports the
+                    // *first* model a session ever had, which is not the one that answered.
                     let provider = string_at(&record, "provider");
                     if let Some(id) = MODEL_ID.read(&record).and_then(|(value, _)| value.as_str()) {
                         model = Some(super::rpc::model_key(provider.as_deref(), id));
@@ -2607,10 +2602,9 @@ pub mod native {
     /// A `model_change` or `thinking_level_change`, as a `status` the timeline can show.
     ///
     /// A [`EventKind::Status`] with **no phase**, which makes it stable and therefore
-    /// journaled (`sylph_protocol::Event::derive_stability`). trace-db mapped these to its
-    /// own `System` kind with a `subtype`; this vocabulary has no `subtype`, so the vendor's
-    /// own record travels in `data` where a reader can see which change it was without the
-    /// text having to be parsed.
+    /// journaled (`sylph_protocol::Event::derive_stability`). This vocabulary has no
+    /// `subtype`, so the vendor's own record travels in `data` where a reader can see which
+    /// change it was without parsing the text.
     ///
     /// `None` when the change names nothing — a `model_change` with no model is a record
     /// about nothing, and a status reading "Model changed to" is worse than no row.
@@ -2920,10 +2914,9 @@ pub mod native {
     ///
     /// Extension only, because the store holds nothing else: one flat directory per working
     /// directory, one `.jsonl` per session, no sidecars and no nesting. There is deliberately
-    /// **no filename filter** — trace-db excluded `None.jsonl` by name
-    /// (`parsers/pi.rs:215`), which is a coincidence of how pi named one placeholder file.
-    /// The actual fact is that its header carries `"id": null`, and that is where it is
-    /// filtered ([`Header::native_id`]).
+    /// **no filename filter.** Excluding a placeholder like `None.jsonl` by name keys on
+    /// how the vendor happened to name it. The actual fact is that its header carries
+    /// `"id": null`, and that is where it is filtered ([`Header::native_id`]).
     fn is_session_file(path: &Path) -> bool {
         path.extension().is_some_and(|ext| ext == "jsonl")
     }
@@ -3077,11 +3070,11 @@ pub mod native {
 
     /// Sessions this store holds that are the vendor's **own test fixtures**.
     ///
-    /// # One filter, and the second one trace-db carried is deleted
+    /// # One filter, not two
     ///
-    /// trace-db dropped a session when `provider == "faux"` **or** `cwd == "/tmp"`
-    /// (`parsers/pi.rs:234-236`). *Re-measured over all 527 files:* the two together drop 46,
-    /// the `faux` clause alone drops the same 46, and the `cwd == "/tmp"` clause matches
+    /// A `provider == "faux"` **or** `cwd == "/tmp"` pair is the obvious shape here.
+    /// *Measured over the whole store:* the two together and the `faux` clause alone drop the
+    /// same files, and the `cwd == "/tmp"` clause matches
     /// **zero** — so it was a filter that had never fired. It is deleted rather than kept:
     /// `AGENTS.md` § Compatibility, a branch that never fires is indistinguishable from one
     /// whose condition is merely rare, and keeping it would suggest `/tmp` sessions had been
@@ -3232,9 +3225,8 @@ pub mod native {
 
         /// **A fork pointer is a file path and must resolve to a `native_id` or be absent.**
         ///
-        /// trace-db hardcoded this to `None` and dropped pi fork lineage entirely. The
-        /// fixture pair is the one real resolvable example in the store, so this is the only
-        /// place the resolution can be exercised end to end.
+        /// The fixture pair is the one real resolvable example in the store, so this is the
+        /// only place the resolution can be exercised end to end.
         #[test]
         fn a_fork_pointer_resolves_to_the_parents_own_id() {
             let child = parse_session(&fixture("fork-child.jsonl")).unwrap();
@@ -3253,10 +3245,9 @@ pub mod native {
 
         /// The vendor-fixture filter names `faux` and nothing else.
         ///
-        /// The `cwd == "/tmp"` clause trace-db paired with it was dropped deliberately:
-        /// measured, the `faux` clause alone drops the same files and the `/tmp` clause
-        /// matches none, so keeping it would imply `/tmp` sessions had been excluded when
-        /// they never were.
+        /// A `cwd == "/tmp"` clause is deliberately **not** paired with it: measured, the
+        /// `faux` clause alone drops the same files and the `/tmp` clause matches none, so
+        /// carrying it would imply `/tmp` sessions are excluded when they are not.
         #[test]
         fn the_vendor_fixture_filter_keys_on_faux_alone() {
             let parent = parse_session(&fixture("fork-parent.jsonl")).unwrap();

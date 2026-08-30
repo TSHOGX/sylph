@@ -1,24 +1,19 @@
 //! Reading a vendor's native store: the parts every agent's parser needs.
 //!
-//! This is the infrastructure half of what trace-db's `parsers/mod.rs` held — the
-//! `Parser` trait, candidate discovery, JSONL iteration, fingerprinting. The
-//! per-vendor record shapes live in each agent's own module, because that is where the
-//! measurements are.
+//! The `Parser` trait, candidate discovery, JSONL iteration, and fingerprinting live here;
+//! the per-vendor record shapes live in each agent's own module, because that is where the
+//! measurements are — [`crate::claude::native`], [`crate::codex::native`],
+//! [`crate::pi::native`].
 //!
-//! # What is deliberately *not* ported
+//! # Every record mapping is derived from a printed payload
 //!
-//! trace-db's parsers processed all 4986 real sessions across the three stores with
-//! **zero** parse failures while misreading them (`AGENTS.md` § Reading a vendor
-//! payload). So this crate reuses the shape of the infrastructure and re-derives every
-//! record mapping from a printed payload. The specific defects, each re-measured on this
-//! machine on 2026-08-28 before being fixed, are recorded beside the code that fixes
-//! them: [`crate::claude::native`], [`crate::codex::native`], [`crate::pi::native`].
+//! **A store-reading defect does not raise an error.** A missing key is indistinguishable
+//! from a field the vendor omitted, so it yields a plausible record rather than a failure —
+//! a parser can read an entire store without a single error while misreading most of it.
 //!
-//! The rule that produced all three: **a store-reading defect does not raise an error.**
-//! A missing key is indistinguishable from a field the vendor omitted, so it yields a
-//! plausible record rather than a failure. Verify a parser by asserting on values it
-//! should have found against a payload you have printed — never by observing that a run
-//! completed.
+//! So verify by asserting on *values a parser should have found* against a payload you have
+//! printed, never by observing that a run completed. `docs/agents.md` § Reading a vendor
+//! payload carries the measured instances and the rest of the rules.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -32,9 +27,9 @@ pub use timestamp::{epoch_millis_from_iso, epoch_millis_from_json};
 
 /// Where a vendor keeps its sessions on this machine.
 ///
-/// Hardcoded per agent, as trace-db had them at `facade.rs:2080-2084`, because a native
-/// store's location is a vendor fact rather than a setting: there is no configuration
-/// key for it and inventing one would offer a lever that cannot be right.
+/// Hardcoded per agent, because a native store's location is a vendor fact rather than a
+/// setting: there is no configuration key for it, and inventing one would offer a lever
+/// that cannot be right.
 ///
 /// `$HOME`-relative and resolved at call time rather than at startup, so a test can
 /// point `HOME` elsewhere without this crate holding a cached path from before it moved.
@@ -92,10 +87,10 @@ impl SessionCandidate {
     ///
     /// # Why not a content hash
     ///
-    /// trace-db hashed content to decide whether a session needed re-ingesting, which is
-    /// right for an ingest pipeline and wrong here for two reasons. It costs a full read
-    /// of every file — the 52.9 s that this type exists to avoid — and Sylph has no
-    /// ingest step to skip: `adopt` parses on demand and `watch` follows appends.
+    /// Hashing content is right for an ingest pipeline and wrong here for two reasons: it
+    /// costs a full read of every file, which is the whole cost this type exists to avoid,
+    /// and there is no ingest step to skip — `adopt` parses on demand and `watch` follows
+    /// appends.
     ///
     /// What a caller actually needs is "is my parse of this file stale", and size+mtime
     /// answers that for the only mutation these stores perform. Two of the three

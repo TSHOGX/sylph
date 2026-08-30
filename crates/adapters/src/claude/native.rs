@@ -1,12 +1,11 @@
 //! Reading `claude`'s native store: one JSONL transcript per session under
 //! `~/.claude/projects/`.
 //!
-//! `docs/agents.md` § `claude` governs, and this module is a **corrective** port of
-//! trace-db's `src/parsers/claude.rs`: two of its record mappings are measurably wrong
-//! against the real store while raising no error, and both are fixed here with a test
-//! asserting the value that should have been found. They are named at
-//! `defect_tool_use_id` and `defect_is_error` so a reader arriving from `AGENTS.md`
-//! § Reading a vendor payload lands on the code rather than on prose.
+//! `docs/agents.md` § `claude` governs. Two record mappings here are the ones a reader is
+//! most likely to get wrong, because the wrong version raises no error and produces
+//! plausible records: `defect_tool_use_id` and `defect_is_error` name the tests that pin
+//! them, each asserting **the value that should have been found** rather than the absence
+//! of a crash (`AGENTS.md` § Reading a vendor payload).
 //!
 //! # There is one projection, not two
 //!
@@ -23,21 +22,22 @@
 //! live `user` payload are the *same shape*, which is the fact that makes the reuse sound
 //! rather than merely convenient.
 //!
-//! # What the store holds, measured
+//! # What the store holds
 //!
-//! *Measured 2026-08-28 over `~/.claude/projects/`: 3235 JSONL files, 352533 records.*
+//! *Layout measured 2026-08-28 over `~/.claude/projects/`.* All four shapes occur in
+//! quantity, and a parser has to handle each: a delegate and a workflow phase are ordinary
+//! session files in a nested directory, not a different format.
 //!
 //! ```text
-//! <project>/<session-uuid>.jsonl                                    999   the session
-//! <project>/<session-uuid>/subagents/agent-<hash>.jsonl             632   a delegate
-//! <project>/<session-uuid>/subagents/agent-<hash>.meta.json               its sidecar
-//! <project>/<session-uuid>/subagents/workflows/wf_<id>/agent-*.jsonl 1379  a workflow's
-//! <project>/<session-uuid>/subagents/workflows/wf_<id>/journal.jsonl  23   phase outcomes
+//! <project>/<session-uuid>.jsonl                                     the session
+//! <project>/<session-uuid>/subagents/agent-<hash>.jsonl              a delegate
+//! <project>/<session-uuid>/subagents/agent-<hash>.meta.json          its sidecar
+//! <project>/<session-uuid>/subagents/workflows/wf_<id>/agent-*.jsonl a workflow's delegate
+//! <project>/<session-uuid>/subagents/workflows/wf_<id>/journal.jsonl phase outcomes
 //! ```
 //!
-//! The root is hardcoded, as trace-db had it at `facade.rs:2080-2084`: a native store's
-//! location is a vendor fact with no configuration key, and inventing one would offer a
-//! lever that cannot be right.
+//! The root is hardcoded: a native store's location is a vendor fact with no configuration
+//! key, and inventing one would offer a lever that cannot be right.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -170,9 +170,9 @@ struct SessionFiles {
     /// `agent-<hash>.jsonl` under `subagents/`, including a workflow's, flattened.
     ///
     /// **Flat, because the store is flat.** Depth is expressed by `parentAgentId` inside
-    /// each sidecar, never by directory nesting — trace-db read only one path component
-    /// up to find a parent, so it attributed every delegate to the root session and
-    /// flattened real depth-2 trees into one level.
+    /// each sidecar, **never by directory nesting**: reading one path component up to find a
+    /// parent attributes every delegate to the root session and flattens a real depth-2 tree
+    /// into one level.
     delegates: Vec<PathBuf>,
     /// `subagents/workflows/wf_<id>/journal.jsonl`.
     journals: Vec<PathBuf>,
@@ -184,7 +184,7 @@ fn locate(id: &NativeId) -> Result<SessionFiles> {
     let wanted = format!("{}.jsonl", id.as_str());
 
     // The project directory is a mangled `cwd` and is **not derivable from the session
-    // id**, so the store has to be walked. Measured at 3235 files and well under the
+    // id**, so the store has to be walked. Measured over the whole store and well under the
     // per-session parse cost, which is why there is no index here to keep in sync.
     let transcript = candidates(&root, is_root_transcript)
         .into_iter()
@@ -542,16 +542,15 @@ fn parse_transcript(path: &Path, span: Option<String>) -> Result<ParsedFile> {
 ///
 /// - **`defect_tool_use_id`** — a `user` record's tool result is read by
 ///   `Correlation::tool_results`, which takes the id off the `tool_result` **content
-///   block**. That is where it is: on **23569 of 23569** blocks measured 2026-08-28, and
-///   trace-db's four candidate spellings (`toolUseResult.tool_use_id`,
-///   `toolUseResult.toolUseId`, and both top-level forms) occur **zero** times in the whole
-///   store. Re-measured here at 87038 blocks with the id present on every one and no
-///   alternative spelling anywhere.
+///   block**. Measured 2026-08-28, that is where it is on *every* such block, while the
+///   plausible alternatives (`toolUseResult.tool_use_id`, `toolUseResult.toolUseId`, and
+///   both top-level forms) occur **zero** times in the whole store. Read one of those and
+///   every tool result carries a null call id.
 /// - **`defect_is_error`** — read off that same block, which is the only place it appears:
-///   46957 occurrences on `user`-role blocks, 2131 of them true, and **never** on an
-///   assistant message. trace-db read it on the assistant branch, so all 2100 real tool
-///   failures parsed as successes — and `false` is indistinguishable from
-///   absent-and-defaulted downstream, which is why this needs a test asserting `true`.
+///   on `user`-role blocks, and **never** on an assistant message. Read it on the assistant
+///   branch and every real tool failure parses as a success — and `false` is
+///   indistinguishable from absent-and-defaulted downstream, which is why the test asserts
+///   `true` rather than merely asserting the field parses.
 ///
 /// An `assistant` record is replayed as the `content_block_start` / `content_block_stop`
 /// pair the live stream would have sent, which is what makes tool calls, thinking, and
@@ -647,8 +646,8 @@ fn assistant_blocks(
     if let Some(failure) = api_error(record, at_ms) {
         // An API-level failure carries a synthetic assistant message whose text is the
         // error. Reported as a failed status rather than as the agent's own prose, which is
-        // what trace-db did — it reads none of the three fields that say so, so an API
-        // failure was indistinguishable from ordinary assistant text to it.
+        // read none of the three fields that say so, and an API failure is
+        // indistinguishable from ordinary assistant text.
         return vec![SessionMessage::Event(failure)];
     }
 
@@ -814,10 +813,10 @@ fn system_record(
                 object.insert("compact_metadata".to_string(), metadata);
             }
             // `logicalParentUuid` names the record this boundary logically follows, and
-            // `trace-db` ignored it along with `sessionKind` and `slug`. Carried in `data`
-            // beside the vendor's own metadata rather than promoted to a field: nothing in
-            // the vocabulary means "the record before compaction", and inventing a field
-            // for one vendor's bookkeeping is worse than keeping it queryable.
+            // Carried in `data` beside the vendor's own metadata rather than promoted to a
+            // field: nothing in the vocabulary means "the record before compaction", and
+            // inventing a field for one vendor's bookkeeping is worse than keeping it
+            // queryable.
             if let Some(logical) = string_at(record, "logicalParentUuid") {
                 if let Some(metadata) = object
                     .get_mut("compact_metadata")
@@ -859,11 +858,11 @@ fn system_record(
 ///
 /// # This file is read rather than skipped, which is a decision
 ///
-/// trace-db skips it (`claude.rs:47`). Measured, the 23 journals hold **1379 `started` and
-/// 1353 `result` records**, and they are the *only* record of a workflow delegate's outcome:
-/// `--forward-subagent-text` forwards nothing for `Workflow` (`docs/agents.md`), and a
-/// workflow delegate's own `.meta.json` carries neither `toolUseId` nor `parentAgentId` —
-/// measured, **0 of 1379**. So without this file a workflow's delegates have no outcome at
+/// Skipping this file loses outcomes. Measured, its `started`/`result` records are the
+/// *only* record of a workflow delegate's outcome: `--forward-subagent-text` forwards nothing
+/// for `Workflow` (`docs/agents.md`), and a workflow delegate's own `.meta.json` carries
+/// neither `toolUseId` nor `parentAgentId` on **any** file. So without this file a workflow's
+/// delegates have no outcome at
 /// all, and every one of them renders as permanently running.
 ///
 /// The 26 `started` with no `result` are real: a workflow interrupted mid-phase. They stay
@@ -954,14 +953,14 @@ fn read_sidecar(path: &Path) -> Option<Value> {
 
 /// Which trajectory each delegate's work belongs inside, keyed by `agentId`.
 ///
-/// # `parentAgentId`, not directory nesting — and this is the flattening trace-db shipped
+/// # `parentAgentId`, not directory nesting
 ///
-/// The files sit **flat** in one `subagents/` directory however deep the delegation went.
-/// trace-db read one path component up to find a parent (`claude.rs`'s `parts[index - 1]`),
-/// so it attributed every delegate to the root session and a depth-2 tree came out one level
-/// deep. Depth is expressed by `parentAgentId` inside the child's own sidecar: measured, 85
-/// of 2209 sidecars carry one, and `fixtures/native/claude/delegation-task-fanout-nested.*`
-/// is a 3-way fan-out where each depth-1 delegate spawns one depth-2 child.
+/// The files sit **flat** in one `subagents/` directory however deep the delegation went, so
+/// reading one path component up to find a parent attributes every delegate to the root
+/// session and a depth-2 tree comes out one level deep. Depth is expressed by
+/// `parentAgentId` inside the child's own sidecar — a minority of sidecars carry one, and
+/// `fixtures/native/claude/delegation-task-fanout-nested.*` is a 3-way fan-out where each
+/// depth-1 delegate spawns one depth-2 child.
 ///
 /// A delegate's trajectory id **is its `agentId`**, so this map answers the other question:
 /// which trajectory *contains* it. Three routes, in order of how directly the store states
@@ -1187,12 +1186,12 @@ mod tests {
 
     /// **Defect 1: a tool result's call id is on the content block, nowhere else.**
     ///
-    /// *Measured 2026-08-28 over `~/.claude/projects/`: `tool_use_id` is present on **87038
-    /// of 87038** `tool_result` blocks, and the four places trace-db looks —
-    /// `toolUseResult.tool_use_id`, `toolUseResult.toolUseId`, and both top-level spellings —
-    /// occur **zero** times in the whole store.* So every tool result it parsed carries a
-    /// null call id, and the pairing `docs/session-protocol.md` § Keying rules depends on
-    /// silently does not exist.
+    /// *Measured 2026-08-28 over `~/.claude/projects/`:* `tool_use_id` is on **every**
+    /// `tool_result` block, and the plausible alternatives — `toolUseResult.tool_use_id`,
+    /// `toolUseResult.toolUseId`, and both top-level spellings — occur **zero** times in the
+    /// whole store. A parser reading those pairs nothing: every tool result gets a null call
+    /// id, and the pairing `docs/session-protocol.md` § Keying rules depends on silently
+    /// does not exist.
     ///
     /// Asserted on the **value that should have been found**, not on presence: the exact id
     /// from the payload, matched to the call that produced it. A presence check would pass
@@ -1232,9 +1231,9 @@ mod tests {
             );
         }
 
-        // The keys trace-db read, asserted absent from the real payload. This is what makes
-        // the test evidence about the *store* rather than about this parser: if a future
-        // vendor version starts writing one, this fails and the comment above is stale.
+        // The plausible alternative keys, asserted absent from the real payload. This is
+        // what makes the test evidence about the *store* rather than about this parser: if a
+        // future vendor version starts writing one, this fails and the doc above is stale.
         let record: Value = serde_json::from_str(
             std::fs::read_to_string(fixture("tool-call-and-result.jsonl"))
                 .unwrap()
@@ -1261,10 +1260,10 @@ mod tests {
     /// **Defect 2: `is_error` is only ever on a `user`-role block.**
     ///
     /// *Measured 2026-08-28: 46957 occurrences, **2131 of them true**, and never on an
-    /// assistant message.* trace-db reads it on the assistant branch, so all of those real
-    /// tool failures parsed as **successes** — and `false` is indistinguishable from
-    /// absent-and-defaulted downstream, which is exactly why this asserts `true` on a
-    /// payload that genuinely failed rather than asserting the field was seen.
+    /// assistant message.* Read it on the assistant branch and every real tool failure parses
+    /// as a **success** — and `false` is indistinguishable from absent-and-defaulted
+    /// downstream, which is exactly why this asserts `true` on a payload that genuinely failed
+    /// rather than asserting the field was seen.
     #[test]
     fn defect_is_error_is_read_from_the_user_role_block() {
         let events = project("tool-error-edit.jsonl");
@@ -1396,10 +1395,10 @@ mod tests {
 
     /// An API failure is not ordinary assistant prose, and three fields say so together.
     ///
-    /// trace-db reads none of them, so an API failure was indistinguishable from the agent
-    /// talking. Measured: 258 records carry `model: "<synthetic>"` while only 196 carry
-    /// `isApiErrorMessage: true` — the flag is the discriminant, because a user interrupt's
-    /// acknowledgement *also* uses a synthetic model.
+    /// Read none of them and an API failure is indistinguishable from the agent talking.
+    /// Measured, more records carry a synthetic `model` than carry `isApiErrorMessage: true`,
+    /// so **the flag is the discriminant** — a user interrupt's acknowledgement *also* uses a
+    /// synthetic model.
     #[test]
     fn an_api_failure_is_a_failed_status_rather_than_assistant_text() {
         let events = project("api-error-server-error.jsonl");
@@ -1466,23 +1465,21 @@ mod tests {
         assert_eq!(data.get("trigger"), Some(&json!("manual")));
         assert_eq!(data.get("preTokens"), Some(&json!(178564)));
         assert_eq!(data.get("postTokens"), Some(&json!(16758)));
-        // `logicalParentUuid` names the record this boundary logically follows. trace-db
-        // ignored it; it is the only thing that says where the pre-compaction conversation
-        // ended.
+        // `logicalParentUuid` names the record this boundary logically follows, and it is
+        // the only thing that says where the pre-compaction conversation ended.
         assert_eq!(
             data.get("logicalParentUuid"),
             Some(&json!("e117dff3-3ce2-490c-b927-f02cd2c7f7d8"))
         );
     }
 
-    /// **`forkedFrom.messageUuid` is not a branch point**, and trace-db's own unit test
-    /// encodes the opposite.
+    /// **`forkedFrom.messageUuid` is not a branch point.**
     ///
     /// *Measured over the whole store: 873 records carry `forkedFrom`, and on **all 873** the
     /// `messageUuid` equals **that record's own `uuid`**.* It is a per-record stamp, not a
-    /// pointer to where the fork happened — trace-db's `captures_fork_parent_and_native_branch_point`
-    /// asserts `messageUuid` is a distinct earlier message, which its hand-written fixture
-    /// satisfies and real data falsifies.
+    /// pointer to where the fork happened. A hand-written fixture can satisfy the opposite
+    /// reading — a distinct earlier message — which real data falsifies, so this is asserted
+    /// against a payload from the store.
     ///
     /// `forkedFrom.sessionId` *is* stable, so session-level lineage is recoverable and a
     /// per-record branch point is not. This parser therefore reports the parent and omits the
@@ -1525,8 +1522,8 @@ mod tests {
     /// Build a session tree on disk in the store's own layout.
     ///
     /// The fixture is a flat file plus six sidecars; the store nests a session's delegates
-    /// under `<session>/subagents/`. The layout is part of what is being tested — that is where
-    /// trace-db's flattening lived — so it is reproduced rather than stubbed.
+    /// under `<session>/subagents/`. The layout **is** part of what is being tested, since that
+    /// is where a flattening defect lives, so it is reproduced rather than stubbed.
     fn stage_fanout(tag: &str) -> SessionFiles {
         let root = std::env::temp_dir().join(format!(
             "sylph-claude-native-{tag}-{}",
@@ -1580,12 +1577,12 @@ mod tests {
         collect(transcript)
     }
 
-    /// **Nesting is `parentAgentId`, not directory depth** — the flattening trace-db shipped.
+    /// **Nesting is `parentAgentId`, not directory depth.**
     ///
     /// The files sit flat in one `subagents/` directory however deep the delegation went, so
-    /// reading one path component up (trace-db's `parts[index - 1]`) attributes every delegate
-    /// to the root session. This fixture is a real 3-way fan-out where each depth-1 delegate
-    /// spawns one depth-2 child; flattened, all six read as siblings of the root.
+    /// reading one path component up attributes every delegate to the root session. This
+    /// fixture is a real 3-way fan-out where each depth-1 delegate spawns one depth-2 child;
+    /// flattened, all six read as siblings of the root.
     ///
     /// Asserted on the **span each depth-2 child resolves to**, which is what a timeline nests
     /// by — not on a depth count, which a flattened tree could still get right by accident.
@@ -1615,10 +1612,10 @@ mod tests {
             );
         }
 
-        // The property the flattening destroyed: a depth-2 child's container is a call *inside
-        // its parent's transcript*, so it is distinct from its parent's own container. Read
-        // one path component up — trace-db's `parts[index - 1]` — and all six collapse onto
-        // the root, which this inequality is what detects.
+        // The property a flattening destroys: a depth-2 child's container is a call *inside
+        // its parent's transcript*, so it is distinct from its parent's own container. Read one
+        // path component up instead and all six collapse onto the root, which is what this
+        // inequality detects.
         assert_ne!(
             spans.get("a9aa098597842ed09"),
             spans.get("a7ee4760914240f23"),
@@ -1782,12 +1779,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A workflow's phase outcomes come from `journal.jsonl`, which trace-db skips.
+    /// A workflow's phase outcomes come from `journal.jsonl`, and nothing else carries them.
     ///
-    /// *Measured: the 23 journals hold 1379 `started` and 1353 `result` records, and they are
-    /// the only record of a workflow delegate's outcome* — `--forward-subagent-text` forwards
-    /// nothing for `Workflow`, and 0 of 1379 workflow sidecars carry `toolUseId` or
-    /// `parentAgentId`. Skipped, every workflow delegate renders as permanently running.
+    /// *Measured:* a workflow journal's `started`/`result` records are the only record of a
+    /// workflow delegate's outcome — `--forward-subagent-text` forwards nothing for
+    /// `Workflow`, and **no** workflow sidecar carries `toolUseId` or `parentAgentId`. Skip
+    /// this file and every workflow delegate renders as permanently running.
     #[test]
     fn a_workflow_journal_supplies_the_outcomes_nothing_else_records() {
         let root = std::env::temp_dir().join(format!(

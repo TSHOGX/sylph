@@ -1,19 +1,18 @@
-//! Decoding a vendor's timestamps. **One module, because two of the three measured
-//! defects in the ported parsers were timestamp bugs.**
+//! Decoding a vendor's timestamps. **One module, because a timestamp is where the
+//! wrong-unit defect lands, and the stores hold two shapes of it.**
 //!
 //! `AGENTS.md` § Reading a vendor payload: *"The right key in the wrong unit fails the
 //! same way, and is harder to catch. A wrong key yields absent, which a presence check
 //! finds; a wrong unit yields a value, which passes every such check."*
 //!
-//! The two defects this module exists to make impossible, both re-measured on this
-//! machine on 2026-08-28 against the real stores:
+//! The two hazards this module exists to make impossible, both measured on this machine
+//! on 2026-08-28 against the real stores:
 //!
-//! - **`pi`'s `message.timestamp` is epoch milliseconds and was divided by 1000.**
-//!   Re-measured: 3947 integer stamps, first sample `1782118877466`, which as
-//!   milliseconds is `2026-06-22T09:01:17Z` and under the parser's divide decodes to
-//!   `1970-01-21`. Every per-event time the parser produced was in 1970 — on a store
-//!   that parsed without a single error.
-//! - **746 of 4881 of `pi`'s outer ISO stamps carry no UTC offset**, so strict RFC3339
+//! - **`pi`'s `message.timestamp` is epoch milliseconds.** Divide it by 1000 and every
+//!   per-event time decodes to 1970: the sample `1782118877466` is
+//!   `2026-06-22T09:01:17Z` as milliseconds and `1970-01-21` divided. The store parses
+//!   without a single error either way, so nothing reports the shift.
+//! - **A minority of `pi`'s outer ISO stamps carry no UTC offset**, so strict RFC3339
 //!   parsing fails on them; and because the value is a *string*, an integer fallback
 //!   never fires either. Both halves are needed or one era of the store is unreadable.
 //!
@@ -26,24 +25,22 @@ use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 /// Accepts both shapes the stores actually hold, and the second is not optional:
 ///
 /// - With an offset (`…Z`, `…+08:00`) — parsed as the instant it names.
-/// - **Without one** (`2026-04-17T17:07:29.330418`) — 746 of 4881 `pi` records. Read as
-///   **local time**, which is measured rather than assumed, and is the opposite of what
-///   an earlier version of this comment claimed.
+/// - **Without one** (`2026-04-17T17:07:29.330418`) — a minority of `pi` records. Read
+///   as **local time**, which is measured rather than assumed.
 ///
 /// The measurement, taken 2026-08-28 over every message in the real `pi` store that
-/// carries both an outer ISO string and an inner integer — 3880 pairs, where the integer
-/// is known-correct epoch milliseconds:
+/// carries both an outer ISO string and an inner integer, where the integer is
+/// known-correct epoch milliseconds:
 ///
 /// | outer stamp | integer minus outer-read-as-UTC | pairs |
 /// | --- | --- | --- |
-/// | offset-bearing | **0 h** | 3750 |
-/// | offsetless | **−8 h**, exactly this machine's zone | 130 |
+/// | offset-bearing | **0 h** | the large majority |
+/// | offsetless | **−8 h**, exactly this machine's zone | the rest |
 ///
 /// So the offsetless era is written in whatever zone the machine was in, and the
-/// millisecond agreement that looked like proof of UTC only ever held for the
-/// offset-bearing era. Reading these as UTC shifts 130 real records by eight hours here
-/// and by a different amount elsewhere — which is precisely the never-reproduces bug the
-/// old comment warned about, arrived at by taking its own advice backwards.
+/// millisecond agreement that looks like proof of UTC holds only for the offset-bearing
+/// era. Reading these as UTC shifts every offsetless record by eight hours here and by a
+/// different amount elsewhere, so the damage never reproduces where it is investigated.
 ///
 /// This is the vendor-key defect family in its unit-rather-than-spelling form
 /// (`AGENTS.md` § "The right key in the wrong unit fails the same way"): a wrong zone
@@ -70,8 +67,8 @@ pub fn epoch_millis_from_iso(text: &str) -> Option<i64> {
     // census above). `Local` makes the result depend on where it runs, which is
     // ordinarily a hazard and is the right answer here for two reasons: the stamps are
     // local wall-clock time, so any fixed zone is wrong by construction; and the
-    // offsetless era is a **closed window** — measured, 2026-04-07 to 2026-04-20, 746
-    // stamps, with every later record offset-bearing. So this branch reads a bounded set
+    // offsetless era is a **closed window** — measured, 2026-04-07 to 2026-04-20, with
+    // every later record offset-bearing. So this branch reads a bounded set
     // of historical records on the machine that produced them, which is the one situation
     // where a local reading is both correct and stable.
     //
@@ -103,8 +100,8 @@ pub fn epoch_millis_from_iso(text: &str) -> Option<i64> {
 ///
 /// There is deliberately no magnitude heuristic. `AGENTS.md`: *"Do not sniff magnitude to
 /// choose a divisor — the vendor writes milliseconds, so read milliseconds."* A heuristic
-/// would also have mis-read the 67 `pi` records whose integer stamp is the literal `1`,
-/// written by test sessions, which look like a second unit era and are not.
+/// would also mis-read the `pi` records whose integer stamp is the literal `1`, written
+/// by test sessions, which look like a second unit era and are not.
 ///
 /// So a caller passes [`Unit`] for what that field is *measured* to hold, and a wrong
 /// answer is then a wrong constant at one call site rather than a value that decodes
@@ -128,7 +125,7 @@ pub fn epoch_millis_from_json(value: &serde_json::Value, unit: Unit) -> Option<i
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unit {
     /// What `pi`'s `message.timestamp` holds, verified against a sibling ISO stamp
-    /// agreeing to the millisecond on 3880 records.
+    /// agreeing to the millisecond on every record carrying both.
     Millis,
     Seconds,
     Micros,
@@ -150,8 +147,8 @@ mod tests {
 
     /// The measured `pi` value, asserted as the instant it actually names.
     ///
-    /// This is the regression test for the eighth vendor-key instance. The bug read the
-    /// correct key and divided it, which yields a *plausible* number — so the assertion
+    /// This asserts the value that should be found, because reading the correct key and
+    /// dividing it yields a *plausible* number rather than an error — so the assertion
     /// has to be on the decoded year, not on presence.
     #[test]
     fn a_pi_message_timestamp_is_milliseconds_and_decodes_to_2026() {
@@ -163,16 +160,16 @@ mod tests {
         let decoded = DateTime::from_timestamp_millis(millis).unwrap();
         assert_eq!(decoded.format("%Y-%m-%d").to_string(), "2026-06-22");
 
-        // What the ported parser produced: the same key, divided as microseconds. Pinned
-        // so the fix cannot silently regress into it — the value is well-formed and only
-        // its *year* betrays it.
+        // The same key, divided as microseconds. Pinned so this cannot silently regress
+        // into it — the value is well-formed and only its *year* betrays it.
         let wrong = epoch_millis_from_json(&raw, Unit::Micros).unwrap();
         let wrong_decoded = DateTime::from_timestamp_millis(wrong).unwrap();
         assert_eq!(wrong_decoded.format("%Y").to_string(), "1970");
     }
 
-    /// The offsetless era. 746 of 4881 real `pi` records, and strict RFC3339 rejects
-    /// every one — so without this branch a whole era of the store has no timestamps.
+    /// The offsetless era. A minority of real `pi` records, and strict RFC3339 rejects
+    /// every one of them — so without this branch a whole era of the store has no
+    /// timestamps.
     ///
     /// **Asserted as a relationship rather than as a constant**, because the correct
     /// reading is local time and a hardcoded millisecond value would pin this test to the
@@ -185,7 +182,7 @@ mod tests {
         let millis = epoch_millis_from_iso(stamp).unwrap();
 
         // It names 17:07:29.330 on that date *in this machine's zone*, which is what the
-        // vendor wrote. Measured over 3880 real pairs: an offsetless stamp sits exactly
+        // vendor wrote. Measured over every real pair: an offsetless stamp sits exactly
         // one local-zone offset away from its own sibling integer, while an
         // offset-bearing one agrees to the millisecond.
         let expected = chrono::NaiveDate::from_ymd_opt(2026, 4, 17)
@@ -198,9 +195,8 @@ mod tests {
             .expect("17:07 on 2026-04-17 is not a DST edge in any real zone");
         assert_eq!(millis, expected.timestamp_millis());
 
-        // And reading it as UTC — what an earlier version of this decoder did, citing
-        // this very stamp as evidence — is wrong by exactly the local offset wherever
-        // that offset is not zero.
+        // And reading it as UTC is wrong by exactly the local offset wherever that
+        // offset is not zero, which is why this stamp is not evidence of UTC on its own.
         let as_utc = chrono::Utc
             .from_utc_datetime(&expected.naive_local())
             .timestamp_millis();
@@ -227,10 +223,9 @@ mod tests {
         assert_ne!(epoch_millis_from_iso("2026-08-28T08:00:00Z").unwrap(), zulu);
     }
 
-    /// A string-valued stamp must work through the JSON entry point too. The parser this
-    /// replaces had an integer branch and a string branch that disagreed about units,
-    /// which is how one store had a working session-level time and broken per-event
-    /// times.
+    /// A string-valued stamp must work through the JSON entry point too. An integer
+    /// branch and a string branch that disagree about units give a store a working
+    /// session-level time and broken per-event times.
     #[test]
     fn the_json_entry_point_reads_both_shapes_consistently() {
         let from_string = epoch_millis_from_json(
@@ -260,7 +255,7 @@ mod tests {
         );
     }
 
-    /// The literal `1` that 67 `pi` test-session records carry. It must survive as the
+    /// The literal `1` that `pi`'s test-session records carry. It must survive as the
     /// value it is rather than being rescued by a magnitude heuristic — there is no such
     /// heuristic, and this pins that.
     #[test]

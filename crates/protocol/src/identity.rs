@@ -11,10 +11,9 @@ use serde::{Deserialize, Serialize};
 
 /// The delimiter between the three parts of an encoded session id.
 ///
-/// **Not `/`, and this is measured rather than stylistic.** 350 of `pi`'s 372
-/// model ids contain a slash (`anthropic/claude-opus-5`, `stealth/ox-alpha`), so
-/// splitting on the first or last one mis-parses the majority of a real
-/// catalogue — a defect this repo already paid for once. A native id is a
+/// **Not `/`, and this is measured rather than stylistic.** Most of `pi`'s model ids
+/// contain a slash (`anthropic/claude-opus-5`, `stealth/ox-alpha`), so splitting on the
+/// first or last one mis-parses the majority of a real catalogue. A native id is a
 /// vendor's value and is under the same suspicion.
 pub const ID_DELIMITER: char = ':';
 

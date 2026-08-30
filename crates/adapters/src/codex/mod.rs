@@ -2,12 +2,11 @@
 //! adapter in this repo, so there was no Python to carry across — and no ported defects
 //! either. Every shape below was read off a printed payload.
 //!
-//! `docs/agents.md` § `codex` is the governing spec and `docs/measurements/codex/` holds
-//! the 15 re-runnable probes plus the redacted frames behind it. **Where this module
-//! disagrees with that document, the disagreement is stated at the code**: six of its
-//! claims were re-measured while writing this and four of them were wrong. They are
-//! collected at [`docs_corrections`] so a reader arriving from the document lands on the
-//! measurement rather than on prose.
+//! `docs/agents.md` § `codex` is the governing spec, and `docs/measurements/codex/` holds
+//! the re-runnable probes and redacted frames behind it. [`measured_facts`] indexes the
+//! vendor facts this module is built on, each stated at the code that acts on it — they
+//! are the ones whose violation is silent, so a reader arriving from the document lands
+//! on the measurement rather than on prose.
 //!
 //! # One file, three halves
 //!
@@ -126,43 +125,41 @@ pub const SANDBOX_MODES: &[&str] = &["read-only", "workspace-write", "danger-ful
 /// treating it as the top of a ladder.
 pub const SPAWN_EFFORT_CHOICES: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 
-/// What this module measured that `docs/agents.md` § `codex` gets wrong.
+/// The measured facts this adapter is built on, each of which a reader would otherwise get
+/// wrong from the vendor's own types.
 ///
-/// Recorded as code rather than left in a commit message, because each one is a branch a
-/// reader would otherwise write from the document and each one fails silently.
+/// Stated here because every one of them **fails silently**: the parse succeeds and produces
+/// a plausible record. `docs/agents.md` § `codex` carries them as prose; this is the
+/// index from the code side.
 ///
-/// 1. **The era discriminant is `session_meta.payload.history_mode`, not `cli_version`.**
-///    The document says the vocabulary changed "around cli_version 0.147". Measured over
-///    1258 rollouts, 0.147.0 appears as `paginated` on 42 files and `legacy` on 21, and
-///    `s13_rollout_sample.jsonl` is **0.150.1 with `history_mode: "legacy"` and zero
-///    `item_completed`** — the newest version in the store, writing the old vocabulary. See
-///    [`native::Era`].
+/// 1. **The era discriminant is `session_meta.payload.history_mode`, never `cli_version`.**
+///    One CLI version appears in both eras, and the store holds files written by the newest
+///    version present in the *old* vocabulary — so a version comparison picks the wrong
+///    parser on a file the vendor still produces. Absence of the field reads as legacy.
+///    See [`native::Era`].
 /// 2. **The two content streams are mutually exclusive per file**, so "both must be read" is
-///    right about the store and wrong about a record: 72 files hold `item_completed` and no
-///    `event_msg/agent_message`, 30 hold the reverse, and only **10 of 1258** hold both —
-///    all of them cli_version 0.104–0.115, the *oldest*, not the newest. Reading both in a
-///    paginated file double-counts. See [`native::Era`].
-/// 3. **`SubAgentActivity.kind` is `started` or `interacted` only.** The document lists
-///    `interrupted` and `completed`; both occur **zero** times in 1258 rollouts — the
-///    declared-only-event trap in its usual form. So a delegation has no close record here.
+///    right about the store and wrong about a record. Reading both in a paginated file
+///    double-counts every assistant message. Only the oldest files hold both.
+///    See [`native::Era`].
+/// 3. **`SubAgentActivity.kind` is `started` or `interacted` only.** `interrupted` and
+///    `completed` are declared and never emitted, so **a delegation has no close record
+///    here** and its end must come from the turn containing it.
 /// 4. **`agent_thread_id` is the *other party*, not the child.** In a parent's rollout it
-///    names the child; in the child's own rollout, `kind: "interacted"` names the **parent**
-///    (`agent_path: "/root"`). Mapping it to `span` unconditionally inverts the edge. See
-///    [`native::delegation_edge`].
-/// 5. **`CollabAgentToolCall` carries no lineage.** The document presents it as delegation
-///    structure; both real instances have `receiver_thread_ids: []` and `agents_states: {}`
-///    with `tool: "wait"`, and its `status: "completed"` is the *wait's* — the paired output
-///    says `{"message":"Wait timed out.","timed_out":true}`. It marks a barrier.
-/// 6. **`custom_tool_call` did not supersede `function_call`.** 26 of the newest 140 files
-///    hold both, and `function_call` is still how every collaboration tool is issued.
-/// 7. **148 client request methods is 153.** Counted from the schema's own `ClientRequest`
-///    union.
-///
-/// And one the document does not mention at all, which is the most consequential for a
-/// delegation card: **from 0.147 the `spawn_agent` brief is ciphertext.** See
-/// [`native::BRIEF_IS_CIPHERTEXT`].
-pub const fn docs_corrections() -> &'static str {
-    "seven measured corrections; each is stated at the code that acts on it"
+///    names the child; in the child's own rollout an `interacted` record names the
+///    **parent**. Mapping it to `span` unconditionally inverts the edge, producing a tree
+///    that is backwards rather than incomplete — and nothing downstream can detect that.
+///    See [`native::delegation_edge`].
+/// 5. **`CollabAgentToolCall` carries no lineage.** Its `receiver_thread_ids` and
+///    `agents_states` are empty and its `status` is a *wait's*, not a delegate's. It marks
+///    a barrier.
+/// 6. **`custom_tool_call` does not supersede `function_call`.** Both appear in the same
+///    files, and `function_call` is still how every collaboration tool is issued, so
+///    switching shapes on a version stops reading the calls that matter.
+/// 7. **The `spawn_agent` brief is ciphertext** in current versions, so a delegation's name
+///    is unrecoverable from the parent's record and must be omitted rather than guessed.
+///    See [`native::BRIEF_IS_CIPHERTEXT`].
+pub const fn measured_facts() -> &'static str {
+    "seven measured facts; each is stated at the code that acts on it"
 }
 
 /// The `codex` adapter.

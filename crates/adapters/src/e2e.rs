@@ -28,21 +28,17 @@
 //!   A per-turn capability update naming one facet is what makes the erasure regression
 //!   visible at all.
 //!
-//! # What the port changed, and what it deliberately did not
+//! # Properties this fixture must keep
 //!
-//! The protocol boundary is gone: the Python spoke NDJSON on stdio and this implements
-//! [`sylph_protocol::Adapter`] directly, so the wire framing, the `hello`/`open`
-//! handshake, the reply correlation ids, and the `out_lock` around stdout have no port
-//! and are simply absent. What survives unchanged is every observable *shape* — the
-//! scenarios, their sizes, their orderings, and their sleeps — because those are what the
-//! specs assert on.
+//! Every observable *shape* here is part of the contract — the scenarios, their sizes,
+//! their orderings, and their sleeps — because that is what the specs assert on
+//! (`docs/agents.md` § Testing an agent module). A tidier or faster fixture tests a
+//! protocol nothing speaks.
 //!
-//! Two consequences of being in-process rather than a subprocess, both improvements:
-//! a refusal is a typed [`sylph_protocol::AdapterError`] rather than a string code, so
-//! the `INVALID_VALUE`-versus-`UNSUPPORTED_FIELD` distinction cannot be lost in framing;
-//! and a turn runs on a `tokio` task rather than a thread, which is the same property the
-//! original needed — the session stays reachable while a turn emits, or a turn could not
-//! be interrupted.
+//! A turn runs on a `tokio` task rather than inline: the session must stay reachable while
+//! a turn emits, or a turn could not be interrupted. A refusal is a typed
+//! [`sylph_protocol::AdapterError`], so the `INVALID_VALUE`-versus-`UNSUPPORTED_FIELD`
+//! distinction is exercised as the real adapters exercise it.
 
 use std::sync::Arc;
 use std::time::Duration;

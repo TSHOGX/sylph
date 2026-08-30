@@ -15,7 +15,7 @@
 //! **No name constant is shared with `native`.** The app-server spells an item
 //! `commandExecution` and the rollout spells it `CommandExecution`; a shared table would
 //! be one vendor rename away from reading a legitimate payload as absent
-//! (`super::docs_corrections`).
+//! (`super::measured_facts`).
 //!
 //! # What the live path has that the store does not
 //!
@@ -237,7 +237,7 @@ impl Translator {
                 return delegation(item, own.as_deref(), at_ms, phase);
             }
             "collabAgentToolCall" => {
-                // **A barrier, not lineage** — `super::docs_corrections` item 5. Both
+                // **A barrier, not lineage** — `super::measured_facts` item 5. Both
                 // real instances carry `receiverThreadIds: []` and `agentsStates: {}`
                 // with `tool: "wait"`, and the `status: "completed"` is the *wait's*.
                 // Opening a trajectory here would create one for the waiting, with no
@@ -265,7 +265,7 @@ impl Translator {
     /// at all.
     ///
     /// **`agentThreadId` is the *other party*, not the child** —
-    /// `super::docs_corrections` item 4. In a parent's stream it names the delegate; in a
+    /// `super::measured_facts` item 4. In a parent's stream it names the delegate; in a
     /// delegate's own stream, `kind: "interacted"` names the **parent**. Mapping it to a
     /// `span` unconditionally inverts the edge, and a reversed pointer is still a
     /// well-formed pointer: the tree it builds is wrong rather than broken.

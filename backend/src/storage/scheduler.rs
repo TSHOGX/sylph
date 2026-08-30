@@ -239,12 +239,11 @@ impl RetentionScheduler {
                 }
             }
 
-            // Measured on every path, including the two `run_one` returns early
-            // on and the one that failed. Bytes held is a local fact that needs no
-            // authority, and the install where nothing can be confirmed — no
-            // TraceDB, so nothing is ever pruned — is precisely the one whose
-            // growth is unbounded. Measuring only where a watermark was written
-            // would leave that install's report empty.
+            // Measured on every path, including the two `run_one` returns early on and
+            // the one that failed. Bytes held is a local fact needing no authority, and the
+            // install where nothing can be confirmed — no environment paired, so nothing is
+            // ever pruned — is precisely the one whose growth is unbounded. Measuring only
+            // where a watermark was written would leave that install's report empty.
             //
             // After the prune rather than before, so the number is what is held
             // now rather than what was held a moment ago.
