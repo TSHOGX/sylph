@@ -1,23 +1,19 @@
 # Database Schema
 
-Sylph keeps one authoritative record, split across three files for SQLite's sake.
+**This file covers `journal.db`** — the hot tier, holding sessions, turns, and the events
+of turns still in flight.
 
-**This file covers `journal.db` only.** The data directory holds three stores, not
-one: `journal.db` (hot, unconsolidated turns — below), `history.db` (warm,
-consolidated blocks, and the FTS index over them) and `blobs/` beside them. `history.db`'s tables, its migrations
-under `backend/migrations/history/`, and the watermark and byte-accounting rows live in
-**`docs/storage.md` § Schema**, because they only make sense alongside the
-consolidation and retention rules that write them. Splitting one store into three is
-SQLite's requirement rather than a data-model choice; `docs/storage.md` § Three tiers
-says why.
+One authoritative record is split across three stores for SQLite's sake, not as a
+data-model choice (`docs/storage.md` § Three tiers says why): `journal.db` here,
+`history.db` for consolidated blocks and the full-text index, and `blobs/` beside them.
+**`docs/storage.md` § Schema owns the other two**, because their tables only make sense
+alongside the consolidation and retention rules that write them.
 
-## Journal (journal.db)
+WAL mode, for concurrent readers against a live writer.
 
-The live journal stores active sessions, turns, and recent events. It uses WAL mode for concurrent access and numbered migrations for schema evolution.
+## Tables
 
-### Tables
-
-#### app_meta
+### app_meta
 
 Application metadata and migration tracking.
 
@@ -28,13 +24,12 @@ CREATE TABLE app_meta (
 );
 ```
 
-No keys are tracked. The table survives as a place to put one, and two former keys
-are worth naming so they are not reinvented: `schema_version` was a hand-maintained
-copy of a number `sqlx` already keeps in `_sqlx_migrations` and drifted four
-migrations behind before anyone noticed, and `instance_id` was never written by any
-code at all.
+No keys are tracked; the table survives as a place to put one.
 
-#### sessions
+**Do not put a schema version here.** `sqlx` maintains one in `_sqlx_migrations`, and a
+second hand-written copy is what drifts — see § Migrations.
+
+### sessions
 
 ```sql
 CREATE TABLE sessions (
@@ -78,8 +73,7 @@ Fields worth a note:
   hostname. A name in a key means renaming destroys identity.
 - `inject_identity` — whether `SOUL.md` is appended. Settable at creation, **refused
   afterwards**: a transcript records what produced it, so rewriting the flag would
-  rewrite what the stored history means. This is the one behavioural remnant of the
-  deleted `identity_mode`.
+  rewrite what the stored history means.
 - `fidelity` — how much resolution the source had, `stream` | `blocks` | `messages`.
   A property of the record, not of who started the session: a session Sylph launched,
   read back from the vendor's store after the process died, is `messages` too. A
@@ -90,20 +84,13 @@ Fields worth a note:
   early user turn and read as one conversation resumed. A listing must not show both
   under one label.
 
-**Four things were deleted here, and the deletion is the design.** `origin`,
-`identity_mode`, `lifecycle_mode`, and the whole `backend_incarnations` table are
-gone, along with `store::end_incarnation`. *Measured 2026-08-27:* `lifecycle_mode` had
-four write sites and **zero** reads, `origin` had zero backend branches, and
-`identity_mode` had exactly one — the `SOUL`-path choice now carried by
-`inject_identity`. `docs/architecture.md` § One class of session is authoritative for
-why a spec had hardened a distinction the implementation never made.
+**There is no session class and no incarnation table**, which is a design decision
+rather than an omission: `docs/architecture.md` § One class of session is authoritative.
+The consequence for this table is that nothing records who started a session, and nothing
+may replace a session's agent-native id — that id is part of the primary key, so a
+mid-life reset would change the row's identity.
 
-`backend_incarnations` existed to track an agent-native id being replaced by a
-lifecycle reset. Nothing scheduled that reset, and under the identity rule above a
-reset would replace a session's *primary key* mid-life — so the table is not merely
-unused, it describes something the data model no longer permits.
-
-#### turns
+### turns
 
 **Every child table carries the triple, not a surrogate.** A composite foreign key is
 more verbose than `session_id TEXT REFERENCES sessions(id)`, and the verbosity is the
@@ -162,15 +149,9 @@ CREATE INDEX turns_status_idx ON turns(status)
   WHERE status IN ('queued', 'starting', 'running', 'stopping');
 ```
 
-Three deletions and one absorption, since `001` is rewritten in place rather than
-migrated. `incarnation_id` referenced `backend_incarnations`, deleted above — a
-foreign key to a table that no longer exists is not a stale comment, it is DDL that
-does not run. `runner_exit_code` is gone: it was described here as a legacy spelling
-kept for compatibility, `AGENTS.md` § Compatibility forbids exactly that, and every
-current path writes it `NULL` because an adapter is long-lived and a turn is a message
-on its link, so there is no per-turn exit code to record. And `origin` is folded into
-the table body rather than shown as `006`'s `ALTER`, because a rewritten `001` has no
-history to replay.
+**There is no per-turn exit code**, because an adapter is long-lived and a turn is a
+message on its link. A turn's outcome arrives as an event and is recorded in `status` with
+`error_code`/`error_message`; nothing reads a process exit.
 
 `idempotency_key` is nullable, so a turn the server originates carries none while
 the `UNIQUE(session_env, session_agent, session_native, idempotency_key)` constraint
@@ -193,7 +174,7 @@ Status transitions:
 - `running` → `stopping` → `cancelled`
 - Any in-flight status → `interrupted` (on service restart)
 
-#### events
+### events
 
 Event stream journal (bounded live storage).
 
@@ -230,27 +211,17 @@ CREATE INDEX idx_events_span
   ON events(session_env, session_agent, session_native, span, seq);
 ```
 
-Three things this shape settles, all of them consequences of `001` being rewritten
-rather than migrated. `span` sits in the table body instead of `005`'s `ALTER`, and
-`kind` is unconstrained from the start rather than rebuilt by `003`. `source` loses
-`'tracedb'`, which named a producer the separate archive supplied and nothing writes
-today — the only `"tracedb"` literals left in the tree are an *authority* name in
-retention, a different concept. And `reconciled_at_ms` is deleted: `docs/roadmap.md`
-§ Audit measured it vestigial, and a rewrite is when a vestigial column goes rather
-than being carried into a new schema.
+**`kind` carries no CHECK, deliberately.** A closed list here is a promise to break on
+the next adapter that adds a kind, and the breakage is silent in the worst way: the insert
+fails while the sequence number is already consumed and the event has already reached live
+clients, so a turn streams correctly and comes back empty on reload. The protocol says
+kinds are additive (`docs/session-protocol.md`), so validation belongs at the wire boundary
+where an unknown kind can be *reported* — not at the storage layer, where it can only be
+dropped.
 
-**`kind` carries no CHECK, and that is the fix rather than an omission.** 001
-constrained it to ten values, which is a promise to break on the next adapter that
-adds one — and it broke exactly that way: `append_event` logged and continued, so a
-sequence number was consumed and the event reached live clients while nothing reached
-the journal. A turn streamed correctly and came back empty on reload. The protocol says
-kinds are additive, so validation belongs at the wire boundary where an unknown kind
-can be *reported*, not at the storage layer where it can only be dropped.
-`docs/session-protocol.md` owns the vocabulary.
-
-**`source` is `agent`, not `runner`.** 003 renamed it with the v1 protocol and migrated
-existing rows. It stays a closed set because it has exactly three producers and a
-fourth would be a design change rather than an adapter's choice.
+**`source` stays a closed set**, unlike `kind`, because it has exactly two producers —
+`agent` and `server` — and a third would be a design change rather than an adapter's
+choice.
 
 `span` is which delegated trajectory an event ran in; NULL means the root turn. It is
 nullable rather than `''` because absent and "the root" are the same fact. That one
@@ -274,7 +245,7 @@ replayed frame cannot be journalled twice. `seq` is per session, not per turn, s
 `events_session_idx` orders by it rather than by timestamp — two events written in
 the same millisecond still have one defined order.
 
-#### pending_requests
+### pending_requests
 
 What an agent is blocked on, waiting for a human. A resource rather than a stream
 message, because the agent waits until someone answers: a client closing its laptop
@@ -335,92 +306,78 @@ meaningful rather than missing: a request with no form is an approval, whose sub
 is the one proposed tool input in `detail_json`. See `docs/session-protocol.md`
 § Request forms.
 
-## Search lives beside `history.db`, not in a second store
+## Search lives beside `history.db`
 
-There is no `archive.db`. One vocabulary and one store (`docs/architecture.md` § One
-authority) means native history is parsed by an adapter into the same events a live
-turn emits, lands in the same journal → history pipeline, and is indexed by one FTS5
-table beside `history.db`.
+Full-text search is one FTS5 table beside `history.db`, over the same rows the timeline
+renders. Native history is parsed by an adapter into the same events a live turn emits, so
+it is indexed by the same table — there is no second store and no id translation
+(`docs/architecture.md` § One authority).
 
-`docs/storage.md` § Schema owns that table, and § "`blocks_fts` is standalone" owns why
-it cannot be the external-content index the separate archive used. What belongs here is
-what it replaced and why the replacement is not merely tidier:
+That is what makes search's coverage statable as a contract: **everything the server
+holds is searchable**, including sessions read out of an agent's native files, whether or
+not the environment that produced them is still reachable. An index over a subset would
+cover whichever sessions some parser happened to reach, and "usually covered" is not a
+contract.
 
-- **Search is the one capability this rewrite takes from working to absent**, so it is
-  net-new work rather than a port. Today `/api/v1/search` is entirely
-  `state.tracedb.search()`; deleting the archive deletes the only implementation, and
-  nothing in this repo has ever held an FTS index.
-- **The old open question is answered by construction.** Full-text search used to
-  cover only what the separate archive had parsed, so a session whose environment had
-  gone away was searchable nowhere and one whose vendor file happened to be local was
-  searchable by coincidence. "Usually covered" is not a contract.
-- **`backend/src/tracedb/mod.rs` goes away whole** — 1279 lines, including
-  per-operation JSON casing pins that existed because the same archive spelled `show`
-  in snake_case and `list`/`search`/`stats` in camelCase. Four pieces of logic in it
-  are *not* archive work and need a new home rather than deletion:
-  `is_injected_envelope` (the rule that raised recognizable session labels from ~10%
-  to 98%, with its narrow-scope warning), `summarize_line` (char-not-byte truncation
-  at 80, already called by `store::hydrate_session_title` and
-  `set_session_title_if_empty`), `envelope_summary`, and `TraceSession::lineage`'s
-  parent-over-fork precedence. `split_lineage` and `archive_id` are the two that
-  genuinely go, because the identity triple deletes the second id space they bridged.
-- **The two-id-space hazard cannot be written.** See `docs/storage.md` § One id space.
+`docs/storage.md` § Schema owns the table, § "`blocks_fts` is standalone" owns why it cannot
+be an external-content index, and § Tokenization owns the `jieba` tokenizer that makes
+Chinese searchable — including why it is linked in rather than loaded.
 
-Two rules that outlive the separate store, because they are about reading *any*
-external store rather than about that one:
+Two rules about reading any store that is not this one:
 
-**Never query another component's tables.** The parsers now live in Sylph's own agent
-modules (`docs/agents.md`), so this applies to the vendors' native stores: read them
-through the agent module, never with SQL or ad-hoc file parsing elsewhere.
+**Never query another component's tables.** The vendors' native stores are read through
+the agent module that owns that vendor (`docs/agents.md`), never with SQL or ad-hoc file
+parsing elsewhere.
 
-**A path filter must be a path match, not a substring match.** The old archive
-compiled a `cwd` filter to `LIKE '%' || ? || '%'`, so asking for `/w/app` also
-returned `/w/app-old` and everything beneath it. Anything meaning "this one directory"
-compares for equality after normalizing trailing slashes. The same shape starved a
-paged scan: because a parent's pattern matched every path beneath it and those sorted
-by recency rather than depth, a directory with 88 sessions of its own reported empty
-because its first exact match landed ~1300 rows in. Bound such a scan in **rows
-examined**, not pages.
+**A path filter must be a path match, not a substring match.** Compiling one to
+`LIKE '%' || ? || '%'` answers `/w/app-old`, and everything beneath it, when asked for
+`/w/app`. Anything meaning "this one directory" compares for equality after normalizing
+trailing separators — `sylph_protocol::normalize_workdir` is that comparison, shared so
+the adapters and the server cannot disagree.
+
+The same shape starves a paged scan: a parent's pattern matches every path beneath it,
+and those sort by recency rather than by depth, so a directory's own first exact match can
+land a thousand rows in and an early page cap reports it empty. **Bound such a scan in
+rows examined, not pages.**
 
 ## Migrations
 
-Numbered SQL migrations in `backend/migrations/`, applied by `sqlx::migrate!` on
-startup:
+Numbered SQL migrations applied by `sqlx::migrate!` on startup, in two sets — one per
+database:
 
 ```
-001_initial_schema.sql         -- rebuilt: the identity triple, no origin/lifecycle
-002_pending_requests.sql       -- what an agent is blocked on
-003_agent_event_vocabulary.sql
-004_request_affordances.sql    -- allow_persistent, expires_at_ms
-005_event_span.sql             -- span, for a delegated trajectory's parent
-006_turn_origin.sql            -- origin, for an agent-initiated turn
-007_request_form.sql           -- form_json
+backend/migrations/                 journal.db
+  001_initial_schema.sql            everything above: sessions, turns, events, requests
+
+backend/migrations/history/         history.db
+  001_history.sql                   blocks, cas_refs, watermarks, session_bytes, blocks_fts
 ```
 
-**`001` is rewritten in place rather than followed by a migration that drops columns**,
-which the append-only rule below would normally forbid. `AGENTS.md` § Compatibility is
-why: there is no other consumer, no irreplaceable installed state, and every existing
-journal is re-derivable from the agents' own native stores. A migration chain that
-adds three columns and then deletes them documents an intermediate state nobody should
-reconstruct. Verify the native sources still exist before discarding a journal — that
-is the one precondition, and it is the same one `AGENTS.md` states.
+`docs/storage.md` § Schema owns the `history/` tables, because they only make sense
+alongside the consolidation and retention rules that write them.
 
-Attachments and commands need no migration of their own: attachments are staged on
-disk under the data directory rather than in a table, and a command invocation is a
-column on `turns`.
+**One migration per database, stating the current shape — not a chain that adds columns and
+later drops them.** `AGENTS.md` § Compatibility is why: there is no other consumer and no
+irreplaceable installed state, so a chain would document intermediate states nobody should
+reconstruct. The one precondition before collapsing a chain is to verify a store's data is
+re-derivable — for the journal, that means the agents' native stores still hold the
+sessions in it.
 
-**`/api/v1/health` reports `MAX(version)` from `_sqlx_migrations`, not a stored key.**
-It used to read `app_meta.schema_version`, which migrations bumped by hand: `001`
-wrote `1`, `003` wrote `3`, and `004` through `007` forgot. So a fully-migrated
-journal published `3` while seven migrations had run, and the one question the field
-exists to answer — whether a client understands this journal's shape — was answered
-wrongly for four migrations without anything reporting it.
+Attachments and commands need no migration of their own: attachments are staged on disk
+under the data directory rather than in a table, and a command invocation is a column on
+`turns`.
 
-The rule this settles: a number the migration runner already maintains must not have
-a second hand-written copy. The copy is what drifts, and it drifts silently because
-nothing compares the two. The integration test now counts the `migrations/` directory
-rather than pinning a literal, since a literal in the test is a third copy and would
-have agreed with the wrong value just as happily as the code did.
+**`/api/v1/health` reports `MAX(version)` from `_sqlx_migrations`, never a stored key.**
+
+**A number the migration runner already maintains must not have a second hand-written
+copy.** A hand-bumped `app_meta.schema_version` drifts the first time a migration forgets
+to bump it, and it drifts *silently* because nothing compares the two — so the one question
+the field exists to answer, whether a client understands this database's shape, is answered
+wrongly with nothing reporting it.
+
+For the same reason the test counts the migrations directory rather than pinning a literal:
+a literal in the test is a third copy, and it would agree with a wrong value as happily as
+the code did.
 
 Migration rules:
 - Each migration is idempotent (use `IF NOT EXISTS`)
@@ -428,9 +385,12 @@ Migration rules:
 - Before deployment, schemas are disposable (change in place). Treat installed
   state, not a date, as the signal that this has flipped
 
-The append-only rule is not merely tidiness here: `sqlx` checksums each migration
-file, so editing a deployed one makes every existing journal refuse to open. That is
-why `004` and `005` add columns to the table `002` created rather than amending it.
+The append-only rule is not merely tidiness: `sqlx` checksums each migration file, so
+editing a *deployed* one makes every existing database refuse to open. **"Before
+deployment, schemas are disposable" is therefore a genuinely different regime**, not a
+softer version of the same rule — and the signal that it has flipped is the presence of
+installed state that cannot be re-derived, never a date. While it holds, collapse a chain
+rather than growing one.
 
 There are no `sqlx::query!` macros here, only runtime `sqlx::query`, so there is no
 `DATABASE_URL` and no `.sqlx` offline directory. A schema mistake surfaces in the

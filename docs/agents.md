@@ -4,34 +4,25 @@ One module per vendor, holding everything Sylph knows about that CLI: how to lau
 it, how to read its native store, what it exposes to a second party, and where it
 lies.
 
-## Three agents, and why the list shrank
+## Three agents
 
-Supported: **`claude`**, **`codex`**, **`pi`**.
+Supported: **`claude`**, **`codex`**, **`pi`**. `gemini` and `opencode` are **not
+supported**, and that is a deliberate narrowing rather than a gap waiting to be filled.
 
-`gemini` and `opencode` are **not supported**. This is a deliberate narrowing, not a
-gap waiting to be filled, and it deletes 867 lines of parser along with two open
-questions that were blocking design work:
+Two requirements decided it, and both are worth stating because they apply to any agent
+proposed later:
 
-- **`opencode` was the only agent that broke every mechanism this architecture
-  depends on.** *Measured:* no per-session file at all — one 541 MB SQLite store with
-  a live WAL — so a file-mtime watcher sees nothing, "upload the bytes" has no
-  referent, and the fingerprint an ingest path needs cannot be computed. An attempt to
-  read it wholesale reached 4.6 GB still running at ~20 minutes and starved every other
-  agent's pass. Its read strategy was recorded as *unresolved and must not be guessed*,
-  and it was gating the ingestion timer.
-- **`gemini`'s mid-turn write behaviour was never located** — unknown rather than
-  measured absent — so it could not be promised as observable, and it exposes no
-  second-party control channel beyond start-time flags.
+- **A readable per-session native store.** An agent that keeps every session in one
+  database with a live WAL cannot be watched by file mtime, has no per-session bytes to
+  point at, and cannot produce a per-session fingerprint; reading such a store wholesale
+  is unbounded work that starves every other agent's pass. Nothing constrains an agent to
+  keep a per-session file, so this has to be checked rather than assumed.
+- **Known mid-turn write behaviour.** Observation is only offerable if it is known *when*
+  a vendor flushes. Unknown is not the same as absent, and neither can be promised to a
+  user as "observable".
 
-Dropping both turns two unresolved questions into zero. What survives from them is
-the *rule* they taught, which is stated in `docs/environments.md`: reading a native
-store is one strategy per agent, and nothing constrains an agent to keep a
-per-session file.
-
-An agent is available on an environment when its CLI is on that machine's `PATH`.
-That is the whole check. There is no discovery handshake, no adapter directory, and
-no `adapter.sh` — see `docs/session-protocol.md` § What changed for the two total
-failures that mechanism produced.
+An agent is available on an environment when its CLI is on that machine's `PATH`. That is
+the whole check — there is no discovery handshake and no adapter directory.
 
 ## What every agent module must answer
 
@@ -57,7 +48,7 @@ goes stale invisibly.*
 | fork | — | `exec fork <id>`, `thread/fork` | — |
 | native store | JSONL per session | `rollout-*.jsonl` | JSONL per session |
 | mid-turn flush | tool-call and content-block boundaries | item completion | every `message_end` |
-| second-party control | authenticated per-process UDS — **delivers, cannot drive** | app-server: **fully drivable**, 153 methods incl. interrupt and steer | **none** — stdio only |
+| second-party control | authenticated per-process UDS — **delivers, cannot drive** | app-server: **fully drivable**, incl. interrupt and steer | **none** — stdio only |
 | second-party observe | — | explicit `thread/resume`; independent of control | — |
 | forwards delegate interior | only for built-in `Task` | **yes**, with the child's `threadId` | no delegation on the wire at all |
 | slash commands | yes, project-dependent | no command concept | yes |
@@ -148,63 +139,55 @@ precisely when AFK matters, because nobody is there to approve.
 **Never connect or write to a socket in the user's real `cc-socks` directory.** That
 injects a turn into a live session of theirs. Probe only a throwaway child's own pid.
 
-**Archived titles cover ~73% of sessions.** Any surface showing one needs the
-opening-ask fallback.
+**It records its own title for most sessions but not all**, so any surface showing one
+needs the opening-ask fallback.
 
 **In the native store, a tool result's id and its error flag are both on the content
-block — nowhere else.** *Measured 2026-08-28 over 3226 files in `~/.claude/projects/`,
-while scoping the parser port, and worth stating because trace-db's parser looked in
-four other places and found none of them.*
+block — nowhere else.** These are the two shapes a parser for this store must be built
+around, and both are stated as shapes rather than counts on purpose: a developer's session
+store grows while you measure it, so a ratio taken today is not re-derivable, while "this
+key is on that block and on no other" stays true.
 
-`tool_use_id` sits on the `tool_result` block inside `message.content[]`, on **every such
-block without exception** — measured three times over 2026-08-28 as the store grew, and
-the ratio was total each time. It is *not* on `toolUseResult` under either spelling, and
-not at the top level of the record: those four keys occur **zero** times anywhere in the
-store. A parser reading them pairs nothing — every tool result gets a null call id, and
-the pairing `docs/session-protocol.md` § Keying rules depends on silently does not exist.
+`tool_use_id` sits on the `tool_result` block inside `message.content[]`, on every such
+block. It is *not* on `toolUseResult` under either spelling and not at the top level of
+the record — those keys occur nowhere in the store. A parser reading them pairs nothing:
+every tool result gets a null call id, and the pairing `docs/session-protocol.md`
+§ Keying rules depends on silently does not exist.
 
 `is_error` is on that same block and **only** on records whose `message.role` is `user`;
-it never appears on an assistant message. So a parser reading it from the assistant branch
-classifies **every real tool failure as a success** — the shape this file's § Reading a
-vendor payload warns about, since `false` and "absent, defaulted to false" are
-indistinguishable downstream.
+it never appears on an assistant message. A parser reading it from the assistant branch
+therefore classifies **every real tool failure as a success**, because `false` and
+"absent, defaulted to false" are indistinguishable downstream.
 
-**Both facts are stated as shapes rather than as counts, deliberately.** Three passes over
-this store on one day returned 46196, 46957, and 47580 occurrences with 2100, 2131, and
-2148 failures, because a developer's session store grows while you measure it. `AGENTS.md`
-§ "A count repeated in four places is four chances to drift" is the rule: the *shape* —
-this key is on that block, and on no other — is what a parser depends on and what stays
-true, so a test asserts a failure parses as a failure rather than asserting a total.
-
-Both bugs shipped in a parser that reads the whole store without a single error, which is
-the point: the risk in reading a vendor store is not a crash, it is a plausible value.
+Note what both failures have in common, since it is the whole risk in reading a vendor
+store: neither raises an error. The parser completes over the entire store and produces
+plausible records. So assert on *values a parser should have found* — that a failure parses
+as a failure — never on the absence of a crash.
 
 ## `codex`
 
-*Measured 2026-08-28 against `codex-cli 0.150.1`. The capture scripts and raw frames
-behind every claim in this section live in the parser-port measurement set; each numbered
-`sNN` probe is re-runnable.*
+*Measured against `codex-cli` 0.150.1. Capture scripts and raw frames for this section
+live in the parser-port measurement set, and each numbered `sNN` probe is re-runnable.*
 
 **The strongest second-party surface of the three, and the reason the control facet is
-worth having** — by a wider margin than this section used to claim. The app-server
-exposes **153 client request methods** in its own generated schema — counted from the
-`ClientRequest` union's own `oneOf`, which is 153 variants and 153 distinct method names.
-An earlier count of 148 here came from grepping for slash-bearing names and silently
-missed the five that carry none, which is the same class of error as reading a vendor key
-by pattern rather than by structure. Among them
-`turn/interrupt`, `turn/steer`, `thread/settings/update`, `thread/fork`, `thread/resume`,
-`thread/unsubscribe`, and `config/value/write`. Interrupt and steer were both measured
-driving a live turn, so **a codex `control` facet declares itself full**, not queue-only.
+worth having.** Its app-server exposes a large generated schema of client request
+methods — among them `turn/interrupt`, `turn/steer`, `thread/settings/update`,
+`thread/fork`, `thread/resume`, `thread/unsubscribe`, and `config/value/write`. Interrupt
+and steer were both measured driving a live turn, so **a codex `control` facet declares
+itself full**, not queue-only.
+
+Count such a union from its own `oneOf` rather than by grepping for method-name patterns:
+names that do not match the pattern are missed silently, which is the same class of error
+as reading a vendor key by pattern rather than by structure.
 
 `turn/steer` requires an `expectedTurnId` and refuses a stale one (`expected active turn
 id X but found Y`), which is the mid-turn precondition Sylph's own protocol asks for.
 `thread/queue/add` additionally requires an undocumented `clientUserMessageId`.
 
 **`remote-control` is not the door an envagent uses.** It is gated twice — `remote control
-requires ChatGPT authentication; API key auth is not supported`, plus a managed
-standalone install — while `app-server --listen unix://PATH` has neither gate. The pairing
-flow is still the shape `docs/environments.md` models itself on; it is just not the
-transport.
+requires ChatGPT authentication; API key auth is not supported`, plus a managed standalone
+install — while `app-server --listen unix://PATH` has neither gate. Its pairing flow is
+still the shape `docs/environments.md` models itself on; it is simply not the transport.
 
 **Observation requires an explicit subscribe, and control does not.** A second client
 attached to the same daemon sees **zero** `item/*` events until it calls `thread/resume`
@@ -216,20 +199,19 @@ completed turn is unresumable (`no rollout found for thread id`), so observation
 on a persisted rollout.
 
 **Approvals fan out to every subscriber, arrival *and* departure.** A
-`item/commandExecution/requestApproval` reached both attached clients at the same
-timestamp, and `serverRequest/resolved` was published to both when one answered. That is
-the shape `AGENTS.md` records Sylph getting wrong in its own request handling — announcing
-arrival without announcing departure — already correct here.
+`item/commandExecution/requestApproval` reaches every attached client, and
+`serverRequest/resolved` is published to all of them when one answers. That is the shape
+`docs/session-protocol.md` § Announce every departure requires of Sylph, implemented here
+by a vendor.
 
 **An out-of-enum approval decision is accepted and silently denies the command.** The
-enum is `accept` | `acceptForSession` | `decline` | `cancel`. Sending `"approved"`
-returned **no error at any layer**: the JSON-RPC reply was accepted, the turn reported
-`completed`, and only the command's own `status` distinguished it. Measured three ways —
-`accept` → `completed` with `exitCode: 0` after 72 ms of real execution; `decline` →
-`declined`; `"approved"` → `failed` in 3 ms, having never run. So an adapter that guesses
-this token gets an approval channel that refuses everything while every layer reports
-success, and the only observable difference is a status two levels down. Read the enum
-from the schema; do not infer the word.
+enum is `accept` | `acceptForSession` | `decline` | `cancel`. A plausible guess outside it
+— `"approved"` — returns **no error at any layer**: the JSON-RPC reply is accepted, the
+turn reports `completed`, and only the command's own `status` two levels down distinguishes
+it from a real approval, having never run. So an adapter that guesses this token ships an
+approval channel that refuses *everything* while every observable layer reports success.
+**Read such an enum from the vendor's schema; never infer the word from what it obviously
+ought to be.**
 
 **It assigns its own session id and reports it**, so Sylph keys on what came back
 rather than dictating. `exec fork <id>` exists, which is the vendor implementing the
@@ -241,35 +223,30 @@ present an empty slash menu as a failure. Its typed config is approval policy.
 **Native store is `rollout-*.jsonl`, flushed at item completion**, with
 `token_count` ticks proving mid-turn append.
 
-**The record vocabulary has two eras, the discriminant is `history_mode`, and the newer
-era's dominant record is the one trace-db's parser discards.** *Measured 2026-08-28 over
-all 1258 rollouts in `~/.codex/sessions/`.* `event_msg/item_completed` carries the turn's
-content keyed by `item.type` — 11231 occurrences in the newest 120 files: Reasoning 4895,
-CommandExecution 3805, AgentMessage 1162, FileChange 1121, UserMessage 154,
-SubAgentActivity 42, McpToolCall 18, ContextCompaction 17, ImageView 15,
-CollabAgentToolCall 2. trace-db matches it in the same arm as `agent_message` and drops
-both, so an adapter inheriting that parser reads almost nothing from a paginated rollout.
+**The record vocabulary has two eras, and the discriminant is `history_mode`.** In the
+newer, paginated era `event_msg/item_completed` carries the turn's content keyed by
+`item.type` — Reasoning, CommandExecution, AgentMessage, FileChange, UserMessage,
+SubAgentActivity, McpToolCall, ContextCompaction, ImageView, CollabAgentToolCall, roughly
+in that order of frequency. A parser that drops `item_completed` reads almost nothing from
+a paginated rollout.
 
-**Do not discriminate on `cli_version`.** An earlier version of this section said the
-vocabulary changed "around cli_version 0.147", and that is measurably wrong: 0.147.0
-appears as `paginated` on 42 files and as `legacy` on 21, and the store holds a **0.150.1
-file — the newest version present — writing `history_mode: "legacy"` with zero
-`item_completed`.** So a version comparison picks the wrong parser on a file the vendor is
-still producing today. The discriminant is `session_meta.payload.history_mode`; it is
-absent on 1154 of 1258 files, all of which predate the field and are legacy, so absence
-reads as legacy rather than as an error.
+**Do not discriminate on `cli_version`.** One CLI version appears in both eras, and the
+store holds files written by the *newest* version present in the legacy shape — so a
+version comparison picks the wrong parser on a file the vendor is still producing today.
+The discriminant is `session_meta.payload.history_mode`. It is absent on the majority of
+files, all of which predate the field and are legacy, so **absence reads as legacy rather
+than as an error**.
 
-**The two content streams are mutually exclusive per file**, which is where the previous
-wording had it backwards. "Both must be read" is true of the *store* and false of a
-*record*: 72 files hold `item_completed` and no `event_msg/agent_message`, 1122 hold the
-reverse, and only **10 of 1258** hold both — all of them cli_version 0.104–0.115, the
-oldest rather than the newest. Reading both in a paginated file **double-counts every
-assistant message**, which is the defect the old sentence would have produced.
+**The two content streams are mutually exclusive per file.** "Both must be read" is true
+of the *store* and false of a *record*: nearly every file holds `item_completed` or
+`event_msg/agent_message`, not both, and reading both in a paginated file
+**double-counts every assistant message**.
 
-For those 10 overlapping files the streams do carry the same text with matching `msg_…`
-ids, and the obvious dedup fails: the pair differs by 1–2 ms and by block type
-(`input_text` against `text`), so a key of `sha(text):timestamp` cannot match them. Prefer
-one stream per file and say which, rather than discovering the overlap per record.
+A small set of the oldest files does hold both, and the obvious dedup fails on them: the
+pair carries the same text with matching `msg_…` ids but differs by a millisecond or two
+*and* by block type (`input_text` against `text`), so a key of `sha(text):timestamp`
+cannot match them. **Choose one stream per file from the discriminant** rather than
+discovering the overlap per record.
 
 **`CommandExecution` is not redundant with the tool call, and cannot be dropped as a
 duplicate.** It is the only carrier of `exit_code`, `status`, and `duration`, it uses a
@@ -281,13 +258,12 @@ over the other.
 own store: a rollout with `parent_thread_id` set and `thread_source: subagent`. So
 lineage cannot be recovered from an id-naming convention alone.
 
-**Lineage is nested, not flat, and reading only the flat key loses 96% of it.** Censused
-over all 1258 rollouts: the nested
-`session_meta.source.subagent.thread_spawn.parent_thread_id` appears on **182** files, a
-top-level `parent_thread_id` on **7**, and both on **20**. An earlier version of this
-section documented only the flat spelling, which is the one that covers 3.4% of the real
-population — so a parser written to it would have found almost nothing while erroring on
-nothing.
+**Lineage is nested, and reading only the flat key finds almost none of it.** The
+authoritative spelling is the nested
+`session_meta.source.subagent.thread_spawn.parent_thread_id`; a top-level
+`parent_thread_id` exists but is rare. A parser written only to the flat key finds almost
+nothing while erroring on nothing — read the nested path, and treat the flat one as a
+supplement.
 
 **`forked_from_id` alone does not mean "fork".** On 0.150.1 a subagent carries it too,
 equal to its `parent_thread_id`. The discriminant for a real fork is `parentThreadId:
@@ -304,36 +280,32 @@ payload for why a parser-synthesized pairing is not.
 delegate's own `commandExecution` and `agentMessage` items arrived unprompted, carrying
 the child's `threadId`** — so a codex delegation card may claim a real, fillable interior.
 
-Three corrections to how that structure was described here, each measured over all 1258
-rollouts and each a branch someone would otherwise have written from this document:
+Three properties of that structure decide how it may be read, and each is a branch an
+adapter author would otherwise get wrong:
 
-- **`kind` is `started` or `interacted` only** — `started` 9, `interacted` 33. This
-  section listed `interrupted` and `completed`; both occur **zero** times. That is the
-  declared-only-event trap in its usual form (§ "A type in a vendor's event union is not
-  a promise anything emits it"), and the consequence is concrete: **a codex delegation
-  has no close record in the store**, so a parsed delegation's end has to come from the
-  turn containing it.
-- **`agent_thread_id` is the *other party*, not the child.** In a parent's rollout it
-  names the child; in the child's own rollout a `kind: "interacted"` record names the
-  **parent** (`agent_path: "/root"`). Mapping it to `span` unconditionally therefore
-  inverts the edge for every child-side record, producing a tree that is not merely
-  incomplete but backwards — and nothing downstream can detect that.
-- **`collabAgentToolCall` is not lineage.** Both real instances carry
-  `receiver_thread_ids: []` and `agents_states: {}` with `tool: "wait"`, and their
-  `status: "completed"` is the *wait's* — the paired output reads
-  `{"message":"Wait timed out.","timed_out":true}`. It marks a barrier.
+- **`kind` is `started` or `interacted` only.** `interrupted` and `completed` are not
+  emitted, so **a codex delegation has no close record in the store** and a parsed
+  delegation's end has to come from the turn containing it. This is the declared-only-event
+  trap in its usual form (§ Reading a vendor payload).
+- **`agent_thread_id` is the *other party*, not the child.** In a parent's rollout it names
+  the child; in the child's own rollout an `interacted` record names the **parent**
+  (`agent_path: "/root"`). Mapping it to `span` unconditionally inverts the edge for every
+  child-side record, producing a tree that is backwards rather than merely incomplete — and
+  nothing downstream can detect that.
+- **`collabAgentToolCall` is not lineage.** It carries empty `receiver_thread_ids` and
+  `agents_states` with `tool: "wait"`, and its `status` is the *wait's* rather than any
+  delegate's. It marks a barrier.
 
-And one thing this section did not mention at all, which is the most consequential for a
-delegation card: **from 0.147 the `spawn_agent` brief is ciphertext**, so a delegation's
-name is unrecoverable from the parent's own record. `docs/session-protocol.md` § "`name`
-is absent when unknown" governs — the name must be omitted, because a journal makes every
-guess permanent and a row written with a placeholder is afterwards indistinguishable from
-one that carried a real name.
+**The `spawn_agent` brief is ciphertext in current versions**, so a delegation's name is
+unrecoverable from the parent's own record. `docs/session-protocol.md` § "`name` is absent
+when unknown" governs: omit the name, because the journal makes every guess permanent and a
+row written with a placeholder is afterwards indistinguishable from one that carried a real
+name.
 
-Do not carry `claude`'s conclusion across. There, `--forward-subagent-text` forwards only
-for the built-in `Task`, so a childless trajectory is a real terminal state and the card
-must say so. Here it is a loading state. The two agents need opposite defaults, which is
-exactly why `fidelity` and the capability facets are per-record rather than global.
+**Do not carry `claude`'s conclusion across.** There, a childless trajectory is a real
+terminal state and the card must say so; here it is a loading state, because codex does
+forward a delegate's interior. The two agents need opposite defaults, which is exactly why
+`fidelity` and the capability facets are per-record rather than global.
 
 **There are three codex event vocabularies for the same concepts, and they are not
 interchangeable.** An adapter reading one while mapping names learned from another gets
@@ -352,21 +324,19 @@ Mapping the app-server's names onto Sylph's vocabulary: `reasoning`→`thinking`
 `contextCompaction`→`compact`.
 
 With no Sylph equivalent: `webSearch`, `imageGeneration`, `imageView`, `sleep`,
-`enteredReviewMode`/`exitedReviewMode`, `hookPrompt`, and `plan` — which Sylph reserves
-but does not implement (`docs/session-protocol.md` § Events). Of 18 declared `ThreadItem`
-variants only 6 appeared in real turns, and of 15 declared server-request kinds only 1
-did — § "A type in a vendor's event union is not a promise anything emits it" in its usual
-form. Write branches for what was observed and let an unknown variant through rather than
-dropping it.
+`enteredReviewMode`/`exitedReviewMode`, `hookPrompt`, and `plan` — which Sylph reserves but
+does not implement (`docs/session-protocol.md` § Events). Only a minority of the declared
+`ThreadItem` variants and server-request kinds appear in real turns, which is § Reading a
+vendor payload's declared-only trap again: **write branches for what was observed, and let
+an unknown variant through rather than dropping it.**
 
-**`custom_tool_call` did not supersede `function_call`** — an earlier version of this
-section said it did. Measured: 550 files hold both, and `function_call` is still how every
-collaboration tool is issued. A parser that switched shapes on a version would stop
-reading the calls that matter.
+**`custom_tool_call` does not supersede `function_call`.** Both appear in the same files,
+and `function_call` is still how every collaboration tool is issued, so a parser that
+switches shapes on a version stops reading the calls that matter.
 
-**Mid-turn flush confirmed, so `watch` is genuinely offerable**: 18 distinct rollout
-appends over a 26.5 s turn, the first at 0.1 s, interleaving `response_item/reasoning`,
-`custom_tool_call`, and `event_msg/token_count`.
+**Mid-turn flush is confirmed, so `watch` is genuinely offerable**: a single turn appends
+to its rollout many times over its life, the first append within a fraction of a second,
+interleaving reasoning, tool calls, and token counts.
 
 **Identity is the vendor's, structurally.** `thread/start` has no `threadId` parameter at
 all — the id comes back at `result.thread.id` — so "assigns its own" follows from the shape
@@ -374,15 +344,14 @@ of the API rather than from observation. Resume keeps the id and appends to the 
 rollout file; fork mints a new id with `forkedFromId` set.
 
 **`thread_history_*.sqlite` is a projection of the rollouts, not a replacement — read
-the JSONL.** *Measured 2026-08-28 against codex-cli 0.150.1.* The store also holds
-`~/.codex/thread_history_1.sqlite` (`thread_items`, `thread_turns`) and the CLI offers
-`migrate-rollouts` to publish legacy sessions into it, which together read as a store
-migrating away from files. It is not: `thread_history_projection_state` tracks a
-per-thread `next_rollout_byte_offset` and `next_rollout_ordinal`, and `thread_turns`
-keeps `rollout_byte_offset`/`rollout_end_byte_offset` pointing back into the file — the
-table is an incrementally-built pagination index *over* the rollouts. The census settles
-it: 1258 `rollout-*.jsonl` against 73 projected threads on the same install, so a
-parser reading only SQLite would silently miss 94% of the sessions on this machine.
+the JSONL.** The store also holds `thread_history_*.sqlite` (`thread_items`,
+`thread_turns`) and the CLI offers `migrate-rollouts` to publish legacy sessions into it,
+which together read as a store migrating away from files. It is not:
+`thread_history_projection_state` tracks a per-thread `next_rollout_byte_offset`, and
+`thread_turns` keeps byte offsets pointing back into the file — the table is an
+incrementally-built pagination index *over* the rollouts. It also covers only a small
+fraction of the threads a real install holds, so a parser reading only SQLite silently
+misses most sessions on the machine.
 
 Two consequences for an adapter. The JSONL is the authoritative source for `adopt` and
 `watch`, as the row above says. But `enumerate` may legitimately prefer the projection
@@ -392,9 +361,7 @@ reconstruct — and it must fall back to walking the files for every thread the
 projection does not hold.
 
 **Model and effort come from `model/list`, and a bad effort value is confirmed rather
-than refused.** `--describe` is **not a codex flag** — `codex --describe` errors and the
-string does not occur in the binary. It was Sylph's own v3 adapter handshake, and this
-sentence used to mis-attribute it to the vendor.
+than refused.**
 
 The vendor's refusals are inconsistent, which decides where validation lives.
 `approvalPolicy: "sometimes"` and `personality: "grumpy"` are both refused with their
@@ -422,32 +389,32 @@ session is observable and undrivable, which is the case that rules out a third l
 state.
 
 **`set_model` takes `provider` + `modelId`, not `model`.** Sending `model=` is answered
-`Model not found: undefined/undefined` — pi interpolating the two fields it looked for
-and found absent — and `provider=` plus `model=` narrows it to `anthropic/undefined`,
-which is what identifies *which* field is misspelled. The provider is not part of the
-value a client sends, so it must be looked up from the model list (372 entries on a real
-install, so cache it). Do not parse it out of the id: 350 of those ids contain a slash
-that is not a provider separator.
+`Model not found: undefined/undefined` — pi interpolating the two fields it looked for and
+found absent — and `provider=` plus `model=` narrows it to `anthropic/undefined`, which is
+what identifies *which* field is misspelled. The provider is not part of the value a client
+sends, so look it up from the model list and cache it: a real install offers hundreds of
+entries. **Do not parse the provider out of the id** — most ids contain a slash that is not
+a provider separator.
 
-This was the most expensive vendor-key instance in the repo's history: the refusal came
-back as a failed RPC that nothing surfaced, so a correct picker looked broken and the
-investigation went to the UI twice before reaching the adapter.
+Note how this one presents: the refusal arrives as a failed RPC, so with no error path in
+the client a correct picker simply looks broken and the investigation goes to the UI rather
+than to the adapter.
 
-**A model's identity is `(provider, id)`.** Of 372 offered models, two ids are each
-offered by two providers and three display names are duplicated. The bare id made one
-of each pair unreachable.
+**A model's identity is `(provider, id)`.** Some ids are offered by more than one provider
+and some display names are duplicated, so a bare id makes one of each pair unreachable and
+puts a checkmark on both (`docs/session-protocol.md` § A config value must be unique).
 
-**Thinking levels depend on the selected model** — the current one offers only `off`
-and `high` — which is why config is a refreshed array rather than a session-global
-enumeration.
+**Thinking levels depend on the selected model**, which is why config is a refreshed array
+rather than a session-global enumeration.
 
-**A turn ends on `agent_settled`, not `agent_end`.** `pi` can emit `agent_end` and then
-continue. Both events genuinely exist and are emitted (`agent_start` at
-`pi-agent-core/dist/agent-loop.js:49,67`, `agent_end` at `:110,157,172`, both reaching
-the wire through `dist/modes/rpc/rpc-mode.js:266`); an earlier claim here that they had
-zero emit sites was **wrong**, measured against a minified bundle. An unbundled
-source-mapped install at `~/.local/lib/node_modules/@earendil-works/pi-coding-agent` is
-far better evidence and should be preferred.
+**A turn ends on `agent_settled`, not `agent_end`**, because `pi` can emit `agent_end` and
+then continue. Both events exist and both reach the wire; the distinction is about which
+one is terminal, not about which one is real.
+
+**Prefer an unbundled source-mapped install to a minified bundle** when checking this
+vendor's behaviour — one is available at
+`~/.local/lib/node_modules/@earendil-works/pi-coding-agent`. Conclusions drawn from the
+minified bundle have been wrong about which events exist at all.
 
 **Two hazards a watcher must be built around.** `_rewriteFile()` truncate-rewrites with
 mode `"w"` and no lock, so a reader can observe an empty or half-written file. And
@@ -458,160 +425,138 @@ in a turn — an absent file is not an absent session.
 *and* per tool result, so a 5-tool turn writes ~11 times. That is message granularity,
 not turn granularity.
 
-**It records no archived title**, so every row needs the opening-ask fallback.
+**It records no title of its own**, so every row needs the opening-ask fallback.
 
-**Its native store has two field-spelling eras that landed field by field, plus two
-timestamp eras, and one unit bug that reads as a spelling bug.** *Measured 2026-08-28
-over all 527 files in `~/.pi/agent/sessions/`, while scoping the parser port.*
-
-The store renamed every multi-word key from snake_case to camelCase — `parent_id`→
-`parentId`, `model_id`→`modelId`, `stop_reason`→`stopReason`, `error_message`→
-`errorMessage`. **The rename was not atomic, and that is the fact a parser must be built
-around.** No file carries both spellings of the *same* field, but different fields flipped
-at different times, so 65 files hold snake `parent_id` beside camel `stopReason`. The
-switch points really are per field: `parent_id` is 111 files snake against 120 camel,
-`stop_reason` 25 against 185, `model_id` 46 against 120.
+**Its native store has two field-spelling eras, and the rename landed field by field
+rather than atomically.** That is the fact a parser must be built around. The store renamed
+every multi-word key from snake_case to camelCase — `parent_id`→`parentId`,
+`model_id`→`modelId`, `stop_reason`→`stopReason`, `error_message`→`errorMessage` — but
+different fields flipped at different times, so a single file can hold snake `parent_id`
+beside camel `stopReason`. No file carries both spellings of the *same* field.
 
 So **resolve the spelling per field, never as one era per file.** A per-file era flag is
-unsound rather than merely coarse: for those 65 files no single era exists, and a reader
-choosing one spelling for the whole file gets `parent_id` right and `stopReason` wrong, or
-the reverse. Worth stating because the per-file shortcut is the obvious design and it
-passes on 462 of 527 files.
+unsound rather than merely coarse: for the mixed files no single era exists, and a reader
+choosing one spelling for the whole file gets one field right and another wrong. This is
+worth stating plainly because the per-file shortcut is the obvious design and it passes on
+the large majority of files — long enough to be believed.
 
-Two traps around this same measurement. **The vendor's version field cannot
-discriminate** — `"version": 3` is on all 527 files in every era — so detection has to come
-from field presence, not from reading the header. And **take a key census by walking the
-parsed structure, never by grepping the serialized line**: these transcripts discuss field
-names, so a substring test matches words inside message *text* and reports keys a record
-does not have. That inflates exactly the count a port branches on, and it manufactured a
-phantom set of mixed files during this work.
+Two traps around the same question:
 
-Do not answer any of it with dual-spelling lookup. § Compatibility forbids the alias, and
-an alias is what makes the *next* rename unobservable. Read field presence, and fail
-loudly on a record whose combination no known era emits.
+- **The vendor's version field cannot discriminate.** Every file in every era carries the
+  same `"version": 3`, so detection comes from field presence, never from the header.
+- **Census keys by walking the parsed structure, never by grepping the serialized line.**
+  These transcripts discuss field names, so a substring test matches words inside message
+  *text* and reports keys a record does not have — inflating exactly the count a port
+  branches on. The defect lands in the *measurement*, which is worse than in the code,
+  because it produces a number and a number reads as evidence.
 
-One shape fact falls out of the counts: `toolCallId`, `isError`, and `toolName` occur only
-in camelCase, on 63 files, with **no** snake_case counterpart — so a snake_case-era file
-cannot hold a tool result, and the spelling check is not independent of the tool-result
-path.
+**Do not answer any of it with dual-spelling lookup.** `AGENTS.md` § Compatibility forbids
+the alias, and an alias is what makes the *next* rename unobservable. Read field presence,
+and fail loudly on a record whose combination no known era emits.
 
-The unit bug is the more consequential half and belongs to the *reader*, not the vendor.
-`message.timestamp` is **epoch milliseconds** — trace-db's parser divided an integer
-timestamp by 1000 while its string branch returned milliseconds, so every per-event time
-it produced decoded to 1970, on 3880 records. Two things made it survivable: the
-session-level start and end come from the *entry's* ISO string and were therefore right,
-so only the finer-grained per-event times were wrong; and the 67 remaining integers are
-the literal `1` written by test sessions (`"model":"claude-test"`), which look like a
-second unit era and are not. Do not sniff magnitude to choose a divisor — the vendor
-writes milliseconds, so read milliseconds.
+One shape fact falls out: `toolCallId`, `isError`, and `toolName` occur only in camelCase,
+with no snake_case counterpart — so a snake_case-era file cannot hold a tool result, and the
+spelling check is not independent of the tool-result path.
 
-The second timestamp era compounds it, and the fix is the opposite of what this section
-used to say. **746 of 4881 outer ISO stamps carry no UTC offset**
-(`2026-04-08T03:20:12.387333`), so an RFC3339 parse fails outright; and because the value
-is a string, an integer fallback never fires either, so those yield absent rather than a
-wrong number. The split is clean — 407 files naive-only, 120 offset-aware-only, none
-mixing — but the naive window (2026-04-07 to 04-20) sits in the **middle** of the
-offset-aware range (2026-02-27 to 08-26), so a "before/after this date" heuristic gets it
-backwards.
+**`message.timestamp` is epoch milliseconds.** Read it as milliseconds; do not sniff a
+value's magnitude to choose a divisor. Dividing as though it were microseconds yields a
+plausible integer that decodes to 1970 — and note what makes that survivable and therefore
+long-lived: session-level start and end come from the entry's own ISO string and stay
+correct, so only the finer-grained per-event times are wrong. A handful of integers in the
+store are the literal `1` written by test sessions, which look like a second unit era and
+are not.
 
-**Read an offsetless stamp as local wall-clock time, not as UTC.** *Measured 2026-08-28
-over all 3880 messages carrying both an outer ISO string and an inner integer, where the
-integer is known-correct epoch milliseconds:*
+**There are also two timestamp eras, and a date heuristic cannot separate them.** Some
+outer ISO stamps carry no UTC offset (`2026-04-08T03:20:12.387333`), so an RFC3339 parse
+fails outright — and because the value is a string, an integer fallback never fires either,
+so those yield *absent* rather than a wrong number. A file is one era or the other, never
+both, but the offsetless window sits in the **middle** of the offset-aware range, so
+"before/after this date" gets it backwards.
 
-| outer stamp | integer minus outer-read-as-UTC | pairs |
-| --- | --- | --- |
-| offset-bearing | **0 h** | 3750 |
-| offsetless | **−8 h**, exactly the measuring machine's zone | 130 |
+**Read an offsetless stamp as local wall-clock time, not as UTC.** Comparing such stamps
+against their sibling integers — whose units are known — shows the offsetless era written in
+whatever zone the machine was in, while the offset-bearing era agrees with UTC exactly.
+Reading them locally therefore makes the result depend on where the parser runs, which is
+normally a hazard and is correct here: the stamps *are* local wall-clock time, so every
+fixed zone is wrong by construction, and the offsetless era is a closed historical window
+rather than something new records join.
 
-So the offsetless era is written in whatever zone the machine was in. An earlier version
-of this section cited one of those very pairs as proof that UTC was correct, having
-compared the ISO string against its sibling integer without noticing the pair was drawn
-from the offsetless era — where they disagree by construction. The millisecond agreement
-that looked like evidence only ever held for the offset-bearing era.
-
-This is worth stating as a general rule, because it is the vendor-key family in its
-subtlest form: **a wrong time zone yields a plausible timestamp, so no presence check and
-no eyeball test can catch it, and the error is invisible on a machine whose offset is
-zero.** What settles it is comparing against a sibling whose units are already known —
-which means censusing *pairs* rather than stamps.
-
-Reading these locally makes the result depend on where the parser runs, which is normally
-a hazard and is right here for two reasons: the stamps are local wall-clock time, so every
-fixed zone is wrong by construction; and the offsetless era is a **closed window** of 13
-days with every later record offset-bearing, so the branch reads a bounded set of
-historical records on the machine that produced them.
+This is the vendor-payload family in its subtlest form, and the rule generalizes: **a wrong
+time zone yields a plausible timestamp**, so no presence check and no eyeball test can catch
+it, and the error is invisible on a machine whose own offset is zero. What settles a units
+or zone question is comparing a value against a sibling whose units are already known —
+which means censusing *pairs* rather than stamps. Draw such a pair from the wrong era and it
+disagrees by construction, so the comparison confirms whatever you already believed.
 
 **A fork pointer is a file path, not a session id.** The session header carries
 `parentSession`/`parent_session` naming another `.jsonl` on disk. Under an identity of
-`(environment, agent, native_id)` it cannot be stored as given: it has to be resolved by
-reading the target file's header for its id, or recorded as unresolvable. trace-db's
-parser hardcoded `parent_session_id: None` and never read the field under either
-spelling, so pi fork lineage was dropped entirely rather than partially.
+`(environment, agent, native_id)` it cannot be stored as given: resolve it by reading the
+target file's header for its id, or record it as unresolvable. Both spellings apply here,
+per the per-field rule above.
 
 ## Reading a vendor payload
 
-This is the most-repeated defect class in the repo, and every instance compiled and
-surfaced one or two layers from its cause. The instances are above,
-under their agents, because the *specific* keys are what a reader needs. The general
-rules:
+**This is the most-repeated defect class in the repo, and every instance compiles.** Each
+surfaces one or two layers from its cause, because a misread key produces a plausible
+record rather than an error. The specific keys live above under their agents, since that is
+what a reader actually needs; these are the general rules.
 
-**Print one real payload rather than inferring field names.** Two of three guesses
-about `claude`'s shapes were wrong, and each one compiled.
+**Print one real payload rather than inferring field names.** Guesses about a vendor's
+shapes are wrong more often than not, and every wrong guess compiles.
 
-**The right key in the wrong unit fails the same way, and is harder to see.** The eighth
-instance was not a misspelling: `pi`'s `message.timestamp` was read from the correct key
-and divided as though it were microseconds, so it produced a plausible integer that
-decoded to 1970. A wrong key at least yields absent; a wrong unit yields a *value*, which
-passes any check for presence. So a payload's units are part of what "print one real
-payload" has to establish — compare the number against a sibling human-readable stamp
-rather than eyeballing its magnitude.
+**The right key in the wrong unit fails the same way and is harder to see.** A wrong key
+yields *absent*, which a presence check finds; a wrong unit yields a *value*, which passes
+every such check. So a payload's units are part of what printing one real payload has to
+establish — compare a number against a sibling human-readable stamp rather than eyeballing
+its magnitude.
 
-**Ask the binary.** Grepping the 321 MB `claude` binary for a key is cheap and
-decisive: `selectedOptions` occurs nowhere in it, which would have caught that instance
-before it shipped.
+**Ask the binary.** Grepping a vendor's shipped binary for a key you intend to write is
+cheap and decisive, and it catches the case where the key exists nowhere at all.
 
 **An SDK object's attribute names and its JSON wire names are different namespaces.**
-The MCP spec says `requestedSchema`; the Python SDK's field is `requested_schema` with
-the camelCase form as an alias, and `claude` passes `__dict__` without resolving
-aliases. So the spec-correct key reads absent against a spec-compliant SDK. When the
-payload came from an SDK rather than off a socket, read the SDK side.
+Where a spec says `requestedSchema` and an SDK's own field is `requested_schema` with the
+camelCase form as an alias, a client passing the object's `__dict__` without resolving
+aliases sends the snake_case form — so the *spec-correct* key reads absent against a
+spec-compliant SDK. When a payload came from an SDK rather than off a socket, read the SDK
+side.
 
 **A type in a vendor's event union is not a promise anything emits it.** Grep the
-implementation for emit sites, not the types for declarations. And note that "I grepped
-and found nothing" is a claim about your grep as much as about the vendor — prefer an
-unbundled source-mapped install over a minified bundle.
+implementation for emit sites, not the types for declarations. And note the symmetric
+error: "I grepped and found nothing" is a claim about your grep as much as about the
+vendor, so prefer an unbundled source-mapped install over a minified bundle.
 
 **A success and a refusal are different shapes.** `{}` must never be reachable from two
 opposite outcomes.
 
 **The first `user` event is usually not what the user typed.** Agents inject their own
 context as leading pseudo user turns (`<permissions instructions>`,
-`<environment_context>`, `<skills_instructions>`, memory files as
-`# AGENTS.md instructions`, `claude`'s `Caveat:` preamble). Taking the first user event
-verbatim labels most sessions with boilerplate byte-identical across every session of
-that agent. Skipping injected envelopes raised recognizable labels from ~10% to 98% over
-311 measured sessions. Keep the rule narrow: an earlier version also treated a leading
-`You are ` as boilerplate and discarded 44 genuine labels, because subagent task briefs
-legitimately open that way.
+`<environment_context>`, `<skills_instructions>`, memory files as `# AGENTS.md
+instructions`, `claude`'s `Caveat:` preamble). Taking the first user event verbatim labels
+most sessions with boilerplate that is byte-identical across every session of that agent,
+so skipping injected envelopes is what makes a label recognizable at all.
+
+**Keep that rule narrow.** Treating a leading `You are ` as boilerplate discards genuine
+labels, because a subagent task brief legitimately opens that way. An over-broad filter
+here costs real data and looks like correct behaviour.
 
 ## Testing an agent module
 
 Two kinds of test, and neither substitutes for the other.
 
 **Recorded-payload tests** pin classification against real vendor JSON checked into the
-repo. Every classification bug in this repo's adapter history was invisible to the live
-verification script, because that script spends real tokens and only sees whatever
-shapes one live turn happens to produce. The `local_bash` versus `local_agent` case is
-the canonical one.
+repo. This is where classification is actually covered: a live run spends real tokens and
+sees only whatever shapes one turn happens to produce, so a classification defect — a
+backgrounded shell job read as a delegation, say — is invisible to it.
 
 **A live verification path** runs a real turn against the real CLI and refreshes the
 recorded payloads. Recorded fixtures go stale as vendors change, so this cannot be
 deleted along with the adapter subprocess — it is what keeps the fixtures honest.
 
-**A fixture's size and timing are both part of the contract.** A two-item model list
-cannot observe an unscrollable, unsearchable catalogue — real agents report a dozen to
-twenty-one, and every symptom was invisible to a green suite. A scenario emitting its
-whole tree inside one millisecond gives every bar equal length, so a client computing
-durations from the wrong field passes everything. And a delegate that forwards nothing
-cannot be timed from its interior at all, so "each delegate forwards at least one event"
-is a fixture requirement rather than a nod to realism.
+**A fixture's size and timing are both part of the contract**, not details of it. A
+two-item model list cannot observe an unscrollable, unsearchable catalogue, because real
+agents report a dozen or more. A scenario emitting its whole tree inside one millisecond
+gives every bar equal length, so a client computing durations from the wrong field passes
+everything. And a delegate that forwards nothing cannot be timed from its interior at all,
+so "each delegate forwards at least one event" is a fixture requirement rather than a nod
+to realism. **When a defect is a function of how much a control holds or how fast events
+arrive, the fixture's shape is the test.**

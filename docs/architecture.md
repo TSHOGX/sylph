@@ -6,13 +6,12 @@ where agents actually execute and dials back to the server. A **web frontend** i
 transport onto the server, and so is anything else.
 
 This document owns the system's shape, the session model, identity, and the
-authority model. It absorbs what used to be spread across `architecture.md`,
-`data-architecture.md`, and `control-plane.md`; those three argued the same
-questions in three places, which is how they came to disagree.
+authority model. Every other document defers to it.
 
-Claims are marked. *Measured* means observed against a real install on the stated
-date, with the evidence named. *Decision* means a design choice this document makes,
-which a reader may disagree with as a judgement rather than as a fact.
+Two markers appear throughout. *Decision* introduces a design choice, which a reader
+may disagree with as a judgement rather than as a fact. *Measured* introduces an
+observation against a real install, named with its version or date because a
+measurement without one goes stale invisibly.
 
 ## Topology
 
@@ -91,53 +90,38 @@ the UI must not imply the other thing exists.
 ## One class of session
 
 *Decision.* There is one kind of session. Sylph does not divide sessions by who
-started them.
+started them — a session Sylph launched and one a user started in a terminal are the
+same kind of thing, and the row records no class.
 
-The previous model had `origin` (`sylph` | `native`), `identity_mode`, and
-`lifecycle_mode` on every row, and the former `data-architecture.md` argued at length that
-the boundary "must not be smoothed over". The implementation says otherwise.
-*Measured 2026-08-27, `backend/src`:*
-
-| Column | Write sites | Behavioural branches |
-| --- | --- | --- |
-| `lifecycle_mode` | 4 | **0** — stored in SQLite, read by nothing |
-| `identity_mode` | 4 | **1** — `links/mod.rs:468`, chooses `SOUL` path or empty string |
-| `origin` | every insert | **0** in the backend; 1 badge, 1 banner, 1 search colour, 1 `deleteEmpty` guard in the frontend |
-
-So a whole section of invariants rested on one `Option<String>`. That is the
-inverse of the failure `AGENTS.md` warns about: not a spec blessing an
-implementation accident, but a spec hardening a distinction the implementation never
-made.
-
-Three separate arguments say the split was wrong rather than merely unbuilt:
+Three arguments hold it up, and each is a case where a class fixed on the session row
+would state something false:
 
 **Who holds stdio is a property of a link, not of a session, and it flips both
 ways.** After its process exits, a session Sylph started is byte-identical on disk
 to one started in a terminal. After Sylph resumes a terminal session, Sylph holds
-its stdio. Any class written onto the session row lies the first time either
-happens.
+its stdio. A class written at creation lies the first time either happens.
 
 **Identity injection has no relationship to who started the session.** Adopting a
-terminal session and then injecting `SOUL.md` from that point on is a coherent thing
-to want, and so is starting a session from Sylph with no injection at all. So
-injection is a per-session boolean with a default, not a class.
+terminal session and injecting `SOUL.md` from that point on is a coherent thing to
+want, and so is starting a session from Sylph with no injection at all. So injection
+is a per-session boolean with a default, not a class.
 
-**Sylph has no lifecycle policy of its own.** The 24h-idle / 04:00-reset rule was
-inherited from the Discord chat daemon's `chat/state.py`. It is deleted, not
-deferred: nothing schedules it, `end_incarnation` has no callers, and a reset would
-break the one property this document most depends on — a stable identity — by
-replacing the agent-native id mid-session. The **link** idle timeout is a different
-and real thing (30 minutes) and stays.
+**Sylph has no lifecycle policy of its own.** Nothing idles a session out and nothing
+resets one, deliberately: a reset would replace the agent-native id mid-session,
+breaking the identity rule below — the property this document most depends on. The
+**link** idle timeout is a different and real thing (30 minutes) and stays.
 
-What is deleted: `sessions.origin`, `sessions.identity_mode`,
-`sessions.lifecycle_mode`, the whole `backend_incarnations` table,
-`store::end_incarnation`, and every frontend surface that renders an origin.
-
-What replaces the one branch that did work: `sessions.inject_identity`, a boolean,
-default true for a session Sylph starts and false for one it adopts. **A default,
-not a policy** — it is settable at creation and refused afterwards, because a
+So the only distinction that survives on the row is `sessions.inject_identity`: a
+boolean, default true for a session Sylph starts and false for one it adopts. **A
+default, not a policy** — settable at creation and refused afterwards, because a
 transcript records what produced it and rewriting the flag would rewrite what the
 stored history means.
+
+One lesson generalizes, and it is the inverse of the failure `AGENTS.md` warns about.
+A spec can harden a distinction the implementation never made, and that costs as much
+as a spec blessing an implementation accident: it invites invariants, surfaces, and
+columns built around a boundary nothing enforces. Before writing a distinction into
+this document, check what in the code actually branches on it.
 
 ### What genuinely differs, and where it belongs
 
@@ -158,41 +142,38 @@ present equal-length bars as measurements.
 
 *Decision.* A session's id is the triple, and there is no Sylph-minted UUID.
 
-The evidence is better than the previous design assumed. *Measured 2026-08-27:*
-`claude`'s adapter mints a UUID and hands it to the vendor with `--session-id`
-(`crates/adapters/src/claude/mod.rs`); `claude` and `pi` both accept the flag, and
-`codex` assigns its own and reports it. So the
-native id is available to Sylph for every agent, either by dictation or on the first
-frame, and a second Sylph id is pure redundancy — plus a permanent invitation to
-compare ids from two spaces, which is silently always false (`AGENTS.md` records the
-instance that shipped fully tested and pruned nothing).
+The native id is available for every agent, either by dictation or on the first
+frame: `claude` and `pi` accept a `--session-id` the adapter mints, and `codex`
+assigns its own and reports it. So a second Sylph id would be pure redundancy — and a
+standing invitation to compare ids from two spaces, a comparison that yields no error
+at any layer and is simply always false. **One id space is the point**, not a
+convenience: it makes the unanswerable comparison unwritable.
 
 Rules the triple needs to hold:
 
 - **`environment` is an opaque id minted at pairing**, never a user-visible name.
   A name in a key means renaming destroys identity. Display names are mutable
   metadata.
-- **The encoding does not use `/`.** This repo has already paid for that once: 350
-  of `pi`'s 372 model ids contain a slash, so splitting on one mis-parses the
-  majority. The wire form is `<env>:<agent>:<native>` with `env` restricted to
+- **The encoding does not use `/`.** Most of `pi`'s model ids contain a slash, and
+  vendor ids generally may, so splitting on one mis-parses the majority of a real
+  catalogue. The wire form is `<env>:<agent>:<native>` with `env` restricted to
   base32, and a URL path segment carries it percent-encoded.
-- **A session exists once an agent has given it an id**, which means `POST
-  /sessions` starts the agent rather than reserving a row. This kills the "draft
-  session with no work in it" concept, and with it `DELETE /sessions/{id}` for
-  empties and the frontend's `deleteEmpty` probe. A failed spawn now reports at the
-  start screen instead of leaving a dead row behind.
-- **The id is stable for the session's whole life**, because nothing resets an
-  incarnation any more.
+- **A session exists once an agent has given it an id**, so `POST /sessions` starts
+  the agent rather than reserving a row. There is therefore no "draft session with no
+  work in it", and a failed spawn reports at the start screen rather than leaving a
+  dead row behind.
+- **The id is stable for the session's whole life**, which follows from nothing
+  resetting a session (§ One class of session).
 
 Three alternatives, each rejected for a reason that would have surfaced late:
 
-- **A content fingerprint.** `opencode` writes no per-session file — one SQLite
-  store with a live WAL — so it cannot compute one (*measured*). A key one agent
-  cannot produce is not a key. (`opencode` is now unsupported, but the shape of the
-  argument is why the rule stands: nothing constrains an agent to keep a file.)
-- **An archive id.** A session is observable the moment its native store exists,
-  before anything has parsed it. Keying on a projection makes identity depend on
-  that projection's progress.
+- **A content fingerprint.** Nothing constrains an agent to keep a per-session file
+  at all: an agent storing its sessions in one SQLite database with a live WAL cannot
+  compute a per-session fingerprint, and one has been measured doing exactly that. A
+  key one agent cannot produce is not a key.
+- **A parsed-history id.** A session is observable the moment its native store
+  exists, before anything has read it. Keying on a projection makes identity depend
+  on that projection's progress.
 - **Anything containing a host or a path.** Provenance, not identity; see below.
 
 ## Sessions do not migrate between environments
@@ -227,28 +208,24 @@ that.
 The server's own store under `~/.sylph` is the authoritative record. Everything
 else is a source it ingests from or a projection it serves.
 
-*Decision: there is exactly one event vocabulary and one durable store, and this is
-the largest change in this rewrite.* The previous design had two of each — an
-adapter protocol feeding `journal.db`/`history.db`, and trace-db's parsers feeding
-`archive.db` — meaning two per-vendor normalizers, two schemas, and two query
-paths for one concept. That is a drift generator, and it produced the open question
-the old document could not close: full-text search covered only what the archive
-had parsed, so a session whose environment had gone away was searchable nowhere.
+*Decision: there is exactly one event vocabulary and one durable store.* Native
+history is parsed **by an adapter** and emitted as the same events a live turn emits.
+It lands in the same journal → history pipeline, carries a `fidelity` marker, and is
+indexed by the same full-text table. A reader cannot tell which mode produced a row,
+and nothing translates between two id spaces because there is only one.
 
-Under one vocabulary, native history is parsed *by an adapter* and emitted as the
-same events a live turn emits. It lands in the same journal → history pipeline,
-carries a `fidelity` marker, and is indexed by the same FTS table. The open question
-is answered by construction rather than moved.
+Two of each — a second store with its own per-vendor normalizers, schema, and query
+path for the same concept — is a drift generator, and it also bounds what any
+capability built on top can honestly claim: full-text search over a *subset* of
+history covers whichever sessions some parser happened to reach, so a session whose
+environment has gone away is searchable nowhere and one whose files are local is
+searchable by coincidence. "Usually covered" is not a contract. One store answers it
+by construction.
 
-What this deletes: `archive.db` as a separate store, `backend/src/tracedb/mod.rs`
-(1440 lines of client plus per-operation spelling pins), the reachable/unreachable
-distinction, the `tracedb.bin` setting, and the two-id-space hazard in full.
-
-What it costs, stated plainly: the vendor-format knowledge in trace-db's
-`parsers/` must move into Sylph's adapters. *Measured:* that is **1219 lines** for
-the three supported agents (`claude.rs` 388, `codex.rs` 561, `pi.rs` 270), against
-1440 lines of client code deleted — a net subtraction before counting the 867 lines
-of `gemini.rs` and `opencode.rs` that go away with those agents.
+The cost is that vendor-format knowledge lives in Sylph's own adapters, which is
+where it belongs anyway: the adapter already owns that vendor's launch line and
+control surface, so its native format is the same body of knowledge rather than a
+second one.
 
 `docs/storage.md` owns the tiers and the fold format. `docs/agents.md` owns each
 vendor's native format and quirks.
@@ -284,18 +261,22 @@ lockstep.
 *Decision.* A link has one state and two facets, each of which can report
 unavailable with a typed reason: **observe** and **control**.
 
-A third link state was considered and rejected, because the vendors do not sort into
-three buckets (*measured 2026-08-27*): a terminal `pi` is observable and
-undrivable, `codex` is both, `claude` is observable and semi-drivable behind a
-human approval gate. A third enum variant would have to pick one and would
-misreport the others.
+**Two facets rather than one tri-state**, because the vendors do not sort into three
+buckets: a terminal `pi` is observable and undrivable, `codex` is both, and `claude`
+is observable but only semi-drivable behind a human approval gate (`docs/agents.md`
+has the matrix). A single enum would have to pick one of those and misreport the rest,
+and `codex` splits the two natively — a second client may drive a turn without ever
+subscribing to its events — so the separation exists in a real vendor, not only in
+Sylph's model of one.
 
-Two inversions in the current code have to be repaired with it. `links/mod.rs:61`
-documents an empty capability surface as meaning *no process exists*, which is
-exactly backwards for a session running under someone else — the process is alive
-and it is Sylph that cannot reach it. And both `LinkFailureCode` values (`NoAdapter`,
-`HandshakeFailed`) describe *our own spawn* failing, so neither can say "somebody
-else's process, running fine, not ours to drive".
+Two rules follow, and each is the opposite of what an obvious implementation states:
+
+- **An empty capability surface means "Sylph cannot reach it", never "there is
+  nothing there".** Those coincide for a session Sylph launched and are opposite for
+  one running under someone else, where the process is alive and healthy.
+- **A failure code must be able to describe someone else's process.** Codes that only
+  describe *our own* spawn failing cannot express "running fine, not ours to drive",
+  which is the ordinary state of a terminal-born session.
 
 This is also what makes "another machine is read-only" fall out rather than being a
 rule anyone writes: **control is available exactly while that environment's envagent
@@ -318,25 +299,25 @@ implementing this same idea, which is evidence the shape is right.
 
 ## AFK degrades in a defined order
 
-The motivating scenario is the reason this architecture exists: work with an agent
-in a terminal, walk away, see it from a phone, continue it. It is not one
-capability. *Measured 2026-08-27 against claude 2.1.247, codex, pi:*
+The motivating scenario is the reason this architecture exists: work with an agent in
+a terminal, walk away, see it from a phone, continue it. It is not one capability but
+three, and they degrade separately.
 
-| | claude | codex | pi |
-| --- | --- | --- | --- |
-| mid-turn native writes | tool-call and content-block boundaries | item completion | every `message_end` |
-| second-party control | authenticated per-process UDS: delivers messages, **cannot drive** | app-server daemon, `remote-control pair`, `queue --thread` | **none** — stdio only |
-| resume after exit | yes | yes | yes |
+**Observe always, resume always, live continuation only where the vendor lets a second
+party in.** All three supported agents write their native store mid-turn, so an
+observer sees work in progress rather than only outcomes, and all three can be resumed
+after their process exits. What varies is second-party *control*, which ranges from
+fully drivable to none at all — `docs/agents.md` § Capability matrix is authoritative
+per vendor and carries the versions each row was measured against.
 
-So: **observe always, resume always, live continuation where the vendor lets a
-second party in.** A client renders "observable, not drivable" as a first-class
-state, never as a failure.
+So a client renders "observable, not drivable" as a first-class state, never as a
+failure. That is what the two facets above exist to express.
 
-`claude`'s inbound `user` frames are gated on the sitting human's approval — the
-binary carries "held for the recipient user's approval", declined, and expired
-strings. Whether the gate is per-frame or once per peer is **unresolved**, and it is
-the difference between useful remote continuation and a feature that fails precisely
-when nobody is at the keyboard. `docs/agents.md` carries the per-vendor detail.
+One unknown is worth naming because it bounds the whole feature: where a vendor gates
+an inbound message on the approval of the human sitting at the machine, remote
+continuation may fail precisely when nobody is there to approve. Whether such a gate
+applies per frame or once per peer decides whether AFK continuation is useful or
+worthless for that agent.
 
 ## Turn execution
 
@@ -358,20 +339,19 @@ backgrounded work emits the delegate's completion after its turn's `result`, the
 entire exchange of its own to report it. So the server opens an agent-initiated turn
 (`origin: "agent"`) on the first out-of-turn event of any kind. Such a turn has no
 waiter, its request text is empty, and a client that ignores `origin` will render an
-answer to a message the user never wrote. This is turn `origin` and is unrelated to
-the deleted session `origin`.
+answer to a message the user never wrote. This is turn `origin`, a property of the
+turn; a session carries no such field (§ One class of session).
 
-Two orderings here are load-bearing and were each paid for:
+Two orderings are load-bearing, and both express the same principle: **write the row
+that makes the next action legal first**, because a client will observe between two
+writes that settle one logical fact.
 
-- **`stop` settles the turn before touching the link.** An agent that stops
-  producing looks like a lost link to the drain task, which would report `LINK_LOST`
-  for something the user asked for. Interrupting first was a race that failed
-  `stopping_a_running_turn_cancels_it` about two runs in five.
-- **A session returns to `idle` before its turn is marked terminal.** These are two
-  writes and a client will observe between them, so the row that makes the next
-  action legal is written first. The other order leaves a finished turn on a
-  `running` session, which is the state that makes the composer refuse the next
-  message.
+- **`stop` settles the turn before touching the link.** An agent that stops producing
+  looks like a lost link to the drain task, so interrupting first reports `LINK_LOST`
+  for something the user deliberately asked for.
+- **A session returns to `idle` before its turn is marked terminal.** The other order
+  leaves a finished turn on a `running` session, which is the state that makes the
+  composer refuse the next message.
 
 ## Security model, and what multi-user requires
 

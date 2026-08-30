@@ -2,15 +2,8 @@
 
 Sylph Web exposes a versioned REST API with SSE streaming for real-time updates.
 
-> **On this file's length, which is deliberate.** It is ~1900 lines and the large
-> majority are one section, `Core Endpoints`. That concentration was checked and left alone:
-> unlike a prose spec, this is a reference organized by resource — twelve subsections, one
-> per resource, each scoped to its own endpoints — and it is searched rather than read
-> end to end. The length is the size of the endpoint surface, so splitting it would
-> fragment a lookup without removing anything. `docs/frontend-architecture.md` was split
-> because 40% of it sat under one heading that answered a *different question* from the
-> rest; no such seam exists here. `docs/api-v1.openapi.json` is the machine-readable
-> form and is authoritative for schemas.
+This is a reference organized by resource, searched rather than read end to end.
+`docs/api-v1.openapi.json` is the machine-readable form and is authoritative for schemas.
 
 ## Design Principles
 
@@ -86,11 +79,12 @@ Detailed system state (sessions, turns, agents, retention).
     "examined": 64,
     "confirmed": 12,
     "withheld": 52,
+    "withheldReasons": {"environment_unreachable": 48, "source_absent": 4},
     "terminal": 41,
-    "unchanged": 9,
+    "failed": 0,
     "blocksPruned": 318,
     "blobsSwept": 4,
-    "archiveAvailable": true,
+    "environmentsReachable": {"env_7fk2": true, "env_k9x1": false},
     "bytesHeld": 4183740928,
     "sessionsMeasured": 357,
     "bytesGrewBy": 12043776,
@@ -114,10 +108,12 @@ agent failure messages.
 `retention` is the last completed pass, or `null` before the first one. Two things
 about its shape are load-bearing, both covered in `docs/storage.md`:
 
-- **`withheld` beside `terminal`** is what separates correct behaviour from a
-  broken pass. A terminal session is *supposed* to keep everything, while a
-  delegated session that keeps withholding means the archive is not confirming it —
-  and an all-`unchanged` pass means the ingestion daemon has stopped advancing.
+- **`withheld` beside `terminal`** is what separates correct behaviour from a broken
+  pass, and `withheldReasons` is what makes the difference legible. A terminal session is
+  *supposed* to keep everything; a backed session that keeps withholding means no
+  environment is confirming it. Counting withheld from the authority's own reported reason
+  rather than from an absent bound is what keeps "answered, nothing safe yet" distinct
+  from "nobody was asked".
 - **The byte fields answer "which session is growing".** The counts cannot: forty
   small withheld sessions and one enormous one report identically. `bytesHeld` is
   the *logical* record across every measured session, not the footprint on disk, so
@@ -328,19 +324,22 @@ model list, which is why `codex` correctly shows effort with no model selector.
 **`supports` is a closed vocabulary that drives the UI directly** — a composer must not
 offer interrupt to an agent that cannot interrupt.
 
-#### `POST /api/v1/environments/pairings`
+#### `POST /api/v1/environments/pairings` — designed, not built
 
 Mint a short-lived, single-use pairing code (`docs/environments.md` § Pairing). The
 envagent exchanges it for a durable credential and is assigned its opaque id.
 
 **Response 201:** `{"code": "…", "expiresAtMs": 1724054460000}`
 
-#### `DELETE /api/v1/environments/{id}`
+#### `DELETE /api/v1/environments/{id}` — designed, not built
 
 Unpair. Sessions recorded from that environment stay readable — their history is in the
 server's store — but their **control** facet reports unavailable, and retention treats
 them as terminal, because no reachable native source can confirm a bound
 (`docs/storage.md`).
+
+Both arrive with `crates/envagent`; there is no route for either today, and the local
+environment needs no pairing.
 
 ### Sessions
 
@@ -505,9 +504,9 @@ rather than from the request changes who chose it, not what happens next.
 not what the user typed — agents inject their own context as leading pseudo user turns
 (`<environment_context>`, `<skills_instructions>`, memory files, `claude`'s `Caveat:`
 preamble). Taking it verbatim labels most sessions with boilerplate byte-identical
-across every session of that agent; skipping those raised recognizable labels from ~10%
-to 98% over 311 measured sessions. Keep the rule narrow: treating a leading `You are `
-as boilerplate discarded 44 genuine labels, because subagent briefs open that way.
+across every session of that agent, so skipping those envelopes is what makes a label
+recognizable at all. Keep the rule narrow: treating a leading `You are ` as boilerplate
+discards genuine labels, because subagent briefs legitimately open that way.
 
 **Errors:**
 - `400` — no such agent on that environment, or the recorded workdir no longer exists
@@ -541,12 +540,9 @@ Get one session.
 { "session": { /* the same shape a listing row has, below */ } }
 ```
 
-**That is the whole response.** This section documented an `incarnations` array and a
-`turns` summary for a release; neither exists — `api::sessions::get` returns
-`SessionResponse { session }` and nothing else, and no endpoint anywhere reports turn
-counts. Incarnations are journalled (`backend_incarnations`, `docs/database-schema.md`)
-but are not published on any route; a client that needs the turn list asks
-`GET /sessions/{id}/turns`.
+**That is the whole response.** `api::sessions::get` returns `SessionResponse { session }`
+and nothing else — no turn summary and no turn counts, on this or any other route. A client
+that needs the turn list asks `GET /sessions/{id}/turns`.
 
 Two field names in that removed example were wrong in a way worth keeping visible,
 because both are easy to re-invent:
@@ -584,34 +580,24 @@ stored, dropped at turn time, and the turn would run on the default with nothing
 anywhere saying why. Validating on write turns that silent no-op into an error the
 UI can show against the control that caused it.
 
-**Identity is not patchable, and three of the four fields that used to say so are
-gone.** `environment`, `agent`, and `nativeId` *are* the session's identity, so
-changing one does not modify a session, it names a different one. `injectIdentity` is
-refused for a different reason: a transcript records what produced it, so rewriting the
-flag would rewrite what the stored history means. `origin`, `identityMode`, and
-`lifecycleMode` no longer exist — `docs/architecture.md` § One class of session carries
-the measurement showing they had four write sites and one behavioural branch between
+**Identity is not patchable.** `environment`, `agent`, and `nativeId` *are* the
+session's identity, so changing one does not modify a session, it names a different one.
+`injectIdentity` is refused for a different reason: a transcript records what produced it,
+so rewriting the flag would rewrite what the stored history means. There are no `origin`,
+`identityMode`, or `lifecycleMode` fields — `docs/architecture.md` § One class of session
+is authoritative for
 them.
 
 Errors: `SESSION_NOT_FOUND` (404), `INVALID_REQUEST` (400) for an undeclared flag
 key, a value outside a declared enumeration, or an agent that is no longer
 installed.
 
-#### `DELETE /api/v1/sessions/{id}` — removed
+#### There is no `DELETE /api/v1/sessions/{id}`
 
-**There is no empty draft to discard, because `POST /sessions` now starts an agent.**
-A session exists only once an agent has assigned it an id, so the state this route
-existed for — a row representing nothing, created by picking a directory and navigating
-away — cannot occur. The frontend probe that called it on unmount goes with it.
-
-Recorded rather than silently dropped, because the shape it guarded is worth
-remembering: the route enforced "empty, and Sylph-created" **in the SQL statement**
-rather than by read-then-delete, and answered `204` on a miss because the caller was an
-unload path that could not act on an error. Both are the right choices for a route of
-that kind.
-
-There is still no route that deletes a session **with** history. Delete, move, and
-export remain absent; see the roadmap.
+**Nothing deletes a session.** There is no empty draft to discard — a session exists only
+once an agent has assigned it an id, so a row representing nothing cannot occur — and no
+route deletes a session *with* history. Delete, move, and export are absent; see the
+roadmap.
 
 ### Turns
 
@@ -675,7 +661,6 @@ Get turn detail.
     "idempotencyKey": "…",
     "errorCode": null,
     "errorMessage": null,
-    "runnerExitCode": null,
     "createdAtMs": 1724059200000,
     "startedAtMs": 1724059205000,
     "completedAtMs": 1724059312000,
@@ -690,10 +675,9 @@ outlived the turn which dispatched it, and such a turn's `requestText` is empty 
 is otherwise indistinguishable from a user sending nothing. `docs/session-protocol.md`
 § An agent may start a turn.
 
-**`runnerExitCode` is a legacy spelling, and it is `null` on every current path.** Under
-the current protocol the adapter holds a session for its lifetime and a turn is a message on its
-link, so there is no per-turn exit code to report. The field is retained so no client
-had to change; do not read its presence as evidence the v1 runner protocol still exists.
+**There is no per-turn exit code**, because an adapter holds a session for its lifetime and
+a turn is a message on its link. A turn's outcome is `status` plus
+`errorCode`/`errorMessage`; nothing reads a process exit.
 
 #### `GET /api/v1/turns/{id}/events`
 
@@ -793,12 +777,9 @@ Stop a running turn.
 }
 ```
 
-**What actually happens, in order.** This paragraph used to read "process receives
-SIGTERM, escalates to SIGKILL after 2 seconds", which described a v1 shape — one
-process per turn, so killing it *was* stopping the turn. Nothing in `backend/src`
-implements that escalation and no timeout of 2 seconds exists anywhere. Under v3 a
-turn runs inside a session-long link, so killing the process would cost the whole
-session to end one turn:
+**What happens, in order.** A turn runs inside a session-long link rather than its own
+process, so **nothing signals or kills a process to stop a turn** — that would end the
+whole session to stop one message:
 
 1. **The turn is settled first**, as `Interrupted`, before the link is touched at all.
    This ordering is the point rather than an optimization: every way of ending a turn
@@ -806,8 +787,7 @@ session to end one turn:
    drain task observes closing — which reports `LINK_LOST`. Claiming the outcome first
    means that attempt finds the turn already terminal and does nothing, so a
    deliberate stop is never reported as a transport failure. Settling *after*
-   interrupting was a race, not a fix: `stopping_a_running_turn_cancels_it` failed
-   roughly two runs in five on it.
+   interrupting is a race rather than a fix.
 2. **The adapter is asked to interrupt.** Settling first is also what makes stop
    unconditional — the record does not wait on the agent to answer, so a user asking
    to stop is never told the agent declined.
@@ -867,20 +847,16 @@ existed and both are the common case now:
 | `environment_unreachable` | no envagent connected for this session's environment — observe still answers from the store |
 | `not_ours_to_drive` | the process is alive under someone else, and this vendor offers a second party no control channel |
 
-**The two differ in whether a retry can change the answer, and an earlier version of this
-passage had it wrong for one of them.** `not_ours_to_drive` is cacheable like a success —
-no retry teaches a vendor a control channel it does not have — and so is `no_agent`. But
-`environment_unreachable` **must be allowed to go stale**, because a laptop wakes up and
-an envagent redials: caching it like a success is how a reachable machine goes on being
-reported offline for the life of the page, which is the same defect as the
-`staleTime: Infinity` one above wearing a different reason code. `crates/protocol`'s
-`UnavailableReason::is_retryable` is the single definition; a client mirrors that rather
-than re-deriving the rule inside a cache policy.
+**These differ in whether a retry can change the answer**, and a client must not cache
+them alike. `not_ours_to_drive` and `no_agent` are cacheable like a success — no retry
+teaches a vendor a control channel it does not have, or installs a CLI. But
+`environment_unreachable` **must be allowed to go stale**, because a laptop wakes and an
+envagent redials; cache it like a success and a reachable machine goes on being reported
+offline for the life of the page.
 
-The vocabulary is authoritative in `crates/protocol/src/link.rs`. Note `no_agent` was
-called `no_adapter` while adapters were subprocesses discovered on disk; availability is
-now whether a vendor CLI is on that machine's `PATH`, which is one question with one
-answer and one fix.
+`crates/protocol`'s `UnavailableReason::is_retryable` is the single definition, and a
+client mirrors it rather than re-deriving the rule inside a cache policy. The vocabulary
+itself is authoritative in `crates/protocol/src/link.rs`.
 
 #### `POST /api/v1/sessions/{id}/link`
 
@@ -1121,19 +1097,14 @@ certain rather than an edge case, and invisible on Linux CI.
 ### Lineage, folding, and labels
 
 **There is no `/archive/*` namespace.** Reading history is `GET /sessions` and
-`GET /sessions/{id}`, because one store holds it (`docs/architecture.md` § One
-authority). What used to be a separate read path against a separate database is now
-query parameters on the listing above.
-
-What survives from it is every measured rule about *presenting* lineage, because those
-were derived from a real archive and are unchanged by where the rows live.
+`GET /sessions/{id}`, because one store holds it (`docs/architecture.md` § One authority);
+what would be a separate read path is query parameters on the listing above.
 
 #### A listing folds delegated work into its parent
 
-Delegated sessions are rows of their own and are **half of a real local archive** —
-2316 of 4606 non-empty, re-censused after the archive grew to 4922 sessions; it was
-2238 of 4416 before, so the ratio is stable and worth trusting over either absolute. A
-listing that does not fold them is half noise.
+**Roughly half the sessions in a real store are delegated work**, so a listing that does
+not fold them is half noise. That ratio has held across re-measurements while the absolute
+counts moved, which is why the fold is a design rule rather than a tuning choice.
 
 So a row carries `delegateCount` and `delegates`, and the fold has one exception that
 is not optional:
@@ -1141,9 +1112,9 @@ is not optional:
 **A cross-directory child is promoted to a row of its own.** 484 of 2238 delegates ran
 somewhere other than their parent — typically a worktree or a subdirectory — and folding
 those into a parent that is *not in the directory being listed* deletes them from the
-only listing that would ever show them. Measured: it emptied 42 directories, one holding
-193 sessions. In its own directory a delegated session is not delegated work, it **is**
-the work.
+only listing that would ever show them — measured, it emptied dozens of directories, one
+of them holding hundreds of sessions. In its own directory a delegated session is not
+delegated work, it **is** the work.
 
 `delegates` carries the children themselves, and `delegateCount` is always its length.
 A count alone is a dead end: half the store is delegated work, so a row reading "13
@@ -1160,38 +1131,33 @@ is. They must not be presented the same way:
 - **Delegation** folds into the parent as a count.
 - **A fork** replays its origin's entire prefix and continues past it, so the two share
   every early user turn and read as one conversation resumed. Listing both shows it
-  twice under one label, so **one survives** — and which one cannot be decided in
-  advance: of the two real local cases, one has its later work in the fork (1108 events
-  against 389) and the other in the origin (2459 against 649). Ordering by end time
-  descending makes the survivor whichever is reached first.
+  twice under one label, so **one survives** — and which one cannot be decided in advance:
+  of two real local cases, one had the bulk of its later work in the fork and the other in
+  the origin. Ordering by end time descending makes the survivor whichever is reached
+  first.
 
 `forkOf` names the suppressed origin on a surviving fork row. Within one response the
-loser is already dropped, but **a pair can straddle two pages** — one measured pair sits
-268 rows apart — and the server keeps no state between requests. A client accumulating
+loser is already dropped, but **a pair can straddle two pages** — measured pairs sit
+hundreds of rows apart — and the server keeps no state between requests. A client accumulating
 pages must therefore drop a row whose `forkOf` names a session it has already shown, and
 equally a row that a previously-shown fork names.
 
 #### Lineage is derived from the listing, not asked per row
 
-This is a performance rule with a measurement behind it, and the ratio is why the fold
-caches per parent rather than asking about each row.
+**Per-row lineage lookups are two orders of magnitude more expensive per fact than
+reading the listing**, measured against a full local store: one session's metadata costs
+milliseconds and a few kilobytes, so a single page spends a substantial fraction of a
+second on lineage alone and a whole-store scan takes tens of seconds — while the entire
+listing that already carries most of those facts returns in a fraction of one.
 
-Reading one session's metadata cost **11.5 ms and ~2.5 KB** (measured over 300
-sequential calls against a 4922-session archive), so a 20-row page spends ~230 ms on
-lineage alone and a whole-store scan costs **52.9 s**. A full unfiltered listing, by
-contrast, was 4922 rows in 10 pages at **164 ms** — about **300× cheaper per fact**. So
-derive what the listing already carries; ask per row only for what it cannot.
+So **derive lineage from the listing and ask per row only for what the listing cannot
+carry.** The fold caches per parent for the same reason. Finding one session's children
+uses an id-prefix test over a single pass, which catches most delegates; the remainder
+record only a parent id and are reached from their parent's directory listing rather than
+by paying for the scan.
 
-Finding one session's children uses that: an id-prefix test over one pass found 2104 of
-2316 delegates, while the rest record only a parent id and would cost the full scan, so
-they are reached from their parent's directory listing instead.
-
-Two cautions that came with those numbers. **A measurement is only quotable while the
-thing it was measured against still exists** — that archive included an agent now
-unsupported, so the ratio has moved while the case has not. And this file once recorded
-one population as **212, "almost all `opencode`"** in two places and **199, "almost all
-`codex`"** in two others: one set, two figures, two agents, so at least one pair was
-always wrong and both read as measured fact. Cite a number once and point at it.
+Re-derive these figures before relying on them (`docs/README.md` § How to write these
+documents). The *ratio* is the durable part, and it is what the design rests on.
 
 #### An id-suffix convention is a fallback, not a lineage signal
 
@@ -1203,10 +1169,11 @@ listing until lineage started reading the store's own recorded parent. The suffi
 survives only for when that lookup fails.
 
 Attribution to the *specific* delegating call was measured and **rejected**: `claude`
-names a child `<parent>/agent-a<name>-<hash>`, but **1918 of 2104** suffixes are
-hash-only, so matching recovers 8.8% and misattributes on a collision. Structure that is
-right for one delegation in eleven is worse than an honest flat view, because nothing on
-screen distinguishes them. Delegation is therefore session-level in both directions.
+names a child `<parent>/agent-a<name>-<hash>`, but the large majority of those suffixes
+are hash-only, so matching recovers a small fraction of delegations and misattributes on a
+collision. Structure that is right for one delegation in ten is worse than an honest flat
+view, because nothing on screen distinguishes the two. Delegation is therefore
+session-level in both directions.
 
 #### A label falls back through three sources
 
@@ -1220,17 +1187,15 @@ screen distinguishes them. Delegation is therefore session-level in both directi
    all — every one is a `<teammate-message … summary="…">` block — but that attribute is
    human-written and describes the task. XML entities in it are decoded.
 
-Measured over a whole local archive, those three take labelled sessions from 94.3%
-(title plus typed ask alone) to **98.3%**; across 138 directories holding history, 99.5%
-of listed rows carry one.
+Together those three label nearly every session in a real store; the title and typed ask
+alone leave a visible fraction unlabelled, and rule 3 is what closes most of the rest.
 
 #### A paged scan is bounded in rows, not pages
 
-Because a directory filter also matches paths beneath it and those sort by recency
-rather than depth, a parent directory's first exact match can land deep: measured,
-`/Users/x/Workspace/huawei` has 88 sessions of its own whose first exact match is ~1300
-rows in, and an 8-page cap gave up first and reported the directory **empty**. Bound such
-a scan in rows examined.
+A directory filter also matches paths beneath it, and those sort by recency rather than
+depth, so a parent directory's own first exact match can land a thousand or more rows in —
+past which a page cap gives up and reports a directory with dozens of sessions as
+**empty**. Bound such a scan in rows examined.
 
 ### Search
 
@@ -1243,13 +1208,10 @@ rather than a variant of them: those answer "what happened in *this directory*",
 sidebar asks on every render, while this answers a question a user has to already know
 how to phrase.
 
-**It covers everything the server holds, and that is what the rewrite bought.** Search
-used to run against a separate archive fed by parsing native stores, so it covered only
-what a parser had read: a session whose environment had gone away was searchable
-nowhere, and one whose vendor file happened to be local was searchable by coincidence.
-With one store and one vocabulary (`docs/architecture.md` § One authority), the index is
-over the same rows the timeline renders. The old caveat — "a client must not present this
-as search my history" — is retired rather than relocated.
+**It covers everything the server holds.** The index is over the same rows the timeline
+renders, including sessions read out of an agent's native files, so a client may present it
+as "search my history" without qualification — the coverage is a contract rather than a
+function of what some parser reached (`docs/architecture.md` § One authority).
 
 **It never returns 503**, and answers `200` with an empty `results` array for a query
 that finds nothing. Whitespace-only `q` is treated as absent and answers empty without
@@ -1284,13 +1246,12 @@ count within that session, so one strong match and thirty weak ones are distingu
 Both `bestMatch` and `hits` are omitted rather than zeroed when the index cannot supply
 them; a client must not read an absent `bestMatch` as "matched at the beginning".
 
-**This is the one read that must stay off any polled path.** Measured in-process against
-an equivalent store, every other operation is microseconds to sub-millisecond —
-per-session coverage at 5.2–9.0 µs, a targeted single-session read at 0.78 ms, a
-whole-store scan at 7.9 ms — while FTS5 search is **174–260 ms**, and 273 ms under
-concurrent write load. FTS5 work is real work and nothing about owning the store makes it
-cheaper, so the cost model that governs every other read does not transfer here and this
-endpoint stays user-initiated.
+**This is the one read that must stay off any polled path.** Every other operation
+against this store is microseconds to sub-millisecond; a full-text query is two to three
+orders of magnitude slower, and slower still under concurrent write load. FTS5 work is
+real work and nothing about owning the store makes it cheaper, so the cost model that
+governs every other read does not transfer here — **this endpoint is user-initiated, and a
+client gates it on a real query rather than binding it to keystrokes.**
 
 ### Files
 
@@ -1304,13 +1265,12 @@ will not recurse unless asked and will not touch the root at all.
 There is still deliberately no rename and no write-in-place: the agent mutates
 file *contents*, the browser manages the files around them.
 
-**Why delete is here at all**, when an earlier version of this document said it
-never would be: the pane is the only view of the workspace a user has while a
-session runs, and a file browser that cannot remove the file it just showed you is
-incomplete in a way that pushes the user to a terminal. What made it acceptable is
-that the guards are enforceable server-side and are not merely UI conventions —
-see the endpoint below. What it costs is honest: this is the one irreversible
-operation in the API, because there is no trash to restore from.
+**Why delete exists at all.** The pane is the only view of the workspace a user has
+while a session runs, and a file browser that cannot remove the file it just showed you
+pushes the user to a terminal. It is acceptable because the guards are enforced
+server-side rather than as UI conventions — see the endpoint below — and the cost is worth
+stating plainly: this is the one irreversible operation in the API, because there is no
+trash to restore from.
 
 **Path safety.** These are the only endpoints that turn a client string into a
 filesystem read, so containment is enforced on the *canonical* path, never on the
@@ -1796,39 +1756,28 @@ loopback. See `docs/development.md`.
 
 ## OpenAPI Specification
 
-Full machine-readable spec: `docs/api-v1.openapi.json` — **33 paths, 41 method-path
-pairs, which is exactly what the router registers.** Measured on 2026-08-27 by
-normalizing path parameters and diffing the spec against the `.route(...)` calls in
-`backend/src/lib.rs`; the diff is empty in both directions. Every operation also
-declares a `2xx` response schema, no `$ref` dangles, and no schema is unreferenced.
+Full machine-readable spec: `docs/api-v1.openapi.json`, which is authoritative for the
+wire contract.
 
-**The history is worth keeping, because both of this section's previous claims were
-wrong and in opposite directions.** It once said "22 paths, covering every route the
-router registers" while a ten-endpoint gap was live — the whole Phase-12 control plane,
-`capabilities` through `resolve` — and named `DELETE /sessions/{id}` and `/fs/*` as the
-gap its process had let through. Corrected, it then said `/search` was documented in
-prose here when no heading named it. A claim that something is documented is itself a
-thing to verify, and both cheap checks are mechanical: diff the routes, and grep for a
-heading.
+**Verify coverage by diffing, never by trusting a count.** A route added to
+`backend/src/lib.rs` without a matching path here is the recurring failure, and the check
+is mechanical: normalize path parameters and diff the spec against the `.route(...)` calls,
+in both directions. Counts stated in prose have been wrong here in both directions at once
+— claiming full coverage while a whole control plane was undocumented, and naming
+endpoints as gaps that were not. **A claim that something is documented is itself a thing
+to verify**, so grep for the heading too.
 
-Two defects the closing pass found are worth naming, because neither is visible to a
-count:
+Two defects worth knowing about, because a path-level count cannot see either:
 
-- **`PATCH /sessions/{id}`'s 200 `$ref`'d `CreateSession`** — the *request* schema. A
-  generated client would have typed the response as the body it had just sent. A path
-  being present is not a path being right, so the check that matters is whether each
-  response names a response shape.
-- **`GET /sessions/{id}` declared no response content at all**, which a generator reads
-  as an untyped body rather than as an omission.
+- **A response that `$ref`s the *request* schema.** A generated client then types the
+  response as the body it just sent. A path being present is not a path being right, so
+  check that each response names a *response* shape.
+- **A response declaring no content at all**, which a generator reads as an untyped body
+  rather than as an omission.
 
-Both now use `SessionEnvelope`.
-
-Keep the spec authoritative for the wire contract. A route added to
-`backend/src/lib.rs` without a matching path here is the recurring failure, and the
-check is mechanical — the diff is a ten-line script over `.route(...)` calls, worth
-re-running rather than trusting a count in prose. `docs/roadmap.md` records the standing
-suggestion to make it a test, mirroring `error::tests::codes_match_the_openapi_enum`,
-which is the only part of this contract a failure currently reports on its own.
+`error::tests::codes_match_the_openapi_enum` is the one part of this contract a failure
+currently reports on its own; extending that to path coverage is a standing suggestion in
+`docs/roadmap.md`.
 
 The frontend does not consume generated types: `frontend/lib/api.ts` is hand-written
 and mirrors the wire shape directly. Generating a second definition of every shape

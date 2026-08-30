@@ -6,22 +6,15 @@ read for configuration, discovery, or identity.
 
 ## Why one root
 
-Before this, six independent environment variables each carried their own
-`$HOME`-relative default, pointing into `~/.agents` — a directory belonging to a
-different project. That had four costs, and each one was paid more than once:
+One root and one file, rather than a set of independent environment variables each with
+its own default, because four things follow from it and each is otherwise a recurring cost:
 
-- **Nothing was discoverable.** A new user had no directory to look in, no file
-  to open, and no way to learn that `TRACEDB_BIN` existed.
-- **Every deployment had to enumerate them.** launchd starts from a bare
-  environment, so the installer wrote each variable it happened to see into the
-  plist. A variable added later was silently absent from existing installs.
-- **A second instance was a five-variable incantation** rather than one.
-- **Uninstall could not be complete**, because no single path described what the
-  app owned.
-
-One root fixes all four at once: `SYLPH_HOME` is the only variable a deployment
-must set, the config file is the thing to open, a second instance is one
-override, and uninstall is one directory.
+- **It is discoverable.** There is a directory to look in and a file to open.
+- **A deployment sets one variable.** launchd and other supervisors start from a bare
+  environment, so anything not set explicitly is absent — and a variable *added later* is
+  then silently missing from every existing install.
+- **A second instance is one override**, not an incantation.
+- **Uninstall is one path**, because one path describes everything the app owns.
 
 ## Layout
 
@@ -50,13 +43,13 @@ Three properties of that shape are deliberate.
 `attachments/` is referenced by turns inside it. Copying `data/` copies a
 consistent whole; copying any part of it does not.
 
-**There is no `agents/` directory, and its escape hatch was replaced by a better
-one.** Adapters are linked into the envagent binary (`docs/session-protocol.md`), so
-there is nothing to drop into a directory. What used to justify that directory —
-"a vendor changed faster than the shipped adapter" — is now answered by upgrading the
-**envagent on that one machine**, which touches no server, no schema, and no other
-environment. The old hatch also carried a hazard: copying a bundled adapter into it
-froze that adapter at install time and broke the next upgrade.
+**There is no `agents/` directory.** Adapters are linked into the envagent binary
+(`docs/session-protocol.md`), so there is nothing to drop into one. The case such a
+directory would serve — "a vendor changed faster than the shipped adapter" — is answered by
+upgrading the **envagent on that one machine**, which touches no server, no schema, and no
+other environment. A drop-in directory also carries a hazard of its own: a copied-in
+adapter is frozen at the version that was copied, and silently outlives the upgrade that
+should have replaced it.
 
 **The two roots are separate even on one machine.** A server does not embed an
 envagent (`docs/environments.md`), so "the machine the server runs on" has both roots
@@ -98,11 +91,13 @@ else, and no legacy location is consulted.
 | `paths.quick_start_dir` | `SYLPH_QUICK_START_DIR` | `<home>/scratch` |
 | `log.level` | `SYLPH_LOG`, then `RUST_LOG` | `info` |
 
-`server.host` binds what it is asked for and **warns loudly when that is not
-loopback**, because a non-loopback bind requires an authentication change this system
-has not made (`docs/architecture.md` § Security model). An earlier version read the
-value into `Config` and then bound `127.0.0.1` literally — a setting the code ignored,
-with no error. Either honour a setting or do not accept it.
+`server.host` binds what it is asked for and **warns loudly when that is not loopback**,
+because a non-loopback bind requires an authentication change this system has not made
+(`docs/architecture.md` § Security model).
+
+**Either honour a setting or do not accept it.** A value read into config and then ignored
+is worse than one not offered: it reports success, changes nothing, and gives an operator a
+lever they believe in.
 
 ### Envagent
 
@@ -147,13 +142,12 @@ so any client of this backend could start an agent anywhere on the filesystem
 while the *narrower* capability, listing directory names, was bounded. The
 narrower one being bounded is what made this easy to miss.
 
-**One key rather than two.** A separate `paths.session_roots` was rejected, and
-not for brevity. `/api/v1/fs/*` exists for exactly one purpose — naming a workdir
-— so a second key would have to be kept equal to this one for the picker to stay
-honest, and two keys that must agree are two keys that will not. Widening one
-alone yields either a picker offering directories creation refuses, or, far worse,
-creation accepting directories the operator only meant to be listable. One key
-means one blast radius, stated once.
+**One key rather than two**, and not for brevity. `/api/v1/fs/*` exists for exactly one
+purpose — naming a workdir — so a second key would have to be kept equal to this one for the
+picker to stay honest, and **two keys that must agree are two keys that will not.** Widening
+one alone yields either a picker offering directories creation refuses, or, far worse,
+creation accepting directories the operator only meant to be listable. One key means one
+blast radius, stated once.
 
 The Quick Start directory is permitted in addition, always, because it is where
 the product's own no-workspace sessions run and it is only *coincidentally*
@@ -211,34 +205,6 @@ agreement with them.
 a meaningful act — the protocol reserves "no identity" — and re-creating a file a
 user removed would be the app arguing with them. `sylph-web-backend config init`
 puts it back on request.
-
-## There is no archive setting, and no archive binary
-
-History is one store the server owns under `data/`, written through Sylph's own code
-(`docs/architecture.md` § One authority). So there is nothing to locate, nothing to
-install, and nothing to report as reachable.
-
-**Four things are deleted together, and the joint deletion is the point:**
-`tracedb.bin`, `SYLPH_TRACEDB_BIN`, the `doctor` row that reported whether the binary
-was found, and `tracedb.available` on `/api/v1/health`.
-
-A setting naming an external binary is only meaningful while an external binary is
-what answers. Keeping it afterwards offers an operator a lever that changes nothing,
-which is precisely the failure `SYLPH_WEB_HOST` demonstrated in this same file: read
-into `Config`, then discarded, so setting it did nothing with no error. The replacement
-fact is not a path but a **version** — which parser code this build carries — and
-nothing outside the process can change that, so nothing should appear to.
-
-One default is worth naming because it was wrong in a specific way: `TRACEDB_BIN` once
-defaulted to `$HOME/Workspace/trace-db/target/release/trace-db`, a sibling checkout
-that exists on exactly one machine. Every other install got a silently unavailable
-archive that read as a dependency bug. An absolute path is only ever right by
-coincidence, and the coincidence holds just long enough to be believed.
-
-What replaces "is the archive reachable" is **per-environment health**
-(`docs/environments.md` § Health is per environment). That is a different and better
-question: it distinguishes a missing CLI locally from a sleeping laptop from an
-exhausted sandbox node, where one boolean about a database answered none of them.
 
 ## Inspecting what resolved
 

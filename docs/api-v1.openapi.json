@@ -3418,10 +3418,6 @@
             "type": "string",
             "nullable": true
           },
-          "runnerExitCode": {
-            "type": "integer",
-            "nullable": true
-          },
           "createdAtMs": {
             "type": "integer",
             "format": "int64"

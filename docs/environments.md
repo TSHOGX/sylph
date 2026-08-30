@@ -4,8 +4,13 @@ Where a session's work runs, and the wire between there and the server.
 
 One authoritative record on the server; agents execute wherever an **envagent** is
 running. `docs/architecture.md` owns why the arrow points inward and why there is one
-abstraction instead of three; this document owns the protocol, the spool, pairing,
-and the two provisioning paths.
+abstraction instead of three; this document owns the protocol, the spool, pairing, and the
+two provisioning paths.
+
+> **`crates/envagent` is designed, not built.** Everything below is the intended shape and
+> is stated in the present tense as a specification. Today adapters run in-process in the
+> server, so there is exactly one implicit environment — the machine the server is on.
+> `docs/roadmap.md` tracks what remains.
 
 ## The envagent is the whole abstraction
 
@@ -184,12 +189,12 @@ way).
 normalized events. One pass, then done. Fidelity is whatever the vendor wrote.
 
 **watch** — the same parse, then follow the file as it grows, emitting events as they
-appear. *Measured 2026-08-27:* `claude` flushes at tool-call and content-block
-boundaries, `codex` at item completion, `pi` at every `message_end` — so a watcher
-sees a turn in progress rather than only its end. Two `pi` hazards are recorded in
-`docs/agents.md` because a watcher must be built around them: it truncate-rewrites
-with mode `"w"` and no lock, and the file does not exist at all before the first
-assistant message.
+appear. All three supported agents flush mid-turn, so a watcher sees a turn in progress
+rather than only its end; `docs/agents.md` § Capability matrix has the per-vendor
+granularity. Two `pi` hazards are recorded there too, because a watcher must be built
+around them: it truncate-rewrites with no lock, so a reader can observe a half-written
+file, and the file does not exist at all before the first assistant message — **an absent
+file is not an absent session.**
 
 A watched session's **control** facet is whatever that vendor offers a second party,
 which is not universal (`docs/agents.md` has the table). Its **observe** facet works
@@ -215,12 +220,11 @@ after.
 
 ## A degraded dependency is one fact per run, not one per attempt
 
-This repo has paid for this twice, one layer apart, and an envagent is a third place
-with the same shape. *Measured:* a per-request warning on an absent binary produced
-**2339 identical lines** in one E2E run.
+**An unreachable envagent is a persistent state, so report it once at `error` and at
+`debug` thereafter.** A per-attempt warning turns one missing dependency into thousands of
+identical lines, and this repo has rebuilt that flood twice at different layers.
 
-An unreachable envagent is a persistent state. Report it once at `error` and at
-`debug` thereafter, and let a caller ask whether it was already reported rather than
-each caller remembering. The fix belongs in the client that holds the connection, not
-in the API handlers that poll it — a sidebar and a picker both polling will otherwise
-rebuild the flood one layer up.
+The fix belongs in **the client that holds the connection**, not in the handlers that poll
+it: a sidebar and a picker both polling will otherwise reproduce the flood one layer up.
+Let a caller ask whether the state was already reported rather than each caller
+remembering.

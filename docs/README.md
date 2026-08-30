@@ -3,12 +3,14 @@
 Sylph is a coding-agent workspace. A **server** holds the authoritative record of every
 session and owns all session policy; an **envagent** runs on each machine where agents
 execute and dials back to the server; a **web frontend** is one transport onto the
-server. `architecture.md` is where to start.
+server.
+
+Start with [architecture.md](architecture.md). Everything else defers to it.
 
 ## Read in this order
 
 1. **[architecture.md](architecture.md)** — the system's shape, the session model,
-   identity, authority, AFK, and the security gate. Everything else defers to it.
+   identity, authority, AFK, and the security gate.
 2. **[environments.md](environments.md)** — the envagent wire protocol, spooling,
    pairing, and how SSH and sandbox environments come to exist.
 3. **[session-protocol.md](session-protocol.md)** — the adapter contract: one event
@@ -33,67 +35,58 @@ Then, by subject:
 | How to install and deploy | [installation.md](installation.md) |
 | How to develop locally | [development.md](development.md) |
 
-## What changed in this rewrite, and why the file list is shorter
-
-Four documents used to argue the authority question — `architecture.md`,
-`data-architecture.md`, `control-plane.md`, and `environments.md` — which is how they
-came to disagree with each other. `data-architecture.md` and `control-plane.md` are
-**deleted**, absorbed into `architecture.md`. A claim now has one home.
-
-Five design changes run through all of these, each with its own section in
-`architecture.md`:
-
-- **One class of session.** `origin`, `identity_mode`, and `lifecycle_mode` are gone.
-  Measured, they had four write sites and one behavioural branch between them, so a spec
-  had hardened a distinction the implementation never made. What survives is
-  `inject_identity`, a boolean with a default.
-- **Identity is `(environment, agent, native_id)`.** No server-minted UUID, so no second
-  id space and no comparison that is silently always false.
-- **One environment abstraction.** Not a trait with an implementation per substrate; one
-  envagent that dials in, differing only in how it came to exist.
-- **One store, one vocabulary.** Native history is parsed by an adapter into the same
-  events a live turn emits. The separate archive, its client, and its id translation are
-  gone — and with them the open question about search covering only part of history.
-- **Three agents.** `claude`, `codex`, `pi`. `gemini` and `opencode` are unsupported,
-  which closes two unresolved questions that were gating design work.
-
 ## Principles
 
 **One authority.** The server's store is the record. Everything else is a source it
 ingests from or a projection it serves. `AGENTS.md` § Compatibility governs the
-consequence: no other consumer exists, so schemas and wire formats change in place, and
-compatibility code is forbidden rather than merely discouraged.
+consequence: no other consumer exists, so schemas and wire formats change in place,
+and compatibility code is forbidden rather than merely discouraged.
 
-**Local-first is about dependencies, not geography.** A server on a remote host is still
-local-first, because the authority is its own store and not somebody else's API.
+**Local-first is about dependencies, not geography.** A server on a remote host is
+still local-first, because the authority is its own store and not somebody else's API.
 
-**Agent workspace, not chat app.** Tool execution is primary content; assistant prose is
-connective tissue; thinking is debugging detail.
+**Agent workspace, not chat app.** Tool execution is primary content; assistant prose
+is connective tissue; thinking is debugging detail.
 
-**Fidelity must be visible.** A record says how much resolution its source had, because
-a waterfall drawn over message-granularity data presents equal-length bars as
+**Fidelity must be visible.** A record says how much resolution its source had,
+because a waterfall drawn over message-granularity data presents equal-length bars as
 measurements.
 
-**Accessibility is a requirement.** WCAG 2.1 AA, verified by automated testing and by
-manual screen-reader passes — and those catch different things. Well-formed ARIA that a
-real reader still fails has happened three times here: axe checks that the graph is
-valid, a screen reader walks it.
+**Accessibility is a requirement.** WCAG 2.1 AA, verified by automated testing *and*
+by manual screen-reader passes, because they catch different things: an automated
+checker verifies the ARIA graph is valid, a screen reader walks it. Well-formed ARIA
+that a real reader still fails is a defect.
 
-## Where a decision lives
+**Performance is a commitment, not a number.** Where a budget appears it exists to
+protect an experience — the first-load budget keeps the app usable on a phone over a
+slow link — so the budget and its reason belong in the docs while the current
+measurement belongs to the script that takes it.
 
-**Rationale goes in a code comment next to what it governs**, not in a separate decision
-log. `frontend/components/timeline.tsx` is the intended density: it explains why
-memoization was chosen over virtualization and what evidence would reverse that call.
+## How to write these documents
 
-**A durable gotcha goes in `AGENTS.md` § Pitfalls.** A cross-cutting design argument goes
-in the governing document above. Progress goes in commit messages and
-[roadmap.md](roadmap.md) — do not add progress, handoff, or summary documents, because
-they duplicate the roadmap and then drift from it.
+**State rules in the present tense.** A specification says what is true, not how it
+came to be true. A rule that was learned from a defect is stated as the rule; the
+incident belongs in the commit that fixed it.
 
-**A measurement is only quotable while the thing it measured still exists**, and a number
-repeated in four places is four chances to drift. Cite it once and point at it — this
-file's own history has an instance where one population was recorded as two different
-figures with two different agents, and nothing could catch it.
+**One claim, one home.** A rule stated in two places is a rule that will diverge, and
+nothing checks the two against each other. Cite it once and point at it from
+elsewhere.
+
+**Prefer a shape to a count.** "This key appears only on a `user`-role block" stays
+true; "on 3226 files" goes stale the moment the store grows. Where a magnitude
+genuinely drives a decision, give the magnitude *and* the command that re-derives it,
+and never carry a measurement forward as current.
+
+**A measurement is quotable only while what it measured still exists.** A figure
+taken against a deleted component cannot be re-derived and cannot be checked, so it
+is not evidence any more.
+
+**Rationale goes next to what it governs.** A design principle belongs in the
+governing document here; the mechanism that implements it belongs in a comment beside
+the code. Neither should restate the other at length.
+
+**Progress belongs in commits and [roadmap.md](roadmap.md).** Do not add progress,
+handoff, or summary documents: they duplicate the roadmap and then drift from it.
 
 ## When code and spec disagree
 
@@ -101,18 +94,8 @@ Neither wins automatically. Identify whether behaviour or intent should move; if
 design changed, update the governing document first, then the code; if evidence
 invalidated the design, update the document and say what the evidence was.
 
-Do not silently rewrite a spec to bless an implementation accident. Do not contort code
-around a design evidence has invalidated. Both failures have shipped here, and the second
-is what this rewrite corrects.
-
-## Design documents
-
-Two files are pre-implementation design arguments rather than descriptions of the code:
-[agent-ui-design-analysis.md](agent-ui-design-analysis.md) and
-[keyboard-shortcuts-default-sessions-settings.md](keyboard-shortcuts-default-sessions-settings.md).
-They are kept because the reasoning still governs the UI, and each opens with a banner
-saying what kind of document it is. Where they disagree with
-`frontend-architecture.md`, `ui-layout.md`, or `roadmap.md`, those win.
+Do not silently rewrite a spec to bless an implementation accident. Do not contort
+code around a design evidence has invalidated.
 
 ## Language
 

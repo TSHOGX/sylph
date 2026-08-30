@@ -1,18 +1,13 @@
 # UI Layout and Design
 
 What the interface *is*: the panes, how they collapse, the surfaces a user touches,
-and the tokens everything is drawn with. Split out of `docs/frontend-architecture.md`,
-which had grown to 3002 lines with 40% of them here — and which answers a different
-question. That file is how the frontend is *built*: state, streaming, data flow,
-performance, error handling. This one is what it looks like and how it behaves.
+and the tokens everything is drawn with.
 
-The split is by question rather than by size, so the test for where something belongs
-is which question it answers. A memoization strategy is construction even though it
-affects the timeline; a pane's collapse breakpoint is layout even though it is
-implemented in a hook.
-
-`docs/agent-ui-design-analysis.md` records *why* the canvas is shaped this way and is
-not maintained against the code. Where it and this file disagree, this one wins.
+`docs/frontend-architecture.md` is the companion and answers a different question —
+how the frontend is *built*: state, streaming, data flow, performance, error
+handling. The test for where something belongs is which of those two questions it
+answers. A memoization strategy is construction even though it affects the timeline;
+a pane's collapse breakpoint is layout even though it is implemented in a hook.
 
 
 ## Three-pane layout
@@ -186,9 +181,8 @@ browsing                            viewing
 Locating a file and reading it are sequential, not simultaneous, and every mature
 tool treats them that way: VS Code's explorer hands off to a full-width editor,
 Finder's column view to a full-screen Quick Look, GitHub's tree collapses when a
-blob opens. The earlier layout gave the preview a `max-h-[55%]` strip of a 320px
-pane — roughly 350x300px — which no spreadsheet, document, or rendered page can be
-read in.
+blob opens. A preview confined to a strip of a 320px pane — a few hundred pixels square —
+is too small to read a spreadsheet, a document, or a rendered page in.
 
 **Both views stay mounted and toggle with `hidden`.** Expansion state lives in the
 pane and scroll offset lives on the DOM node, so unmounting would discard both and
@@ -399,10 +393,13 @@ if evidence shows it matters.
 
 ## Conversation canvas: agent-first, not chat-first
 
-The canvas follows `agent-ui-design-analysis.md`, which compares Claude Code,
-Cursor, and Zed against chat UIs. The distinction that drives every decision here:
-in an agent workspace the **tool calls are the content**, and prose is what joins
-them. So:
+One distinction drives every decision here, and it is what separates this from a
+chat client: in an agent workspace the **tool calls are the content**, and prose is
+what joins them. Claude Code, Cursor, and Zed all converged on that shape; chat UIs
+optimize for the opposite, spending their vertical space on who is speaking.
+
+So a bubble is not a styling choice this canvas declined, it is the wrong unit. The
+decisions below all follow from reading the timeline as a work log:
 
 | Decision | Reason |
 | --- | --- |
@@ -414,15 +411,15 @@ them. So:
 | Turn boundary is a rule with a status line, not a box | A box per turn fragments one continuous work log. |
 | Every file path is a button into the Artifacts pane | The path is the natural link between what the agent did and what it did it to. |
 
-A tool call and its `tool_result` render as **one row**, paired by the shared
-`streamId` the runner protocol says they SHOULD reuse. A result whose runner did
-not reuse the id still renders on its own, so no output is ever dropped.
+A tool call and its `tool_result` render as **one row**, paired by the `streamId`
+they share (`docs/session-protocol.md`). A result whose adapter did not reuse the id
+still renders on its own, so no output is ever dropped.
 
-Tool payloads are interpreted by `lib/tool-shape.ts`. The runner protocol
-deliberately leaves `data` unspecified, so that module normalizes what the four
-shipped runners actually emit — `data.input` holding the arguments, with `text` as
-a stringified fallback — and degrades to "unknown tool with some arguments" rather
-than throwing, because a fifth runner will spell something differently.
+Tool payloads are interpreted by `lib/tool-shape.ts`. The protocol deliberately
+leaves `data` unspecified, so that module normalizes what the three adapters emit —
+`data.input` holding the arguments, with `text` as a stringified fallback — and
+degrades to "unknown tool with some arguments" rather than throwing, because the next
+agent will spell something differently.
 
 ## Keyboard model
 
@@ -496,9 +493,8 @@ is whether the invocation already names a working directory.
 | Sidebar group → "New session here" | `useQuickCreateSession` | A group **is** a directory. The right-click already named it. |
 | `Mod+Shift+O`, empty-state button | `overlay: "newSession"` → same mutation | No directory yet, so a picker asks for that and nothing else. |
 
-A session needs a directory. Nothing else is worth asking at creation time, and
-the four-field form that used to ask is worth recording because each field's
-removal has a different reason:
+A session needs a directory, and nothing else is worth asking at creation time. Each
+field a create form would offer has somewhere better to live:
 
 - **`workdir`** — the one field a session cannot start without, and the one a text
   input served worst. An absolute path typed from memory fails as a backend
@@ -533,13 +529,12 @@ error banner. Its value is memoized and passes `mutate` by reference: it feeds t
 shell context's memo, which `runAction` closes over, so an unstable identity would
 re-register the document-level keydown listener on every shell render.
 
-`resolveSessionDefaults` checks both stored preferences against live `--describe`
-output. A `defaultAgent` whose runner was uninstalled would be rejected as an
-unknown agent, and a `defaultModels` entry the runner no longer declares would be
-passed as `--flag model=...` and fail at turn time — far from the setting that
-caused it. Both degrade to a silent, correct fallback instead, and only "no
-runners at all" surfaces as an error, because that is the one case with no
-sensible default.
+`resolveSessionDefaults` checks both stored preferences against what the chosen
+environment reports. A `defaultAgent` whose CLI is not on that machine would be
+rejected as an unknown agent, and a `defaultModels` entry the agent no longer
+declares would be passed as a flag and fail at turn time — far from the setting that
+caused it. Both degrade to a silent, correct fallback instead, and only "no agents at
+all" surfaces as an error, because that is the one case with no sensible default.
 
 ## Choosing a place
 
@@ -597,23 +592,15 @@ focus trap is ever mounted; see the mode-swap reasoning under
 
 ## `/` — the start screen, not a session list
 
-`/` used to be "All sessions": a listing with four filter controls (agent, origin,
-workdir substring, updated-after date). It was replaced by an IDE-style start
-screen, and the reason is that the list had become a second, weaker copy of
-navigation the shell already owned:
+**`/` is an IDE-style start screen, not a session list.** A user opening the app has
+arrived to **start** work or **resume** it, and a filterable listing answers neither — every
+axis it could filter on is already owned by a better surface: the sidebar groups by
+workdir, `Mod+K` searches by content, and `Mod+Shift+K` pages one workspace's full history
+past any cap a single listing could show.
 
-| The list offered | The shell already offers |
-| --- | --- |
-| Every session, `LIMIT`-capped | The sidebar, grouped by the directory each session runs in, scoped to that directory's environment |
-| Filter by workdir substring | The sidebar's grouping *is* the workdir axis |
-| Filter by agent / date | `Mod+K` searches by content, which is the question users actually arrive with |
-| A row per session | `Mod+Shift+K` pages one workspace's history, which the 50-row cap could not |
-
-A user opening the app has not asked to filter sessions by date. They have arrived
-to **start** work or **resume** it, and the filter form answered neither. It also
-cost two `GET /api/v1/sessions` round trips on first paint — the second only to
-populate the agent dropdown from an unfiltered listing, since deriving it from
-filtered results would collapse the menu to the agent already selected.
+So the start screen is deliberately *not* a general index. A second, weaker copy of
+navigation the shell already owns costs round trips on first paint and answers a question
+nobody asked on arrival.
 
 What replaced it has three tiers, and two properties that constrain the design:
 
@@ -712,8 +699,8 @@ belong to the chat shape this canvas rejected, and the reasoning is under
 target (`ToolTarget`) and outcome (`StatusMark`), and decides its own expansion
 from the shape rather than from a uniform default: edits open with their diff,
 shell output opens only on failure, reads stay closed. The pairing and the target
-extraction are not in the component — `lib/tool-shape.ts` normalizes all four
-runners' argument spellings into one `ToolShape` (`describeTool`, `resultStatus`),
+extraction are not in the component — `lib/tool-shape.ts` normalizes the
+adapters' argument spellings into one `ToolShape` (`describeTool`, `resultStatus`),
 which is why that logic is unit-tested and the component is not.
 
 `MemoizedRow` wraps each row and is keyed on event identity, so a delta arriving
@@ -851,11 +838,11 @@ list actually open, which a static read does not catch:
 
 Not a styling preference. **A `<select>` is sized by its longest option, not by
 its current value.** The composer's agent, model, and effort controls were
-native selects, so a runner declaring `claude-opus-5-20260501` made that control
+native selects, so an agent declaring `claude-opus-5-20260501` made that control
 ~180px wide regardless of what was selected; three of them plus Send exceeded a
 390px viewport. Because the width came from content the user could not see, no
 amount of `min-w-0` or `truncate` could recover it — the intrinsic minimum was
-already too large. This is the direct cause of the reported "composer runs off
+already too large. This is the direct cause of the "composer runs off
 the screen".
 
 A button that renders the *current* value can truncate. A `<select>` cannot. The
@@ -942,7 +929,7 @@ and `·`/`⋯` as punctuation.
 
 ## The composer
 
-One bordered surface holding attachments, the message, and the runner
+One bordered surface holding attachments, the message, and the session
 configuration that turn will use. The layout rule is that **the message owns its
 own row** and the controls sit beneath it, which is what makes it usable on a
 phone.
@@ -975,7 +962,7 @@ a phone user arrives with from every messaging app.
 
 The control row is `flex-nowrap` with a **horizontally scrolling middle
 section**, not `flex-wrap`. Wrapping would make the composer's height depend on
-how many flags a runner declares, so the transcript would reflow when a model
+how many flags an agent declares, so the transcript would reflow when a model
 name changed. Scrolling keeps the height fixed and Send pinned. Only the `model`
 and `effort` categories are promoted to the row; anything else the agent declares
 still gets a control, in the menu — so the row is a fixed shape no matter what an

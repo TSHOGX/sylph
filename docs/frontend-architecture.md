@@ -1,84 +1,43 @@
 # Frontend Architecture
 
-Sylph Web frontend is a Next.js 16 application providing a local-first UI for
-multi-agent session management. It is an **agent workspace**, not a chat client:
-tool execution is the primary content, prose is connective tissue, and navigation
-is keyboard-first.
+How the frontend is *built*: state, streaming, data flow, performance, error handling,
+and testing. `docs/ui-layout.md` is the companion and owns what the interface *is* — the
+panes, the surfaces, the component inventory, and the design tokens.
 
-> **Reading this document.** Sections below describe the shipped design. Where an
-> earlier plan was not followed, the deviation is stated with its reason rather
-> than quietly deleted — a spec that hides why it diverged from the code teaches
-> the next reader nothing. The largest deviations are: no Zustand (React context
-> plus an external store), no Radix UI, no Shiki, no `react-markdown`, and no
-> virtualization. All four are bundle-budget decisions, explained in
-> **Performance Optimization**.
+It is an **agent workspace, not a chat client**: tool execution is the primary content,
+prose is connective tissue, and navigation is keyboard-first.
 
-## Reference Implementations and Research
+Two things shape almost every decision below, so they are stated once here:
 
-**DeepSeek Harness is a reference, no longer the directive**
-
-DSH source is still worth reading when a UI question has an established answer:
-
-```
-/Users/hsw/Workspace/oss/deepseek-harness/repo/apps/web/
-/Users/hsw/Workspace/oss/deepseek-harness/repo/packages/web/
-```
-
-This section originally read "PRIMARY DIRECTIVE: default to DSH's patterns" and
-scoped itself to Phase 2. Three of its instructions have since been overtaken by
-measurement, so it is recorded as history rather than followed:
-
-- **Not the canvas.** DSH renders message bubbles; Phase 6 rejected that shape for a
-  flat tool-anchored timeline. See "Conversation canvas: agent-first, not chat-first"
-  and `docs/agent-ui-design-analysis.md` for the argument.
-- **Not the transport.** The `EventSource` design copied from here shipped a bug that
-  dropped the entire stream. `lib/use-sse.ts` reads the body with `fetch` instead —
-  reasons at "Why not EventSource" below.
-- **Not the dependency choices.** DSH is measured against a different bundle; the
-  no-dependency decisions here are measured against this one.
-
-What still transfers: layout structure, streaming-text handling, and the general
-lesson that reading a production implementation beats guessing.
-
-**On researching before designing**, the rule is `AGENTS.md` § Design Decisions and it
-is not repeated here. A generic five-step research workflow used to occupy this spot,
-with a worked example concluding that SSE reconnection should use exponential backoff
-"proven in both eventsource lib and DSH" — advice this codebase does not take, because
-`lib/use-sse.ts` resumes from `after_seq` with its own reader rather than delegating
-reconnection to `EventSource` at all. A section teaching a method by an example the code
-contradicts teaches the wrong thing twice. The findings that method produced are in
-this file, next to what they govern: **Why not EventSource**, the dependency costs in
-**Technology Stack**, and the measurements in **Performance Optimization**.
+- **No runtime dependency is added without a measured reason.** The runtime tree is
+  `next`, `react`, `react-dom`, and `@tanstack/react-query`; Markdown, diffing, fuzzy
+  ranking, icons, and every UI primitive are implemented directly. § Technology Stack
+  gives the cost of each library that was declined and what the replacement gives up,
+  and § Performance Optimization gives the budget that motivates it.
+- **A rule enforced in one place is stated in one place.** Where a mechanism lives in
+  `lib/`, the comment beside it carries the mechanism and this document carries the
+  principle.
 
 ## Design Philosophy
 
-**Core principles:**
-1. **Honest capability** — a session shows what can be observed, what can be driven, and how much resolution its record has
-2. **Real-time first** — SSE-driven updates with optimistic rendering
-3. **Local-first** — No external dependencies, works offline after initial load
-4. **Accessibility** — WCAG 2.1 AA compliance, keyboard navigation, screen reader support
-5. **Performance** — Keep bundles compact, optimize rendering, maintain responsiveness
-6. **Architecture quality** — Balance performance, user experience, maintainability, and extensibility
+1. **Honest capability** — a session shows what can be observed, what can be driven, and
+   how much resolution its record has. An empty capability surface means "Sylph cannot
+   reach it", never "there is nothing there".
+2. **Real-time first** — SSE-driven, with optimistic rendering where a mutation's outcome
+   is predictable.
+3. **Local-first** — no external runtime dependencies; works offline after first load.
+4. **Accessibility** — WCAG 2.1 AA, keyboard-complete, screen-reader verified.
+5. **Performance in service of the experience** — a compact bundle because the app must
+   start quickly on a phone over a slow link, not to satisfy a number.
+6. **Balance** — performance, experience, maintainability, and extensibility together;
+   none of them alone.
 
-**Taken from DeepSeek Harness, and what was not:**
-
-| Borrowed | Diverged, with the reason recorded below |
-| --- | --- |
-| Layout: rail plus canvas, now three panes | Message bubbles → flat tool-anchored timeline |
-| Streaming text handling | `EventSource` → `fetch` body reading |
-| Attachment handling in the input area | Input area → one composer surface carrying agent, model, effort |
-| Thinking block collapse/expand | Uniform expansion → expansion by role (edits open, shell output on failure, reads closed) |
-| Error-state and loading patterns | Syntax-highlighting library → hand-rolled `code-block.tsx` |
-
-**Sylph-specific, with no DSH equivalent:**
-- Per-session agent, model, and effort flags, read from the agent's own report
-- History browsing and search with lineage rollup
-- Link capability facets: observe and control reported separately, each with a reason
-- Fidelity indicators, so a duration is only drawn where one was recorded
-- Environment picker, including whether an environment is reachable only via a relay
-
-Lifecycle indicators (24h idle, 04:00 reset) are modelled in the backend and surfaced
-nowhere in the UI yet.
+Surfaces with no equivalent in a chat client, each of which exists because the backend
+models something a chat client does not have: per-session agent, model, and effort read
+from the agent's own report; history browsing and search with lineage rollup; link
+capability facets reported separately with reasons; fidelity indicators, so a duration is
+drawn only where one was measured; and an environment picker that says whether a machine
+is reachable only through a relay.
 
 ## Technology Stack
 
@@ -236,19 +195,6 @@ change. The consequence is that pages render only their own scrolling content an
 do not declare `<main>` — the shell owns `<main id="main">`, which the skip link
 targets.
 
-## UI Layout and Design
-
-Moved to **`docs/ui-layout.md`**. This section was 1188 lines — 40% of this file — and
-it answers a different question than the rest of it: what the interface *is*, rather
-than how the frontend is built.
-
-The dividing line, so a future addition lands in one place rather than both: this file
-covers construction — state, streaming, data flow, performance, error handling,
-testing. `ui-layout.md` covers the panes, their breakpoints, the surfaces a user
-touches, the component inventory, and the design tokens. A memoization strategy is
-construction even though it affects the timeline; a pane's collapse breakpoint is
-layout even though a hook implements it.
-
 ## State Management
 
 ### Server State (TanStack Query)
@@ -346,21 +292,20 @@ without rendering.
 **An untranslated key is a build error, not a surprise in the UI.** `zh` is typed as
 a total `Record` over the key set, so adding an English string without its
 translation fails `npm run build`. What the compiler *cannot* catch is a translation
-that drops a `{placeholder}` — that compiles and renders a sentence with a hole in
-it — so a unit test asserts placeholder agreement across catalogues. Both catalogues
-currently sit at 396 keys, verified equal.
+that drops a `{placeholder}` — that compiles and renders a sentence with a hole in it — so
+a unit test asserts placeholder agreement across catalogues.
 
-The three overlays — search (`Mod+K`), the command palette (`Mod+P`), and the
-workspace history browser — were the last surfaces holding literal English, and they
-are now in the catalogue like everything else. Two rules came out of translating
-them. A *rendered* group heading has to be a key, not a literal used only for
-sorting; and a label built from a stored enum reads that enum's own translation
-(`settings.density.*`) rather than interpolating the raw value, or a translated
-sentence carries an English word in the slot the user is reading. Note also that a
-component whose labels are translated must list `t` among its `useMemo`
-dependencies: without it a language change leaves the labels the surface was opened
-with while the filter keeps matching them, so typing hits a row whose visible text
-no longer contains what was typed.
+Three rules that are easy to miss, each of which leaves a surface half-translated:
+
+- **A *rendered* group heading has to be a key**, not a literal that happens to be used for
+  sorting too.
+- **A label built from a stored enum reads that enum's own translation**
+  (`settings.density.*`) rather than interpolating the raw value, or a translated sentence
+  carries an English word in the slot the user is reading.
+- **A component whose labels are translated must list `t` among its `useMemo`
+  dependencies.** Without it a language change leaves the labels the surface was opened
+  with while the filter matches the new ones, so typing selects a row whose visible text no
+  longer contains what was typed.
 
 **No framework.** `next-intl` and `next-i18next` are built around locale-in-the-URL:
 a `[locale]` segment, negotiating middleware, per-request catalogue loads on the
@@ -413,16 +358,9 @@ string the API can emit. Both call sites say so in a comment.
 
 ### SSE Connection Management
 
-The stream is read with `fetch` and parsed in the client, **not** with
-`EventSource`. This is a correction: the original design here specified
-`EventSource` with one `addEventListener` per event kind, and the implementation
-that followed it listened on `onmessage` instead — which by the SSE spec receives
-only frames named `message`. Since the backend names every frame after its kind
-(`event: thinking`), every mid-turn event was dropped, and the transcript
-appeared all at once when the turn finished because the only repaint was the
-history refetch on completion.
+The stream is read with `fetch` and parsed in the client, **not** with `EventSource`.
 
-`EventSource` is the wrong primitive here for three reasons, not just that one:
+`EventSource` is the wrong primitive here for three reasons:
 
 1. Dispatch is by frame name, so a client must enumerate every kind it expects.
    A kind the backend adds later is silently dropped — and silent event loss
@@ -490,367 +428,193 @@ speed while staying far below the ~100ms at which a human perceives lag.
 - A clean end-of-body means the turn finished; retrying there would loop
 - `AbortController` makes teardown immediate, which `EventSource` cannot offer
 
-### Event Rendering
+### Event rendering
 
-**Streaming text:**
-```tsx
-function StreamingText({ turnId, kind }: Props) {
-  const liveText = useStreamStore(s => s.liveEvents.get(turnId)
-    ?.filter(e => e.kind === kind && e.phase !== 'completed')
-    ?.map(e => e.text)
-    ?.join(''))
-  
-  const finalText = useQuery(['turns', turnId, kind])
-  
-  return (
-    <div className="animate-typing">
-      {liveText || finalText}
-      {liveText && <Cursor />}
-    </div>
-  )
-}
-```
+**Deltas accumulate into a live projection and are replaced by the `completed` event**,
+which is the one that reaches the journal. `lib/timeline-rows.ts` owns the fold: it
+collapses deltas into rows, pairs a `tool_result` with its `tool_call` by shared
+`streamId`, and renders an unpaired result on its own so no output is ever dropped.
 
-**Delta accumulation:**
-- Buffer deltas in memory
-- Render incrementally (typewriter effect)
-- Replace with completed event when received
-- Clear delta buffer after completion
+**Rows are memoized on event identity, and that is what makes the timeline fast** — see
+§ Render cost, which also states the property a unit test pins and why it is invisible if
+it breaks.
 
-**Scroll anchoring:**
-- Auto-scroll when user is at bottom
-- Lock scroll when user scrolls up
-- Resume auto-scroll when user scrolls to bottom
-- Smooth scroll during streaming
+**Scroll is anchored only while the user is already at the bottom.** Auto-scrolling a user
+who has scrolled up to read is the standard way to make a streaming transcript unusable.
 
 ### Delegated trajectories
 
-An event's `span` names the trajectory it ran in, and a `subagent` event's
-`streamId` *is* a trajectory id (`docs/session-protocol.md` § Delegated
-trajectories). `lib/timeline-tree.ts` turns that into a tree: `buildRows`
-collapses deltas and pairs results, `buildTree` links each row to the trajectory
-it names. Both are React-free so they unit-test in a `node` environment, which is
-the same reason `lib/sse-parse.ts` is separate from the hook that uses it.
+An event's `span` names the trajectory it ran in, and a `subagent` event's `streamId` *is*
+a trajectory id (`docs/session-protocol.md` § Delegated trajectories). `lib/timeline-tree.ts`
+turns that into a tree — `buildRows` collapses deltas and pairs results, `buildTree` links
+each row to the trajectory it names — and is React-free so it unit-tests in a `node`
+environment, the same reason `lib/sse-parse.ts` is separate from the hook that uses it.
 
-**The tree is navigated, not displayed.** Depth is unbounded — an agent delegates,
-its delegates delegate, a dynamic workflow fans out to a dozen agents and then
-synthesizes — so one indent level per depth runs out of viewport before it runs
-out of tree. Instead:
+**The tree is navigated, not displayed.** Depth is unbounded, so one indent level per depth
+runs out of viewport before it runs out of tree. Instead: a trajectory renders as one
+collapsed card; indentation stops at `MAX_INDENT`, past which a phone's content column is
+narrower than a line of code and the indent destroys content rather than conveying
+structure; and focusing a trajectory **re-roots** the timeline with a breadcrumb back.
 
-- A trajectory renders as **one collapsed card**. Opening it shows its immediate
-  children, themselves collapsed.
-- Indentation stops at `MAX_INDENT = 2`. Past that a phone's content column is
-  narrower than a line of code and a tool call's path truncates to nothing, so the
-  indent stops conveying structure and starts destroying content.
-- **Focus re-roots** the timeline at a trajectory with a breadcrumb back. This is
-  the file-manager move, and it works because a user drilling into a delegation has
-  stopped caring about its siblings.
+**Collapsing is what makes it fast**, and it is why virtualization is still not needed. A
+closed card mounts none of its subtree, so DOM cost tracks what the user opened rather than
+what the agent did — a huge workflow costs the same as a small one until someone drills in.
+An indented rendering cannot have that property, because it must lay out every node to know
+where any node goes.
 
-**Collapsing is what makes it fast.** A closed card mounts none of its subtree, so
-DOM cost tracks what the user opened rather than what the agent did: a
-20,000-event workflow costs the same as a small one until someone drills in. An
-indented rendering cannot have that property, because it must lay out every node
-to know where any node goes. This is a stronger result than the memoization note
-in `components/timeline.tsx`, and it is why virtualization is still not needed.
+**Every card reports its whole subtree.** `Rollup` carries failures, nested trajectory
+count, tool count, token usage, and duration, computed bottom-up, and a descendant failure
+escalates its ancestors' status even when their own result was clean. **No state reachable
+in the tree may be unreported at the root** — otherwise collapsing is lossy rather than
+deferred, and a user must open every branch to learn something broke, which is the work
+collapsing was supposed to save.
 
-**Every card reports its whole subtree,** because collapsing is otherwise where a
-failure goes to die. `Rollup` carries failures, nested trajectory count, tool
-count, token usage, and duration, computed bottom-up; a descendant failure
-escalates its ancestors' status even when their own result was clean. The rule is
-that no state reachable in the tree is unreported at the root — otherwise
-collapsing is lossy rather than deferred.
+#### `abandoned` is not `failed`
 
-**`abandoned` is not `failed`.** A trajectory the server closed on turn
-termination says nobody ever reported an outcome; a failed one says the work
-reported an error. Colouring the first red would report an interrupted turn as a
-broken one. Three consequences follow, and each was a real misreading of one real
-session where a `Workflow` dispatched a backgrounded delegate and returned cleanly:
+A trajectory the server closed on turn termination says *nobody reported an outcome*; a
+failed one says the work reported an error. Colouring the first red reports an interrupted
+turn as a broken one. Three consequences, each of which is a way the distinction gets erased
+one level above the node that holds it:
 
-- **A server close is not a rollup failure.** The server marks its own closing
-  event `isError` so the row reads as unresolved rather than clean — but counting
-  that as a descendant failure escalated every ancestor, so a workflow whose own
-  `tool_result` succeeded was badged red because one delegate was still running at
-  turn end. `rowFailed` in `lib/timeline-tree.ts` therefore excludes a
-  server-closed row, while the trajectory still reports `abandoned` as its own
-  status. The distinction is erased one level *above* the node that holds it, which
-  is why the rollup has to know about it.
-- **"No interior" and "outlived its turn" are different claims, and only one is a
-  measurement.** `no interior` means the host finished and forwarded none of its
-  delegate's events — a real terminal state, and the common case for every
-  delegating tool except `Task` (see § Delegation). Abandoned-and-empty is the
-  opposite: it was still running when we stopped listening, so *nothing* is known
-  about its interior. Rendering both badges together stated two things that cannot
-  both be the point. Note that work the agent declares backgrounded is now exempt
-  from the turn-settle sweep entirely, so `abandoned` no longer appears on a delegate
-  that was *expected* to outlive its turn — see the roadmap's "Backgrounded work is
-  not abandoned work".
-- **A badge's explanation has to survive the behaviour it explains.** The
-  "outlived its turn" tooltip said an agent *cannot* report back after its turn
-  "because its process exits with the turn", and measured on `claude` 2.x that is
-  false: stdout stays open, the delegate's completion arrives after its turn's
-  `result`, and the agent opens an exchange of its own to report it — which is why
-  `origin: "agent"` turns exist. So the badge explained its own state with the
-  mechanism that resolves it, teaching a model of the product the product
-  contradicts. What is true is narrower: nobody has reported an outcome *yet*.
-  `abandoned` is not final, because a late outcome is written against the turn that
-  owns the trajectory. The one terminal case is a restart — startup recovery
-  deliberately ignores `is_backgrounded`, since a process that no longer exists cannot
-  report — and that has to stay distinguishable from work still running in the
-  background. The same wrong tense was in the overview's row description and in
-  `ExtentBound`, and is corrected in both.
-- **A delegate's summary was recorded and never rendered.** `task_notification`
-  carries the delegate's own account of its work, and the card showed neither it nor
-  `data.progress` — so a collapsed row was a status and a set of counts, which say
-  work happened and nothing about what came of it. It is now the card's first line,
-  clamped to two, and appended last to each overview row's accessible name so a reader
-  scanning twenty rows hears the comparison before the prose. This matters most where
-  a late outcome lands on a turn of the agent's own, because the summary is then the
-  whole of what a user learns about work that finished after its dispatching turn.
-  `trajectoryReport` in `lib/timeline-tree.ts` owns the two rules, both of which fail
-  silently: a **promoted host's `text` is its tool arguments**, so its summary can only
-  come from the `subagent` close held beside the row (`trajectoryClose`) — reading
-  `text` uniformly captions a `Workflow` with a JSON blob, and reading only `text` left
-  the `Agent` host, whose interior is never forwarded, with nothing at all. And a
-  **close outranks progress**, because a snapshot describes a state the outcome has
-  superseded.
+- **A server-authored close is not a rollup failure.** The server marks its own closing
+  event `isError` so the row reads as unresolved rather than clean — but counting that as a
+  descendant failure badges every ancestor red, including a host whose own `tool_result`
+  succeeded. `rowFailed` excludes a server-closed row while the trajectory still reports
+  `abandoned` as its own status.
+- **"Forwarded no interior" and "outlived its turn" are different claims, and only one is a
+  measurement.** No interior means the host finished and forwarded nothing — a real terminal
+  state. Abandoned-and-empty means it was still running when we stopped listening, so
+  *nothing* is known about its interior. Rendering both badges states two things that cannot
+  both be the point.
+- **`abandoned` is not final**, because a late outcome is recorded against the turn that owns
+  the trajectory. The one terminal case is a restart, since a process that no longer exists
+  cannot report — and that must stay distinguishable from work still running in the
+  background.
 
-  **Nor may it read a promoted host's `tool_result`**, which is the obvious next step
-  precisely because a promoted host's *lifecycle* is its result (§ Promotion). A result
-  is the tool's output, not the delegation's account of itself — and now that cards
-  carry summaries, this is coupled to the suite: several
-  `not.toContainText("running" | "failed")` assertions in `e2e/delegation.spec.ts` match
-  a card's whole subtree, so a status word appearing inside a *summary* fails them as
-  though the status were wrong. The fixture already holds the ammunition —
-  `pr-host-d`'s result reads "dispatched; running in background". Pinned by a unit test
-  rather than a comment, because a comment cannot fail: it was confirmed by adding the
-  `row.result` fallback and watching the test reject that exact string.
-- **A nameless delegation is called "Unnamed", and the rename order was the whole
-  problem.** `trajectoryName` is the sole definition — it was duplicated in the card and
-  the strip, which let one node be named two ways and a locator that found one stop
-  finding the other. Its fallback used to be "Subagent", and that was wrong twice over.
-  As *copy* it restated a category the chrome already carries, where "Unnamed" states
-  what the row knows: nobody reported what this is — the same rule as the `≥` on a
-  bounded duration. As a *string* it was a substring-superset of a tool name `claude`
-  ships, so `"Subagent delegation"` contains `"agent delegation"` and every
-  `{ name: "<tool> delegation" }` locator was ambiguous with it by construction — in
-  exactly the states that render a nameless row, which is why it passed indefinitely and
-  then failed twice under load, reading as a broken card. No tool name is a substring of
-  "Unnamed delegation", so the class is closed rather than guarded per instance; the
-  `exact: true` guards stay because `exact` is the correct expression of "this one
-  region" regardless.
+**A badge's explanation has to survive the behaviour it explains.** Saying an agent *cannot*
+report after its turn because its process exits is false — stdout stays open, and the agent
+opens a turn of its own to report (`docs/session-protocol.md` § An agent may start a turn).
+What is true is narrower: nobody has reported an outcome *yet*.
 
-  **The ordering is the transferable part.** The adapter was *also* producing that
-  string, sending `"Subagent"` as a wire `name` whenever a delegation's brief had not
-  finished streaming — a data defect, not a display one, since `name` means "what this is
-  called" and the guess is journaled: `consolidate` keeps the best name any phase gave a
-  block, so a brief that never finishes leaves the placeholder as the trajectory's
-  durable name. Renaming the client first would have given one condition two labels, the
-  adapter's string for trajectories it named and the new one for the rest — worse than a
-  single imprecise label, and invisible until a card renders. So: **when two layers both
-  supply a default for one field, the layer that writes data stops first and the layer
-  that renders changes second.** And the bound on the fix is worth stating, because it
-  sounds better than it is — rows already journaled with the literal are permanently
-  indistinguishable from a genuine name. There was nothing to migrate because nothing can
-  tell them apart, so a historical "Subagent" row is not evidence an agent chose it.
-- **A promoted host renders its own call.** The row keeps `kind: "tool_call"`
-  precisely so the tool's name, arguments, and result survive promotion, so a card
-  that drew only trajectory chrome answered opening a `Workflow` with an empty
-  pane. The call renders above the work it dispatched, because that is the order it
-  happened in — and a promoted host therefore stays expandable even with nothing
-  forwarded, while a *declared* trajectory with no interior has nothing at all and
-  keeps its disclosure suppressed. `aria-expanded` on a control with nothing to
-  expand is a promise the tree cannot keep. **Focus is the same question one level
-  up**: it re-roots to `children`, which is right for a declared `subagent` whose row
-  carries no content of its own and wrong for a promoted host — focusing a `Workflow`
-  whose interior was never forwarded showed a breadcrumb over an empty pane, which
-  made a delegation that had genuinely reported nothing look broken. `Timeline`
-  renders the focused row itself when it is not a `subagent`, and says why the pane
-  is empty rather than leaving it blank.
+#### A summary is the point of a collapsed card
 
-**A rollup cannot compare siblings.** It describes one node against itself, so it
-answers "should I open this branch" and not "which of these twenty was slow" — and a
-user with a wide fan-out had to open every branch to find the expensive one, which is
-the work collapsing was supposed to save. `lib/timeline-waterfall.ts` puts every
-trajectory in view on **one shared time axis**, which is what distributed tracing
-settled on for the same problem and the same `span`. A concurrent fan-out reads as
-bars stacked in one band, a sequential chain as a staircase; the slow one is the long
-bar. `components/delegation-overview.tsx` renders it as `left`/`width` percentages —
-no chart library, no measuring pass — and it is `next/dynamic`, so a route that never
-opens it pays nothing: `/sessions/[id]` measured 242.8 → 243.2 KB gzipped across the
-strip and the summary line together, **+0.4 KB**. Note that
-`scripts/measure-bundle.sh` reports the *root* route (221.1 KB), which is the figure
-the roadmap tracks; a dynamic route renders no HTML at build time, so the session
-route is measured by serving it and summing the scripts it references.
+A card showing only a status and counts says work happened and nothing about what came of
+it. The delegate's own account is the card's first line, clamped, and is appended last to
+each overview row's accessible name so a reader scanning many rows hears the comparison
+before the prose. `trajectoryReport` owns two rules, both of which fail silently:
 
-It is scoped to what is on screen, so under focus the comparison is between the
-branch's own children rather than the whole turn, and it renders nothing below two
-trajectories: one delegation compares to nothing, and its card already states its
-duration. Rows are buttons whose accessible name carries what the bar shows — name,
-status, elapsed, offset into the turn, depth — because a purely visual overview
-excludes the reader who most needs a summary. Native tab order, not a roving cursor:
-these are navigation targets like the breadcrumb's, and `lib/select-list.ts` exists so
-a *choice list* does not grow a fourth cursor, not so a delegation is announced as an
-option nobody picked.
+- **A promoted host's `text` is its tool arguments**, so a summary can only come from the
+  `subagent` close held beside the row. Reading `text` uniformly captions a workflow with a
+  JSON blob; reading only `text` leaves a host whose interior is never forwarded with
+  nothing at all.
+- **A close outranks progress**, because a progress snapshot describes a state the outcome
+  has superseded.
 
-**What it may not claim is the whole design.** Only `createdAtMs` exists, so three
-states are not measurable and each is rendered as itself rather than as a bar:
+**It may not read a promoted host's `tool_result`**, which is the obvious next step
+precisely because a promoted host's *lifecycle* is its result. A result is the tool's
+output, not the delegation's account of itself.
 
-- **Running** has no end. Deriving one from `Date.now()` would re-lay out every bar at
-  clock rate inside a live stream, so the axis comes from the data and an open bar
-  fades instead.
+#### `trajectoryName` is the sole definition
+
+Duplicating it lets one node be named two ways, so a locator that finds one stops finding
+the other. Its fallback states what the row knows — nobody reported what this is — rather
+than restating a category the chrome already carries.
+
+**A fallback string must not be a substring of any real name.** A fallback that contains a
+tool name makes every `{ name: "<tool> delegation" }` locator ambiguous with it *by
+construction*, in exactly the states that render a nameless row — so it passes indefinitely
+and then fails under load, reading as a broken card. Choosing a fallback no tool name
+contains closes the class rather than guarding each instance.
+
+#### A promoted host renders its own call
+
+The row keeps `kind: "tool_call"` precisely so the tool's name, arguments, and result
+survive promotion; a card drawing only trajectory chrome answers opening a workflow with an
+empty pane. The call renders above the work it dispatched, because that is the order it
+happened in.
+
+So a promoted host stays expandable even with nothing forwarded, while a *declared*
+trajectory with no interior keeps its disclosure suppressed — **`aria-expanded` on a control
+with nothing to expand is a promise the tree cannot keep.** Focus is the same question one
+level up: re-rooting to `children` is right for a declared `subagent` whose row carries no
+content of its own and wrong for a promoted host, so `Timeline` renders the focused row
+itself when it is not a `subagent`, and says why a pane is empty rather than leaving it
+blank.
+
+#### Comparing siblings needs one shared axis
+
+A rollup describes one node against itself, so it answers "should I open this branch" and
+not "which of these twenty was slow" — and a user with a wide fan-out had to open every
+branch to find the expensive one. `lib/timeline-waterfall.ts` puts every trajectory in view
+on **one shared time axis**, which is what distributed tracing settled on for the same
+problem and the same `span`. A concurrent fan-out reads as bars stacked in one band, a
+sequential chain as a staircase; the slow one is the long bar.
+
+`components/delegation-overview.tsx` renders it as `left`/`width` percentages — no chart
+library, no measuring pass — and is `next/dynamic`, so a route that never opens it pays
+essentially nothing. It is scoped to what is on screen, so under focus the comparison is
+between the branch's own children, and it renders nothing below two trajectories: one
+delegation compares to nothing.
+
+Rows are buttons whose accessible name carries what the bar shows — name, status, elapsed,
+offset into the turn, depth — because a purely visual overview excludes the reader who most
+needs a summary. Native tab order, not a roving cursor: these are navigation targets, and
+`lib/select-list.ts` exists so a *choice list* does not grow a fourth cursor, not so a
+delegation is announced as an option nobody picked.
+
+**Most of the design is what it may not claim.** Three states are not measurable and each is
+rendered as itself rather than as a bar:
+
+- **Running** has no end. Deriving one from `Date.now()` would re-lay out every bar at clock
+  rate inside a live stream, so the axis comes from the data and an open bar fades.
 - **Abandoned** ends when the turn terminated and we stopped listening — a lower bound,
   labelled `≥`.
-- **Consolidated** has no start at all. `history::consolidate` folds a declared
-  trajectory's phases into one row keyed by its close and `block_to_event` publishes
-  only that timestamp, so an *exact* duration exists only while a turn is live — which
-  is a few seconds of the life of every turn a user scrolls back to. The interior
-  survives, each descendant being its own timestamped block, so the row is bounded from
-  below by the work it forwarded and says so. A trajectory that forwarded nothing has no
-  bound either and is drawn as a caret, because a width there would be invented. The
-  real fix is one field on the wire: `consolidate` already computes `started_at_ms` and
-  stores it on the block, and publishing it would make these exact.
+- **A trajectory that forwarded nothing** has no bound at all and is drawn as a caret,
+  because a width there would be invented.
 
-**"Slowest" therefore requires that every row is exact.** A rank over lower bounds is
-not a rank: a delegate that ran 9s and forwarded its one event at 8.9s bounds at 0.1s,
-so ranking it against an exact 0.5s names the wrong row — confidently, in answer to the
-only question the view exists for. When any row is a bound the figures are still shown
-with their `≥` and no row is badged. `e2e/timeline.spec.ts` asserts the live window and
-the settled degradation separately, against a `fanout` fixture sized at six delegates
-with genuinely different durations: at two the answer is visible without an overview,
-and a fixture that emits its whole tree within one millisecond gives every bar the same
-length, so neither could observe the comparison at all.
+**"Slowest" therefore requires that every row is exact.** A rank over lower bounds is not a
+rank: a delegate that ran nine seconds and forwarded its one event near the end bounds at a
+fraction of that, so ranking it against an exact figure names the wrong row — confidently,
+in answer to the only question the view exists for. When any row is a bound, figures are
+shown with their `≥` and no row is badged.
 
-## Data Flow Patterns
+## Data flow
 
-### Creating a Session
+Three flows carry almost everything, and each has one owner in `lib/`.
 
-```tsx
-function CreateSessionDialog() {
-  const createSession = useMutation({
-    mutationFn: (data: CreateSessionRequest) =>
-      api.sessions.create(data),
-    onSuccess: (session) => {
-      queryClient.invalidateQueries(['sessions'])
-      router.push(`/sessions/${session.id}`)
-    }
-  })
-  
-  return (
-    <Dialog>
-      <form onSubmit={(e) => {
-        e.preventDefault()
-        createSession.mutate(formData)
-      }}>
-        <AgentSelect />
-        <WorkdirInput />
-        <FlagsInput />
-        <Button type="submit">Create</Button>
-      </form>
-    </Dialog>
-  )
-}
-```
+**Creating a session** — `lib/create-session.ts`. One mutation for every surface; the only
+question is whether the caller already names a working directory (`docs/ui-layout.md`
+§ Creating a session). On success it invalidates the session list and navigates to the new
+session.
 
-### Sending a Message
+**Sending a turn** — `POST /sessions/{id}/turns` with an idempotency key, optimistically
+appending the turn so the composer clears immediately, rolling back on error. The
+idempotency key is what makes the retry safe rather than the optimism.
 
-```tsx
-function MessageInput({ sessionId }: Props) {
-  const sendMessage = useMutation({
-    mutationFn: (data: CreateTurnRequest) =>
-      api.turns.create(sessionId, data),
-    onMutate: async (variables) => {
-      // Optimistic update
-      await queryClient.cancelQueries(['sessions', sessionId])
-      const previous = queryClient.getQueryData(['sessions', sessionId])
-      
-      queryClient.setQueryData(['sessions', sessionId], (old) => ({
-        ...old,
-        turns: [...old.turns, {
-          id: 'temp-' + Date.now(),
-          status: 'queued',
-          requestText: variables.text,
-          createdAtMs: Date.now()
-        }]
-      }))
-      
-      return { previous }
-    },
-    onSuccess: (turn) => {
-      // Start streaming
-      streamManager.connect(turn.id)
-    },
-    onError: (err, variables, context) => {
-      // Rollback
-      queryClient.setQueryData(['sessions', sessionId], context.previous)
-    }
-  })
-  
-  return (
-    <form onSubmit={(e) => {
-      e.preventDefault()
-      sendMessage.mutate({
-        text: inputText,
-        attachments,
-        idempotencyKey: crypto.randomUUID()
-      })
-    }}>
-      <textarea />
-      <AttachmentPicker />
-      <Button type="submit">Send</Button>
-    </form>
-  )
-}
-```
+**Streaming a turn** — `lib/use-sse.ts` reads the body and hands frames to the page, which
+merges them into the live projection and refetches history when the turn settles. The
+handover from live stream to durable history is the subtle part: the live turn is filtered
+out of history until the refetched history actually contains it, which closes the frame
+where it would otherwise vanish from both.
 
-### Streaming Events
-
-```tsx
-function ConversationCanvas({ sessionId }: Props) {
-  const { data: session } = useQuery(['sessions', sessionId])
-  const currentTurn = session.turns.find(t => t.status === 'running')
-  
-  useTurnStream(currentTurn?.id, {
-    onEvent: (event) => {
-      // Update live projection
-      streamStore.addEvent(currentTurn.id, event)
-      
-      // Finalize when completed
-      if (event.phase === 'completed') {
-        streamStore.finalizeEvent(currentTurn.id, event.seq)
-        queryClient.invalidateQueries(['turns', currentTurn.id])
-      }
-    },
-    onComplete: () => {
-      queryClient.invalidateQueries(['sessions', sessionId])
-    }
-  })
-  
-  return (
-    <div className="flex flex-col gap-4">
-      {session.turns.map(turn => (
-        <TurnView key={turn.id} turn={turn} />
-      ))}
-    </div>
-  )
-}
-```
+**A mutation with no error path turns any backend refusal into a phantom UI bug.** Where
+the only observable outcome of a rejected write is that clicking did nothing, every layer
+is behaving correctly and the layer that is *not* at fault is the one that gets debugged.
+So a refused write invalidates and renders its error; the E2E fixture refuses one config
+value on purpose to keep that path covered.
 
 ## Sylph-Specific Features
 
-### There is no origin badge, and no reset banner
+### There is no origin badge and no reset banner
 
-Both are deleted. They were the frontend half of a distinction the backend never made:
-`origin` had **zero** behavioural branches in the backend, and the 24h-idle / 04:00-reset
-policy the banner described was never scheduled by anything (`docs/architecture.md` § One
-class of session).
+Nothing in the UI says who started a session, because there is no such distinction to draw
+(`docs/architecture.md` § One class of session). A reader coming from an older screenshot
+will look for them.
 
-Recorded because a reader coming from an older screenshot will look for them. The badge
-rendered green-sylph / violet-native, and a banner promised a native session would not be
-injected into or reset. The promise was kept by construction — nothing reset anything —
-so the banner was describing an absence as a feature, on every one of those sessions,
-forever.
-
-What replaces them is smaller and says more.
+The general rule they violated is worth keeping: **do not render an absence as a feature.**
+A banner promising a session would not be reset described something nothing did, on every
+such session, forever. What replaces both is smaller and says more — the two facets below,
+and `fidelity`.
 
 ### Two facets, each with a reason
 
@@ -904,8 +668,7 @@ draws a duration that was never measured.
 
 ### Search integration
 
-**One query, because there is one store.** This used to merge two result sets and
-deduplicate them, and the deduplication is what is gone:
+**One query, because there is one store.**
 
 ```tsx
 function SessionSearch() {
@@ -928,14 +691,11 @@ function SessionSearch() {
 }
 ```
 
-**What the old version had to do, and why not doing it is a correctness win as well as
-less code.** It held a set of archive ids seen on live rows, plus a fallback set built by
-re-deriving `<agent>:<native-id>` for live rows that had no archive id yet — a
-translation between two id spaces. Comparing across those spaces produces **no error at
-any layer** when it is wrong: the archive answers "no such session", the caller concludes
-nothing matched, and every component behaves impeccably while the feature silently does
-nothing. With identity now `(environment, agent, native_id)` throughout, that comparison
-cannot be written.
+**One id space is what removes the deduplication**, and that is a correctness property
+rather than a saving. Merging two result sets means translating ids between two spaces, and
+such a comparison produces no error at any layer when it is wrong — one side answers "no
+such session", the caller concludes nothing matched, and every component behaves impeccably
+while the feature silently does nothing.
 
 **Keep it user-initiated.** FTS5 search measured **174–260 ms** while every other read is
 microseconds to sub-millisecond, so `enabled` gating on a real query length is not
@@ -943,28 +703,23 @@ politeness — it is the difference between a search box and a load generator.
 
 ### History in the sidebar
 
-The left pane is built from **one** source, and that is the change worth stating,
-because it used to be two.
+The left pane is built from **one** source.
 
-`GET /sessions` once held only sessions this app created, so a directory with years of
-coding-agent history rendered as **"No sessions yet"** — the sidebar claimed a workspace
-was empty while a separate archive held hundreds of sessions for that same path. The pane
-therefore queried both and merged them, which brought a deduplication step, a
-two-id-space fallback, and a count that could only be reported as `8+`.
+A group is one query, rows are rows, and a count is a count — which follows from one
+store and one vocabulary (`docs/architecture.md` § One authority). A sidebar built from two
+sources needs a deduplication step, an id translation, and a count it can only report as
+approximate (`8+`).
 
-With one store and one vocabulary (`docs/architecture.md` § One authority) all three go
-away: a group is one query, rows are rows, and the count is a count.
-
-What survives from that design, because it was about *presentation* rather than about
-which store answered:
+The presentation rules that matter:
 
 - **Marked by shape, not colour** (WCAG 1.4.1). What is marked has changed: there is no
   sylph/native distinction to draw. A row shows its **fidelity** when it is not `stream`,
   and `⑂N` for rolled-up delegated sessions.
 - **`⑂N` counts only delegates that ran in *this* directory.** One that ran in a worktree
   or subdirectory is a row in that directory instead, because there it is the work rather
-  than a delegation. Measured: 484 of 2238 delegates ran elsewhere, and folding those into
-  an absent parent emptied 42 directories, one holding 193 sessions.
+  than a delegation. Measured, a substantial minority of delegates run elsewhere, and
+  folding those into an absent parent emptied dozens of directories — one of them holding
+  hundreds of sessions.
 - **Fetched only while the group is open** (`enabled: open`), because each row costs the
   backend a lineage fold.
 - **A distinguishable unreachable state.** "No history here" and "cannot reach the
@@ -995,11 +750,10 @@ invalid ARIA — a `listbox` admits only options — and below however many rows
 loaded, which is the one place a user paging a thousand sessions has to scroll to
 reach. The footer is fixed, so it is one keystroke away at any scroll position.
 
-Changing the scope goes through `WorkspacePicker`, not a `<select>`. On a real
-archive that select is 200+ options sharing a `~/Workspace/` prefix, ordered by
-recency and reachable only by first letter — and it could not name a directory the
-archive has never seen at all. See **Choosing a place** for what the picker does
-and why all three callers share it.
+Changing the scope goes through `WorkspacePicker`, not a `<select>`. On a real store that
+select is hundreds of options sharing a `~/Workspace/` prefix, ordered by recency and
+reachable only by first letter — and it cannot name a directory no session has run in yet.
+See `docs/ui-layout.md` § Choosing a place.
 
 It is a **mode swap inside the same modal**, not a second modal. Nesting `Overlay`
 in `Overlay` puts two focus traps on one DOM path: the outer trap's
@@ -1021,153 +775,100 @@ row's `forkOf` names. Two index maps keep it linear as pages accumulate.
 The sidebar deliberately does *not* do this: it fetches one page, where the server
 has already resolved any pair.
 
-### Reading an archived session
+### Reading a session Sylph did not start
 
-`app/archive/[...id]/page.tsx` renders an archived transcript read-only, through
-the same `Timeline` the live conversation uses — the backend normalizes archived
-events into the live `StreamEvent` shape, so there is no second renderer to drift.
+There is **no separate route and no second renderer.** An adopted session is
+`/sessions/[id]` like any other, through the same `Timeline`, because an adapter parses
+native history into the same events a live turn emits (`docs/architecture.md` § One
+authority). There is no "import to read" step, because there is nothing to import.
 
-A catch-all route, because a session id is the encoded triple and a native id can
-itself contain a slash (`env:claude:uuid/agent-name`). Next hands those segments back
-**still percent-encoded**, so each is decoded before rejoining; without that the client
-re-encodes and the backend looks up a literal `env%3Aclaude%3A...`.
+What differs is not the route but two fields the renderer already handles: the link's
+`control` facet reports unavailable with a reason, so the composer explains itself instead
+of failing, and `fidelity` says how much resolution the record has.
 
-**Reading never mutates, and reading no longer implies a separate store.** A session
-whose environment is offline, or whose vendor offers no second-party channel, opens and
-renders like any other — what differs is the link's `control` facet, which reports
-unavailable with a reason, so the composer explains itself instead of failing. There is
-no "import to read" step, because there is nothing to import: the history is already the
-server's.
+**A session id in a route segment is percent-encoded and must be decoded before use.**
+The id is the encoded triple and a native id can itself contain a slash, so Next hands
+those segments back still encoded; re-encoding them produces a lookup for a literal
+`env%3Aclaude%3A…`. `lib/use-session-id-param.ts` owns that decode.
 
 #### Delegation is shown beside the transcript, not inside it
 
 A live turn nests a subagent's work inside the tool call that spawned it, because every
 event carries a `span`. **A record read from a vendor's native store carries none**, and
-the page has to be built around that rather than around the resemblance.
+the page is built around that rather than around the resemblance.
 
-This is a `fidelity` consequence, not an archive consequence, and it survives the move to
-one store unchanged: no vendor writes event-level delegation structure to its native
-files. Measured, the raw vendor payload field was null on all 36308 events sampled, and
-the field that *looks* like a span means something different per agent — for `claude` it is
-the conversation chain, where 13689 of 15119 pointers name the immediately preceding
-event, so honouring it as a span nests a whole transcript into one chain thousands deep.
-Its only sound use is pairing a `tool_result` to its `tool_call`.
+This is a `fidelity` consequence, not a property of any one source: no vendor writes
+event-level delegation structure to its native files, and the field that *looks* like a
+parent pointer means something different per agent — for `claude` it is the conversation
+chain, so honouring it as a `span` would nest a whole transcript into one chain thousands
+deep. Its only sound use is pairing a `tool_result` to its `tool_call`.
 
-So the page renders two session-level surfaces and nothing that imitates a
-trajectory:
+So the page renders two **session-level** surfaces and nothing that imitates a trajectory:
+`LineageBar` above the transcript, turning a parent id into "open parent session" and
+giving a fork its own wording; and a `Delegations` list at the top of the pane, each row
+linking to that session's own transcript.
 
-- **`LineageBar`**, above the transcript. `parentId` becomes "open parent session",
-  because half a real archive is delegated work and a delegate reached from a search
-  hit otherwise reads as a conversation someone started. `forkedFrom` gets its own
-  wording — a fork replays its origin's whole prefix, so calling it a parent would
-  claim a delegation that did not happen, and it is what explains a transcript that
-  seems to open mid-conversation.
-- **`Delegations`**, a list at the top of the pane, each row linking to that
-  session's own transcript.
+**Placing that list above the transcript rather than at guessed points inside it is the
+load-bearing choice.** Anchoring a delegation to the specific call that spawned it was
+measured and rejected: most child ids carry only a hash, so anchoring recovers a small
+fraction and misattributes on collisions — and nine in ten delegations sitting under the
+wrong tool call, while looking exactly like the live tree, is worse than an honest flat
+view. The panel says plainly that the source records no link to the exact call, which is
+what keeps a flat view honest rather than merely poorer.
 
-Placing that list *above* the transcript rather than at guessed points inside it is
-the load-bearing choice. Attribution to the specific call that delegated was
-measured: `claude` names a child `<parent>/agent-a<name>-<hash>`, but 1918 of 2104
-suffixes in a real archive are hash-only, so anchoring recovers 8.8% and
-misattributes on a collision. Nine in ten delegations would sit under the wrong tool
-call while looking exactly like the live tree, and a reader has no way to tell the
-two apart — so the panel states plainly that the archive records no link to the
-exact tool call, which is the one thing that keeps a flat view honest rather than
-merely poorer.
-
-The list is not a disclosure inside a sidebar row, and that is an ARIA constraint
-rather than a layout preference: a history-overlay row is a `role="option"`, which
-may not contain a button, the same rule that stops a `role="menu"` holding a text
-field. Session-level delegation therefore belongs on this page, where a `<section>`
-with a heading and a list of links is valid.
-
-E2E cannot reach any of this: the harness points `TRACEDB_BIN` at a path that does
-not exist, so the archive is empty by construction and these surfaces never render.
-They are covered by backend tests using **real** archive ids and by manual
-verification against a 4922-session archive.
+The list cannot be a disclosure inside a sidebar row, and that is an ARIA constraint
+rather than a layout preference: a history-overlay row is a `role="option"`, which may not
+contain a button — the same rule that stops a `role="menu"` holding a text field.
 
 ## Performance Optimization
 
 ### Bundle size management
 
-**Current figure lives in `docs/roadmap.md`, and is measured by
-`scripts/measure-bundle.sh`.** Do not quote a number here as current: this section
-carried 203.9 KB as "measured" while the roadmap recorded 221.1 KB, which is the
-same staleness the roadmap warns about, in a second place. What follows is the
-attribution history — each figure is what a specific change cost when it landed, and
-is correct as a past measurement.
+**The budget exists to protect first paint on a phone over a slow link.** It is not a
+score to keep down for its own sake, and it does not get to veto valuable work — but it is
+the number that triggers a look, so growth is deliberate rather than discovered.
 
-The project maintains a compact bundle
-through deliberate architecture and dependency choices. Phase 4 measured 187.8 KB;
-Phase 6 added the shell, three overlays, the file browser, the Markdown renderer,
-the diff view, and the fuzzy ranker for **+8.4 KB**, reaching 196.2 KB. Archive
-browsing added **+1.2 KB** across 6.6 and 6.7, and the document viewers **+0.9 KB**:
-the history overlay, the read-only archived view, and every format viewer are all
-`next/dynamic`, so only their client-side entry points land here.
-
-The design-system pass measured **198.2 KB → 203.9 KB**, `+5.7 KB`, with the same
-recipe run on both trees — the baseline was re-measured rather than quoted, and
-reproduced at 198.2 KB exactly. What it buys:
-
-| Change | Cost |
-| --- | --- |
-| 48 hand-authored icons replacing Unicode dingbats | ~1.0 KB gz for the path data alone; the components tree-shake per route |
-| `ui/button`, `ui/menu` — the shared primitives | The largest single item. `menu` carries popover placement, arrow navigation, and the sheet fork, and is reached from the sidebar, which *is* first-load |
-| `lib/theme`, `lib/viewport`, `lib/use-dialog` | Small; two are `useSyncExternalStore` wrappers |
-| Service-worker registration | ~0.2 KB, production-only |
-| `Sheet`/`Drawer` split out of the shell | −0.2 KB. Small, but they are unreachable above `md`, so shipping them to every desktop route is wrong regardless of size |
-
-That is a 2.9% increase for the token layer, dark mode, the icon set, the mobile
-layout, and PWA installability. Judged against the stated policy — size should
-scale proportionally to value delivered, and no arbitrary ceiling should constrain
-valuable work — it is a straightforward trade. It is recorded rather than
-optimised away because the alternative reading is available too: the primitives
-would be cheaper if the sidebar were not in the first-load bundle, and moving it
-behind a dynamic boundary is the change to make if this number needs to come down.
-
-Replacing the all-sessions list with the start screen measured **198.4 KB → 198.2
-KB** — the two tracks of this work were measured against each other after merging,
-with the same recipe on both trees. The screen adds markup, the directory grouping,
-and a small pure module; it gives back the four filter controls, the query-building
-they fed, the debounce on that path, and a dead `sessionSubtitle` export, which is
-slightly the larger side.
-
-**The goal is to keep the bundle lean and fast-loading**, not to enforce a hard
-numeric ceiling. As features grow, bundle size should scale proportionally to value
-delivered. Monitor growth deliberately, optimize where reasonable, but never let an
-arbitrary limit constrain valuable functionality or architectural improvements.
-
-This principle explains the "no dependency" decisions throughout this document. The
-alternative implementations — `react-markdown` + `remark-gfm` (~45 KB), Shiki or
-Prism (~35 KB), jsdiff (~30 KB), Radix (~30 KB for the primitives used), fuse.js
-(~12 KB), an icon package — would have totaled over 150 KB. Each replacement is a
-bounded, well-understood algorithm carrying unit tests; that is the trade-off,
-stated plainly. This approach remains correct while the implemented subset serves
-the product's needs and the bundle stays compact. As requirements evolve, adopting
-battle-tested libraries may become the better choice.
-
-**Office formats are parsed server-side**, which is the largest single instance of
-this. SheetJS (`xlsx`) is 7.5 MB unpacked, frozen at 0.18.5 on npm, and carries two
-unpatched High CVEs — prototype pollution (CVE-2023-30533) and ReDoS
-(CVE-2024-22363) — reachable on precisely the "parse a file we did not write" path
-this feature needs. `calamine` and `quick-xml` do the same work in Rust, where the
-cost is compile time rather than every page load, and the browser receives
-structure instead of bytes. See `docs/api-design.md`, Files.
-
-To measure:
+**No figure is quoted here.** `scripts/measure-bundle.sh` takes the measurement, and it
+takes a `--route` because the routes are not comparable: the session route legitimately
+carries the timeline, the delegation tree, and the overview, so quoting one route's figure
+against another's budget has already caused confusion. `docs/roadmap.md` § Current state
+carries the current numbers.
 
 ```sh
-cd frontend && npm run build
-# then sum the gzipped size of the scripts referenced by a prerendered route
+cd frontend && SYLPH_WEB_BACKEND=http://localhost:4317 npm run build
+./scripts/measure-bundle.sh                          # the root route
+./scripts/measure-bundle.sh --route='/sessions/[id]'
 ```
+
+The script serves the route and reads the scripts its HTML references, rather than summing
+the chunk directory. That is forced: summing counts every route's chunks together, a
+prerendered route's served HTML is the only authority on what it actually loads, and a
+dynamic route emits no build-time HTML at all while Turbopack publishes no per-route chunk
+manifest for the App Router.
+
+**What the budget buys, stated as the trade it is.** The libraries declined in
+§ Technology Stack — a Markdown renderer, a syntax highlighter, a diff library, a
+component primitives library, a fuzzy matcher, an icon package — total well over the
+entire first-load budget. Each replacement is a bounded, well-understood algorithm
+carrying unit tests, and that test burden *is* the cost. This stays the right trade while
+the implemented subset serves the product; adopting a battle-tested library becomes
+correct if the budget rises or a primitive with real complexity is needed.
+
+**Office formats are parsed server-side**, which is the largest single instance. The
+dominant JavaScript spreadsheet library is multiple megabytes unpacked, frozen on npm, and
+carries unpatched high-severity CVEs — prototype pollution and ReDoS — reachable on
+precisely the "parse a file we did not write" path this feature needs. `calamine` and
+`quick-xml` do the same work in Rust, where the cost is compile time rather than every
+page load, and the browser receives structure instead of bytes (`docs/api-design.md`
+§ Files).
 
 ### Code splitting
 
 `AppShell` sits in the root layout, so anything it imports statically lands in the
 first-load bundle of *every* route. The three overlays and the Artifacts pane are
 therefore `next/dynamic` with `ssr: false`: each is reached by a keypress or a
-toggle, by which point the chunk has fetched. Measured effect: **204.3 KB → 195.8
-KB**, which is the difference between over and under budget.
+toggle, by which point the chunk has fetched. Measured, this is the difference between
+being over the budget and under it — the single largest lever available.
 
 The format viewers split again *beneath* the pane, so opening a `.ts` file never
 fetches the table or document code. With ~3 KB of headroom that is not an
@@ -1326,110 +1027,30 @@ Checked in a real browser, because none of it is verifiable statically:
 
 ### Not done
 
-- Screen-reader passes with VoiceOver and NVDA.
+- Systematic screen-reader passes with VoiceOver and NVDA. Ad-hoc VoiceOver testing has
+  found real defects an automated checker cannot (see § Automated), so this is the
+  highest-value gap.
 - High-contrast and forced-colours modes.
-- Dark theme — deliberately absent rather than half-built. It needs a `dark:` pass
-  over every component plus a resolved `prefers-color-scheme` fallback, and a
-  settings toggle storing a preference nothing reads would misrepresent that.
 
-## Error Handling
+## Error handling
 
-### Error Boundaries
+**Error boundaries** wrap each route, the conversation canvas, and each turn, so one
+malformed event cannot blank the app. `lib/error-boundary.tsx` is the implementation.
 
-```tsx
-class ErrorBoundary extends Component {
-  state = { hasError: false, error: null }
-  
-  static getDerivedStateFromError(error) {
-    return { hasError: true, error }
-  }
-  
-  componentDidCatch(error, errorInfo) {
-    console.error('Error boundary caught:', error, errorInfo)
-  }
-  
-  render() {
-    if (this.state.hasError) {
-      return (
-        <ErrorFallback
-          error={this.state.error}
-          reset={() => this.setState({ hasError: false })}
-        />
-      )
-    }
-    return this.props.children
-  }
-}
-```
+**A network failure and a refusal need different handling.** A validation error or a
+`404` is final and is reported to the user; only a transport failure is retried. Retrying
+a refusal turns one bad request into several and delays the message the user needs.
 
-**Error boundaries wrap:**
-- Each route (page-level recovery)
-- Conversation canvas (isolated failure)
-- Each turn (prevent cascade)
+**SSE reconnection** backs off (500 ms through 10 s, capped, so a dead backend is polled
+gently) and resumes from the highest `seq` seen via `after_seq`. A clean end of body means
+the turn finished, and retrying there would loop forever. `AbortController` makes teardown
+immediate.
 
-### Network Errors
-
-**API call failures:**
-```tsx
-function useSessionMutation() {
-  return useMutation({
-    mutationFn: api.sessions.create,
-    onError: (error) => {
-      if (error.code === 'VALIDATION_ERROR') {
-        toast.error(error.message)
-      } else if (error.code === 'NOT_FOUND') {
-        toast.error('Session not found')
-        router.push('/')
-      } else {
-        toast.error('Failed to create session. Please try again.')
-      }
-    },
-    retry: (failureCount, error) => {
-      // Retry only on network errors, not validation
-      return failureCount < 3 && !error.code
-    }
-  })
-}
-```
-
-**SSE reconnection failures:**
-- Show "Reconnecting..." badge after 3s
-- Show "Connection lost" after 30s
-- Offer manual refresh button
-- Log errors to console for debugging
-
-### User-Facing Error States
-
-**Empty states.** The one empty state that matters — an app holding no sessions —
-is not a placeholder card. It is the start screen's first-run guide, described under
-"`/` — the start screen, not a session list", and the decision worth carrying is
-that it is only rendered once a listing has *settled* empty. `selectStartState`
-enforces that, because a pending or failed listing is also an empty array and
-treating it as "no sessions yet" flashes onboarding at users who have hundreds.
-
-**Loading states:**
-```tsx
-function ConversationCanvas({ sessionId }: Props) {
-  const { data, isLoading, error } = useQuery(['sessions', sessionId])
-  
-  if (isLoading) {
-    return <Skeleton />
-  }
-  
-  if (error) {
-    return (
-      <ErrorState>
-        <Icon name="alert-circle" />
-        <Title>Failed to load session</Title>
-        <Button onClick={() => queryClient.invalidateQueries()}>
-          Try Again
-        </Button>
-      </ErrorState>
-    )
-  }
-  // render conversation
-}
-```
+**An empty state must not be reachable from a pending one.** A listing that has not
+resolved is also an empty array, so treating "no rows" as "no sessions" flashes onboarding
+at a user with hundreds of them. `selectStartState` distinguishes settled-empty from
+pending and failed, and the start screen renders its first-run guide only for the first
+(`docs/ui-layout.md` § Pending is not empty).
 
 ## Testing Strategy
 
@@ -1443,15 +1064,12 @@ cd frontend && npm run test:watch
 ```
 
 **Pure logic that replaced a dependency, plus the state decisions that are one line of
-JSX away from being wrong.** That is the selection rule: hand-rolling a diff, a
-Markdown parser, and a fuzzy ranker means taking on the test burden those libraries
-carried, and this is where that debt is paid.
+JSX away from being wrong.** That is the selection rule: hand-rolling a diff, a Markdown
+parser, and a fuzzy ranker means taking on the test burden those libraries carried, and
+this is where that debt is paid.
 
-Counts are not quoted here. This section carried "140 tests" across three phases that
-each added files, and a stale number in a table of *what is covered* is worse than
-none — it invites a reader to conclude coverage shrank. `npm test` prints the total per
-file; `docs/roadmap.md` § Current State carries the figure that is maintained
-deliberately.
+`npm test` reports the totals. A count in a table of *what is covered* goes stale and then
+invites a reader to conclude coverage shrank.
 
 | File | Covers |
 | --- | --- |
@@ -1487,7 +1105,7 @@ that a passing test would not mean much. Those live in Playwright.
 
 **Two projects: `chromium` at desktop width, `mobile` on a phone profile.** Both
 servers start automatically on offset ports with a throwaway data directory and a mock
-adapter, so a run never touches the real journal, archive, or agents. `npx playwright
+adapter, so a run never touches the real journal or the real agents. `npx playwright
 test --list` reports the totals; they are not quoted here for the same reason the unit
 counts are not.
 
@@ -1498,7 +1116,7 @@ counts are not.
 | `timeline.spec.ts` | Tool calls as regions, inline diff, failure auto-expansion, Markdown, 1000-event render budget |
 | `delegation.spec.ts` | The delegation tree: one card per delegate, nesting to the agent's own depth, a failure three levels down surfacing on the collapsed card above, focus mode and the way back, structure surviving reload, promotion of an undeclared delegating tool, a host that forwarded no interior saying so, the turn-settle sweep closing what an adapter left open without failing a host that succeeded, work reported on a later agent-initiated turn, and a backgrounded shell command staying a tool call |
 | `requests.spec.ts` | A declared request form: pick, note, and multi-select reaching the agent; an answer outside the offered list; declining while a required field is empty; prefill; dismissal saying the agent still waits; keyboard-only answering |
-| `workspace-shell.spec.ts` | Pane toggles and persistence, palette including grouping and a cursor that skips headings, search including an archive hit's match snippet, focus restoration, settings round-trip, Artifacts tree, history browser, dialog-free creation |
+| `workspace-shell.spec.ts` | Pane toggles and persistence, palette including grouping and a cursor that skips headings, search including a hit's match snippet, focus restoration, settings round-trip, Artifacts tree, history browser, dialog-free creation |
 | `file-viewer.spec.ts` | Tree/viewer swap preserving expansion, fullscreen and focus return, dialog sizing to content vs filling for a page, single-modal invariant, CSV table, sandboxed HTML refusing script and cookie access, image zoom, axe over both scales |
 | `streaming.spec.ts` | Mid-turn painting against a deliberately paced adapter |
 | `workspace-picking.spec.ts` | The three "which directory" flows: filter focused on open, folder browsing filterable inside one focus trap, a typed path reaching an unlisted folder, Enter-opens vs `Mod+Enter`-chooses |
@@ -1637,13 +1255,8 @@ on a cold load, not a test artifact.
 cd frontend && npm install
 ```
 
-That is the whole setup. The scaffolding recipe that used to sit here —
-`create-next-app`, then `npm install zustand @radix-ui/* framer-motion lucide-react
-shiki react-markdown` — is deleted rather than corrected: **none of those seven
-packages is a dependency**, and every one of them was rejected by name and with a
-measured cost in **Technology Stack** above. A setup block installing them contradicted
-the document it was in. `package.json` is the authority; today it is four runtime
-dependencies (`next`, `react`, `react-dom`, `@tanstack/react-query`) and the toolchain.
+That is the whole setup. `package.json` is the authority on dependencies: four at
+runtime — `next`, `react`, `react-dom`, `@tanstack/react-query` — plus the toolchain.
 
 ### Development Server
 
@@ -1663,21 +1276,10 @@ first. For LAN or tunnel access, see `docs/development.md` — reaching `next de
 non-localhost hostname needs `SYLPH_WEB_DEV_ORIGINS`, and without it every `/_next/*`
 chunk 403s and the page freezes before React hydrates, which reads as a backend failure.
 
-### Reading reference implementations
-
-A per-component "read DSH first, then compare" checklist used to sit here, and it is
-recorded in **Reference Implementations and Research** at the top of this file instead,
-where it belongs: as a reference worth consulting, not a directive to follow. Three of
-its instructions have since been overtaken by measurement — the canvas, the transport,
-and the dependency choices — so a checklist telling a reader to mirror DSH's patterns
-would send them at all three.
-
 ### API Proxy
 
-`next.config.ts` rewrites `/api/v1/*` to the backend. **Not a route handler** — the
-hand-written `app/api/[...proxy]/route.ts` this section used to show does not exist and
-should not be added: a handler buffers, and buffering an SSE stream delivers a whole
-turn at once.
+`next.config.ts` rewrites `/api/v1/*` to the backend. **Never a route handler**: a handler
+buffers, and buffering an SSE stream delivers a whole turn at once.
 
 Two properties are load-bearing, both documented at the rewrite itself:
 
@@ -1693,12 +1295,10 @@ shape exactly; `docs/api-v1.openapi.json` is the contract both sides are checked
 against, and the backend has a test (`error::tests::codes_match_the_openapi_enum`)
 pinning its error enum to it.
 
-An `openapi-typescript` recipe used to sit here. It was never run: `openapi-typescript`
-is not a dependency, there is no `src/types/api.ts`, and generating one would produce a
-second definition of every shape that `lib/api.ts` already defines — two sources to
-keep in step rather than one. The trade is deliberate: hand-writing means a wire change
-surfaces as a type error in the client where it is consumed, and `npm run build` is the
-gate.
+**Deliberately no generated types.** Generating them produces a second definition of
+every shape `lib/api.ts` already defines — two sources to keep in step rather than one.
+Hand-writing means a wire change surfaces as a type error where the shape is consumed, and
+`npm run build` is the gate.
 
 ### Build
 
@@ -1714,46 +1314,23 @@ npm run e2e                         # Playwright, starts its own servers
 404s; `scripts/install.sh` does it and fails the install if `static` is missing. The
 backend does not serve the frontend — there is no `dist/` to hand it.
 
-<!--
-  A per-week deliverables checklist used to live here. It has been removed rather
-  than updated: `docs/roadmap.md` owns phase status, and a second copy in a design
-  document only drifts from it. This file describes how the frontend is built and
-  why; what is built and what is next belongs in the roadmap.
--->
+## What is absent
 
-## Future Enhancements
+**Session management** — delete, move, and export have no endpoint behind them. Rename has
+one (`PATCH /api/v1/sessions/{id}` accepts `title`) but no menu item calls it. Forking at a
+turn would need an adapter able to resume from a prefix, which the session protocol does
+not ask for.
 
-This list was written when most of it was unbuilt. What remains genuinely absent:
-
-**Session management** — delete, move, and export have no endpoint behind them. Rename
-has one (`PATCH /api/v1/sessions/{id}` accepts `title`) but no menu item calls it.
-Forking at a turn would need an adapter able to resume from a prefix, which
-the session protocol does not currently ask for.
-
-**Search** — `Cmd+F` filters turns rather than highlighting matches inside them.
-Highlighting means reaching into the Markdown, diff, and code renderers to rewrite
+**Search highlighting** — `Mod+F` filters turns rather than highlighting matches inside
+them. Highlighting means reaching into the Markdown, diff, and code renderers to rewrite
 their text nodes, which is why it is not a small change.
 
-**Lifecycle** — manual reset, native→Sylph conversion, and an incarnation history
-viewer are all unbuilt. Conversion is still an open decision about endpoint shape, not
-just missing UI; see `docs/roadmap.md`. Lifecycle timing (24h idle, 04:00) is modelled
-in the backend and surfaced nowhere.
+**Collaboration** — sharing, comments, and session-to-session diff are out of scope, and
+each needs a story for a surface that is currently loopback-only.
 
-**Performance** — virtualization stays deferred, now with measurement behind it rather
-than as an aspiration: a 1000-event conversation renders inside budget through
-memoization. The evidence that would reverse it is scroll jank while *idle* on a large
-session, which indicates DOM size rather than render count.
-
-**Collaboration** — sharing, comments, and session-to-session diff remain out of
-scope, and each would need a story for a surface that is currently loopback-only.
-
-Already shipped, and listed here only because the original list predates them:
-attachments with drag-and-drop and paste, image and PDF viewers, code rendering,
-per-route code splitting, `Cmd+K` full-text search across live sessions and the
-archive, inline diffs within a turn, **dark mode** (Phase 9, with a pre-paint bootstrap
-— `docs/ui-layout.md` § Dark mode), **the mobile layout and PWA installability** (also
-Phase 9, which is what makes the service worker a shipped thing rather than a
-speculative one), and **the delegation tree with its sibling comparison** (Phase 12).
+**Virtualization** stays deferred, with measurement behind it rather than as an
+aspiration (§ Render cost). The evidence that would reverse it is scroll jank while *idle*
+on a large session, which indicates DOM size rather than render count.
 
 ## Decision Log
 
@@ -1774,10 +1351,9 @@ speculative one), and **the delegation tree with its sibling comparison** (Phase
 
 ### Why no component library (neither Radix nor Headless UI)?
 
-Radix would have been the right choice on accessibility defaults and edge-case
-coverage. It was not taken because of one measured constraint: Phase 4 left ~12 KB
-of first-load budget, and the primitives needed here — modal, context menu,
-disclosure, listbox — cost roughly 30 KB of it.
+Radix would have been the right choice on accessibility defaults and edge-case coverage.
+It was not taken because the primitives needed here — modal, context menu, disclosure,
+listbox — cost several times the first-load headroom available when the decision was made.
 
 What was built instead: `lib/use-dialog.ts` (focus trap, Escape, focus
 restoration), `components/overlay.tsx` (the modal frame), `components/ui/menu.tsx`
@@ -1804,15 +1380,15 @@ snapshot is separate, and gets cross-tab sync from the `storage` event for free.
 ### Why hand-rolled Markdown, diff, and fuzzy matching?
 
 See **Technology Stack** and **Performance Optimization**. Short version: the three
-libraries total ~87 KB gzipped against ~12 KB of headroom, and what each provides
-beyond the subset used — character-level diffs, patch formats, typo tolerance,
-full CommonMark — is not rendered by this UI. The cost is carrying 81 unit tests
-and two bugs already found in review; both are recorded in the test file that now
-guards them.
+libraries together cost several times the available headroom, and what each provides
+beyond the subset used — character-level diffs, patch formats, typo tolerance, full
+CommonMark — is not rendered by this UI. The cost is carrying the unit tests those
+libraries would have carried.
 
 ## References
 
-- Backend API: `docs/api-design.md`
-- Event protocol: `docs/architecture.md` (Event Streaming section)
-- Database schema: `docs/database-schema.md`
-- Product roadmap: `docs/roadmap.md`
+- What the interface is: `docs/ui-layout.md`
+- Endpoint contracts: `docs/api-design.md`
+- The event vocabulary an adapter emits: `docs/session-protocol.md`
+- Tables and migrations: `docs/database-schema.md`
+- What is built and what is next: `docs/roadmap.md`

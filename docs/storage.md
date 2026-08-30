@@ -1,29 +1,22 @@
 # Storage
 
 The record is lossless, replayable from any frontend, and pruned only when a
-downstream authority has confirmed the data — never because time passed.
-
-> **This describes what is built, not a proposal.** The tier split, delta folding,
-> replay over HTTP, and watermark-gated retention with its scheduler all shipped in
-> Phase 12. Several sections below open in the present tense about the *pre-split*
-> state — "today only `completed` is durable", "one `events` table currently serves
-> three access patterns" — because they were written as the argument for building this
-> and kept for the reasoning. Where a paragraph says "today", read it as "before this
-> design"; the code is `backend/src/storage/`.
+downstream authority has confirmed the data — never because time passed. The
+implementation is `backend/src/storage/`.
 
 ## What "lossless" has to mean here
 
-A turn's event stream is not a log of text. It is a log of text *arriving*: a
-hundred `delta` events, each a few tokens, then one `completed` carrying the whole
-block. Today only `completed` is durable, so what a client saw is unrecoverable —
-the timeline can be re-rendered, but the turn cannot be replayed.
+A turn's event stream is not a log of text. It is a log of text *arriving*: a hundred
+`delta` events, each a few tokens, then one `completed` carrying the whole block. Keep
+only the `completed` events and the timeline can still be re-rendered, but the turn can
+never be replayed — what a client actually saw is gone.
 
-Replay is the requirement that forces the design. If a frontend can only see final
-state, then "open this conversation on my phone and watch what happened" is
-impossible, and every future frontend inherits that limit.
+Replay is the requirement that forces this design. If a frontend can only see final
+state, "open this conversation on my phone and watch what happened" is impossible, and
+every future frontend inherits that limit.
 
-So losslessness is stated precisely, because the naive reading is ruinously
-expensive and the precise one is nearly free:
+So losslessness is stated precisely, because the naive reading is ruinously expensive
+and the precise one is nearly free:
 
 > Every event a client could have observed is reconstructible byte-for-byte,
 > with its arrival time.
@@ -60,8 +53,7 @@ than assume every boundary is a valid string edge.
 
 ## Three tiers, because there are three workloads
 
-One `events` table currently serves three access patterns with opposite optimal
-shapes:
+Three access patterns want opposite shapes from one table:
 
 | Workload | Rate | Row | Read pattern |
 | --- | --- | --- | --- |
@@ -225,13 +217,10 @@ consumer has not read.
 
 ### Two retention classes, because one is not honest
 
-**The authority question changed with this rewrite, and it changed in Sylph's
-favour.** Retention used to ask a *separate* archive whether it had ingested a
-session, because that archive was a second copy fed by parsing native stores. With
-one store and one vocabulary (`docs/architecture.md` § One authority), there is no
-second Sylph-side copy to wait for — so the only remaining downstream copy is the
-**vendor's own native store**, and the only question is whether it still exists and
-still holds the session.
+The only downstream copy of a session is the **vendor's own native store**, so the only
+question retention can ask is whether that store still exists and still holds the
+session. There is no second Sylph-side copy to wait for (`docs/architecture.md` § One
+authority).
 
 | Class | When | Rule |
 | --- | --- | --- |
@@ -283,47 +272,18 @@ bound was established. This distinction is why `Confirmation` carries a `withhel
 reason rather than only an `Option`.
 
 **A degraded dependency is one fact per pass, not one per session.** Probe an
-environment's reachability once per pass, not per session, and log an absent one
-once. This repo has paid for the other shape twice, one layer apart: per-session
-probing turned one missing dependency into a warning per session per pass, and a
-timer-driven caller then reproduced the same unbounded stream a layer down. An
-install with no environment paired is a supported configuration, not a fault.
+environment's reachability once per pass and log an absent one once. Per-session probing
+turns one missing dependency into a warning per session per pass, and a timer-driven
+caller then reproduces the same unbounded stream one layer down. **An install with no
+environment paired is a supported configuration, not a fault**, so it must not be
+reported as one forever.
 
-**A subsystem whose correct behaviour is "nothing happened" needs a report.**
-Keeping every block is right for a terminal session and a symptom for a backed one,
-and the observable state — no blocks pruned — is identical. It is also identical to
-never having run at all, which is what an early version was doing while looking
-impeccable. So the watermark row is written even when nothing is confirmed, and
-`/diagnostics` reports confirmed / withheld / terminal / unchanged **separately**,
-because a single `pruned: 0` answers none of the questions that matter.
-
-### What is deleted with the separate archive
-
-Three mechanisms existed only to negotiate with a second store, and they go away
-whole rather than being ported:
-
-- **Archive-id translation.** Sylph keyed a session by UUID while the archive keyed
-  the same conversation as `<agent>:<native-id>`, and comparing across the two id
-  spaces produced no error at any layer — the archive answered "no such session", the
-  caller concluded nothing was confirmed, and every component behaved impeccably
-  while the feature did nothing. That is how the first watermark implementation
-  shipped fully written and tested, pruning nothing, with an empty watermark table
-  that looked exactly like correct conservatism. With identity now
-  `(environment, agent, native_id)` (`docs/architecture.md`), there is one id space
-  and the unanswerable question cannot be asked.
-- **The archive-global ingestion ack.** It was one monotonic sequence per ingest run,
-  committed after the data transaction so it was never a false positive — but it said
-  nothing about which events of which session were covered, so it could not replace a
-  per-session bound. Its only surfaces were a gRPC response and a `doctor --json` call
-  measured at **2m34s**, because doctor walked every agent's native store.
-- **Per-operation JSON spelling pins.** The old client pinned the exact casing each
-  archive operation emitted (`show` snake_case, `list`/`search`/`stats` camelCase) so a
-  rename failed a test rather than silently yielding `None`. Correct, and no longer
-  needed: the boundary is now a Rust type, so a rename is a compile error.
-
-The rule that *survives* is the one about the shape of a bound. A per-session
-coverage question needs a per-session answer; a global "is the pipeline healthy"
-signal is a different question and must not be substituted for it.
+**A subsystem whose correct behaviour is "nothing happened" needs a report.** Keeping
+every block is right for a terminal session and a symptom for a backed one, and the
+observable state — no blocks pruned — is identical in both cases *and* identical to never
+having run at all. So the watermark row is written even when nothing is confirmed, and
+`/diagnostics` reports confirmed / withheld / terminal / unchanged **separately**: a
+single `pruned: 0` answers none of the questions that matter.
 
 ## Replay
 
@@ -403,10 +363,16 @@ CREATE INDEX cas_refs_by_block ON cas_refs(session_id, seq);
 CREATE TABLE watermarks (
   session_id    TEXT PRIMARY KEY,
   authority     TEXT NOT NULL,        -- 'envagent' | 'terminal'
-  confirmed_seq INTEGER,              -- NULL: nothing confirmed yet
+  confirmed_seq INTEGER,              -- NULL: nothing confirmed
   checked_at_ms INTEGER NOT NULL,
-  archive_id        TEXT,             -- which archived session confirmed it
-  source_fingerprint TEXT             -- which version of the native source
+  -- What the environment reported about the native source:
+  -- 'present' | 'absent' | 'unreachable'. NULL for a terminal session, which has
+  -- no native source to describe.
+  source        TEXT,
+  -- Why nothing was confirmed, when nothing was; NULL when something was. This is
+  -- what keeps "the environment answered, and nothing is safe yet" distinct from
+  -- "nobody was asked" — see § Retention is watermark-driven.
+  withheld      TEXT
 ) WITHOUT ROWID;
 
 -- What each session holds, and what it held before. Separate from `watermarks`
@@ -425,7 +391,7 @@ CREATE VIRTUAL TABLE blocks_fts USING fts5(
   text,
   session_id UNINDEXED,
   seq        UNINDEXED,
-  tokenize = 'unicode61'
+  tokenize = 'jieba'          -- see Tokenization below
 );
 ```
 
@@ -443,46 +409,70 @@ nothing.
 
 ### `blocks_fts` is standalone, and that is forced rather than chosen
 
-This table was promised in three places and defined in none, which is worth stating
-plainly: search today is entirely `tracedb.search()`, so deleting the separate archive
-deletes the *only* implementation. It is the one capability in this rewrite that goes
-from working to absent, and the DDL above is the whole replacement.
+Cross-session search is one FTS5 table beside `history.db`, written by consolidation in
+the same transaction as the blocks it indexes.
 
-**It cannot be an external-content FTS5 table**, which is the shape the separate
-archive used (`content='events'`, `content_rowid='id'`) and therefore the obvious thing
-to copy. External content re-reads the column from the base table at query time, and
-`blocks.text_inline` is not text: `text_encoding` says it may be `zstd`, and when the
-text is externalized to CAS the column is `NULL` and the bytes live under
-`blobs/`. So an external-content index would index compressed bytes for some rows and
-nothing at all for the rows most worth finding — the large ones. Consolidation
-therefore inserts the *decoded* text, which costs a second copy of it and is the price
-of the tier split.
+**It cannot be an external-content FTS5 table**, which is the obvious shape and the wrong
+one here. External content re-reads the column from the base table at query time, and
+`blocks.text_inline` is not reliably text: `text_encoding` says it may be `zstd`, and when
+the text is externalized the column is `NULL` and the bytes live under `blobs/`. Such an
+index would hold compressed bytes for some rows and nothing at all for the rows most worth
+finding — the large ones. Consolidation therefore inserts the *decoded* text, which costs a
+second copy of it and is the price of the tier split.
 
-`session_id` and `seq` ride along `UNINDEXED` so a hit resolves to a block without a
-join back through a rowid mapping that would have to be maintained separately.
+`session_id` and `seq` ride along `UNINDEXED` so a hit resolves to a block without a join
+back through a rowid mapping that would have to be maintained separately.
 
-**The tokenizer is `unicode61`, and that is a stated limitation for CJK rather than a
-default nobody looked at.** `unicode61` splits on non-alphanumerics, so a run of Han
-characters becomes one token and a query for a substring of it does not match — which
-matters here, because this project's own transcripts are substantially Chinese. The
-separate archive solved it with a loadable jieba tokenizer
-(`~/Workspace/trace-db/native/fts5-jieba`, selected through a config key that defaulted
-to `unicode61` and fell back when the extension was absent), and that remains the
-reference implementation if segmented CJK search is wanted. It is deliberately not
-adopted here yet: a loadable SQLite extension is a per-platform build artifact and an
-`sqlx` connection has to be told to allow loading it, which is a real dependency to
-take on for a capability that is currently zero. Ship the stock tokenizer, and treat
-CJK segmentation as a separate decision with a known answer.
+### Tokenization
 
-**A user's query is not an FTS5 query, and passing it through unescaped fails with an
-error naming the wrong layer.** FTS5 reads punctuation as syntax: measured 2026-08-28,
-`MATCH 'needle-one'` is parsed as `needle` NOT `one` and answers **`no such column:
-one`** — so a perfectly ordinary search string produces an error about a column, three
-layers from the text box that produced it. Hyphens are the common case here because
-identifiers and flags are exactly what someone searches a transcript for. Quote or
-escape the user's text into a phrase rather than interpolating it, and keep a test whose
-query contains a hyphen — without one this is invisible, since every single-word query
-works.
+**The tokenizer is `jieba`, because `unicode61` cannot search Chinese.** `unicode61` splits
+on non-alphanumerics, so an entire run of Han characters becomes one token and a query for
+any substring of it matches nothing — which matters here, since this project's own
+transcripts are substantially Chinese. `crates/fts5-jieba` segments CJK, folds diacritics,
+and stems English, so **one tokenizer serves both languages** and adopting it costs no
+English capability.
+
+**It is linked into the binary, not loaded as an extension**, and that is a requirement
+rather than a convenience. A loadable extension is a per-platform build artifact that can
+be missing at runtime, which would make "extension absent" a state the server could run
+in — and it must not, because **an index built with one tokenizer and queried with another
+silently returns nothing.** A fallback to `unicode61` would therefore answer *wrongly*
+rather than answering worse, which is the failure this design refuses. Registration happens
+per connection in `HistoryStore::open` and a failure there is fatal.
+
+**The dictionary is process-wide.** Building it costs about 600 ms, and FTS5 creates a
+tokenizer per table per connection, so a per-instance dictionary multiplies that by the
+pool size on each connection's first query. Sharing is sound because the dictionary is
+immutable once built and tokenizing takes `&self`.
+
+Two consequences for anyone changing the tokenizer later. **The index is tokenizer-specific,
+so a change requires a rebuild** — the FTS rows have to be reinserted, since existing terms
+were segmented by the old rules. And **a test for CJK search must fail against
+`unicode61`**, or it is not evidence about the index: `chinese_text_is_searchable_by_word`
+in `backend/tests/storage.rs` is written that way and was verified by reverting the
+tokenizer.
+
+### A user's query is not an FTS5 query
+
+**Quote the user's text into a phrase.** FTS5 reads punctuation as syntax, so
+`MATCH 'needle-one'` parses as `needle` NOT `one` and answers `no such column: one` — an
+ordinary search string producing an error about a column, three layers from the text box
+that typed it. Hyphens are the common case, because identifiers and flags are exactly what
+someone searches a transcript for.
+
+**Binding the value as a parameter is not sufficient**, and this is the trap: binding
+protects against SQL injection, and the bound value still reaches FTS5's *expression*
+parser. A comment asserting that a parameter is safe here is describing the wrong hazard.
+
+The tradeoff is worth stating, because quoting changes behaviour rather than only hardening
+it: a multi-word query becomes a phrase match rather than an implicit AND, so `foo bar`
+finds "foo bar" and not a block mentioning both apart. That is the safe direction — it never
+errors and never silently inverts a term — and supporting operators means *parsing* the
+user's text rather than escaping it.
+
+**Keep a test whose query contains punctuation.** Without one this is invisible, because
+every single-word query works — which is exactly how it survived as a documented rule the
+code did not implement.
 
 ## Deriving a native-source bound
 
@@ -495,15 +485,12 @@ supported agents appends complete records — `claude` at content-block boundari
 `codex` at item completion, `pi` at `message_end` (`docs/agents.md`). So the last
 record in the file is complete, and everything before it is too.
 
-What a native store never contains is intra-message delta timing, so that is the one
-thing pruning destroys outright. **It is not the only thing pruning deletes**: the
-operation is `DELETE FROM blocks WHERE session_id = ? AND seq <= :watermark` — whole
-rows, as § Retention is watermark-driven shows and `HistoryStore::prune_below`
-implements. An earlier version of this sentence claimed pruning "drops *deltas* and
-never blocks", which read as a promise that retention is lossless against the local
-store alone. It is not, and that is the entire reason a watermark gates it: what makes
-the deletion safe is a confirmation that the vendor's own store still holds those
-records, never a claim that Sylph kept them.
+**Pruning deletes whole rows**, not merely their delta arrays: the operation is
+`DELETE FROM blocks WHERE session_id = ? AND seq <= :watermark`. So retention is *not*
+lossless against the local store, and that is the entire reason a watermark gates it —
+what makes the deletion safe is a confirmation that the vendor's own store still holds
+those records, never a claim that Sylph kept them. Intra-message delta timing is the one
+thing no native store holds, so that is destroyed outright.
 
 **A record's identity is the vendor's own.** The bound is expressed as the last
 native record the environment can see, translated by the adapter into the sequence
@@ -652,21 +639,19 @@ What an operator does about a session that is too large is delete the session, o
 pair the environment holding its native source so it stops being terminal. Both are
 decisions with an owner. Neither belongs to a background timer.
 
-### One id space, and the hazard that shaped it
+### One id space, and why the type enforces it
 
-Identity is `(environment, agent, native_id)` throughout — the same triple the
-vendor's own store keys on (`docs/architecture.md`). There is no translation layer,
-so the comparison that used to be silently always false cannot be written.
+Identity is `(environment, agent, native_id)` throughout — the same triple the vendor's own
+store keys on (`docs/architecture.md`). There is no translation layer, so a comparison
+across two id spaces cannot be written here.
 
-It is recorded here because the failure is worth recognizing in a new subsystem.
-Sylph once keyed a session by UUID while its archive keyed the same conversation as
-`<agent>:<native-id>`; comparing across the two produced no error at any layer — the
-archive answered "no such session", retention correctly kept everything, and every
-component behaved impeccably while the subsystem did nothing. It shipped fully
-written and tested, confirming nothing, with an empty watermark table that looked
-exactly like correct conservatism.
+That constraint is worth carrying into any new subsystem that talks to an external store,
+because the failure it prevents is invisible. Compare an id against a store that keys the
+same thing differently and there is no error at any layer: the store answers "no such
+session", the caller concludes nothing is confirmed, retention correctly keeps everything,
+and every component behaves impeccably while the subsystem does nothing at all. An empty
+watermark table looks exactly like correct conservatism.
 
-The generalizable fix is not a more careful comparison. It is that a type needing the
-downstream identity to be constructed cannot be asked the unanswerable question, and
-anything comparing an id against an external store needs a test with a *real*
-external id, because a wrong one passes.
+**The fix is a type, not a more careful comparison.** Something that needs the downstream
+identity in order to be constructed cannot be asked the unanswerable question. And any test
+covering such a comparison needs a *real* external id, because a wrong one passes.

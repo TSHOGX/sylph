@@ -118,11 +118,9 @@ Schema changes are applied on startup and recorded in the database, so a
 development journal carries into a packaged install with no separate migration
 step — the default data directory is the same one `cargo run` uses.
 
-**There is no separate archive to install, and nothing to configure to reach one.**
-History is one store the server owns under `data/`, holding both what Sylph ran and what
-it read out of an agent's native files — one vocabulary, one index
-(`docs/architecture.md` § One authority). A user installs Sylph, not Sylph and a
-database.
+**Nothing else to install, and no database to configure.** History is one store the
+server owns under `data/`, holding both what Sylph ran and what it read out of an agent's
+native files — one vocabulary, one index (`docs/architecture.md` § One authority).
 
 An agent's own native files are never written by anything here, so they are unaffected by
 an install, an upgrade, or a reset of the journal — which is what makes a journal

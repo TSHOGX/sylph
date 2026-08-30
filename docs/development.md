@@ -1,48 +1,46 @@
 # Development Deployment
 
-This guide covers running Sylph Web in development mode using herdr for local
-testing and remote access scenarios.
+Running Sylph Web from a checkout, including LAN and tunnelled access.
 
-For packaged production installs, see [**installation.md**](installation.md).
-For a quick two-terminal setup without herdr, see the Quick Start in
-[**README.md**](../README.md).
+For packaged production installs, see [**installation.md**](installation.md). For the
+simplest two-terminal start, see the Quick Start in [**README.md**](../README.md).
+
+`$REPO` below is your checkout path.
 
 ## Overview
 
-Development deployment runs:
 - **Backend** (Rust): `cargo run` on `127.0.0.1:4317`
 - **Frontend** (Next.js): `npm run dev` on `localhost:3000`
 
-Both run in separate herdr tabs for easy monitoring and log access.
+Two processes, so run them in two panes of whatever terminal multiplexer or task runner
+you use — the examples below use [herdr](https://github.com/TSHOGX/herdr) tabs, but nothing
+here depends on it.
 
-## Setup in herdr
+## Setup
 
 ### Prerequisites
 
-1. **herdr installed and configured**
-2. **Project dependencies:**
+1. **Project dependencies:**
    ```sh
-   cd /Users/hsw/Workspace/sylph-web/backend && cargo build
-   cd /Users/hsw/Workspace/sylph-web/frontend && npm install
+   cd $REPO/backend && cargo build
+   cd $REPO/frontend && npm install
    ```
-3. **At least one agent CLI on your `PATH`** — `claude`, `codex`, or `pi`. That is
-   what makes an agent available to an envagent; there is nothing else to install.
+2. **At least one agent CLI on your `PATH`** — `claude`, `codex`, or `pi`. That is the
+   whole availability check; there is nothing else to install.
 
-### Create herdr tabs
+### Two panes
 
-In your herdr configuration, create two tabs in the `sylph-web` workspace:
-
-**Tab 1: `backend`**
+**Backend**
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
-cd /Users/hsw/Workspace/sylph-web/backend
+cd $REPO/backend
 cargo run
 ```
 
-**Tab 2: `frontend`**
+**Frontend** — `SYLPH_WEB_DEV_ORIGINS` is only needed for LAN access, see below:
 ```sh
-cd /Users/hsw/Workspace/sylph-web/frontend
-export SYLPH_WEB_DEV_ORIGINS="100.125.12.35"
+cd $REPO/frontend
+export SYLPH_WEB_DEV_ORIGINS="<lan-ip>"
 npm run dev
 ```
 
@@ -56,8 +54,8 @@ npm run dev
   rewrites `Origin` to `localhost`).
 
   Examples:
-  - LAN IP: `"100.125.12.35"`
-  - Multiple LAN IPs: `"100.125.12.35,192.168.1.100"`
+  - LAN IP: `"<lan-ip>"`
+  - Multiple LAN IPs: `"<lan-ip>,<other-lan-ip>"`
 
 **Backend tab (optional overrides):**
 - `SYLPH_HOME` — the root holding config, identity, data, and scratch
@@ -121,7 +119,7 @@ Look for these lines in the frontend tab output:
 ✓ Good:
   ▲ Next.js 16.3.1 (Turbopack)
   - Local:         http://localhost:3000
-  - Network:       http://100.125.12.35:3000
+  - Network:       http://<lan-ip>:3000
   ✓ Ready in 290ms
 
 ✗ Issues:
@@ -147,7 +145,7 @@ Look for these lines in the frontend tab output:
 | URL | Access From | Requires |
 |-----|-------------|----------|
 | http://localhost:3000 | Same machine | Nothing (default) |
-| http://100.125.12.35:3000 | LAN devices | `SYLPH_WEB_DEV_ORIGINS="100.125.12.35"` |
+| http://<lan-ip>:3000 | LAN devices | `SYLPH_WEB_DEV_ORIGINS="<lan-ip>"` |
 | https://<id>.r8.cpolar.cn | Internet (via cpolar) | loopback reverse proxy + cpolar (below) |
 
 ### Internet access via cpolar
@@ -160,8 +158,8 @@ origin. Route through the loopback reverse proxy instead, which rewrites
 `Host`/`Origin` to loopback and sends `/api/*` straight to the backend:
 
 ```sh
-python3 ~/.agents/data/cpolar/loopback-proxy.py 47317 3000 4317
-~/.agents/data/cpolar/cpolar http -httpauth="user:password" -region=cn 47317
+python3 $CPOLAR_DIR/loopback-proxy.py 47317 3000 4317
+$CPOLAR_DIR/cpolar http -httpauth="user:password" -region=cn 47317
 ```
 
 - `-region=cn` is load-bearing. The default r17 international line runs about
@@ -187,9 +185,8 @@ read/write access rather than the read-only direct frontend.
 screen's recents list *directories*, not sessions, so a directory worked in all week is
 one row.
 
-There is no separate archive to look in. History is one store the server owns, holding
-both what Sylph ran and what an adapter read out of an agent's native files, so a
-session reaches every read surface the same way:
+History is one store the server owns, holding both what Sylph ran and what an adapter read
+out of an agent's native files, so a session reaches every read surface the same way:
 
 1. **The sidebar** — selecting a directory shows its sessions, with delegated work folded
    into its parent as a count
@@ -216,8 +213,8 @@ environment that ran it is connected.
 
 **Symptom:** Browser console shows:
 ```
-GET http://100.125.12.35:3000/_next/static/chunks/lib_1zew020._.js net::ERR_ABORTED 403
-⚠ Blocked cross-origin request to Next.js dev resource /_next/hmr from "100.125.12.35"
+GET http://<lan-ip>:3000/_next/static/chunks/lib_1zew020._.js net::ERR_ABORTED 403
+⚠ Blocked cross-origin request to Next.js dev resource /_next/hmr from "<lan-ip>"
 ```
 
 **Fix:**
@@ -226,7 +223,7 @@ GET http://100.125.12.35:3000/_next/static/chunks/lib_1zew020._.js net::ERR_ABOR
 
 Example:
 ```sh
-export SYLPH_WEB_DEV_ORIGINS="100.125.12.35"
+export SYLPH_WEB_DEV_ORIGINS="<lan-ip>"
 npm run dev
 ```
 
@@ -315,21 +312,20 @@ For remote access:
 
 ### Data locations
 
-- `~/.sylph/` — everything Sylph owns: `config.toml`, `SOUL.md`, `agents/`,
-  `data/`, `scratch/`
-- `~/.sylph/data/journal.db` — active sessions (SQLite)
-- `~/.sylph/data/history.db`, `~/.sylph/data/blobs/` — consolidated history, derived from
-  the journal rather than separately configurable
-- `~/Library/Application Support/trace-db/trace.db` — archived sessions, **currently**,
-  because the archive is still `trace-db`'s own process at `trace-db`'s own default. The
-  design moves it under `~/.sylph` as a private store Sylph owns; the point of that is
-  that one root holds everything Sylph has, so a reset or a backup has one target rather
-  than two on different platform conventions. See `docs/architecture.md`.
+Everything Sylph owns is under `~/.sylph` — one root, so a backup or a reset has one
+target (`docs/configuration.md`):
+
+- `config.toml`, `SOUL.md`, `scratch/`
+- `data/journal.db` — sessions, turns, and events still in flight
+- `data/history.db`, `data/blobs/` — consolidated history and the full-text index, derived
+  from the journal rather than separately configurable
+
+An agent's own native files stay where that vendor puts them and are never written to.
 
 ## Cleanup
 
 To stop services:
-1. In herdr, switch to each tab and press Ctrl-C
+1. Press Ctrl-C in each pane
 2. Or kill processes:
    ```sh
    pkill -f sylph-web-backend
