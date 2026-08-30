@@ -989,9 +989,8 @@ async fn a_second_retention_pass_over_unchanged_history_changes_nothing() {
 
 // ------------------------------------------------------------------ search
 //
-// `blocks_fts` is net-new: search was entirely the separate archive's, so deleting it
-// deleted the only implementation. These pin the shape `docs/api-design.md` § Search
-// defines and the two decisions that shape rests on.
+// These pin the shape `docs/api-design.md` § Search defines, and the decisions that shape
+// rests on.
 
 /// A block is findable by its text once consolidated, and the hit resolves to a position.
 #[tokio::test]
@@ -1018,6 +1017,47 @@ async fn a_consolidated_block_is_findable_by_its_text() {
         hits[0].excerpt.contains("reconnect"),
         "the excerpt is the text containing the query: {}",
         hits[0].excerpt
+    );
+}
+
+/// A query containing punctuation is a phrase, not an FTS5 expression.
+///
+/// **Without a hyphen in the query this is invisible, because every single-word query
+/// works.** FTS5 reads `-` as NOT, so `needle-one` parses as `needle NOT one` and SQLite
+/// answers `no such column: one` — a 500 naming a column, three layers from the text box.
+/// Identifiers and flags are exactly what someone searches a transcript for, so this is
+/// the common case rather than an edge one.
+#[tokio::test]
+async fn a_query_with_punctuation_is_searched_literally() {
+    let (history, _dir) = history_store().await;
+
+    history
+        .put_blocks(&history::consolidate(&[event(
+            0,
+            "assistant",
+            Some("completed"),
+            Some("a1"),
+            "passing needle-one to the parser",
+            1000,
+        )]))
+        .await
+        .unwrap();
+
+    // The hyphenated term itself: an expression parse errors instead of answering.
+    let hits = history.search("needle-one", 10).await.unwrap();
+    assert_eq!(hits.len(), 1, "a hyphenated query must match as a phrase");
+
+    // A quote is escaped rather than ending the phrase, which would be a syntax error.
+    assert!(
+        history.search("say \"hello", 10).await.is_ok(),
+        "an unbalanced quote must not reach FTS5's parser as syntax"
+    );
+
+    // The phrase is literal, so a term the block does not hold finds nothing rather than
+    // matching on a fragment of it.
+    assert!(
+        history.search("needle-two", 10).await.unwrap().is_empty(),
+        "a phrase match must not fall back to matching either half"
     );
 }
 
@@ -1143,14 +1183,72 @@ async fn re_consolidating_a_turn_does_not_index_it_twice() {
     assert_eq!(hits[0].hits, 1, "the second pass replaced rather than added");
 }
 
-/// A malformed FTS5 query is an error carrying the engine's own message, not a panic and
-/// not a silently empty result.
+/// Chinese is searchable by word, which is the whole reason the tokenizer is `jieba`.
 ///
-/// The query is bound as a parameter rather than interpolated, so this needs no
-/// hand-written parser to detect — and an empty result would be indistinguishable from a
-/// valid query that found nothing.
+/// **`unicode61` cannot do this**: it splits on non-alphanumerics, so an entire run of Han
+/// characters is one token and a query for any substring of it matches nothing. This test
+/// fails against the stock tokenizer, which is what makes it evidence about the index
+/// rather than about SQLite.
 #[tokio::test]
-async fn a_malformed_query_is_an_error_rather_than_an_empty_result() {
+async fn chinese_text_is_searchable_by_word() {
     let (history, _dir) = history_store().await;
-    assert!(history.search("\"unbalanced", 10).await.is_err());
+
+    history
+        .put_blocks(&history::consolidate(&[event(
+            0,
+            "assistant",
+            Some("completed"),
+            Some("a1"),
+            "检索引擎的中文分词很重要",
+            1000,
+        )]))
+        .await
+        .unwrap();
+
+    // A word *inside* the run, which is the case `unicode61` cannot answer.
+    assert_eq!(
+        history.search("中文", 10).await.unwrap().len(),
+        1,
+        "a word inside a run of Han characters must match"
+    );
+    assert_eq!(history.search("分词", 10).await.unwrap().len(), 1);
+
+    // English in the same index still works, including inflections — one tokenizer serves
+    // both languages, so adopting jieba must not cost English stemming.
+    history
+        .put_blocks(&history::consolidate(&[event(
+            1,
+            "assistant",
+            Some("completed"),
+            Some("a2"),
+            "the parser drops frames",
+            2000,
+        )]))
+        .await
+        .unwrap();
+    assert_eq!(
+        history.search("drop", 10).await.unwrap().len(),
+        1,
+        "English stemming must survive the CJK tokenizer"
+    );
+}
+
+/// **No user input is a malformed query**, because the text is quoted into a phrase rather
+/// than parsed as an FTS5 expression.
+///
+/// This test previously asserted the opposite — that an unbalanced quote *errors* — which
+/// pinned the defect as intended behaviour. FTS5 has its own expression syntax, and a
+/// user's search string is not written in it: punctuation is ordinary text to the person
+/// typing it, so reaching the expression parser at all is the bug. See
+/// `a_query_with_punctuation_is_searched_literally`.
+#[tokio::test]
+async fn no_user_input_reaches_the_fts5_expression_parser() {
+    let (history, _dir) = history_store().await;
+
+    for query in ["\"unbalanced", "needle-one", "a AND b", "NOT x", "*", "(", "col:v"] {
+        assert!(
+            history.search(query, 10).await.is_ok(),
+            "`{query}` must be searched as text, not parsed as syntax"
+        );
+    }
 }

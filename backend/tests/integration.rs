@@ -19,11 +19,11 @@ async fn health_is_public() {
     let body = json_body(response).await;
     assert_eq!(body["ok"], true);
     assert_eq!(body["apiVersion"], "1");
-    // Asserted against the migration directory rather than a literal. The previous
-    // version pinned `3`, which is what the code also said, so the two agreed with
-    // each other and neither could catch the field drifting away from the schema —
-    // and it had, by four migrations. Counting the files fails when a migration is
-    // added without the reported version following it.
+    // Derived from the migration directory, never pinned to a literal. A literal here
+    // would be a third copy of a number the runner already maintains, and it would agree
+    // with a wrong value as happily as the code did — so neither side could catch the
+    // reported version drifting away from the schema. Counting the files fails when a
+    // migration is added without the reported version following it.
     let migrations = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
         .expect("migrations directory")
         .filter_map(|entry| entry.ok())
