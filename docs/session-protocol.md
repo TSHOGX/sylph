@@ -594,6 +594,20 @@ open, or a close the *server* authored. An outcome the agent itself stated is ne
 rewritten, because a later mention is a description, not a re-decision. This is what
 makes `abandoned` genuinely non-final rather than merely documented as such.
 
+*The turn does not read terminal until the sweep has finished.* A turn holding a known
+outcome over an unfinished record has its own status, `settling`, which is **in flight**.
+Every client question of the form "is this done" turns on the four terminal statuses, and
+this is what lets one answer be enough: read `completed`, refetch history, find everything.
+
+The alternative was tried and is worth naming, because it looks harmless. Writing the
+outcome first and sweeping afterwards makes `status` answer two questions at once — what the
+turn produced, and whether its record is complete — and no client can tell which one it is
+reading. One that acts on the first meaning gets the second: it stops listening before the
+sweep's own closes arrive, and its refetch reads a journal the sweep has not written yet, so
+a delegation the server closed renders as running forever. The sweep usually won that race,
+which is what made it present as flakiness. `docs/database-schema.md` § A terminal status
+means the record is finished holds the measurement.
+
 ### `is_backgrounded` inverts the sweep
 
 **An adapter that knows a delegation runs in the background must say so, and must

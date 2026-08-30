@@ -80,11 +80,26 @@ impl JournalStore {
             .connect_with(options)
             .await?;
 
-        // Run migrations
+        // Run migrations.
+        //
+        // A *checksum* failure here is the expected cost of this project's compatibility
+        // posture, not a bug: migrations are edited in place rather than appended to
+        // (`AGENTS.md` § Compatibility), so a journal written before an edit cannot be
+        // migrated onto it. The remedy is to delete the data directory, which is safe
+        // because a live journal is re-derivable from the agents' own native stores — and
+        // saying so here is the difference between a one-line fix and reading sqlx's
+        // internals to guess at one.
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await
-            .map_err(|e| Error::Internal(format!("Migration failed: {}", e)))?;
+            .map_err(|e| {
+                Error::Internal(format!(
+                    "Migration failed: {e}\n\
+                     A version-mismatch or checksum error means this journal predates an \
+                     edit to a migration. Sylph's journal is a cache of the agents' own \
+                     stores, so deleting the data directory and restarting is the fix."
+                ))
+            })?;
 
         Ok(Self { pool })
     }
@@ -564,43 +579,114 @@ impl JournalStore {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Record a terminal turn state. `status` is one of `completed`, `failed`,
-    /// `cancelled`, or `interrupted`.
-    /// Record a turn's terminal state. First writer wins.
+    /// Claim a live turn for settling, recording the outcome it settled with.
     ///
-    /// The `status NOT IN (...)` guard is what makes a terminal state final. Two
-    /// settlements race by design: `stop` interrupts the agent and records
-    /// `cancelled`, and the agent then emits its own `turn` event, which arrives a
-    /// moment later and would otherwise overwrite that with `completed`. The user
-    /// asked for a stop and got one, so reporting the turn as having completed
-    /// normally is a lie about what happened.
+    /// This is the **first** half of settling a live turn; [`Self::promote_settled_turn`]
+    /// is the second, and the settle sweep runs between them. The pair exists because
+    /// `status` answers two questions a client cannot otherwise separate — *what did this
+    /// turn produce*, and *is its record finished* — and one column reporting both meant a
+    /// reader between the two writes saw a terminal turn over a record still being written.
+    /// `crate::supervisor::TurnCloser` owns the ordering and states the cost.
     ///
-    /// Returns whether this call was the one that settled it, so a caller can tell
-    /// "I settled this" from "someone already had".
-    pub async fn finish_turn(
+    /// So the outcome lands here, under a non-terminal status, and the status becomes
+    /// terminal only once the record is complete. A reader therefore never observes a
+    /// terminal turn whose sweep has not run.
+    ///
+    /// `completed_at_ms` is stamped **here**, not at promotion: the turn ended when its
+    /// outcome arrived, and charging the sweep's duration to the turn would report a
+    /// duration nobody spent.
+    ///
+    /// # Why this is the first-writer-wins guard
+    ///
+    /// The `status NOT IN (...)` guard is what makes a settled turn final, and it is why
+    /// the claim rather than the promotion is the guard: two settlements race by design.
+    /// `stop` interrupts the agent and records `cancelled`, and the agent then emits its own
+    /// `turn` event, which arrives a moment later and would otherwise overwrite that with
+    /// `completed`. The user asked for a stop and got one, so reporting the turn as having
+    /// completed normally is a lie about what happened.
+    ///
+    /// `settling` is in the guard alongside the four terminal statuses. Without it two
+    /// racing callers would both claim, both sweep, and both emit a close for every
+    /// trajectory the turn left open — so the guard is what keeps the sweep single-shot as
+    /// well as the outcome.
+    ///
+    /// Returns whether this call was the one that claimed it, so a caller can tell "I am
+    /// settling this" from "someone already is".
+    ///
+    /// # Why the outcome is not stored for the promotion to read
+    ///
+    /// The status the turn will end at is written by [`Self::promote_settled_turn`], which
+    /// takes it as an argument rather than reading a column this call left behind. A
+    /// `settling_status` column would be a second field holding one fact, live only
+    /// between two calls in a single function body — and the one caller already holds the
+    /// value, from the same `Outcome::as_status` binding it passes here.
+    pub async fn begin_settling(
         &self,
         turn_id: &str,
-        status: &str,
         error_code: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<bool> {
-        self.finish_turn_at(turn_id, status, error_code, error_message, now_ms())
-            .await
+        let result = sqlx::query(
+            r#"
+            UPDATE turns
+            SET status = 'settling', completed_at_ms = ?,
+                error_code = ?, error_message = ?
+            WHERE id = ?
+              AND status NOT IN
+                ('settling', 'completed', 'failed', 'cancelled', 'interrupted')
+            "#,
+        )
+        .bind(now_ms())
+        .bind(error_code)
+        .bind(error_message)
+        .bind(turn_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
-    /// Record a terminal turn state at a stated time.
+    /// Publish a swept turn's outcome, ending the settle.
     ///
-    /// Same first-writer-wins guard as [`Self::finish_turn`], which delegates here so
-    /// there is one implementation of the guard rather than two that can drift.
+    /// The second half of [`Self::begin_settling`], and the write every client's "is this
+    /// finished" question turns on: after it the turn's record does not change again.
+    ///
+    /// Guarded on `settling` so it can only follow a claim, which is what makes the two a
+    /// pair rather than two independent writers of the same column. It also means a
+    /// promotion cannot resurrect a turn `interrupt_stale_turns` settled while the sweep
+    /// was in flight — that turn is already terminal, so this reports `false` and the
+    /// restart's account of it stands.
+    pub async fn promote_settled_turn(&self, turn_id: &str, status: &str) -> Result<bool> {
+        let result = sqlx::query("UPDATE turns SET status = ? WHERE id = ? AND status = 'settling'")
+            .bind(status)
+            .bind(turn_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Record a terminal turn state at a stated time, in one write.
+    ///
+    /// Same first-writer-wins guard as its siblings, so a terminal state stays final.
+    ///
+    /// # Why this settles in one write and a live turn does not
+    ///
+    /// A live turn settles in two — [`Self::begin_settling`], then
+    /// [`Self::promote_settled_turn`] — because the server has work to do between knowing
+    /// the outcome and having written the record, and a client must not see a terminal turn
+    /// in between.
+    ///
+    /// There is no such gap here. This is `crate::db::ingest` reading a vendor's own store
+    /// for a turn that ended before Sylph looked, so nothing is left open to sweep and no
+    /// client is streaming it. Routing it through the two-phase pair would add a state the
+    /// turn is never really in.
     ///
     /// # Why the timestamp is a parameter
     ///
-    /// A live turn ends *now*, so [`Self::finish_turn`] reading the clock is right. An
-    /// **adopted** turn ended whenever the vendor recorded it, possibly months ago
-    /// (`crate::db::ingest`), and stamping it `now()` would report every adopted turn as
-    /// having finished at the moment somebody clicked adopt — giving a whole transcript
-    /// one timestamp, a duration of zero, and a position at the top of every
-    /// recency-ordered listing.
+    /// A live turn ends *now*, so [`Self::begin_settling`] reading the clock is right. An
+    /// **adopted** turn ended whenever the vendor recorded it, possibly months ago, and
+    /// stamping it `now()` would report every adopted turn as having finished at the moment
+    /// somebody clicked adopt — giving a whole transcript one timestamp, a duration of zero,
+    /// and a position at the top of every recency-ordered listing.
     pub async fn finish_turn_at(
         &self,
         turn_id: &str,
@@ -674,16 +760,41 @@ impl JournalStore {
     /// Child processes do not survive a backend restart, so any turn still
     /// marked live in the journal is unrecoverable and must be reported as
     /// interrupted rather than appearing to hang forever.
+    ///
+    /// # `settling` is in scope, and what that costs
+    ///
+    /// A crash between [`Self::begin_settling`] and [`Self::promote_settled_turn`] leaves a
+    /// turn whose outcome is known and whose record is unfinished. Left out of this sweep it
+    /// would stay `settling` forever, which is the spinning card this function exists to
+    /// prevent — so it is swept, and the sweep's own account replaces the outcome the claim
+    /// recorded. That is a real loss of precision: a turn that had completed is reported
+    /// `interrupted`.
+    ///
+    /// It is accepted rather than engineered around. Recovering the outcome would mean
+    /// persisting it in a column read only by this function, in a window a few milliseconds
+    /// wide that only a crash can land in — and `interrupted` with this message is a *true*
+    /// statement about what happened, not a placeholder standing in for one.
+    ///
+    /// What is **not** accepted is losing the turn's end time. `completed_at_ms` is
+    /// `COALESCE`d, so a `settling` turn keeps the stamp its claim recorded and only a turn
+    /// that never ended is stamped with the restart. Overwriting it would give a turn that
+    /// finished before the crash a duration measured to whenever the backend came back —
+    /// hours, for an overnight restart — which is `AGENTS.md`'s publishing-gap defect with a
+    /// new cause.
+    ///
+    /// The trajectories such a turn left open are closed by
+    /// [`Self::close_stale_trajectories`], which the caller runs next.
     pub async fn interrupt_stale_turns(&self) -> Result<u64> {
         let mut tx = self.pool.begin().await?;
 
         let result = sqlx::query(
             r#"
             UPDATE turns
-            SET status = 'interrupted', completed_at_ms = ?,
+            SET status = 'interrupted',
+                completed_at_ms = COALESCE(completed_at_ms, ?),
                 error_code = 'TURN_INTERRUPTED',
                 error_message = 'Backend restarted while this turn was running'
-            WHERE status IN ('queued', 'starting', 'running', 'stopping')
+            WHERE status IN ('queued', 'starting', 'running', 'stopping', 'settling')
             "#,
         )
         .bind(now_ms())
@@ -2086,6 +2197,178 @@ mod tests {
             row.data_json.contains("is_backgrounded"),
             "and so does the flag that explains why it outlived its turn: {}",
             row.data_json
+        );
+    }
+
+    /// A settling turn is not terminal, and its outcome is not published until it is.
+    ///
+    /// The property every client depends on, stated where it is enforced. A reader between
+    /// the two writes must be able to tell "the outcome is known" from "the record is
+    /// finished", which is exactly what one column reporting both could not do.
+    #[tokio::test]
+    async fn a_claimed_turn_is_not_terminal_until_it_is_promoted() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        assert!(
+            store
+                .begin_settling("turn-1", None, Some(""))
+                .await
+                .expect("claim"),
+            "the first caller claims the turn"
+        );
+
+        let claimed = store.get_turn("turn-1").await.expect("read").expect("turn");
+        assert_eq!(claimed.status, "settling");
+        assert!(
+            !claimed.is_terminal(),
+            "a client polling mid-sweep must read this as in flight, or it acts on a \
+             record the sweep has not finished writing"
+        );
+        assert!(
+            claimed.completed_at_ms.is_some(),
+            "the turn ended when its outcome arrived, so the stamp is the claim's — \
+             charging the sweep's duration to the turn would report time nobody spent"
+        );
+
+        assert!(
+            store
+                .promote_settled_turn("turn-1", "completed")
+                .await
+                .expect("promote"),
+            "the promotion follows its own claim"
+        );
+
+        let settled = store.get_turn("turn-1").await.expect("read").expect("turn");
+        assert_eq!(settled.status, "completed");
+        assert!(settled.is_terminal());
+        assert_eq!(
+            settled.completed_at_ms, claimed.completed_at_ms,
+            "promotion publishes the outcome and changes nothing else"
+        );
+    }
+
+    /// The claim is the first-writer-wins guard, so the sweep runs once.
+    ///
+    /// Two settlements race by design — a stop records `cancelled` and the agent's own
+    /// `turn` event arrives a moment later — and before two-phase settling the terminal
+    /// status was what refused the second one. It has to be the claim now: a second caller
+    /// getting through would sweep the same turn again and emit a duplicate close for every
+    /// trajectory it left open.
+    #[tokio::test]
+    async fn only_one_caller_can_claim_a_turn_for_settling() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        assert!(store
+            .begin_settling("turn-1", Some("TURN_INTERRUPTED"), Some("Interrupted by user"))
+            .await
+            .expect("first claim"));
+        assert!(
+            !store
+                .begin_settling("turn-1", None, Some(""))
+                .await
+                .expect("second claim"),
+            "a turn already settling is refused, or its trajectories are closed twice"
+        );
+
+        store
+            .promote_settled_turn("turn-1", "cancelled")
+            .await
+            .expect("promote");
+
+        assert!(
+            !store
+                .begin_settling("turn-1", None, Some(""))
+                .await
+                .expect("post-terminal claim"),
+            "and a settled turn stays settled: the agent's late `completed` must not \
+             overwrite the stop the user asked for"
+        );
+
+        let turn = store.get_turn("turn-1").await.expect("read").expect("turn");
+        assert_eq!(turn.status, "cancelled");
+        assert_eq!(turn.error_code.as_deref(), Some("TURN_INTERRUPTED"));
+    }
+
+    /// A promotion with no claim behind it does nothing.
+    ///
+    /// What keeps the two calls a pair rather than two independent writers of `status`. It
+    /// is also the case a restart produces: `interrupt_stale_turns` settles a turn whose
+    /// sweep was still in flight, and the in-flight sweep's promotion must not resurrect it
+    /// with an outcome the restart already overrode.
+    #[tokio::test]
+    async fn a_promotion_without_a_claim_changes_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        assert!(
+            !store
+                .promote_settled_turn("turn-1", "completed")
+                .await
+                .expect("unclaimed promotion"),
+            "a running turn cannot be promoted straight to terminal"
+        );
+        assert_eq!(
+            store.get_turn("turn-1").await.expect("read").expect("turn").status,
+            "running"
+        );
+
+        store
+            .begin_settling("turn-1", None, Some(""))
+            .await
+            .expect("claim");
+        store.interrupt_stale_turns().await.expect("restart sweep");
+
+        assert!(
+            !store
+                .promote_settled_turn("turn-1", "completed")
+                .await
+                .expect("promotion after a restart claimed it"),
+            "the restart's account stands"
+        );
+        assert_eq!(
+            store.get_turn("turn-1").await.expect("read").expect("turn").status,
+            "interrupted"
+        );
+    }
+
+    /// A restart sweeps a settling turn, keeping the end time its claim recorded.
+    ///
+    /// Left out of the restart sweep it would stay `settling` forever, which is the
+    /// spinning card that sweep exists to prevent. Included naively it would be stamped
+    /// with the restart, giving a turn that finished before the crash a duration measured
+    /// to whenever the backend came back.
+    #[tokio::test]
+    async fn a_restart_settles_a_claimed_turn_without_moving_its_end() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = seeded(dir.path()).await;
+
+        store
+            .begin_settling("turn-1", None, Some(""))
+            .await
+            .expect("claim");
+        let ended = store
+            .get_turn("turn-1")
+            .await
+            .expect("read")
+            .expect("turn")
+            .completed_at_ms
+            .expect("the claim stamped it");
+
+        assert_eq!(
+            store.interrupt_stale_turns().await.expect("restart sweep"),
+            1,
+            "a turn left settling by a crash is unrecoverable and must be reported"
+        );
+
+        let turn = store.get_turn("turn-1").await.expect("read").expect("turn");
+        assert_eq!(turn.status, "interrupted");
+        assert!(turn.is_terminal(), "nothing may be left reading as in flight");
+        assert_eq!(
+            turn.completed_at_ms,
+            Some(ended),
+            "the turn ended when its outcome arrived, not when the backend came back"
         );
     }
 }

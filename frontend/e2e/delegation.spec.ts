@@ -31,12 +31,15 @@ import { createSession } from "./fixtures/session";
  * closed it. That is a fact this file already asserts elsewhere, which is what makes it the
  * right thing to wait on: no product surface exists solely for the test.
  *
- * Waiting on the closer's post-sweep `status` frame instead was tried and abandoned: the
- * client cannot deliver it to a spec, because the page ends this tab's claim on a turn as
- * soon as *history* holds it terminal — which is before the sweep, and which is load-bearing
- * for adopting an agent-initiated turn. Measured with the sweep delayed 1500ms, no
- * client-side settle signal appeared in 24.5s of sampling. `docs/roadmap.md` carries what
- * that gap costs the product; this helper only needs a signal, and the swept card is one.
+ * Waiting on the closer's post-sweep `status` frame instead was tried and abandoned when the
+ * page could not deliver it to a spec: it ended this tab's claim on a turn as soon as history
+ * held it terminal, which was *before* the sweep. Measured with the sweep delayed 1500ms, no
+ * client-side settle signal appeared in 24.5s of sampling.
+ *
+ * That gap is closed — a turn no longer reads terminal until the sweep has finished — so the
+ * frame would work now. This still waits on the swept card, because it is a better signal
+ * either way: it observes the sweep's *effect* on the surface under test rather than an
+ * announcement that the sweep ran, and no product surface exists solely for the test.
  */
 async function sweptClosed(page: import("@playwright/test").Page) {
   await expect(
@@ -242,22 +245,27 @@ async function runPromotion(page: import("@playwright/test").Page) {
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
   // Waits for the *settled* turn, not for the scenario's first line — and specifically for
-  // the turn-settle sweep, which is a later thing still. See `sweptClosed` above for why
-  // `Stop` disappearing is the wrong signal. This scenario emits four hosts and a
-  // backgrounded Bash, so the gap between its first line and its last is wide enough to
+  // the turn-settle sweep, which is a later thing still. This scenario emits four hosts and
+  // a backgrounded Bash, so the gap between its first line and its last is wide enough to
   // lose a host count to.
   //
-  // **Still `Stop`, deliberately, and this is the weaker of the two waits.** The swept
-  // signal `runDelegation` uses is not available here: this scenario's promoted host is
-  // closed by the sweep too, but *whether the client ever renders that close* is subject to
-  // the product race recorded in `docs/roadmap.md` § A swept trajectory close can be lost —
-  // the stream can be gone before the sweep's event arrives. Waiting on it therefore turned
-  // a latent bug into a red suite roughly one run in twenty-two, which is a worse trade than
-  // leaving the weaker wait and naming the gap.
+  // `Stop` disappearing means the turn is **terminal**, and that is now the same claim as
+  // "the sweep has finished". It was not: the server used to commit the turn's row terminal
+  // and sweep afterwards, so this wait could return with the sweep's closes still arriving —
+  // which made it the weaker of this file's two waits, and made every spec below race it.
+  // Waiting on the swept card instead turned that latent bug into a red suite about one run
+  // in twenty-two, so the weaker wait was kept and the gap named.
   //
-  // So this waits for terminal and the specs below carry their own deadlines. When that
-  // client race is fixed, this should become the same `toContainText("never finished")` wait
-  // on `workflowHosting(page, "Stage A: A:item-1")` that `:367` already asserts.
+  // The turn now goes terminal only after the sweep, enforced by
+  // `a_terminal_turn_always_has_its_trajectories_closed` in `backend/tests/integration.rs`.
+  // So this is a settled-turn wait rather than a terminal-turn wait, and the specs below no
+  // longer race anything.
+  //
+  // Deliberately *not* `workflowHosting(...)` as the wait, even though the comment this
+  // replaces prescribed it. That helper snapshots the host count and expands each one at call
+  // time, and a collapsed card mounts none of its subtree — so a host still to be rendered
+  // stays collapsed and its delegate never appears. It is correct after a settle and wrong as
+  // the thing that waits for one.
   await expect(page.getByText("Running a workflow.")).toBeVisible({ timeout: 15000 });
   await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0, {
     timeout: 20000,

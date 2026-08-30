@@ -89,6 +89,17 @@ export function EnvironmentChip({
  * adjacent hues that were indistinguishable at badge size and carried no meaning
  * a reader could recover.
  *
+ * `settling` takes `running`'s hue rather than a hue of its own. The agent's work is over
+ * and the server is closing the record, which is a distinction about Sylph's internals —
+ * giving it a fourth colour would spend a reader's attention on something they cannot act
+ * on. What it must not do is read as *finished*, hence the moving dot.
+ *
+ * It is close to unreachable here, and is present because the `Record` demands it rather
+ * than as defensive padding: this badge draws on history entries, a settling turn is the
+ * live turn, and the live turn is filtered out of that list until history absorbs it. The
+ * exhaustive type is what makes that a deliberate answer instead of a `??` fallback nobody
+ * chose — and it is why adding a status to `TurnStatus` fails the build here.
+ *
  * Every badge carries a border. A 10% tint is nearly invisible against a dark
  * canvas without one, which is what the tokens resolve to in dark mode.
  */
@@ -96,11 +107,19 @@ const TURN_STATUS_STYLES: Record<TurnStatus, string> = {
   queued: "border-line bg-hover text-ink-soft",
   running: "border-info-line bg-info-bg text-info",
   stopping: "border-warning-line bg-warning-bg text-warning",
+  settling: "border-info-line bg-info-bg text-info",
   completed: "border-success-line bg-success-bg text-success",
   failed: "border-danger-line bg-danger-bg text-danger",
   cancelled: "border-line bg-active text-ink-muted",
   interrupted: "border-warning-line bg-warning-bg text-warning",
 };
+
+/** The statuses whose badge carries a moving dot: the turn is not done yet. */
+const IN_FLIGHT: ReadonlySet<TurnStatus> = new Set<TurnStatus>([
+  "running",
+  "stopping",
+  "settling",
+]);
 
 export function TurnStatusBadge({ status }: { status: TurnStatus }) {
   return (
@@ -109,11 +128,11 @@ export function TurnStatusBadge({ status }: { status: TurnStatus }) {
         TURN_STATUS_STYLES[status] ?? "border-line bg-hover text-ink-soft"
       }`}
     >
-      {(status === "running" || status === "stopping") && (
+      {IN_FLIGHT.has(status) && (
         <span
           aria-hidden="true"
           className={`h-1.5 w-1.5 animate-pulse rounded-full ${
-            status === "running" ? "bg-info-solid" : "bg-warning-solid"
+            status === "stopping" ? "bg-warning-solid" : "bg-info-solid"
           }`}
         />
       )}

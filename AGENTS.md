@@ -332,13 +332,19 @@ state a spec is in right after sending. 33 specs once failed on their deadline w
 wrong in the code under test. **Prefer a control whose *presence* changes** — the composer
 swaps Send for Stop while a turn is live.
 
-**And `Stop` disappearing is still the wrong signal for anything the settle sweep produces.**
-`Stop` is gone once the turn is **terminal**, which is not the same claim as fully **settled**:
-the terminal row commits before open trajectories are closed. Every spec asserting on what the
-sweep produces therefore races it, and under load whichever one loses is the one that fails —
-which reads as flakiness and, once, as a branch regression when the branch was innocent. Wait
-on something the sweep itself produces. (`docs/roadmap.md` records the product-side half of
-this.)
+**`Stop` disappearing once meant `terminal` but not `settled`, and that gap is now closed — the
+lesson it taught is not.** The terminal row used to commit *before* open trajectories were
+closed, so every spec asserting on what the sweep produces raced it, and under load whichever
+one lost was the one that failed: it read as flakiness and once as a branch regression when the
+branch was innocent. A turn now goes terminal only after the sweep
+(`docs/database-schema.md` § A terminal status means the record is finished), so `Stop`
+vanishing is a settled-turn signal.
+
+What generalizes is the diagnosis, and it is worth more than the fix. **A state that carries
+two facts under one name cannot be waited on**, because a waiter cannot say which one it got —
+and the symptom is never a failing assertion in the code that conflated them. It is a different
+spec failing each run, somewhere else. When a suite flakes on a rotating set with one shared
+dependency, suspect the signal before the specs.
 
 **An OOM-killed suite is indistinguishable from an interrupted one, so the machine is the last
 thing anyone suspects.** A suite killed for memory reports **zero failures at the point of

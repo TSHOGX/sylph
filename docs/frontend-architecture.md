@@ -597,6 +597,15 @@ handover from live stream to durable history is the subtle part: the live turn i
 out of history until the refetched history actually contains it, which closes the frame
 where it would otherwise vanish from both.
 
+**That refetch is sound because a terminal turn status means the record is finished** — a
+server guarantee, not a race the client wins (`docs/database-schema.md` § A terminal status
+means the record is finished). It is worth knowing it was not always: the turn row went
+terminal before the server closed what the turn left open, so ending the claim there tore
+down the stream before those closes arrived *and* refetched a journal that lacked them. Both
+halves of the handover failed on the same early signal, which is why a delegation the server
+had closed could render as running forever. A client needs no grace period here, and should
+not grow one.
+
 **A mutation with no error path turns any backend refusal into a phantom UI bug.** Where
 the only observable outcome of a rejected write is that clicking did nothing, every layer
 is behaving correctly and the layer that is *not* at fault is the one that gets debugged.

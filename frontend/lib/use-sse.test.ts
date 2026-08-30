@@ -12,10 +12,15 @@ import { terminalStateOf } from "@/lib/use-sse";
  * `GET /turns/{id}` every 1500ms for a fact it was already being handed, and settled up to
  * a poll interval late.
  *
- * The frame is also *stricter* than the row it replaced. The turn row commits before the
- * settle sweep closes whatever trajectories the turn left open; this frame is emitted
- * after. That is why the state has to be read here rather than inferred from the stream
- * simply ending (`AGENTS.md` § And `Stop` disappearing is still the wrong signal).
+ * The frame used to be *stricter* than the row as well as sooner: the row went terminal
+ * before the settle sweep closed whatever trajectories the turn left open, and this frame is
+ * emitted after. The server now settles in two phases, so both agree and the frame's
+ * remaining value is latency — the row is otherwise a 20s poll away.
+ *
+ * Either way the state has to be **read out of `data`** rather than inferred from the stream
+ * ending. That is what these tests pin, and it is independent of the ordering above: a
+ * stream can end without a frame at all, and an outcome guessed from a closed socket is
+ * `completed` for a turn that failed.
  */
 function frame(over: Partial<StreamEvent>): StreamEvent {
   return {

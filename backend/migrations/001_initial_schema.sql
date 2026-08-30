@@ -92,8 +92,14 @@ CREATE TABLE turns (
   session_env    TEXT NOT NULL,
   session_agent  TEXT NOT NULL,
   session_native TEXT NOT NULL,
+  -- `settling` is in flight, not terminal, and it is what makes the four terminal
+  -- statuses mean something a client can act on: *the record is finished*. A turn
+  -- whose outcome is known but whose settle sweep has not finished writing what it
+  -- left open sits here, so no reader ever sees a terminal turn over a partial
+  -- record. `crate::supervisor::TurnCloser::close` owns the two writes and states
+  -- what one write cost.
   status TEXT NOT NULL CHECK (status IN (
-    'queued', 'starting', 'running', 'stopping',
+    'queued', 'starting', 'running', 'stopping', 'settling',
     'completed', 'failed', 'cancelled', 'interrupted'
   )),
   -- Who started this turn, and **not the same concept as the deleted session
@@ -131,7 +137,7 @@ CREATE INDEX turns_session_idx
 -- Partial, covering exactly the in-flight states, which is the query restart
 -- reconciliation runs.
 CREATE INDEX turns_status_idx ON turns(status)
-  WHERE status IN ('queued', 'starting', 'running', 'stopping');
+  WHERE status IN ('queued', 'starting', 'running', 'stopping', 'settling');
 
 -- The live event tail. Bounded: consolidation moves a settled turn's rows into
 -- `history.db` and deletes them here (`docs/storage.md` § Three tiers).

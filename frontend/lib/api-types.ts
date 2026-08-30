@@ -74,10 +74,28 @@ export interface Session {
   updatedAtMs: number;
 }
 
+/**
+ * A turn's lifecycle state.
+ *
+ * The four terminal members — `completed`, `failed`, `cancelled`, `interrupted` — mean
+ * something stronger than "the agent stopped": **the turn's record is finished**. A turn
+ * whose outcome is known while the server is still closing what it left open reads
+ * `settling`, which is in flight. So a client that sees a terminal status can refetch
+ * history and find everything, with no grace period and no second signal.
+ *
+ * That is a server guarantee rather than a convention, and a recent one: `status` used to
+ * go terminal *before* the settle sweep ran, so a client acting on it unmounted the stream
+ * before the sweep's events arrived and refetched a journal the sweep had not written.
+ * `backend/src/supervisor/closer.rs` holds the measurement.
+ *
+ * `settling` is transient and usually a few milliseconds, but it is a real state a poll can
+ * land on, so it renders as in-flight rather than being folded into `running`.
+ */
 export type TurnStatus =
   | "queued"
   | "running"
   | "stopping"
+  | "settling"
   | "completed"
   | "failed"
   | "cancelled"

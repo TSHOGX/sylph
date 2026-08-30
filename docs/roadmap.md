@@ -99,24 +99,46 @@ being terminal.
 
 ## Known bugs
 
-### A swept trajectory close can be lost by a client that stops listening at terminal
-
-*Measured on the wire 2026-08-29.* `TurnCloser::close` commits the turn row, returns the
-session to idle, closes whatever trajectories the turn left open, and only then emits its
-terminal `status` frame — so the sweep's own `subagent`/`completed` arrives **before** the
-frame announcing the turn is over.
-
-A client that ends its claim on a turn as soon as *history* reports it terminal therefore
-unmounts before those events arrive, and the history refetch cannot repair it: it fires on the
-same early signal and reads a journal the sweep has not written yet. At natural speed the
-sweep wins the race, which is why the delegation suite passes with the bug present — delaying
-the sweep exposes it immediately.
-
-The fix is to key the claim, the connection lifetime, and the history refetch on **the
-stream's own announcement** rather than on the turn row, with a bounded grace period, because
-a connection down for the whole turn produces no frame at all.
+None outstanding.
 
 ## Recently fixed, worth knowing
+
+**A terminal turn status now means the record is finished.** `TurnCloser::close` used to
+commit the turn row terminal and *then* run the settle sweep, so `status` was answering two
+questions with one column — what the turn produced, and whether its record was complete —
+with no field that separated them. A client ending its claim on the row therefore tore down
+the stream before the sweep's own `subagent`/`completed` events arrived, and its history
+refetch fired on the same early signal and read a journal the sweep had not written yet: a
+delegation the server had closed rendered as running forever.
+
+Settling is now two writes with the sweep between them, through a new non-terminal
+`settling` status (`docs/database-schema.md` § A terminal status means the record is
+finished). Three things are worth carrying forward:
+
+- **The client-side fix was the wrong half.** Keying the claim and the refetch on the
+  stream's own announcement with a bounded grace period was the plan of record here, and it
+  would have left the server publishing a state no client could name — so every future
+  reader would have re-derived the same timer. A previous attempt at it also cascaded into
+  rewriting the page's whole turn-lifecycle model. The server-side fix is one enum member,
+  and it deleted the reason the frontend's two workaround comments existed.
+- **It presented as flakiness, and that was the expensive part.** One run in three failed on
+  a *different* spec each time, because whichever assertion lost the race was the one that
+  failed. The E2E suite had already been shaped around it: `runPromotion` was deliberately
+  left with the weaker of two available waits, and `sweptClosed` carried a measurement of why
+  the client could not deliver the settle signal at all. Both comments named this entry and
+  predicted the fix.
+- **The Rust suite got stricter for free.** `await_turn` polls exactly the four terminal
+  statuses, so it now waits through the sweep rather than returning mid-sweep — every test
+  that settles a turn and then asserts on swept state stopped racing without being touched.
+  Verified rather than assumed: a throwaway test asserting all 48 of a turn's abandoned
+  trajectories are closed the moment `await_turn` returns passes, and the same assertion is
+  what `a_terminal_turn_always_has_its_trajectories_closed` makes permanent.
+
+**The OpenAPI turn-status enum had drifted in both directions**, undetected because nothing
+compared it to anything: it declared `stopped`, which no code has ever written, and omitted
+`starting`, `stopping`, `cancelled`, and `interrupted`, all four of which a client can be
+handed. `every_turn_status_the_schema_declares_is_one_the_journal_allows` now reads the
+vocabulary out of the migration and compares, rather than holding a third copy of it.
 
 **Segmented CJK search now ships.** `crates/fts5-jieba` is linked into the server and
 registered per connection, so Chinese is searchable by word rather than as one opaque token

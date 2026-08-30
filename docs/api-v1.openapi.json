@@ -3382,11 +3382,16 @@
             "type": "string",
             "enum": [
               "queued",
+              "starting",
               "running",
+              "stopping",
+              "settling",
               "completed",
               "failed",
-              "stopped"
-            ]
+              "cancelled",
+              "interrupted"
+            ],
+            "description": "A turn's lifecycle state. The four terminal values -- completed, failed, cancelled, interrupted -- mean the turn's record is finished, not merely that the agent stopped: a client that reads one of them can fetch the turn's history and find everything. settling is in flight, and is the state a turn holds while the server closes what it left open."
           },
           "origin": {
             "type": "string",

@@ -60,11 +60,14 @@ const TERMINAL_STATES: ReadonlySet<string> = new Set(["completed", "failed", "ca
 /**
  * The terminal state a `status` frame announces, or `null` for any other event.
  *
- * `TurnCloser::close` emits this frame **after** it has settled the turn, written the
- * session back to idle, and closed whatever trajectories the turn left open. So it is the
- * one signal that means "fully settled" rather than merely "terminal": the turn row commits
- * ~35 lines earlier, which is why polling the row observes a finished turn while the sweep
- * is still emitting (`AGENTS.md` § And `Stop` disappearing is still the wrong signal).
+ * `TurnCloser::close` emits this frame last: after the session is idle, after whatever
+ * trajectories the turn left open are closed and journaled, and after the turn row itself
+ * has gone terminal. So it is the *earliest* signal a client gets that the record is
+ * finished, and it agrees with the row rather than outrunning it.
+ *
+ * It used to be the only trustworthy one. The row went terminal before the sweep, so a
+ * client acting on a poll unmounted this stream before the sweep's own events arrived; the
+ * frame was the fix's other half, and the server now closes the window instead.
  *
  * The state travels in `data.state` and the frame's `text` is empty, which is why a
  * text-rendering branch cannot see it.

@@ -143,14 +143,22 @@ export default function SessionPage() {
     // a turn already terminal when the page loads, and a stream that never delivered
     // because the connection was down for the whole turn. At 1500ms it was ~40 requests
     // a minute duplicating a pushed fact.
+    //
+    // A poll landing mid-sweep reads `settling`, which is in flight, so it keeps polling
+    // and the stream stays attached. That is the point of the state existing: this used to
+    // read terminal there and end the claim on a record still being written.
     refetchInterval: (query) =>
       query.state.data && TERMINAL.has(query.state.data.turn.status) ? false : 20_000,
   });
 
-  // What the live stream said, which is both earlier and stricter than the row: the
-  // `status` frame is emitted after the settle sweep has closed the turn's open
-  // trajectories, while the row commits before it (`AGENTS.md` § And `Stop` disappearing
-  // is still the wrong signal).
+  // What the live stream said, which is *sooner* than the poll but no longer stricter.
+  //
+  // The distinction used to be correctness. The row went terminal before the settle sweep
+  // ran, so acting on it tore down the stream before the sweep's events arrived and
+  // refetched a journal the sweep had not written — and the `status` frame, emitted after
+  // the sweep, was the only trustworthy signal. The server now settles in two phases and a
+  // terminal row means a finished record, so both signals are sound and this one is kept
+  // purely for latency: without it a turn's close waits on the 20s poll below.
   const [announcedSettle, setAnnouncedSettle] = useState<{
     turnId: string;
     state: string;

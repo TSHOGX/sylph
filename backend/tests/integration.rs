@@ -4184,6 +4184,120 @@ async fn await_reconciled(
     panic!("trajectory {stream_id} was never reconciled; history was {last}");
 }
 
+/// A turn that reads terminal has already had its trajectories closed.
+///
+/// The promise the four terminal statuses make, and the one every client acts on: seeing a
+/// terminal turn is enough to know a history read will be complete. No grace period, no
+/// second signal, no waiting to see whether more arrives.
+///
+/// # What this catches, and why it is shaped like this
+///
+/// `status` used to answer two questions with one column — *what did this turn produce* and
+/// *is its record finished* — and the outcome was written **before** the settle sweep. So a
+/// client polling the row saw a terminal turn over a record still being written, with no
+/// field that could tell it so. Measured on the wire: the frontend ended its claim there,
+/// unmounted the stream before the sweep's own `subagent`/`completed` events arrived, and
+/// refetched a journal the sweep had not written yet. A delegation the server had closed
+/// rendered as running forever.
+///
+/// The turn now goes terminal *after* the sweep, so this is structurally impossible rather
+/// than merely unlikely — which is why the test needs care. The property is about an
+/// *interleaving*, so it can only be observed while the sweep is still running.
+///
+/// **What does the observing is the poll, with no sleep in it**: it reads the row the instant
+/// it goes terminal and then reads history with nothing in between. Measured against the
+/// pre-fix ordering — the promotion moved to just after the claim — this fails 5/5, on the
+/// first turn each time, reporting 0 of 48 closed. With the fix it passes 3/3.
+///
+/// `MockRunner::abandons_many` leaves `OPEN_TRAJECTORIES` delegations open, which widens the
+/// sweep. That width is margin for a suite running tests concurrently, **not** the thing that
+/// catches the defect: the same measurement at a single open trajectory also fails 5/5. The
+/// first version of this comment claimed otherwise before it was measured.
+///
+/// Asserting after a settle instead would prove nothing — by then the sweep has run under
+/// either ordering. Same reason `a_settled_turn_is_never_visible_on_a_running_session` reads
+/// its pair with nothing between the two requests.
+#[tokio::test]
+async fn a_terminal_turn_always_has_its_trajectories_closed() {
+    let backend =
+        TestBackend::start_with_runners(&[MockRunner::abandons_many("mock")]).await;
+    let session_id = backend.create_session("mock").await;
+
+    for attempt in 0..6 {
+        let response = backend
+            .post_authed(
+                &format!("/api/v1/sessions/{session_id}/turns"),
+                json!({"text": "go"}),
+            )
+            .await;
+        let turn_id = json_body(response).await["turn"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // The first terminal reading is the one that matters: it is the moment a client
+        // acts on. Anything asserted after a settle would be asserted after the sweep no
+        // matter which ordering produced it.
+        let mut status = String::new();
+        for _ in 0..4000 {
+            let body = json_body(
+                backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await,
+            )
+            .await;
+            status = body["turn"]["status"].as_str().unwrap_or("").to_string();
+            if matches!(
+                status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted"
+            ) {
+                break;
+            }
+        }
+        assert!(
+            matches!(
+                status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted"
+            ),
+            "turn {turn_id} never went terminal (last status {status:?}, attempt {attempt})"
+        );
+
+        // Read history with nothing in between, and count what is still open. Every
+        // trajectory this turn opened was left open by the agent, so the sweep owes a
+        // close for all of them.
+        let history = json_body(
+            backend
+                .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+                .await,
+        )
+        .await;
+
+        let events: Vec<&Value> = history["turns"]
+            .as_array()
+            .expect("history lists turns")
+            .iter()
+            .filter(|entry| entry["turn"]["id"] == turn_id.as_str())
+            .flat_map(|entry| entry["events"].as_array().expect("events").iter())
+            .collect();
+
+        let closed = events
+            .iter()
+            .filter(|e| e["kind"] == "subagent" && e["phase"] == "completed")
+            .count();
+        let opened = events
+            .iter()
+            .filter(|e| e["kind"] == "subagent" && e["phase"] == "started")
+            .count();
+
+        assert_eq!(
+            closed,
+            common::mock::OPEN_TRAJECTORIES,
+            "turn {turn_id} read terminal with only {closed} of {} trajectories closed \
+             ({opened} still recorded as open, attempt {attempt}) — a client acting on \
+             that status renders a delegation the server closed as running forever",
+            common::mock::OPEN_TRAJECTORIES
+        );
+    }
+}
+
 /// The record for one trajectory, on whichever turn holds it.
 fn find_event<'a>(history: &'a Value, stream_id: &str) -> Option<&'a Value> {
     history["turns"].as_array()?.iter().find_map(|entry| {
@@ -4199,3 +4313,4 @@ fn find_event<'a>(history: &'a Value, stream_id: &str) -> Option<&'a Value> {
             })
     })
 }
+

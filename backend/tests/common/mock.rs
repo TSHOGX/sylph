@@ -66,6 +66,17 @@ enum Behavior {
     /// it, with stdout still open. Every one of those events used to be dropped for
     /// arriving outside a turn.
     Backgrounded,
+    /// End the turn with many delegations open, so the settle sweep is measurably wide.
+    ///
+    /// **The width is the instrument.** The sweep closes what a turn left open, and the
+    /// property under test is that a turn does not read terminal until it has. That
+    /// property is about an *interleaving*, so a test can only observe it while the sweep
+    /// is still running — and one open trajectory makes the sweep a single query and a
+    /// single emit, narrow enough that a poll almost never lands inside it. A test written
+    /// against that passes whether the ordering is right or wrong, which is the shape
+    /// `AGENTS.md` names: a property observable only through timing needs the window opened
+    /// on purpose.
+    AbandonsMany,
     /// The same shape, with the delegate declaring `is_backgrounded` on every phase.
     ///
     /// What a *cooperating* adapter sends: `claude` reports the flag only on
@@ -121,6 +132,11 @@ impl MockRunner {
     /// An adapter that reports a delegate finishing after its turn ended.
     pub fn backgrounded(name: &str) -> Self {
         Self { name: name.to_string(), behavior: Behavior::Backgrounded }
+    }
+
+    /// An adapter that ends its turn with [`OPEN_TRAJECTORIES`] delegations still open.
+    pub fn abandons_many(name: &str) -> Self {
+        Self { name: name.to_string(), behavior: Behavior::AbandonsMany }
     }
 
     pub fn backgrounded_flagged(name: &str) -> Self {
@@ -668,6 +684,7 @@ async fn run_turn(tx: mpsc::Sender<Result<SessionMessage>>, behavior: Behavior) 
         }
         Behavior::Backgrounded => backgrounded(&tx, false).await,
         Behavior::BackgroundedFlagged => backgrounded(&tx, true).await,
+        Behavior::AbandonsMany => abandons_many(&tx).await,
         // Never completes: the turn stays in flight until interrupted or the link is torn
         // down, which is what a stop test needs.
         Behavior::Slow => {
@@ -752,6 +769,38 @@ async fn success(tx: &mpsc::Sender<Result<SessionMessage>>) {
 /// what a *cooperating* adapter sends. The vendor reports it on the open only, so an
 /// adapter re-attaches it — and the turn-settle sweep has to find it from whichever phase
 /// carried it rather than from the phase it happens to be looking at.
+/// How many delegations [`Behavior::AbandonsMany`] leaves open.
+///
+/// Each one costs the sweep a sequence allocation, a journal append, and a publish, so this
+/// widens the window `a_terminal_turn_always_has_its_trajectories_closed` observes.
+///
+/// **The width is margin, not the instrument** — measured, not assumed, and the first guess
+/// here was wrong. Against the pre-fix ordering that test fails 5/5 at this count *and* 5/5
+/// at a single trajectory: what catches the defect is polling the row with no sleep, which
+/// reads it the instant it goes terminal. The count is kept above one because the suite runs
+/// tests concurrently and a wider sweep stays observable under load, not because detection
+/// needs it.
+pub const OPEN_TRAJECTORIES: usize = 48;
+
+/// Open [`OPEN_TRAJECTORIES`] delegations and end the turn without closing any.
+async fn abandons_many(tx: &mpsc::Sender<Result<SessionMessage>>) {
+    for index in 0..OPEN_TRAJECTORIES {
+        emit(
+            tx,
+            Ev::new(EventKind::Subagent, Some(Phase::Started))
+                .stream_id(&format!("open-{index}"))
+                .name(&format!("Worker {index}")),
+        )
+        .await;
+    }
+
+    emit(
+        tx,
+        Ev::new(EventKind::Turn, Some(Phase::Completed)).text("dispatched everything"),
+    )
+    .await;
+}
+
 async fn backgrounded(tx: &mpsc::Sender<Result<SessionMessage>>, flagged: bool) {
     emit(
         tx,

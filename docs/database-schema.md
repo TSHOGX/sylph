@@ -125,7 +125,7 @@ CREATE TABLE turns (
   session_agent  TEXT NOT NULL,
   session_native TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN (
-    'queued', 'starting', 'running', 'stopping',
+    'queued', 'starting', 'running', 'stopping', 'settling',
     'completed', 'failed', 'cancelled', 'interrupted'
   )),
   origin TEXT NOT NULL DEFAULT 'user' CHECK (origin IN ('user', 'agent')),
@@ -146,7 +146,7 @@ CREATE TABLE turns (
 CREATE INDEX turns_session_idx
   ON turns(session_env, session_agent, session_native, created_at_ms DESC);
 CREATE INDEX turns_status_idx ON turns(status)
-  WHERE status IN ('queued', 'starting', 'running', 'stopping');
+  WHERE status IN ('queued', 'starting', 'running', 'stopping', 'settling');
 ```
 
 **There is no per-turn exit code**, because an adapter is long-lived and a turn is a
@@ -170,9 +170,36 @@ waiter, because a deliberate stop already claimed it" — conflating them report
 user's stop as `LINK_LOST`. `docs/session-protocol.md` § An agent may start a turn.
 
 Status transitions:
-- `queued` → `starting` → `running` → `completed` / `failed` / `cancelled`
-- `running` → `stopping` → `cancelled`
-- Any in-flight status → `interrupted` (on service restart)
+- `queued` → `starting` → `running` → `settling` → `completed` / `failed` / `cancelled`
+- `running` → `stopping` → `settling` → `cancelled`
+- Any in-flight status, `settling` included → `interrupted` (on service restart)
+
+### A terminal status means the record is finished
+
+**`settling` is what makes the four terminal statuses worth acting on.** A turn passes
+through it holding a known outcome and an unfinished record: the settle sweep still has to
+close whatever trajectories the turn left open, journal them, and flush the writer's
+buffered deltas. Only then does the status become terminal.
+
+So a client that reads `completed` may refetch history and find everything — no grace
+period, no waiting to see whether more arrives, no second signal to correlate. That is a
+guarantee about this column rather than a convention, and `settling` is the only reason it
+can be one.
+
+It replaced a single write, placed *before* the sweep, which made `status` answer two
+questions at once — *what did this turn produce* and *is its record finished* — with no
+field that could separate them. Every reader in that window saw a terminal turn over a
+partial record and had no way to know it. Measured on the wire: a client ended its claim
+there, tore down the stream before the sweep's own events arrived, and refetched a journal
+the sweep had not written; a delegation the server had closed rendered as running forever.
+At natural speed the sweep usually won, so the failure presented as one test in three
+flaking on a *different* assertion each run.
+
+`crate::supervisor::TurnCloser::close` owns the ordering, and
+`a_terminal_turn_always_has_its_trajectories_closed` pins it. The cost is that a crash
+between the two writes leaves a turn whose outcome is known and unrecorded; the restart
+sweep reports it `interrupted`, keeping the end time the claim stamped
+(`JournalStore::interrupt_stale_turns` states what that loses and why it is accepted).
 
 ### events
 
