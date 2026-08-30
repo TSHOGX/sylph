@@ -55,12 +55,12 @@ import {
 /**
  * Surfaces that are not on screen at first paint are code-split.
  *
- * The shell lives in the root layout, so a static import here lands in the
- * first-load bundle of *every* route. Measured on this tree: importing the three
- * overlays and the Artifacts pane statically costs 204.3 KB gzipped of first-load
- * JS, over the 200 KB budget Phase 4 established; splitting them brings it back
- * under. Each is reached by a keypress or a toggle, by which point the chunk has
- * fetched — a fraction of the round trip the action itself takes.
+ * The shell lives in the root layout, so a static import here lands in the first-load
+ * bundle of *every* route. Measured, importing the three overlays and the Artifacts pane
+ * statically is the difference between being over the first-load budget and under it —
+ * the single largest lever available (`docs/frontend-architecture.md` § Code splitting).
+ * Each is reached by a keypress or a toggle, by which point the chunk has fetched, which
+ * is a fraction of the round trip the action itself takes.
  *
  * `ssr: false` on all four: they render nothing until state opens them, so
  * prerendering them produces markup the client immediately discards.
@@ -98,8 +98,8 @@ const AdoptPicker = dynamic(
  * The mobile surfaces, split for the same reason as the overlays above — with one
  * extra: they are reachable only *below the `md` breakpoint*, so on a desktop they
  * are not merely unopened, they are unreachable. A static import would put the drag
- * gesture, the scrim, and the focus trap into the first-load bundle of every route
- * for every desktop user. Measured at 1.1 KB gzipped.
+ * gesture, the scrim, and the focus trap into the first-load bundle of every route for
+ * every desktop user.
  */
 const Drawer = dynamic(() => import("@/components/ui/sheet").then((m) => m.Drawer), {
   ssr: false,

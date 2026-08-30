@@ -5,12 +5,11 @@
  *
  * # Why this shape
  *
- * `docs/agent-ui-design-analysis.md` compares Claude Code, Cursor, and Zed
- * against chat UIs and lands on one distinction: in an agent workspace the tool
- * calls are the content and the prose is the connective tissue, so the layout
- * must make tool execution scannable. That rules out message bubbles, alternating
- * alignment, and per-event cards, all of which spend vertical space separating
- * speakers rather than surfacing work.
+ * In an agent workspace the tool calls are the content and the prose is the
+ * connective tissue, so the layout must make tool execution scannable
+ * (`docs/ui-layout.md` § Conversation canvas). That rules out message bubbles,
+ * alternating alignment, and per-event cards, all of which spend vertical space
+ * separating speakers rather than surfacing work.
  *
  * Concretely:
  * - No bubbles, no backgrounds on prose. Tool calls get a left border as a

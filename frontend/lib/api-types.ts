@@ -106,7 +106,6 @@ export interface Turn {
   idempotencyKey: string | null;
   errorCode: string | null;
   errorMessage: string | null;
-  runnerExitCode: number | null;
   createdAtMs: number;
   startedAtMs: number | null;
   completedAtMs: number | null;
@@ -613,7 +612,7 @@ export type BlockedReason = "alreadyAdopted" | "noWorkdir" | "outsideRoots";
  *
  * **Every optional field is absent rather than defaulted**, because a synthesized title
  * or timestamp is a lie a journal makes permanent and this row is what a picker renders.
- * Measured per agent: `claude` records its own title for ~93% of sessions, `codex` and
+ * Measured per agent: `claude` records its own title for most sessions, `codex` and
  * `pi` for none.
  */
 export interface NativeSessionRow {
@@ -705,7 +704,7 @@ export interface CreateTurnRequest {
   text?: string;
   attachments?: AttachmentPayload[];
   idempotencyKey?: string;
-  /** Named command from the agent's `--describe` output. */
+  /** Named command the agent declared for this session. */
   command?: string;
   args?: Record<string, string>;
 }
@@ -719,12 +718,10 @@ export interface BestMatch {
 /**
  * One search hit: a session, and why it matched.
  *
- * **One store, so a hit is a session rather than a foreign row.** This used to be
- * archive-shaped — a TraceDB id, a `cwd`, and a `sessionId` set only when the
- * archived row had already been imported, which is what made a hit *importable*
- * rather than navigable. All of that is gone: the index is over the same rows the
- * timeline renders (`docs/database-schema.md` § Search lives beside `history.db`), so
- * every hit is openable and there is no second id space to translate through.
+ * **One store, so a hit is a session rather than a foreign row.** The index is over the
+ * same rows the timeline renders (`docs/database-schema.md` § Search lives beside
+ * `history.db`), so every hit is openable, nothing has to be imported first, and there is
+ * no second id space to translate through.
  *
  * The session is carried whole rather than flattened into a handful of fields, so a
  * result row renders with the same `sessionLabel`, fidelity marker, and environment
@@ -820,9 +817,9 @@ export interface ConfigEntry {
  * `current_dir` may be and therefore where arbitrary code may run. The panel shows
  * these values and the path of the file to edit.
  *
- * There is no `bundledAgentCandidates` any more, and no `tracedb` row: adapters are
- * linked into the envagent rather than discovered in directories, and a setting naming
- * an external archive binary is only meaningful while an external binary answers.
+ * There is no adapter-candidate list and no external-binary row: adapters are linked into
+ * the envagent rather than discovered in directories, and a setting naming an external
+ * binary is only meaningful while an external binary answers.
  */
 export interface ConfigReport {
   /** The one root everything else defaults under. */

@@ -34,9 +34,9 @@
  *
  * Translations are localizations, not transliterations: `zh` reads as something
  * a Chinese developer would write, not as English word order in Chinese
- * characters. Product nouns that are proper names stay in English — Sylph,
- * TraceDB, an agent's name, `SOUL.md` — because they name things that are spelled
- * that way on disk and in the API.
+ * characters. Product nouns that are proper names stay in English — Sylph, an agent's
+ * name, `SOUL.md` — because they name things that are spelled that way on disk and in
+ * the API.
  */
 
 export const en = {
@@ -110,9 +110,9 @@ export const en = {
   "shell.newSession.title": "New session",
   "shell.newSession.confirm": "Start session here",
 
-  // Finding a session and jumping to it (`Mod+K`). One store, so one kind of result:
-  // this used to say "and the TraceDB archive", and the import badge and
-  // archive-unavailable notice that went with it are gone too.
+  // Finding a session and jumping to it (`Mod+K`). One store, so one kind of result —
+  // there is no separate archive to name, no import badge, and nothing to report as
+  // unavailable.
   //
   // `search.field` is deliberately *not* `shell.search`, which names the top-bar
   // button that opens this overlay. Giving the button and the field inside it one
@@ -582,7 +582,7 @@ export const en = {
   "settings.identity.inject.on": "Append SOUL.md (Sylph)",
   "settings.identity.inject.off": "Use the agent as it comes",
   "settings.identity.unavailable":
-    "No SOUL.md was found, so every session runs on the agent's own identity. Sylph looks for it beside the runners directory, or wherever SYLPH_SOUL points.",
+    "No SOUL.md was found, so every session runs on the agent's own identity. Sylph looks for it in its own root, or wherever SYLPH_SOUL points.",
   "settings.identity.preview.label": "SOUL.md",
   "settings.identity.preview.show": "Show",
   "settings.identity.preview.hide": "Hide",

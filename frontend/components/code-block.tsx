@@ -5,11 +5,10 @@
  *
  * # No syntax highlighter
  *
- * Shiki ships a WASM regex engine plus per-language grammars (~200 KB before
- * grammars), and `react-syntax-highlighter` with Prism is ~35 KB gzipped for a
- * useful language set. Phase 4 left about 9.6 KB of first-load budget, so
- * neither fits, and Phase 6 needs those bytes for the file browser, palette, and
- * diff view instead.
+ * Shiki ships a WASM regex engine plus per-language grammars (~200 KB before grammars),
+ * and `react-syntax-highlighter` with Prism is ~35 KB gzipped for a useful language set.
+ * Neither fits the first-load budget, and the bytes are better spent on the file browser,
+ * palette, and diff view.
  *
  * What is given up is colour. What is kept is everything that makes code
  * readable in a transcript: monospace, preserved whitespace, line numbers,

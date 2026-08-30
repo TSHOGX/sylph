@@ -24,7 +24,7 @@
  *   query useful — the recent sessions, which is what a picker opened by muscle memory
  *   wants.
  * - **`GET /search`, for text inside transcripts the browser never loaded.** Debounced
- *   and gated on a real query, because FTS5 is 174–260 ms where every other read here
+ *   and gated on a real query, because FTS5 is orders of magnitude slower than every other read here
  *   is sub-millisecond. That is not politeness: bound to keystrokes it is a load
  *   generator.
  *
@@ -97,7 +97,7 @@ export function SearchOverlay() {
 
   const environments = useEnvironments();
 
-  // Gated on a query worth 174–260 ms of FTS5 work. Two characters rather than one,
+  // Gated on a query worth a full-text scan. Two characters rather than one,
   // matching `docs/api-design.md` § Search: a single letter matches most of a real
   // store and answers a question nobody asked.
   const indexQuery = useQuery({

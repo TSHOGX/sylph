@@ -5,7 +5,7 @@
  * until it is translated — the compiler is the completeness gate, and
  * `i18n.test.ts` covers what the compiler cannot (placeholder agreement).
  *
- * Proper nouns stay in English on purpose: Sylph, TraceDB, SOUL.md, and
+ * Proper nouns stay in English on purpose: Sylph, SOUL.md, and
  * environment variable names are spelled that way on disk, in the API, and in
  * this repo's docs, so translating them would break the connection between what
  * the UI says and what a user has to type or find.
@@ -399,7 +399,7 @@ export const zh: Dictionary = {
   "settings.identity.inject.on": "追加 SOUL.md（Sylph）",
   "settings.identity.inject.off": "使用 Agent 原生身份",
   "settings.identity.unavailable":
-    "未找到 SOUL.md，因此所有会话都使用 Agent 自身的身份。Sylph 会在 runners 目录旁边查找，或使用 SYLPH_SOUL 指定的位置。",
+    "未找到 SOUL.md，因此所有会话都使用 Agent 自身的身份。Sylph 会在自己的根目录中查找，或使用 SYLPH_SOUL 指定的位置。",
   "settings.identity.preview.label": "SOUL.md",
   "settings.identity.preview.show": "查看",
   "settings.identity.preview.hide": "收起",

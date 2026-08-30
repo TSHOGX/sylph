@@ -26,7 +26,7 @@
  *
  * # Rollups exist because collapsing hides failure
  *
- * A collapsed row that says only "Subagent" is a place a failure three levels
+ * A collapsed row carrying only a name is a place a failure three levels
  * down goes to die. So each node carries an aggregate of its whole subtree —
  * failures, tool count, token usage, duration — computed bottom-up. The rule is
  * that no state is reachable in the tree that is not reported at the root, or
@@ -619,14 +619,13 @@ function isCompletedTool(row: TimelineRow): boolean {
 }
 
 function rowFailed(row: TimelineRow): boolean {
-  // A trajectory the *server* closed is `abandoned`, and abandoned is not a
-  // failure: nobody reported an outcome, which is a different fact from work that
-  // reported an error. The server sets `isError` on its closing event so the row
-  // reads as unresolved rather than clean — but counting that as a descendant
-  // failure escalated every ancestor to `failed`, so a `Workflow` whose own
-  // `tool_result` succeeded was badged red because one delegate was still running
-  // when the turn ended. That reports an interrupted turn as a broken one, which is
-  // exactly the distinction `abandoned` exists to preserve.
+  // A trajectory the *server* closed is `abandoned`, and abandoned is not a failure:
+  // nobody reported an outcome, which is a different fact from work that reported an
+  // error. The server sets `isError` on its closing event so the row reads as unresolved
+  // rather than clean, but counting that as a descendant failure escalates every ancestor
+  // — badging a host red whose own `tool_result` succeeded, because one delegate was still
+  // running at turn end. That reports an interrupted turn as a broken one, which is the
+  // distinction `abandoned` exists to preserve.
   if (closedByServer(row.event) || closedByServer(row.trajectoryClose)) return false;
   if (row.event.isError || row.result?.isError) return true;
   return row.event.kind === "error";
@@ -686,49 +685,24 @@ export function pathTo(
 /**
  * A trajectory's display name, never the vendor's tool name.
  *
- * One definition, because two is what this had and the copies could disagree. The card
- * and the sibling-comparison strip each computed it, so a change to either would label
- * one node two ways — and the strip's `aria-label` would stop matching the card's region
- * name, which nothing type-checks and no test asserts.
+ * **The sole producer.** Two definitions can disagree, which labels one node two ways and
+ * makes the strip's `aria-label` stop matching the card's region name — neither of which
+ * anything type-checks.
  *
- * # Why this is the only producer, and what that took
+ * The fallback states what the row knows: nobody reported what this is. Two constraints on
+ * choosing it, and the second is easy to miss:
  *
- * It was not always. `claude`'s adapter used to send the literal `"Subagent"` as the
- * `name` on the wire whenever a delegation's brief had not finished streaming — which at
- * `started` is the usual case, since the brief arrives as partial JSON. So the string on
- * screen had two producers, and renaming this one would only have changed which of them
- * put it there.
+ * - **It must not restate a category the chrome already carries.**
+ * - **It must not be a substring of any real name.** A fallback containing a tool name
+ *   makes every `{ name: "<tool> delegation" }` locator ambiguous with it *by
+ *   construction*, in exactly the states that render a nameless row — so it passes
+ *   indefinitely and then fails under load, reading as a broken card.
  *
- * The adapter's half was the more serious one, and it was a *data* defect rather than a
- * display one. `name` means "what this delegation is called", so `null` says nobody knows
- * yet while a literal asserts a name the adapter cannot support — and that guess is
- * journaled. `history::consolidate` keeps the best name any phase gave a block, so a
- * later `delta` carrying the real brief normally wins; but when the brief never finishes
- * streaming (the delegation fails early, or the link dies mid-input) the placeholder
- * becomes the trajectory's durable name in `history.db`.
- *
- * `_task_label` returns `None` as of `c8783b3` (its tests widened in `438a808`), which
- * is what makes this the sole
- * producer and the rename above safe. **That is a dependency of this code, not a
- * historical note**: move the rename to a tree without that commit — a cherry-pick, an
- * older branch — and the two-label state returns, silently, until a card renders. The
- * commit is named here so the check is a `git log` rather than a memory.
- *
- * **The bound on what that fixed is worth stating exactly, because it sounds
- * better than it is: rows already journaled with the literal are permanently
- * indistinguishable from a genuine name.** There was nothing to migrate not because the
- * data is fine but because nothing can tell the two apart — the fix stops new guesses and
- * cannot undo old ones. So a historical `"Subagent"` row is not evidence that an agent
- * named it that, and any analysis over archived names has to treat those as unknowable
- * rather than as data.
- *
- * The **ordering** is the part worth keeping now that both halves have landed, because it
- * is the trap anyone repeating this shape will walk into. The two fixes were not
- * interchangeable: renaming *this* while the adapter still sent a literal would have given
- * one condition two labels — the adapter's string for trajectories it named, this one for
- * those it did not — which is worse than a single imprecise label, and invisible until a
- * card renders. The general rule: when two layers both supply a default for one field,
- * the layer that *writes data* stops first and the layer that *renders* changes second.
+ * An adapter must omit `name` rather than guess it, because the journal makes a guess
+ * permanent (`docs/session-protocol.md` § `name` is absent when unknown). That is a
+ * precondition of this fallback being the only one: **when two layers both supply a default
+ * for one field, the layer that writes data stops first and the layer that renders changes
+ * second.** Reversed, one condition acquires two labels.
  */
 export function trajectoryName(node: TimelineNode): string {
   return node.row.event.name?.trim() || UNNAMED_TRAJECTORY;
@@ -754,50 +728,38 @@ export function trajectoryName(node: TimelineNode): string {
  * remembering the rule. The `exact: true` guards stay regardless: they are correct on
  * their own terms, and cost nothing.
  *
- * Deliberately a named constant rather than an inline literal, because the ordering
- * hazard above is a property of *this string's relationship to the adapter's*, and a
- * grep for it should land somewhere that explains that.
+ * A named constant rather than an inline literal, so a grep for the string lands where the
+ * constraints on choosing it are stated.
  */
 const UNNAMED_TRAJECTORY = "Unnamed";
 
 /**
  * What a delegation says about itself: its closing summary, else its latest progress.
  *
- * The protocol records both — `task_notification` carries the delegate's own summary,
- * and `data.progress` is a snapshot the vendor re-sends — and the card rendered
- * neither, so a delegate's account of its work was stored and never shown. That is the
- * one piece of *content* a collapsed row can carry: without it the row is a status and
- * a set of counts, which says that work happened and nothing about what came of it.
- * It matters more now that a late outcome can arrive on a turn of the agent's own,
- * because then this summary is the whole of what a user learns about work that
- * finished after the turn that dispatched it.
+ * This is the one piece of *content* a collapsed row can carry. Without it the row is a
+ * status and a set of counts, which says work happened and nothing about what came of it —
+ * and it matters most when a late outcome arrives on a turn of the agent's own, because
+ * then the summary is the whole of what a user learns about work that finished after the
+ * turn that dispatched it.
  *
- * Two rules, and both are why this is a function here rather than an expression in the
- * renderer — `lib/timeline-tree.test.ts` can pin them, and a component in a `node`
- * test environment cannot be rendered at all:
+ * A function here rather than an expression in the renderer so
+ * `lib/timeline-tree.test.ts` can pin two rules, both of which fail silently:
  *
- * 1. **A promoted host's `text` is not a summary.** It is the tool call's serialized
- *    arguments (a `Workflow` script, a JSON blob), so reading `text` uniformly would
- *    put a wall of JSON where a sentence belongs. Its outcome instead arrives as the
- *    `subagent` close kept *beside* the row — `trajectoryClose`, which exists exactly
- *    so a promotion does not overwrite the call.
+ * 1. **A promoted host's `text` is not a summary** — it is the tool call's serialized
+ *    arguments, so reading `text` uniformly puts a wall of JSON where a sentence belongs.
+ *    Its account arrives as the `subagent` close kept *beside* the row
+ *    (`trajectoryClose`), which exists so a promotion does not overwrite the call.
  *
- *    **And not its `tool_result` either**, however reasonable that looks: a promoted
- *    host's lifecycle *is* its result (`docs/session-protocol.md` § Promotion), so
- *    reaching for `row.result` here is the obvious next step for anyone extending this.
- *    It is wrong because a result is the tool's output, not the delegation's account of
- *    itself — and it is load-bearing beyond taste. A card's text is matched by
- *    `not.toContainText(...)` assertions in `e2e/delegation.spec.ts`, so a status word
- *    appearing inside a summary fails them as though the *status* were wrong. The real
- *    fixture already contains the ammunition: `pr-host-d`'s result reads
- *    "dispatched; running in background", and the `promote` scenario asserts that host
- *    is not `failed` and that a server-closed trajectory is not `running`. The test
- *    below pins this so the rule fails here, next to the reason, rather than three
- *    layers away as a status bug.
- * 2. **A close outranks progress.** Progress is a snapshot of work in flight; once the
- *    delegation reports an outcome, the snapshot describes a state that has been
- *    superseded. Preferring the fresher-arriving field would leave a finished
- *    delegation captioned with its own last guess.
+ *    **Nor its `tool_result`**, however reasonable that looks: a promoted host's lifecycle
+ *    *is* its result (`docs/session-protocol.md` § Promotion), so reaching for
+ *    `row.result` is the obvious next step for anyone extending this. A result is the
+ *    tool's output, not the delegation's account of itself — and a card's text is matched
+ *    by `not.toContainText(...)` assertions in `e2e/delegation.spec.ts`, so a status word
+ *    appearing inside a summary fails them as though the *status* were wrong. Pinned by a
+ *    unit test rather than a comment, because a comment cannot fail.
+ * 2. **A close outranks progress.** Progress is a snapshot of work in flight; once an
+ *    outcome is reported the snapshot describes a superseded state, so preferring the
+ *    fresher-arriving field leaves a finished delegation captioned with its last guess.
  */
 export function trajectoryReport(node: TimelineNode): string | undefined {
   const { row } = node;

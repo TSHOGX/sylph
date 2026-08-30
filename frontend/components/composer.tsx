@@ -42,11 +42,10 @@
  *
  * # The controls are generated, never hardcoded
  *
- * From the runner's `--describe` output. Not defensiveness — the four installed
- * runners genuinely disagree: `codex` declares no `model` at all, and every runner
- * declares a different `effort` enumeration (`claude` has `xhigh`/`max`, `codex`
- * has `minimal`, `pi` has `off`). A fixed pair of dropdowns would be wrong for
- * `codex` on the first render.
+ * From what the agent itself declares. Not defensiveness — the agents genuinely
+ * disagree: `codex` declares no `model` at all, and each declares a different `effort`
+ * enumeration (`claude` has `xhigh`/`max`, `codex` has `minimal`, `pi` has `off`). A
+ * fixed pair of dropdowns would be wrong for `codex` on the first render.
  */
 
 import dynamic from "next/dynamic";

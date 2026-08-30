@@ -137,19 +137,11 @@ export function Overlay({
 /**
  * Scroll the active row into view without yanking the whole page.
  *
- * All that remains here of list behaviour. `useListNavigation` used to sit beside it
- * — arrow keys, Home/End, Enter over a count the caller supplied — and it was a
- * second answer to the question `useSelectList` answers. It could not be anything
- * else: it took a count, so the caller had to number the rows itself, and a caller
- * numbering rendered rows while the hook counted choosable ones is precisely the
- * dual-index bug `lib/select-list.ts` was written to make unrepresentable. It was
- * also structurally unable to draw a heading, which is why the palette hand-rolled
- * grouping, and unable to host a filter field without each caller re-deriving the
- * combobox ARIA — four call sites did, and they drifted.
- *
- * It is deleted rather than deprecated. A hook that still compiles is a pattern the
- * next picker can copy, and this one's failure mode is invisible until a list grows
- * a non-selectable row.
+ * All that remains here of list behaviour: `useSelectList` owns cursor movement, headings,
+ * filtering, and the combobox ARIA for every list in the app (`docs/ui-layout.md` § One
+ * choice list). A second navigation hook taking a row *count* cannot coexist with it — the
+ * caller then numbers rendered rows while the hook counts choosable ones, which is the
+ * dual-index bug `lib/select-list.ts` exists to make unrepresentable.
  */
 export function scrollActiveIntoView(container: HTMLElement | null, index: number) {
   const row = container?.querySelector<HTMLElement>(`[data-index="${index}"]`);

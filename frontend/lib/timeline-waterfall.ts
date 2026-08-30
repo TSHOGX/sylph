@@ -29,15 +29,12 @@
  * 2. **Abandoned.** The server closed it when the turn terminated, so the close
  *    timestamp is when *we stopped listening*, not when the work ended. That is a
  *    lower bound, and it is labelled as one.
- * 3. **Consolidated.** `history::consolidate` folds a block's phases into one row
- *    keyed by the closing event, and `block_to_event` publishes only its
- *    `created_at_ms` — so after a reload a *declared* trajectory's `started` phase is
- *    gone and its start is genuinely unknown. `buildRows` then leaves `closedAtMs`
- *    unset, which is the signal. Such a row is an instant on the axis, not a bar:
- *    inventing a width there would be a fabricated measurement, and it is the case
- *    that occurs on every reloaded turn rather than a corner. A *promoted* host
- *    survives, because its call and its result are separate blocks with separate
- *    timestamps.
+ * 3. **A consolidated row with no `startedAtMs`.** Consolidation folds a block's phases
+ *    into one row keyed by its close, so the start has to be carried on the block
+ *    explicitly; where it is absent — history written before the field was published, or a
+ *    block that never had a distinct start — the start is genuinely unknown. Such a row is
+ *    an instant on the axis rather than a bar, because inventing a width there fabricates
+ *    a measurement.
  *
  * The same honesty rule the cards follow applies to width: a `Workflow` whose
  * interior the vendor never forwarded has no measurable interior, so the row carries
@@ -329,9 +326,10 @@ export function buildWaterfall(
   // here", which is the one sentence this view must never get wrong. Its true duration
   // can only be longer, so it cannot lose a comparison and must not win one.
   //
-  // Publishing `startedAtMs` is what surfaced this: while every settled row was a
-  // bound, no rank was ever offered, so the gap could not be observed. Making the
-  // honest rows exact is what let a dishonest one be crowned.
+  // Worth noting how this class of defect surfaces: while *every* row was a bound no rank
+  // was offered at all, so the gap was unobservable. Removing one degradation can expose a
+  // second that the first was masking — an "is the arithmetic sound" check is not an "is
+  // the subject finished" check, and a rank needs both.
   const finished = (row: WaterfallRow) => row.status === "done" || row.status === "failed";
   const rankableRows = rows.filter(
     (row) => row.extent.kind === "measured" && row.extent.bound === "exact" && finished(row),

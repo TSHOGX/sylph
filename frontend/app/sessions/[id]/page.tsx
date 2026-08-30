@@ -5,8 +5,8 @@
  *
  * The transcript is one continuous timeline rather than a list of per-turn cards.
  * A turn boundary is a rule with a status line, not a container — an agent's work
- * reads as a single log, and boxing each turn re-introduces the chat framing that
- * `docs/agent-ui-design-analysis.md` argues against.
+ * reads as a single log, and boxing each turn re-introduces chat framing
+ * (`docs/ui-layout.md` § Conversation canvas).
  *
  * Live and durable events come from different places and must not both render the
  * same turn: history holds every finished turn, and the SSE stream holds the one
@@ -722,9 +722,8 @@ function FindBar({
 /**
  * Flatten a turn into Markdown for the clipboard.
  *
- * Tool calls are included as headings now, unlike the Phase 4 version which kept
- * only prose: in an agent transcript the tool calls are the record of what
- * happened, so a copy without them is not the conversation.
+ * Tool calls are included as headings, not only prose: in an agent transcript the tool
+ * calls are the record of what happened, so a copy without them is not the conversation.
  */
 function turnAsText(entry: TurnWithEvents): string {
   const lines = entry.turn.requestText ? [`> ${entry.turn.requestText}`, ""] : [];

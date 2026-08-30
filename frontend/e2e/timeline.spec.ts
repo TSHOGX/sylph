@@ -5,9 +5,9 @@ import { createSession } from "./fixtures/session";
  * The agent-first timeline: tool calls as primary content, inline diffs, and
  * expansion policy that follows what a reader needs.
  *
- * These assertions encode design decisions from `docs/agent-ui-design-analysis.md`
- * rather than incidental markup, so a failure means the canvas stopped behaving
- * like an agent workspace — not that a class name changed.
+ * These assertions encode design decisions from `docs/ui-layout.md`
+ * § Conversation canvas rather than incidental markup, so a failure means the canvas
+ * stopped behaving like an agent workspace — not that a class name changed.
  */
 
 async function runPrompt(page: Page, prompt: string) {
@@ -520,7 +520,7 @@ test("the overview fits a phone without overflowing it", async ({ page }) => {
 /**
  * Render cost for a long conversation.
  *
- * The Phase 6 exit criterion is a 1000-message conversation rendering in under
+ * The budget is a 1000-message conversation rendering in under
  * two seconds. The bulk prompt journals 1000 events (250 iterations × 4), and the
  * measurement is taken on a reload so it covers a cold render of durable history
  * rather than incremental streaming — the slower and more meaningful direction.

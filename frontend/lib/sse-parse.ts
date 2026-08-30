@@ -14,7 +14,7 @@
  *    transcript was the history refetch on completion.
  * 2. A frame named `error` is dispatched as an `error` event on the `EventSource`
  *    object, which is the same event type the browser uses for connection
- *    failures. Any `addEventListener("error", ...)` conflates a runner error with
+ *    failures. Any `addEventListener("error", ...)` conflates an agent error with
  *    a dropped socket.
  * 3. Registering one listener per known kind means a kind the backend adds later
  *    is silently dropped. Silent event loss is the worst failure mode available

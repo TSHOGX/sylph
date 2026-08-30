@@ -11,7 +11,7 @@
  *
  * **One store, so one source.** This used to page a separate archive with a cursor and
  * fold fork lineage across page boundaries in the client, because the server held no
- * state between requests and a measured fork pair sat 268 rows apart. Both are gone:
+ * state between requests and measured fork pairs sit hundreds of rows apart. Both are gone:
  * rows are sessions, and a fork is a session of its own that belongs in the listing.
  *
  * # A known limitation, and it is the server's to fix

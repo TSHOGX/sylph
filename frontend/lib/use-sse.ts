@@ -23,7 +23,7 @@ const RECONNECT_DELAYS = [500, 1000, 2000, 5000, 10000];
 /**
  * How long to batch arriving events before repainting.
  *
- * A streaming agent emits deltas at token rate — the claude runner measured at
+ * A streaming agent emits deltas at token rate — `claude` measured at
  * ~20ms between tool-input deltas — and one `setState` per delta means one React
  * commit per token. Coalescing into a single frame per animation tick keeps the
  * repaint rate bounded by the display rather than by the model's speed, while

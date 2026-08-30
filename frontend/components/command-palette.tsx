@@ -245,12 +245,11 @@ export function CommandPalette() {
         group: t("palette.group.settings"),
         keywords: "machines agents connected reload",
         run: () => {
-          // Re-reads which machines are connected and what each can run. This used to
-          // be "refresh agent runners", which re-ran a `--describe` discovery pass on
-          // the backend — there is no such pass now: an agent is available when its CLI
-          // is on some machine's `PATH`, reported by that machine's envagent. So this
-          // is a plain refetch rather than a command that changes server state, and it
-          // is worth keeping because a laptop that just woke reports differently.
+          // Re-reads which machines are connected and what each can run. A plain refetch
+          // rather than a command that changes server state: an agent is available when
+          // its CLI is on some machine's `PATH`, reported by that machine's envagent, so
+          // there is no discovery pass to trigger. Worth keeping because a laptop that
+          // just woke reports differently.
           void queryClient.invalidateQueries({ queryKey: ["environments"] });
           closeOverlay();
         },

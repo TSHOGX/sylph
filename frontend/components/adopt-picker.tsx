@@ -103,7 +103,7 @@ export function AdoptPicker({ onClose }: { onClose: () => void }) {
       };
     },
     enabled: Boolean(environmentId),
-    // A listing costs seconds on a cold snapshot (measured: ~5.6 s for a whole machine),
+    // A listing costs seconds on a cold snapshot for a whole machine,
     // so refetching on remount would make reopening the picker feel broken. The server's
     // own snapshot expires in 30 s, which bounds how stale this can be either way.
     staleTime: 30_000,

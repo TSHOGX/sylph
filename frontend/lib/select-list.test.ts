@@ -187,9 +187,9 @@ describe("buildRows, keywords and the excerpt", () => {
   });
 
   /**
-   * The excerpt is the *product* of a match — TraceDB's full-text hit on a transcript
-   * the browser never loaded — so re-ranking by it would launder the caller's ranking
-   * through a weaker one. `meta` is excluded for a different reason: it names nothing.
+   * The excerpt is the *product* of a match — a full-text hit on a transcript the browser
+   * never loaded — so re-ranking by it would launder the caller's ranking through a weaker
+   * one. `meta` is excluded for a different reason: it names nothing.
    */
   it("does not match the excerpt", () => {
     expect(

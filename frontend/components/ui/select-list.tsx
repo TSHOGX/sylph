@@ -104,12 +104,11 @@ export function useSelectList<T extends SelectChoice>(
      * # Why this exists, when the whole point was one filtering rule
      *
      * The search overlay cannot be filtered here, and not for a stylistic reason.
-     * Its rows come from two sources ranked by different engines — live sessions by
-     * `fuzzyRank` in the browser, archive hits by TraceDB's full-text search over
-     * event bodies that were never sent to the client — and it fixes live above
-     * archive because a session you can open beats one you must import first. Ranking
-     * that merged list by `buildRows` would re-score archive hits against the only
-     * text the browser has, their titles, which is precisely the text that did *not*
+     * Its rows are ranked by two different engines — live sessions by `fuzzyRank` in the
+     * browser, and full-text hits by the server's index over event bodies that were
+     * never sent to the client. Ranking that merged list by `buildRows` would re-score
+     * a full-text hit against the only text the browser has, its title, which is
+     * precisely the text that did *not*
      * match. A hit found by its transcript would then rank last or vanish.
      *
      * The query also has to leave this hook either way: it drives a debounced
@@ -308,10 +307,10 @@ export function SelectFilter<T extends SelectChoice>({
   /**
    * Replaces the composed "Filter {name}" name outright.
    *
-   * For the field that is not a filter. The search overlay's query reaches TraceDB's
-   * full-text index over transcripts the browser never loaded, and the palette's runs
-   * a command rather than narrowing a set — calling either "Filter …" would name the
-   * wrong operation for a screen reader, which is the only place this string is read.
+   * For the field that is not a filter. The search overlay's query reaches the server's
+   * full-text index over transcripts the browser never loaded, and the palette's runs a
+   * command rather than narrowing a set — calling either "Filter …" would name the wrong
+   * operation for a screen reader, which is the only place this string is read.
    */
   label?: string;
   /**
@@ -330,7 +329,7 @@ export function SelectFilter<T extends SelectChoice>({
    */
   size?: "compact" | "roomy";
   /**
-   * Status beside the field: "searching archive…", a spinner.
+   * Status beside the field: "searching…", a spinner.
    *
    * Here rather than in the caller's own bar because it belongs to the query, and a
    * separate row above the list would move the rows down the moment a request
@@ -407,7 +406,7 @@ export function SelectFilter<T extends SelectChoice>({
  *
  * # Why a row shape rather than a render callback
  *
- * Every richer picker in the app — workspaces, archived sessions, the palette —
+ * Every richer picker in the app — workspaces, past sessions, the palette —
  * originally forked the whole engine because this renderer could only draw
  * `icon / label / hint`, and a workspace needs its path on a second line. The seam
  * that fixed that is `detail` and `meta` on the row *model*, not a `renderRow`

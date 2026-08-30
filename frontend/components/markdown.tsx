@@ -5,10 +5,9 @@
  *
  * # Why not react-markdown
  *
- * `react-markdown` + `remark-gfm` is ~45 KB gzipped, and Phase 4 measured
- * first-load JS at 190.4 KB against a 200 KB budget. Adding it would blow the
- * budget on its own, before the command palette, file browser, and diff view
- * that Phase 6 also needs.
+ * `react-markdown` + `remark-gfm` is ~45 KB gzipped, which is a substantial fraction of
+ * the whole first-load budget on its own — and the budget exists to protect first paint on
+ * a phone over a slow link (`docs/frontend-architecture.md` § Bundle size management).
  *
  * What agent output actually uses is a small subset: fenced code, inline code,
  * headings, lists, bold/italic, links, blockquotes, and tables. That is what

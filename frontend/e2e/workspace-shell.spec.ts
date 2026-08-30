@@ -5,7 +5,7 @@ import path from "node:path";
 import { createSession } from "./fixtures/session";
 
 /**
- * The Phase 6 shell: three panes, keyboard-driven overlays, and the Artifacts
+ * The shell: three panes, keyboard-driven overlays, and the Artifacts
  * file browser.
  *
  * These paths are keyboard- and focus-dependent, which is exactly what a static
@@ -569,7 +569,7 @@ test("binding a workspace from the empty sidebar area needs no session first", a
   await expect(groupHeader(page, "tmp")).toBeVisible();
 });
 
-// -------------------------------------------------------- Phase 7: composer
+// ----------------------------------------------------------------- composer
 //
 // The composer exposes the configuration a turn will use, generated from what the
 // agent reports rather than hardcoded — so these assert against whatever the E2E

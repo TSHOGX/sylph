@@ -35,7 +35,7 @@ export class ApiError extends Error {
 }
 
 /**
- * Parse a session's runner flags from the JSON column.
+ * Parse a session's spawn-time flags from the JSON column.
  *
  * The column is written by the backend and already validated, but parsed here
  * rather than duplicated across every row because JSON parsing can technically
@@ -214,8 +214,8 @@ export const api = {
      * omitted — see {@link BlockedReason}.
      *
      * Slow on a first call and fast thereafter, and the asymmetry is worth knowing before
-     * building a surface on it. Measured on a real machine: `pi` 531 rows in 90 ms,
-     * `claude` 1000 in 1.81 s, `codex` 1258 in 3.51 s — then 29 ms per page while the
+     * building a surface on it. Measured on a real machine, a cold enumerate costs
+     * hundreds of milliseconds to seconds per agent — then tens of milliseconds per page while the
      * server's snapshot lives. So a picker should render its loading state honestly rather
      * than assume a listing is instant.
      */
@@ -451,7 +451,7 @@ export const api = {
    * FTS5 over the server's own history.
    *
    * **Keep this off any polled path.** Measured against an equivalent store, every
-   * other read is microseconds to sub-millisecond while this is 174–260 ms — so
+   * other read is microseconds to sub-millisecond while this is orders of magnitude slower — so
    * gating it on a real query length is not politeness, it is the difference between
    * a search box and a load generator.
    */
@@ -463,9 +463,9 @@ export const api = {
       apiVersion: string;
       schemaVersion: number;
       /**
-       * Per environment, because "the agent will not start" has a different cause
-       * and a different fix per machine. This replaces a single `tracedb.available`
-       * boolean, which could not distinguish a missing CLI from a sleeping laptop.
+       * Per environment, because "the agent will not start" has a different cause and a
+       * different fix per machine — one global boolean cannot distinguish a missing CLI
+       * from a sleeping laptop from an exhausted sandbox node.
        *
        * `/health` is unauthenticated, so it reports availability and never counts.
        */

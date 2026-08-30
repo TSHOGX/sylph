@@ -9,12 +9,11 @@
  *
  * # Why no dependency
  *
- * `diff` (jsdiff) is ~30 KB minified and `diff-match-patch` ~70 KB. Phase 4
- * measured first-load JS at 190.4 KB against a 200 KB budget, so either would
- * blow it on its own. What is needed here is line-granularity Myers on inputs
- * that are almost always under a few hundred lines — a bounded, well-understood
- * algorithm. The library's value is character-level diffing and patch formats,
- * neither of which this UI renders.
+ * `diff` (jsdiff) is ~30 KB minified and `diff-match-patch` ~70 KB, either of which is a
+ * large share of the whole first-load budget. What is needed here is line-granularity
+ * Myers on inputs almost always under a few hundred lines — a bounded, well-understood
+ * algorithm. The libraries' value is character-level diffing and patch formats, neither of
+ * which this UI renders.
  *
  * # Algorithm
  *

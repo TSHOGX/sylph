@@ -196,25 +196,19 @@ function GeneralSection() {
 /**
  * Which machines exist, what each can run, and the model defaults that depend on it.
  *
- * # There is no "discovery" here any more, and that deleted a whole control
+ * # There is no discovery, so there is nothing to refresh
  *
- * This section used to hold a Refresh button that re-ran a `--describe` pass over
- * adapter directories, plus a fingerprint of what it found so the panel could
- * distinguish "re-read and something changed" from "re-read and nothing did" — because
- * a runner hardcoding its model list keeps reporting the same models until its script
- * is edited, which made "nothing changed" the common case and an honest button look
- * broken.
+ * An agent is available when its CLI is on some machine's `PATH` and reports a version,
+ * answered by that machine's envagent (`docs/api-design.md` § Agents and environments).
+ * There is no server-side pass to re-run, so this section offers no Refresh button and
+ * needs no fingerprint to tell "re-read and something changed" from "re-read and nothing
+ * did".
  *
- * All of it is gone with the discovery pass. An agent is available when its CLI is on
- * some machine's `PATH` and reports a version, answered by that machine's envagent
- * (`docs/api-design.md` § Agents and environments), so there is no pass on this side to
- * re-run and nothing for a fingerprint to compare. What replaces it is better: the list
- * is *per machine*, which is the question a user actually has — "why can I not use this
- * agent" now has one answer with one fix, and it names the machine.
+ * The list is **per machine**, which is the question a user actually has: "why can I not
+ * use this agent" gets one answer with one fix, and it names the machine.
  *
- * The `broken` map went the same way. A pass over directories could half-succeed and
- * needed to report a directory that failed to describe itself; `PATH` plus a version
- * cannot, so there is no third state between available and absent.
+ * There is also no third state between available and absent. `PATH` plus a version cannot
+ * half-succeed the way a directory scan can, so nothing here reports a broken agent.
  */
 function EnvironmentsSection() {
   const { settings, update } = useSettings();
