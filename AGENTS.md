@@ -286,6 +286,14 @@ time, which reads as flakiness rather than as accumulated fixture state.** Raisi
 does not help, because the cost grows without bound. `SYLPH_E2E_KEEP_HOME=1` opts out to
 inspect a journal after a failure.
 
+**So `npx playwright test` directly does not wipe, and a session of targeted re-runs
+accumulates exactly the state the wipe exists to prevent.** Measured: 727 sessions and
+11,168 blocks in a working checkout against 1 in a fresh one, after a day of running single
+specs to verify changes. The spec that then failed was fine — it passes on a clean home, and
+failed again as state rebuilt within one wipe cycle. Run `node e2e/reset-home.mjs` before
+believing a timing or ordering result from a direct invocation, and **anything asserting on a
+comparison across runs must own its reset** rather than assume one happened.
+
 **Neither Playwright hook can do that wipe, and both fail the same way.** A `globalSetup` runs
 *after* `webServer`, because `webServer` is a plugin and plugin setup is ordered first; module
 scope in `playwright.config.ts` runs again in every worker process. Both delete `journal.db`
