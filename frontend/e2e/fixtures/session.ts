@@ -132,7 +132,12 @@ export async function createSession(
     `session create failed: ${response.status()} ${await response.text()}`,
   ).toBe(true);
 
-  const { session } = (await response.json()) as { session: { id: string } };
+  const { draftId } = (await response.json()) as { draftId: string };
+  const firstTurn = await page.request.post(`/api/v1/sessions/draft/${encodeURIComponent(draftId)}/turns`, {
+    data: { text: "fixture setup" },
+  });
+  expect(firstTurn.ok(), `first turn failed: ${firstTurn.status()} ${await firstTurn.text()}`).toBe(true);
+  const { session } = (await firstTurn.json()) as { session: { id: string } };
   await page.goto(`/sessions/${session.id}`);
   await expect(page.getByLabel("Message")).toBeVisible();
   return session.id;

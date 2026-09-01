@@ -213,7 +213,10 @@ impl CodexAdapter {
         flags.insert(
             "sandbox".to_string(),
             FlagSpec {
-                choices: SANDBOX_MODES.iter().map(|value| value.to_string()).collect(),
+                choices: SANDBOX_MODES
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect(),
                 description: "Filesystem and network sandbox.".to_string(),
             },
         );
@@ -478,7 +481,9 @@ mod tests {
         let (argv, warnings) = CodexAdapter::argv_for(&spec(RequestedNativeId::Resume(id.clone())));
         assert_eq!(argv, vec!["codex".to_string(), "app-server".to_string()]);
         assert!(
-            warnings.iter().any(|warning| warning.contains("thread/resume")),
+            warnings
+                .iter()
+                .any(|warning| warning.contains("thread/resume")),
             "a resume must name the method that performs it: {warnings:?}"
         );
 

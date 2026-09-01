@@ -94,7 +94,11 @@ pub async fn replay(
                 });
             }
         }
-        frames.push(Frame { at_ms: block.created_at_ms, seq: block.seq, event });
+        frames.push(Frame {
+            at_ms: block.created_at_ms,
+            seq: block.seq,
+            event,
+        });
     }
 
     for row in state
@@ -103,7 +107,11 @@ pub async fn replay(
         .await?
     {
         let event = StreamEvent::from_row(&row);
-        frames.push(Frame { at_ms: event.created_at_ms, seq: event.seq, event });
+        frames.push(Frame {
+            at_ms: event.created_at_ms,
+            seq: event.seq,
+            event,
+        });
     }
 
     // By sequence first: it is the authority on order, and two events can share a

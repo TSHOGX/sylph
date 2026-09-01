@@ -141,7 +141,10 @@ pub async fn search(
         // than surfaced: a result a client cannot navigate to is worse than one row
         // fewer, and there is nothing a user could do about it.
         let Ok(session_id) = sylph_protocol::SessionId::decode(&hit.session_id) else {
-            tracing::warn!("Search index holds an unparseable session id: {}", hit.session_id);
+            tracing::warn!(
+                "Search index holds an unparseable session id: {}",
+                hit.session_id
+            );
             continue;
         };
         if environment

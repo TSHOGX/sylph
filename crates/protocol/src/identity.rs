@@ -276,7 +276,10 @@ mod tests {
     #[test]
     fn an_encoded_id_round_trips_through_decode() {
         let id = triple("9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60");
-        assert_eq!(id.encode(), "env7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60");
+        assert_eq!(
+            id.encode(),
+            "env7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60"
+        );
         assert_eq!(SessionId::decode(&id.encode()).unwrap(), id);
     }
 

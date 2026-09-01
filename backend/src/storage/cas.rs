@@ -203,7 +203,10 @@ mod tests {
     async fn a_blob_round_trips_by_its_hash() {
         let (blobs, _dir) = store();
         let hash = blobs.put(b"hello world").await.unwrap();
-        assert_eq!(blobs.get(&hash).await.unwrap().as_deref(), Some(&b"hello world"[..]));
+        assert_eq!(
+            blobs.get(&hash).await.unwrap().as_deref(),
+            Some(&b"hello world"[..])
+        );
     }
 
     /// The dedup property, which is what makes an agent re-reading one file cheap.
@@ -288,7 +291,10 @@ mod tests {
             .collect();
         let payload = store_text(&blobs, &text).await.unwrap();
         if let Payload::Zstd(bytes) = &payload {
-            assert!(bytes.len() < text.len(), "compression that grew the payload was kept");
+            assert!(
+                bytes.len() < text.len(),
+                "compression that grew the payload was kept"
+            );
         }
         assert_eq!(load_text(&blobs, &payload).await.unwrap(), text);
     }
@@ -350,11 +356,7 @@ mod tests {
     async fn objects_are_sharded_two_levels_deep() {
         let (blobs, _dir) = store();
         let hash = blobs.put(b"shard me").await.unwrap();
-        let expected = blobs
-            .root()
-            .join(&hash[0..2])
-            .join(&hash[2..4])
-            .join(&hash);
+        let expected = blobs.root().join(&hash[0..2]).join(&hash[2..4]).join(&hash);
         assert!(expected.is_file(), "expected {expected:?}");
     }
 
@@ -362,7 +364,9 @@ mod tests {
         let mut out = Vec::new();
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {

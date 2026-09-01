@@ -132,7 +132,10 @@ fn config_command(args: &[String]) -> anyhow::Result<()> {
             let mut notes = sylph_web_backend::config::seed(&resolved)?;
             notes.extend(sylph_web_backend::config::seed_soul(&resolved)?);
             if notes.is_empty() {
-                println!("Nothing to do — {} is already set up.", resolved.home.display());
+                println!(
+                    "Nothing to do — {} is already set up.",
+                    resolved.home.display()
+                );
             } else {
                 for note in notes {
                     println!("{note}");

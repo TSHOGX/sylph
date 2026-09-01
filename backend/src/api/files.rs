@@ -132,8 +132,8 @@ pub async fn tree(
 
     let mut entries = Vec::new();
     let mut truncated = false;
-    let reader =
-        std::fs::read_dir(&target).map_err(|e| paths::describe_io_error(&e, "read that directory"))?;
+    let reader = std::fs::read_dir(&target)
+        .map_err(|e| paths::describe_io_error(&e, "read that directory"))?;
 
     for entry in reader {
         let entry = match entry {
@@ -295,7 +295,8 @@ pub async fn content(
                 modified_at_ms: paths::modified_ms(&metadata),
             }));
         }
-        let bytes = std::fs::read(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
+        let bytes =
+            std::fs::read(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
         return Ok(Json(ContentResponse {
             path: paths::normalize_relative(&query.path),
             absolute_path: target.display().to_string(),
@@ -478,7 +479,7 @@ pub struct RawQuery {
 /// # Why this is the "open in a new tab" route
 ///
 /// The pane's viewer is bounded on purpose — `MAX_PREVIEW_BYTES` and
-/// [`TRUNCATE_TO_BYTES`] keep a 40 MB log from being pushed through JSON into a
+/// `TRUNCATE_TO_BYTES` keep a 40 MB log from being pushed through JSON into a
 /// 320px panel. But "the preview is truncated" should not mean "you cannot see
 /// this file", so the same file is reachable here in full, rendered by the
 /// browser's own viewer, which streams, finds, and zooms better than anything
@@ -565,7 +566,8 @@ pub async fn raw(
             .into_response());
     }
 
-    let bytes = std::fs::read(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
+    let bytes =
+        std::fs::read(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
 
     Ok((
         hardened_headers(&etag, &content_type, inline, filename.as_deref()),
@@ -756,7 +758,8 @@ fn preview_kind(path: &Path) -> Option<&'static str> {
 /// just to be discarded by the size check afterwards.
 fn read_prefix(path: &Path, limit: usize) -> Result<Vec<u8>> {
     use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
     let mut buffer = Vec::with_capacity(limit.min(64 * 1024));
     file.take(limit as u64)
         .read_to_end(&mut buffer)
@@ -769,19 +772,34 @@ fn read_prefix(path: &Path, limit: usize) -> Result<Vec<u8>> {
 /// Returns `(canonical_root, canonical_target)`. Every containment decision in
 /// this module goes through here; no handler joins paths itself.
 async fn resolve(state: &AppState, session_id: &str, relative: &str) -> Result<(PathBuf, PathBuf)> {
-    let session = state
-        .store
-        .get_session(&crate::api::sessions::decode_id(session_id)?)
-        .await?
-        .ok_or(Error::SessionNotFound)?;
+    // A prepared link has a working directory before it has a durable identity.  The
+    // handle is deliberately accepted only when it has the server-generated `draft-`
+    // shape; every other value still goes through the strict identity decoder below.
+    // This keeps the file API useful while composing without pretending a draft handle
+    // is a session id (the original bug sent `draft-...` through `SessionId::decode`).
+    let workdir = if session_id.starts_with("draft-") {
+        state
+            .links
+            .prepared_spec(session_id)
+            .await
+            .ok_or(Error::SessionNotFound)?
+            .workdir
+    } else {
+        state
+            .store
+            .get_session(&crate::api::sessions::decode_id(session_id)?)
+            .await?
+            .ok_or(Error::SessionNotFound)?
+            .workdir
+    };
 
     // Canonicalizing the root too matters on macOS, where `/tmp` is a symlink to
     // `/private/tmp`: comparing a canonical target against a non-canonical root
     // would reject every path under a session created in `/tmp`.
-    let root = std::fs::canonicalize(&session.workdir).map_err(|_| {
+    let root = std::fs::canonicalize(&workdir).map_err(|_| {
         Error::InvalidRequest(format!(
             "This session's working directory no longer exists: {}",
-            session.workdir
+            workdir
         ))
     })?;
 

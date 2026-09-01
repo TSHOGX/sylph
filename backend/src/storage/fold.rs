@@ -149,7 +149,10 @@ mod tests {
     fn deltas(parts: &[(&str, i64)]) -> Vec<Delta> {
         parts
             .iter()
-            .map(|(text, at_ms)| Delta { text: text.to_string(), at_ms: *at_ms })
+            .map(|(text, at_ms)| Delta {
+                text: text.to_string(),
+                at_ms: *at_ms,
+            })
             .collect()
     }
 
@@ -157,7 +160,12 @@ mod tests {
     /// arrived, text and timing both.
     #[test]
     fn folding_and_unfolding_reproduces_every_delta_and_its_arrival() {
-        let original = deltas(&[("I'll ", 1000), ("start ", 1034), ("by ", 1085), ("reading.", 1097)]);
+        let original = deltas(&[
+            ("I'll ", 1000),
+            ("start ", 1034),
+            ("by ", 1085),
+            ("reading.", 1097),
+        ]);
         let text = "I'll start by reading.";
 
         let folded = fold(&original, text, 1000).expect("must fold");
@@ -172,7 +180,10 @@ mod tests {
     fn folding_costs_eight_bytes_per_delta_rather_than_a_row() {
         let text = "x".repeat(2048);
         let original: Vec<Delta> = (0..400)
-            .map(|i| Delta { text: "x".repeat(5), at_ms: 1000 + i * 10 })
+            .map(|i| Delta {
+                text: "x".repeat(5),
+                at_ms: 1000 + i * 10,
+            })
             .collect();
         let text = &text[..2000];
 
@@ -218,8 +229,14 @@ mod tests {
     #[test]
     fn deltas_that_do_not_rebuild_the_final_text_refuse_to_fold() {
         let original = deltas(&[("hel", 0), ("lo", 10)]);
-        assert!(fold(&original, "hello there", 0).is_none(), "short of the final text");
-        assert!(fold(&original, "hi", 0).is_none(), "longer than the final text");
+        assert!(
+            fold(&original, "hello there", 0).is_none(),
+            "short of the final text"
+        );
+        assert!(
+            fold(&original, "hi", 0).is_none(),
+            "longer than the final text"
+        );
         // Same length, different bytes: the length check alone would pass this.
         assert!(fold(&original, "world", 0).is_none());
     }
@@ -268,7 +285,10 @@ mod tests {
     #[test]
     fn a_zero_length_delta_is_not_replayed_as_an_empty_frame() {
         let text = "ab";
-        let folded = Folded { offsets: vec![1, 1, 2], timings: vec![0, 5, 5] };
+        let folded = Folded {
+            offsets: vec![1, 1, 2],
+            timings: vec![0, 5, 5],
+        };
         let replayed = unfold(text, &folded, 0);
         assert_eq!(replayed.len(), 2);
         assert_eq!(replayed[0].text, "a");
@@ -280,7 +300,10 @@ mod tests {
     #[test]
     fn an_offset_past_the_text_is_clamped_rather_than_panicking() {
         // Defensive: a corrupted row must not take down a replay.
-        let folded = Folded { offsets: vec![2, 99], timings: vec![0, 0] };
+        let folded = Folded {
+            offsets: vec![2, 99],
+            timings: vec![0, 0],
+        };
         let replayed = unfold("abc", &folded, 0);
         let rebuilt: String = replayed.iter().map(|d| d.text.as_str()).collect();
         assert_eq!(rebuilt, "abc");

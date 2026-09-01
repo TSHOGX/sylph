@@ -68,9 +68,7 @@ fn session_dir_name(session_id: &SessionId) -> String {
     let mut out = String::with_capacity(encoded.len());
     for byte in encoded.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' => {
-                out.push(byte as char)
-            }
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' => out.push(byte as char),
             other => out.push_str(&format!("%{other:02X}")),
         }
     }
@@ -84,6 +82,57 @@ pub async fn stage(
     turn_id: &str,
     attachments: &[AttachmentData],
 ) -> Result<Vec<PathBuf>> {
+    stage_into(
+        data_dir
+            .join("attachments")
+            .join(session_dir_name(session_id))
+            .join(turn_id),
+        attachments,
+    )
+    .await
+}
+
+/// Decode and write attachments for a prepared draft.
+///
+/// A draft has no native session identity yet, so it cannot use [`stage`]'s
+/// durable session directory.  The draft handle is server-minted and scoped
+/// under `attachments/drafts`; the paths remain valid after promotion, which is
+/// important because the adapter may read them after accepting the first turn.
+pub async fn stage_draft(
+    data_dir: &Path,
+    draft_id: &str,
+    turn_id: &str,
+    attachments: &[AttachmentData],
+) -> Result<Vec<PathBuf>> {
+    stage_into(
+        data_dir
+            .join("attachments")
+            .join("drafts")
+            .join(scope_dir_name(draft_id))
+            .join(turn_id),
+        attachments,
+    )
+    .await
+}
+
+/// Remove all staged files for a draft that was abandoned before promotion.
+pub async fn cleanup_draft(data_dir: &Path, draft_id: &str) {
+    let dir = data_dir
+        .join("attachments")
+        .join("drafts")
+        .join(scope_dir_name(draft_id));
+    if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(
+                "Could not clean draft attachment directory {}: {}",
+                dir.display(),
+                error
+            );
+        }
+    }
+}
+
+async fn stage_into(dir: PathBuf, attachments: &[AttachmentData]) -> Result<Vec<PathBuf>> {
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
@@ -95,12 +144,6 @@ pub async fn stage(
         )));
     }
 
-    // `turn_id` is server-minted (a UUID) and needs no such treatment; the session
-    // component is the only one carrying a vendor's string.
-    let dir = data_dir
-        .join("attachments")
-        .join(session_dir_name(session_id))
-        .join(turn_id);
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| Error::Internal(format!("Failed to create attachment dir: {}", e)))?;
@@ -141,6 +184,22 @@ pub async fn stage(
     Ok(staged)
 }
 
+/// Encode a server-owned scope before using it as a path component.
+fn scope_dir_name(scope: &str) -> String {
+    let mut out = String::with_capacity(scope.len());
+    for byte in scope.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' => out.push(byte as char),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    if out.is_empty() {
+        "scope".to_string()
+    } else {
+        out
+    }
+}
+
 /// Reduce a client-supplied filename to a single safe path component.
 ///
 /// The name reaches us from the browser and is used to build a filesystem path,
@@ -158,7 +217,11 @@ fn safe_filename(name: &str, index: usize) -> String {
 /// between two attachments in one message are the hazard, and wrong for a file
 /// the user is placing in their own project by name.
 pub fn sanitize_filename(name: &str) -> String {
-    let base = name.rsplit(['/', '\\']).next().unwrap_or("attachment").trim();
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("attachment")
+        .trim();
 
     let cleaned: String = base
         .chars()
@@ -245,7 +308,11 @@ mod tests {
                     "a staged path must stay under the data directory: {name}"
                 );
                 // One component, so `join` cannot climb.
-                assert_eq!(std::path::Path::new(&name).components().count(), 1, "{name}");
+                assert_eq!(
+                    std::path::Path::new(&name).components().count(),
+                    1,
+                    "{name}"
+                );
             }
         }
 

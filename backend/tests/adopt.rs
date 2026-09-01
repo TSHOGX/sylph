@@ -67,7 +67,10 @@ async fn a_malformed_environment_id_is_a_bad_request() {
         )
         .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json_body(response).await["error"]["code"], "INVALID_REQUEST");
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "INVALID_REQUEST"
+    );
 }
 
 /// Adopting a session the store holds records it and ingests its transcript.
@@ -315,7 +318,10 @@ async fn a_foreign_cursor_is_refused_rather_than_restarting_the_scan() {
         ))
         .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json_body(response).await["error"]["code"], "INVALID_REQUEST");
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "INVALID_REQUEST"
+    );
 }
 
 /// A listing is well-formed and paged even when this machine holds no sessions.
@@ -344,7 +350,10 @@ async fn a_listing_is_shaped_correctly_whatever_this_machine_holds() {
     for row in sessions {
         // Every row must be adoptable-or-explained. A row with neither an id nor a reason
         // is one a picker can only offer and then fail on.
-        assert!(row["id"].is_string(), "every row carries the triple it would adopt as");
+        assert!(
+            row["id"].is_string(),
+            "every row carries the triple it would adopt as"
+        );
         assert!(row["agent"].is_string());
         assert!(row["nativeId"].is_string());
         // `stream` is unreachable for anything read off a disk.

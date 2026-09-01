@@ -186,7 +186,10 @@ mod tests {
             )
             .await;
 
-        assert!(index.get(&NativeIndex::key("local", "pi", None)).await.is_none());
+        assert!(index
+            .get(&NativeIndex::key("local", "pi", None))
+            .await
+            .is_none());
         assert!(index
             .get(&NativeIndex::key("local", "pi", Some("/w/app-old")))
             .await
@@ -230,9 +233,14 @@ mod tests {
         let b = NativeIndex::key("local", "pi", None);
         index.put(a.clone(), Arc::new(vec![summary("a")])).await;
         index.put(b.clone(), Arc::new(vec![summary("b")])).await;
-        index.put(a.clone(), Arc::new(vec![summary("a2"), summary("a3")])).await;
+        index
+            .put(a.clone(), Arc::new(vec![summary("a2"), summary("a3")]))
+            .await;
 
         assert_eq!(index.get(&a).await.expect("replaced").len(), 2);
-        assert!(index.get(&b).await.is_some(), "an unrelated key must survive");
+        assert!(
+            index.get(&b).await.is_some(),
+            "an unrelated key must survive"
+        );
     }
 }

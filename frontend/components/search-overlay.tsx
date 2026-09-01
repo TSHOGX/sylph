@@ -3,12 +3,9 @@
 /**
  * `Cmd+K`: find a session and jump to it.
  *
- * **One store, so one kind of result.** This used to hold two sources ranked
- * separately — live sessions matched client-side, and a separate archive searched
- * server-side — plus the machinery that came with having two: a filter dropping hits
- * that had already been imported, an import mutation, an "importing…" badge, and an
- * "archive unavailable" footer. All of it is gone, because a hit is now a session that
- * can simply be opened.
+ * **One store, so one kind of result.** Search and listings both name durable sessions
+ * from the server-owned store. A hit can simply be opened; there is no import step or
+ * second id space to reconcile.
  *
  * What is worth recording is that the deduplication was not merely redundant, it was
  * a hazard: it compared a live row's remembered archive id against a hit's id across
@@ -126,7 +123,7 @@ export function SearchOverlay() {
       .slice(0, PER_SOURCE)
       .map((result) => ({
         session: result.session,
-        excerpt: result.bestMatch?.snippet?.replace(/\s+/g, " "),
+        excerpt: result.bestMatch?.excerpt?.replace(/\s+/g, " "),
       }));
 
     return [...local, ...indexed];
@@ -150,7 +147,7 @@ export function SearchOverlay() {
             <FidelityMarker value={session.fidelity} />
             {environments.showEnvironment && (
               <EnvironmentChip
-                name={session.environmentName}
+                name={environments.nameOf(session.environment) ?? session.environment}
                 reachableVia={relayName(session.environment, environments)}
               />
             )}

@@ -255,15 +255,30 @@ mod tests {
         let jpeg = write("b.png", b"\xff\xd8\xff\xe0\x00\x10JFIF");
         assert_eq!(image_mime(&jpeg), Some("image/jpeg"));
 
-        assert_eq!(image_mime(&write("c.gif", b"GIF89a\x01\x00\x01\x00\x00\x00")), Some("image/gif"));
-        assert_eq!(image_mime(&write("d.gif", b"GIF87a\x01\x00\x01\x00\x00\x00")), Some("image/gif"));
+        assert_eq!(
+            image_mime(&write("c.gif", b"GIF89a\x01\x00\x01\x00\x00\x00")),
+            Some("image/gif")
+        );
+        assert_eq!(
+            image_mime(&write("d.gif", b"GIF87a\x01\x00\x01\x00\x00\x00")),
+            Some("image/gif")
+        );
 
         // The marker is at offset 8, so this needs the full twelve bytes.
-        assert_eq!(image_mime(&write("e.webp", b"RIFF\x24\x00\x00\x00WEBPVP8 ")), Some("image/webp"));
+        assert_eq!(
+            image_mime(&write("e.webp", b"RIFF\x24\x00\x00\x00WEBPVP8 ")),
+            Some("image/webp")
+        );
         // A RIFF container that is not WEBP — a WAV — must not be claimed as an image.
-        assert_eq!(image_mime(&write("f.wav", b"RIFF\x24\x00\x00\x00WAVEfmt ")), None);
+        assert_eq!(
+            image_mime(&write("f.wav", b"RIFF\x24\x00\x00\x00WAVEfmt ")),
+            None
+        );
 
-        assert_eq!(image_mime(&write("g.txt", b"just text, not an image")), None);
+        assert_eq!(
+            image_mime(&write("g.txt", b"just text, not an image")),
+            None
+        );
         // Too short to match anything, which must answer None rather than panic.
         assert_eq!(image_mime(&write("h.png", b"\x89PN")), None);
         assert_eq!(image_mime(&dir.join("absent.png")), None);
@@ -273,10 +288,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "sylph-native-{tag}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("sylph-native-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

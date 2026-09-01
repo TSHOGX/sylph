@@ -1,5 +1,6 @@
 //! Sessions: listing, reading, starting, adopting, and patching.
 
+use crate::models::now_ms;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -7,7 +8,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sylph_protocol::{AgentName, EnvironmentId, NativeId, SessionId};
-use crate::models::now_ms;
 
 use crate::{
     db::store::SessionFilter,
@@ -102,7 +102,21 @@ pub async fn list(
 
 #[derive(Serialize)]
 pub struct SessionResponse {
-    session: Session,
+    pub session: Session,
+}
+
+#[derive(Serialize)]
+pub struct PreparedSessionResponse {
+    /// Opaque, process-local handle. It is intentionally not a SessionId and is not
+    /// accepted by history/listing endpoints.
+    #[serde(rename = "draftId")]
+    pub draft_id: String,
+    pub environment: EnvironmentId,
+    pub agent: String,
+    pub workdir: String,
+    pub title: Option<String>,
+    #[serde(rename = "injectIdentity")]
+    pub inject_identity: bool,
 }
 
 pub async fn get(
@@ -202,6 +216,7 @@ pub async fn history(
 pub fn block_to_event(block: &crate::storage::Block) -> StreamEvent {
     StreamEvent {
         seq: block.seq,
+        arrival_turn_id: Some(block.turn_id.clone()),
         kind: block.kind.clone(),
         phase: block.phase.clone(),
         stream_id: block.stream_id.clone(),
@@ -301,89 +316,110 @@ fn contain_workdir(state: &AppState, requested: &str) -> Result<String> {
 
 /// POST /api/v1/sessions
 ///
-/// **This starts an agent.** It does not reserve a row.
+/// **This starts an agent and returns an in-memory draft.** It does not reserve a row.
 ///
 /// A session has no identity until an agent has assigned one
-/// (`docs/architecture.md` § Identity), so there is nothing to create in advance and
-/// the insert follows the spawn. [`crate::links::LinkManager::open_session`] owns that
-/// ordering; this handler validates what a client asked for and hands it over.
-///
-/// What this deletes, recorded because the shape is easy to reinvent: the previous
-/// version minted a `Uuid::new_v4()` here and wrote a row with the agent unstarted,
-/// producing a class of session with no work in it. `DELETE /sessions/{id}` for
-/// empties, the frontend probe that called it on unmount, and the window where a
-/// session had no native id all go with it. A failed spawn now reports at the start
-/// screen instead of leaving a dead row behind.
+/// (`docs/architecture.md` § Identity), so the draft is kept only by the link manager.
+/// The first real turn atomically writes the session and turn; discarding the draft
+/// closes the process without leaving any history behind.
 pub async fn create(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
-) -> Result<(StatusCode, Json<SessionResponse>)> {
-    let environment = EnvironmentId::parse(req.environment.trim())
-        .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+) -> Result<(StatusCode, Json<PreparedSessionResponse>)> {
+    // All new sessions use the same prepared lifecycle. There is no eager-create
+    // compatibility path: a session becomes durable only after its first real turn.
+    create_prepared(State(state), Json(req)).await
+}
 
-    // Refused before the spawn rather than after, so an unknown agent is a 400 about
-    // the request instead of a failed process.
-    // Read from the same place the link path resolves an adapter, so this gate cannot
-    // refuse an agent a link could start. `AGENTS.md` records the inverse of that
-    // mismatch costing a release: discovery listed an agent as usable while every link
-    // to it failed naming a different root.
-    let known = state.adapters.available();
-    if !known.iter().any(|name| name == &req.agent) {
+/// Start an agent without durable history for POST /api/v1/sessions.
+///
+/// This endpoint is the draft half of the two-phase lifecycle.  It deliberately
+/// returns only an opaque handle; no `sessions` row is written until the first turn
+/// promotes the prepared link.
+async fn create_prepared(
+    State(state): State<AppState>,
+    Json(req): Json<CreateSessionRequest>,
+) -> Result<(StatusCode, Json<PreparedSessionResponse>)> {
+    // The local build has exactly one environment, and future envagent-backed
+    // deployments will resolve this through the selected environment's connection.
+    // Parsing alone is not enough: it would let a well-formed id for an unreachable
+    // machine start a process locally and stamp the resulting session with a foreign
+    // identity. Creation and adoption must share the same environment gate.
+    let environment = require_environment(&state, &req.environment)?;
+    if !state
+        .adapters
+        .available()
+        .iter()
+        .any(|name| name == &req.agent)
+    {
         return Err(Error::InvalidRequest(format!(
-            "Unknown agent: {}. This build can run: {:?}. Availability is per \
-             environment — see GET /api/v1/environments.",
-            req.agent, known
+            "Unknown agent: {}",
+            req.agent
         )));
     }
-
-    // Existence is necessary and nowhere near sufficient: this path is where a process
-    // gets spawned.
     let workdir = contain_workdir(&state, &req.workdir)?;
-
+    let agent_name = req.agent.clone();
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let inject_identity = req.inject_identity;
     let flags = req
         .flags
         .as_ref()
         .and_then(|value| value.as_object().cloned())
         .map(|map| {
             map.into_iter()
-                .filter_map(|(key, value)| {
-                    value
-                        .as_str()
-                        .map(|text| (key.clone(), text.to_string()))
-                        .or_else(|| Some((key, value.to_string())))
-                })
+                .filter_map(|(key, value)| value.as_str().map(|text| (key, text.to_string())))
                 .collect()
         })
         .unwrap_or_default();
-
-    let session = state
+    let draft_id = state
         .links
-        .open_session(crate::links::OpenSpec {
-            environment,
-            agent: req.agent,
-            workdir,
-            title: req.title.map(|title| title.trim().to_string()),
-            inject_identity: req.inject_identity,
+        .prepare_handle(crate::links::OpenSpec {
+            environment: environment.clone(),
+            agent: agent_name.clone(),
+            workdir: workdir.clone(),
+            title: title.clone(),
+            inject_identity,
             flags,
-            // Set only by a fork, which is a separate operation.
             parent_session: None,
         })
         .await
-        // A typed error travels through `anyhow` and is recovered by **downcast, never
-        // by matching the message text** — the same rule `AGENTS.md` states for adapter
-        // refusal codes: the wording is the producer's and may be reworded, while the
-        // type is declared contract. Without this, a duplicate triple would be reported
-        // as `AGENT_START_FAILED`, which is a 502 blaming the agent for a 409 about the
-        // request.
-        .map_err(|error| match error.downcast::<Error>() {
-            Ok(typed) => typed,
-            Err(other) => Error::AgentStartFailed(other),
-        })?;
-
+        .map_err(Error::AgentStartFailed)?;
     Ok((
         StatusCode::CREATED,
-        Json(SessionResponse { session }),
+        Json(PreparedSessionResponse {
+            draft_id,
+            environment,
+            agent: agent_name,
+            workdir,
+            title,
+            inject_identity,
+        }),
     ))
+}
+
+/// GET /api/v1/sessions/draft/{id} — read immutable metadata for a prepared link.
+pub async fn prepared_get(
+    State(state): State<AppState>,
+    Path(draft_id): Path<String>,
+) -> Result<Json<PreparedSessionResponse>> {
+    let spec = state
+        .links
+        .prepared_spec(&draft_id)
+        .await
+        .ok_or(Error::SessionNotFound)?;
+    Ok(Json(PreparedSessionResponse {
+        draft_id,
+        environment: spec.environment,
+        agent: spec.agent,
+        workdir: spec.workdir,
+        title: spec.title,
+        inject_identity: spec.inject_identity,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -766,7 +802,10 @@ pub async fn enumerate(
             None => match adapter.enumerate(&filter).await {
                 Ok(summaries) => {
                     let summaries = std::sync::Arc::new(summaries);
-                    state.native_index.put(key, std::sync::Arc::clone(&summaries)).await;
+                    state
+                        .native_index
+                        .put(key, std::sync::Arc::clone(&summaries))
+                        .await;
                     summaries
                 }
                 Err(error) => {
@@ -922,7 +961,8 @@ pub async fn adopt(
     let native_id = NativeId::new(native_raw);
     let session_id = SessionId::new(
         environment,
-        AgentName::parse(agent.clone()).map_err(|error| Error::InvalidRequest(error.to_string()))?,
+        AgentName::parse(agent.clone())
+            .map_err(|error| Error::InvalidRequest(error.to_string()))?,
         native_id.clone(),
     );
 
@@ -1042,7 +1082,9 @@ pub async fn adopt(
         let ingest = state.ingest.clone();
         let watched = session_id.clone();
         let stream = adapter.watch(&native_id).await.map_err(|error| {
-            Error::Internal(format!("Could not watch {agent}'s native session: {error:#}"))
+            Error::Internal(format!(
+                "Could not watch {agent}'s native session: {error:#}"
+            ))
         })?;
         tokio::spawn(async move {
             let report = ingest.drain(&watched, stream).await;
@@ -1054,13 +1096,18 @@ pub async fn adopt(
                 report.read_errors
             );
         });
-        return Ok((StatusCode::CREATED, Json(SessionResponse { session: stored })));
+        return Ok((
+            StatusCode::CREATED,
+            Json(SessionResponse { session: stored }),
+        ));
     }
 
     // One pass, awaited: a `201` means the transcript is readable, not that a task was
     // started. A client refetching history on the response would otherwise race it.
     let stream = adapter.adopt(&native_id).await.map_err(|error| {
-        Error::Internal(format!("Could not read {agent}'s native session: {error:#}"))
+        Error::Internal(format!(
+            "Could not read {agent}'s native session: {error:#}"
+        ))
     })?;
     let report = state.ingest.drain(&session_id, stream).await;
     tracing::info!(

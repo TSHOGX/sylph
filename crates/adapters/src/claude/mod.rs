@@ -461,7 +461,9 @@ mod tests {
     fn spec(mode: Option<&str>) -> RunSpec {
         RunSpec {
             workdir: "/tmp".into(),
-            native_id: RequestedNativeId::Dictate(NativeId::new("11111111-2222-3333-4444-555555555555")),
+            native_id: RequestedNativeId::Dictate(NativeId::new(
+                "11111111-2222-3333-4444-555555555555",
+            )),
             inject_identity: false,
             identity_preamble: None,
             flags: BTreeMap::new(),
@@ -474,7 +476,9 @@ mod tests {
     }
 
     fn flag_after(argv: &[String], flag: &str) -> Option<String> {
-        argv.iter().position(|part| part == flag).map(|at| argv[at + 1].clone())
+        argv.iter()
+            .position(|part| part == flag)
+            .map(|at| argv[at + 1].clone())
     }
 
     /// The permission-mode validation rule, as a unit test.
@@ -534,13 +538,19 @@ mod tests {
     #[test]
     fn a_bypassing_launch_still_registers_the_approval_channel() {
         let argv = argv(Some("bypassPermissions"));
-        assert_eq!(flag_after(&argv, "--permission-prompt-tool").as_deref(), Some("stdio"));
+        assert_eq!(
+            flag_after(&argv, "--permission-prompt-tool").as_deref(),
+            Some("stdio")
+        );
     }
 
     #[test]
     fn an_interactive_launch_registers_it_too() {
         let argv = argv(Some("default"));
-        assert_eq!(flag_after(&argv, "--permission-prompt-tool").as_deref(), Some("stdio"));
+        assert_eq!(
+            flag_after(&argv, "--permission-prompt-tool").as_deref(),
+            Some("stdio")
+        );
     }
 
     /// Both halves matter: the flag has to be present, or `set_permission_mode` is
@@ -549,12 +559,19 @@ mod tests {
     #[test]
     fn bypass_is_made_reachable_without_starting_in_it() {
         let argv = argv(Some("default"));
-        assert!(argv.iter().any(|part| part == "--allow-dangerously-skip-permissions"));
+        assert!(argv
+            .iter()
+            .any(|part| part == "--allow-dangerously-skip-permissions"));
         assert!(
-            !argv.iter().any(|part| part == "--dangerously-skip-permissions"),
+            !argv
+                .iter()
+                .any(|part| part == "--dangerously-skip-permissions"),
             "the launch mode must stay as asked"
         );
-        assert_eq!(flag_after(&argv, "--permission-mode").as_deref(), Some("default"));
+        assert_eq!(
+            flag_after(&argv, "--permission-mode").as_deref(),
+            Some("default")
+        );
     }
 
     /// An unaccepted mode is substituted rather than forwarded, and the substitution is
@@ -563,9 +580,15 @@ mod tests {
     #[test]
     fn an_unaccepted_mode_is_substituted_and_reported() {
         let (argv, warnings) = ClaudeAdapter::argv_for(&spec(Some("ask")));
-        assert_eq!(flag_after(&argv, "--permission-mode").as_deref(), Some("default"));
+        assert_eq!(
+            flag_after(&argv, "--permission-mode").as_deref(),
+            Some("default")
+        );
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("ask"), "the warning must name what was refused");
+        assert!(
+            warnings[0].contains("ask"),
+            "the warning must name what was refused"
+        );
     }
 
     /// Dictate and resume are different flags on this CLI, and collapsing them is what
@@ -597,7 +620,10 @@ mod tests {
             "--include-partial-messages",
             "--forward-subagent-text",
         ] {
-            assert!(argv.iter().any(|part| part == required), "missing {required}");
+            assert!(
+                argv.iter().any(|part| part == required),
+                "missing {required}"
+            );
         }
     }
 
@@ -609,7 +635,9 @@ mod tests {
         without.inject_identity = false;
         without.identity_preamble = Some("ignored".into());
         let (argv, _) = ClaudeAdapter::argv_for(&without);
-        assert!(!argv.iter().any(|part| part == "--append-system-prompt-file"));
+        assert!(!argv
+            .iter()
+            .any(|part| part == "--append-system-prompt-file"));
 
         let mut with = spec(None);
         with.inject_identity = true;
@@ -637,7 +665,9 @@ mod tests {
     /// are hidden in a dialog that closes.
     #[test]
     fn commands_whose_output_is_worth_keeping_are_not_control() {
-        for prompt in ["context", "compact", "usage", "clear", "doctor", "init", "mcp", "agents"] {
+        for prompt in [
+            "context", "compact", "usage", "clear", "doctor", "init", "mcp", "agents",
+        ] {
             assert!(
                 !CONTROL_COMMANDS.iter().any(|(name, _)| *name == prompt),
                 "/{prompt} must stay a prompt command"

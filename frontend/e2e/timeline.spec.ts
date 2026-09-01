@@ -249,7 +249,12 @@ test("a settled fan-out reports exact durations and withholds the rank for the o
   // a settled trajectory reported when it ended and not when it began, and the start
   // had to be reconstructed from whatever the interior happened to forward. Now the
   // block's own start is on the wire, so a settled delegate is exact.
-  await expect(overview).not.toContainText(/lower bound/);
+  // The overview itself still explains why the unfinished Cutoff row is a lower
+  // bound.  Assert the completed Survey row instead: its accessible summary must
+  // carry an exact duration and no forwarded-events caveat.
+  await expect(
+    overview.getByRole("button", { name: /^Survey, finished, took \d/ }),
+  ).toHaveCount(1);
   await expect(
     overview.getByRole("button", { name: /^Survey, .*measured from the work it forwarded/ }),
   ).toHaveCount(0);

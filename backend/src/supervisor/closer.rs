@@ -41,7 +41,13 @@ impl TurnCloser {
         consolidator: Consolidator,
         writer: crate::db::JournalWriter,
     ) -> Self {
-        Self { store, hub, seq, consolidator, writer }
+        Self {
+            store,
+            hub,
+            seq,
+            consolidator,
+            writer,
+        }
     }
 
     /// Record a turn as terminal, resolve what it left open, and hand it to history.
@@ -75,7 +81,12 @@ impl TurnCloser {
     /// Keying it on the stream's announcement with a bounded grace period was the
     /// alternative, and it leaves the server publishing a state no client can name, so
     /// every future reader has to re-derive the same timer.
-    pub async fn close(&self, session_id: &sylph_protocol::SessionId, turn_id: &str, outcome: Outcome) -> bool {
+    pub async fn close(
+        &self,
+        session_id: &sylph_protocol::SessionId,
+        turn_id: &str,
+        outcome: Outcome,
+    ) -> bool {
         let (status, error_code, message) = outcome.as_status();
 
         let claimed = match self
@@ -120,7 +131,8 @@ impl TurnCloser {
         // on the pair, because `settling` is not terminal.
         let _ = self.store.update_session_status(session_id, "idle").await;
 
-        self.close_open_trajectories(session_id, turn_id, &outcome).await;
+        self.close_open_trajectories(session_id, turn_id, &outcome)
+            .await;
 
         if !message.is_empty() {
             let _ = self
@@ -276,6 +288,7 @@ impl TurnCloser {
         turn_id: &str,
         mut event: StreamEvent,
     ) -> crate::error::Result<()> {
+        event.arrival_turn_id = Some(turn_id.to_string());
         event.seq = self.seq.next(session_id).await?;
 
         if event.is_stable() {
@@ -290,7 +303,8 @@ impl TurnCloser {
             }
         }
 
-        self.hub.publish(turn_id, event).await;
+        self.hub.publish(turn_id, event.clone()).await;
+        self.hub.publish_trace(&session_id.encode(), event).await;
         Ok(())
     }
 }

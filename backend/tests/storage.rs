@@ -35,7 +35,14 @@ fn session_id() -> sylph_protocol::SessionId {
     )
 }
 
-fn event(seq: i32, kind: &str, phase: Option<&str>, stream: Option<&str>, text: &str, at_ms: i64) -> Event {
+fn event(
+    seq: i32,
+    kind: &str,
+    phase: Option<&str>,
+    stream: Option<&str>,
+    text: &str,
+    at_ms: i64,
+) -> Event {
     Event {
         id: None,
         session_id: session_id(),
@@ -72,7 +79,14 @@ async fn a_streamed_block_replays_exactly_what_the_client_saw() {
         event(3, "assistant", Some("delta"), Some("a1"), "read ", 1134),
         event(4, "assistant", Some("delta"), Some("a1"), "the ", 1185),
         event(5, "assistant", Some("delta"), Some("a1"), "config.", 1197),
-        event(6, "assistant", Some("completed"), Some("a1"), "I'll read the config.", 1200),
+        event(
+            6,
+            "assistant",
+            Some("completed"),
+            Some("a1"),
+            "I'll read the config.",
+            1200,
+        ),
     ];
 
     let blocks = history::consolidate(&events);
@@ -113,7 +127,14 @@ async fn a_trajectory_keeps_the_name_an_earlier_phase_gave_it() {
     let closed = event(3, "subagent", Some("completed"), Some("s1"), "", 1200);
 
     let child = {
-        let mut e = event(4, "assistant", Some("completed"), Some("b1"), "found it", 1150);
+        let mut e = event(
+            4,
+            "assistant",
+            Some("completed"),
+            Some("b1"),
+            "found it",
+            1150,
+        );
         e.span = Some("s1".to_string());
         e
     };
@@ -160,7 +181,14 @@ async fn a_trajectory_left_open_survives_consolidation_as_running() {
     let mut opened = event(1, "subagent", Some("started"), Some("bg-task"), "", 1000);
     opened.name = Some("Background: worker".to_string());
     opened.data_json = r#"{"is_backgrounded":true}"#.to_string();
-    let sibling = event(2, "assistant", Some("completed"), Some("a1"), "dispatched", 1100);
+    let sibling = event(
+        2,
+        "assistant",
+        Some("completed"),
+        Some("a1"),
+        "dispatched",
+        1100,
+    );
 
     history
         .put_blocks(&history::consolidate(&[opened, sibling]))
@@ -256,7 +284,7 @@ async fn a_late_outcome_corrects_a_consolidated_trajectory() {
 
     let amended = history
         .reconcile_trajectory(
-        &session_id().encode(),
+            &session_id().encode(),
             "bg-task",
             "turn-later",
             &sylph_web_backend::supervisor::TrajectoryOutcome {
@@ -312,7 +340,14 @@ async fn deltas_become_one_block_rather_than_a_row_each() {
         ));
     }
     let full = "token ".repeat(200);
-    events.push(event(201, "assistant", Some("completed"), Some("a1"), &full, 2000));
+    events.push(event(
+        201,
+        "assistant",
+        Some("completed"),
+        Some("a1"),
+        &full,
+        2000,
+    ));
 
     history
         .put_blocks(&history::consolidate(&events))
@@ -336,7 +371,14 @@ async fn a_consolidated_block_publishes_when_it_began_and_not_only_when_it_close
     let events = vec![
         event(0, "assistant", Some("started"), Some("a1"), "", 1000),
         event(1, "assistant", Some("delta"), Some("a1"), "half ", 1500),
-        event(2, "assistant", Some("completed"), Some("a1"), "half done", 2000),
+        event(
+            2,
+            "assistant",
+            Some("completed"),
+            Some("a1"),
+            "half done",
+            2000,
+        ),
     ];
     history
         .put_blocks(&history::consolidate(&events))
@@ -422,7 +464,14 @@ async fn an_unstreamed_block_replays_as_a_single_arrival() {
 async fn a_large_block_is_externalized_and_still_reads_back_whole() {
     let (history, _dir) = history_store().await;
     let big = "x".repeat(20_000);
-    let events = vec![event(0, "tool_result", Some("completed"), Some("c1"), &big, 1000)];
+    let events = vec![event(
+        0,
+        "tool_result",
+        Some("completed"),
+        Some("c1"),
+        &big,
+        1000,
+    )];
 
     history
         .put_blocks(&history::consolidate(&events))
@@ -477,7 +526,10 @@ async fn consolidating_the_same_turn_twice_is_harmless() {
     history.put_blocks(&blocks).await.unwrap();
     history.put_blocks(&blocks).await.unwrap();
 
-    assert_eq!(history.block_count(&session_id().encode()).await.unwrap(), 2);
+    assert_eq!(
+        history.block_count(&session_id().encode()).await.unwrap(),
+        2
+    );
 }
 
 /// The ordering rule: history holds the turn before the journal drops it. A turn
@@ -552,8 +604,22 @@ async fn multibyte_deltas_survive_the_round_trip() {
     let (history, _dir) = history_store().await;
     let events = vec![
         event(0, "assistant", Some("delta"), Some("a1"), "我会先", 1000),
-        event(1, "assistant", Some("delta"), Some("a1"), "读取配置。", 1050),
-        event(2, "assistant", Some("completed"), Some("a1"), "我会先读取配置。", 1100),
+        event(
+            1,
+            "assistant",
+            Some("delta"),
+            Some("a1"),
+            "读取配置。",
+            1050,
+        ),
+        event(
+            2,
+            "assistant",
+            Some("completed"),
+            Some("a1"),
+            "我会先读取配置。",
+            1100,
+        ),
     ];
 
     history
@@ -571,7 +637,9 @@ fn count_files(root: &std::path::Path) -> usize {
     let mut count = 0;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -693,7 +761,10 @@ async fn replay_reproduces_the_deltas_and_not_only_the_final_text() {
 
     // The mock streams "mock " then "mock reply", so a faithful replay carries the
     // partial arrival as well as the settled value.
-    assert!(stream.contains("\"phase\":\"delta\""), "no deltas replayed: {stream}");
+    assert!(
+        stream.contains("\"phase\":\"delta\""),
+        "no deltas replayed: {stream}"
+    );
     assert!(stream.contains("mock reply"));
 }
 
@@ -723,7 +794,12 @@ async fn a_retention_pass_examines_a_consolidated_session_and_keeps_unconfirmed_
     backend.await_turn(&turn_id).await;
     backend.await_consolidation(&turn_id).await;
 
-    let before = backend.state.history.block_count(&session_id).await.unwrap();
+    let before = backend
+        .state
+        .history
+        .block_count(&session_id)
+        .await
+        .unwrap();
     assert!(before > 0, "the session must hold history to retain");
 
     let report = backend.state.retention.pass().await;
@@ -739,7 +815,12 @@ async fn a_retention_pass_examines_a_consolidated_session_and_keeps_unconfirmed_
         "nothing confirmed it, so nothing may be dropped: {report:?}"
     );
     assert_eq!(
-        backend.state.history.block_count(&session_id).await.unwrap(),
+        backend
+            .state
+            .history
+            .block_count(&session_id)
+            .await
+            .unwrap(),
         before,
         "every block stays"
     );
@@ -976,12 +1057,22 @@ async fn a_second_retention_pass_over_unchanged_history_changes_nothing() {
     backend.await_consolidation(&turn_id).await;
 
     backend.state.retention.pass().await;
-    let after_first = backend.state.history.block_count(&session_id).await.unwrap();
+    let after_first = backend
+        .state
+        .history
+        .block_count(&session_id)
+        .await
+        .unwrap();
 
     backend.state.retention.pass().await;
 
     assert_eq!(
-        backend.state.history.block_count(&session_id).await.unwrap(),
+        backend
+            .state
+            .history
+            .block_count(&session_id)
+            .await
+            .unwrap(),
         after_first,
         "a repeated pass must be a no-op, not a slow erosion of history"
     );
@@ -1081,8 +1172,22 @@ async fn a_compressed_and_an_externalized_block_are_both_findable() {
 
     history
         .put_blocks(&history::consolidate(&[
-            event(0, "assistant", Some("completed"), Some("a1"), &compressed, 1000),
-            event(1, "tool_result", Some("completed"), Some("t1"), &externalized, 2000),
+            event(
+                0,
+                "assistant",
+                Some("completed"),
+                Some("a1"),
+                &compressed,
+                1000,
+            ),
+            event(
+                1,
+                "tool_result",
+                Some("completed"),
+                Some("t1"),
+                &externalized,
+                2000,
+            ),
         ]))
         .await
         .unwrap();
@@ -1120,11 +1225,18 @@ async fn many_matches_in_one_session_are_one_result_carrying_a_count() {
             )
         })
         .collect();
-    history.put_blocks(&history::consolidate(&blocks)).await.unwrap();
+    history
+        .put_blocks(&history::consolidate(&blocks))
+        .await
+        .unwrap();
 
     let hits = history.search("widget", 10).await.unwrap();
 
-    assert_eq!(hits.len(), 1, "five matching blocks in one session are one result");
+    assert_eq!(
+        hits.len(),
+        1,
+        "five matching blocks in one session are one result"
+    );
     assert_eq!(hits[0].hits, 5, "and the count says how many matched");
 }
 
@@ -1149,7 +1261,10 @@ async fn pruning_a_block_removes_it_from_the_index() {
         .unwrap();
     assert_eq!(history.search("findable", 10).await.unwrap().len(), 1);
 
-    history.prune_below(&session_id().encode(), 0).await.unwrap();
+    history
+        .prune_below(&session_id().encode(), 0)
+        .await
+        .unwrap();
 
     assert!(
         history.search("findable", 10).await.unwrap().is_empty(),
@@ -1180,7 +1295,10 @@ async fn re_consolidating_a_turn_does_not_index_it_twice() {
 
     let hits = history.search("indexed", 10).await.unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].hits, 1, "the second pass replaced rather than added");
+    assert_eq!(
+        hits[0].hits, 1,
+        "the second pass replaced rather than added"
+    );
 }
 
 /// Chinese is searchable by word, which is the whole reason the tokenizer is `jieba`.
@@ -1245,7 +1363,15 @@ async fn chinese_text_is_searchable_by_word() {
 async fn no_user_input_reaches_the_fts5_expression_parser() {
     let (history, _dir) = history_store().await;
 
-    for query in ["\"unbalanced", "needle-one", "a AND b", "NOT x", "*", "(", "col:v"] {
+    for query in [
+        "\"unbalanced",
+        "needle-one",
+        "a AND b",
+        "NOT x",
+        "*",
+        "(",
+        "col:v",
+    ] {
         assert!(
             history.search(query, 10).await.is_ok(),
             "`{query}` must be searched as text, not parsed as syntax"

@@ -16,7 +16,7 @@
 //! A reply is `{"type":"control_response","response":{"subtype":"success","request_id":"…",…}}`
 //! — the id is **one level down** — while a request the *vendor* raised is
 //! `{"type":"control_request","request_id":"…","request":{…}}`, with its id at the top level.
-//! So [`reply_id`] does three things and each prevents a distinct silent failure:
+//! So `reply_id` does three things and each prevents a distinct silent failure:
 //!
 //! - **It tests `type` first.** `can_use_tool` and `AskUserQuestion` arrive as
 //!   `control_request` on this same channel. A predicate reading only an id would route an
@@ -28,7 +28,7 @@
 //!   while the CLI answered correctly.
 //! - **It requires our own prefix.** This channel carries frames from id spaces this session
 //!   does not own. Unlike the two above it is **defence rather than a measured collision**,
-//!   and [`REQUEST_PREFIX`] says exactly how far the evidence goes.
+//!   and `REQUEST_PREFIX` says exactly how far the evidence goes.
 //!
 //! # Reading a control reply: the discriminant comes first
 //!
@@ -37,7 +37,7 @@
 //! Reading `response.response or {}` mapped every refusal onto the same empty value a
 //! successful no-payload control returns, and the cost was the reported bug: selecting
 //! `bypassPermissions` was refused by the CLI, recorded as applied, answered 200, and
-//! rendered as the current mode while every tool call went on prompting. [`Control::send`]
+//! rendered as the current mode while every tool call went on prompting. `Control::send`
 //! reads `subtype` before it reaches for a payload, so `{}` is reachable from exactly one
 //! outcome.
 
@@ -46,9 +46,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};
@@ -58,11 +58,11 @@ use sylph_protocol::{
     Resolution, RunSpec, Session, SessionCapabilities, SessionMessage, TurnInput,
 };
 
-use super::requests::{ask_from, answer_payload, AskKind};
+use super::requests::{answer_payload, ask_from, AskKind};
 use super::surface::{capabilities_from, config_from, models_from};
 use super::{Correlation, SETTABLE_PERMISSION_MODES, SUPPORTED_DIALOG_KINDS};
-use crate::process::{Child, Line, Spawn};
 use crate::now_ms;
+use crate::process::{Child, Line, Spawn};
 
 /// The vendor refused a control it understood.
 ///
@@ -262,6 +262,9 @@ impl Control {
 /// What the pump learns and the session's methods need, and vice versa.
 #[derive(Default)]
 struct Shared {
+    /// Native history identity, assigned by Claude on the first real turn when the
+    /// process was launched without `--session-id`.
+    native_id: std::sync::RwLock<Option<NativeId>>,
     /// Pending vendor requests → the response shape each expects.
     ///
     /// **Remembered from the request, never inferred from the answer.** Sending a dialog's
@@ -272,17 +275,24 @@ struct Shared {
     /// The model the **vendor** last said it is running.
     ///
     /// Arrives on `system/init` and nowhere else. *Measured on 2.1.251:* the `initialize`
-    /// reply carries no `current_model` — not on open, and not after a successful
-    /// `set_model` either — so this is the only vendor source there is, and the config
-    /// surface's `currentValue` is absent until a turn has produced one. Writing what was
-    /// last *set* here would make the adapter the authority on a fact only the vendor
-    /// holds, which is the defect `docs/session-protocol.md` § Three rules records.
+    /// reply carries no current model — not on open, and not after a successful
+    /// `set_model` either — so this is the only vendor source. Until it arrives,
+    /// `pending_model` is used solely to keep a validated picker selection visible.
     observed_model: Mutex<Option<String>>,
+
+    /// A model selected through Sylph's config control, but not yet echoed by
+    /// Claude in a `system/init` notification.
+    ///
+    /// Claude's `set_model` acknowledgement has no payload and `initialize`
+    /// does not expose the current model.  Keeping this adapter-local pending
+    /// value lets a successful, catalogue-validated selection be reflected in
+    /// the refreshed surface immediately.  The next vendor `system/init` is
+    /// authoritative and clears this value before rebuilding capabilities.
+    pending_model: Mutex<Option<String>>,
 }
 
 /// A live `claude` session.
 pub struct ClaudeSession {
-    native_id: NativeId,
     control: Arc<Control>,
     shared: Arc<Shared>,
     /// Yielded **once** by [`Session::events`]. A second call is a bug rather than a second
@@ -389,11 +399,23 @@ async fn pump(
                 }
             }
             _ => {
-                let emission = correlation.translate(&payload, now_ms());
-                if let Some(model) = emission.observed_model {
-                    *shared.observed_model.lock().await = Some(model);
+                if let Some(id) = payload
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                {
+                    if let Ok(mut native) = shared.native_id.write() {
+                        *native = Some(NativeId::new(id));
+                    }
                 }
-                if emission.refresh_capabilities {
+                let emission = correlation.translate(&payload, now_ms());
+                let observed_model = emission.observed_model;
+                if let Some(ref model) = observed_model {
+                    *shared.observed_model.lock().await = Some(model.clone());
+                    // A real vendor report supersedes a locally pending set.
+                    *shared.pending_model.lock().await = None;
+                }
+                if emission.refresh_capabilities || observed_model.is_some() {
                     // **Spawned, never awaited here.** This task is the only reader of the
                     // reply it is about to wait for, so awaiting inline would deadlock the
                     // whole session on its own `initialize`. `commands_changed` carries only
@@ -456,15 +478,26 @@ async fn pump(
 /// adapter answer from its own memory, so anything that changed the session by another
 /// route (the agent's own `/model`, a plugin loading, a mode the CLI normalized) is
 /// invisible until something happens to invalidate the cache. `docs/session-protocol.md`
-/// § Three rules: read current values from the vendor, not from what you last set.
+/// § Three rules: read current values from the vendor, not from what you last set. The one
+/// exception is Claude's model control: its acknowledgement and initialize response both
+/// omit the current model, so a catalogue-validated pending selection is exposed until the
+/// next `system/init` report arrives.
 ///
 /// `supportedDialogKinds` is **not** re-sent. Per the CLI's own schema the declaration is
 /// first-attached-client-wins and later initializes do not change it, so re-sending would
 /// be a field that reads as effective and is not.
 async fn refreshed_surface(control: &Control, shared: &Shared) -> Result<SessionCapabilities> {
     let initialize = control.send("initialize", json!({})).await?;
-    let observed = shared.observed_model.lock().await.clone();
-    Ok(capabilities_from(&initialize, observed.as_deref()))
+    // A pending local selection is preferred until the vendor reports the
+    // resolved native model.  This is only an adapter presentation hint; the
+    // vendor's later `system/init` always wins.
+    let pending = shared.pending_model.lock().await.clone();
+    let model = if pending.is_some() {
+        pending
+    } else {
+        shared.observed_model.lock().await.clone()
+    };
+    Ok(capabilities_from(&initialize, model.as_deref()))
 }
 
 /// Start one `claude` process and hand back the session it holds.
@@ -492,17 +525,8 @@ pub async fn run(spec: RunSpec) -> Result<Box<dyn Session>> {
 /// therefore receives the real command line and a test can assert on it.
 pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Session>> {
     let native_id = match &spec.native_id {
-        RequestedNativeId::Dictate(id) | RequestedNativeId::Resume(id) => id.clone(),
-        // `dictates_native_id` is true for this agent, so the server always names one.
-        // Refused rather than minted here: an id this adapter invented would not be the
-        // one the server keys the session on, and a session with no id can never be
-        // resumed — every link death would make it permanently unlinkable.
-        RequestedNativeId::New => {
-            return Err(anyhow!(
-                "claude dictates its session id, so the server must name one; opening \
-                 without an id would make the session unresumable"
-            ))
-        }
+        RequestedNativeId::Dictate(id) | RequestedNativeId::Resume(id) => Some(id.clone()),
+        RequestedNativeId::New => None,
     };
 
     let (mut argv, warnings) = super::ClaudeAdapter::argv_for(&spec);
@@ -520,7 +544,7 @@ pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Sess
             let path = std::env::temp_dir().join(format!(
                 "sylph-claude-soul-{}-{}.md",
                 std::process::id(),
-                native_id.as_str()
+                native_id.as_ref().map_or("new", NativeId::as_str)
             ));
             std::fs::write(&path, text)
                 .with_context(|| format!("writing the identity preamble to {}", path.display()))?;
@@ -557,7 +581,11 @@ pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Sess
     .await?;
 
     let control = Arc::new(Control { child });
-    let shared = Arc::new(Shared::default());
+    let shared = Arc::new(Shared {
+        native_id: std::sync::RwLock::new(native_id.clone()),
+        pending_model: Mutex::new(spec.flags.get("model").cloned()),
+        ..Shared::default()
+    });
     // Bounded. A turn streams thousands of deltas, and a channel small enough to block
     // would make the pump's backpressure part of what a duration measures.
     let (tx, rx) = mpsc::channel(1024);
@@ -579,7 +607,6 @@ pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Sess
         .context("claude did not complete the initialize handshake")?;
 
     Ok(Box::new(ClaudeSession {
-        native_id,
         control,
         shared,
         stream: Mutex::new(Some(rx)),
@@ -635,6 +662,12 @@ impl ClaudeSession {
                 self.control
                     .send("set_model", json!({"model": requested}))
                     .await?;
+                // `set_model` succeeds without a confirmation payload and a
+                // subsequent `initialize` still omits the current model.  The
+                // value was validated against that very catalogue, so retain it
+                // as a pending adapter-local selection until `system/init`
+                // reports the vendor's resolved id.
+                *self.shared.pending_model.lock().await = Some(requested.to_string());
             }
             "effort" => {
                 let Some(requested) = value.as_str() else {
@@ -645,10 +678,13 @@ impl ClaudeSession {
                 // Scoped to the **selected** model, because `supportedEffortLevels` is a
                 // field on a model entry: a session-global effort enumeration is wrong for
                 // any account whose models differ.
-                let offered = config_from(
-                    &initialize,
-                    self.shared.observed_model.lock().await.as_deref(),
-                );
+                let pending = self.shared.pending_model.lock().await.clone();
+                let model = if pending.is_some() {
+                    pending
+                } else {
+                    self.shared.observed_model.lock().await.clone()
+                };
+                let offered = config_from(&initialize, model.as_deref());
                 let Some(option) = offered.iter().find(|option| option.id == "effort") else {
                     return Err(anyhow::Error::new(AdapterError::unsupported_field(
                         "the selected model reports no effort levels",
@@ -717,9 +753,9 @@ impl ClaudeSession {
             // load-bearing: it means "no such option", which justifies disabling the
             // control, where `INVALID_VALUE` must leave it usable.
             _ => {
-                return Err(anyhow::Error::new(AdapterError::unsupported_field(format!(
-                    "'{id}' is not settable on a claude session"
-                ))))
+                return Err(anyhow::Error::new(AdapterError::unsupported_field(
+                    format!("'{id}' is not settable on a claude session"),
+                )))
             }
         }
         Ok(())
@@ -728,8 +764,8 @@ impl ClaudeSession {
 
 #[async_trait]
 impl Session for ClaudeSession {
-    fn native_id(&self) -> &NativeId {
-        &self.native_id
+    fn native_id(&self) -> Option<NativeId> {
+        self.shared.native_id.read().ok().and_then(|id| id.clone())
     }
 
     async fn capabilities(&self) -> Result<SessionCapabilities> {
@@ -796,6 +832,30 @@ impl Session for ClaudeSession {
                 "message": {"role": "user", "content": build_content(&text, &turn.attachments)},
             }))
             .await
+    }
+
+    /// Send the first turn of a prepared link and wait until Claude reports its id.
+    ///
+    /// `initialize` exposes capabilities before a user message, but Claude does not put a
+    /// session id on that response.  The id arrives on the first `system/init` frame instead;
+    /// waiting here keeps that vendor timing inside the adapter rather than making the server
+    /// guess or require a fabricated id.  The event pump continues to run while we wait, so
+    /// callers must buffer the stream until promotion has created the durable row.
+    async fn send_initial(&self, turn: TurnInput) -> Result<NativeId> {
+        self.send(turn).await?;
+        let deadline = tokio::time::Instant::now() + crate::process::REPLY_TIMEOUT;
+        loop {
+            if let Some(native) = self.native_id() {
+                return Ok(native);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "claude accepted the first turn but did not report a session id within {}s",
+                    crate::process::REPLY_TIMEOUT.as_secs()
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     async fn interrupt(&self) -> Result<()> {
@@ -868,6 +928,22 @@ impl Session for ClaudeSession {
             return Err(error);
         }
         Ok(refreshed_surface(&self.control, &self.shared).await?.config)
+    }
+
+    fn launch_flag_for_config(&self, id: &str, value: &Value) -> Option<(String, String)> {
+        let value = value.as_str()?.to_string();
+        match id {
+            // These controls have the same launch vocabulary and are safe to carry
+            // across a detach/reattach. `permissionMode` deliberately maps to the
+            // adapter's launch-only spelling; the server must not know that the two
+            // names describe one Claude setting.
+            "model" | "effort" => Some((id.to_string(), value)),
+            "permissionMode" if super::LAUNCH_PERMISSION_MODES.contains(&value.as_str()) => {
+                Some(("mode".to_string(), value))
+            }
+            // Output style and fast mode are process controls with no launch flag.
+            _ => None,
+        }
     }
 
     /// Answer a request this session raised.
@@ -1067,6 +1143,32 @@ while IFS= read -r line; do
 done
 "#;
 
+    /// A peer that reports a resolved model only when the first turn starts.
+    ///
+    /// This is the ordering the real CLI uses: `set_model` has an empty success
+    /// response, while `system/init` carries the resolved model (including the
+    /// optional `[1m]` context suffix). The adapter's pending selection must be
+    /// replaced by that report and effort levels rebuilt from its catalogue entry.
+    const MODEL_PEER: &str = r#"
+log="$1"
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$log"
+  id=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"subtype":"initialize"'*)
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"commands":[{"name":"model","description":"Set the model","argumentHint":""}],"models":[{"value":"default","displayName":"Default","resolvedModel":"claude-opus-5[1m]","supportedEffortLevels":["low","high"]},{"value":"sonnet[1m]","displayName":"Sonnet 5 (1M)","resolvedModel":"claude-sonnet-5[1m]","supportedEffortLevels":["low","medium","high"]},{"value":"haiku","displayName":"Haiku"}],"current_permission_mode":"default","fast_mode_state":"off"}}}\n' "$id"
+      ;;
+    *'"subtype":"set_model"'*)
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s"}}\n' "$id"
+      ;;
+    *'"type":"user"'*)
+      printf '{"type":"system","subtype":"init","session_id":"claude-model-observed","model":"claude-sonnet-5[1m]","permissionMode":"default"}\n'
+      printf '{"type":"result","subtype":"success","result":"done"}\n'
+      ;;
+  esac
+done
+"#;
+
     /// A peer that dies immediately, for the paths that must diagnose a dead vendor.
     const DEAD_PEER: &str = "echo 'claude: bad argument' >&2; exit 1";
 
@@ -1136,7 +1238,10 @@ done
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            panic!("the adapter never wrote the expected line: {:?}", self.written());
+            panic!(
+                "the adapter never wrote the expected line: {:?}",
+                self.written()
+            );
         }
 
         /// Wait for the user message the adapter wrote.
@@ -1147,8 +1252,7 @@ done
         /// Wait for the reply the adapter sent to one vendor request.
         async fn awaited_reply(&self, vendor_id: &str) -> Value {
             self.awaited(|line| {
-                line["type"] == "control_response"
-                    && line["response"]["request_id"] == vendor_id
+                line["type"] == "control_response" && line["response"]["request_id"] == vendor_id
             })
             .await["response"]
                 .clone()
@@ -1193,11 +1297,17 @@ done
             spec,
         )
         .await?;
-        Ok(Peer { session, log, script: path })
+        Ok(Peer {
+            session,
+            log,
+            script: path,
+        })
     }
 
     async fn peer(tag: &str) -> Peer {
-        peer_with(tag, PEER, spec(tag)).await.expect("the peer initializes")
+        peer_with(tag, PEER, spec(tag))
+            .await
+            .expect("the peer initializes")
     }
 
     /// The predicate's three conditions, each pinned on the frame it has to reject.
@@ -1250,7 +1360,10 @@ done
         );
 
         // An event, which is most of the stream.
-        assert_eq!(reply_id(&json!({"type": "result", "subtype": "success"})), None);
+        assert_eq!(
+            reply_id(&json!({"type": "result", "subtype": "success"})),
+            None
+        );
         // A top-level id, which is where it is *not*: answering would mean the nesting was
         // never read.
         assert_eq!(
@@ -1289,7 +1402,9 @@ while IFS= read -r line; do
   esac
 done
 "#;
-        let mut peer = peer_with("collides", COLLIDES, spec("collides")).await.unwrap();
+        let mut peer = peer_with("collides", COLLIDES, spec("collides"))
+            .await
+            .unwrap();
         let stream = peer.session.events().unwrap();
 
         // The reply must be the vendor's confirmation, not the approval.
@@ -1305,7 +1420,9 @@ done
         assert_eq!(mode.current_value, Some(json!("plan")));
 
         // And the approval must have reached the stream, so somebody is asked.
-        let request = first_request(stream).await.expect("the approval reaches a client");
+        let request = first_request(stream)
+            .await
+            .expect("the approval reaches a client");
         assert_eq!(request.kind, RequestKind::Approval);
         assert_eq!(request.tool.as_deref(), Some("Bash"));
     }
@@ -1327,7 +1444,11 @@ done
         let png = dir.join("shot.png");
         // A real PNG signature, because `image_mime` sniffs the header rather than trusting
         // the extension — a wrong guess there sends a binary blob as text.
-        std::fs::write(&png, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, b'A', b'B']).unwrap();
+        std::fs::write(
+            &png,
+            [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, b'A', b'B'],
+        )
+        .unwrap();
         let notes = dir.join("notes.txt");
         std::fs::write(&notes, "not an image").unwrap();
 
@@ -1338,7 +1459,9 @@ done
                 notes.to_string_lossy().to_string(),
             ],
         );
-        let blocks = content.as_array().expect("images make it an array of blocks");
+        let blocks = content
+            .as_array()
+            .expect("images make it an array of blocks");
         assert_eq!(blocks[0]["type"], json!("image"));
         assert_eq!(blocks[0]["source"]["media_type"], json!("image/png"));
         assert_eq!(blocks[0]["source"]["data"], json!("iVBORw0KGgpBQg=="));
@@ -1372,25 +1495,21 @@ done
     #[tokio::test]
     async fn the_native_id_is_the_dictated_one() {
         let peer = peer("native-id").await;
-        assert_eq!(peer.session.native_id().as_str(), "native-native-id");
+        assert_eq!(
+            peer.session.native_id().as_ref().unwrap().as_str(),
+            "native-native-id"
+        );
     }
 
-    /// A session the server named no id for is refused, not minted for.
-    ///
-    /// An id this adapter invented would not be the one the server keys the session on, and
-    /// a session with no id can never be resumed — every link death would make it
-    /// permanently unlinkable, which was a real bug on the resume path.
+    /// A session launched without a dictated id remains nameless until Claude reports one.
     #[tokio::test]
-    async fn an_unnamed_session_is_refused_rather_than_given_an_invented_id() {
+    async fn an_unnamed_session_waits_for_a_vendor_identity() {
         let mut unnamed = spec("unnamed");
         unnamed.native_id = RequestedNativeId::New;
-        let error = peer_with("unnamed", PEER, unnamed)
+        let peer = peer_with("unnamed", PEER, unnamed)
             .await
-            .expect_err("claude dictates its id");
-        assert!(
-            error.to_string().contains("unresumable"),
-            "the error must say why, got: {error}"
-        );
+            .expect("initializes");
+        assert!(peer.session.native_id().is_none());
     }
 
     /// **The handshake is awaited, so an argv mistake is diagnosable.**
@@ -1421,7 +1540,9 @@ done
         let declared = sent[0]["supportedDialogKinds"]
             .as_array()
             .expect("the kinds are declared");
-        assert!(declared.iter().any(|kind| kind == "permission_ask_user_question"));
+        assert!(declared
+            .iter()
+            .any(|kind| kind == "permission_ask_user_question"));
         assert_eq!(declared.len(), SUPPORTED_DIALOG_KINDS.len());
     }
 
@@ -1435,7 +1556,11 @@ done
         assert_eq!(surface.subagents.len(), 1);
         let model = surface.config_option("model").expect("a model option");
         assert_eq!(
-            model.options.iter().map(|c| c.value.as_str()).collect::<Vec<_>>(),
+            model
+                .options
+                .iter()
+                .map(|c| c.value.as_str())
+                .collect::<Vec<_>>(),
             vec!["default", "sonnet"]
         );
         // A second `initialize` went out, which is what "read from the vendor" costs and
@@ -1477,10 +1602,16 @@ done
     #[tokio::test]
     async fn a_refused_mode_leaves_the_surface_saying_what_is_really_running() {
         let peer = peer("refused-surface").await;
-        let _ = peer.session.set_config("permissionMode", json!("bypassPermissions")).await;
+        let _ = peer
+            .session
+            .set_config("permissionMode", json!("bypassPermissions"))
+            .await;
         let surface = peer.session.capabilities().await.unwrap();
         assert_eq!(
-            surface.config_option("permissionMode").unwrap().current_value,
+            surface
+                .config_option("permissionMode")
+                .unwrap()
+                .current_value,
             Some(json!("default")),
             "a refused mode must not be reported as current"
         );
@@ -1491,7 +1622,11 @@ done
     #[tokio::test]
     async fn an_applied_mode_is_reported_from_the_vendors_confirmation() {
         let peer = peer("applied").await;
-        let refreshed = peer.session.set_config("permissionMode", json!("plan")).await.unwrap();
+        let refreshed = peer
+            .session
+            .set_config("permissionMode", json!("plan"))
+            .await
+            .unwrap();
         let mode = refreshed.iter().find(|o| o.id == "permissionMode").unwrap();
         assert_eq!(mode.current_value, Some(json!("plan")));
     }
@@ -1544,7 +1679,10 @@ done
 
         // And an enumerated one does reach it, so the validation is a filter rather than a
         // wall.
-        peer.session.set_config("model", json!("sonnet")).await.unwrap();
+        peer.session
+            .set_config("model", json!("sonnet"))
+            .await
+            .unwrap();
         assert_eq!(peer.controls("set_model")[0]["model"], json!("sonnet"));
     }
 
@@ -1566,7 +1704,10 @@ done
         // The vendor wants `{"settings": {...}}`, measured — a bare field is refused with
         // "requires settings to be an object", and `set_max_thinking_tokens` wants an integer
         // budget rather than an effort name. Two wrong guesses, both silent.
-        peer.session.set_config("effort", json!("high")).await.unwrap();
+        peer.session
+            .set_config("effort", json!("high"))
+            .await
+            .unwrap();
         assert_eq!(
             peer.controls("apply_flag_settings")[0]["settings"]["effort"],
             json!("high")
@@ -1603,7 +1744,10 @@ done
             error.downcast_ref::<AdapterError>().unwrap().code,
             RefusalCode::InvalidValue
         );
-        peer.session.set_config("fastMode", json!(true)).await.unwrap();
+        peer.session
+            .set_config("fastMode", json!(true))
+            .await
+            .unwrap();
         assert_eq!(
             peer.controls("apply_flag_settings")[0]["settings"]["fastMode"],
             json!(true)
@@ -1615,34 +1759,133 @@ done
     #[tokio::test]
     async fn a_set_answers_with_the_refreshed_array() {
         let peer = peer("refresh").await;
-        let refreshed = peer.session.set_config("model", json!("sonnet")).await.unwrap();
+        let refreshed = peer
+            .session
+            .set_config("model", json!("sonnet"))
+            .await
+            .unwrap();
         assert!(refreshed.iter().any(|option| option.id == "model"));
         assert!(refreshed.iter().any(|option| option.id == "permissionMode"));
     }
 
-    /// **A successful set answers from the vendor's read-back, never from the request.**
+    /// **A successful model set is reflected immediately, then superseded by the vendor.**
     ///
-    /// This is the sharpest available form of that rule on this CLI, and it is sharp because
-    /// of a measurement: `set_model` answers **success** and the vendor then reports no
-    /// `current_model` at all — not in the `initialize` reply, not anywhere. So after a set
-    /// that genuinely succeeded, the honest `currentValue` is **absent**. An adapter writing
-    /// what it asked for would report `"sonnet"` here, which is a claim the vendor never
-    /// made, and it would look right.
-    ///
-    /// Worth stating why the weaker test is not enough: asserting the surface after a
-    /// *refusal* passes either way, because a refusal returns early and never reaches the
-    /// write-back. Only a successful set can distinguish the two.
+    /// `set_model` answers **success** without a payload and `initialize` still omits a
+    /// current model. The adapter validates the requested value against that catalogue and
+    /// keeps it as a pending selection so the picker does not continue to show the model
+    /// from an earlier turn. A later `system/init` report is authoritative and replaces the
+    /// pending value with Claude's resolved id.
     #[tokio::test]
-    async fn a_successful_set_reports_only_what_the_vendor_confirmed() {
+    async fn a_successful_model_set_is_visible_before_vendor_echo() {
         let peer = peer("readback").await;
-        let refreshed = peer.session.set_config("model", json!("sonnet")).await.unwrap();
-        let model = refreshed.iter().find(|option| option.id == "model").unwrap();
+        let refreshed = peer
+            .session
+            .set_config("model", json!("sonnet"))
+            .await
+            .unwrap();
+        let model = refreshed
+            .iter()
+            .find(|option| option.id == "model")
+            .unwrap();
         assert_eq!(
-            model.current_value, None,
-            "the vendor confirmed no model, so none may be reported"
+            model.current_value,
+            Some(json!("sonnet")),
+            "a successful, catalogue-validated model set must be visible immediately"
         );
         // The write did happen — this is a read-back rule, not a refusal.
         assert_eq!(peer.controls("set_model")[0]["model"], json!("sonnet"));
+    }
+
+    /// A later `system/init` is the vendor's authoritative model report. It must
+    /// replace the adapter-local pending value and keep the effort picker scoped
+    /// to the resolved catalogue entry (including `[1m]` model ids).
+    #[tokio::test]
+    async fn a_vendor_model_report_replaces_pending_selection_and_keeps_effort() {
+        let mut peer = peer_with("model-observed", MODEL_PEER, spec("model-observed"))
+            .await
+            .expect("the peer initializes");
+        let stream = peer.session.events().expect("the stream yields once");
+
+        // The picker must immediately show the selection even though Claude's
+        // set_model acknowledgement carries no value.
+        peer.session
+            .set_config("model", json!("haiku"))
+            .await
+            .unwrap();
+        let pending = peer.session.capabilities().await.unwrap();
+        assert_eq!(
+            pending.config_option("model").unwrap().current_value,
+            Some(json!("haiku"))
+        );
+        assert!(
+            pending.config_option("effort").is_none(),
+            "haiku has no effort levels"
+        );
+
+        peer.session
+            .send(TurnInput {
+                text: "first turn".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let _ = peer.user_message().await;
+
+        // Drain enough for the pump to observe system/init. The result itself is
+        // not the assertion; this loop waits on the adapter's read-back state.
+        for _ in 0..100 {
+            let surface = peer.session.capabilities().await.unwrap();
+            if surface
+                .config_option("model")
+                .and_then(|option| option.current_value.clone())
+                == Some(json!("sonnet[1m]"))
+            {
+                assert_eq!(surface.config_option("effort").unwrap().options.len(), 3);
+                drop(stream);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("system/init did not replace the pending model selection");
+    }
+
+    /// A prepared Claude process can expose capabilities before it has a native id.  The
+    /// first real user turn is the adapter-owned boundary that waits for the vendor's id;
+    /// events emitted while that wait is in flight remain on the stream for the caller.
+    #[tokio::test]
+    async fn an_initial_turn_returns_the_vendor_id_and_keeps_early_events() {
+        let mut unnamed = spec("initial-id");
+        unnamed.native_id = RequestedNativeId::New;
+        let mut peer = peer_with("initial-id", MODEL_PEER, unnamed)
+            .await
+            .expect("the peer initializes");
+        assert!(peer.session.native_id().is_none());
+        let stream = peer.session.events().expect("the stream yields once");
+
+        let native = peer
+            .session
+            .send_initial(TurnInput {
+                text: "first turn".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("the first turn reports its native id");
+        assert_eq!(native.as_str(), "claude-model-observed");
+        assert_eq!(
+            peer.session.native_id().as_ref().map(NativeId::as_str),
+            Some("claude-model-observed")
+        );
+
+        let messages = collect(stream, |message| {
+            matches!(message, SessionMessage::Event(event)
+                if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed))
+        })
+        .await;
+        assert!(
+            messages.iter().any(|message| matches!(message,
+                SessionMessage::Event(event) if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed))),
+            "the result emitted while waiting for the id must remain available"
+        );
     }
 
     /// The same rule where the vendor answers success **with a different value**.
@@ -1695,7 +1938,10 @@ done
         let mut peer = peer("send").await;
         let stream = peer.session.events().expect("the stream yields once");
         peer.session
-            .send(TurnInput { text: "hi".into(), ..Default::default() })
+            .send(TurnInput {
+                text: "hi".into(),
+                ..Default::default()
+            })
             .await
             .unwrap();
 
@@ -1711,7 +1957,9 @@ done
         })
         .await;
         assert!(
-            events.iter().any(|message| matches!(message, SessionMessage::Event(event)
+            events
+                .iter()
+                .any(|message| matches!(message, SessionMessage::Event(event)
                 if event.kind == EventKind::Assistant && event.text == "hello")),
             "the assistant's prose must reach the stream: {events:?}"
         );
@@ -1742,9 +1990,15 @@ done
     async fn a_control_reply_never_reaches_the_event_stream() {
         let mut peer = peer("no-leak").await;
         let stream = peer.session.events().unwrap();
-        peer.session.set_config("model", json!("sonnet")).await.unwrap();
         peer.session
-            .send(TurnInput { text: "hi".into(), ..Default::default() })
+            .set_config("model", json!("sonnet"))
+            .await
+            .unwrap();
+        peer.session
+            .send(TurnInput {
+                text: "hi".into(),
+                ..Default::default()
+            })
             .await
             .unwrap();
 
@@ -1780,7 +2034,10 @@ done
         let mut peer = peer("approve").await;
         let stream = peer.session.events().unwrap();
         peer.session
-            .send(TurnInput { text: "ASKME".into(), ..Default::default() })
+            .send(TurnInput {
+                text: "ASKME".into(),
+                ..Default::default()
+            })
             .await
             .unwrap();
 
@@ -1801,7 +2058,10 @@ done
         assert_eq!(reply["subtype"], json!("success"));
         assert_eq!(reply["response"]["behavior"], json!("allow"));
         // The edited input, which is how "allow, but change the command" works.
-        assert_eq!(reply["response"]["updatedInput"]["command"], json!("ls -la"));
+        assert_eq!(
+            reply["response"]["updatedInput"]["command"],
+            json!("ls -la")
+        );
     }
 
     /// **An approval answer carries no `toolName`**, because the CLI's check on it is opt-in
@@ -1822,7 +2082,10 @@ done
         let mut peer = peer("no-toolname").await;
         let stream = peer.session.events().unwrap();
         peer.session
-            .send(TurnInput { text: "ASKME".into(), ..Default::default() })
+            .send(TurnInput {
+                text: "ASKME".into(),
+                ..Default::default()
+            })
             .await
             .unwrap();
         let request = first_request(stream).await.unwrap();
@@ -1869,14 +2132,21 @@ while IFS= read -r line; do
   esac
 done
 "#;
-        let mut peer = peer_with("odd-dialog", ODD_DIALOG, spec("odd-dialog")).await.unwrap();
+        let mut peer = peer_with("odd-dialog", ODD_DIALOG, spec("odd-dialog"))
+            .await
+            .unwrap();
         let stream = peer.session.events().unwrap();
         peer.session
-            .send(TurnInput { text: "go".into(), ..Default::default() })
+            .send(TurnInput {
+                text: "go".into(),
+                ..Default::default()
+            })
             .await
             .unwrap();
 
-        let request = first_request(stream).await.expect("an unknown kind still reaches a client");
+        let request = first_request(stream)
+            .await
+            .expect("an unknown kind still reaches a client");
         peer.session
             .resolve(Resolution {
                 request_id: request.id.clone(),
@@ -1902,7 +2172,10 @@ done
         let mut peer = peer("question").await;
         let stream = peer.session.events().unwrap();
         peer.session
-            .send(TurnInput { text: "QUESTION".into(), ..Default::default() })
+            .send(TurnInput {
+                text: "QUESTION".into(),
+                ..Default::default()
+            })
             .await
             .unwrap();
 
@@ -1931,7 +2204,10 @@ done
         let mut peer = peer("twice").await;
         let stream = peer.session.events().unwrap();
         peer.session
-            .send(TurnInput { text: "ASKME".into(), ..Default::default() })
+            .send(TurnInput {
+                text: "ASKME".into(),
+                ..Default::default()
+            })
             .await
             .unwrap();
         let request = first_request(stream).await.unwrap();
@@ -1943,7 +2219,10 @@ done
         };
         peer.session.resolve(resolution.clone()).await.unwrap();
         let again = peer.session.resolve(resolution).await;
-        assert!(again.is_err(), "a resolved request has no pending kind left");
+        assert!(
+            again.is_err(),
+            "a resolved request has no pending kind left"
+        );
         peer.awaited_reply("vendor-1").await;
         assert_eq!(
             peer.replies()
@@ -1972,7 +2251,10 @@ done
             .await
             .expect_err("nothing was raised");
         assert!(error.to_string().contains("never-raised"));
-        assert!(peer.replies().is_empty(), "nothing may be sent to the vendor");
+        assert!(
+            peer.replies().is_empty(),
+            "nothing may be sent to the vendor"
+        );
     }
 
     /// **A subtype this adapter does not model is answered anyway.**
@@ -1984,7 +2266,10 @@ done
         let mut peer = peer("future").await;
         let _stream = peer.session.events().unwrap();
         peer.session
-            .send(TurnInput { text: "FUTURE".into(), ..Default::default() })
+            .send(TurnInput {
+                text: "FUTURE".into(),
+                ..Default::default()
+            })
             .await
             .unwrap();
 
@@ -2004,7 +2289,10 @@ done
         let mut peer = peer("changed").await;
         let stream = peer.session.events().unwrap();
         peer.session
-            .send(TurnInput { text: "CHANGED".into(), ..Default::default() })
+            .send(TurnInput {
+                text: "CHANGED".into(),
+                ..Default::default()
+            })
             .await
             .unwrap();
 
@@ -2150,10 +2438,15 @@ while IFS= read -r line; do
   esac
 done
 "#;
-        let mut peer = peer_with("mid-turn", DIES_MID_TURN, spec("mid-turn")).await.unwrap();
+        let mut peer = peer_with("mid-turn", DIES_MID_TURN, spec("mid-turn"))
+            .await
+            .unwrap();
         let mut stream = peer.session.events().unwrap();
         peer.session
-            .send(TurnInput { text: "hi".into(), ..Default::default() })
+            .send(TurnInput {
+                text: "hi".into(),
+                ..Default::default()
+            })
             .await
             .unwrap();
 
@@ -2194,12 +2487,18 @@ id=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
 printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"current_permission_mode":"default"}}}\n' "$id"
 exit 0
 "#;
-        let peer = peer_with("once-only", ANSWERS_ONCE, spec("once-only")).await.unwrap();
+        let peer = peer_with("once-only", ANSWERS_ONCE, spec("once-only"))
+            .await
+            .unwrap();
         // Give the process time to exit, so the closure has been observed.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let started = tokio::time::Instant::now();
-        let error = peer.session.interrupt().await.expect_err("nothing can answer");
+        let error = peer
+            .session
+            .interrupt()
+            .await
+            .expect_err("nothing can answer");
         let waited = started.elapsed();
 
         assert!(
@@ -2245,12 +2544,14 @@ exit 0
 
     /// The first request the stream carries.
     async fn first_request(stream: EventStream) -> Option<sylph_protocol::Request> {
-        collect(stream, |message| matches!(message, SessionMessage::Request(_)))
-            .await
-            .into_iter()
-            .find_map(|message| match message {
-                SessionMessage::Request(request) => Some(request),
-                _ => None,
-            })
+        collect(stream, |message| {
+            matches!(message, SessionMessage::Request(_))
+        })
+        .await
+        .into_iter()
+        .find_map(|message| match message {
+            SessionMessage::Request(request) => Some(request),
+            _ => None,
+        })
     }
 }

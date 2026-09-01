@@ -41,8 +41,8 @@ export function FidelityMarker({ value }: { value: Fidelity }) {
 /**
  * Which machine a session runs on.
  *
- * Rendered from `environmentName`, never from the id: the id is opaque and base32, so
- * showing it names nothing a user recognizes. The name is mutable and is never a key,
+ * Rendered from the environment resource's display name, never from the id: the id is
+ * opaque and base32, so showing it names nothing a user recognizes. The name is mutable and is never a key,
  * which is exactly why it is safe to render and unsafe to compare.
  *
  * `reachableVia` is drawn *differently* rather than merely annotated, and that is a

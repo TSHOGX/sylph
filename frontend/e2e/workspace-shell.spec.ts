@@ -199,7 +199,7 @@ test("global search finds a session and opens it", async ({ page }) => {
  * row, so there is no `available` flag, no `cwd`/`title` pair flattened onto the hit,
  * and no `sessionId` that is set only for an already-imported row. Every hit opens.
  */
-test("an index hit renders its match snippet, which is the only text carrying the query", async ({
+test("an index hit renders its match excerpt, which is the only text carrying the query", async ({
   page,
 }) => {
   await createSession(page);
@@ -224,7 +224,7 @@ test("an index hit renders its match snippet, which is the only text carrying th
               createdAtMs: 1_700_000_000_000,
               updatedAtMs: 1_700_000_060_000,
             },
-            bestMatch: { snippet: "the supervisor deadlocked on the\nsettle sweep" },
+            bestMatch: { seq: 4, excerpt: "the supervisor deadlocked on the\nsettle sweep" },
             hits: 3,
           },
         ],
@@ -240,7 +240,7 @@ test("an index hit renders its match snippet, which is the only text carrying th
   await dialog.getByRole("combobox", { name: /search query/i }).fill("deadlock");
 
   const hit = dialog.getByRole("option").filter({ hasText: "Notes" });
-  // Collapsed whitespace: a snippet spanning lines in the transcript is one line here,
+  // Collapsed whitespace: an excerpt spanning lines in the transcript is one line here,
   // and a raw newline inside a truncating row renders as a gap of arbitrary width.
   await expect(hit).toContainText("the supervisor deadlocked on the settle sweep");
   // The path is still its own line, not displaced by the snippet: `/tmp/x` and
@@ -397,13 +397,15 @@ test("Quick Sessions creates a session from its menu with no dialog", async ({ p
 
   // Straight to a usable conversation: no form, and never the create route.
   await expect(page.getByLabel("Message")).toBeVisible();
-  // The **encoded triple**, not a bare UUID: a session's id is
-  // `(environment, agent, native_id)` (`docs/architecture.md` § Identity), so the route
-  // segment reads `local:e2e:<native id>`. The old pattern matched 36 hex-and-dash
-  // characters, which is what a Sylph-minted UUID used to look like — and it could not fail
-  // until a session could actually be created through this path.
-  await expect(page).toHaveURL(/\/sessions\/(?!new)local:e2e:[0-9a-f-]{36}/);
+  // Creation is two-phase: this route carries an opaque draft handle until the first
+  // real message. It is intentionally absent from the sidebar and history while empty.
+  await expect(page).toHaveURL(/\/sessions\/draft\/draft-/);
   await expect(page.getByLabel("Working directory")).toHaveCount(0);
+
+  await page.getByLabel("Message").fill("persist this draft");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  // Only promotion creates the identity triple and the durable row.
+  await expect(page).toHaveURL(/\/sessions\/(?!draft\/)[^/]+/);
 
   // Created in the fixed Quick Start directory, so it joins that group rather than
   // spawning a workspace of its own.
@@ -460,7 +462,11 @@ test("a workspace group creates in its own directory, with one menu item and no 
     .click();
 
   await expect(page.getByLabel("Message")).toBeVisible();
-  // The directory was inherited from the group, not re-asked.
+  // The directory was inherited from the group, not re-asked. The empty draft is
+  // deliberately not a sidebar row; it becomes one only after a real message.
+  await expect(rows).toHaveCount(1);
+  await page.getByLabel("Message").fill("persist this draft");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(rows).toHaveCount(2);
 
   // Exactly one create item in the menu. There were two — one creating directly,

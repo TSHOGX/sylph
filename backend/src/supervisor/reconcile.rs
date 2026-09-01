@@ -74,10 +74,11 @@ impl TrajectoryOutcome<'_> {
     pub fn supersedes(&self, phase: Option<&str>, data: Option<&serde_json::Value>) -> bool {
         match phase {
             Some("started") | Some("delta") => true,
-            Some("completed") => data
-                .and_then(|d| d.get("closedBy"))
-                .and_then(|v| v.as_str())
-                == Some("server"),
+            Some("completed") => {
+                data.and_then(|d| d.get("closedBy"))
+                    .and_then(|v| v.as_str())
+                    == Some("server")
+            }
             _ => false,
         }
     }

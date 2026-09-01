@@ -51,11 +51,17 @@ pub struct Health {
 
 impl Health {
     pub fn up() -> Self {
-        Self { available: true, reason: None }
+        Self {
+            available: true,
+            reason: None,
+        }
     }
 
     pub fn down(reason: impl Into<String>) -> Self {
-        Self { available: false, reason: Some(reason.into()) }
+        Self {
+            available: false,
+            reason: Some(reason.into()),
+        }
     }
 }
 

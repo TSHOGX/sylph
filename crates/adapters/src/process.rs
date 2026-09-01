@@ -340,7 +340,9 @@ impl Child {
 
         match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
             Ok(Ok(reply)) => Ok(reply),
-            Ok(Err(_)) => Err(self.error("the vendor process closed without answering").await),
+            Ok(Err(_)) => Err(self
+                .error("the vendor process closed without answering")
+                .await),
             Err(_) => {
                 self.pending.lock().await.remove(&id.to_string());
                 Err(anyhow!(
@@ -356,7 +358,7 @@ impl Child {
         self.stderr.lock().await.trim().to_string()
     }
 
-    /// Whether the vendor's stdout has ended. See [`Self::closed`].
+    /// Whether the vendor's stdout has ended. See `Self::closed`.
     pub fn has_ended(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
@@ -464,10 +466,9 @@ mod tests {
     /// Lines arrive parsed, in order.
     #[tokio::test]
     async fn stdout_lines_arrive_parsed_and_in_order() {
-        let (_child, mut lines) =
-            Child::spawn(spawn_sh(r#"printf '{"n":1}\n{"n":2}\n'"#, None))
-                .await
-                .unwrap();
+        let (_child, mut lines) = Child::spawn(spawn_sh(r#"printf '{"n":1}\n{"n":2}\n'"#, None))
+            .await
+            .unwrap();
 
         assert_eq!(lines.recv().await.unwrap().unwrap()["n"], json!(1));
         assert_eq!(lines.recv().await.unwrap().unwrap()["n"], json!(2));
@@ -480,10 +481,9 @@ mod tests {
     /// gap.
     #[tokio::test]
     async fn an_unparsable_line_is_reported_without_ending_the_stream() {
-        let (_child, mut lines) =
-            Child::spawn(spawn_sh(r#"printf 'not json\n{"n":1}\n'"#, None))
-                .await
-                .unwrap();
+        let (_child, mut lines) = Child::spawn(spawn_sh(r#"printf 'not json\n{"n":1}\n'"#, None))
+            .await
+            .unwrap();
 
         assert!(lines.recv().await.unwrap().is_err());
         assert_eq!(lines.recv().await.unwrap().unwrap()["n"], json!(1));
@@ -779,4 +779,3 @@ mod tests {
         assert_eq!(unique.len(), ids.len(), "{ids:?}");
     }
 }
-

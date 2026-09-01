@@ -4,8 +4,53 @@ mod common;
 
 use axum::http::{header, StatusCode};
 use common::{body_string, json_body, MockRunner, TestBackend};
+use futures::StreamExt;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tempfile::TempDir;
+
+/// Read exactly `count` data-bearing SSE frames from a long-lived stream.
+///
+/// Session trace connections intentionally stay open across turns, so converting the
+/// whole body to bytes would wait forever. The helper consumes only the frames needed by
+/// a test and drops the response body afterwards, which is also how a browser stops a
+/// trace subscription on navigation.
+async fn read_sse_frames(
+    response: axum::http::Response<axum::body::Body>,
+    count: usize,
+) -> Vec<Value> {
+    let mut body = response.into_body().into_data_stream();
+    let mut pending = String::new();
+    let mut frames = Vec::with_capacity(count);
+
+    while frames.len() < count {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("timed out waiting for an SSE frame")
+            .expect("SSE stream ended before the requested frames arrived")
+            .expect("SSE body returned an error");
+        pending.push_str(std::str::from_utf8(&chunk).expect("SSE body was not UTF-8"));
+
+        while let Some(boundary) = pending.find("\n\n") {
+            let raw = pending[..boundary].to_string();
+            pending.drain(..boundary + 2);
+            for line in raw.lines() {
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                frames.push(serde_json::from_str(data.trim()).expect("SSE data was not JSON"));
+                if frames.len() == count {
+                    break;
+                }
+            }
+            if frames.len() == count {
+                break;
+            }
+        }
+    }
+
+    frames
+}
 
 // ---------------------------------------------------------------- auth
 
@@ -101,7 +146,9 @@ async fn diagnostics_reports_runtime_state() {
         "the fixture agent this test installed must be reported, found {agents:?}"
     );
     assert!(
-        !agents.iter().any(|name| name == "gemini" || name == "opencode"),
+        !agents
+            .iter()
+            .any(|name| name == "gemini" || name == "opencode"),
         "a deliberately unsupported agent must never be reported, found {agents:?}"
     );
     // `activeTurns`, not `activeProcesses`: the value has always been a turn count,
@@ -135,11 +182,27 @@ async fn create_and_read_back_a_session() {
 
     assert_eq!(response.status(), StatusCode::CREATED);
     let body = json_body(response).await;
-    let session = &body["session"];
+    let draft_id = body["draftId"].as_str().expect("draft id").to_string();
+    assert!(
+        body.get("session").is_none(),
+        "draft must not be durable: {body}"
+    );
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/draft/{draft_id}/turns"),
+            json!({"text": "first message"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let session = &json_body(response).await["session"];
 
     assert_eq!(session["agent"], "mock");
     assert_eq!(session["title"], "Feature work");
-    assert_eq!(session["status"], "idle");
+    // Promotion accepts the first turn before answering, so the returned durable
+    // session is already running.  It becomes idle after the adapter's terminal
+    // event is settled.
+    assert_eq!(session["status"], "running");
 
     // `origin`, `identityMode`, and `lifecycleMode` are **gone**, and their absence is
     // the invariant this now pins (`docs/architecture.md` § One class of session).
@@ -155,8 +218,8 @@ async fn create_and_read_back_a_session() {
     assert_eq!(session["injectIdentity"], true);
 
     // **Identity is the triple, and a row exists only because an agent assigned an id.**
-    // There is no server-minted UUID and no window in which a session has no native id:
-    // `POST /sessions` started an agent, and the id it reported is the primary key.
+    // The draft had no durable id; promotion after the first message records the
+    // native identity as the primary key.
     let native = session["nativeId"]
         .as_str()
         .expect("an agent assigned an id before the row was written");
@@ -183,13 +246,164 @@ async fn create_and_read_back_a_session() {
 
     // Round-trips as a path segment, which is the property the encoding exists for.
     let response = backend
-        .get_authed(&format!(
-            "/api/v1/sessions/{}",
-            urlencoding(id)
-        ))
+        .get_authed(&format!("/api/v1/sessions/{}", urlencoding(id)))
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(json_body(response).await["session"]["id"], id);
+}
+
+#[tokio::test]
+async fn prepared_session_is_not_listed_until_first_turn() {
+    let backend = TestBackend::start().await;
+    let request = json!({
+        "environment": backend.environment_id().await,
+        "agent": "mock",
+        "workdir": backend.workdir().display().to_string(),
+    });
+
+    let response = backend.post_authed("/api/v1/sessions", request).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let draft_id = json_body(response).await["draftId"]
+        .as_str()
+        .expect("prepare returns an opaque draft id")
+        .to_string();
+
+    let listed = backend.get_authed("/api/v1/sessions").await;
+    assert_eq!(listed.status(), StatusCode::OK);
+    assert!(json_body(listed).await["sessions"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+
+    let deleted = backend
+        .request_authed(
+            "DELETE",
+            &format!("/api/v1/sessions/draft/{draft_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn prepared_file_routes_use_the_draft_workdir_without_creating_history() {
+    let backend = TestBackend::start().await;
+    std::fs::write(backend.workdir().join("before-send.txt"), "draft file").unwrap();
+
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({
+                "environment": backend.environment_id().await,
+                "agent": "mock",
+                "workdir": backend.workdir().display().to_string(),
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let draft_id = json_body(response).await["draftId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let tree = backend
+        .get_authed(&format!("/api/v1/sessions/draft/{draft_id}/files"))
+        .await;
+    assert_eq!(tree.status(), StatusCode::OK);
+    let body = json_body(tree).await;
+    assert_eq!(body["root"], backend.workdir().display().to_string());
+    assert!(body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["name"] == "before-send.txt"));
+
+    // The draft remains ephemeral even though its workdir is browseable.
+    let listed = backend.get_authed("/api/v1/sessions").await;
+    assert!(json_body(listed).await["sessions"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+
+    let deleted = backend
+        .delete_authed(&format!("/api/v1/sessions/draft/{draft_id}"))
+        .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let gone = backend
+        .get_authed(&format!("/api/v1/sessions/draft/{draft_id}/files"))
+        .await;
+    assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn prepared_first_turn_is_persisted_after_promotion() {
+    let backend = TestBackend::start().await;
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({
+                "environment": backend.environment_id().await,
+                "agent": "mock",
+                "workdir": backend.workdir().display().to_string(),
+            }),
+        )
+        .await;
+    let draft_id = json_body(response).await["draftId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/draft/{draft_id}/turns"),
+            json!({"text": "first draft turn"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let session_id = json_body(response).await["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let history = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{}/turns",
+            urlencoding(&session_id)
+        ))
+        .await;
+    assert_eq!(history.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(history).await["turns"].as_array().unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn prepared_first_prompt_command_can_promote_without_message_text() {
+    let backend = TestBackend::start().await;
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({
+                "environment": backend.environment_id().await,
+                "agent": "mock",
+                "workdir": backend.workdir().display().to_string(),
+            }),
+        )
+        .await;
+    let draft_id = json_body(response).await["draftId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/draft/{draft_id}/turns"),
+            json!({"command": "status", "args": {"args": "now"}}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let session = json_body(response).await["session"].clone();
+    assert_eq!(session["title"], "/status");
+    assert_eq!(session["agent"], "mock");
 }
 
 /// A malformed id is a 400, and a well-formed one naming nothing is a 404.
@@ -202,14 +416,20 @@ async fn a_malformed_session_id_is_refused_rather_than_reported_missing() {
 
     let response = backend.get_authed("/api/v1/sessions/not-a-triple").await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json_body(response).await["error"]["code"], "INVALID_REQUEST");
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "INVALID_REQUEST"
+    );
 
     // Well-formed — base32 environment, an agent name, a native id — and naming nothing.
     let response = backend
         .get_authed("/api/v1/sessions/env7fk2%3Amock%3Anothing-here")
         .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert_eq!(json_body(response).await["error"]["code"], "SESSION_NOT_FOUND");
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "SESSION_NOT_FOUND"
+    );
 }
 
 #[tokio::test]
@@ -235,6 +455,30 @@ async fn create_session_rejects_unknown_agent_and_missing_workdir() {
         )
         .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_session_rejects_an_unreachable_environment() {
+    let backend = TestBackend::start().await;
+
+    // `env7fk2` is a well-formed environment id that is not the local environment
+    // this test backend exposes. Creation must classify that as unavailable rather
+    // than starting a local process and stamping it with a foreign identity.
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions",
+            json!({
+                "environment": "env7fk2",
+                "agent": "mock",
+                "workdir": backend.workdir().display().to_string(),
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "ENVIRONMENT_UNREACHABLE"
+    );
 }
 
 // ------------------------------------------------------- workdir containment
@@ -265,9 +509,21 @@ async fn a_workdir_inside_the_configured_roots_is_accepted() {
     // Journalled canonical, so two spellings of one directory cannot become two
     // workspaces — and so the recorded path has no symlinked component that could
     // be re-pointed after the check.
+    let draft = json_body(response).await;
+    let draft_id = draft["draftId"].as_str().unwrap();
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/draft/{draft_id}/turns"),
+            json!({"text": "first message"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
     assert_eq!(
         json_body(response).await["session"]["workdir"],
-        std::fs::canonicalize(&inside).unwrap().display().to_string()
+        std::fs::canonicalize(&inside)
+            .unwrap()
+            .display()
+            .to_string()
     );
 }
 
@@ -443,7 +699,6 @@ async fn a_session_recorded_outside_the_roots_stays_readable_after_narrowing() {
     );
 }
 
-
 #[tokio::test]
 async fn session_history_returns_turns_oldest_first_with_events() {
     let backend = TestBackend::start().await;
@@ -490,10 +745,7 @@ async fn session_history_returns_turns_oldest_first_with_events() {
         let events = turn["events"].as_array().unwrap();
         assert!(!events.is_empty(), "turn has no events: {turn}");
 
-        let seqs: Vec<i64> = events
-            .iter()
-            .map(|e| e["seq"].as_i64().unwrap())
-            .collect();
+        let seqs: Vec<i64> = events.iter().map(|e| e["seq"].as_i64().unwrap()).collect();
         let mut sorted = seqs.clone();
         sorted.sort_unstable();
         assert_eq!(seqs, sorted, "events out of order: {seqs:?}");
@@ -514,12 +766,13 @@ async fn session_history_returns_turns_oldest_first_with_events() {
     }
 }
 
-
 #[tokio::test]
 async fn session_history_404s_for_an_unknown_session() {
     let backend = TestBackend::start().await;
 
-    let response = backend.get_authed("/api/v1/sessions/env7fk2%3Amock%3Adoes-not-exist/turns").await;
+    let response = backend
+        .get_authed("/api/v1/sessions/env7fk2%3Amock%3Adoes-not-exist/turns")
+        .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(
         json_body(response).await["error"]["code"],
@@ -532,17 +785,7 @@ async fn session_history_404s_for_an_unknown_session() {
 #[tokio::test]
 async fn turn_runs_to_completion_and_journals_its_events() {
     let backend = TestBackend::start().await;
-    let session_response = backend
-        .post_authed(
-            "/api/v1/sessions",
-            json!({"environment": backend.environment_id().await, "agent": "mock", "workdir": backend.workdir().display().to_string()}),
-        )
-        .await;
-    assert_eq!(session_response.status(), StatusCode::CREATED);
-    let session_id = json_body(session_response).await["session"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let session_id = backend.create_session("mock").await;
 
     let response = backend
         .post_authed(
@@ -574,7 +817,10 @@ async fn turn_runs_to_completion_and_journals_its_events() {
     // Only stable events are journaled: the runner's `completed` phases and the
     // server's own status/user events.
     assert!(stream.contains("\"kind\":\"user\""), "missing user event");
-    assert!(stream.contains("thinking done"), "missing completed thinking");
+    assert!(
+        stream.contains("thinking done"),
+        "missing completed thinking"
+    );
     assert!(stream.contains("mock reply"), "missing assistant reply");
     assert!(stream.contains("\"kind\":\"usage\""), "missing usage event");
 
@@ -614,7 +860,7 @@ async fn turn_runs_to_completion_and_journals_its_events() {
     assert!(
         session["nativeId"]
             .as_str()
-            .is_some_and(|native| native.starts_with("mock-session-")),
+            .is_some_and(|native| native.starts_with("fixture-")),
         "the id the adapter reported is the primary key: {session}"
     );
     assert_eq!(session["title"], "do the thing");
@@ -706,7 +952,9 @@ async fn session_returns_to_idle_after_a_turn() {
         .to_string();
     backend.await_turn(&turn_id).await;
 
-    let response = backend.get_authed(&format!("/api/v1/sessions/{session_id}")).await;
+    let response = backend
+        .get_authed(&format!("/api/v1/sessions/{session_id}"))
+        .await;
     assert_eq!(json_body(response).await["session"]["status"], "idle");
 }
 
@@ -855,7 +1103,9 @@ async fn stopping_a_running_turn_cancels_it() {
     // Wait for the process to actually exist before signaling it.
     let mut running = false;
     for _ in 0..100 {
-        let response = backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await;
+        let response = backend
+            .get_authed(&format!("/api/v1/turns/{turn_id}"))
+            .await;
         if json_body(response).await["turn"]["status"] == "running" {
             running = true;
             break;
@@ -892,7 +1142,9 @@ async fn concurrent_turns_on_one_session_conflict() {
 
     // Let the supervisor register the process.
     for _ in 0..100 {
-        let response = backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await;
+        let response = backend
+            .get_authed(&format!("/api/v1/turns/{turn_id}"))
+            .await;
         if json_body(response).await["turn"]["status"] == "running" {
             break;
         }
@@ -918,7 +1170,9 @@ async fn concurrent_turns_on_one_session_conflict() {
 async fn unknown_resources_return_stable_error_codes() {
     let backend = TestBackend::start().await;
 
-    let response = backend.get_authed("/api/v1/sessions/env7fk2%3Amock%3Adoes-not-exist").await;
+    let response = backend
+        .get_authed("/api/v1/sessions/env7fk2%3Amock%3Adoes-not-exist")
+        .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(
         json_body(response).await["error"]["code"],
@@ -1163,10 +1417,7 @@ async fn sse_reconnection_replays_journal_after_turn_finishes() {
         .collect();
 
     // The reconnected stream should contain every stable event > 0.
-    assert!(
-        !replayed_seqs.is_empty(),
-        "reconnection returned no events"
-    );
+    assert!(!replayed_seqs.is_empty(), "reconnection returned no events");
     assert!(
         replayed_seqs.contains(&highest_seq),
         "reconnection missed the highest stable event (seq={})",
@@ -1178,6 +1429,159 @@ async fn sse_reconnection_replays_journal_after_turn_finishes() {
     );
 }
 
+/// A session trace is the one stream that can bridge durable history, the still-hot
+/// journal, and events arriving after the previous turn has settled.
+///
+/// This test uses one synthetic history block and one journal row so the two replay tiers
+/// cannot accidentally agree by reading the same source. It then attaches with a cursor
+/// after both and publishes a late ephemeral event; receiving that frame proves the
+/// subscription was installed before the snapshot was assembled (the replay/live gap).
+#[tokio::test]
+async fn session_trace_merges_history_journal_and_live_with_arrival_provenance() {
+    let backend = TestBackend::start().await;
+    let encoded = backend.create_session("mock").await;
+    let session_id = TestBackend::session_id(&encoded);
+
+    let parent_turn_id = "trace-parent-turn".to_string();
+    let arrival_turn_id = "trace-arrival-turn".to_string();
+    for (id, origin) in [(&parent_turn_id, "user"), (&arrival_turn_id, "agent")] {
+        backend
+            .state
+            .store
+            .create_turn(&sylph_web_backend::models::Turn {
+                id: id.clone(),
+                session_id: session_id.clone(),
+                status: "completed".to_string(),
+                origin: origin.to_string(),
+                request_text: String::new(),
+                command_invocation_id: None,
+                idempotency_key: None,
+                error_code: None,
+                error_message: None,
+                created_at_ms: 100,
+                started_at_ms: Some(100),
+                completed_at_ms: Some(200),
+                stopped_at_ms: None,
+            })
+            .await
+            .expect("trace fixture turn insert failed");
+    }
+
+    backend
+        .state
+        .history
+        .put_blocks(&[sylph_web_backend::storage::Block {
+            session_id: encoded.clone(),
+            seq: 1,
+            turn_id: parent_turn_id.clone(),
+            kind: "assistant".to_string(),
+            phase: Some("completed".to_string()),
+            stream_id: None,
+            span: None,
+            name: None,
+            text: "from history".to_string(),
+            folded: None,
+            data: None,
+            is_error: false,
+            source: "agent".to_string(),
+            started_at_ms: 100,
+            created_at_ms: 200,
+        }])
+        .await
+        .expect("trace history fixture insert failed");
+
+    backend
+        .state
+        .store
+        .append_event(&sylph_web_backend::models::Event {
+            id: None,
+            session_id: session_id.clone(),
+            turn_id: Some(arrival_turn_id.clone()),
+            seq: 2,
+            kind: "subagent".to_string(),
+            phase: Some("completed".to_string()),
+            stream_id: Some("child-1".to_string()),
+            span: Some("host-1".to_string()),
+            name: Some("Worker".to_string()),
+            text: "from journal".to_string(),
+            data_json: "{}".to_string(),
+            is_error: false,
+            stability: "stable".to_string(),
+            source: "agent".to_string(),
+            created_at_ms: 300,
+        })
+        .await
+        .expect("trace journal fixture insert failed");
+
+    let response = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{encoded}/trace/events?after_seq=-1"
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-cache, no-store, no-transform")
+    );
+    let replayed = read_sse_frames(response, 2).await;
+    assert_eq!(
+        replayed
+            .iter()
+            .map(|event| event["seq"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(replayed[0]["text"], "from history");
+    assert_eq!(replayed[0]["arrivalTurnId"], parent_turn_id);
+    assert_eq!(replayed[1]["text"], "from journal");
+    assert_eq!(replayed[1]["arrivalTurnId"], arrival_turn_id);
+
+    let filtered = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{encoded}/trace/events?after_seq=1"
+        ))
+        .await;
+    let filtered = read_sse_frames(filtered, 1).await;
+    assert_eq!(filtered[0]["seq"], 2);
+
+    // No replay remains after seq 2. The frame below therefore has to come from the
+    // receiver that was attached before the handler read durable storage.
+    let live_response = backend
+        .get_authed(&format!(
+            "/api/v1/sessions/{encoded}/trace/events?after_seq=2"
+        ))
+        .await;
+    backend
+        .state
+        .hub
+        .publish_trace(
+            &encoded,
+            sylph_web_backend::events::StreamEvent {
+                seq: 3,
+                arrival_turn_id: Some(arrival_turn_id.clone()),
+                kind: "assistant".to_string(),
+                phase: Some("delta".to_string()),
+                stream_id: Some("late-child-block".to_string()),
+                span: Some("host-1".to_string()),
+                name: None,
+                text: "late live".to_string(),
+                data: None,
+                is_error: false,
+                stability: "ephemeral".to_string(),
+                source: "agent".to_string(),
+                created_at_ms: 400,
+                started_at_ms: None,
+            },
+        )
+        .await;
+    let live = read_sse_frames(live_response, 1).await;
+    assert_eq!(live[0]["seq"], 3);
+    assert_eq!(live[0]["arrivalTurnId"], arrival_turn_id);
+}
+
 // -------------------------------------------------------------- search
 
 #[tokio::test]
@@ -1187,11 +1591,6 @@ async fn search_requires_auth() {
     let response = backend.get("/api/v1/search?q=refactor").await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
-
-
-
-
-
 
 // ------------------------------------------------------- workdir filtering
 
@@ -1217,7 +1616,9 @@ async fn a_workdir_filter_names_one_directory_and_not_its_neighbours() {
     std::fs::create_dir_all(&app).unwrap();
     std::fs::create_dir_all(&app_old).unwrap();
 
-    let in_app = backend.create_session_in("mock", &app.display().to_string()).await;
+    let in_app = backend
+        .create_session_in("mock", &app.display().to_string())
+        .await;
     let in_app_old = backend
         .create_session_in("mock", &app_old.display().to_string())
         .await;
@@ -1255,23 +1656,12 @@ async fn a_workdir_filter_names_one_directory_and_not_its_neighbours() {
             .await,
     )
     .await;
-    assert_eq!(ids(&trailing), vec![in_app], "a trailing slash is the same directory");
+    assert_eq!(
+        ids(&trailing),
+        vec![in_app],
+        "a trailing slash is the same directory"
+    );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[tokio::test]
 async fn workspaces_lists_the_directory_a_session_runs_in() {
@@ -1294,9 +1684,11 @@ async fn workspaces_lists_the_directory_a_session_runs_in() {
 
 #[tokio::test]
 async fn session_list_filters_by_agent() {
-    let backend =
-        TestBackend::start_with_runners(&[MockRunner::success("alpha"), MockRunner::success("beta")])
-            .await;
+    let backend = TestBackend::start_with_runners(&[
+        MockRunner::success("alpha"),
+        MockRunner::success("beta"),
+    ])
+    .await;
 
     let alpha = backend.create_session("alpha").await;
     let beta = backend.create_session("beta").await;
@@ -1346,7 +1738,6 @@ async fn session_list_treats_a_blank_filter_as_unfiltered() {
     }
 }
 
-
 #[tokio::test]
 async fn session_list_filters_by_updated_time_range() {
     let backend = TestBackend::start().await;
@@ -1382,24 +1773,7 @@ async fn session_list_filters_by_updated_time_range() {
     assert_eq!(body["sessions"].as_array().unwrap().len(), 1);
 }
 
-
 // ------------------------------------------------- archive availability
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[tokio::test]
 async fn a_command_turn_needs_no_message_text() {
@@ -1432,7 +1806,9 @@ async fn a_command_turn_needs_no_message_text() {
 /// a real subprocess whose startup is not synchronous with the HTTP response.
 async fn await_turn_status(backend: &TestBackend, turn_id: &str, status: &str) {
     for _ in 0..100 {
-        let response = backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await;
+        let response = backend
+            .get_authed(&format!("/api/v1/turns/{turn_id}"))
+            .await;
         if json_body(response).await["turn"]["status"] == status {
             return;
         }
@@ -1462,7 +1838,12 @@ async fn a_restart_interrupts_a_turn_that_was_still_running() {
 
     backend.restart().await;
 
-    let turn = json_body(backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await).await;
+    let turn = json_body(
+        backend
+            .get_authed(&format!("/api/v1/turns/{turn_id}"))
+            .await,
+    )
+    .await;
     assert_eq!(turn["turn"]["status"], "interrupted");
     assert_eq!(turn["turn"]["errorCode"], "TURN_INTERRUPTED");
     assert!(
@@ -1492,12 +1873,22 @@ async fn a_session_is_usable_again_after_a_restart_interrupts_its_turn() {
         .to_string();
     await_turn_status(&backend, &turn_id, "running").await;
 
-    let before = json_body(backend.get_authed(&format!("/api/v1/sessions/{session_id}")).await).await;
+    let before = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}"))
+            .await,
+    )
+    .await;
     assert_eq!(before["session"]["status"], "running");
 
     backend.restart().await;
 
-    let after = json_body(backend.get_authed(&format!("/api/v1/sessions/{session_id}")).await).await;
+    let after = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}"))
+            .await,
+    )
+    .await;
     assert_eq!(
         after["session"]["status"], "idle",
         "a session cannot be running when no turn is"
@@ -1536,11 +1927,21 @@ async fn a_restart_leaves_finished_turns_alone() {
         .to_string();
     await_turn_status(&backend, &turn_id, "completed").await;
 
-    let before = json_body(backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await).await;
+    let before = json_body(
+        backend
+            .get_authed(&format!("/api/v1/turns/{turn_id}"))
+            .await,
+    )
+    .await;
 
     backend.restart().await;
 
-    let after = json_body(backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await).await;
+    let after = json_body(
+        backend
+            .get_authed(&format!("/api/v1/turns/{turn_id}"))
+            .await,
+    )
+    .await;
     assert_eq!(after["turn"]["status"], "completed");
     assert!(after["turn"]["errorCode"].is_null());
     assert_eq!(
@@ -1568,13 +1969,23 @@ async fn a_restart_preserves_journalled_events() {
         .to_string();
     await_turn_status(&backend, &turn_id, "completed").await;
 
-    let before = json_body(backend.get_authed(&format!("/api/v1/sessions/{session_id}/turns")).await).await;
+    let before = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+            .await,
+    )
+    .await;
     let before_events = before["turns"][0]["events"].as_array().unwrap().len();
     assert!(before_events > 0, "the turn journalled nothing to compare");
 
     backend.restart().await;
 
-    let after = json_body(backend.get_authed(&format!("/api/v1/sessions/{session_id}/turns")).await).await;
+    let after = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+            .await,
+    )
+    .await;
     assert_eq!(
         after["turns"][0]["events"].as_array().unwrap().len(),
         before_events,
@@ -1666,7 +2077,10 @@ async fn file_tree_lists_the_session_workdir() {
     .await;
 
     let entries = body["entries"].as_array().unwrap();
-    let names: Vec<&str> = entries.iter().map(|e| e["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = entries
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"src"), "directory missing: {names:?}");
     assert!(names.contains(&"README.md"), "file missing: {names:?}");
     // Directories sort ahead of files, which is what makes a tree scannable.
@@ -1705,7 +2119,11 @@ async fn file_tree_omits_vcs_and_build_directories() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["src"], "only real source dirs belong: {names:?}");
+    assert_eq!(
+        names,
+        vec!["src"],
+        "only real source dirs belong: {names:?}"
+    );
 }
 
 /// The traversal defense. `..` must not escape the workdir, whatever spelling
@@ -1717,7 +2135,11 @@ async fn file_access_refuses_paths_outside_the_workdir() {
 
     // A real secret outside the root, so a successful escape would be visible
     // rather than merely a 404 from a nonexistent target.
-    let outside = backend.workdir().parent().unwrap().join("outside-secret.txt");
+    let outside = backend
+        .workdir()
+        .parent()
+        .unwrap()
+        .join("outside-secret.txt");
     std::fs::write(&outside, "do not serve me").unwrap();
 
     for attempt in [
@@ -1753,7 +2175,11 @@ async fn symlinks_leaving_the_workdir_are_not_served() {
     let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
     let session_id = backend.create_session("agent").await;
 
-    let outside = backend.workdir().parent().unwrap().join("linked-secret.txt");
+    let outside = backend
+        .workdir()
+        .parent()
+        .unwrap()
+        .join("linked-secret.txt");
     std::fs::write(&outside, "secret via symlink").unwrap();
     let link = backend.workdir().join("escape.txt");
     #[cfg(unix)]
@@ -1909,7 +2335,10 @@ async fn file_tree_follows_symlinks_to_their_target_kind() {
         linked_dir["size"].is_null(),
         "a directory carries no size, however it was reached"
     );
-    assert_eq!(linked_dir["isSymlink"], true, "the link is still flagged as one");
+    assert_eq!(
+        linked_dir["isSymlink"], true,
+        "the link is still flagged as one"
+    );
 
     // The target's size, not the link's own byte length.
     let linked_file = find("linked-file");
@@ -1932,7 +2361,10 @@ async fn file_tree_follows_symlinks_to_their_target_kind() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"inside.txt"), "link did not expand: {names:?}");
+    assert!(
+        names.contains(&"inside.txt"),
+        "link did not expand: {names:?}"
+    );
     assert!(names.contains(&"nested"), "link did not expand: {names:?}");
 }
 
@@ -1986,9 +2418,15 @@ async fn file_tree_omits_dangling_symlinks() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert!(!names.contains(&"dangling"), "dangling link listed: {names:?}");
+    assert!(
+        !names.contains(&"dangling"),
+        "dangling link listed: {names:?}"
+    );
     // A broken link must not take the rest of the listing down with it.
-    assert!(names.contains(&"real.txt"), "listing lost entries: {names:?}");
+    assert!(
+        names.contains(&"real.txt"),
+        "listing lost entries: {names:?}"
+    );
 }
 
 #[tokio::test]
@@ -2148,7 +2586,9 @@ async fn every_session_route_refuses_a_malformed_id_with_a_bad_request() {
     // Without this the test above would pass on a server that answered 400 for
     // everything, which would be the same defect in the other direction.
     let absent = "env7fk2%3Amock%3Anothing-here";
-    let response = backend.get_authed(&format!("/api/v1/sessions/{absent}")).await;
+    let response = backend
+        .get_authed(&format!("/api/v1/sessions/{absent}"))
+        .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(
         json_body(response).await["error"]["code"],
@@ -2165,7 +2605,10 @@ async fn config_reports_every_setting_with_its_source_and_override() {
     let body = json_body(backend.get_authed("/api/v1/config").await).await;
 
     assert!(!body["home"].as_str().unwrap().is_empty());
-    assert!(body["configPath"].as_str().unwrap().ends_with("config.toml"));
+    assert!(body["configPath"]
+        .as_str()
+        .unwrap()
+        .ends_with("config.toml"));
 
     let entries = body["entries"].as_array().unwrap();
     let keys: Vec<&str> = entries.iter().map(|e| e["key"].as_str().unwrap()).collect();
@@ -2385,7 +2828,10 @@ async fn fs_roots_lists_configured_browse_roots() {
     let body = json_body(backend.get_authed("/api/v1/fs/roots").await).await;
 
     let roots = body["roots"].as_array().unwrap();
-    assert!(!roots.is_empty(), "at least the harness root must be listed");
+    assert!(
+        !roots.is_empty(),
+        "at least the harness root must be listed"
+    );
     assert!(
         body["home"].as_str().is_some(),
         "home is needed for `~/...` abbreviation"
@@ -2496,7 +2942,10 @@ async fn fs_tree_lists_dot_directories() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&".sylph"), "dotfiles must be pickable: {names:?}");
+    assert!(
+        names.contains(&".sylph"),
+        "dotfiles must be pickable: {names:?}"
+    );
 }
 
 #[tokio::test]
@@ -2524,7 +2973,11 @@ async fn fs_tree_omits_build_directories() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["src"], "only real directories belong: {names:?}");
+    assert_eq!(
+        names,
+        vec!["src"],
+        "only real directories belong: {names:?}"
+    );
 }
 
 /// The traversal defense for the machine-level browser. Resolution, not
@@ -2673,7 +3126,12 @@ async fn upload_refuses_to_escape_the_workdir() {
         .await;
     assert_eq!(response.status(), StatusCode::CREATED);
     assert!(
-        !backend.workdir().parent().unwrap().join("escaped.txt").exists(),
+        !backend
+            .workdir()
+            .parent()
+            .unwrap()
+            .join("escaped.txt")
+            .exists(),
         "the filename must be reduced to one component, not treated as a path"
     );
 }
@@ -2774,9 +3232,7 @@ async fn delete_refuses_the_working_directory_itself() {
 
     for path in ["", ".", "/"] {
         let response = backend
-            .delete_authed(&format!(
-                "/api/v1/sessions/{session_id}/files?path={path}"
-            ))
+            .delete_authed(&format!("/api/v1/sessions/{session_id}/files?path={path}"))
             .await;
         assert_eq!(
             response.status(),
@@ -3505,7 +3961,11 @@ async fn raw_renders_text_inline_whatever_the_extension() {
 async fn raw_refuses_to_name_a_type_it_does_not_render() {
     let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
     let session_id = backend.create_session("agent").await;
-    std::fs::write(backend.workdir().join("payload.xyz"), "<h1>not rendered</h1>").unwrap();
+    std::fs::write(
+        backend.workdir().join("payload.xyz"),
+        "<h1>not rendered</h1>",
+    )
+    .unwrap();
 
     let response = backend
         .get_authed(&format!(
@@ -3519,11 +3979,19 @@ async fn raw_refuses_to_name_a_type_it_does_not_render() {
         "text/plain; charset=utf-8",
         "smuggled markup is shown as source, never labelled as HTML"
     );
-    assert_eq!(headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
-    assert_eq!(headers.get(header::CONTENT_SECURITY_POLICY).unwrap(), "sandbox");
+    assert_eq!(
+        headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
+        "sandbox"
+    );
     // The body is the markup verbatim, which is the point: it was not
     // interpreted, and `nosniff` above is what stops the browser reconsidering.
-    assert!(body_string(response).await.contains("<h1>not rendered</h1>"));
+    assert!(body_string(response)
+        .await
+        .contains("<h1>not rendered</h1>"));
 }
 
 /// A file whose bytes are not text still downloads.
@@ -3592,8 +4060,14 @@ async fn raw_never_serves_svg_as_an_executable_type() {
     assert_eq!(content_type, "text/plain; charset=utf-8");
     // The script survives in the body, unexecuted. That is the whole distinction:
     // the bytes are delivered, the type refuses to interpret them.
-    assert_eq!(headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
-    assert_eq!(headers.get(header::CONTENT_SECURITY_POLICY).unwrap(), "sandbox");
+    assert_eq!(
+        headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
+        "sandbox"
+    );
 }
 
 #[tokio::test]
@@ -3626,7 +4100,10 @@ async fn raw_revalidates_with_an_etag_instead_of_resending_bytes() {
     assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
     // A 304 must carry the policy too: it is still a response about this file.
     assert_eq!(
-        second.headers().get(header::CONTENT_SECURITY_POLICY).unwrap(),
+        second
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap(),
         "sandbox"
     );
 }
@@ -3644,7 +4121,11 @@ async fn the_new_file_routes_refuse_paths_outside_the_workdir() {
     std::os::unix::fs::symlink(&outside, backend.workdir().join("escape.html")).unwrap();
 
     for route in ["document", "raw"] {
-        for attempt in ["../doc-secret.txt", "src/../../doc-secret.txt", "/etc/hosts"] {
+        for attempt in [
+            "../doc-secret.txt",
+            "src/../../doc-secret.txt",
+            "/etc/hosts",
+        ] {
             let response = backend
                 .get_authed(&format!(
                     "/api/v1/sessions/{session_id}/files/{route}?path={}",
@@ -3796,6 +4277,15 @@ mod soul {
                     "workdir": backend.workdir().display().to_string(),
                     "injectIdentity": false,
                 }),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let draft = json_body(response).await;
+        let draft_id = draft["draftId"].as_str().unwrap();
+        let response = backend
+            .post_authed(
+                &format!("/api/v1/sessions/draft/{draft_id}/turns"),
+                serde_json::json!({"text": "first message"}),
             )
             .await;
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -4089,9 +4579,7 @@ async fn a_late_outcome_does_not_abandon_the_host_it_names() {
         let agent_turn = entry["turn"]["origin"] == "agent";
         for event in entry["events"].as_array().unwrap() {
             if agent_turn && event["streamId"] == "bg-host" {
-                panic!(
-                    "the host was closed on a turn it never ran in: {event}"
-                );
+                panic!("the host was closed on a turn it never ran in: {event}");
             }
         }
     }
@@ -4113,10 +4601,9 @@ async fn a_late_outcome_does_not_abandon_the_host_it_names() {
 /// delegation has to end up carrying its real outcome.
 #[tokio::test]
 async fn a_flagged_delegate_stays_on_its_turn_and_records_its_outcome() {
-    let backend = common::TestBackend::start_with_runners(&[
-        common::MockRunner::backgrounded_flagged("bgf"),
-    ])
-    .await;
+    let backend =
+        common::TestBackend::start_with_runners(&[common::MockRunner::backgrounded_flagged("bgf")])
+            .await;
     let session_id = backend.create_session("bgf").await;
 
     let response = backend
@@ -4174,9 +4661,7 @@ async fn await_reconciled(
                 .await,
         )
         .await;
-        if find_event(&last, stream_id)
-            .is_some_and(|event| event["data"]["reconciled"] == true)
-        {
+        if find_event(&last, stream_id).is_some_and(|event| event["data"]["reconciled"] == true) {
             return last;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -4219,8 +4704,7 @@ async fn await_reconciled(
 /// its pair with nothing between the two requests.
 #[tokio::test]
 async fn a_terminal_turn_always_has_its_trajectories_closed() {
-    let backend =
-        TestBackend::start_with_runners(&[MockRunner::abandons_many("mock")]).await;
+    let backend = TestBackend::start_with_runners(&[MockRunner::abandons_many("mock")]).await;
     let session_id = backend.create_session("mock").await;
 
     for attempt in 0..6 {
@@ -4241,7 +4725,9 @@ async fn a_terminal_turn_always_has_its_trajectories_closed() {
         let mut status = String::new();
         for _ in 0..4000 {
             let body = json_body(
-                backend.get_authed(&format!("/api/v1/turns/{turn_id}")).await,
+                backend
+                    .get_authed(&format!("/api/v1/turns/{turn_id}"))
+                    .await,
             )
             .await;
             status = body["turn"]["status"].as_str().unwrap_or("").to_string();
@@ -4313,4 +4799,3 @@ fn find_event<'a>(history: &'a Value, stream_id: &str) -> Option<&'a Value> {
             })
     })
 }
-

@@ -36,9 +36,11 @@ Two rules a client must not break:
   object, and reading them from the id is how a rename or an encoding change breaks a
   client silently.
 
-There is no server-minted UUID. `POST /sessions` therefore **starts an agent** rather
-than reserving a row, because a session has no identity until an agent has given it
-one — see that endpoint below for what changed with it.
+There is no server-minted UUID. `POST /sessions` therefore starts an agent and returns a
+process-local draft handle rather than reserving a row. Capabilities and configuration can
+be read or changed through the draft routes, and the first turn promotes it to a normal
+session. A draft handle is never a session id and is not included in listings or
+native-history browsing.
 
 ## Core Endpoints
 
@@ -90,7 +92,7 @@ Detailed system state (sessions, turns, agents, retention).
     "bytesGrewBy": 12043776,
     "largestSessions": [
       {
-        "sessionId": "s_abc123",
+        "sessionId": "env_7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
         "bytes": 1183741952,
         "blocks": 21044,
         "measuredAtMs": 1724058000000,
@@ -278,6 +280,7 @@ Every paired environment, whether it is connected, and what it can run.
         {
           "name": "claude",
           "version": "2.1.247",
+          "available": true,
           "flags": {
             "model": {"choices": ["opus-5", "sonnet-5"], "description": "Model to use"},
             "effort": {"choices": ["low", "medium", "high", "xhigh", "max"]}
@@ -293,7 +296,7 @@ Every paired environment, whether it is connected, and what it can run.
       "connected": true,
       "origin": "ssh-bootstrapped",
       "reachableVia": "env_7fk2",
-      "agents": [{"name": "codex", "version": "0.9.1", "flags": {}, "supports": []}]
+      "agents": [{"name": "codex", "version": "0.9.1", "flags": {}, "supports": [], "available": true}]
     }
   ]
 }
@@ -359,7 +362,6 @@ the same store (`docs/architecture.md` § One authority).
     {
       "id": "env_7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
       "environment": "env_7fk2",
-      "environmentName": "laptop",
       "agent": "claude",
       "nativeId": "9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
       "workdir": "/Users/hsw/Workspace/project",
@@ -379,7 +381,8 @@ the same store (`docs/architecture.md` § One authority).
 are also given as separate fields **so a client never parses the id** — see § A session
 id in a path.
 
-`environmentName` is display-only and mutable. It is never a key: a rename must not
+The environment display name is resolved from `GET /api/v1/environments` rather than
+duplicated on every session row. It is mutable metadata, never a key: a rename must not
 destroy identity (`docs/environments.md` § Pairing).
 
 **`fidelity` is what a renderer must read before drawing a duration.** `stream` means
@@ -397,9 +400,9 @@ asking for `/w/app` also returned `/w/app-old` and every subdirectory.
 
 #### `POST /api/v1/sessions`
 
-**This starts an agent.** It does not reserve a row. A session has no identity until an
-agent has assigned one (`docs/architecture.md` § Identity), so there is nothing to
-create in advance.
+**This starts an agent.** It does not reserve a durable row. A session has no durable
+identity until an agent has assigned one (`docs/architecture.md` § Identity), so the
+pre-message state is an in-memory draft rather than a session record.
 
 **Request:**
 ```json
@@ -418,7 +421,12 @@ create in advance.
 would rewrite what the stored history means. It is a default, not a policy — see
 `GET /api/v1/soul` for the text it governs.
 
-**Response 201:** the session object, with its id.
+**Response 201:** a process-local `draftId` plus the launch metadata.  This is not a
+session id and is not listed anywhere.  The draft may still read or change its
+working-directory files through the `/sessions/draft/{id}/files/*` routes, because the
+prepared link already owns the contained `workdir`; those routes disappear with the
+draft and never create history.  The first non-empty turn sent to
+`/sessions/draft/{id}/turns` atomically promotes the link and returns the durable session.
 
 **What changed, and what it deletes.** The previous shape wrote a row with a
 server-minted UUID and left the agent unstarted, which produced a class of session with
@@ -452,17 +460,43 @@ bug is invisible on Linux CI and certain on a developer's machine.
 - `403` — `POLICY_VIOLATION`: the workdir exists but is outside that environment's
   permitted roots. Distinct from `400` on purpose — the request is well-formed and the
   fix is in configuration, not in the request. The message lists what is permitted.
-- `409` — the agent reported an id that already names a session
-- `502` — `AGENT_START_FAILED`: the CLI could not be started, or started and reported
-  no id. Reporting no id is a failure rather than a degraded success: without one the
-  session can never be resumed, so every link death would make it permanently
-  unlinkable.
+- `502` — `AGENT_START_FAILED`: the CLI could not be started or did not answer the
+  initial capability handshake. A draft may start without a native id; identity is
+  acquired and checked only when its first real turn is promoted.
 - `503` — `ENVIRONMENT_UNREACHABLE`: no envagent is connected for that environment
 
 A session already recorded outside the permitted roots stays fully readable. Nothing
 re-checks a recorded workdir on read, list, or resume — a rule that applied on read
 would make every session created under wider configuration unreadable, which is a worse
 failure than the hole it closes.
+
+#### Prepared-link routes
+
+The `draftId` returned by `POST /sessions` is an opaque, process-local handle. It is
+valid only while the prepared link is alive and must never be passed to a durable
+session endpoint. These routes expose the capabilities needed to configure a link
+before the first message, without inventing a second session identity:
+
+- `GET /api/v1/sessions/draft/{id}` returns the launch metadata (`draftId`, environment,
+  agent, workdir, title, and `injectIdentity`).
+- `GET /api/v1/sessions/draft/{id}/capabilities` returns the same typed `LinkState`
+  surface used by durable sessions. The adapter owns all vendor-specific model,
+  thinking, permission, and command details.
+- `POST /api/v1/sessions/draft/{id}/config` accepts `{ "id": "...", "value": ... }`
+  and returns the updated `LinkState`. The id and value are opaque to the server; the
+  adapter validates and translates them.
+- `POST /api/v1/sessions/draft/{id}/turns` accepts the normal turn payload. A non-empty
+  text, declared command, or attachment is the promotion boundary: the adapter first
+  obtains the vendor's native id, then the server atomically writes the durable session
+  and first turn and returns `SessionEnvelope`. An entirely empty payload is rejected
+  and leaves the draft disposable.
+- `DELETE /api/v1/sessions/draft/{id}` closes the link and removes draft-only temporary
+  resources. It always leaves no journal row; calling it for an already-discarded draft
+  is harmless.
+
+Draft file routes under `/sessions/draft/{id}/files/*` use the same containment rules as
+durable file routes and disappear with the draft. Reading or changing files never
+promotes a draft and never creates history.
 
 #### `POST /api/v1/sessions/adopt`
 
@@ -544,14 +578,9 @@ Get one session.
 and nothing else — no turn summary and no turn counts, on this or any other route. A client
 that needs the turn list asks `GET /sessions/{id}/turns`.
 
-Two field names in that removed example were wrong in a way worth keeping visible,
-because both are easy to re-invent:
-
-- **`nativeSessionId` is never serialized on an incarnation.** `models/incarnation.rs`
-  marks `backend_session_id` `#[serde(skip_serializing)]` — agent-native ids are not
-  exposed at the incarnation level on purpose. The *session* does expose
-  `nativeSessionId`, which is where it belongs.
-- The timestamps are `startedAtMs` / `endedAtMs`, not `createdAtMs` / `lastUsedAtMs`.
+The response exposes the vendor id as `nativeId`, alongside the encoded `id` and the
+separate `environment` and `agent` fields. There is no second server-minted id to
+translate, and session timestamps are `createdAtMs` / `updatedAtMs`.
 
 #### `PATCH /api/v1/sessions/{id}`
 
@@ -594,10 +623,9 @@ installed.
 
 #### There is no `DELETE /api/v1/sessions/{id}`
 
-**Nothing deletes a session.** There is no empty draft to discard — a session exists only
-once an agent has assigned it an id, so a row representing nothing cannot occur — and no
-route deletes a session *with* history. Delete, move, and export are absent; see the
-roadmap.
+**Nothing deletes a durable session.** A prepared draft is disposable through its draft
+route because it has no journal row; no route deletes a session *with* history. Delete,
+move, and export of durable records are absent; see the roadmap.
 
 ### Turns
 
@@ -625,7 +653,7 @@ Create a turn (send message or attachment).
 {
   "turn": {
     "id": "t_ghi789",
-    "sessionId": "s_abc123",
+    "sessionId": "env_7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
     "status": "queued",
     "requestText": "Implement feature X",
     "createdAtMs": 1724059200000
@@ -652,8 +680,7 @@ Get turn detail.
 {
   "turn": {
     "id": "t_ghi789",
-    "sessionId": "s_abc123",
-    "incarnationId": "i_def456",
+    "sessionId": "env_7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
     "status": "completed",
     "origin": "user",
     "requestText": "Implement feature X",
@@ -670,7 +697,7 @@ Get turn detail.
 ```
 
 **`origin` is `user` or `agent`, and a client that ignores it renders an answer to a
-message the user never wrote.** An agent may start a turn of its own to report work that
+message the user never wrote.** This is turn-level provenance, not a session class. An agent may start a turn of its own to report work that
 outlived the turn which dispatched it, and such a turn's `requestText` is empty — which
 is otherwise indistinguishable from a user sending nothing. `docs/session-protocol.md`
 § An agent may start a turn.
@@ -816,14 +843,12 @@ Returns `LinkState`. **Establishes a link as a side effect** — this is the rea
 most clients use to attach, because a UI asking what a session can do is a UI about to
 offer it.
 
-A failure here is **200, not 5xx**, carrying `attached: false` and a typed `failure`.
+A failure here is **200, not 5xx**, carrying an unavailable `control` facet with a
+typed reason.
 That is the endpoint's one non-obvious decision and it is deliberate: a missing adapter
 or a refusing agent is the *agent's* failure, not the request's, and the session remains
-valid with readable history — a 500 would make the whole session look broken. Logging
-the reason and returning a bare `attached: false` was the original defect, because a
-client then could not distinguish a failed handshake from an agent that simply declares
-no commands, so the only honest thing it could render was nothing at all. That is how a
-stale install presented as a composer ignoring the `/` key.
+valid with readable history — a 500 would make the whole session look broken. The two
+facets make the reason explicit instead of flattening it into an unexplained boolean.
 
 Two consequences a client must handle:
 
@@ -941,6 +966,13 @@ this endpoint's history earned, each of which cost a debugging round:
   request.** A vendor's `success` is not a promise it did what you asked: measured on
   `claude` 2.1.246, `manual` answers success while confirming `default`.
 
+An accepted setting is remembered for a durable session only when its adapter declares a
+safe launch-flag equivalent. That mapping belongs to the adapter: the server does not
+know that Claude's live `permissionMode` is spelled `mode` at launch, nor should it persist
+runtime-only controls such as output style. The stored `flagsJson` therefore represents
+the next-link launch preferences, while `currentValue` remains the vendor-confirmed live
+state. A prepared draft keeps the same adapter-owned subset in memory until promotion.
+
 #### `GET /api/v1/sessions/{id}/events`
 
 Session-scoped facts as SSE: a link attaching or dying, capabilities changing, a request
@@ -954,6 +986,23 @@ ever grew is what made an answered question sit on a second client until reload.
 payload is the **row**, carrying `status`, not the transition, so a client reconciles
 against a state rather than replaying a vocabulary of verbs, and a status added later
 needs no client change.
+
+#### `GET /api/v1/sessions/{id}/trace/events`
+
+The reconnectable, session-scoped trace. This is the stream a transcript view should
+hold while a session is open: it carries normalized events from every turn, not only
+link/request invalidations. Stable rows are replayed from `journal.db` or
+`history.db`; the live channel contributes the bounded ephemeral tail and then stays
+open across turn boundaries.
+
+Each event includes `arrivalTurnId`, the turn on which the server received it. That is
+not trajectory ownership: a child can finish after its parent turn, so the frontend's
+trace index uses the first trajectory declaration (or promoted host) as `ownerTurnId`
+and keeps `arrivalTurnId` only as provenance. This is what prevents a late Codex child
+close from becoming a synthetic `origin: agent` turn or a second outer card.
+
+The older `/sessions/{id}/events` endpoint remains a cheap state-invalidation stream
+for capabilities, links, and pending requests; it intentionally has no trace replay.
 
 #### `GET /api/v1/sessions/{id}/replay`
 
@@ -1082,11 +1131,6 @@ exist before the first quick session is created.
 `/home/user/app` is not a collision, because a path is only ever read alongside the
 environment that named it (`docs/architecture.md` § Sessions do not migrate). Grouping
 by path alone would merge two unrelated directories into one row.
-
-**`includeUnpaired=true` also reports directories whose environment is not currently
-connected**, so a project can be pinned and browsed while the laptop holding it is
-asleep. It is off by default because the sidebar polls this endpoint and needs only what
-it can group; the surfaces where a user *picks* a directory pass it.
 
 **Comparing a recorded path against a configured one needs the same spelling.**
 `workdir` is stored canonicalized, so comparing it against a configured Quick Start path

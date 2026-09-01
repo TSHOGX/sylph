@@ -321,7 +321,11 @@ fn heading_level(style: &str) -> Option<u8> {
     let lower = style.to_lowercase();
     let digits = lower.strip_prefix("heading")?.trim_start_matches('-');
     // `Heading1` and `heading 1` are both current; `Title` is not a heading level.
-    digits.trim().parse::<u8>().ok().filter(|n| (1..=6).contains(n))
+    digits
+        .trim()
+        .parse::<u8>()
+        .ok()
+        .filter(|n| (1..=6).contains(n))
 }
 
 /// List membership from a paragraph style name.
@@ -366,9 +370,7 @@ pub fn parse_pptx(path: &std::path::Path) -> Result<Blocks> {
 
     let order = slide_order(&presentation, &rels)?;
     if order.is_empty() {
-        return Err(unreadable(
-            "a PowerPoint presentation: it lists no slides",
-        ));
+        return Err(unreadable("a PowerPoint presentation: it lists no slides"));
     }
 
     let mut sections = Vec::new();
@@ -810,9 +812,7 @@ mod tests {
             .blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Paragraph { spans } => {
-                    Some(spans.iter().map(|s| s.text.as_str()).collect())
-                }
+                Block::Paragraph { spans } => Some(spans.iter().map(|s| s.text.as_str()).collect()),
                 _ => None,
             })
             .collect();

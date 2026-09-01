@@ -57,7 +57,12 @@ async fn raise_request(
 async fn a_pending_request_is_listed_with_what_the_agent_proposed() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
+    raise_request(
+        &server,
+        &common::TestBackend::session_id(&session_id),
+        "Bash",
+    )
+    .await;
 
     let response = server
         .get_authed(&format!("/api/v1/sessions/{}/requests", session_id))
@@ -84,7 +89,12 @@ async fn a_pending_request_is_listed_with_what_the_agent_proposed() {
 async fn the_adapter_request_id_is_never_serialized_to_a_client() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
+    raise_request(
+        &server,
+        &common::TestBackend::session_id(&session_id),
+        "Bash",
+    )
+    .await;
 
     let body = json_body(
         server
@@ -107,7 +117,12 @@ async fn the_adapter_request_id_is_never_serialized_to_a_client() {
 async fn a_restart_abandons_pending_requests_rather_than_leaving_them_answerable() {
     let mut server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
+    let request = raise_request(
+        &server,
+        &common::TestBackend::session_id(&session_id),
+        "Bash",
+    )
+    .await;
 
     server.restart().await;
 
@@ -140,7 +155,12 @@ async fn a_restart_abandons_pending_requests_rather_than_leaving_them_answerable
 async fn an_option_the_agent_never_offered_is_refused() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
+    let request = raise_request(
+        &server,
+        &common::TestBackend::session_id(&session_id),
+        "Bash",
+    )
+    .await;
 
     let response = server
         .post_authed(
@@ -154,7 +174,13 @@ async fn an_option_the_agent_never_offered_is_refused() {
     assert_eq!(body["error"]["code"], "INVALID_REQUEST");
 
     // Still open: a refused answer must not consume the request.
-    let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    let stored = server
+        .state
+        .store
+        .get_request(&request.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.status, "pending");
 }
 
@@ -178,7 +204,12 @@ async fn resolving_an_unknown_request_is_a_404() {
 async fn a_second_answer_to_one_request_is_a_conflict() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
+    let request = raise_request(
+        &server,
+        &common::TestBackend::session_id(&session_id),
+        "Bash",
+    )
+    .await;
 
     // The first answer claims the row and forwards it. `POST /sessions` starts an agent
     // now, so this session has a live link — where this test previously asserted a
@@ -192,7 +223,13 @@ async fn a_second_answer_to_one_request_is_a_conflict() {
         .await;
     assert_eq!(first.status(), StatusCode::OK);
 
-    let claimed = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    let claimed = server
+        .state
+        .store
+        .get_request(&request.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(claimed.status, "resolved");
     assert_eq!(claimed.chosen_option.as_deref(), Some("allow"));
 
@@ -211,7 +248,13 @@ async fn a_second_answer_to_one_request_is_a_conflict() {
 
     // The first decision stands. An approval overwritten by a later "deny" would
     // be bad; overwritten by a later "allow" would be a security hole.
-    let final_row = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    let final_row = server
+        .state
+        .store
+        .get_request(&request.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(final_row.chosen_option.as_deref(), Some("allow"));
 }
 
@@ -232,7 +275,12 @@ async fn a_second_answer_to_one_request_is_a_conflict() {
 async fn answering_a_request_announces_it_so_other_clients_stop_showing_it() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
+    let request = raise_request(
+        &server,
+        &common::TestBackend::session_id(&session_id),
+        "Bash",
+    )
+    .await;
 
     // Subscribed before the answer, standing in for the laptop that is already
     // displaying the panel.
@@ -283,7 +331,12 @@ async fn answering_a_request_announces_it_so_other_clients_stop_showing_it() {
 async fn a_request_abandoned_with_its_agent_is_announced_too() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
+    let request = raise_request(
+        &server,
+        &common::TestBackend::session_id(&session_id),
+        "Bash",
+    )
+    .await;
 
     // A real link, so this exercises the path a dying agent takes rather than an
     // artificial one. `detach` returns early when there is nothing attached — correct,
@@ -299,7 +352,11 @@ async fn a_request_abandoned_with_its_agent_is_announced_too() {
     // in the buffer ahead of what this test is about.
     let mut other_client = server.state.hub.attach_session(&session_id).await;
 
-    server.state.links.detach(&common::TestBackend::session_id(&session_id), "test").await;
+    server
+        .state
+        .links
+        .detach(&common::TestBackend::session_id(&session_id), "test")
+        .await;
 
     // The request's own announcement, ahead of the `link` event: a client learns what
     // happened to the thing it is displaying, not only that something happened.
@@ -318,7 +375,12 @@ async fn a_request_abandoned_with_its_agent_is_announced_too() {
 async fn an_answer_can_carry_an_edited_version_of_the_proposed_input() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
+    let request = raise_request(
+        &server,
+        &common::TestBackend::session_id(&session_id),
+        "Bash",
+    )
+    .await;
 
     server
         .post_authed(
@@ -327,8 +389,16 @@ async fn an_answer_can_carry_an_edited_version_of_the_proposed_input() {
         )
         .await;
 
-    let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
-    let recorded = stored.resolved_input_json.expect("the edit must be recorded");
+    let stored = server
+        .state
+        .store
+        .get_request(&request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let recorded = stored
+        .resolved_input_json
+        .expect("the edit must be recorded");
     assert!(
         recorded.contains("build/tmp"),
         "what was actually approved is the audit trail: {recorded}"
@@ -338,7 +408,9 @@ async fn an_answer_can_carry_an_edited_version_of_the_proposed_input() {
 #[tokio::test]
 async fn requests_on_an_unknown_session_are_a_404() {
     let server = TestBackend::start().await;
-    let response = server.get_authed("/api/v1/sessions/env7fk2%3Amock%3Anope/requests").await;
+    let response = server
+        .get_authed("/api/v1/sessions/env7fk2%3Amock%3Anope/requests")
+        .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
@@ -356,7 +428,10 @@ async fn interrupt_and_steer_reach_a_live_agent() {
     let session_id = server.create_session("mock").await;
 
     let interrupted = server
-        .post_authed(&format!("/api/v1/sessions/{}/interrupt", session_id), json!({}))
+        .post_authed(
+            &format!("/api/v1/sessions/{}/interrupt", session_id),
+            json!({}),
+        )
         .await;
     assert_eq!(interrupted.status(), StatusCode::OK);
 
@@ -513,8 +588,8 @@ async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
 /// own.
 #[tokio::test]
 async fn an_agent_that_will_not_report_itself_is_a_failed_handshake_not_a_missing_install() {
-    let server = TestBackend::start_with_runners(&[common::MockRunner::broken_describe("mute")])
-        .await;
+    let server =
+        TestBackend::start_with_runners(&[common::MockRunner::broken_describe("mute")]).await;
 
     let created = server
         .post_authed(
@@ -571,10 +646,52 @@ async fn setting_a_config_option_answers_with_the_refreshed_surface() {
     // and the two produce identical bytes — but "identical" is a claim about serde's
     // internal tagging that only a round trip through a real producer can settle.
     assert_eq!(model["type"], "select");
-    assert!(model.get("kind").is_none(), "the Rust field name must not reach a client");
+    assert!(
+        model.get("kind").is_none(),
+        "the Rust field name must not reach a client"
+    );
     // And the rest of the surface is intact, which is the property the whole facet
     // design exists to guarantee.
-    assert_eq!(body["capabilities"]["commands"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        body["capabilities"]["commands"].as_array().unwrap().len(),
+        2
+    );
+}
+
+/// A successful live config change that has a launch equivalent is remembered on the
+/// durable session, so a later link re-attach starts with the user's model again.
+#[tokio::test]
+async fn setting_a_config_option_persists_the_adapter_owned_launch_flag() {
+    let server = TestBackend::start().await;
+    let session_id = server.create_session("mock").await;
+    let typed_id = common::TestBackend::session_id(&session_id);
+    server
+        .state
+        .store
+        .set_session_flags(&typed_id, r#"{"effort":"high"}"#)
+        .await
+        .expect("seed an existing launch flag");
+
+    let response = server
+        .post_authed(
+            &format!("/api/v1/sessions/{}/config", session_id),
+            json!({"configId": "model", "value": "slow"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}", session_id))
+            .await,
+    )
+    .await;
+    let flags = body["session"]["flagsJson"]
+        .as_str()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .expect("flagsJson must remain a JSON object string");
+    assert_eq!(flags["model"], "slow");
+    assert_eq!(flags["effort"], "high");
 }
 
 /// An option the agent never offered is refused before it reaches the adapter.
@@ -736,7 +853,10 @@ async fn a_turn_does_not_erase_the_session_command_list() {
     )
     .await;
     let commands_before = before["capabilities"]["commands"].as_array().unwrap().len();
-    assert!(commands_before > 0, "the fixture must report commands to begin with");
+    assert!(
+        commands_before > 0,
+        "the fixture must report commands to begin with"
+    );
 
     let turn = json_body(
         server
@@ -747,7 +867,9 @@ async fn a_turn_does_not_erase_the_session_command_list() {
             .await,
     )
     .await;
-    server.await_turn(turn["turn"]["id"].as_str().unwrap()).await;
+    server
+        .await_turn(turn["turn"]["id"].as_str().unwrap())
+        .await;
 
     let after = json_body(
         server
@@ -760,8 +882,14 @@ async fn a_turn_does_not_erase_the_session_command_list() {
         commands_before,
         "a turn must not change what the agent can be asked to do"
     );
-    assert!(!after["capabilities"]["config"].as_array().unwrap().is_empty());
-    assert!(!after["capabilities"]["subagents"].as_array().unwrap().is_empty());
+    assert!(!after["capabilities"]["config"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(!after["capabilities"]["subagents"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 /// A session survives losing its link, which is the ordinary path rather than an
@@ -804,9 +932,15 @@ async fn a_session_relinks_after_its_link_is_torn_down() {
             .await,
     )
     .await;
-    assert_eq!(relinked["link"]["control"]["available"], true, "a detached session must be relinkable");
     assert_eq!(
-        relinked["capabilities"]["commands"].as_array().unwrap().len(),
+        relinked["link"]["control"]["available"], true,
+        "a detached session must be relinkable"
+    );
+    assert_eq!(
+        relinked["capabilities"]["commands"]
+            .as_array()
+            .unwrap()
+            .len(),
         commands,
         "a resumed link reports the same surface"
     );
@@ -825,8 +959,12 @@ async fn establishing_a_link_does_not_reorder_a_session_as_recent() {
     let older = server.create_session("mock").await;
     let newer = server.create_session("mock").await;
 
-    let before = json_body(server.get_authed(&format!("/api/v1/sessions/{}", older)).await)
-        .await["session"]["updatedAtMs"]
+    let before = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}", older))
+            .await,
+    )
+    .await["session"]["updatedAtMs"]
         .as_i64()
         .unwrap();
 
@@ -835,19 +973,29 @@ async fn establishing_a_link_does_not_reorder_a_session_as_recent() {
         .get_authed(&format!("/api/v1/sessions/{}/capabilities", older))
         .await;
 
-    let after = json_body(server.get_authed(&format!("/api/v1/sessions/{}", older)).await)
-        .await["session"]["updatedAtMs"]
+    let after = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}", older))
+            .await,
+    )
+    .await["session"]["updatedAtMs"]
         .as_i64()
         .unwrap();
     assert_eq!(before, after, "opening a session is not activity in it");
 
     // And the ordering the start screen depends on still holds.
-    let newer_updated =
-        json_body(server.get_authed(&format!("/api/v1/sessions/{}", newer)).await).await
-            ["session"]["updatedAtMs"]
-            .as_i64()
-            .unwrap();
-    assert!(newer_updated >= after, "the newer session is still the newer one");
+    let newer_updated = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}", newer))
+            .await,
+    )
+    .await["session"]["updatedAtMs"]
+        .as_i64()
+        .unwrap();
+    assert!(
+        newer_updated >= after,
+        "the newer session is still the newer one"
+    );
 }
 
 /// A request that declares a form, the way an agent's own question does.
@@ -919,8 +1067,7 @@ async fn a_declared_form_reaches_a_client_that_lists_the_request() {
     let body = json_body(response).await;
 
     let form: serde_json::Value =
-        serde_json::from_str(body[0]["formJson"].as_str().expect("a form must be listed"))
-            .unwrap();
+        serde_json::from_str(body[0]["formJson"].as_str().expect("a form must be listed")).unwrap();
     assert_eq!(form["fields"].as_array().unwrap().len(), 2);
     assert_eq!(form["fields"][1]["mode"], "many");
 }
@@ -945,9 +1092,17 @@ async fn a_form_answer_is_recorded_with_its_values_and_notes() {
         .await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    let stored = server
+        .state
+        .store
+        .get_request(&request.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.status, "resolved");
-    let recorded = stored.resolved_input_json.expect("the answer must be recorded");
+    let recorded = stored
+        .resolved_input_json
+        .expect("the answer must be recorded");
     assert!(recorded.contains("Tabs"), "{recorded}");
     assert!(recorded.contains("only for generated files"), "{recorded}");
 }
@@ -989,7 +1144,13 @@ async fn an_answer_that_does_not_fit_the_form_is_refused_and_leaves_it_open() {
             "must refuse {input}"
         );
 
-        let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+        let stored = server
+            .state
+            .store
+            .get_request(&request.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             stored.status, "pending",
             "a refused answer must leave the request answerable: {input}"
@@ -1014,7 +1175,13 @@ async fn declining_a_form_does_not_require_it_to_be_complete() {
     // Claimed, then reported as having nowhere to go — not refused as incomplete.
     assert_eq!(response.status(), StatusCode::OK);
 
-    let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    let stored = server
+        .state
+        .store
+        .get_request(&request.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.chosen_option.as_deref(), Some("deny"));
 }
 
@@ -1024,7 +1191,12 @@ async fn declining_a_form_does_not_require_it_to_be_complete() {
 async fn a_request_with_no_form_still_accepts_an_edited_proposal() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
-    let request = raise_request(&server, &common::TestBackend::session_id(&session_id), "Bash").await;
+    let request = raise_request(
+        &server,
+        &common::TestBackend::session_id(&session_id),
+        "Bash",
+    )
+    .await;
 
     let response = server
         .post_authed(
@@ -1034,7 +1206,13 @@ async fn a_request_with_no_form_still_accepts_an_edited_proposal() {
         .await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    let stored = server.state.store.get_request(&request.id).await.unwrap().unwrap();
+    let stored = server
+        .state
+        .store
+        .get_request(&request.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.status, "resolved");
     assert!(stored.form_json.is_none());
 }

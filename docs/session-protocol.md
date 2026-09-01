@@ -88,7 +88,7 @@ success. The last of those is the easiest to do by accident — see § A refused
 | Field | Meaning |
 | --- | --- |
 | `workdir` | the agent's `current_dir`, already contained by the envagent |
-| `native_id` | dictate this id, or `None` to resume an existing one, or `New` to let the vendor assign |
+| `native_id` | `Dictate` a new id, `Resume` an existing id, or `New` and let the vendor assign one |
 | `inject_identity` | whether to append `SOUL.md`; the server decides, not the adapter |
 | `flags` | spawn-time options: model, effort, and whatever the agent declared |
 | `permission_mode` | initial mode, if the vendor takes one at launch |
@@ -98,11 +98,12 @@ success. The last of those is the easiest to do by accident — see § A refused
 means the server knows a session's identity before the first event, so nothing has to
 correlate afterwards.
 
-An adapter that cannot dictate reports the vendor's id on `open`, and the server keys
-the session on what came back. **An `open` that reports no id at all is a failure**,
-not a degraded success: without an id the session can never be resumed, so every link
-death — the 30-minute idle reaper, a restart, an explicit detach — makes it
-permanently unlinkable.
+An adapter that cannot dictate reports the vendor's id when it starts the first turn,
+and the server keys the durable session on what came back. A prepared link may report
+no id at all while it is idle; that is valid because it has no durable record to resume.
+The adapter must return a non-empty id from the first-turn promotion operation. If it
+cannot, promotion fails and the prepared link is closed without writing a session or
+turn row.
 
 ### A launch flag gating a runtime-mutable value must be set unconditionally
 
@@ -409,6 +410,11 @@ fans out to a dozen agents and then synthesizes. **One field carries all of it:*
 ```
 span    the trajectory this event happened in. Absent means the root turn.
 ```
+
+The server's session-trace projection also carries `arrivalTurnId`: the turn on which
+the event was received. It is provenance, not ownership. A child trajectory may finish
+after its parent turn, so consumers must not use the arrival turn as the trajectory's
+container; the first declaration (or promoted host) remains the owner.
 
 A `subagent` event *is* the trajectory's own record: its `stream_id` is the trajectory
 id and its `span` names the trajectory it was delegated from. A `thinking` block

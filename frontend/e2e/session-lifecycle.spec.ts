@@ -101,7 +101,9 @@ test("reloading mid-conversation replays the journal", async ({ page }) => {
   await page.reload();
 
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Persist this" })).toBeVisible();
+  // The fixture's promotion turn intentionally owns the session title.  Reloading
+  // must preserve the later user message as a turn, not replace the title with a
+  // subsequent prompt.
   await expect(page.getByLabel(/Turn /).getByText("Persist this")).toBeVisible();
 });
 

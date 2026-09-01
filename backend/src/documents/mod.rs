@@ -246,14 +246,8 @@ pub fn parse(path: &std::path::Path, window: Window) -> Result<Document> {
     }
 
     match format {
-        DocumentFormat::Csv => Ok(Document::grid(
-            format,
-            table::parse(path, b',', window)?,
-        )),
-        DocumentFormat::Tsv => Ok(Document::grid(
-            format,
-            table::parse(path, b'\t', window)?,
-        )),
+        DocumentFormat::Csv => Ok(Document::grid(format, table::parse(path, b',', window)?)),
+        DocumentFormat::Tsv => Ok(Document::grid(format, table::parse(path, b'\t', window)?)),
         DocumentFormat::Docx => Ok(Document::blocks(format, blocks::parse_docx(path)?)),
         DocumentFormat::Pptx => Ok(Document::blocks(format, blocks::parse_pptx(path)?)),
         _ => Ok(Document::grid(format, sheet::parse(path, window)?)),

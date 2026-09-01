@@ -73,7 +73,7 @@ use tracing::{debug, warn};
 use sylph_protocol::{EventStream, SessionId, SessionMessage};
 
 use crate::db::{JournalStore, JournalWriter};
-use crate::events::{SeqAllocator, StreamEvent};
+use crate::events::{EventHub, SeqAllocator, StreamEvent};
 
 /// What one pass over a native store produced.
 ///
@@ -161,11 +161,30 @@ pub struct NativeIngest {
     store: JournalStore,
     writer: JournalWriter,
     seq: SeqAllocator,
+    /// Optional live projection for `watch`. Adopt is a finite operation and its
+    /// caller can read the journal after the response; a watch must also wake an
+    /// already-open session trace as records arrive.
+    hub: Option<EventHub>,
 }
 
 impl NativeIngest {
     pub fn new(store: JournalStore, writer: JournalWriter, seq: SeqAllocator) -> Self {
-        Self { store, writer, seq }
+        Self {
+            store,
+            writer,
+            seq,
+            hub: None,
+        }
+    }
+
+    /// Attach the session trace projection used by the running server.
+    ///
+    /// Kept as a builder rather than changing [`Self::new`] so the ingest unit tests can
+    /// exercise the storage path without constructing a hub, and so callers that only
+    /// need a one-shot adopt do not pay for a live registry they will never use.
+    pub fn with_hub(mut self, hub: EventHub) -> Self {
+        self.hub = Some(hub);
+        self
     }
 
     /// Drain a native session's stream into the journal.
@@ -263,11 +282,15 @@ impl NativeIngest {
                     None => return report,
                 },
             };
+            wire.arrival_turn_id = Some(turn_id.clone());
 
             match self.seq.next(session_id).await {
                 Ok(seq) => wire.seq = seq,
                 Err(error) => {
-                    warn!("Could not allocate a sequence number for {}: {}", session_id, error);
+                    warn!(
+                        "Could not allocate a sequence number for {}: {}",
+                        session_id, error
+                    );
                     continue;
                 }
             }
@@ -289,6 +312,14 @@ impl NativeIngest {
                 continue;
             }
             report.events += 1;
+
+            // A watched native file is a live source just like an adapter link. Publish
+            // after the writer accepts the row so a reconnect can always find the same
+            // event in the durable tier; the bounded trace projection covers the window
+            // before consolidation.
+            if let Some(hub) = &self.hub {
+                hub.publish_trace(&session_id.encode(), wire.clone()).await;
+            }
 
             if closes {
                 // The vendor stated an outcome, so the container closes on the vendor's
@@ -432,7 +463,9 @@ mod tests {
 
     fn stream(events: Vec<Event>) -> EventStream {
         Box::pin(futures::stream::iter(
-            events.into_iter().map(|event| Ok(SessionMessage::Event(event))),
+            events
+                .into_iter()
+                .map(|event| Ok(SessionMessage::Event(event))),
         ))
     }
 
@@ -477,6 +510,53 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_watched_native_stream_publishes_its_events_to_the_session_trace() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
+            .await
+            .expect("store");
+        let hub = EventHub::new();
+        let id = crate::fixtures::test_session_id("watched-1");
+        store
+            .create_session(&crate::models::Session {
+                id: id.clone(),
+                workdir: "/tmp".to_string(),
+                title: None,
+                inject_identity: false,
+                fidelity: Fidelity::Blocks,
+                flags_json: "{}".to_string(),
+                status: "idle".to_string(),
+                parent_session: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            })
+            .await
+            .expect("session row");
+        let ingest = NativeIngest::new(
+            store.clone(),
+            JournalWriter::new(store.clone()),
+            SeqAllocator::new(store),
+        )
+        .with_hub(hub.clone());
+        let mut trace = hub.attach_trace(&id.encode(), -1).await.live;
+
+        let mut assistant = event(EventKind::Assistant, Some(Phase::Completed), 1000);
+        assistant.text = "watched output".to_string();
+        ingest.drain(&id, stream(vec![assistant])).await;
+
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(1), trace.recv())
+            .await
+            .expect("trace did not receive the watched event")
+            .expect("trace channel closed");
+        assert!(observed
+            .arrival_turn_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty()));
+        assert_eq!(observed.text, "watched output");
+        assert_eq!(observed.source, "agent");
+    }
+
     /// A container the vendor never closed is still settled, and settled honestly.
     ///
     /// A `running` turn refuses the next message — the composer reads it and disables — so
@@ -490,7 +570,11 @@ mod tests {
         ingest
             .drain(
                 &id,
-                stream(vec![event(EventKind::Assistant, Some(Phase::Completed), 500)]),
+                stream(vec![event(
+                    EventKind::Assistant,
+                    Some(Phase::Completed),
+                    500,
+                )]),
             )
             .await;
 
@@ -618,7 +702,10 @@ mod tests {
             .turn_events_after(&turns[0].id, -1)
             .await
             .expect("events");
-        let turn_event = events.iter().find(|event| event.kind == "turn").expect("one");
+        let turn_event = events
+            .iter()
+            .find(|event| event.kind == "turn")
+            .expect("one");
         assert!(turn_event.is_error);
         assert!(
             turn_event.text.contains("404"),
@@ -655,7 +742,10 @@ mod tests {
             .await;
 
         assert_eq!(report.read_errors, 1);
-        assert_eq!(report.events, 2, "the event after the error must still land");
+        assert_eq!(
+            report.events, 2,
+            "the event after the error must still land"
+        );
     }
 
     /// The opening ask is the first `status`/`completed`, not the first phase-less one.

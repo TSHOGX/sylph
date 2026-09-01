@@ -8,10 +8,7 @@
 //! would be wrong for anyone who set `paths.quick_start_dir`, and for every
 //! deployment where `HOME` differs from the user Next.js runs as.
 
-use axum::{
-    extract::State,
-    Json,
-};
+use axum::{extract::State, Json};
 use serde::Serialize;
 
 use crate::{db::store::SessionFilter, error::Result, AppState};
@@ -140,7 +137,11 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
         });
     }
 
-    rows.sort_by(|a, b| b.last_used_ms.cmp(&a.last_used_ms).then(a.path.cmp(&b.path)));
+    rows.sort_by(|a, b| {
+        b.last_used_ms
+            .cmp(&a.last_used_ms)
+            .then(a.path.cmp(&b.path))
+    });
 
     Ok(Json(WorkspacesResponse {
         quick_start_dir,
@@ -167,7 +168,9 @@ pub fn normalize(workdir: &str) -> String {
 
 /// Last path component, for display.
 fn leaf(path: &str) -> &str {
-    path.rsplit('/').find(|part| !part.is_empty()).unwrap_or(path)
+    path.rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
 }
 
 #[cfg(test)]

@@ -32,6 +32,16 @@ pub struct TurnRequest {
     pub command_args: HashMap<String, String>,
 }
 
+/// The first turn submitted for an in-memory draft.
+///
+/// The draft handle and turn identity travel with the complete request so the
+/// promotion path cannot accidentally mix a turn id, prompt, or attachment set
+/// from separate calls.
+pub struct PreparedTurnRequest {
+    pub draft_id: String,
+    pub turn: crate::links::PreparedTurn,
+}
+
 /// How a turn ended, as reported by the link.
 #[derive(Debug, Clone)]
 pub enum Outcome {
@@ -89,7 +99,8 @@ impl Outcome {
 /// A turn's completion arrives as an event, which the drain task sees. It cannot
 /// call back into the supervisor without a cycle, so it resolves a channel the
 /// supervisor is holding instead.
-pub type TurnWaiters = std::sync::Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<Outcome>>>>;
+pub type TurnWaiters =
+    std::sync::Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<Outcome>>>>;
 
 /// Runs turns against links.
 #[derive(Clone)]
@@ -170,6 +181,114 @@ impl LinkedSupervisor {
         });
     }
 
+    /// Promote a prepared link by sending its first turn through the adapter.
+    ///
+    /// Unlike [`Self::spawn`], the session identity is not known when this operation starts.
+    /// The link manager asks the adapter to accept the turn and waits for its native id while
+    /// buffering events.  The waiter is registered before that call so a very fast first turn
+    /// cannot complete before the supervisor is listening; the buffered stream is attached only
+    /// after the session/turn rows and server-authored opening events exist.
+    pub async fn promote_prepared(
+        &self,
+        request: PreparedTurnRequest,
+    ) -> Result<(crate::models::Session, crate::models::Turn)> {
+        let turn = request.turn;
+        let turn_id = turn.id.clone();
+        let prompt = turn.text.clone();
+        let draft_id = request.draft_id;
+        self.hub.open(&turn_id).await;
+        let (tx, rx) = oneshot::channel();
+        self.waiters.lock().await.insert(turn_id.clone(), tx);
+
+        let promoted = match self.links.promote_prepared_turn(&draft_id, turn).await {
+            Ok(promoted) => promoted,
+            Err(error) => {
+                self.waiters.lock().await.remove(&turn_id);
+                self.hub.close(&turn_id).await;
+                return Err(error);
+            }
+        };
+
+        // The row is inserted queued because the adapter had to run before identity was
+        // available. Claim it before exposing the stream; the drain will then attribute every
+        // buffered vendor event to this user turn.
+        match self.store.mark_turn_running(&turn_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                promoted.close().await;
+                self.waiters.lock().await.remove(&turn_id);
+                self.hub.close(&turn_id).await;
+                return Err(anyhow::anyhow!("prepared turn was not queued"));
+            }
+            Err(error) => {
+                promoted.close().await;
+                self.waiters.lock().await.remove(&turn_id);
+                self.hub.close(&turn_id).await;
+                return Err(error.into());
+            }
+        }
+        if let Err(error) = self
+            .store
+            .update_session_status(&promoted.session.id, "running")
+            .await
+        {
+            promoted.close().await;
+            self.waiters.lock().await.remove(&turn_id);
+            self.hub.close(&turn_id).await;
+            return Err(error.into());
+        }
+
+        if !prompt.is_empty() {
+            if let Err(error) = self
+                .emit(
+                    &promoted.session.id,
+                    &turn_id,
+                    server_event("user", prompt, None),
+                )
+                .await
+            {
+                promoted.close().await;
+                self.waiters.lock().await.remove(&turn_id);
+                self.hub.close(&turn_id).await;
+                return Err(error.into());
+            }
+        }
+        if let Err(error) = self
+            .emit(
+                &promoted.session.id,
+                &turn_id,
+                server_event(
+                    "status",
+                    String::new(),
+                    Some(serde_json::json!({"state": "starting"})),
+                ),
+            )
+            .await
+        {
+            promoted.close().await;
+            self.waiters.lock().await.remove(&turn_id);
+            self.hub.close(&turn_id).await;
+            return Err(error.into());
+        }
+
+        let session = promoted.session.clone();
+        let session_id = session.id.clone();
+        let mut turn = promoted.turn.clone();
+        turn.status = "running".to_string();
+        self.links.attach_promoted(promoted).await;
+
+        let supervisor = self.clone();
+        tokio::spawn(async move {
+            let outcome = match rx.await {
+                Ok(outcome) => outcome,
+                Err(_) => Outcome::LinkLost { detail: None },
+            };
+            supervisor.settle(&session_id, &turn_id, outcome).await;
+        });
+
+        Ok((session, turn))
+    }
+
     async fn run(&self, request: TurnRequest) -> Result<()> {
         let TurnRequest {
             session_id,
@@ -198,13 +317,19 @@ impl LinkedSupervisor {
             self.hub.close(&turn_id).await;
             return Ok(());
         }
-        self.store.update_session_status(&session_id, "running").await?;
+        self.store
+            .update_session_status(&session_id, "running")
+            .await?;
 
         // The user's own message is durable transcript, journaled as an event
         // rather than living only in `turns.request_text`.
         if !prompt.is_empty() {
-            self.emit(&session_id, &turn_id, server_event("user", prompt.clone(), None))
-                .await?;
+            self.emit(
+                &session_id,
+                &turn_id,
+                server_event("user", prompt.clone(), None),
+            )
+            .await?;
         }
 
         // Establishing may take seconds — an agent CLI loads a project — so the
@@ -328,7 +453,8 @@ impl LinkedSupervisor {
         // Settling first also means the record does not wait on `interrupt` to answer,
         // which is what makes stop unconditional: a user asking to stop must not be
         // told the agent declined.
-        self.settle(&session_id, turn_id, Outcome::Interrupted).await;
+        self.settle(&session_id, turn_id, Outcome::Interrupted)
+            .await;
 
         match self.links.get(&session_id).await {
             Some(link) => {
@@ -354,7 +480,12 @@ impl LinkedSupervisor {
     }
 
     /// Record a turn's terminal state and close its stream.
-    async fn settle(&self, session_id: &sylph_protocol::SessionId, turn_id: &str, outcome: Outcome) {
+    async fn settle(
+        &self,
+        session_id: &sylph_protocol::SessionId,
+        turn_id: &str,
+        outcome: Outcome,
+    ) {
         // Recorded before the waiter is released, and that order is load-bearing.
         //
         // Releasing the waiter drops the oneshot sender, which wakes whoever is parked
@@ -389,6 +520,7 @@ impl LinkedSupervisor {
         turn_id: &str,
         mut event: StreamEvent,
     ) -> crate::error::Result<()> {
+        event.arrival_turn_id = Some(turn_id.to_string());
         event.seq = self.seq.next(session_id).await?;
 
         if event.is_stable() {
@@ -403,15 +535,21 @@ impl LinkedSupervisor {
             }
         }
 
-        self.hub.publish(turn_id, event).await;
+        self.hub.publish(turn_id, event.clone()).await;
+        self.hub.publish_trace(&session_id.encode(), event).await;
         Ok(())
     }
 }
 
 /// A server-authored event. These have no phase and are always stable.
-pub(crate) fn server_event(kind: &str, text: String, data: Option<serde_json::Value>) -> StreamEvent {
+pub(crate) fn server_event(
+    kind: &str,
+    text: String,
+    data: Option<serde_json::Value>,
+) -> StreamEvent {
     StreamEvent {
         seq: 0,
+        arrival_turn_id: None,
         kind: kind.to_string(),
         phase: None,
         stream_id: None,

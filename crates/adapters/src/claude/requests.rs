@@ -409,9 +409,7 @@ fn dialog_ask(vendor_id: &str, request: &Value) -> Ask {
                 .get("tool_name")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .unwrap_or_else(|| {
-                    kind.strip_prefix("permission_").unwrap_or(kind).to_string()
-                });
+                .unwrap_or_else(|| kind.strip_prefix("permission_").unwrap_or(kind).to_string());
             request_out.title = payload
                 .get("title")
                 .or_else(|| payload.get("message"))
@@ -573,7 +571,10 @@ pub fn answer_payload(kind: &AskKind, resolution: &Resolution) -> Value {
                 if !picked.is_empty() {
                     answers.insert(text.clone(), Value::String(picked));
                 }
-                if let Some(note) = notes.get(&id).map(|note| note.trim()).filter(|n| !n.is_empty())
+                if let Some(note) = notes
+                    .get(&id)
+                    .map(|note| note.trim())
+                    .filter(|n| !n.is_empty())
                 {
                     annotations.insert(text.clone(), json!({"notes": note}));
                 }
@@ -747,7 +748,11 @@ mod tests {
     #[test]
     fn every_forwarded_question_gets_a_field_and_can_be_answered() {
         let ask = ask_from(&question_envelope()).unwrap();
-        let form = ask.request.form.as_ref().expect("a question declares a form");
+        let form = ask
+            .request
+            .form
+            .as_ref()
+            .expect("a question declares a form");
         assert_eq!(form.fields.len(), 2);
         assert_eq!(form.fields[0].id, "q:0");
         assert_eq!(form.fields[1].id, "q:1");
@@ -765,7 +770,13 @@ mod tests {
     fn a_choice_value_is_the_label_the_vendor_matches_on() {
         let ask = ask_from(&question_envelope()).unwrap();
         let form = ask.request.form.as_ref().unwrap();
-        let FieldKind::Select { choices, mode, allow_other, notes, .. } = &form.fields[0].kind
+        let FieldKind::Select {
+            choices,
+            mode,
+            allow_other,
+            notes,
+            ..
+        } = &form.fields[0].kind
         else {
             panic!("a question is a select");
         };
@@ -799,7 +810,10 @@ mod tests {
                 "notes": {"q:0": "  two of them  "},
             })),
         );
-        assert_eq!(body["updatedInput"]["answers"]["Indentation?"], json!("Spaces"));
+        assert_eq!(
+            body["updatedInput"]["answers"]["Indentation?"],
+            json!("Spaces")
+        );
         assert_eq!(
             body["updatedInput"]["annotations"]["Indentation?"]["notes"],
             json!("two of them")
@@ -871,7 +885,11 @@ mod tests {
 
         let offered = ask_from(&permission("Bash", json!({"command": "ls"}), false)).unwrap();
         assert!(offered.request.allow_persistent);
-        assert!(offered.request.options.iter().any(|option| option.id == "allow_always"));
+        assert!(offered
+            .request
+            .options
+            .iter()
+            .any(|option| option.id == "allow_always"));
     }
 
     /// `AskUserQuestion` is a permission on the wire and a question in substance, so it must
@@ -901,8 +919,14 @@ mod tests {
         assert_eq!(ask.request.title, "Continue past the spending threshold?");
         assert_eq!(ask.request.detail, Some(json!({"spent": 12.5})));
 
-        assert_eq!(answer(&ask.kind, "deny", None), json!({"behavior": "cancelled"}));
-        assert_eq!(answer(&ask.kind, "allow", None)["behavior"], json!("completed"));
+        assert_eq!(
+            answer(&ask.kind, "deny", None),
+            json!({"behavior": "cancelled"})
+        );
+        assert_eq!(
+            answer(&ask.kind, "allow", None)["behavior"],
+            json!("completed")
+        );
     }
 
     /// A dialog's answer is **unwrapped**: the `{values, notes}` envelope is Sylph's
@@ -939,7 +963,10 @@ mod tests {
                         "payload": {"plan": "1. Read the file\n2. Fix it"}}
         });
         let ask = ask_from(&envelope).unwrap();
-        assert_eq!(ask.request.detail.unwrap()["plan"], json!("1. Read the file\n2. Fix it"));
+        assert_eq!(
+            ask.request.detail.unwrap()["plan"],
+            json!("1. Read the file\n2. Fix it")
+        );
         assert!(ask.request.options.iter().any(|o| o.id == "allow_always"));
     }
 
@@ -971,7 +998,10 @@ mod tests {
         });
         let ask = ask_from(&envelope).unwrap();
         assert_eq!(ask.request.title, "Proceed?");
-        assert_eq!(ask.request.detail.unwrap()["dialogKind"], json!("something_new"));
+        assert_eq!(
+            ask.request.detail.unwrap()["dialogKind"],
+            json!("something_new")
+        );
         assert_eq!(ask.request.options.len(), 2);
     }
 
@@ -996,7 +1026,10 @@ mod tests {
             risk_of(Some("Bash"), Some(&json!({"command": "git push --force"}))),
             Risk::Destructive
         );
-        assert_eq!(risk_of(Some("Bash"), Some(&json!({"command": "ls"}))), Risk::Safe);
+        assert_eq!(
+            risk_of(Some("Bash"), Some(&json!({"command": "ls"}))),
+            Risk::Safe
+        );
         assert_eq!(risk_of(Some("Read"), None), Risk::Safe);
     }
 }

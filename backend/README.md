@@ -70,34 +70,35 @@ from the root. The full table is in `docs/configuration.md`; the ones used most:
 
 ## API Endpoints
 
-### Health
-- `GET /api/v1/health` - Health check
-- `GET /api/v1/diagnostics` - System diagnostics
+The complete, machine-checked contract is [`docs/api-v1.openapi.json`](../docs/api-v1.openapi.json).
+The most important surfaces are:
 
-### Sessions
-- `GET /api/v1/sessions` - List sessions (query: `limit=50`)
-- `POST /api/v1/sessions` - Create Sylph session
-- `GET /api/v1/sessions/{id}` - Get session detail
-
-### Turns (TODO)
-- `GET /api/v1/sessions/{id}/turns` - List turns
-- `POST /api/v1/sessions/{id}/turns` - Create turn
-- `GET /api/v1/turns/{id}` - Get turn detail
-- `GET /api/v1/turns/{id}/events` - Stream events (SSE)
-- `POST /api/v1/turns/{id}/stop` - Stop turn
-
-### Agents (TODO)
-- `GET /api/v1/agents` - List discovered agents
-- `POST /api/v1/agents/refresh` - Refresh agent discovery
+- `GET /api/v1/health`, `/diagnostics`, `/config`, `/environments`, and `/soul`
+- `GET /api/v1/sessions` and `GET /api/v1/sessions/{id}` for the one durable session
+  collection
+- `POST /api/v1/sessions` to start an ephemeral draft; the draft is promoted by
+  `POST /api/v1/sessions/draft/{id}/turns` after the first real turn
+- `GET /api/v1/sessions/{id}/turns` and `POST /api/v1/sessions/{id}/turns` for durable
+  history and subsequent turns
+- `GET /api/v1/sessions/{id}/trace/events` and turn-scoped SSE for live replay
+- `GET/POST /api/v1/sessions/{id}/capabilities`, `/link`, `/requests`, and `/config`
+  for the adapter-owned control surface
+- `POST /api/v1/sessions/adopt` and `GET /api/v1/sessions/enumerate` for explicit
+  adoption from an environment's native store
+- Session-scoped file/document routes and machine-scoped `/api/v1/fs/*` browsing
+- `GET /api/v1/search` and `GET /api/v1/workspaces` over the server-owned store
 
 ## Database Schema
 
 SQLite database with tables:
 - `app_meta` - Metadata
-- `sessions` - Session records
-- `backend_incarnations` - Session lifecycle tracking
-- `turns` - Turn records
-- `events` - Event stream storage
+- `sessions` - Durable records keyed by `(environment, agent, native_id)`
+- `turns` - Turn records, including the user/agent origin
+- `events` - The journal tail for live and recently settled turns
+
+Consolidated blocks, content-addressed payloads, and the full-text index live in the
+separate `history.db` and `blobs/` paths under the same data directory. There is no
+incarnation table, surrogate session id, or second archive database.
 
 Migrations are in `migrations/` and run automatically on startup.
 
@@ -118,24 +119,19 @@ backend/
 │   ├── models/            # Domain models
 │   ├── db/                # The journal: unsettled turns and their sessions
 │   ├── storage/           # Durable history: folds, blobs, retention
-│   ├── adapter/           # The sylph.agent.v3 wire protocol
-│   ├── agents/            # Adapter discovery and handshake
-│   ├── links/             # The pool of live adapter processes
+│   ├── links/             # The pool of live adapter sessions
 │   ├── supervisor/        # Turn supervision
 │   ├── events/            # Event normalization and the SSE hub
 │   ├── env/               # Where a session's work runs
 │   ├── documents/         # Spreadsheet, document, and slide parsing
-│   ├── tracedb/           # TraceDB client
 │   └── middleware/        # Auth middleware
 └── tests/                 # Integration tests
 ```
 
-There is no `runners/`. What the v1 runner protocol did in one module is now four,
-because a long-lived adapter process has a lifecycle a one-shot subprocess did not:
-`adapter/` speaks the wire format, `agents/` finds installed adapters and learns what
-each one can do by handshaking with it, `links/` owns the live processes, and
-`supervisor/` drives a turn across one. `docs/session-protocol.md` is authoritative
-for the protocol itself.
+Vendor-specific process and native-history handling lives in `crates/adapters`; the
+backend only consumes the protocol types from `crates/protocol`. `links/` owns one live
+adapter session, `supervisor/` settles turns, and `storage/` is the durable authority.
+`docs/session-protocol.md` is authoritative for the protocol itself.
 
 ## Testing
 
@@ -143,35 +139,15 @@ for the protocol itself.
 # Unit tests
 cargo test
 
-# Integration tests (TODO)
-cargo test --test '*'
+# Integration tests
+cargo test --test integration
 
 # With output
 cargo test -- --nocapture
 ```
 
-## Implementation Status
-
-### ✅ Completed
-- Project structure and dependencies
-- Database layer with SQLx and migrations
-- Session API (list, create, get)
-- Health and diagnostics endpoints
-- Structured error handling
-- Configuration loading
-
-### 🚧 In Progress (Phase 1)
-- Turn management API
-- Runner discovery and execution
-- SSE streaming
-- Authentication middleware
-
-### 📋 TODO (Later Phases)
-- Native session import
-- Attachment handling
-- TraceDB integration
-- Comprehensive tests
-- Performance optimization
+The implementation roadmap and remaining work are maintained in
+[`docs/roadmap.md`](../docs/roadmap.md), rather than duplicated here.
 
 ## License
 

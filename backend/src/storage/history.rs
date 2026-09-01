@@ -16,17 +16,18 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions,
-    SqliteSynchronous};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
+};
 use sqlx::Row;
 use tracing::{debug, info, warn};
 
 use crate::events::data_from_column;
+use crate::models::now_ms;
 use crate::models::Event;
-use crate::supervisor::TrajectoryOutcome;
 use crate::storage::cas::{self, BlobStore, Payload};
 use crate::storage::fold::{self, Delta, Folded};
-use crate::models::now_ms;
+use crate::supervisor::TrajectoryOutcome;
 
 /// One block as stored: a completed event plus how it streamed.
 #[derive(Debug, Clone)]
@@ -312,14 +313,12 @@ impl HistoryStore {
                 .execute(&mut *tx)
                 .await?;
             if !block.text.trim().is_empty() {
-                sqlx::query(
-                    "INSERT INTO blocks_fts (text, session_id, seq) VALUES (?, ?, ?)",
-                )
-                .bind(&block.text)
-                .bind(&block.session_id)
-                .bind(block.seq)
-                .execute(&mut *tx)
-                .await?;
+                sqlx::query("INSERT INTO blocks_fts (text, session_id, seq) VALUES (?, ?, ?)")
+                    .bind(&block.text)
+                    .bind(&block.session_id)
+                    .bind(block.seq)
+                    .execute(&mut *tx)
+                    .await?;
             }
         }
 
@@ -329,13 +328,12 @@ impl HistoryStore {
 
     /// A session's blocks in stream order, resolving external payloads.
     pub async fn blocks(&self, session_id: &str, after_seq: i32) -> Result<Vec<Block>> {
-        let rows = sqlx::query(
-            "SELECT * FROM blocks WHERE session_id = ? AND seq > ? ORDER BY seq",
-        )
-        .bind(session_id)
-        .bind(after_seq)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows =
+            sqlx::query("SELECT * FROM blocks WHERE session_id = ? AND seq > ? ORDER BY seq")
+                .bind(session_id)
+                .bind(after_seq)
+                .fetch_all(&self.pool)
+                .await?;
 
         let mut blocks = Vec::with_capacity(rows.len());
         for row in rows {
@@ -377,8 +375,7 @@ impl HistoryStore {
         let data_hash: Option<String> = row.try_get("data_hash")?;
         let data = match (data_inline, data_hash) {
             (_, Some(hash)) => {
-                let rendered =
-                    cas::load_text(&self.blobs, &Payload::External { hash }).await?;
+                let rendered = cas::load_text(&self.blobs, &Payload::External { hash }).await?;
                 serde_json::from_str(&rendered).ok()
             }
             (Some(bytes), None) => {
@@ -608,14 +605,16 @@ impl HistoryStore {
             .fetch_one(&self.pool)
             .await?;
 
-            sqlx::query("DELETE FROM cas_refs WHERE hash = ? AND NOT EXISTS (
+            sqlx::query(
+                "DELETE FROM cas_refs WHERE hash = ? AND NOT EXISTS (
                 SELECT 1 FROM blocks
                  WHERE blocks.session_id = cas_refs.session_id
                    AND blocks.seq = cas_refs.seq
-              )")
-                .bind(&hash)
-                .execute(&self.pool)
-                .await?;
+              )",
+            )
+            .bind(&hash)
+            .execute(&self.pool)
+            .await?;
 
             if live == 0 {
                 self.blobs.remove(&hash).await?;
@@ -691,10 +690,11 @@ impl HistoryStore {
     }
 
     pub async fn watermark(&self, session_id: &str) -> Result<Option<(String, Option<i32>)>> {
-        let row = sqlx::query("SELECT authority, confirmed_seq FROM watermarks WHERE session_id = ?")
-            .bind(session_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row =
+            sqlx::query("SELECT authority, confirmed_seq FROM watermarks WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(|row| {
             (
                 row.get::<String, _>("authority"),
@@ -709,11 +709,7 @@ impl HistoryStore {
     /// environment reports how far its native store extends as a time, and retention needs
     /// the position in this session's stream that corresponds to it
     /// (`docs/storage.md` § Deriving a native-source bound).
-    pub async fn max_seq_at_or_before(
-        &self,
-        session_id: &str,
-        at_ms: i64,
-    ) -> Result<Option<i32>> {
+    pub async fn max_seq_at_or_before(&self, session_id: &str, at_ms: i64) -> Result<Option<i32>> {
         sqlx::query_scalar::<_, Option<i32>>(
             "SELECT MAX(seq) FROM blocks WHERE session_id = ? AND created_at_ms <= ?",
         )
@@ -1040,7 +1036,9 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     // a name or a flag the first did not.
                     open_trajectories.insert(id.clone(), event.clone());
                 }
-                first_arrival.entry(id.clone()).or_insert(event.created_at_ms);
+                first_arrival
+                    .entry(id.clone())
+                    .or_insert(event.created_at_ms);
                 // A name given by an earlier phase is kept, because for some blocks
                 // that is the *only* phase that has it. A delegated trajectory is
                 // named on `started` — or renamed by the `delta` that carries its
@@ -1082,9 +1080,10 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     .unwrap_or(event.created_at_ms);
 
                 // Resolved before the id is moved into the block below.
-                let name = event.name.clone().or_else(|| {
-                    stream_id.as_ref().and_then(|id| names.remove(id))
-                });
+                let name = event
+                    .name
+                    .clone()
+                    .or_else(|| stream_id.as_ref().and_then(|id| names.remove(id)));
 
                 let folded = fold::fold(&deltas, &event.text, started_at_ms);
                 if folded.is_none() && !deltas.is_empty() {
@@ -1144,10 +1143,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
             // The phase *is* the claim: this delegation has not reported an outcome.
             phase: Some("started".to_string()),
             span: declaring.span.clone(),
-            name: declaring
-                .name
-                .clone()
-                .or_else(|| names.remove(&stream_id)),
+            name: declaring.name.clone().or_else(|| names.remove(&stream_id)),
             stream_id: Some(stream_id),
             text,
             folded,
@@ -1177,7 +1173,10 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
         let last = deltas.last().map(|d| d.at_ms).unwrap_or(started_at_ms);
         let folded = fold::fold(&deltas, &text, started_at_ms);
 
-        warn!("Block {} was never completed; storing what arrived", stream_id);
+        warn!(
+            "Block {} was never completed; storing what arrived",
+            stream_id
+        );
 
         blocks.push(Block {
             // Every event in this fold belongs to one session, so the first row's id is

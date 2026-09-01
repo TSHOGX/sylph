@@ -216,10 +216,7 @@ mod tests {
 
     #[test]
     fn extract_cookie_parsing() {
-        assert_eq!(
-            extract_cookie("session=abc123", "session"),
-            Some("abc123")
-        );
+        assert_eq!(extract_cookie("session=abc123", "session"), Some("abc123"));
         assert_eq!(
             extract_cookie("foo=bar; session=xyz; baz=qux", "session"),
             Some("xyz")

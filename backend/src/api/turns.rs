@@ -1,15 +1,18 @@
-use tokio_stream::wrappers::BroadcastStream;
+use crate::models::now_ms;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::{sse::{Event, KeepAlive}, Sse},
+    response::{
+        sse::{Event, KeepAlive},
+        Sse,
+    },
     Json,
 };
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::time::Duration;
+use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
-use crate::models::now_ms;
 
 use crate::{
     attachments,
@@ -22,6 +25,54 @@ use crate::{
 #[derive(Serialize)]
 pub struct TurnResponse {
     turn: Turn,
+}
+
+/// POST /api/v1/sessions/draft/{id}/turns
+///
+/// Sends the first user turn to a prepared link and promotes it when the adapter has
+/// supplied a native identity.  The regular turn endpoint remains unchanged for
+/// already-committed sessions.
+pub async fn create_prepared(
+    State(state): State<AppState>,
+    Path(draft_id): Path<String>,
+    Json(req): Json<CreateTurnRequest>,
+) -> Result<(StatusCode, Json<crate::api::sessions::SessionResponse>)> {
+    let text = req.text.unwrap_or_default();
+    let attachments = req.attachments.unwrap_or_default();
+    // A first turn is real work even when it has no prose: a declared prompt
+    // command or an attachment is enough to promote the prepared link. Only a
+    // completely empty request is still a draft, and must not leave a durable row.
+    if text.trim().is_empty() && req.command.is_none() && attachments.is_empty() {
+        return Err(Error::InvalidRequest(
+            "A first turn needs text, a command, or an attachment".to_string(),
+        ));
+    }
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    let staged_attachments =
+        attachments::stage_draft(&state.config.data_dir, &draft_id, &turn_id, &attachments).await?;
+    let (session, _turn) = state
+        .turns
+        .promote_prepared(crate::supervisor::turn::PreparedTurnRequest {
+            draft_id,
+            turn: crate::links::PreparedTurn {
+                id: turn_id,
+                text,
+                attachments: staged_attachments
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
+                command: req.command,
+                args: req.args.unwrap_or_default().into_iter().collect(),
+                idempotency_key: req.idempotency_key,
+                created_at_ms: now_ms(),
+            },
+        })
+        .await
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::api::sessions::SessionResponse { session }),
+    ))
 }
 
 /// POST /api/v1/sessions/{id}/turns
@@ -65,11 +116,18 @@ pub async fn create(
     }
 
     let text = req.text.unwrap_or_default();
-    if session.title.as_deref().is_none_or(|title| title.trim().is_empty()) {
+    if session
+        .title
+        .as_deref()
+        .is_none_or(|title| title.trim().is_empty())
+    {
         // Most agents record no title of their own, so the opening ask is the only label
         // available (`docs/agents.md`). Persisting it here means a row stays recognisable
         // whether it is read live or folded into history later.
-        state.store.set_session_title_if_empty(&session_id, &text).await?;
+        state
+            .store
+            .set_session_title_if_empty(&session_id, &text)
+            .await?;
     }
     let attachments = req.attachments.unwrap_or_default();
     let staged_attachments = attachments::stage(
@@ -198,7 +256,11 @@ pub async fn events(
     // under a single lock. Calling it twice (once for `live`, once for `replay`)
     // reintroduces the gap it exists to close — an event published between the
     // two calls is both replayed and broadcast, so the client sees it twice.
-    let Attachment { replay: projection, live, .. } = state.hub.attach(&turn_id, after_seq).await;
+    let Attachment {
+        replay: projection,
+        live,
+        ..
+    } = state.hub.attach(&turn_id, after_seq).await;
 
     let stream = if let Some(attachment) = live {
         // BroadcastStream wraps errors; unwrap them because this adapter is
@@ -209,7 +271,7 @@ pub async fn events(
             stream::iter(journal_events)
                 .chain(stream::iter(projection))
                 .chain(live)
-                .map(sse_event)
+                .map(sse_event),
         )
     } else {
         // Turn already finished; only journal replay is available.

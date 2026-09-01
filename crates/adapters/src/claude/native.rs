@@ -180,7 +180,8 @@ struct SessionFiles {
 
 /// Find one session's files by its native id.
 fn locate(id: &NativeId) -> Result<SessionFiles> {
-    let root = store_root().ok_or_else(|| anyhow!("HOME is not set, so ~/.claude/projects cannot be located"))?;
+    let root = store_root()
+        .ok_or_else(|| anyhow!("HOME is not set, so ~/.claude/projects cannot be located"))?;
     let wanted = format!("{}.jsonl", id.as_str());
 
     // The project directory is a mangled `cwd` and is **not derivable from the session
@@ -192,13 +193,7 @@ fn locate(id: &NativeId) -> Result<SessionFiles> {
             candidate.path.file_name().and_then(|name| name.to_str()) == Some(wanted.as_str())
         })
         .map(|candidate| candidate.path)
-        .ok_or_else(|| {
-            anyhow!(
-                "no `claude` session {} in {}",
-                id.as_str(),
-                root.display()
-            )
-        })?;
+        .ok_or_else(|| anyhow!("no `claude` session {} in {}", id.as_str(), root.display()))?;
 
     Ok(collect(transcript))
 }
@@ -316,14 +311,21 @@ fn summarize(candidate: &SessionCandidate) -> Option<NativeSummary> {
     // the whole file, and 15 of these transcripts are over 10 MB.
     let tail_from = candidate.size.saturating_sub(TAIL_BYTES);
     let tail = read_span(&candidate.path, tail_from, TAIL_BYTES).unwrap_or_default();
-    let ended_at_ms = json_lines(&tail, if tail_from == 0 { Edge::Head } else { Edge::Tail })
-        .filter_map(|record| {
-            record
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(epoch_millis_from_iso)
-        })
-        .next_back();
+    let ended_at_ms = json_lines(
+        &tail,
+        if tail_from == 0 {
+            Edge::Head
+        } else {
+            Edge::Tail
+        },
+    )
+    .filter_map(|record| {
+        record
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(epoch_millis_from_iso)
+    })
+    .next_back();
 
     Some(NativeSummary {
         native_id,
@@ -447,8 +449,11 @@ fn parse_session(session: &SessionFiles) -> Result<Vec<SessionMessage>> {
         // The delegate's own declaration, so a reader has a node to attach its work to even
         // when the parent's transcript never named it. Emitted before its contents, because
         // `started` is where a trajectory's identity lives.
-        let mut opened =
-            Event::new(EventKind::Subagent, Some(Phase::Started), parsed.started_at_ms);
+        let mut opened = Event::new(
+            EventKind::Subagent,
+            Some(Phase::Started),
+            parsed.started_at_ms,
+        );
         opened.stream_id = Some(agent);
         opened.span = container;
         opened.name = delegate_name(delegate);
@@ -561,7 +566,10 @@ fn project_record(
     record: &Value,
     at_ms: i64,
 ) -> Vec<SessionMessage> {
-    let kind = record.get("type").and_then(Value::as_str).unwrap_or_default();
+    let kind = record
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     // The delegating call whose output this is, when the record is a delegate's. Live, this
     // rides on the envelope as `parent_tool_use_id`; natively the store spells the same
     // fact `agentId`, and it is resolved to a trajectory by the caller rather than here.
@@ -601,9 +609,9 @@ fn has_tool_result(record: &Value) -> bool {
         .and_then(|message| message.get("content"))
         .and_then(Value::as_array)
         .is_some_and(|blocks| {
-            blocks.iter().any(|block| {
-                block.get("type").and_then(Value::as_str) == Some("tool_result")
-            })
+            blocks
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
         })
 }
 
@@ -798,11 +806,7 @@ fn api_error(record: &Value, at_ms: i64) -> Option<Event> {
 /// it `compact_metadata`, so the record is rewritten to the live spelling rather than
 /// handled twice — a dual-spelling reader is what `AGENTS.md` § Compatibility forbids, and
 /// the whole point of one projection is that the *reader* stays single.
-fn system_record(
-    correlation: &mut Correlation,
-    record: &Value,
-    at_ms: i64,
-) -> Vec<SessionMessage> {
+fn system_record(correlation: &mut Correlation, record: &Value, at_ms: i64) -> Vec<SessionMessage> {
     match record.get("subtype").and_then(Value::as_str) {
         Some("compact_boundary") => {
             let mut payload = record.clone();
@@ -841,8 +845,8 @@ fn system_record(
         Some("api_error") => {
             let mut event = Event::new(EventKind::Status, None, at_ms);
             event.is_error = true;
-            event.text = string_at(record, "content")
-                .unwrap_or_else(|| "The API call failed".to_string());
+            event.text =
+                string_at(record, "content").unwrap_or_else(|| "The API call failed".to_string());
             vec![SessionMessage::Event(event)]
         }
         // `turn_duration` (2665) is a measurement of a turn the server already owns,
@@ -897,8 +901,11 @@ fn parse_journal(path: &Path) -> Result<Vec<SessionMessage>> {
         // declares the trajectory in `parse_session`, and a second `started` would be the
         // duplicate node that rule exists to prevent.
         if record.get("type").and_then(Value::as_str) == Some("result") {
-            let mut event =
-                Event::new(EventKind::Subagent, Some(Phase::Completed), NO_RECORDED_TIME);
+            let mut event = Event::new(
+                EventKind::Subagent,
+                Some(Phase::Completed),
+                NO_RECORDED_TIME,
+            );
             event.stream_id = Some(agent);
             // The phase's own answer. A string for most, an object for a structured result —
             // serialized rather than dropped, because it is the delegate's whole output.
@@ -1106,8 +1113,7 @@ fn follow(session: SessionFiles) -> EventStream {
                                 .and_then(Value::as_str)
                                 .and_then(epoch_millis_from_iso)
                                 .unwrap_or(0);
-                            let projected =
-                                project_record(&mut state.correlation, &record, at_ms);
+                            let projected = project_record(&mut state.correlation, &record, at_ms);
                             state.pending.extend(projected);
                         }
                         continue;
@@ -1507,7 +1513,10 @@ mod tests {
                  so it cannot be a branch point"
             );
             // The one part that is stable across the whole replayed prefix.
-            assert_eq!(fork["sessionId"], json!("bba7f74d-801e-4a61-b814-3091cafeb904"));
+            assert_eq!(
+                fork["sessionId"],
+                json!("bba7f74d-801e-4a61-b814-3091cafeb904")
+            );
         }
 
         // And the listing row reports the parent, which is the half that is real.
@@ -1525,10 +1534,8 @@ mod tests {
     /// under `<session>/subagents/`. The layout **is** part of what is being tested, since that
     /// is where a flattening defect lives, so it is reproduced rather than stubbed.
     fn stage_fanout(tag: &str) -> SessionFiles {
-        let root = std::env::temp_dir().join(format!(
-            "sylph-claude-native-{tag}-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("sylph-claude-native-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let session = "9f1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
         let subagents = root.join(session).join("subagents");
@@ -1589,7 +1596,11 @@ mod tests {
     #[test]
     fn a_depth_two_delegate_nests_inside_its_parents_call_and_not_at_the_root() {
         let session = stage_fanout("nested");
-        assert_eq!(session.delegates.len(), 6, "three depth-1 and three depth-2");
+        assert_eq!(
+            session.delegates.len(),
+            6,
+            "three depth-1 and three depth-2"
+        );
         let spans = delegate_spans(&session);
 
         // Every delegate is contained by the `Agent` call that spawned it — depth-1 by a call
@@ -1657,25 +1668,42 @@ mod tests {
         // multiplexing collapse.
         let declared: Vec<&str> = events
             .iter()
-            .filter(|event| event.kind == EventKind::Subagent && event.phase == Some(Phase::Started))
+            .filter(|event| {
+                event.kind == EventKind::Subagent && event.phase == Some(Phase::Started)
+            })
             .filter_map(|event| event.stream_id.as_deref())
             .collect();
-        assert_eq!(declared.len(), 6, "one trajectory per delegate; got {declared:?}");
+        assert_eq!(
+            declared.len(),
+            6,
+            "one trajectory per delegate; got {declared:?}"
+        );
         assert!(declared.contains(&"a7ee4760914240f23"));
-        assert!(declared.contains(&"a9aa098597842ed09"), "including the depth-2 children");
+        assert!(
+            declared.contains(&"a9aa098597842ed09"),
+            "including the depth-2 children"
+        );
 
         // Each one nests inside the call that spawned it.
         let opened: Vec<(&str, Option<&str>)> = events
             .iter()
-            .filter(|event| event.kind == EventKind::Subagent && event.phase == Some(Phase::Started))
+            .filter(|event| {
+                event.kind == EventKind::Subagent && event.phase == Some(Phase::Started)
+            })
             .map(|event| (event.stream_id.as_deref().unwrap(), event.span.as_deref()))
             .collect();
         assert!(
-            opened.contains(&("a7ee4760914240f23", Some("toolu_bdrk_01KEQn5XcyFaadCoYPixk1bs"))),
+            opened.contains(&(
+                "a7ee4760914240f23",
+                Some("toolu_bdrk_01KEQn5XcyFaadCoYPixk1bs")
+            )),
             "a depth-1 delegate nests inside its root-transcript call; got {opened:?}"
         );
         assert!(
-            opened.contains(&("a9aa098597842ed09", Some("toolu_bdrk_01XmGjD3gDvCnUzZJGGmQmZY"))),
+            opened.contains(&(
+                "a9aa098597842ed09",
+                Some("toolu_bdrk_01XmGjD3gDvCnUzZJGGmQmZY")
+            )),
             "a depth-2 delegate nests inside the call within its parent; got {opened:?}"
         );
 
@@ -1694,7 +1722,9 @@ mod tests {
             "a delegate's own output must carry its trajectory, or it renders as the root \
              agent's work"
         );
-        assert!(inside.iter().any(|event| event.text.contains("work by agent-a7ee4760914240f23")));
+        assert!(inside
+            .iter()
+            .any(|event| event.text.contains("work by agent-a7ee4760914240f23")));
 
         // Nothing a delegate produced may be left at the root: that is the flattening.
         assert!(
@@ -1716,10 +1746,8 @@ mod tests {
     /// because dropping loses work exactly where structure is least reliable.
     #[test]
     fn an_unattributable_delegate_is_kept_at_the_root() {
-        let root = std::env::temp_dir().join(format!(
-            "sylph-claude-native-orphan-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("sylph-claude-native-orphan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let session = "1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809";
         let subagents = root.join(session).join("subagents");
@@ -1827,7 +1855,11 @@ mod tests {
         .unwrap();
 
         let session_files = collect(root.join(format!("{session}.jsonl")));
-        assert_eq!(session_files.journals.len(), 1, "the journal must be read, not skipped");
+        assert_eq!(
+            session_files.journals.len(),
+            1,
+            "the journal must be read, not skipped"
+        );
 
         let outcomes = parse_journal(&session_files.journals[0]).unwrap();
         let closed: Vec<&Event> = outcomes
@@ -1837,7 +1869,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(closed.len(), 1, "one result, and the unreported phase stays open");
+        assert_eq!(
+            closed.len(),
+            1,
+            "one result, and the unreported phase stays open"
+        );
         assert_eq!(closed[0].kind, EventKind::Subagent);
         assert_eq!(closed[0].phase, Some(Phase::Completed));
         assert_eq!(closed[0].stream_id.as_deref(), Some("a21fcc237510c4670"));
@@ -1845,7 +1881,9 @@ mod tests {
         // The phase with no result is **not** closed with a guess: the server's turn-settle
         // sweep records that as `abandoned`, which stays distinguishable from `failed`.
         assert!(
-            !closed.iter().any(|event| event.stream_id.as_deref() == Some("ab020b248dc2d843d")),
+            !closed
+                .iter()
+                .any(|event| event.stream_id.as_deref() == Some("ab020b248dc2d843d")),
             "an unreported phase must not be closed by this parser"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -1860,7 +1898,9 @@ mod tests {
     fn only_a_sessions_own_transcript_is_a_listing_candidate() {
         assert!(is_root_transcript(Path::new("/p/9f1b2c3d.jsonl")));
         // A delegate, a workflow delegate, and a workflow journal are all interior structure.
-        assert!(!is_root_transcript(Path::new("/p/s/subagents/agent-af9bb.jsonl")));
+        assert!(!is_root_transcript(Path::new(
+            "/p/s/subagents/agent-af9bb.jsonl"
+        )));
         assert!(!is_root_transcript(Path::new(
             "/p/s/subagents/workflows/wf_1/agent-af9bb.jsonl"
         )));
@@ -1868,7 +1908,9 @@ mod tests {
             "/p/s/subagents/workflows/wf_1/journal.jsonl"
         )));
         // A sidecar is not a transcript.
-        assert!(!is_root_transcript(Path::new("/p/s/subagents/agent-af9bb.meta.json")));
+        assert!(!is_root_transcript(Path::new(
+            "/p/s/subagents/agent-af9bb.meta.json"
+        )));
     }
 
     /// A listing row is built from a window, and every field it claims is the vendor's.
@@ -1935,10 +1977,13 @@ mod tests {
         let events = project("tool-call-and-result.jsonl");
 
         let thinking = of_kind(&events, EventKind::Thinking);
-        assert!(!thinking.is_empty(), "the fixture opens with a thinking block");
-        assert!(thinking
-            .iter()
-            .any(|event| event.text.contains("starting to explore the discord-me project")));
+        assert!(
+            !thinking.is_empty(),
+            "the fixture opens with a thinking block"
+        );
+        assert!(thinking.iter().any(|event| event
+            .text
+            .contains("starting to explore the discord-me project")));
 
         assert!(of_kind(&events, EventKind::Assistant)
             .iter()
@@ -2017,7 +2062,8 @@ mod tests {
     /// emits rather than tolerating it.
     #[test]
     fn a_wholly_unparseable_transcript_is_an_error_and_not_an_empty_session() {
-        let dir = std::env::temp_dir().join(format!("sylph-claude-native-bad-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sylph-claude-native-bad-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -2050,10 +2096,9 @@ mod tests {
         .unwrap();
         let parsed = parse_transcript(&partial, None).expect("a half-written line is normal");
         assert!(
-            parsed
-                .messages
-                .iter()
-                .any(|message| matches!(message, SessionMessage::Event(event) if event.text == "hi")),
+            parsed.messages.iter().any(
+                |message| matches!(message, SessionMessage::Event(event) if event.text == "hi")
+            ),
             "the records before a truncated line must survive"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2062,7 +2107,8 @@ mod tests {
     /// A watcher only advances past a **complete** line, so a half-written record is re-read.
     #[test]
     fn a_follow_offset_never_advances_past_a_partial_record() {
-        let dir = std::env::temp_dir().join(format!("sylph-claude-native-tail-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sylph-claude-native-tail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("growing.jsonl");
@@ -2080,7 +2126,10 @@ mod tests {
         std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n").unwrap();
         let (bytes, next) = read_appended(&path, offset).unwrap();
         assert_eq!(String::from_utf8_lossy(&bytes), "{\"a\":2}\n");
-        assert_eq!(next, 16, "both complete lines, and nothing past the last newline");
+        assert_eq!(
+            next, 16,
+            "both complete lines, and nothing past the last newline"
+        );
 
         // Nothing new is not an error and not an ending.
         assert_eq!(read_appended(&path, next), Some((Vec::new(), next)));

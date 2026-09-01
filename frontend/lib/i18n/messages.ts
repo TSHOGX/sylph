@@ -166,7 +166,7 @@ export const en = {
   "palette.cmd.adoptSession": "Adopt an existing session",
   "palette.cmd.quickStart": "Quick Start session",
   "palette.cmd.stopTurn": "Stop the running turn",
-  "palette.cmd.search": "Search sessions and archive",
+  "palette.cmd.search": "Search sessions",
   "palette.cmd.browseHistory": "Browse this workspace's history",
   "palette.cmd.startScreen": "Go to the start screen",
   // Each toggle reads as the action it performs, not the state it is in, so the

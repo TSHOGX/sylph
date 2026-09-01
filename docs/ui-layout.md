@@ -550,9 +550,9 @@ the component rendering that answer was fifty lines away.
 `WorkspacePicker` ranks known workspaces by recency, filters on the full path
 rather than the leaf name (the segment someone remembers is often in the middle:
 `huawei`, `sylph`), and shows each one's session count so an empty directory is visible
-before it is opened. It requests `includeUnpaired`, sharing the query key with the
-history browser: a directory whose environment is connected is already one click away in
-the sidebar, so the ones worth listing here are largely those whose machine is asleep.
+before it is opened. It shares the workspace query with the history browser: a directory
+whose environment is connected is already one click away in the sidebar, so the picker
+remains a view over the server's one authoritative workspace list.
 
 **Browse folders… is a footer button, not a row.** A row would be ranked against
 the workspaces and dropped by the very query that failed to match any of them —
@@ -1187,4 +1187,3 @@ on whatever machine is to hand, so a build-time font fetch is a build-time
 network dependency. The CJK entries matter because this project's users read
 Chinese — without them a mixed string falls back per-glyph and one line ends up
 in two faces.
-

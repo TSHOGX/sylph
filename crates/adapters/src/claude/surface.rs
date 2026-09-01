@@ -54,6 +54,8 @@ fn text_field(payload: &Value, key: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
     pub value: String,
+    /// The concrete model id reported after aliases such as `default` resolve.
+    pub resolved_model: Option<String>,
     pub name: String,
     pub description: Option<String>,
     /// The effort levels **this model** supports.
@@ -80,6 +82,7 @@ pub fn models_from(initialize: &Value) -> Vec<Model> {
             if let Some(name) = entry.as_str() {
                 return Some(Model {
                     value: name.to_string(),
+                    resolved_model: None,
                     name: name.to_string(),
                     description: None,
                     effort_levels: Vec::new(),
@@ -88,6 +91,7 @@ pub fn models_from(initialize: &Value) -> Vec<Model> {
             let value = text_field(entry, "value")?;
             Some(Model {
                 name: text_field(entry, "displayName").unwrap_or_else(|| value.clone()),
+                resolved_model: text_field(entry, "resolvedModel"),
                 description: text_field(entry, "description"),
                 effort_levels: entry
                     .get("supportedEffortLevels")
@@ -215,11 +219,37 @@ pub fn subagents_from(initialize: &Value) -> Vec<SubagentSpec> {
         .collect()
 }
 
+/// Compare a model id while ignoring Claude's context-window annotation.
+///
+/// The annotation is rendered as a trailing `[1m]` (and has appeared only on the
+/// `system/init` value in some CLI versions).  It is not a separate row in the
+/// `initialize.models` catalogue, so treating it as one leaves `currentValue` outside
+/// the option choices.  This helper deliberately remains private to the Claude adapter:
+/// no vendor spelling leaks into the protocol or frontend.
+fn canonical_model_id(id: &str) -> &str {
+    id.split_once('[').map_or(id, |(base, _)| base)
+}
+
+/// Find the catalogue entry corresponding to a value reported by Claude.
+fn find_model<'a>(models: &'a [Model], observed: &str) -> Option<&'a Model> {
+    let canonical = canonical_model_id(observed);
+    models.iter().find(|model| {
+        model.value == observed
+            || model.resolved_model.as_deref() == Some(observed)
+            || canonical_model_id(&model.value) == canonical
+            || model
+                .resolved_model
+                .as_deref()
+                .is_some_and(|resolved| canonical_model_id(resolved) == canonical)
+    })
+}
+
 /// Everything adjustable on this live session, typed.
 ///
-/// `observed_model` is what the **vendor** last said it is running, which arrives on
-/// `system/init` as [`super::Emission::observed_model`]. It is a parameter rather than
-/// state here because a pure function is what makes the read-back rule checkable.
+/// `model_hint` is either what the **vendor** last said it is running (from
+/// `system/init`) or a catalogue-validated selection still pending that report. It
+/// is a parameter rather than state here because a pure function is what makes the
+/// model/effort projection checkable.
 ///
 /// # Where a current value may come from, and where it may not
 ///
@@ -233,9 +263,10 @@ pub fn subagents_from(initialize: &Value) -> Vec<SubagentSpec> {
 /// - **`permissionMode` reads `current_permission_mode`**, which is genuinely confirmed
 ///   — set `bypassPermissions`, re-initialize, and the reply says `bypassPermissions`.
 ///   This is the one option whose current value is a vendor fact here.
-/// - **`model` reads `observed_model`** and is absent until a turn has produced a
-///   `system/init`. Writing what was last *set* is the defect `AGENTS.md` records twice:
-///   it makes the adapter the authority on a fact only the vendor holds.
+/// - **`model` reads the vendor's `system/init` value**, or a validated pending selection
+///   before that event arrives. This avoids leaving the picker on the previous model when
+///   Claude's `set_model` acknowledgement carries no value; once `system/init` reports a
+///   resolved id it supersedes the pending hint.
 /// - **`effort` is always absent.** No vendor surface reports it — not `initialize`, not
 ///   `system/init`, not `apply_flag_settings`' reply, which carries no payload at all.
 ///   Reporting the requested value would put a checkmark on a row nothing confirmed;
@@ -245,7 +276,7 @@ pub fn subagents_from(initialize: &Value) -> Vec<SubagentSpec> {
 ///   **success** for `{"effort":"banana"}` — measured — so an unvalidated write is a
 ///   refusal indistinguishable from an applied set.
 /// - **`fastMode` reads `fast_mode_state`**, which is reported.
-pub fn config_from(initialize: &Value, observed_model: Option<&str>) -> Vec<ConfigOption> {
+pub fn config_from(initialize: &Value, model_hint: Option<&str>) -> Vec<ConfigOption> {
     let models = models_from(initialize);
     let mut options = Vec::new();
 
@@ -253,15 +284,37 @@ pub fn config_from(initialize: &Value, observed_model: Option<&str>) -> Vec<Conf
     // what the current value is: the levels have to come from some model or the option
     // cannot be rendered at all, while a current value that was not confirmed must stay
     // absent. Conflating the two is how a fallback becomes a claim.
-    let offering = observed_model
-        .map(str::to_string)
+    // `system/init` reports the resolved model id (for example
+    // `claude-sonnet-5[1m]`), while the setter and catalogue use the selectable
+    // alias (`sonnet`). Resolve the observed id back to that alias before looking
+    // up per-model effort levels; otherwise the effort control disappears after
+    // the first turn and every model appears to be the default resolved id.
+    // Keep the vendor's resolved id out of the protocol surface.  The CLI has used
+    // both `claude-sonnet-5` and `claude-sonnet-5[1m]` for the same model: the suffix is
+    // a context-window variant, not a selectable model.  Matching only byte-for-byte
+    // therefore made the model chip lose its selected row and removed effort choices
+    // after the first turn.  All aliases and resolved ids are compared through this
+    // adapter-local equivalence, while the value exposed to callers is always `value`.
+    let selected = model_hint
+        .and_then(|observed| find_model(&models, observed))
         .or_else(|| {
-            models
-                .iter()
-                .find(|model| model.value == "default")
-                .map(|model| model.value.clone())
-        })
-        .or_else(|| models.first().map(|model| model.value.clone()));
+            // Before the first turn the vendor has not reported a model.  The effort
+            // picker can still be rendered from its documented default entry; this is
+            // an offer, not a claim about the current model.
+            if model_hint.is_none() {
+                models
+                    .iter()
+                    .find(|model| model.value == "default")
+                    .or_else(|| models.first())
+            } else {
+                // An unrecognised id is not evidence for any catalogue entry.  Do not
+                // silently present the default model's effort ladder in that case.
+                None
+            }
+        });
+    let observed_value = model_hint
+        .and_then(|observed| find_model(&models, observed))
+        .map(|model| model.value.clone());
 
     if !models.is_empty() {
         options.push(ConfigOption {
@@ -270,7 +323,7 @@ pub fn config_from(initialize: &Value, observed_model: Option<&str>) -> Vec<Conf
             description: None,
             category: Some("model".to_string()),
             kind: ConfigKind::Select,
-            current_value: observed_model.map(|model| Value::String(model.to_string())),
+            current_value: observed_value.map(Value::String),
             options: models
                 .iter()
                 .map(|model| ConfigChoice {
@@ -284,9 +337,7 @@ pub fn config_from(initialize: &Value, observed_model: Option<&str>) -> Vec<Conf
 
     // Omitted rather than shown empty when the model supports no effort: an empty picker
     // invites a choice that cannot exist.
-    let levels = offering
-        .as_deref()
-        .and_then(|selected| models.iter().find(|model| model.value == selected))
+    let levels = selected
         .map(|model| model.effort_levels.clone())
         .unwrap_or_default();
     if !levels.is_empty() {
@@ -366,11 +417,11 @@ pub fn config_from(initialize: &Value, observed_model: Option<&str>) -> Vec<Conf
 }
 
 /// The whole surface an open session reports.
-pub fn capabilities_from(initialize: &Value, observed_model: Option<&str>) -> SessionCapabilities {
+pub fn capabilities_from(initialize: &Value, model_hint: Option<&str>) -> SessionCapabilities {
     SessionCapabilities {
         commands: commands_from(initialize),
         subagents: subagents_from(initialize),
-        config: config_from(initialize, observed_model),
+        config: config_from(initialize, model_hint),
         permission_mode: text_field(initialize, "current_permission_mode"),
         // Not reported by this CLI's `initialize` — printed and checked, so absent rather
         // than a plausible constant. A synthesized window would be a lie a journal makes
@@ -463,6 +514,10 @@ mod tests {
         );
         assert_eq!(models[0].name, "Default (recommended)");
         assert_eq!(models[1].name, "Sonnet");
+        assert_eq!(
+            models[0].resolved_model.as_deref(),
+            Some("claude-opus-5[1m]")
+        );
         // No `displayName`, so the value stands in rather than an empty label.
         assert_eq!(models[2].name, "haiku");
     }
@@ -494,6 +549,15 @@ mod tests {
         let narrowed = config_from(&payload, Some("sonnet"));
         assert_eq!(option(&narrowed, "effort").options.len(), 3);
 
+        // `system/init` reports the resolved id, not the selectable alias.  Claude may
+        // append a context-window annotation that is absent from `resolvedModel`.
+        let resolved = config_from(&payload, Some("claude-sonnet-5[1m]"));
+        assert_eq!(
+            option(&resolved, "model").current_value,
+            Some(json!("sonnet"))
+        );
+        assert_eq!(option(&resolved, "effort").options.len(), 3);
+
         // A model reporting none omits the option entirely rather than showing an empty
         // picker, which would invite a choice that cannot exist.
         let none = config_from(&payload, Some("haiku"));
@@ -502,6 +566,12 @@ mod tests {
             "got {:?}",
             ids(&none)
         );
+
+        // An id outside the catalogue must not be shown as a current choice or guessed
+        // into the default model's effort ladder.
+        let unknown = config_from(&payload, Some("claude-unknown"));
+        assert_eq!(option(&unknown, "model").current_value, None);
+        assert!(!unknown.iter().any(|option| option.id == "effort"));
     }
 
     /// **The model's current value is the vendor's, and absent until it says so.**
@@ -513,7 +583,10 @@ mod tests {
     #[test]
     fn the_model_current_value_is_absent_until_the_vendor_reports_one() {
         let payload = printed_initialize();
-        assert_eq!(option(&config_from(&payload, None), "model").current_value, None);
+        assert_eq!(
+            option(&config_from(&payload, None), "model").current_value,
+            None
+        );
         assert_eq!(
             option(&config_from(&payload, Some("sonnet")), "model").current_value,
             Some(json!("sonnet")),
@@ -604,7 +677,10 @@ mod tests {
     fn subagents_are_read_from_the_key_the_initialize_reply_uses() {
         let subagents = subagents_from(&printed_initialize());
         assert_eq!(
-            subagents.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            subagents
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["claude", "Explore"]
         );
         assert!(subagents[1].description.starts_with("Fast read-only"));
@@ -625,7 +701,10 @@ mod tests {
         let cooling = config_from(&payload, None);
         let fast = option(&cooling, "fastMode");
         assert_eq!(fast.current_value, Some(json!(false)));
-        assert_eq!(fast.description.as_deref(), Some("Budget exhausted until 14:00."));
+        assert_eq!(
+            fast.description.as_deref(),
+            Some("Budget exhausted until 14:00.")
+        );
 
         payload["fast_mode_state"] = json!("on");
         assert_eq!(

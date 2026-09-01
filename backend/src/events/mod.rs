@@ -13,7 +13,9 @@
 //! Sequence numbers come from one monotonic per-session counter, so stable and
 //! ephemeral events share a single ordering. The journal therefore contains
 //! gaps where ephemeral events were dropped, which is expected and allowed by
-//! the `UNIQUE(session_id, seq)` constraint.
+//! the `UNIQUE(session_id, seq)` constraint. The session trace channel reuses
+//! that ordering across turns; `arrivalTurnId` on the wire preserves where a
+//! late delegated event arrived without making that turn its owner.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -21,8 +23,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
 
-use crate::models::Event;
 use crate::models::now_ms;
+use crate::models::Event;
 
 pub mod seq;
 
@@ -76,6 +78,13 @@ pub fn data_from_column(data_json: &str) -> Option<serde_json::Value> {
 #[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
     pub seq: i32,
+    /// The turn on which the server received this event.
+    ///
+    /// This is intentionally separate from trajectory ownership. A delegated trajectory
+    /// may outlive the turn that opened it, so a consumer needs both the arrival position
+    /// and the trajectory's owner. Older clients may ignore this field.
+    #[serde(rename = "arrivalTurnId", skip_serializing_if = "Option::is_none")]
+    pub arrival_turn_id: Option<String>,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
@@ -235,6 +244,7 @@ impl StreamEvent {
     ) -> Self {
         Self {
             seq: 0,
+            arrival_turn_id: None,
             kind: event.kind.as_str().to_string(),
             phase: event.phase.map(|phase| phase.as_str().to_string()),
             stream_id: event.stream_id.clone(),
@@ -259,12 +269,14 @@ impl StreamEvent {
 
     /// Rebuild the wire form from a journal row.
     ///
-    /// No `started_at_ms`: a journal row is one arrival, so its `created_at_ms` is
-    /// already the moment it happened. The field exists only for a consolidated
-    /// block, which is many arrivals folded into one row.
+    /// `turn_id` becomes `arrivalTurnId` here. No `started_at_ms`: a journal row is
+    /// one arrival, so its `created_at_ms` is already the moment it happened. The
+    /// field exists only for a consolidated block, which is many arrivals folded
+    /// into one row.
     pub fn from_row(row: &Event) -> Self {
         Self {
             seq: row.seq,
+            arrival_turn_id: row.turn_id.clone(),
             kind: row.kind.clone(),
             phase: row.phase.clone(),
             stream_id: row.stream_id.clone(),
@@ -291,6 +303,13 @@ struct TurnChannel {
     finished: bool,
 }
 
+/// A session-level trace channel. Unlike the session-facts channel below, this carries
+/// every turn event and keeps the ephemeral tail needed for reconnects.
+struct TraceChannel {
+    tx: broadcast::Sender<StreamEvent>,
+    projection: VecDeque<StreamEvent>,
+}
+
 /// Registry of live event channels, keyed by turn id, plus session-scoped ones.
 #[derive(Clone, Default)]
 pub struct EventHub {
@@ -303,6 +322,10 @@ pub struct EventHub {
     /// idle. Kept separate from turn channels rather than folded in, because
     /// their lifetimes differ — a session channel outlives every turn on it.
     sessions: Arc<RwLock<HashMap<String, broadcast::Sender<StreamEvent>>>>,
+    /// Complete session traces, including events from turns that have already settled.
+    /// Kept separate from `sessions`: that channel is a notification stream for current
+    /// state and deliberately has no replay semantics.
+    traces: Arc<RwLock<HashMap<String, TraceChannel>>>,
 }
 
 /// What an SSE handler needs to serve one client: the backlog to replay first,
@@ -311,6 +334,13 @@ pub struct Attachment {
     pub replay: Vec<StreamEvent>,
     pub live: Option<broadcast::Receiver<StreamEvent>>,
     pub finished: bool,
+}
+
+/// A session trace attachment: a projection snapshot plus a live receiver. Stable
+/// history is assembled by the HTTP handler from the two durable storage tiers.
+pub struct TraceAttachment {
+    pub projection: Vec<StreamEvent>,
+    pub live: broadcast::Receiver<StreamEvent>,
 }
 
 impl EventHub {
@@ -389,6 +419,48 @@ impl EventHub {
             .subscribe()
     }
 
+    /// Publish an event on the complete session trace. Stable events are replayed from
+    /// storage; ephemeral events stay in this bounded projection until consolidation.
+    pub async fn publish_trace(&self, session_id: &str, event: StreamEvent) {
+        let mut traces = self.traces.write().await;
+        let channel = traces.entry(session_id.to_string()).or_insert_with(|| {
+            let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
+            TraceChannel {
+                tx,
+                projection: VecDeque::with_capacity(PROJECTION_CAPACITY),
+            }
+        });
+        if !event.is_stable() {
+            if channel.projection.len() == PROJECTION_CAPACITY {
+                channel.projection.pop_front();
+            }
+            channel.projection.push_back(event.clone());
+        }
+        let _ = channel.tx.send(event);
+    }
+
+    /// Attach to a complete session trace. The projection snapshot and live receiver are
+    /// created under one lock so an event cannot fall into the replay/live gap.
+    pub async fn attach_trace(&self, session_id: &str, after_seq: i32) -> TraceAttachment {
+        let mut traces = self.traces.write().await;
+        let channel = traces.entry(session_id.to_string()).or_insert_with(|| {
+            let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
+            TraceChannel {
+                tx,
+                projection: VecDeque::with_capacity(PROJECTION_CAPACITY),
+            }
+        });
+        TraceAttachment {
+            projection: channel
+                .projection
+                .iter()
+                .filter(|event| event.seq > after_seq)
+                .cloned()
+                .collect(),
+            live: channel.tx.subscribe(),
+        }
+    }
+
     /// Attach a client, replaying ephemeral events newer than `after_seq`.
     ///
     /// Subscription happens under the same lock as the projection read, so no
@@ -455,8 +527,7 @@ mod tests {
         assert_eq!(wire.get("span").and_then(|v| v.as_str()), Some("s1"));
 
         // A root event says nothing rather than saying "".
-        let mut empty =
-            sylph_protocol::Event::new(sylph_protocol::EventKind::Assistant, None, 0);
+        let mut empty = sylph_protocol::Event::new(sylph_protocol::EventKind::Assistant, None, 0);
         empty.span = Some(String::new());
         let root = StreamEvent::from_event(&empty);
         assert_eq!(root.span, None);
@@ -493,15 +564,15 @@ mod tests {
             source.stream_id = Some("s1".to_string());
             let event = StreamEvent::from_event(&source);
             assert_eq!(event.stability, "stable", "subagent/{phase:?}");
-            assert!(event.is_stable(), "subagent/{phase:?} must reach the journal");
+            assert!(
+                event.is_stable(),
+                "subagent/{phase:?} must reach the journal"
+            );
         }
 
         // The exception is scoped to structure: content still projects.
-        let mut source = sylph_protocol::Event::new(
-            sylph_protocol::EventKind::Assistant,
-            Some(Phase::Delta),
-            0,
-        );
+        let mut source =
+            sylph_protocol::Event::new(sylph_protocol::EventKind::Assistant, Some(Phase::Delta), 0);
         source.stream_id = Some("b1".to_string());
         let delta = StreamEvent::from_event(&source);
         assert_eq!(delta.stability, "ephemeral");
@@ -510,6 +581,7 @@ mod tests {
     fn event(seq: i32, kind: &str, phase: Option<&str>) -> StreamEvent {
         StreamEvent {
             seq,
+            arrival_turn_id: None,
             kind: kind.to_string(),
             phase: phase.map(str::to_string),
             stream_id: None,
@@ -527,6 +599,26 @@ mod tests {
             created_at_ms: 1_700_000_000_000,
             started_at_ms: None,
         }
+    }
+
+    #[tokio::test]
+    async fn session_trace_keeps_ephemeral_tail_and_live_delivery() {
+        let hub = EventHub::new();
+        let mut first = hub.attach_trace("session", -1).await.live;
+        let mut delta = event(1, "assistant", Some("delta"));
+        delta.arrival_turn_id = Some("turn-1".to_string());
+        hub.publish_trace("session", delta.clone()).await;
+        assert_eq!(first.recv().await.unwrap().seq, 1);
+
+        // A later subscriber can recover the projection even though the event was not
+        // durable yet. This is the reconnect property a turn-scoped channel cannot give
+        // a child that outlives its parent turn.
+        let attachment = hub.attach_trace("session", -1).await;
+        assert_eq!(attachment.projection.len(), 1);
+        assert_eq!(
+            attachment.projection[0].arrival_turn_id.as_deref(),
+            Some("turn-1")
+        );
     }
 
     /// A live adapter's `stability` is re-derived, never trusted.
@@ -580,7 +672,9 @@ mod tests {
         original.data = Some(serde_json::json!({"path": "/tmp/x"}));
         original.is_error = true;
 
-        let restored = StreamEvent::from_row(&original.to_row(&crate::fixtures::test_session_id("sess-1"), "turn-1"));
+        let restored = StreamEvent::from_row(
+            &original.to_row(&crate::fixtures::test_session_id("sess-1"), "turn-1"),
+        );
 
         assert_eq!(restored.seq, 7);
         assert_eq!(restored.kind, "tool_call");
@@ -595,7 +689,8 @@ mod tests {
 
     #[test]
     fn to_row_carries_the_session_and_turn_ids() {
-        let row = event(1, "status", None).to_row(&crate::fixtures::test_session_id("sess-9"), "turn-9");
+        let row =
+            event(1, "status", None).to_row(&crate::fixtures::test_session_id("sess-9"), "turn-9");
         assert_eq!(row.session_id.native_id.as_str(), "sess-9");
         assert_eq!(row.turn_id.as_deref(), Some("turn-9"));
         assert!(row.id.is_none(), "a new row has no assigned id yet");
@@ -619,7 +714,8 @@ mod tests {
     fn malformed_stored_data_reads_back_as_none_rather_than_failing() {
         // A corrupt data column must not make an otherwise readable event
         // unrenderable; the text and kind still carry the useful content.
-        let mut row = event(1, "assistant", Some("completed")).to_row(&crate::fixtures::test_session_id("s"), "t");
+        let mut row = event(1, "assistant", Some("completed"))
+            .to_row(&crate::fixtures::test_session_id("s"), "t");
         row.data_json = "{not json".to_string();
         assert!(StreamEvent::from_row(&row).data.is_none());
     }
@@ -651,7 +747,8 @@ mod tests {
         let hub = EventHub::new();
         hub.open("t1").await;
         for seq in 1..=5 {
-            hub.publish("t1", event(seq, "assistant", Some("delta"))).await;
+            hub.publish("t1", event(seq, "assistant", Some("delta")))
+                .await;
         }
 
         let attachment = hub.attach("t1", 3).await;
@@ -667,9 +764,11 @@ mod tests {
         // too would replay them twice on reconnect.
         let hub = EventHub::new();
         hub.open("t1").await;
-        hub.publish("t1", event(1, "assistant", Some("completed"))).await;
+        hub.publish("t1", event(1, "assistant", Some("completed")))
+            .await;
         hub.publish("t1", event(2, "status", None)).await;
-        hub.publish("t1", event(3, "assistant", Some("delta"))).await;
+        hub.publish("t1", event(3, "assistant", Some("delta")))
+            .await;
 
         let replay = hub.attach("t1", 0).await.replay;
         let seqs: Vec<i32> = replay.iter().map(|e| e.seq).collect();
@@ -682,12 +781,17 @@ mod tests {
         hub.open("t1").await;
         let overflow = PROJECTION_CAPACITY as i32 + 10;
         for seq in 1..=overflow {
-            hub.publish("t1", event(seq, "assistant", Some("delta"))).await;
+            hub.publish("t1", event(seq, "assistant", Some("delta")))
+                .await;
         }
 
         let replay = hub.attach("t1", 0).await.replay;
         assert_eq!(replay.len(), PROJECTION_CAPACITY);
-        assert_eq!(replay.first().unwrap().seq, 11, "oldest events were dropped");
+        assert_eq!(
+            replay.first().unwrap().seq,
+            11,
+            "oldest events were dropped"
+        );
         assert_eq!(replay.last().unwrap().seq, overflow);
     }
 
@@ -697,7 +801,8 @@ mod tests {
         hub.open("t1").await;
         let mut live = hub.attach("t1", 0).await.live.expect("live channel");
 
-        hub.publish("t1", event(1, "assistant", Some("delta"))).await;
+        hub.publish("t1", event(1, "assistant", Some("delta")))
+            .await;
         let received = live.recv().await.expect("event delivered");
         assert_eq!(received.seq, 1);
     }
@@ -708,7 +813,8 @@ mod tests {
         // the normal case rather than a failure.
         let hub = EventHub::new();
         hub.open("t1").await;
-        hub.publish("t1", event(1, "assistant", Some("delta"))).await;
+        hub.publish("t1", event(1, "assistant", Some("delta")))
+            .await;
         assert!(hub.is_live("t1").await);
     }
 
@@ -716,13 +822,20 @@ mod tests {
     async fn attaching_to_a_closed_turn_reports_finished_instead_of_hanging() {
         let hub = EventHub::new();
         hub.open("t1").await;
-        hub.publish("t1", event(1, "assistant", Some("delta"))).await;
+        hub.publish("t1", event(1, "assistant", Some("delta")))
+            .await;
         hub.close("t1").await;
 
         let attachment = hub.attach("t1", 0).await;
         assert!(attachment.finished);
-        assert!(attachment.live.is_none(), "no live channel for a closed turn");
-        assert!(attachment.replay.is_empty(), "closing clears the projection");
+        assert!(
+            attachment.live.is_none(),
+            "no live channel for a closed turn"
+        );
+        assert!(
+            attachment.replay.is_empty(),
+            "closing clears the projection"
+        );
         assert!(!hub.is_live("t1").await);
     }
 
@@ -738,7 +851,8 @@ mod tests {
     #[tokio::test]
     async fn publishing_to_an_unopened_turn_is_dropped_silently() {
         let hub = EventHub::new();
-        hub.publish("t1", event(1, "assistant", Some("delta"))).await;
+        hub.publish("t1", event(1, "assistant", Some("delta")))
+            .await;
         assert!(!hub.is_live("t1").await);
     }
 
@@ -756,12 +870,16 @@ mod tests {
         let hub = EventHub::new();
         hub.open("t1").await;
         hub.open("t2").await;
-        hub.publish("t1", event(1, "assistant", Some("delta"))).await;
+        hub.publish("t1", event(1, "assistant", Some("delta")))
+            .await;
 
         assert_eq!(hub.attach("t1", 0).await.replay.len(), 1);
         assert!(hub.attach("t2", 0).await.replay.is_empty());
 
         hub.close("t1").await;
-        assert!(hub.is_live("t2").await, "closing one turn must not close another");
+        assert!(
+            hub.is_live("t2").await,
+            "closing one turn must not close another"
+        );
     }
 }

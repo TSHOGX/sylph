@@ -53,7 +53,6 @@ use sylph_protocol::{
     Session, StoreFilter,
 };
 
-
 pub use rpc::{model_key, split_model_key, ConfigId, MODEL_KEY_SEPARATOR};
 pub use session::PiSession;
 pub use translate::{Correlation, Emission};
@@ -72,9 +71,8 @@ pub const AGENT_NAME: &str = "pi";
 /// the launch flag's vocabulary and nothing else may be derived from it; the live surface
 /// is re-read from the vendor after every model change
 /// ([`rpc::ConfigSurface::after_model_change`]).
-pub const LAUNCH_THINKING_LEVELS: &[&str] = &[
-    "off", "minimal", "low", "medium", "high", "xhigh", "max",
-];
+pub const LAUNCH_THINKING_LEVELS: &[&str] =
+    &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// The `pi` adapter.
 #[derive(Debug, Clone, Default)]
@@ -102,8 +100,7 @@ impl PiAdapter {
             "model".to_string(),
             FlagSpec {
                 choices: vec![],
-                description: "Model for this session, as `provider/id` or a pattern."
-                    .to_string(),
+                description: "Model for this session, as `provider/id` or a pattern.".to_string(),
             },
         );
         flags.insert(
@@ -406,7 +403,9 @@ mod tests {
         // The measured live answer for one real model, which this list must never be
         // used to widen.
         let live = ["off", "high"];
-        assert!(live.iter().all(|level| LAUNCH_THINKING_LEVELS.contains(level)));
+        assert!(live
+            .iter()
+            .all(|level| LAUNCH_THINKING_LEVELS.contains(level)));
         assert!(live.len() < LAUNCH_THINKING_LEVELS.len());
     }
 
@@ -816,10 +815,7 @@ pub mod rpc {
                     description: None,
                     category: Some("effort".to_string()),
                     kind: ConfigKind::Select,
-                    current_value: self
-                        .current_thinking
-                        .clone()
-                        .map(Value::String),
+                    current_value: self.current_thinking.clone().map(Value::String),
                     options: self
                         .thinking_levels
                         .iter()
@@ -840,7 +836,10 @@ pub mod rpc {
         /// `subagents` is empty and `commands` comes from `get_commands`, which is a fourth
         /// round trip a caller makes separately — this takes what it read rather than
         /// pretending to have read it.
-        pub fn capabilities(&self, commands: Vec<sylph_protocol::CommandSpec>) -> SessionCapabilities {
+        pub fn capabilities(
+            &self,
+            commands: Vec<sylph_protocol::CommandSpec>,
+        ) -> SessionCapabilities {
             SessionCapabilities {
                 commands,
                 // Empty, and this is a **report**: pi exposes no delegation on the RPC wire
@@ -979,10 +978,7 @@ pub mod ui {
         /// silence stalls the turn until pi's own timeout lapses — which presents as a
         /// session that stopped for no reason. The payload to send back is
         /// [`cancel_response`].
-        Unsupported {
-            method: String,
-            vendor_id: String,
-        },
+        Unsupported { method: String, vendor_id: String },
     }
 
     /// Project one `extension_ui_request` onto a Sylph request.
@@ -1545,8 +1541,7 @@ pub mod translate {
                     // Note what `completed` means on a `tool_call`: its *arguments* finished
                     // streaming, never that the tool finished. The outcome is the
                     // `tool_result` below.
-                    let mut event =
-                        Event::new(EventKind::ToolCall, Some(Phase::Completed), at_ms);
+                    let mut event = Event::new(EventKind::ToolCall, Some(Phase::Completed), at_ms);
                     event.stream_id = tool_call_id(payload);
                     event.name = string_field(payload, "toolName");
                     let args = payload.get("args").cloned().unwrap_or(json!({}));
@@ -1620,9 +1615,7 @@ pub mod translate {
                     // would duplicate every block — but its `message` is the authoritative
                     // `AssistantMessage`, and `stopReason` and `errorMessage` appear nowhere
                     // else on the wire. `agent_settled` then closes the turn with it.
-                    if let Some(outcome) =
-                        payload.get("message").and_then(Outcome::read)
-                    {
+                    if let Some(outcome) = payload.get("message").and_then(Outcome::read) {
                         out.observed_model = observed_model(payload.get("message"));
                         self.outcome = Some(outcome);
                     }
@@ -1681,7 +1674,10 @@ pub mod translate {
             let Some(delta_type) = delta.get("type").and_then(Value::as_str) else {
                 return;
             };
-            let index = delta.get("contentIndex").and_then(Value::as_u64).unwrap_or(0);
+            let index = delta
+                .get("contentIndex")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
 
             // `rsplit_once` rather than a prefix test, because `toolcall_start` and
             // `text_start` share a suffix and nothing else.
@@ -1751,10 +1747,11 @@ pub mod translate {
                     // because that is what the `started` and `delta` events already carried
                     // — a `completed` under a different kind would consolidate into a
                     // different block than the phases it closes.
-                    let kind = block.as_ref().map(|block| block.kind.clone()).unwrap_or(kind);
-                    let stream_id = block
-                        .map(|block| block.stream_id)
-                        .unwrap_or(stream_id);
+                    let kind = block
+                        .as_ref()
+                        .map(|block| block.kind.clone())
+                        .unwrap_or(kind);
+                    let stream_id = block.map(|block| block.stream_id).unwrap_or(stream_id);
                     let mut event = Event::new(kind.clone(), Some(Phase::Completed), at_ms);
                     event.stream_id = Some(stream_id);
                     event.text = text;
@@ -1891,7 +1888,10 @@ pub mod translate {
 
             let close = closing_turn(&events);
             assert!(close.is_error, "stopReason `error` is a failure");
-            let data = close.data.as_ref().expect("a stated outcome publishes data");
+            let data = close
+                .data
+                .as_ref()
+                .expect("a stated outcome publishes data");
             assert_eq!(data["stopReason"], json!("error"));
             assert_eq!(
                 data["errorMessage"],
@@ -1999,11 +1999,19 @@ pub mod translate {
                 json!({"type": "agent_start"}),
                 json!({"type": "agent_settled"}),
             ] {
-                second.extend(link.translate(&payload, 2_000).events().into_iter().cloned());
+                second.extend(
+                    link.translate(&payload, 2_000)
+                        .events()
+                        .into_iter()
+                        .cloned(),
+                );
             }
 
             let close = closing_turn(&second);
-            assert!(!close.is_error, "the previous turn's failure is not this one's");
+            assert!(
+                !close.is_error,
+                "the previous turn's failure is not this one's"
+            );
             assert!(close.data.is_none());
         }
 
@@ -2382,9 +2390,10 @@ pub mod native {
         BufReader::new(file)
             .read_line(&mut first)
             .with_context(|| format!("reading the header of {}", path.display()))?;
-        let record: Value = serde_json::from_str(first.trim()).map_err(|_| ParseError::NoHeader {
-            path: path.display().to_string(),
-        })?;
+        let record: Value =
+            serde_json::from_str(first.trim()).map_err(|_| ParseError::NoHeader {
+                path: path.display().to_string(),
+            })?;
         if record.get("type").and_then(Value::as_str) != Some("session") {
             return Err(ParseError::NoHeader {
                 path: path.display().to_string(),
@@ -2612,7 +2621,9 @@ pub mod native {
         let at_ms = at_ms.unwrap_or(NO_RECORDED_TIME);
         let (text, detail) = match kind {
             "model_change" => {
-                let id = MODEL_ID.read(record).and_then(|(value, _)| value.as_str())?;
+                let id = MODEL_ID
+                    .read(record)
+                    .and_then(|(value, _)| value.as_str())?;
                 let provider = string_at(record, "provider");
                 let key = super::rpc::model_key(provider.as_deref(), id);
                 (format!("Model set to {key}"), json!({"model": key}))
@@ -2687,9 +2698,7 @@ pub mod native {
                 .read(message)
                 .and_then(|(value, _)| value.as_str())
                 .map(str::to_string);
-            event.text = super::translate::flatten(
-                message.get("content").unwrap_or(&Value::Null),
-            );
+            event.text = super::translate::flatten(message.get("content").unwrap_or(&Value::Null));
             // **Read off the `toolResult` message, which is the only place it occurs.**
             // Measured: `isError` is present on all 1751 tool results and true on 62 of them,
             // and occurs nowhere else. The sibling defect in `claude`'s parser was reading
@@ -2717,10 +2726,7 @@ pub mod native {
         };
 
         for (index, block) in blocks.iter().enumerate() {
-            let block_type = block
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("text");
+            let block_type = block.get("type").and_then(Value::as_str).unwrap_or("text");
             let kind = match block_type {
                 "thinking" => EventKind::Thinking,
                 "toolCall" => EventKind::ToolCall,
@@ -2740,9 +2746,7 @@ pub mod native {
             // live stream's `<message>:<contentIndex>`.
             event.stream_id = match &kind {
                 EventKind::ToolCall => string_at(block, "id"),
-                _ => entry_id
-                    .as_ref()
-                    .map(|entry| format!("{entry}:{index}")),
+                _ => entry_id.as_ref().map(|entry| format!("{entry}:{index}")),
             };
 
             match &kind {
@@ -3210,7 +3214,10 @@ pub mod native {
         #[test]
         fn a_placeholder_message_timestamp_does_not_poison_the_session_time() {
             let parsed = parse_session(&fixture("mixed-spelling-per-field.jsonl")).unwrap();
-            let started = parsed.header.started_at_ms.expect("the header has an ISO stamp");
+            let started = parsed
+                .header
+                .started_at_ms
+                .expect("the header has an ISO stamp");
 
             // 2026, not 1970: the session time comes from the ISO string rather than from
             // the placeholder integer beside it.
@@ -3504,8 +3511,8 @@ pub mod session {
 
     #[async_trait]
     impl Session for PiSession {
-        fn native_id(&self) -> &NativeId {
-            &self.native_id
+        fn native_id(&self) -> Option<NativeId> {
+            Some(self.native_id.clone())
         }
 
         /// The whole surface, every field of it read from the vendor.
@@ -3581,6 +3588,14 @@ pub mod session {
             }
             self.call("prompt", fields).await?;
             Ok(())
+        }
+
+        /// Start a prepared link's first turn.  pi exposes its session id during the
+        /// handshake, so the adapter can answer immediately while the native store remains
+        /// empty until the prompt actually writes a message.
+        async fn send_initial(&self, turn: TurnInput) -> Result<NativeId> {
+            self.send(turn).await?;
+            Ok(self.native_id.clone())
         }
 
         /// End the turn with pi's `abort`, **without awaiting its reply**.
@@ -3698,6 +3713,14 @@ pub mod session {
             Ok(self.read_surface().await?.options())
         }
 
+        fn launch_flag_for_config(&self, id: &str, value: &Value) -> Option<(String, String)> {
+            let value = value.as_str()?.to_string();
+            match id {
+                "model" | "thinking" => Some((id.to_string(), value)),
+                _ => None,
+            }
+        }
+
         /// Answer an `extension_ui_request`, which is the only thing pi ever waits on a
         /// human for.
         ///
@@ -3750,9 +3773,7 @@ pub mod session {
             let receiver = self.stream.try_lock().ok()?.take()?;
             Some(Box::pin(futures::stream::unfold(
                 receiver,
-                |mut receiver| async move {
-                    receiver.recv().await.map(|item| (item, receiver))
-                },
+                |mut receiver| async move { receiver.recv().await.map(|item| (item, receiver)) },
             )))
         }
 
@@ -3882,7 +3903,11 @@ pub mod session {
                     .lock()
                     .await
                     .insert(request.id.clone(), offered);
-                state.messages.send(Ok(SessionMessage::Request(request))).await.is_ok()
+                state
+                    .messages
+                    .send(Ok(SessionMessage::Request(request)))
+                    .await
+                    .is_ok()
             }
             ui::Inversion::Notice(text) => {
                 let mut event = Event::new(EventKind::Notice, None, at_ms);
@@ -3937,9 +3962,10 @@ pub mod session {
             let _order = refreshing.lock().await;
             match read_surface(&child, &models).await {
                 Ok(surface) => {
-                    let facets =
-                        sylph_protocol::CapabilityFacets::config(surface.options());
-                    let _ = messages.send(Ok(SessionMessage::Capabilities(facets))).await;
+                    let facets = sylph_protocol::CapabilityFacets::config(surface.options());
+                    let _ = messages
+                        .send(Ok(SessionMessage::Capabilities(facets)))
+                        .await;
                 }
                 // Degraded, not fatal, and said once per occurrence rather than retried: the
                 // surface a client already holds stays correct except for this one change,
@@ -4005,8 +4031,7 @@ pub mod session {
         let reply = child
             .request(|id| {
                 let mut payload = json!({"id": id.to_string(), "type": command});
-                if let (Some(object), Some(extra)) = (payload.as_object_mut(), fields.as_object())
-                {
+                if let (Some(object), Some(extra)) = (payload.as_object_mut(), fields.as_object()) {
                     for (key, value) in extra {
                         object.insert(key.clone(), value.clone());
                     }
@@ -4142,7 +4167,6 @@ pub mod session {
         (body, images)
     }
 
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -4217,10 +4241,8 @@ done
 
         /// A throwaway directory for one test's log and event files.
         fn scratch(name: &str) -> PathBuf {
-            let dir = std::env::temp_dir().join(format!(
-                "sylph-pi-session-{}-{name}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir()
+                .join(format!("sylph-pi-session-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             dir
@@ -4257,11 +4279,7 @@ done
             scripted_peer(name, &[], true).await
         }
 
-        async fn scripted_peer(
-            name: &str,
-            events: &[&str],
-            collide: bool,
-        ) -> (PiSession, PathBuf) {
+        async fn scripted_peer(name: &str, events: &[&str], collide: bool) -> (PiSession, PathBuf) {
             let dir = scratch(name);
             let log = dir.join("out.jsonl");
             std::fs::write(&log, "").unwrap();
@@ -4308,10 +4326,7 @@ done
         ///
         /// A timeout rather than an unbounded await, so a test asserting that **nothing** is
         /// published can say so — which is what pins "a reply is not an event".
-        async fn next_message(
-            stream: &mut EventStream,
-            ms: u64,
-        ) -> Option<SessionMessage> {
+        async fn next_message(stream: &mut EventStream, ms: u64) -> Option<SessionMessage> {
             use futures::StreamExt;
             tokio::time::timeout(Duration::from_millis(ms), stream.next())
                 .await
@@ -4339,7 +4354,9 @@ done
                 Some("anthropic claude-opus-5"),
                 "the current model must be the vendor's, provider-qualified"
             );
-            let thinking = surface.config_option("thinking").expect("a thinking option");
+            let thinking = surface
+                .config_option("thinking")
+                .expect("a thinking option");
             assert_eq!(
                 thinking.current_value.as_ref().and_then(Value::as_str),
                 Some("off")
@@ -4378,7 +4395,10 @@ done
                 .iter()
                 .find(|line| line.get("type").and_then(Value::as_str) == Some("set_model"))
                 .expect("a set_model line must have been sent");
-            assert_eq!(set.get("provider").and_then(Value::as_str), Some("anthropic"));
+            assert_eq!(
+                set.get("provider").and_then(Value::as_str),
+                Some("anthropic")
+            );
             assert_eq!(
                 set.get("modelId").and_then(Value::as_str),
                 Some("claude-opus-5")
@@ -4477,7 +4497,9 @@ done
             // Recovered by **type**, never by parsing the message: the text is the adapter's
             // and may be reworded, while the code is declared protocol.
             assert_eq!(
-                unknown.downcast_ref::<AdapterError>().map(|error| error.code),
+                unknown
+                    .downcast_ref::<AdapterError>()
+                    .map(|error| error.code),
                 Some(RefusalCode::UnsupportedField)
             );
 
@@ -4523,8 +4545,10 @@ done
             // nothing else was sent.
             let lines = sent(&log, 1).await;
             assert!(
-                !lines.iter().any(|line| line.get("type").and_then(Value::as_str)
-                    == Some("set_thinking_level")),
+                !lines
+                    .iter()
+                    .any(|line| line.get("type").and_then(Value::as_str)
+                        == Some("set_thinking_level")),
                 "a refused value must not be forwarded: {lines:?}"
             );
         }
@@ -4543,7 +4567,8 @@ done
         /// own sentence, and `is_error`.
         #[tokio::test]
         async fn a_vendor_failure_closes_the_turn_as_a_failure_with_its_own_sentence() {
-            let sentence = "404: Thank you for participating in the Stealth Ox Alpha testing period";
+            let sentence =
+                "404: Thank you for participating in the Stealth Ox Alpha testing period";
             let events = [
                 r#"{"type":"agent_start"}"#,
                 r#"{"type":"message_start","message":{"role":"assistant"}}"#,
@@ -4725,7 +4750,10 @@ done
                 })
                 .collect();
             assert_eq!(answers.len(), 3, "{lines:?}");
-            assert_eq!(answers[0].get("value").and_then(Value::as_str), Some("Allow"));
+            assert_eq!(
+                answers[0].get("value").and_then(Value::as_str),
+                Some("Allow")
+            );
             assert_eq!(
                 answers[1].get("cancelled").and_then(Value::as_bool),
                 Some(true),
@@ -4747,8 +4775,9 @@ done
         /// taught the method.
         #[tokio::test]
         async fn an_unknown_dialog_method_is_dismissed_and_narrated() {
-            let events =
-                [r#"{"type":"extension_ui_request","id":"uuid-9","method":"holograph","title":"?"}"#];
+            let events = [
+                r#"{"type":"extension_ui_request","id":"uuid-9","method":"holograph","title":"?"}"#,
+            ];
             let (mut session, log) = scripted("unknown-dialog", &events).await;
             let mut stream = session.events().unwrap();
 
@@ -4867,11 +4896,7 @@ done
         /// makes one answer to "is a turn open" impossible to disagree with.
         #[tokio::test]
         async fn a_named_steer_is_delivered_while_a_turn_is_open() {
-            let (mut session, log) = scripted(
-                "steer-open",
-                &[r#"{"type":"agent_start"}"#],
-            )
-            .await;
+            let (mut session, log) = scripted("steer-open", &[r#"{"type":"agent_start"}"#]).await;
             let mut stream = session.events().unwrap();
 
             // Drained so the pump has processed `agent_start` before the steer is attempted —
@@ -4974,7 +4999,10 @@ done
                     }
                 }
             }
-            assert!(seen >= 6, "the whole turn must have been observed, saw {seen}");
+            assert!(
+                seen >= 6,
+                "the whole turn must have been observed, saw {seen}"
+            );
         }
 
         /// **Which base64 variant an image is encoded with**, which is this adapter's choice
@@ -5047,7 +5075,6 @@ done
             assert!(message.ends_with("look at these"), "{message}");
             let _ = std::fs::remove_dir_all(&dir);
         }
-
 
         /// **A vendor-initiated request whose id collides with an in-flight one must reach the
         /// stream, not a waiter.**

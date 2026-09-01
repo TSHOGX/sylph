@@ -293,7 +293,10 @@ pub fn xlsx_two_sheets() -> NamedTempFile {
     xlsx(&[
         (
             "Sales",
-            worksheet(format!(r#"<row r="1">{}</row>"#, text_cell("A1", "revenue"))),
+            worksheet(format!(
+                r#"<row r="1">{}</row>"#,
+                text_cell("A1", "revenue")
+            )),
         ),
         (
             "Notes",
@@ -624,9 +627,7 @@ fn slide_xml(title: &str, bullets: &[(u8, String)]) -> String {
             if *level == 0 {
                 format!(r#"<a:p><a:r><a:t>{text}</a:t></a:r></a:p>"#)
             } else {
-                format!(
-                    r#"<a:p><a:pPr lvl="{level}"/><a:r><a:t>{text}</a:t></a:r></a:p>"#
-                )
+                format!(r#"<a:p><a:pPr lvl="{level}"/><a:r><a:t>{text}</a:t></a:r></a:p>"#)
             }
         })
         .collect::<String>();

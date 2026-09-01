@@ -144,7 +144,11 @@ pub struct NotesSpec {
 /// the wire parses as `false` while everything compiles and every non-variant field
 /// works.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum FieldKind {
     Select {
         #[serde(default)]
@@ -235,7 +239,9 @@ impl Field {
                                 return Err(format!("'{id}' takes a list of strings"));
                             };
                             if !offered(candidate) {
-                                return Err(format!("'{candidate}' is not a choice '{id}' offered"));
+                                return Err(format!(
+                                    "'{candidate}' is not a choice '{id}' offered"
+                                ));
                             }
                         }
                     }
@@ -346,10 +352,7 @@ impl Form {
         }
 
         for field in self.fields.iter().filter(|field| field.required) {
-            let answered = answer
-                .values
-                .get(&field.id)
-                .is_some_and(Field::is_answered);
+            let answered = answer.values.get(&field.id).is_some_and(Field::is_answered);
             if !answered {
                 return Err(format!("'{}' is required", field.id));
             }
@@ -606,12 +609,18 @@ mod tests {
     fn an_answer_the_form_did_not_ask_for_is_refused() {
         let form = two_field_form();
 
-        assert!(form.validate(Some(&json!({"values": {"nope": "Tabs"}}))).is_err());
+        assert!(form
+            .validate(Some(&json!({"values": {"nope": "Tabs"}})))
+            .is_err());
 
         // A single-select handed a list, and a multi-select handed a bare string.
         // Either would reach the adapter as the wrong JSON type.
-        assert!(form.validate(Some(&json!({"values": {"q:0": ["Tabs"]}}))).is_err());
-        assert!(form.validate(Some(&json!({"values": {"q:1": "ESLint"}}))).is_err());
+        assert!(form
+            .validate(Some(&json!({"values": {"q:0": ["Tabs"]}})))
+            .is_err());
+        assert!(form
+            .validate(Some(&json!({"values": {"q:1": "ESLint"}})))
+            .is_err());
 
         // A value outside `choices` on a field that did not permit one.
         assert!(form
@@ -648,8 +657,12 @@ mod tests {
 
         assert!(form.validate(None).is_err());
         assert!(form.validate(Some(&json!({"values": {}}))).is_err());
-        assert!(form.validate(Some(&json!({"values": {"why": "   "}}))).is_err());
-        assert!(form.validate(Some(&json!({"values": {"why": "because"}}))).is_ok());
+        assert!(form
+            .validate(Some(&json!({"values": {"why": "   "}})))
+            .is_err());
+        assert!(form
+            .validate(Some(&json!({"values": {"why": "because"}})))
+            .is_ok());
     }
 
     /// A form whose fields are all optional is legitimately answerable by submitting
@@ -710,6 +723,9 @@ mod tests {
         .unwrap();
         let wire = serde_json::to_value(&request.options).unwrap();
         assert_eq!(wire[0]["description"], "Use tab characters");
-        assert!(wire[1].get("description").is_none(), "an absent one stays absent");
+        assert!(
+            wire[1].get("description").is_none(),
+            "an absent one stays absent"
+        );
     }
 }

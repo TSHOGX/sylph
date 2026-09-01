@@ -216,7 +216,16 @@ function ShellFrame({
           <WorkspaceSidebar />
         </aside>
 
-        <main id="main" className="flex min-w-0 flex-1 flex-col">
+        {/*
+          The middle pane is the shell's only scroll owner.  `min-h-0` is
+          essential on a flex child: without it the main element's automatic
+          minimum height is its content height, so the transcript/composer can
+          force the whole shell past the viewport and the conversation appears
+          pinned at the top while the composer is pushed out of the visible
+          frame.  The descendants already use `min-h-0`; this is the missing
+          boundary that lets those constraints actually take effect.
+        */}
+        <main id="main" className="flex min-h-0 min-w-0 flex-1 flex-col">
           {children}
         </main>
 

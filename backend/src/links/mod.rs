@@ -41,14 +41,15 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use tokio::sync::{Mutex, RwLock};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::AdapterSource;
 use crate::db::JournalStore;
 use crate::env::Environment;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
-use crate::models::PendingRequest;
 use crate::models::now_ms;
+use crate::models::PendingRequest;
 use sylph_protocol::{
     AgentInfo, AgentName, CapabilityFacets, EnvironmentId, EventStream, Facet, Fidelity,
     LinkFacets, NativeId, RequestedNativeId, Resolution, RunSpec, Session, SessionCapabilities,
@@ -74,6 +75,29 @@ const REAP_INTERVAL: Duration = Duration::from_secs(60);
 /// real case, and the cost of being wrong is refusing a session that would have worked.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long an adapter may take to return the native identity after accepting
+/// a prepared link's first turn.  This bounds only identity acquisition; a
+/// normal turn remains unbounded and is controlled by interrupt/stop.
+const INITIAL_ID_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Keep a prepared link's event stream lossless while its first turn is being promoted.
+///
+/// The adapter may emit `system/init` and content before the server has a durable
+/// `SessionId` to attach them to.  An unbounded hand-off queue lets the adapter's pump
+/// continue reading without blocking on an unconsumed bounded channel; the queue is
+/// dropped with the prepared link when promotion is abandoned.
+fn buffer_events(mut events: EventStream) -> EventStream {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(message) = events.next().await {
+            if tx.send(message).is_err() {
+                break;
+            }
+        }
+    });
+    Box::pin(UnboundedReceiverStream::new(rx))
+}
+
 /// What starting a session needs to know.
 ///
 /// A struct rather than seven arguments because they travel together and four of them
@@ -96,6 +120,63 @@ pub struct OpenSpec {
     pub flags: HashMap<String, String>,
     /// The delegation parent or fork origin, as an encoded triple.
     pub parent_session: Option<String>,
+}
+
+/// A live agent that has not yet been promoted to the durable journal.
+///
+/// Preparation intentionally owns no `SessionId`: adapters are allowed to assign
+/// their native identity only when the first real turn is sent.  Callers may still
+/// inspect capabilities and change configuration through `live`; promotion is the
+/// only operation that requires an identity and writes a journal row.
+pub struct PreparedSession {
+    pub live: Arc<LiveSession>,
+    pub events: EventStream,
+    pub spec: OpenSpec,
+    /// Last client activity on the ephemeral link. Drafts are not history, but an
+    /// abandoned browser tab must not keep an agent process alive forever.
+    last_used_ms: i64,
+}
+
+/// The first turn of a prepared link, before a durable `SessionId` exists.
+///
+/// The request deliberately carries no session identity.  `LinkManager` asks the adapter
+/// to accept it, waits for the vendor's native id, and only then constructs the final
+/// `(environment, agent, native_id)` triple and journal rows.
+#[derive(Debug, Clone)]
+pub struct PreparedTurn {
+    pub id: String,
+    pub text: String,
+    pub attachments: Vec<String>,
+    pub command: Option<String>,
+    pub args: BTreeMap<String, String>,
+    pub idempotency_key: Option<String>,
+    pub created_at_ms: i64,
+}
+
+/// A prepared turn after the adapter has supplied its identity but before the link's
+/// event stream is attached to the normal drain.  Keeping the stream in this value lets
+/// the supervisor journal its user/status events first, then start draining buffered
+/// vendor events without losing the opening frames.
+pub struct PromotedPrepared {
+    pub session: crate::models::Session,
+    pub turn: crate::models::Turn,
+    link: Arc<LiveSession>,
+    events: EventStream,
+    draft_id: String,
+    data_dir: PathBuf,
+}
+
+impl PromotedPrepared {
+    /// Tear down a promotion that could not be attached to the live pool.
+    ///
+    /// Promotion has already created the durable rows by this point, so callers
+    /// settle the turn separately; this method only releases the adapter and its
+    /// buffered stream rather than leaking a process on an HTTP error path.
+    pub(crate) async fn close(self) {
+        self.link.close().await;
+        drop(self.events);
+        crate::attachments::cleanup_draft(&self.data_dir, &self.draft_id).await;
+    }
 }
 
 /// A live link plus the bookkeeping the pool needs about it.
@@ -134,6 +215,11 @@ pub struct LiveSession {
     /// The server's merged view, built from the surface the adapter answered on open and
     /// every facet it has sent since.
     surface: Mutex<SessionCapabilities>,
+    /// Serializes config writes against each other. Vendor controls are generally
+    /// request/response protocols; allowing two model changes to overlap could make
+    /// the later surface belong to the earlier write, and a draft's persisted launch
+    /// flags would then disagree with the live agent.
+    config_gate: Mutex<()>,
 }
 
 impl LiveSession {
@@ -143,7 +229,7 @@ impl LiveSession {
     }
 
     /// The id the vendor actually used.
-    pub fn native_id(&self) -> &NativeId {
+    pub fn native_id(&self) -> Option<NativeId> {
         self.session.native_id()
     }
 
@@ -170,6 +256,11 @@ impl LiveSession {
     /// finished: completion arrives as an event.
     pub async fn send(&self, turn: TurnInput) -> Result<()> {
         self.session.send(turn).await
+    }
+
+    /// Start a prepared link's first turn and wait for the adapter-owned native identity.
+    pub async fn send_initial(&self, turn: TurnInput) -> Result<NativeId> {
+        self.session.send_initial(turn).await
     }
 
     /// End the current turn, keep the session.
@@ -208,6 +299,45 @@ impl LiveSession {
         config_id: &str,
         value: serde_json::Value,
     ) -> Result<SessionCapabilities> {
+        self.apply_config(config_id, value)
+            .await
+            .map(|(surface, _)| surface)
+    }
+
+    /// Set a config option and persist its adapter-approved launch equivalent while
+    /// the same per-link gate is held. Keeping the database write in this critical
+    /// section preserves ordering when two clients change a model back-to-back: the
+    /// last live vendor write and the last durable preference cannot cross in flight.
+    pub async fn set_config_and_persist(
+        &self,
+        store: &JournalStore,
+        session_id: &SessionId,
+        config_id: &str,
+        value: serde_json::Value,
+    ) -> Result<SessionCapabilities> {
+        let _guard = self.config_gate.lock().await;
+        let (surface, persisted) = self.apply_config_inner(config_id, value).await?;
+        if let Some((key, value)) = persisted {
+            store.set_session_flag(session_id, &key, &value).await?;
+        }
+        Ok(surface)
+    }
+
+    async fn apply_config(
+        &self,
+        config_id: &str,
+        value: serde_json::Value,
+    ) -> Result<(SessionCapabilities, Option<(String, String)>)> {
+        let _guard = self.config_gate.lock().await;
+        self.apply_config_inner(config_id, value).await
+    }
+
+    async fn apply_config_inner(
+        &self,
+        config_id: &str,
+        value: serde_json::Value,
+    ) -> Result<(SessionCapabilities, Option<(String, String)>)> {
+        let persisted = self.session.launch_flag_for_config(config_id, &value);
         let config = self.session.set_config(config_id, value).await?;
         let mut surface = self.surface.lock().await;
         CapabilityFacets {
@@ -215,7 +345,17 @@ impl LiveSession {
             ..Default::default()
         }
         .apply_to(&mut surface);
-        Ok(surface.clone())
+        Ok((surface.clone(), persisted))
+    }
+
+    /// Return the adapter-owned launch flag corresponding to a successful runtime
+    /// setting, if this setting should survive a detach and re-attach.
+    pub fn launch_flag_for_config(
+        &self,
+        config_id: &str,
+        value: &serde_json::Value,
+    ) -> Option<(String, String)> {
+        self.session.launch_flag_for_config(config_id, value)
     }
 
     /// Answer a request this session raised.
@@ -329,6 +469,9 @@ impl LinkState {
 #[derive(Clone)]
 pub struct LinkManager {
     store: JournalStore,
+    /// Root for per-turn attachment staging.  Drafts use a separate namespace
+    /// because they do not have a native session id yet.
+    data_dir: PathBuf,
     /// The batching front for the journal, used by the drain path.
     ///
     /// Deltas arrive here thousands per turn, so this is the one write path where
@@ -383,6 +526,9 @@ pub struct LinkManager {
     /// producer and one reader (`SessionId::encode`), so the two spellings cannot
     /// diverge.
     links: Arc<RwLock<HashMap<String, Entry>>>,
+    /// Prepared links keyed by opaque, process-local handles.  They deliberately do
+    /// not participate in session listings and disappear when the process exits.
+    prepared: Arc<Mutex<HashMap<String, PreparedSession>>>,
     /// Serializes establishment per session.
     ///
     /// Two turns arriving together on a detached session would otherwise both
@@ -391,28 +537,38 @@ pub struct LinkManager {
     establishing: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
+/// Construction dependencies for the link pool.
+///
+/// Keeping these as one value avoids an argument list whose order is easy to
+/// get wrong as the server grows (the pool already coordinates storage, event
+/// publication, environments, adapters, identity, and sequencing).
+pub struct LinkManagerConfig {
+    pub store: JournalStore,
+    pub data_dir: PathBuf,
+    pub writer: crate::db::JournalWriter,
+    pub hub: EventHub,
+    pub environment: Arc<dyn Environment>,
+    pub adapters: Arc<dyn AdapterSource>,
+    pub soul_path: Option<PathBuf>,
+    pub seq: SeqAllocator,
+}
+
 impl LinkManager {
-    pub fn new(
-        store: JournalStore,
-        writer: crate::db::JournalWriter,
-        hub: EventHub,
-        environment: Arc<dyn Environment>,
-        adapters: Arc<dyn AdapterSource>,
-        soul_path: Option<PathBuf>,
-        seq: SeqAllocator,
-    ) -> Self {
+    pub fn new(config: LinkManagerConfig) -> Self {
         let manager = Self {
-            store,
-            writer,
-            hub,
-            environment,
-            adapters,
-            soul_path,
-            seq,
+            store: config.store,
+            data_dir: config.data_dir,
+            writer: config.writer,
+            hub: config.hub,
+            environment: config.environment,
+            adapters: config.adapters,
+            soul_path: config.soul_path,
+            seq: config.seq,
             waiters: Arc::new(RwLock::new(None)),
             closer: Arc::new(RwLock::new(None)),
             reconciler: Arc::new(RwLock::new(None)),
             links: Arc::new(RwLock::new(HashMap::new())),
+            prepared: Arc::new(Mutex::new(HashMap::new())),
             establishing: Arc::new(Mutex::new(HashMap::new())),
         };
         manager.spawn_reaper();
@@ -553,6 +709,29 @@ impl LinkManager {
                     info!("Reaping idle link for session {}", encoded);
                     manager.detach(&session_id, "idle").await;
                 }
+
+                // Prepared links have no durable row, so they cannot use the session
+                // status checks above. Reap them by the same inactivity bound and close
+                // the process outside the map lock. A browser tab can disappear without
+                // running React cleanup (tab close, crash, network loss); the server is
+                // the final owner of this in-memory resource.
+                let expired: Vec<(String, PreparedSession)> = {
+                    let mut prepared = manager.prepared.lock().await;
+                    let handles: Vec<String> = prepared
+                        .iter()
+                        .filter(|(_, entry)| entry.last_used_ms < cutoff)
+                        .map(|(handle, _)| handle.clone())
+                        .collect();
+                    handles
+                        .into_iter()
+                        .filter_map(|handle| prepared.remove(&handle).map(|entry| (handle, entry)))
+                        .collect()
+                };
+                for (handle, entry) in expired {
+                    info!("Reaping abandoned prepared link");
+                    entry.live.close().await;
+                    crate::attachments::cleanup_draft(&manager.data_dir, &handle).await;
+                }
             }
         });
     }
@@ -652,10 +831,10 @@ impl LinkManager {
 
     /// Re-attach to a session the journal already holds.
     ///
-    /// Distinct from [`Self::open_session`], and the difference is which way identity
-    /// flows. Here the id is **known** — it is the row's primary key — so the agent is
-    /// asked to resume it. There, no id exists yet and the agent's answer is what
-    /// creates one.
+    /// Distinct from [`Self::promote_with_turn`], and the difference is which way
+    /// identity flows. Here the id is **known** — it is the row's primary key — so the
+    /// agent is asked to resume it. There, no durable row exists yet and promotion
+    /// uses the agent's native id to create one atomically with the first turn.
     async fn establish(&self, session_id: &SessionId) -> Result<Arc<LiveSession>> {
         let session = self
             .store
@@ -663,21 +842,20 @@ impl LinkManager {
             .await?
             .ok_or_else(|| anyhow!("Unknown session {}", session_id.encode()))?;
 
-        let flags: BTreeMap<String, String> = serde_json::from_str::<serde_json::Value>(
-            &session.flags_json,
-        )
-        .ok()
-        .and_then(|v| v.as_object().cloned())
-        .map(|map| {
-            map.into_iter()
-                .filter_map(|(k, v)| {
-                    v.as_str()
-                        .map(|s| (k.clone(), s.to_string()))
-                        .or_else(|| Some((k, v.to_string())))
+        let flags: BTreeMap<String, String> =
+            serde_json::from_str::<serde_json::Value>(&session.flags_json)
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+                .map(|map| {
+                    map.into_iter()
+                        .filter_map(|(k, v)| {
+                            v.as_str()
+                                .map(|s| (k.clone(), s.to_string()))
+                                .or_else(|| Some((k, v.to_string())))
+                        })
+                        .collect()
                 })
-                .collect()
-        })
-        .unwrap_or_default();
+                .unwrap_or_default();
 
         info!(
             "Establishing link for session {} ({})",
@@ -719,14 +897,14 @@ impl LinkManager {
         // A vendor answering with a *different* id than the one asked for would be a
         // resumed session becoming a different session, which the type system cannot
         // catch and the journal must not absorb silently.
-        if live.native_id() != &session.id.native_id {
+        if live.native_id().as_ref() != Some(&session.id.native_id) {
             warn!(
                 "Session {} asked agent {} to resume '{}' and it reported '{}'; \
                  the journal keeps the id it was keyed by",
                 session_id.encode(),
                 session.id.agent,
                 session.id.native_id,
-                live.native_id()
+                live.native_id().as_ref().map_or("<none>", NativeId::as_str)
             );
         }
 
@@ -734,36 +912,9 @@ impl LinkManager {
         Ok(live)
     }
 
-    /// Open one agent in process, and take its stream.
-    ///
-    /// The one place [`sylph_protocol::Adapter::run`] is called, shared by
-    /// [`Self::establish`] and [`Self::open_session`] so the two cannot disagree about
-    /// what a freshly opened session knows about itself.
-    ///
-    /// # An absent agent is a typed failure, not a message
-    ///
-    /// [`NoAgent`] is what a client renders as `UnavailableReason::NoAgent`, the reason no
-    /// retry can fix, and it is recovered by `downcast_ref` rather than by matching text.
-    /// This is now the *only* way an agent can fail to start for want of an adapter: there
-    /// is no second question about a path, so a listed agent and a startable one are the
-    /// same fact.
-    ///
-    /// # `events` is taken here, once
-    ///
-    /// [`Session::events`] yields its stream once by contract — two consumers of one
-    /// vendor's stdio would each see half the turn — so it is taken before the session is
-    /// shared behind an `Arc`, which is also the only point at which `&mut self` is
-    /// available. A session that answers `None` has already been drained, which for a
-    /// freshly opened one is an adapter bug rather than a state to tolerate.
-    /// # The spec is built from the probe, not before it
-    ///
-    /// `spec` is a closure rather than a value because one of its fields is only decidable
-    /// once the agent has said what it is: [`AgentInfo::dictates_native_id`] is what
-    /// separates "open a new session under this id" from "assign one and report it", and
-    /// `codex` spells those differently on its command line. Asking for a dictated id
-    /// unconditionally happened to work — an adapter that cannot accept one ignores it and
-    /// reports its own — but it put a value on the wire that the agent was known not to
-    /// honour, which is the shape of a fact with two answers.
+    /// Open one agent in process and take its event stream. The same handshake is shared
+    /// by prepared links and durable-session reattachment so capability and identity
+    /// handling cannot diverge between the two paths.
     async fn run(
         &self,
         agent: &str,
@@ -820,7 +971,9 @@ impl LinkManager {
             // composer renders an empty surface, which `LinkState.supports` and
             // `link.control.reason` together explain — the alternative is refusing to open
             // a session because one query failed.
-            warn!("Agent '{agent}' opened a session but would not report its capabilities: {error:#}");
+            warn!(
+                "Agent '{agent}' opened a session but would not report its capabilities: {error:#}"
+            );
             SessionCapabilities::default()
         });
 
@@ -829,9 +982,262 @@ impl LinkManager {
                 session,
                 info,
                 surface: Mutex::new(surface),
+                config_gate: Mutex::new(()),
             }),
             events,
         ))
+    }
+
+    /// Start an agent without creating a durable session row.
+    ///
+    /// This is the first phase of the session lifecycle.  The returned link is suitable
+    /// for capability discovery and configuration changes, but it is not visible to
+    /// history until [`Self::promote_prepared_turn`] is called after a real user turn.
+    pub async fn prepare_session(&self, spec: OpenSpec) -> Result<PreparedSession> {
+        let agent = AgentName::parse(spec.agent.clone())?;
+        let (live, events) = self
+            .run(&spec.agent, |info| RunSpec {
+                workdir: spec.workdir.clone(),
+                native_id: if info.dictates_native_id {
+                    // A dictated id is still only a vendor launch option.  It is not
+                    // persisted until promotion, so abandoning this prepared link leaves
+                    // no journal record.
+                    RequestedNativeId::Dictate(NativeId::new(uuid::Uuid::new_v4().to_string()))
+                } else {
+                    RequestedNativeId::New
+                },
+                inject_identity: spec.inject_identity,
+                identity_preamble: self.identity_preamble(spec.inject_identity),
+                flags: spec.flags.clone().into_iter().collect(),
+                permission_mode: None,
+            })
+            .await
+            .with_context(|| format!("Failed to prepare {} in {}", spec.agent, spec.workdir))?;
+        // Keep the parsed agent validation above explicit: it makes malformed names fail
+        // before a process is started, while the value itself remains in `spec` for the
+        // eventual identity triple.
+        let _ = agent;
+        Ok(PreparedSession {
+            live,
+            events: buffer_events(events),
+            spec,
+            last_used_ms: now_ms(),
+        })
+    }
+
+    /// Store a prepared link and return its process-local handle.
+    pub async fn prepare_handle(&self, spec: OpenSpec) -> Result<String> {
+        let prepared = self.prepare_session(spec).await?;
+        let handle = format!("draft-{}", uuid::Uuid::new_v4());
+        self.prepared.lock().await.insert(handle.clone(), prepared);
+        Ok(handle)
+    }
+
+    /// Read capabilities for a prepared link without creating a journal row.
+    pub async fn prepared_capabilities(&self, handle: &str) -> Option<SessionCapabilities> {
+        let live = {
+            let mut prepared = self.prepared.lock().await;
+            let entry = prepared.get_mut(handle)?;
+            entry.last_used_ms = now_ms();
+            entry.live.clone()
+        };
+        Some(live.capabilities().await)
+    }
+
+    /// Snapshot the complete link state for a prepared handle.
+    pub async fn prepared_state(&self, handle: &str) -> Option<LinkState> {
+        let live = {
+            let mut prepared = self.prepared.lock().await;
+            let entry = prepared.get_mut(handle)?;
+            entry.last_used_ms = now_ms();
+            entry.live.clone()
+        };
+        let info = live.info();
+        let capabilities = live.capabilities().await;
+        Some(LinkState {
+            link: LinkFacets {
+                observe: Facet::available(),
+                control: Facet::available(),
+            },
+            agent: Some(info.name.clone()),
+            supports: info
+                .supports
+                .iter()
+                .filter_map(|c| serde_json::to_value(c).ok())
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            capabilities: Some(capabilities),
+        })
+    }
+
+    /// Return the immutable launch metadata for a prepared handle.
+    pub async fn prepared_spec(&self, handle: &str) -> Option<OpenSpec> {
+        let mut prepared = self.prepared.lock().await;
+        let entry = prepared.get_mut(handle)?;
+        entry.last_used_ms = now_ms();
+        Some(entry.spec.clone())
+    }
+
+    /// Remove and close a prepared link.  This is cleanup of an in-memory resource, not
+    /// deletion of a history row (none exists by construction).
+    pub async fn discard_prepared(&self, handle: &str) {
+        if let Some(prepared) = self.prepared.lock().await.remove(handle) {
+            prepared.live.close().await;
+        }
+        crate::attachments::cleanup_draft(&self.data_dir, handle).await;
+    }
+
+    /// Change one option on a prepared link.
+    pub async fn prepared_set_config(
+        &self,
+        handle: &str,
+        config_id: &str,
+        value: serde_json::Value,
+    ) -> Result<SessionCapabilities> {
+        let live = {
+            let mut prepared = self.prepared.lock().await;
+            let entry = prepared
+                .get_mut(handle)
+                .ok_or_else(|| anyhow!("unknown prepared session {handle}"))?;
+            entry.last_used_ms = now_ms();
+            entry.live.clone()
+        };
+        let capabilities = live.set_config(config_id, value.clone()).await?;
+        // Keep only adapter-approved launch settings in the in-memory spec. Runtime
+        // controls such as Claude's output style have no resume equivalent and must not
+        // leak into `flags_json` merely because a draft happened to use them.
+        if let Some((flag, text)) = live.launch_flag_for_config(config_id, &value) {
+            if let Some(entry) = self.prepared.lock().await.get_mut(handle) {
+                entry.last_used_ms = now_ms();
+                entry.spec.flags.insert(flag, text);
+            }
+        }
+        Ok(capabilities)
+    }
+
+    /// Send the first turn of a prepared link, then create its durable identity and rows.
+    ///
+    /// The adapter owns the vendor-specific wait for a native id.  The prepared event stream
+    /// was converted to an unbounded hand-off queue in [`Self::prepare_session`], so frames
+    /// emitted while the adapter is establishing that identity remain ordered and available
+    /// when the supervisor attaches the normal drain.
+    pub async fn promote_prepared_turn(
+        &self,
+        handle: &str,
+        turn: PreparedTurn,
+    ) -> Result<PromotedPrepared> {
+        // Remove first so a concurrent discard/config call cannot race the one-shot initial
+        // send.  On every failure below the owned link is closed, and no durable row exists.
+        let Some(prepared) = self.prepared.lock().await.remove(handle) else {
+            // The HTTP layer stages attachments before entering promotion.  A retry
+            // against an already-consumed handle must not leave those bytes behind,
+            // even though there is no live link left to close.
+            crate::attachments::cleanup_draft(&self.data_dir, handle).await;
+            return Err(anyhow!("unknown prepared session {handle}"));
+        };
+
+        let input = TurnInput {
+            text: turn.text.clone(),
+            attachments: turn.attachments.clone(),
+            command: turn.command.clone(),
+            args: turn.args.clone(),
+            config: BTreeMap::new(),
+        };
+        let native =
+            match tokio::time::timeout(INITIAL_ID_TIMEOUT, prepared.live.send_initial(input)).await
+            {
+                Ok(Ok(native)) => native,
+                Ok(Err(error)) => {
+                    prepared.live.close().await;
+                    crate::attachments::cleanup_draft(&self.data_dir, handle).await;
+                    return Err(error);
+                }
+                Err(_) => {
+                    prepared.live.close().await;
+                    crate::attachments::cleanup_draft(&self.data_dir, handle).await;
+                    return Err(anyhow!(
+                        "agent did not provide a native id within {INITIAL_ID_TIMEOUT:?}"
+                    ));
+                }
+            };
+        let agent = match AgentName::parse(prepared.spec.agent.clone()) {
+            Ok(agent) => agent,
+            Err(error) => {
+                prepared.live.close().await;
+                crate::attachments::cleanup_draft(&self.data_dir, handle).await;
+                return Err(error.into());
+            }
+        };
+        let session_id = SessionId::new(prepared.spec.environment.clone(), agent, native);
+        let now = now_ms();
+        let record = crate::models::Session {
+            id: session_id.clone(),
+            workdir: prepared.spec.workdir.clone(),
+            title: prepared.spec.title.clone().or_else(|| {
+                let opening = turn.text.trim().to_string();
+                let opening = if opening.is_empty() {
+                    turn.command
+                        .as_deref()
+                        .map(|command| format!("/{command}"))
+                        .unwrap_or_default()
+                } else {
+                    opening
+                };
+                let label = crate::db::labels::summarize_line(&opening);
+                (!label.is_empty()).then_some(label)
+            }),
+            inject_identity: prepared.spec.inject_identity,
+            fidelity: Fidelity::Stream,
+            flags_json: serde_json::to_string(&prepared.spec.flags)
+                .unwrap_or_else(|_| "{}".to_string()),
+            status: "running".to_string(),
+            parent_session: prepared.spec.parent_session.clone(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        let turn_record = crate::models::Turn {
+            id: turn.id,
+            session_id: session_id.clone(),
+            status: "queued".to_string(),
+            origin: "user".to_string(),
+            request_text: turn.text,
+            command_invocation_id: turn.command,
+            idempotency_key: turn.idempotency_key,
+            error_code: None,
+            error_message: None,
+            created_at_ms: turn.created_at_ms,
+            started_at_ms: None,
+            completed_at_ms: None,
+            stopped_at_ms: None,
+        };
+        let (session, stored_turn) = match self
+            .store
+            .create_session_and_turn(&record, &turn_record)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                prepared.live.close().await;
+                crate::attachments::cleanup_draft(&self.data_dir, handle).await;
+                return Err(error.into());
+            }
+        };
+
+        Ok(PromotedPrepared {
+            session,
+            turn: stored_turn,
+            link: prepared.live,
+            events: prepared.events,
+            draft_id: handle.to_string(),
+            data_dir: self.data_dir.clone(),
+        })
+    }
+
+    /// Attach a promoted prepared link after the caller has opened its turn channel and
+    /// journaled any server-authored opening events.
+    pub(crate) async fn attach_promoted(&self, promoted: PromotedPrepared) {
+        self.insert(&promoted.session.id, promoted.link, promoted.events)
+            .await;
     }
 
     /// The identity text to inject, or `None`.
@@ -870,7 +1276,7 @@ impl LinkManager {
 
     /// Register a live link and start draining it.
     ///
-    /// Shared by [`Self::establish`] and [`Self::open_session`] so the pool insert and
+    /// Shared by [`Self::establish`] and [`Self::promote_with_turn`] so the pool insert and
     /// the drain spawn cannot get out of step: a link in the map with nothing reading
     /// it wedges the session, and a drain with no map entry publishes events for a
     /// session nothing can find.
@@ -890,136 +1296,6 @@ impl LinkManager {
             },
         );
         self.spawn_drain(encoded, events);
-    }
-
-    /// Start an agent, learn the id it assigned, and journal the session.
-    ///
-    /// # This is `POST /sessions`, and the order is the whole design
-    ///
-    /// A session has no identity until an agent has given it one
-    /// (`docs/architecture.md` § Identity), so the row cannot come first. The previous
-    /// shape minted a `Uuid::new_v4()`, wrote a row, and left the agent unstarted —
-    /// which produced a **class of session with no work in it**, and three things go
-    /// away with it: `DELETE /sessions/{id}` for empties, the frontend probe that
-    /// called it on unmount, and the window in which a session existed with no native
-    /// id and therefore could not be resumed.
-    ///
-    /// So: spawn, read the id off the handshake, then insert. A failed spawn reports at
-    /// the start screen instead of leaving a dead row behind.
-    ///
-    /// # Why the insert can still fail, and why that is a conflict rather than a retry
-    ///
-    /// Two clients can ask for a session in the same directory at the same moment, and
-    /// a vendor that was handed an id it already holds will happily resume it. The
-    /// primary key is what refuses the second row, and the error is a genuine `409`:
-    /// two rows for one conversation is exactly the state it exists to prevent. The
-    /// link is closed on that path rather than leaked, because a process nobody holds
-    /// a row for cannot be reached again.
-    ///
-    /// # Ordering on the failure path
-    ///
-    /// The link is registered **after** the insert commits. Registering first would
-    /// leave a live entry in the pool keyed to a session the journal does not have, so
-    /// a caller could find a link, send a turn, and have every event dropped for
-    /// naming a session that does not exist.
-    pub async fn open_session(&self, spec: OpenSpec) -> Result<crate::models::Session> {
-        info!(
-            "Starting {} in {} to open a session",
-            spec.agent, spec.workdir
-        );
-
-        // The agent is validated before the id is minted, because minting one for an agent
-        // that cannot run would put a `Dictate` on the wire for nothing — and the parse is
-        // the one failure here that is about the *request* rather than about the machine.
-        let agent = AgentName::parse(spec.agent.clone())?;
-
-        let (live, events) = self
-            .run(&spec.agent, |info| RunSpec {
-                workdir: spec.workdir.clone(),
-                // A fresh session, so the id is **dictated where the agent accepts one**:
-                // the server mints it and hands it over, which is what makes identity known
-                // before the first event and is the path `claude` and `pi` take. `codex`
-                // assigns its own and reports it, so it gets `New` — and `native_id()`
-                // below is *read* either way rather than assumed, because that is the only
-                // value this can trust.
-                native_id: if info.dictates_native_id {
-                    RequestedNativeId::Dictate(NativeId::new(uuid::Uuid::new_v4().to_string()))
-                } else {
-                    RequestedNativeId::New
-                },
-                inject_identity: spec.inject_identity,
-                identity_preamble: self.identity_preamble(spec.inject_identity),
-                flags: spec.flags.clone().into_iter().collect(),
-                permission_mode: None,
-            })
-            .await
-            .with_context(|| format!("Failed to start {} in {}", spec.agent, spec.workdir))?;
-
-        // **An `open` that reports no id is a failure, not a degraded success.**
-        // Without one the session can never be resumed, so every link death — the idle
-        // reaper, a restart, an explicit detach — would make it permanently
-        // unlinkable. Better to refuse now, with the agent torn down, than to journal a
-        // row nothing can ever reach again.
-        //
-        // The type makes an *absent* id unrepresentable, which is why this checks for an
-        // empty one: `NativeId` is a newtype over `String`, so a blank is the remaining way
-        // an adapter can answer with nothing while satisfying the signature.
-        let native = live.native_id().clone();
-        if native.as_str().trim().is_empty() {
-            live.close().await;
-            return Err(anyhow!(
-                "Agent '{}' started but reported no session id, so the session \
-                 could never be resumed",
-                spec.agent
-            ));
-        }
-
-        let session_id = SessionId::new(spec.environment.clone(), agent, native);
-
-        let now = now_ms();
-        let record = crate::models::Session {
-            id: session_id.clone(),
-            workdir: spec.workdir,
-            title: spec.title,
-            inject_identity: spec.inject_identity,
-            // A live link holds the process's own stdio, which is the only source that
-            // carries every delta and its arrival time.
-            fidelity: Fidelity::Stream,
-            flags_json: serde_json::to_string(&spec.flags).unwrap_or_else(|_| "{}".to_string()),
-            status: "idle".to_string(),
-            parent_session: spec.parent_session,
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
-
-        let stored = match self.store.create_session(&record).await {
-            Ok(stored) => stored,
-            Err(error) => {
-                // The row is what makes the process reachable, so a refused insert means
-                // this link can never be found again.
-                live.close().await;
-
-                // A duplicate triple is a **conflict, not a start failure**. The primary
-                // key refusing a second row for one conversation is the constraint doing
-                // its job, and it is reachable whenever a vendor is handed an id it
-                // already holds: two clients starting a session in one directory at the
-                // same moment, or an adapter that dictates a fixed id. Reported as a
-                // generic start failure it reads as "the agent is broken", which sends
-                // the investigation to the agent install rather than to the collision.
-                if let crate::error::Error::Database(sqlx::Error::Database(db)) = &error {
-                    if db.is_unique_violation() {
-                        return Err(anyhow::Error::new(
-                            crate::error::Error::SessionAlreadyPresent,
-                        ));
-                    }
-                }
-                return Err(error.into());
-            }
-        };
-
-        self.insert(&session_id, live, events).await;
-        info!("Opened session {}", session_id.encode());
-        Ok(stored)
     }
 
     /// Consume a link's output for as long as it lives.
@@ -1140,6 +1416,10 @@ impl LinkManager {
         // build does not model lands in `EventKind::Other` and is preserved verbatim
         // instead of being dropped.
         let mut event = StreamEvent::from_event(&event);
+        // Keep the arrival location separate from trajectory lineage. A child frame may
+        // arrive after the parent turn has settled; retaining this id lets a session-level
+        // trace route it in real time without opening a synthetic root turn.
+        event.arrival_turn_id = Some(turn_id.clone());
 
         match self.seq.next(session_id).await {
             Ok(seq) => event.seq = seq,
@@ -1216,7 +1496,8 @@ impl LinkManager {
             .map(|s| s.to_string());
         let text = event.text.clone();
 
-        self.hub.publish(&turn_id, event).await;
+        self.hub.publish(&turn_id, event.clone()).await;
+        self.hub.publish_trace(&session_id.encode(), event).await;
 
         if settles {
             use crate::supervisor::turn::Outcome;
@@ -1284,7 +1565,10 @@ impl LinkManager {
                 );
                 // The session is running again, so the composer reflects that rather
                 // than inviting a message the agent is busy to receive.
-                let _ = self.store.update_session_status(session_id, "running").await;
+                let _ = self
+                    .store
+                    .update_session_status(session_id, "running")
+                    .await;
                 // Announced on the session stream, which is the one a client holds
                 // between turns. Without this a client learns about the turn only by
                 // polling, so the notification it exists to carry arrives late or not
@@ -1454,9 +1738,12 @@ impl LinkManager {
             Err(error) => error!("Failed to abandon open requests: {}", error),
         }
 
-        // No `exitCode`: there is no process of Sylph's own to exit, so the field would be
-        // a constant `null` claiming a fact nothing holds. `detail` carries what there is.
-        let mut data = serde_json::json!({"reason": "closed", "attached": false});
+        // No `exitCode` or legacy `attached` boolean: there is no process status field
+        // that can describe this in-process link, and a boolean cannot explain whether
+        // observation and control differ. Publish the same typed detached facets as the
+        // resource endpoint, with the close reason as notification metadata.
+        let mut data = serde_json::to_value(LinkState::detached()).unwrap_or_default();
+        data["reason"] = "closed".into();
         if let Some(detail) = detail {
             data["detail"] = detail.into();
         }
@@ -1477,12 +1764,9 @@ impl LinkManager {
                 self.announce_request(session_id, request).await;
             }
         }
-        self.publish_session_event(
-            session_id,
-            "link",
-            serde_json::json!({"reason": reason, "attached": false}),
-        )
-        .await;
+        let mut data = serde_json::to_value(LinkState::detached()).unwrap_or_default();
+        data["reason"] = reason.into();
+        self.publish_session_event(session_id, "link", data).await;
     }
 
     /// Re-publish the current capability surface to attached clients.
@@ -1544,6 +1828,7 @@ impl LinkManager {
     ) {
         let event = StreamEvent {
             seq: self.seq.next(session_id).await.unwrap_or(0),
+            arrival_turn_id: None,
             kind: kind.to_string(),
             phase: None,
             stream_id: None,

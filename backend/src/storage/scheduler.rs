@@ -31,10 +31,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::db::JournalStore;
 use crate::env::Environment;
+use crate::models::now_ms;
 use crate::storage::history::HistoryStore;
 use crate::storage::retention::{self, Resolved};
 use sylph_protocol::SessionId;
-use crate::models::now_ms;
 
 /// How many sessions one pass examines.
 ///
@@ -139,11 +139,7 @@ fn human_bytes(bytes: i64) -> String {
     let magnitude = bytes.unsigned_abs() as f64;
     let sign = if bytes < 0 { "-" } else { "" };
 
-    for (limit, unit) in [
-        (KIB, "B"),
-        (KIB * KIB, "KiB"),
-        (KIB * KIB * KIB, "MiB"),
-    ] {
+    for (limit, unit) in [(KIB, "B"), (KIB * KIB, "KiB"), (KIB * KIB * KIB, "MiB")] {
         if magnitude < limit {
             let scaled = magnitude / (limit / KIB);
             return if unit == "B" {

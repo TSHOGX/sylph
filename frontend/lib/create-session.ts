@@ -9,13 +9,13 @@
  * is a mutation, not a route — asking for a working directory that the invocation
  * already named is a form the user has to dismiss to get what they clicked.
  *
- * `/sessions/new` still exists, for the two cases this cannot serve: no
- * directory chosen yet (`Mod+N`), and overriding the agent, model, or title.
+ * The directory picker remains the entry point for the two cases this cannot serve:
+ * no directory chosen yet (`Mod+N`), and choosing a workspace before starting.
  */
 
 import { useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { api, type Environment } from "@/lib/api";
 import { defaultEnvironment, useEnvironments } from "@/lib/environments";
 import { useSettings, type Settings } from "@/lib/settings";
@@ -127,7 +127,6 @@ export interface QuickCreate {
  */
 export function useQuickCreateSession(): QuickCreate {
   const router = useRouter();
-  const queryClient = useQueryClient();
   const { settings } = useSettings();
 
   const environments = useEnvironments();
@@ -163,13 +162,10 @@ export function useQuickCreateSession(): QuickCreate {
         injectIdentity: resolved.injectIdentity,
       });
     },
-    onSuccess: ({ session }) => {
-      // The sidebar and the workspace roll-up both list this session. Without
-      // invalidating them it is missing until the sidebar's 10-second poll fires,
-      // long enough that the group it was created in looks unchanged.
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      router.push(`/sessions/${session.id}`);
+    onSuccess: ({ draftId }) => {
+      // A prepared link is intentionally absent from the sidebar. It becomes a
+      // durable row only when the draft page sends its first real turn.
+      router.push(`/sessions/draft/${encodeURIComponent(draftId)}`);
     },
   });
 

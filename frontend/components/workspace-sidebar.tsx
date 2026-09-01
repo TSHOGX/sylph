@@ -594,7 +594,10 @@ function SessionRow({
           </span>
         )}
         {environments.showEnvironment && (
-          <EnvironmentChip name={session.environmentName} reachableVia={relay} />
+          <EnvironmentChip
+            name={environments.nameOf(session.environment) ?? session.environment}
+            reachableVia={relay}
+          />
         )}
         {session.status === "running" ? (
           <span

@@ -49,7 +49,6 @@
  */
 
 import dynamic from "next/dynamic";
-import { useRouter } from "next/navigation";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -170,6 +169,7 @@ export function Composer({
   onReattach,
   onRunCommand,
   onSetConfig,
+  onAgentChange,
   sending,
   sendError,
   configError,
@@ -235,6 +235,12 @@ export function Composer({
   onRunCommand?: (name: string, rest: string) => void;
   /** Set one config option. A control command resolves to this, never to a turn. */
   onSetConfig?: (configId: string, value: string | boolean) => void;
+  /**
+   * Replace an empty draft with another agent. The caller owns draft lifecycle and
+   * navigation; the composer must not create a replacement behind its back because
+   * it cannot know whether the current id is ephemeral or durable.
+   */
+  onAgentChange?: (agent: string) => void;
   sending: boolean;
   sendError: unknown;
   /**
@@ -271,7 +277,6 @@ export function Composer({
   onShowBlocked?: () => void;
 }) {
   const queryClient = useQueryClient();
-  const router = useRouter();
   const isMobile = useIsMobile();
   const t = useT();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -461,31 +466,17 @@ export function Composer({
    * Changing the agent replaces the session: `agent` is part of a session's
    * identity, so it cannot be edited — it is one of the three fields the id is
    * made of. On an empty session there is nothing to preserve, so this creates a
-   * fresh one in the same directory on the same machine and navigates to it, which
-   * is why it is only offered at turn zero.
+   * fresh one in the same directory on the same machine. The route that owns an
+   * ephemeral draft supplies the replacement callback; this component does not
+   * guess whether its id is durable or disposable.
    */
-  const recreate = useMutation({
-    mutationFn: (agent: string) =>
-      api.sessions.create({
-        // The same environment, always. A session does not migrate between machines
-        // — moving work elsewhere is a fork (`docs/architecture.md`) — so silently
-        // landing the replacement somewhere else would change more than the one
-        // thing the user asked to change.
-        environment: session.environment,
-        agent,
-        workdir: session.workdir,
-        // Carried from the session being replaced, not re-read from settings. The
-        // user is changing one thing — the agent — and identity is fixed at creation,
-        // so re-deriving it here would silently flip a session started without
-        // Sylph's identity back to having it the moment its agent was switched, with
-        // nothing on screen saying so.
-        injectIdentity: session.injectIdentity,
-      }),
-    onSuccess: ({ session: created }) => {
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      router.push(`/sessions/${created.id}`);
+  const agentChange = useMutation({
+    mutationFn: async (agent: string) => {
+      if (!onAgentChange) throw new Error("Agent switching is unavailable here.");
+      await onAgentChange(agent);
     },
+    /* The page that owns a draft performs replacement, cleanup, and navigation. */
+    onSuccess: () => {},
   });
 
   /**
@@ -620,7 +611,7 @@ export function Composer({
     // inert row naming the current agent once it is not. Present-but-inert rather
     // than absent — a control that vanishes reads as a bug, where one that states
     // it is fixed explains the rule.
-    ...(agentLocked || agents.length < 2
+    ...(!onAgentChange || agentLocked || agents.length < 2
       ? [
           {
             label: `Agent: ${session.agent}`,
@@ -636,9 +627,9 @@ export function Composer({
           ...agents.map((agent) => ({
             label: agent.name,
             checked: agent.name === session.agent,
-            disabled: disabled || recreate.isPending,
+            disabled: disabled || agentChange.isPending,
             onSelect: () => {
-              if (agent.name !== session.agent) recreate.mutate(agent.name);
+              if (agent.name !== session.agent) agentChange.mutate(agent.name);
             },
           })),
         ]),
@@ -1057,10 +1048,10 @@ export function Composer({
           </p>
         )}
 
-        {recreate.error != null && (
+        {agentChange.error != null && (
           <p role="alert" className="mt-1 text-2xs text-danger">
-            {recreate.error instanceof Error
-              ? recreate.error.message
+            {agentChange.error instanceof Error
+              ? agentChange.error.message
               : "Could not switch agent."}
           </p>
         )}

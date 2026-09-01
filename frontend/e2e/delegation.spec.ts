@@ -510,9 +510,13 @@ test("a delegate that finishes late is reported as finishing, not as abandoned",
   // narrated in the agent's prose, and a substring match resolves to both — the prose
   // reads "The background worker finished while you were away." This asserting on the
   // *card's* copy is the stronger claim anyway: it is the record on the turn that
-  // dispatched the work, which is the one a reader scrolls back to.
+  // dispatched the work, which is the one a reader scrolls back to. The card is
+  // deliberately collapsed by default, so open its workflow before asserting on the
+  // nested summary; otherwise the locator is asking for text that is not mounted yet.
+  const host = page.getByRole("region", { name: /Workflow delegation/ });
+  await host.getByRole("button", { name: "Workflow", exact: true }).click();
   await expect(
-    page.getByText("the background worker finished", { exact: true }),
+    host.getByText("the background worker finished", { exact: true }),
   ).toBeVisible();
 
   // And — the half that was missing — the *dispatching* turn's own card has to agree.
@@ -526,9 +530,6 @@ test("a delegate that finishes late is reported as finishing, not as abandoned",
   // its subtree — so the host has to be opened before the card exists in the DOM at
   // all. Asserting on it directly reported "0 found", which reads as the card being
   // absent rather than unmounted.
-  const host = page.getByRole("region", { name: /Workflow delegation/ });
-  await host.getByRole("button", { name: "Workflow", exact: true }).click();
-
   const dispatched = host.getByRole("region", {
     name: "Background: worker delegation",
   });

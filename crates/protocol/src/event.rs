@@ -313,7 +313,10 @@ mod tests {
         for phase in [Phase::Started, Phase::Delta, Phase::Completed] {
             let event = Event::new(EventKind::Subagent, Some(phase), 0);
             assert_eq!(event.stability, Stability::Stable, "subagent/{phase:?}");
-            assert!(event.is_stable(), "subagent/{phase:?} must reach the journal");
+            assert!(
+                event.is_stable(),
+                "subagent/{phase:?} must reach the journal"
+            );
         }
 
         // The exception is scoped to structure: content still projects.
@@ -341,10 +344,9 @@ mod tests {
     /// a newer envagent really can send one.
     #[test]
     fn an_unknown_kind_is_preserved_rather_than_failing_the_event() {
-        let event: Event = serde_json::from_str(
-            r#"{"kind":"telemetry","stability":"stable","createdAtMs":1}"#,
-        )
-        .unwrap();
+        let event: Event =
+            serde_json::from_str(r#"{"kind":"telemetry","stability":"stable","createdAtMs":1}"#)
+                .unwrap();
         assert_eq!(event.kind, EventKind::Other("telemetry".into()));
         // And it round-trips under its own name, not under a wrapper.
         assert_eq!(serde_json::to_value(&event).unwrap()["kind"], "telemetry");
@@ -355,10 +357,9 @@ mod tests {
     /// tautology.
     #[test]
     fn a_known_kind_parses_as_itself_and_not_as_other() {
-        let event: Event = serde_json::from_str(
-            r#"{"kind":"tool_call","stability":"stable","createdAtMs":1}"#,
-        )
-        .unwrap();
+        let event: Event =
+            serde_json::from_str(r#"{"kind":"tool_call","stability":"stable","createdAtMs":1}"#)
+                .unwrap();
         assert_eq!(event.kind, EventKind::ToolCall);
         assert_eq!(event.kind.as_str(), "tool_call");
     }
@@ -385,8 +386,8 @@ mod tests {
     /// permanent and `null` is the only value that stays honest after the fact.
     #[test]
     fn an_unnamed_block_omits_the_field_entirely() {
-        let wire = serde_json::to_value(Event::new(EventKind::Subagent, Some(Phase::Started), 1))
-            .unwrap();
+        let wire =
+            serde_json::to_value(Event::new(EventKind::Subagent, Some(Phase::Started), 1)).unwrap();
         assert!(wire.get("name").is_none());
         for absent in ["phase_missing", "text", "data", "isError", "startedAtMs"] {
             assert!(wire.get(absent).is_none(), "{absent} should be omitted");

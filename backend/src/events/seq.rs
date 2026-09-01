@@ -89,8 +89,14 @@ mod tests {
     async fn numbers_climb_and_never_repeat_for_one_session() {
         let (store, _dir) = store().await;
         let allocator = SeqAllocator::new(store);
-        let first = allocator.next(&crate::fixtures::test_session_id("s1")).await.unwrap();
-        let second = allocator.next(&crate::fixtures::test_session_id("s1")).await.unwrap();
+        let first = allocator
+            .next(&crate::fixtures::test_session_id("s1"))
+            .await
+            .unwrap();
+        let second = allocator
+            .next(&crate::fixtures::test_session_id("s1"))
+            .await
+            .unwrap();
         assert_eq!(second, first + 1);
     }
 
@@ -100,9 +106,21 @@ mod tests {
         // numbers forward and leave gaps in its stream.
         let (store, _dir) = store().await;
         let allocator = SeqAllocator::new(store);
-        allocator.next(&crate::fixtures::test_session_id("s1")).await.unwrap();
-        allocator.next(&crate::fixtures::test_session_id("s1")).await.unwrap();
-        assert_eq!(allocator.next(&crate::fixtures::test_session_id("s2")).await.unwrap(), 0);
+        allocator
+            .next(&crate::fixtures::test_session_id("s1"))
+            .await
+            .unwrap();
+        allocator
+            .next(&crate::fixtures::test_session_id("s1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            allocator
+                .next(&crate::fixtures::test_session_id("s2"))
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     /// The property the shared allocator exists for: concurrent producers never
@@ -118,7 +136,12 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let mut mine = Vec::new();
                 for _ in 0..50 {
-                    mine.push(allocator.next(&crate::fixtures::test_session_id("shared")).await.unwrap());
+                    mine.push(
+                        allocator
+                            .next(&crate::fixtures::test_session_id("shared"))
+                            .await
+                            .unwrap(),
+                    );
                 }
                 mine
             }));
@@ -130,7 +153,11 @@ mod tests {
         }
 
         let unique: std::collections::HashSet<_> = all.iter().copied().collect();
-        assert_eq!(unique.len(), all.len(), "every number must be handed out once");
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "every number must be handed out once"
+        );
         // Dense from 0, so the journal has no unexplained gaps.
         let mut sorted: Vec<_> = unique.into_iter().collect();
         sorted.sort();

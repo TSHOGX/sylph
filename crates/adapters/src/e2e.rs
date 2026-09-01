@@ -43,18 +43,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::now_ms;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use sylph_protocol::{
     Adapter, AdapterError, AgentInfo, Capability, CapabilityFacets, Choice, ConfigChoice,
-    ConfigKind, ConfigOption, Event, EventKind, EventStream, Field, FieldKind, Fidelity, FlagSpec,
+    ConfigKind, ConfigOption, Event, EventKind, EventStream, Fidelity, Field, FieldKind, FlagSpec,
     Form, NativeId, NativeSummary, Phase, Request, RequestKind, RequestOption, RequestedNativeId,
     Resolution, RunSpec, SelectMode, Session, SessionCapabilities, SessionMessage, StoreFilter,
     SubagentSpec, TurnInput,
 };
 use tokio::sync::{mpsc, Mutex};
-use crate::now_ms;
 
 /// The name this adapter answers to.
 ///
@@ -164,7 +164,11 @@ fn commands() -> Vec<sylph_protocol::CommandSpec> {
         // dialog's search path had no coverage at all.
         CommandSpec {
             config_id: Some("provider".to_string()),
-            ..spec("provider", "Choose the provider model", CommandKind::Control)
+            ..spec(
+                "provider",
+                "Choose the provider model",
+                CommandKind::Control,
+            )
         },
     ]
 }
@@ -483,8 +487,8 @@ impl E2eSession {
 
 #[async_trait]
 impl Session for E2eSession {
-    fn native_id(&self) -> &NativeId {
-        &self.native_id
+    fn native_id(&self) -> Option<NativeId> {
+        Some(self.native_id.clone())
     }
 
     async fn capabilities(&self) -> Result<SessionCapabilities> {
@@ -537,6 +541,17 @@ impl Session for E2eSession {
             run_turn(emit, surface, text, turn_number).await;
         });
         Ok(())
+    }
+
+    /// Start the first turn of a prepared fixture link.
+    ///
+    /// The deterministic fixture assigns its native id when the link is opened,
+    /// so there is no vendor-specific wait here.  Keeping the method explicit
+    /// nevertheless exercises the same prepared-session contract as the real
+    /// adapters and lets the backend promote a draft through one path.
+    async fn send_initial(&self, turn: TurnInput) -> Result<NativeId> {
+        self.send(turn).await?;
+        Ok(self.native_id.clone())
     }
 
     /// End the turn, and say so on the stream.
@@ -601,9 +616,9 @@ impl Session for E2eSession {
     async fn set_config(&self, id: &str, value: Value) -> Result<Vec<ConfigOption>> {
         let mut surface = self.surface.lock().await;
         let Some(option) = surface.config.iter_mut().find(|o| o.id == id) else {
-            return Err(anyhow::Error::new(AdapterError::unsupported_field(format!(
-                "no such config option: {id}"
-            ))));
+            return Err(anyhow::Error::new(AdapterError::unsupported_field(
+                format!("no such config option: {id}"),
+            )));
         };
         if value.as_str() == Some(REFUSED_VALUE) {
             return Err(anyhow::Error::new(AdapterError::invalid_value(
@@ -651,9 +666,7 @@ impl Session for E2eSession {
         // lock is uncontended by construction: `&mut self` means nothing else holds this
         // session. Taking the receiver is what makes a second call answer `None`.
         let receiver = self.stream.try_lock().ok()?.take()?;
-        Some(Box::pin(
-            tokio_stream_receiver(receiver),
-        ))
+        Some(Box::pin(tokio_stream_receiver(receiver)))
     }
 
     /// Idempotent, and there is nothing to signal.
@@ -692,11 +705,7 @@ fn canonical_json(value: &Value) -> String {
             let body: Vec<String> = ordered
                 .into_iter()
                 .map(|(key, value)| {
-                    format!(
-                        "{}: {}",
-                        Value::String(key.clone()),
-                        canonical_json(value)
-                    )
+                    format!("{}: {}", Value::String(key.clone()), canonical_json(value))
                 })
                 .collect();
             format!("{{{}}}", body.join(", "))
@@ -732,6 +741,13 @@ fn tokio_stream_receiver(
 /// because each spec writes its own prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
+    /// Setup turn used by the browser fixture to promote a prepared draft.
+    ///
+    /// It is a real turn (and therefore creates the durable session row), but it
+    /// deliberately emits no visible assistant/thinking content.  Otherwise every
+    /// test would start with the same canned reply and assertions about the turn
+    /// under test would see duplicate fixture output.
+    Setup,
     Bulk,
     Tools,
     Approval,
@@ -750,6 +766,7 @@ enum Scenario {
 impl Scenario {
     /// The token each scenario answers to, in match order.
     const TOKENS: &'static [(&'static str, Scenario)] = &[
+        ("fixture setup", Scenario::Setup),
         ("bulk", Scenario::Bulk),
         ("tools", Scenario::Tools),
         ("approval", Scenario::Approval),
@@ -785,8 +802,22 @@ impl Scenario {
 }
 
 /// One turn's worth of events, then a terminal `turn` event.
-async fn run_turn(emit: Emitter, surface: Arc<Mutex<SessionCapabilities>>, text: String, turn: u64) {
+async fn run_turn(
+    emit: Emitter,
+    surface: Arc<Mutex<SessionCapabilities>>,
+    text: String,
+    turn: u64,
+) {
     let scenario = Scenario::of(&text);
+
+    // The browser fixture must promote a draft before it can navigate to a durable
+    // session.  Keep that promotion turn real, but silent, so it does not become
+    // indistinguishable from the reply produced by the turn a test is exercising.
+    if scenario == Scenario::Setup {
+        settle(&emit).await;
+        drop(surface);
+        return;
+    }
 
     emit.event(
         Ev::new(EventKind::Status, Some(Phase::Started))
@@ -818,6 +849,7 @@ async fn run_turn(emit: Emitter, surface: Arc<Mutex<SessionCapabilities>>, text:
     .await;
 
     match scenario {
+        Scenario::Setup => unreachable!("setup turns return before scenario dispatch"),
         Scenario::Bulk => bulk(&emit).await,
         Scenario::Tools => tools(&emit).await,
         Scenario::Approval => approval(&emit, turn).await,
@@ -1032,10 +1064,10 @@ async fn tools(emit: &Emitter) {
             stream_id: "blk-edit",
             name: "Edit",
             input: json!({
-            "file_path": "src/lib.rs",
-            "old_string": "fn main() {\n    println!(\"before\");\n}",
-            "new_string": "fn main() {\n    tracing::info!(\"after\");\n}",
-        }),
+                "file_path": "src/lib.rs",
+                "old_string": "fn main() {\n    println!(\"before\");\n}",
+                "new_string": "fn main() {\n    tracing::info!(\"after\");\n}",
+            }),
             result: "Applied 1 edit.",
             ..Default::default()
         },
@@ -1365,7 +1397,12 @@ async fn unprompted(emit: &Emitter) {
             .done(),
     )
     .await;
-    open_delegate(emit, "up-task", Some("Background: worker"), Some("up-host")).await;
+    // Mark the work as backgrounded.  The server deliberately leaves this trajectory
+    // open when the dispatching turn settles, because the agent is expected to report
+    // its outcome on a later agent-initiated turn.  Without the flag the normal settle
+    // sweep is correct to close it as abandoned, and this scenario would exercise the
+    // wrong lifecycle rather than the late-report path it names.
+    open_backgrounded_delegate(emit, "up-task", Some("Background: worker"), Some("up-host")).await;
     emit.event(
         Ev::new(EventKind::ToolResult, Some(Phase::Completed))
             .stream_id("up-host")
@@ -1446,6 +1483,24 @@ async fn open_delegate(emit: &Emitter, stream_id: &str, name: Option<&str>, span
     emit.event(event.done()).await;
 }
 
+/// Open work the agent explicitly says may outlive the current turn.
+async fn open_backgrounded_delegate(
+    emit: &Emitter,
+    stream_id: &str,
+    name: Option<&str>,
+    span: Option<&str>,
+) {
+    let mut event = Ev::new(EventKind::Subagent, Some(Phase::Started)).stream_id(stream_id);
+    if let Some(name) = name {
+        event = event.name(name);
+    }
+    if let Some(span) = span {
+        event = event.span(span);
+    }
+    event = event.data(json!({"is_backgrounded": true}));
+    emit.event(event.done()).await;
+}
+
 /// Close a delegated trajectory.
 ///
 /// **`span` is set on the close as well as the open, and it is load-bearing rather than
@@ -1453,7 +1508,13 @@ async fn open_delegate(emit: &Emitter, stream_id: &str, name: Option<&str>, span
 /// event, and it carries `name` forward from an earlier phase but **not** `span`. So a
 /// nested delegate that declares its parent only on `started` is correctly nested while the
 /// turn is live and **re-roots itself the moment the turn settles**.
-async fn close_delegate(emit: &Emitter, stream_id: &str, span: Option<&str>, text: &str, failed: bool) {
+async fn close_delegate(
+    emit: &Emitter,
+    stream_id: &str,
+    span: Option<&str>,
+    text: &str,
+    failed: bool,
+) {
     let mut event = Ev::new(EventKind::Subagent, Some(Phase::Completed)).stream_id(stream_id);
     if let Some(span) = span {
         event = event.span(span);
@@ -1498,7 +1559,13 @@ async fn promote(emit: &Emitter) {
     // Its own close is its `tool_result`, **not** its call's `completed` phase — a call
     // completes when its arguments finish streaming, which says nothing about the delegated
     // work.
-    host_call(emit, "pr-host-a", "Workflow", json!({"script": "parallel([agentOne, agentTwo])"})).await;
+    host_call(
+        emit,
+        "pr-host-a",
+        "Workflow",
+        json!({"script": "parallel([agentOne, agentTwo])"}),
+    )
+    .await;
     open_delegate(emit, "pr-task-1", Some("Demo: agent-1"), Some("pr-host-a")).await;
     open_delegate(emit, "pr-task-2", Some("Demo: agent-2"), Some("pr-host-a")).await;
 
@@ -1557,8 +1624,20 @@ async fn promote(emit: &Emitter) {
     // a promoted host does not spin forever either — the path that reading the call's
     // `phase` used to miss entirely, because a `tool_call`'s `completed` phase reports every
     // delegation as finished the instant its input parsed.
-    host_call(emit, "pr-host-c", "Workflow", json!({"script": "phase('Stage A')"})).await;
-    open_delegate(emit, "pr-task-3", Some("Stage A: A:item-1"), Some("pr-host-c")).await;
+    host_call(
+        emit,
+        "pr-host-c",
+        "Workflow",
+        json!({"script": "phase('Stage A')"}),
+    )
+    .await;
+    open_delegate(
+        emit,
+        "pr-task-3",
+        Some("Stage A: A:item-1"),
+        Some("pr-host-c"),
+    )
+    .await;
 
     // Host 4: the shape a real backgrounded workflow has, and the one that produced two
     // wrong readings at once.
@@ -1570,9 +1649,27 @@ async fn promote(emit: &Emitter) {
     // workflow red for finishing exactly as designed. And the delegate must not claim "no
     // interior", because nobody looked — which is a different fact from a host that finished
     // and forwarded nothing.
-    host_call(emit, "pr-host-d", "Workflow", json!({"script": "parallel([sleep20, sleep15])"})).await;
-    open_delegate(emit, "pr-task-4", Some("Barrier: worker-1"), Some("pr-host-d")).await;
-    host_result(emit, "pr-host-d", "Workflow", "dispatched; running in background").await;
+    host_call(
+        emit,
+        "pr-host-d",
+        "Workflow",
+        json!({"script": "parallel([sleep20, sleep15])"}),
+    )
+    .await;
+    open_delegate(
+        emit,
+        "pr-task-4",
+        Some("Barrier: worker-1"),
+        Some("pr-host-d"),
+    )
+    .await;
+    host_result(
+        emit,
+        "pr-host-d",
+        "Workflow",
+        "dispatched; running in background",
+    )
+    .await;
 
     // A backgrounded **Bash** job, which is not a delegation at all.
     //
@@ -1955,7 +2052,10 @@ mod tests {
             short.options.len() < CLIENT_SEARCH_THRESHOLD,
             "the two-choice option is what keeps the menu contract covered"
         );
-        let long = config.iter().find(|option| option.id == "provider").unwrap();
+        let long = config
+            .iter()
+            .find(|option| option.id == "provider")
+            .unwrap();
         assert_eq!(long.options.len(), CATALOGUE.len());
     }
 
@@ -1972,13 +2072,17 @@ mod tests {
             .collect();
         assert_eq!(shared.len(), 2, "the duplicate-name pair is the point");
 
-        let values: std::collections::HashSet<_> = shared.iter().map(|(value, _, _)| value).collect();
+        let values: std::collections::HashSet<_> =
+            shared.iter().map(|(value, _, _)| value).collect();
         assert_eq!(values.len(), 2, "both rows would be checked at once");
         // Provider-qualified, and delimited with a space rather than a `/` — 350 of pi's
         // 372 ids already contain a slash, so splitting on one mis-parses the catalogue.
         for (value, _, _) in shared {
             assert!(value.contains(' '), "{value} must be provider-qualified");
-            assert!(!value.contains('/'), "{value} must not use a slash delimiter");
+            assert!(
+                !value.contains('/'),
+                "{value} must not use a slash delimiter"
+            );
         }
     }
 
@@ -2102,7 +2206,10 @@ mod tests {
         assert_eq!(facets.permission_mode.as_deref(), Some("default"));
         // The other four facets must be **unmentioned**, because an unmentioned facet
         // cannot be cleared and a mentioned-but-empty one erases.
-        assert!(facets.commands.is_none(), "naming commands would erase them");
+        assert!(
+            facets.commands.is_none(),
+            "naming commands would erase them"
+        );
         assert!(facets.subagents.is_none());
         assert!(facets.config.is_none());
         assert!(facets.context_window.is_none());
@@ -2160,12 +2267,18 @@ mod tests {
 
         let (call, result) = (bash[0], bash[1]);
         assert_eq!(call.kind, EventKind::ToolCall);
-        assert!(!call.is_error, "the call itself did not fail; the command did");
+        assert!(
+            !call.is_error,
+            "the call itself did not fail; the command did"
+        );
         assert_eq!(result.kind, EventKind::ToolResult);
         assert!(result.is_error);
         assert_eq!(result.data.as_ref().unwrap()["exitCode"], 101);
         // The call carries the parsed input, which is what an expanded row renders.
-        assert_eq!(call.data.as_ref().unwrap()["input"]["command"], "cargo test --lib");
+        assert_eq!(
+            call.data.as_ref().unwrap()["input"]["command"],
+            "cargo test --lib"
+        );
     }
 
     /// An approval **blocks**: it raises a request and emits no terminal turn event, so the
@@ -2291,7 +2404,11 @@ mod tests {
         assert_eq!(request.kind, RequestKind::Choice);
 
         let form = request.form.as_ref().expect("a question declares its form");
-        assert_eq!(form.fields.len(), 2, "one field cannot observe independence");
+        assert_eq!(
+            form.fields.len(),
+            2,
+            "one field cannot observe independence"
+        );
 
         let first = &form.fields[0];
         match &first.kind {
@@ -2315,7 +2432,10 @@ mod tests {
         }
 
         let second = &form.fields[1];
-        assert!(second.required, "a required multi-select is what refuses an empty submit");
+        assert!(
+            second.required,
+            "a required multi-select is what refuses an empty submit"
+        );
         match &second.kind {
             FieldKind::Select { mode, choices, .. } => {
                 assert_eq!(*mode, SelectMode::Many);
@@ -2487,7 +2607,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{stream_id} never closed"))
         };
         assert!(!closed("sub-worker").is_error);
-        assert!(!closed("sub-verify").is_error, "the ancestor reports its own outcome");
+        assert!(
+            !closed("sub-verify").is_error,
+            "the ancestor reports its own outcome"
+        );
         assert_eq!(closed("sub-explore").text, "Found 3 call sites.");
     }
 
@@ -2540,9 +2663,15 @@ mod tests {
             .map(|event| event.name.as_deref().unwrap())
             .collect();
         assert_eq!(names, vec!["Demo: agent-1", "Demo: agent-2"]);
-        let ids: std::collections::HashSet<_> =
-            under_host.iter().map(|event| event.stream_id.as_deref()).collect();
-        assert_eq!(ids.len(), 2, "a trajectory id must be the delegate's, not the host's");
+        let ids: std::collections::HashSet<_> = under_host
+            .iter()
+            .map(|event| event.stream_id.as_deref())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "a trajectory id must be the delegate's, not the host's"
+        );
     }
 
     /// **Nothing declares a promoted host.** It is discovered to be a container only because
@@ -2555,10 +2684,12 @@ mod tests {
             let declared = of_kind(&messages, EventKind::Subagent)
                 .into_iter()
                 .any(|event| {
-                    event.stream_id.as_deref() == Some(host)
-                        && event.phase == Some(Phase::Started)
+                    event.stream_id.as_deref() == Some(host) && event.phase == Some(Phase::Started)
                 });
-            assert!(!declared, "{host} must be promoted by reference, not declared");
+            assert!(
+                !declared,
+                "{host} must be promoted by reference, not declared"
+            );
         }
 
         // Host A's own close is its `tool_result`, not its call's `completed` phase: a call
@@ -2583,7 +2714,10 @@ mod tests {
             .collect();
         assert_eq!(deltas.len(), 3);
         for delta in &deltas {
-            assert_eq!(delta.data.as_ref().unwrap()["progress"], "Working on the demo");
+            assert_eq!(
+                delta.data.as_ref().unwrap()["progress"],
+                "Working on the demo"
+            );
             assert!(
                 delta.text.is_empty(),
                 "progress travels as data; as text it would be appended and repeated"
@@ -2627,11 +2761,17 @@ mod tests {
 
         for name in FANOUT_DELEGATES {
             assert!(
-                opened.iter().any(|event| event.name.as_deref() == Some(name)),
+                opened
+                    .iter()
+                    .any(|event| event.name.as_deref() == Some(name)),
                 "{name} must be one of the six"
             );
         }
-        assert_eq!(FANOUT_DELEGATES.len(), 6, "six is the smallest scannable width");
+        assert_eq!(
+            FANOUT_DELEGATES.len(),
+            6,
+            "six is the smallest scannable width"
+        );
     }
 
     /// **A nameless delegate**, whose name is absent at every phase.
@@ -2702,7 +2842,13 @@ mod tests {
         };
 
         let survey = closed_at("fo-survey");
-        for sibling in ["fo-format", "fo-lint", "fo-typecheck", "fo-audit", "fo-compile"] {
+        for sibling in [
+            "fo-format",
+            "fo-lint",
+            "fo-typecheck",
+            "fo-audit",
+            "fo-compile",
+        ] {
             assert!(
                 closed_at(sibling) < survey,
                 "{sibling} must close before the outlier, or the slowest row is a tie"
@@ -2727,7 +2873,10 @@ mod tests {
                     && event.phase == Some(Phase::Completed)
             })
             .unwrap();
-        assert!(!survey_close.is_error, "slowest and failed must be different rows");
+        assert!(
+            !survey_close.is_error,
+            "slowest and failed must be different rows"
+        );
     }
 
     /// **Five of six delegates forward an event, and one deliberately does not.**
@@ -2742,16 +2891,19 @@ mod tests {
     async fn every_fanout_delegate_forwards_work_except_the_one_that_deliberately_does_not() {
         let messages = run("fanout across agents please").await;
         let forwarded = |span: &str| {
-            events(&messages)
-                .iter()
-                .any(|event| event.span.as_deref() == Some(span) && event.kind != EventKind::Subagent)
+            events(&messages).iter().any(|event| {
+                event.span.as_deref() == Some(span) && event.kind != EventKind::Subagent
+            })
         };
         for name in FANOUT_DELEGATES {
             let id = format!("fo-{}", name.to_lowercase());
             if *name == "Audit" {
                 assert!(!forwarded(&id), "Audit is the deliberate no-interior case");
             } else {
-                assert!(forwarded(&id), "{name} must forward work, or it cannot be timed");
+                assert!(
+                    forwarded(&id),
+                    "{name} must forward work, or it cannot be timed"
+                );
             }
         }
     }
@@ -2810,7 +2962,9 @@ mod tests {
         let all = events(&collected);
         let first_settle = all
             .iter()
-            .position(|event| event.kind == EventKind::Turn && event.phase == Some(Phase::Completed))
+            .position(|event| {
+                event.kind == EventKind::Turn && event.phase == Some(Phase::Completed)
+            })
             .unwrap();
         let late_close = all
             .iter()
@@ -2857,7 +3011,10 @@ mod tests {
             .await
             .unwrap();
         assert!(session.events().is_some());
-        assert!(session.events().is_none(), "a second call must not resubscribe");
+        assert!(
+            session.events().is_none(),
+            "a second call must not resubscribe"
+        );
     }
 
     /// The server's dictated id is honoured, so identity is known before the first event.
@@ -2875,7 +3032,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(session.native_id().as_str(), "chosen-by-the-server");
+        assert_eq!(
+            session.native_id().as_ref().unwrap().as_str(),
+            "chosen-by-the-server"
+        );
         assert!(adapter.probe().await.unwrap().dictates_native_id);
     }
 
@@ -2929,7 +3089,10 @@ mod tests {
             Scenario::Question,
             Scenario::Elicit,
         ] {
-            assert!(blocking.blocks_on_a_request(), "{blocking:?} raises a request");
+            assert!(
+                blocking.blocks_on_a_request(),
+                "{blocking:?} raises a request"
+            );
         }
         for settling in [
             Scenario::Bulk,
@@ -2941,7 +3104,10 @@ mod tests {
             Scenario::Fanout,
             Scenario::Reply,
         ] {
-            assert!(!settling.blocks_on_a_request(), "{settling:?} settles its own turn");
+            assert!(
+                !settling.blocks_on_a_request(),
+                "{settling:?} settles its own turn"
+            );
         }
     }
 }

@@ -54,12 +54,12 @@ pub struct AgentInfo {
     /// *Measured 2026-08-27:* `claude` takes `--session-id`, `pi` takes `--session-id`
     /// and creates the session if it is missing, `codex` assigns its own and reports it.
     ///
-    /// **Dictating is the preferred path**, because then the server knows a session's
-    /// identity before the first event and nothing has to correlate afterwards. An
-    /// agent that cannot dictate reports its id on `run`, and an `open` that reports
-    /// **no id at all is a failure**, not a degraded success: without one the session
-    /// can never be resumed, so every link death — the idle reaper, a restart, an
-    /// explicit detach — would make it permanently unlinkable.
+    /// **Dictating is the preferred path**, because then the server can establish the
+    /// durable identity without correlating a later event. A prepared link may still
+    /// have no id while it is idle: some vendors create the native history record only
+    /// when the first turn is accepted. In that case the adapter returns the id from
+    /// [`Session::send_initial`]; an id is required for promotion, but not for opening
+    /// a disposable prepared link.
     pub dictates_native_id: bool,
     /// The best fidelity this agent's *native store* can yield.
     ///
@@ -335,13 +335,14 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<SessionMessage>> + Send>
 /// [`Self::events`] rather than as an exit code.
 #[async_trait]
 pub trait Session: Send + Sync {
-    /// The id the vendor actually used.
+    /// The id the vendor actually used, when it has assigned one.
     ///
-    /// Known before the first event when the agent accepted a dictated id, and reported
-    /// on open otherwise. Infallible because a session that reached this trait has one:
-    /// an `open` that reported no id is a failure of [`Adapter::run`], not a session
-    /// with an absent id.
-    fn native_id(&self) -> &NativeId;
+    /// A prepared link may be fully usable before the vendor creates a native history
+    /// record.  In particular Claude assigns its id only after the first user turn;
+    /// Pi and Codex may expose an in-memory id that is not yet listed by their native
+    /// history store.  The server must therefore delay durable promotion until this
+    /// becomes `Some` rather than inventing an id.
+    fn native_id(&self) -> Option<NativeId>;
 
     /// This session's current capability surface.
     ///
@@ -363,6 +364,16 @@ pub trait Session: Send + Sync {
     /// outlives the call that started it, which is the same reason `POST /turns` answers
     /// `202`. Completion arrives on [`Self::events`].
     async fn send(&self, turn: TurnInput) -> Result<()>;
+
+    /// Start the first turn of a prepared session and return the native identity.
+    ///
+    /// A prepared link is useful before it has a durable identity, because capabilities
+    /// and configuration are live properties.  Some vendors only assign their native id
+    /// when the first user message is accepted (Claude is one measured example), so the
+    /// server cannot require [`Self::native_id`] before sending that message.  The adapter
+    /// owns the wait for its id and buffers any events emitted while the server promotes the
+    /// link; the ordinary [`Self::events`] stream remains lossless for the caller.
+    async fn send_initial(&self, turn: TurnInput) -> Result<NativeId>;
 
     /// End the current turn, keep the session.
     ///
@@ -409,6 +420,28 @@ pub trait Session: Send + Sync {
     /// interchangeable**: [`crate::RefusalCode::UnsupportedField`] for no such option,
     /// [`crate::RefusalCode::InvalidValue`] for this value right now.
     async fn set_config(&self, id: &str, value: serde_json::Value) -> Result<Vec<ConfigOption>>;
+
+    /// Map a runtime config change to the launch flag that should be remembered when
+    /// this session is re-attached.
+    ///
+    /// The server stores only spawn-time flags on a durable session.  A live config
+    /// surface is intentionally broader: some controls are process-local (for example
+    /// Claude's output style), while others use a different launch spelling (Claude's
+    /// `permissionMode` versus its `mode` flag).  Keeping this decision in the adapter
+    /// means the server never grows a vendor-name table and never persists a setting
+    /// that a resumed process cannot consume.  Returning `None` means the setting is
+    /// runtime-only, or the vendor did not provide a safe launch equivalent.
+    ///
+    /// The method is called only after [`Self::set_config`] succeeds.  The value is the
+    /// user's request, not a claim about the vendor's current state; the capability
+    /// surface remains the sole source of confirmed `current_value` fields.
+    fn launch_flag_for_config(
+        &self,
+        _id: &str,
+        _value: &serde_json::Value,
+    ) -> Option<(String, String)> {
+        None
+    }
 
     /// Answer a request this session raised.
     ///

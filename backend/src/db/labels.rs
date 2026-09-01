@@ -7,7 +7,7 @@
 //! call this session", which is a question about a transcript rather than about any
 //! particular store — so they outlive the store that first needed them
 //! (`docs/database-schema.md` § Search lives beside `history.db`). Their callers are
-//! all in the journal: [`crate::db::JournalStore::hydrate_session_title`],
+//! all in the journal: `crate::db::JournalStore::hydrate_session_title`,
 //! [`crate::db::JournalStore::set_session_title_if_empty`], and the adopt path in
 //! `api::sessions`.
 //!

@@ -114,42 +114,69 @@ pub struct MockRunner {
 
 impl MockRunner {
     pub fn success(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::Success }
+        Self {
+            name: name.to_string(),
+            behavior: Behavior::Success,
+        }
     }
 
     pub fn failure(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::Failure }
+        Self {
+            name: name.to_string(),
+            behavior: Behavior::Failure,
+        }
     }
 
     pub fn no_envelope(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::NoOutput }
+        Self {
+            name: name.to_string(),
+            behavior: Behavior::NoOutput,
+        }
     }
 
     pub fn slow(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::Slow }
+        Self {
+            name: name.to_string(),
+            behavior: Behavior::Slow,
+        }
     }
 
     /// An adapter that reports a delegate finishing after its turn ended.
     pub fn backgrounded(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::Backgrounded }
+        Self {
+            name: name.to_string(),
+            behavior: Behavior::Backgrounded,
+        }
     }
 
     /// An adapter that ends its turn with [`OPEN_TRAJECTORIES`] delegations still open.
     pub fn abandons_many(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::AbandonsMany }
+        Self {
+            name: name.to_string(),
+            behavior: Behavior::AbandonsMany,
+        }
     }
 
     pub fn backgrounded_flagged(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::BackgroundedFlagged }
+        Self {
+            name: name.to_string(),
+            behavior: Behavior::BackgroundedFlagged,
+        }
     }
 
     pub fn broken_describe(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::BrokenProbe }
+        Self {
+            name: name.to_string(),
+            behavior: Behavior::BrokenProbe,
+        }
     }
 
     /// An agent with no native store to read.
     pub fn no_store(name: &str) -> Self {
-        Self { name: name.to_string(), behavior: Behavior::NoStore }
+        Self {
+            name: name.to_string(),
+            behavior: Behavior::NoStore,
+        }
     }
 }
 
@@ -561,8 +588,8 @@ async fn emit(tx: &mpsc::Sender<Result<SessionMessage>>, event: Ev) {
 
 #[async_trait]
 impl Session for MockSession {
-    fn native_id(&self) -> &NativeId {
-        &self.native_id
+    fn native_id(&self) -> Option<NativeId> {
+        Some(self.native_id.clone())
     }
 
     async fn capabilities(&self) -> Result<SessionCapabilities> {
@@ -579,6 +606,11 @@ impl Session for MockSession {
         let behavior = self.behavior;
         tokio::spawn(async move { run_turn(tx, behavior).await });
         Ok(())
+    }
+
+    async fn send_initial(&self, turn: TurnInput) -> Result<NativeId> {
+        self.send(turn).await?;
+        Ok(self.native_id.clone())
     }
 
     async fn interrupt(&self) -> Result<()> {
@@ -632,6 +664,16 @@ impl Session for MockSession {
         }
         .apply_to(&mut surface);
         Ok(refreshed)
+    }
+
+    fn launch_flag_for_config(&self, id: &str, value: &Value) -> Option<(String, String)> {
+        (id == "model")
+            .then(|| {
+                value
+                    .as_str()
+                    .map(|value| (id.to_string(), value.to_string()))
+            })
+            .flatten()
     }
 
     async fn resolve(&self, _resolution: Resolution) -> Result<()> {
@@ -866,8 +908,7 @@ async fn backgrounded(tx: &mpsc::Sender<Result<SessionMessage>>, flagged: bool) 
     .await;
     emit(
         tx,
-        Ev::new(EventKind::Turn, Some(Phase::Completed))
-            .text("the background worker finished"),
+        Ev::new(EventKind::Turn, Some(Phase::Completed)).text("the background worker finished"),
     )
     .await;
 }

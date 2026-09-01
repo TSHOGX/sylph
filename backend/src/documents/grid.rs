@@ -225,6 +225,9 @@ mod tests {
     #[test]
     fn an_empty_sheet_has_no_header() {
         assert!(!Grid::detect_header(&[], true));
-        assert!(!Grid::detect_header(&[vec![Some(Cell::text("only"))]], true));
+        assert!(!Grid::detect_header(
+            &[vec![Some(Cell::text("only"))]],
+            true
+        ));
     }
 }

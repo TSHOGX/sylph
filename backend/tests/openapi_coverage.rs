@@ -58,7 +58,9 @@ fn implemented() -> BTreeSet<String> {
     // `.route("<path>", <handler chain>)` — the chain runs to the next `.route(` or to
     // the end of the builder, and carries one or more `get(...)`/`post(...)` calls.
     for chunk in router.split(".route(").skip(1) {
-        let Some(open) = chunk.find('"') else { continue };
+        let Some(open) = chunk.find('"') else {
+            continue;
+        };
         let Some(len) = chunk[open + 1..].find('"') else {
             continue;
         };
@@ -169,7 +171,10 @@ fn no_session_id_parameter_claims_to_be_a_uuid() {
         }
     }
 
-    assert!(checked > 0, "no sessionId parameters found, so this test verified nothing");
+    assert!(
+        checked > 0,
+        "no sessionId parameters found, so this test verified nothing"
+    );
     assert!(
         offenders.is_empty(),
         "a session id is the encoded identity triple, not a UUID: {offenders:#?}"
@@ -212,7 +217,10 @@ fn every_ref_resolves_and_every_schema_is_referenced() {
 
     let mut refs = BTreeMap::new();
     collect(&schema, &mut refs);
-    assert!(!refs.is_empty(), "no $refs found, so this test verified nothing");
+    assert!(
+        !refs.is_empty(),
+        "no $refs found, so this test verified nothing"
+    );
 
     let declared: BTreeSet<String> = schema["components"]["schemas"]
         .as_object()
@@ -228,7 +236,10 @@ fn every_ref_resolves_and_every_schema_is_referenced() {
             (!declared.contains(name)).then_some(target.as_str())
         })
         .collect();
-    assert!(dangling.is_empty(), "these $refs resolve to nothing: {dangling:#?}");
+    assert!(
+        dangling.is_empty(),
+        "these $refs resolve to nothing: {dangling:#?}"
+    );
 
     let referenced: BTreeSet<String> = refs
         .keys()

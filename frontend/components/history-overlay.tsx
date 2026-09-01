@@ -125,7 +125,7 @@ export function HistoryOverlay() {
             <FidelityMarker value={session.fidelity} />
             {environments.showEnvironment && (
               <EnvironmentChip
-                name={session.environmentName}
+                name={environments.nameOf(session.environment) ?? session.environment}
                 reachableVia={relayName(session.environment, environments)}
               />
             )}

@@ -19,7 +19,11 @@
 //! costing time).
 
 use axum::{extract::State, Json};
+use futures::future::join_all;
 use serde::Serialize;
+use std::time::Duration;
+use sylph_protocol::{AgentInfo, Capability, FlagSchema};
+use tokio::time::timeout;
 
 use crate::{error::Result, AppState};
 
@@ -55,19 +59,27 @@ pub struct Environment {
 #[serde(rename_all = "camelCase")]
 pub struct AgentAvailability {
     pub name: String,
-    /// The CLI's own version, when it reported one.
+    /// The CLI's own version, when the adapter probe reported one.
     ///
     /// `Option` because absent is a real state and **never synthesized**: a
     /// fabricated version would make an unsupported install look supported, and a
     /// journal makes every guess permanent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Spawn-time options the adapter declares before a session is opened.
+    ///
+    /// An empty map means the adapter has no static choices here; session-scoped
+    /// catalogues such as Pi's model list arrive from the draft capability surface.
+    pub flags: FlagSchema,
+    /// Controls available on a live session of this agent.
+    pub supports: Vec<Capability>,
     /// Whether this agent's CLI is on that machine's `PATH`.
     ///
     /// One question, one answer, one fix — which is the whole argument for replacing
-    /// discovery. When false, `GET /sessions/{id}/capabilities` reports
-    /// `no_agent`, which a client caches like a success because no retry installs a
-    /// CLI.
+    /// discovery. When false, `GET /sessions/{id}/capabilities` reports `no_agent`,
+    /// which a client caches like a success because no retry installs a CLI. The local
+    /// implementation currently lists only PATH-present agents, so this is true for
+    /// every emitted row; paired envagents may also report unavailable names.
     pub available: bool,
 }
 
@@ -92,16 +104,39 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<EnvironmentsResp
     let descriptor = state.environment.descriptor();
     let health = state.environment.probe().await;
 
-    let agents: Vec<AgentAvailability> = state.adapters.available()
-        .into_iter()
-        .map(|name| AgentAvailability {
-            name,
-            // Filled from `Adapter::probe` once `crates/adapters` lands. Absent
-            // rather than guessed until then.
-            version: None,
-            available: true,
-        })
-        .collect();
+    // Probe each installed adapter once, concurrently.  The environment list is the
+    // only machine-level catalogue, so it must carry the same spawn-time metadata the
+    // draft UI uses for defaults.  A probe failure does not hide a PATH-present agent:
+    // opening a session will report the classified handshake failure, while this list
+    // still tells the user which CLI was found.  The timeout prevents a wedged vendor
+    // binary from hanging the environments picker indefinitely.
+    let probes = state.adapters.available().into_iter().map(|name| {
+        let adapters = state.adapters.clone();
+        async move {
+            let fallback = || AgentAvailability {
+                name: name.clone(),
+                version: None,
+                flags: FlagSchema::new(),
+                supports: Vec::new(),
+                available: true,
+            };
+            let Some(adapter) = adapters.for_agent(&name) else {
+                return fallback();
+            };
+            match timeout(Duration::from_secs(10), adapter.probe()).await {
+                Ok(Ok(info)) => AgentAvailability::from(info),
+                Ok(Err(error)) => {
+                    tracing::debug!(agent = %name, "Agent probe failed while listing environments: {error:#}");
+                    fallback()
+                }
+                Err(_) => {
+                    tracing::debug!(agent = %name, "Agent probe timed out while listing environments");
+                    fallback()
+                }
+            }
+        }
+    });
+    let agents = join_all(probes).await;
 
     Ok(Json(EnvironmentsResponse {
         environments: vec![Environment {
@@ -114,4 +149,16 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<EnvironmentsResp
             agents,
         }],
     }))
+}
+
+impl From<AgentInfo> for AgentAvailability {
+    fn from(info: AgentInfo) -> Self {
+        Self {
+            name: info.name,
+            version: info.version,
+            flags: info.flags,
+            supports: info.supports,
+            available: true,
+        }
+    }
 }

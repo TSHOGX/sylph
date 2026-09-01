@@ -72,9 +72,8 @@ pub fn for_agent(name: &str) -> Option<Box<dyn Adapter>> {
     // holds the same rule, and `a_fixture_build_offers_only_the_fixture` pins both.
     #[cfg(feature = "e2e")]
     {
-        return (name == e2e::AGENT_NAME).then(|| {
-            Box::new(e2e::E2eAdapter::new()) as Box<dyn Adapter>
-        });
+        return (name == e2e::AGENT_NAME)
+            .then(|| Box::new(e2e::E2eAdapter::new()) as Box<dyn Adapter>);
     }
 
     #[allow(unreachable_code)]
@@ -155,9 +154,8 @@ pub fn on_path(binary: &str) -> bool {
 #[cfg(unix)]
 fn is_executable(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|meta| {
-        meta.is_file() && meta.permissions().mode() & 0o111 != 0
-    })
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
@@ -203,7 +201,10 @@ mod tests {
         assert!(is_known(e2e::AGENT_NAME));
         assert!(for_agent(e2e::AGENT_NAME).is_some());
         for real in ["claude", "codex", "pi"] {
-            assert!(!is_known(real), "{real} must not be known to a fixture build");
+            assert!(
+                !is_known(real),
+                "{real} must not be known to a fixture build"
+            );
             assert!(
                 for_agent(real).is_none(),
                 "{real} must not resolve, however the PATH looks"
@@ -222,7 +223,10 @@ mod tests {
         assert!(for_agent("gemini").is_none());
         assert!(for_agent("opencode").is_none());
         assert!(for_agent("").is_none());
-        assert!(for_agent("claude ").is_none(), "no trimming: a name is exact");
+        assert!(
+            for_agent("claude ").is_none(),
+            "no trimming: a name is exact"
+        );
     }
 
     /// Listing an agent and being able to open it are the same question.

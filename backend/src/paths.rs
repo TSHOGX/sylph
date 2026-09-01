@@ -68,8 +68,8 @@ pub fn join_relative(parent: &str, name: &str) -> String {
 /// canonical target so callers operate on the resolved path rather than the
 /// string they were handed.
 pub fn contain(root: &Path, candidate: &Path) -> Result<PathBuf> {
-    let target = std::fs::canonicalize(candidate)
-        .map_err(|e| describe_io_error(&e, "find that path"))?;
+    let target =
+        std::fs::canonicalize(candidate).map_err(|e| describe_io_error(&e, "find that path"))?;
     if !target.starts_with(root) {
         return Err(Error::Forbidden(
             "That path is outside the permitted directory.".to_string(),

@@ -225,8 +225,8 @@ mod tests {
         assert_eq!(ok["available"], true);
         assert!(ok.get("reason").is_none());
 
-        let no = serde_json::to_value(Facet::unavailable(UnavailableReason::NotOursToDrive))
-            .unwrap();
+        let no =
+            serde_json::to_value(Facet::unavailable(UnavailableReason::NotOursToDrive)).unwrap();
         assert_eq!(no["available"], false);
         assert_eq!(no["reason"], "not_ours_to_drive");
     }

@@ -142,12 +142,14 @@ present equal-length bars as measurements.
 
 *Decision.* A session's id is the triple, and there is no Sylph-minted UUID.
 
-The native id is available for every agent, either by dictation or on the first
-frame: `claude` and `pi` accept a `--session-id` the adapter mints, and `codex`
-assigns its own and reports it. So a second Sylph id would be pure redundancy — and a
-standing invitation to compare ids from two spaces, a comparison that yields no error
-at any layer and is simply always false. **One id space is the point**, not a
-convenience: it makes the unanswerable comparison unwritable.
+The native id is the durable identity, but it is not necessarily available when a
+process is first opened. A prepared link may expose capabilities and accept
+configuration before the vendor creates a native history record; Claude assigns its
+id when the first turn starts, while Pi and Codex may expose an in-memory id before
+their stores contain a resumable transcript. So a second Sylph id would be pure
+redundancy — and a standing invitation to compare ids from two spaces, a comparison
+that yields no error at any layer and is simply always false. **One id space is the
+point**, not a convenience: it makes the unanswerable comparison unwritable.
 
 Rules the triple needs to hold:
 
@@ -158,12 +160,24 @@ Rules the triple needs to hold:
   vendor ids generally may, so splitting on one mis-parses the majority of a real
   catalogue. The wire form is `<env>:<agent>:<native>` with `env` restricted to
   base32, and a URL path segment carries it percent-encoded.
-- **A session exists once an agent has given it an id**, so `POST /sessions` starts
-  the agent rather than reserving a row. There is therefore no "draft session with no
-  work in it", and a failed spawn reports at the start screen rather than leaving a
-  dead row behind.
+- **A durable session exists only after a real turn and a native id**, so `POST
+  /sessions` starts a prepared link rather than reserving a row. The prepared handle
+  is process-local and disposable: it may be used to read capabilities, change
+  configuration, and browse the contained workdir, but it is never a session id and
+  never appears in history. A first user message (including a prompt command or an
+  attachment) promotes it atomically; abandoning it closes the link without leaving
+  a record. A failed spawn reports at the start screen rather than leaving a dead row
+  behind.
 - **The id is stable for the session's whole life**, which follows from nothing
   resetting a session (§ One class of session).
+
+The web composer uses that two-phase launch when the user has not sent a message yet:
+`POST /sessions` starts a process and returns an opaque, process-local draft
+handle. This handle is a live link, not a second session identity and never appears in
+the journal or history listings. Capabilities, configuration, and the contained
+working-directory file surface are available through draft-scoped routes while the
+link is alive. The first real user turn promotes that link to the identity triple
+above; abandoning the draft simply closes the link.
 
 Three alternatives, each rejected for a reason that would have surfaced late:
 
@@ -352,6 +366,27 @@ writes that settle one logical fact.
 - **A session returns to `idle` before its turn is marked terminal.** The other order
   leaves a finished turn on a `running` session, which is the state that makes the
   composer refuse the next message.
+
+### Session trace is the transport boundary for delegated work
+
+The per-turn SSE remains a compatibility projection for a single live turn. The
+session page should consume `GET /sessions/{id}/trace/events` instead: one monotonic
+session cursor, stable replay from both storage tiers, and a bounded in-memory tail for
+events that have not consolidated yet. This is the only stream that can remain attached
+when a delegated trajectory outlives the turn that opened it.
+
+The trace envelope carries both `trajectoryId` (represented by the existing
+`streamId`/`span` vocabulary) and `arrivalTurnId`. The first declaration establishes
+trajectory ownership; `arrivalTurnId` is only arrival provenance. Keeping those facts
+separate prevents a late child close from being routed to a synthetic `origin: agent`
+turn, and it lets the frontend project the event into the existing owner card without
+moving the event's historical sequence.
+
+This is a transitional projection rather than a second authority. A future schema can
+materialize the same index as `trajectories` and `invocations` tables, but it must keep
+the event envelope append-only and derive the UI tree from it. The current spike proves
+the boundary without duplicating vendor-specific storage or forcing a migration before
+the late-event semantics are exercised in production-like captures.
 
 ## Security model, and what multi-user requires
 

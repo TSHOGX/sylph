@@ -172,6 +172,22 @@ export function segment(id: string): string {
   return encodeURIComponent(id);
 }
 
+/**
+ * Address a workspace file for either half of the session lifecycle.
+ *
+ * A draft handle is not an encoded session identity, so it must travel through the
+ * draft file routes while the composer is still empty. Keeping this distinction in
+ * the API client means panes, viewers, and upload operations do not each grow their
+ * own `draft-` branch (and none of them can accidentally send the handle to a durable
+ * endpoint again).
+ */
+function filesPath(id: string, suffix = ""): string {
+  const root = id.startsWith("draft-")
+    ? `/sessions/draft/${segment(id)}/files`
+    : `/sessions/${segment(id)}/files`;
+  return `${root}${suffix}`;
+}
+
 export const api = {
   sessions: {
     list: (filters: SessionFilters = {}) =>
@@ -187,10 +203,40 @@ export const api = {
      * and therefore could not be resumed.
      */
     create: (req: CreateSessionRequest) =>
-      fetchAPI<{ session: Session }>("/sessions", {
+      fetchAPI<{
+        draftId: string;
+        environment: string;
+        agent: string;
+        workdir: string;
+        title: string | null;
+        injectIdentity: boolean;
+      }>("/sessions", {
         method: "POST",
         body: JSON.stringify(req),
       }),
+    preparedCapabilities: (draftId: string) =>
+      fetchAPI<LinkState>(`/sessions/draft/${segment(draftId)}/capabilities`),
+    preparedGet: (draftId: string) =>
+      fetchAPI<{
+        draftId: string;
+        environment: string;
+        agent: string;
+        workdir: string;
+        title: string | null;
+        injectIdentity: boolean;
+      }>(`/sessions/draft/${segment(draftId)}`),
+    preparedConfig: (draftId: string, id: string, value: unknown) =>
+      fetchAPI<LinkState>(`/sessions/draft/${segment(draftId)}/config`, {
+        method: "POST",
+        body: JSON.stringify({ id, value }),
+      }),
+    preparedTurn: (draftId: string, req: CreateTurnRequest) =>
+      fetchAPI<{ session: Session }>(`/sessions/draft/${segment(draftId)}/turns`, {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    discardPrepared: (draftId: string) =>
+      fetchAPI<void>(`/sessions/draft/${segment(draftId)}`, { method: "DELETE" }),
     /** Full durable history: every turn in the session with its events. */
     history: (id: string) =>
       fetchAPI<{ turns: TurnWithEvents[] }>(`/sessions/${segment(id)}/turns`),
@@ -323,9 +369,9 @@ export const api = {
   },
   files: {
     tree: (sessionId: string, path = "") =>
-      fetchAPI<FileTreeResponse>(`/sessions/${segment(sessionId)}/files${queryString({ path })}`),
+      fetchAPI<FileTreeResponse>(filesPath(sessionId, queryString({ path }))),
     content: (sessionId: string, path: string) =>
-      fetchAPI<FileContentResponse>(`/sessions/${segment(sessionId)}/files/content${queryString({ path })}`),
+      fetchAPI<FileContentResponse>(filesPath(sessionId, `/content${queryString({ path })}`)),
     /**
      * Upload one file into the session's working directory.
      *
@@ -333,19 +379,19 @@ export const api = {
      * already writes to — and refuses to overwrite unless asked.
      */
     upload: (sessionId: string, req: UploadFileRequest) =>
-      fetchAPI<UploadFileResponse>(`/sessions/${segment(sessionId)}/files`, {
+      fetchAPI<UploadFileResponse>(filesPath(sessionId), {
         method: "POST",
         body: JSON.stringify(req),
       }),
     /** A spreadsheet, CSV, Word document, or deck as structure. */
     document: (sessionId: string, path: string, window: DocumentWindow = {}) =>
       fetchAPI<FileDocumentResponse>(
-        `/sessions/${segment(sessionId)}/files/document${queryString({
+        filesPath(sessionId, "/document" + queryString({
           path,
           sheet: window.sheet,
           row: window.row,
           rows: window.rows,
-        })}`,
+        })),
       ),
     /**
      * URL for the file's bytes, for content the browser loads itself.
@@ -356,13 +402,13 @@ export const api = {
      * session cookie is sent.
      */
     rawUrl: (sessionId: string, path: string, options: { download?: boolean } = {}) =>
-      `${API_BASE}/sessions/${segment(sessionId)}/files/raw${queryString({
+      `${API_BASE}${filesPath(sessionId, "/raw" + queryString({
         path,
         download: options.download ? "true" : undefined,
-      })}`,
+      }))}`,
     /** Create one directory. Reports a collision rather than succeeding quietly. */
     mkdir: (sessionId: string, req: MkdirRequest) =>
-      fetchAPI<MkdirResponse>(`/sessions/${segment(sessionId)}/files/directory`, {
+      fetchAPI<MkdirResponse>(filesPath(sessionId, "/directory"), {
         method: "POST",
         body: JSON.stringify(req),
       }),
@@ -375,10 +421,13 @@ export const api = {
      */
     remove: (sessionId: string, path: string, options: { recursive?: boolean } = {}) =>
       fetchAPI<void>(
-        `/sessions/${segment(sessionId)}/files${queryString({
-          path,
-          recursive: options.recursive ? "true" : undefined,
-        })}`,
+        filesPath(
+          sessionId,
+          queryString({
+            path,
+            recursive: options.recursive ? "true" : undefined,
+          }),
+        ),
         { method: "DELETE" },
       ),
   },

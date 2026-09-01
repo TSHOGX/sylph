@@ -69,7 +69,7 @@ impl HostId {
     ///
     /// **There is deliberately no conversion the other way.** A `TrajectoryId` that
     /// could become a `HostId` would make [`BlockKey`] constructible from a resolved
-    /// trajectory, which is the silent block-loss described on [`Correlation::blocks`].
+    /// trajectory, which is the silent block-loss described on `Correlation::blocks`.
     /// Nothing needs the reverse direction, so nothing offers it.
     pub fn as_trajectory(&self) -> TrajectoryId {
         TrajectoryId(self.0.clone())
@@ -445,12 +445,7 @@ impl Correlation {
     /// **The block map is keyed by the envelope's own tag, never by the resolved
     /// trajectory** — see [`BlockKey`], where the failure is silent loss of a whole
     /// content block.
-    pub fn stream_event(
-        &mut self,
-        nested: &Value,
-        host: Option<&HostId>,
-        at_ms: i64,
-    ) -> Emission {
+    pub fn stream_event(&mut self, nested: &Value, host: Option<&HostId>, at_ms: i64) -> Emission {
         let mut out = Emission::default();
         let parent = self.delegate_of(host);
 
@@ -517,8 +512,8 @@ impl Correlation {
             return;
         };
 
-        let stream_id = text_field(&content, "id")
-            .unwrap_or_else(|| format!("{}:{}", self.message_id, index));
+        let stream_id =
+            text_field(&content, "id").unwrap_or_else(|| format!("{}:{}", self.message_id, index));
         let name = text_field(&content, "name");
         let text = text_field(&content, "text")
             .or_else(|| text_field(&content, "thinking"))
@@ -542,7 +537,8 @@ impl Correlation {
             // already carry (`docs/session-protocol.md` § Promotion), which needs no list
             // and covers tools nobody has written yet.
             let declared = TrajectoryId::new(stream_id.clone());
-            self.tool_names.insert(stream_id.clone(), Some(tool.clone()));
+            self.tool_names
+                .insert(stream_id.clone(), Some(tool.clone()));
             if tool == "Task" {
                 self.subagent_tools.insert(declared.clone());
                 self.subagent_parent
@@ -598,7 +594,10 @@ impl Correlation {
         out: &mut Emission,
     ) {
         let index = index_of(nested);
-        let Some(block) = self.blocks.get_mut(&BlockKey::for_envelope_tag(host, index)) else {
+        let Some(block) = self
+            .blocks
+            .get_mut(&BlockKey::for_envelope_tag(host, index))
+        else {
             return;
         };
         let delta = nested.get("delta").cloned().unwrap_or(Value::Null);
@@ -648,12 +647,12 @@ impl Correlation {
         // string rather than discarded: it is what the agent said, and it is the only
         // evidence a reader has about a delegation that died mid-input.
         let data = match block.kind {
-            EventKind::ToolCall | EventKind::Subagent => Some(match serde_json::from_str::<Value>(
-                &block.text,
-            ) {
-                Ok(parsed) => json!({ "input": parsed }),
-                Err(_) => json!({ "input": block.text }),
-            }),
+            EventKind::ToolCall | EventKind::Subagent => {
+                Some(match serde_json::from_str::<Value>(&block.text) {
+                    Ok(parsed) => json!({ "input": parsed }),
+                    Err(_) => json!({ "input": block.text }),
+                })
+            }
             _ => None,
         };
 
@@ -740,7 +739,7 @@ impl Correlation {
     /// exists to prevent. Attributing to the host is *true*; picking a delegate is
     /// corruption indistinguishable from correct output.
     ///
-    /// **The answer is latched.** [`Self::host_tasks`] grows while the turn runs, so this
+    /// **The answer is latched.** `Self::host_tasks` grows while the turn runs, so this
     /// question has a different answer before and after `task_started`, and the forwarded
     /// stream does not pause for it. Answering freshly each time splits one delegate's
     /// output across the container and the delegate at whatever instant the notification
@@ -756,7 +755,7 @@ impl Correlation {
     ///
     /// On claude 2.1.245 **no host both forwards interior events and multiplexes.**
     /// `--forward-subagent-text` forwards only for the built-in `Task`, whose
-    /// notifications reuse the host id and so never populate [`Self::host_tasks`]; `Agent`
+    /// notifications reuse the host id and so never populate `Self::host_tasks`; `Agent`
     /// and `Workflow` populate it and forward nothing. So the re-label cannot fire today.
     /// It is kept because the vendor adding forwarding for `Agent` would activate it
     /// silently, and that is the shape a whitelist-shaped bug takes here.
@@ -1127,8 +1126,8 @@ impl Correlation {
         // `description` is a live label, not a stable name: measured as "Read README.md
         // first heading" at `task_started` and "Reading README.md" during progress. The
         // later one is better informed, and the server keeps the latest a phase gave.
-        let name = text_field(payload, "description")
-            .or_else(|| text_field(payload, "subagent_type"));
+        let name =
+            text_field(payload, "description").or_else(|| text_field(payload, "subagent_type"));
 
         let mut data = Map::new();
         if let Some(object) = payload.as_object() {
@@ -1475,7 +1474,10 @@ mod tests {
     #[test]
     fn the_two_invented_task_subtypes_are_not_recognized() {
         for invented in ["task_completed", "task_failed"] {
-            assert!(!TASK_SUBTYPES.contains(&invented), "{invented} does not exist");
+            assert!(
+                !TASK_SUBTYPES.contains(&invented),
+                "{invented} does not exist"
+            );
             let mut link = Link::new();
             link.system(
                 invented,
@@ -1532,7 +1534,10 @@ mod tests {
             .into_iter()
             .filter(|e| e.phase == Some(Phase::Delta))
             .collect();
-        assert_eq!(data_of(deltas.last().unwrap())["is_backgrounded"], json!(true));
+        assert_eq!(
+            data_of(deltas.last().unwrap())["is_backgrounded"],
+            json!(true)
+        );
     }
 
     /// The close too, which is the row the sweep is deciding about.
@@ -1678,7 +1683,11 @@ mod tests {
             );
         }
         for event in link.trajectories() {
-            assert!(event.text.is_empty(), "text must stay empty: {:?}", event.text);
+            assert!(
+                event.text.is_empty(),
+                "text must stay empty: {:?}",
+                event.text
+            );
         }
         let deltas: Vec<&Event> = link
             .trajectories()
@@ -1686,7 +1695,10 @@ mod tests {
             .filter(|e| e.phase == Some(Phase::Delta))
             .collect();
         assert_eq!(deltas.len(), 3);
-        assert_eq!(data_of(deltas.last().unwrap())["progress"], json!("Working on it"));
+        assert_eq!(
+            data_of(deltas.last().unwrap())["progress"],
+            json!("Working on it")
+        );
     }
 
     // ---- ClosingIsIdempotent ---------------------------------------------------
@@ -1813,7 +1825,10 @@ mod tests {
         // reaching into the correlation state, so the declaration path is under test too.
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_task", "name": "Task" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_task", "name": "Task" }),
+            ),
         );
         link.system(
             "task_started",
@@ -1937,7 +1952,10 @@ mod tests {
         let mut link = Link::new();
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_task", "name": "Task" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_task", "name": "Task" }),
+            ),
         );
         link.system(
             "task_started",
@@ -1986,13 +2004,20 @@ mod tests {
                 "description": "worker", "task_type": "local_agent",
             }),
         );
-        link.stream(Some("toolu_wf"), block_delta(0, json!({ "text": "half a sentence" })));
+        link.stream(
+            Some("toolu_wf"),
+            block_delta(0, json!({ "text": "half a sentence" })),
+        );
         link.stream(Some("toolu_wf"), block_stop(0));
 
         let assistant = link.of_kind(EventKind::Assistant);
         assert_eq!(
             assistant.iter().map(|e| e.phase).collect::<Vec<_>>(),
-            [Some(Phase::Started), Some(Phase::Delta), Some(Phase::Completed)]
+            [
+                Some(Phase::Started),
+                Some(Phase::Delta),
+                Some(Phase::Completed)
+            ]
         );
         assert_eq!(assistant.last().unwrap().text, "half a sentence");
         // And it stays in the trajectory its `started` claimed, rather than moving to the
@@ -2009,7 +2034,10 @@ mod tests {
     fn concurrent_delegates_keep_their_own_index_zero() {
         let mut link = Link::new();
         for host in ["toolu_a", "toolu_b"] {
-            link.stream(Some(host), block_start(0, json!({ "type": "text", "text": "" })));
+            link.stream(
+                Some(host),
+                block_start(0, json!({ "type": "text", "text": "" })),
+            );
         }
         for (host, text) in [("toolu_a", "from A"), ("toolu_b", "from B")] {
             link.stream(Some(host), block_delta(0, json!({ "text": text })));
@@ -2038,7 +2066,10 @@ mod tests {
             link.stream(host, block_start(0, json!({ "type": "text", "text": "" })));
         }
         link.stream(None, block_delta(0, json!({ "text": "root" })));
-        link.stream(Some("toolu_a"), block_delta(0, json!({ "text": "delegate" })));
+        link.stream(
+            Some("toolu_a"),
+            block_delta(0, json!({ "text": "delegate" })),
+        );
         for host in [None, Some("toolu_a")] {
             link.stream(host, block_stop(0));
         }
@@ -2071,24 +2102,40 @@ mod tests {
         // The outer Task, at the root.
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_outer", "name": "Task" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_outer", "name": "Task" }),
+            ),
         );
         // The inner one, declared inside it — the envelope tags it with the outer id.
         link.stream(
             Some("toolu_outer"),
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_inner", "name": "Task" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_inner", "name": "Task" }),
+            ),
         );
         link.stream(
             Some("toolu_outer"),
-            block_delta(0, json!({ "partial_json": "{\"subagent_type\":\"Explore\"}" })),
+            block_delta(
+                0,
+                json!({ "partial_json": "{\"subagent_type\":\"Explore\"}" }),
+            ),
         );
         link.stream(Some("toolu_outer"), block_stop(0));
         // Its `tool_result` is the delegated work's outcome, so it closes it.
-        link.results(Some("toolu_outer"), tool_result("toolu_inner", "done", false));
+        link.results(
+            Some("toolu_outer"),
+            tool_result("toolu_inner", "done", false),
+        );
 
         assert_eq!(
             link.phase_list("toolu_inner"),
-            [Some(Phase::Started), Some(Phase::Delta), Some(Phase::Completed)]
+            [
+                Some(Phase::Started),
+                Some(Phase::Delta),
+                Some(Phase::Completed)
+            ]
         );
         for phase in link.phases_of("toolu_inner") {
             assert_eq!(
@@ -2118,7 +2165,11 @@ mod tests {
 
         assert_eq!(
             link.phase_list("t1"),
-            [Some(Phase::Started), Some(Phase::Delta), Some(Phase::Completed)]
+            [
+                Some(Phase::Started),
+                Some(Phase::Delta),
+                Some(Phase::Completed)
+            ]
         );
         for phase in link.phases_of("t1") {
             assert_eq!(phase.span.as_deref(), Some("toolu_wf"), "{:?}", phase.phase);
@@ -2134,17 +2185,26 @@ mod tests {
         let mut link = Link::new();
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_outer", "name": "Task" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_outer", "name": "Task" }),
+            ),
         );
         link.stream(
             Some("toolu_outer"),
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_inner", "name": "Task" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_inner", "name": "Task" }),
+            ),
         );
         link.stream(Some("toolu_outer"), block_stop(0));
         // The result envelope is tagged with the *inner* delegation, which is what the
         // vendor does once the child is running — and it is precisely the value that must
         // not become the close's span.
-        link.results(Some("toolu_inner"), tool_result("toolu_inner", "done", false));
+        link.results(
+            Some("toolu_inner"),
+            tool_result("toolu_inner", "done", false),
+        );
 
         let closed = *link.phases_of("toolu_inner").last().unwrap();
         assert_eq!(closed.phase, Some(Phase::Completed));
@@ -2184,18 +2244,32 @@ mod tests {
         let mut link = Link::new();
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_x", "name": "Task" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_x", "name": "Task" }),
+            ),
         );
-        link.stream(None, block_delta(0, json!({ "partial_json": "{\"subagent_ty" })));
+        link.stream(
+            None,
+            block_delta(0, json!({ "partial_json": "{\"subagent_ty" })),
+        );
         link.stream(None, block_stop(0));
         link.results(None, tool_result("toolu_x", "died", true));
 
         assert_eq!(
             link.phase_list("toolu_x"),
-            [Some(Phase::Started), Some(Phase::Delta), Some(Phase::Completed)]
+            [
+                Some(Phase::Started),
+                Some(Phase::Delta),
+                Some(Phase::Completed)
+            ]
         );
         for phase in link.phases_of("toolu_x") {
-            assert_eq!(phase.name, None, "{:?} named an unnamed delegation", phase.phase);
+            assert_eq!(
+                phase.name, None,
+                "{:?} named an unnamed delegation",
+                phase.phase
+            );
         }
         assert!(link.phases_of("toolu_x").last().unwrap().is_error);
     }
@@ -2206,11 +2280,17 @@ mod tests {
         let mut link = Link::new();
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_y", "name": "Task" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_y", "name": "Task" }),
+            ),
         );
         link.stream(
             None,
-            block_delta(0, json!({ "partial_json": "{\"subagent_type\":\"Explore\"}" })),
+            block_delta(
+                0,
+                json!({ "partial_json": "{\"subagent_type\":\"Explore\"}" }),
+            ),
         );
         link.stream(None, block_stop(0));
         link.results(None, tool_result("toolu_y", "found it", false));
@@ -2232,7 +2312,10 @@ mod tests {
         let mut link = Link::new();
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_z", "name": "Task" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_z", "name": "Task" }),
+            ),
         );
         link.stream(None, block_stop(0));
         link.results(None, tool_result("toolu_z", "done", false));
@@ -2249,7 +2332,10 @@ mod tests {
         let mut link = Link::new();
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_r", "name": "Read" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_r", "name": "Read" }),
+            ),
         );
         link.stream(None, block_stop(0));
         link.results(None, tool_result("toolu_r", "file contents", false));
@@ -2268,7 +2354,10 @@ mod tests {
         let mut link = Link::new();
         link.system("task_progress", json!({ "summary": "something" }));
         assert_eq!(
-            link.events.iter().map(|e| e.kind.clone()).collect::<Vec<_>>(),
+            link.events
+                .iter()
+                .map(|e| e.kind.clone())
+                .collect::<Vec<_>>(),
             [EventKind::Notice]
         );
         assert_eq!(link.events[0].text, "something");
@@ -2282,11 +2371,17 @@ mod tests {
     #[test]
     fn a_subagents_message_does_not_open_the_turn() {
         let mut link = Link::new();
-        link.stream(Some("toolu_wf"), json!({ "type": "message_start", "message": { "id": "m1" } }));
+        link.stream(
+            Some("toolu_wf"),
+            json!({ "type": "message_start", "message": { "id": "m1" } }),
+        );
         assert!(link.of_kind(EventKind::Turn).is_empty());
         assert!(!link.state.turn_is_open());
 
-        link.stream(None, json!({ "type": "message_start", "message": { "id": "m2" } }));
+        link.stream(
+            None,
+            json!({ "type": "message_start", "message": { "id": "m2" } }),
+        );
         let turns = link.of_kind(EventKind::Turn);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].phase, Some(Phase::Started));
@@ -2298,7 +2393,10 @@ mod tests {
     fn a_second_root_message_does_not_open_a_second_turn() {
         let mut link = Link::new();
         for id in ["m1", "m2"] {
-            link.stream(None, json!({ "type": "message_start", "message": { "id": id } }));
+            link.stream(
+                None,
+                json!({ "type": "message_start", "message": { "id": id } }),
+            );
         }
         assert_eq!(link.of_kind(EventKind::Turn).len(), 1);
     }
@@ -2308,7 +2406,10 @@ mod tests {
     #[test]
     fn a_result_closes_the_turn_and_reports_usage() {
         let mut link = Link::new();
-        link.stream(None, json!({ "type": "message_start", "message": { "id": "m1" } }));
+        link.stream(
+            None,
+            json!({ "type": "message_start", "message": { "id": "m1" } }),
+        );
         link.feed(json!({
             "type": "result", "subtype": "success", "result": "all done",
             "duration_ms": 1234, "total_cost_usd": 0.5,
@@ -2353,7 +2454,10 @@ mod tests {
         // whole fix for the 46-commands bug, and it is one assertion per facet because a
         // facet added later must not silently start being cleared.
         assert!(facets.commands.is_none(), "commands must not be mentioned");
-        assert!(facets.subagents.is_none(), "subagents must not be mentioned");
+        assert!(
+            facets.subagents.is_none(),
+            "subagents must not be mentioned"
+        );
         assert!(facets.config.is_none(), "config must not be mentioned");
         assert!(facets.context_window.is_none());
         // The model is reported for the session to fold into a config surface, never
@@ -2391,8 +2495,14 @@ mod tests {
     #[test]
     fn thinking_and_prose_are_projected_as_their_own_kinds() {
         let mut link = Link::new();
-        link.stream(None, json!({ "type": "message_start", "message": { "id": "msg_1" } }));
-        link.stream(None, block_start(0, json!({ "type": "thinking", "thinking": "" })));
+        link.stream(
+            None,
+            json!({ "type": "message_start", "message": { "id": "msg_1" } }),
+        );
+        link.stream(
+            None,
+            block_start(0, json!({ "type": "thinking", "thinking": "" })),
+        );
         link.stream(None, block_delta(0, json!({ "thinking": "hmm" })));
         link.stream(None, block_stop(0));
         link.stream(None, block_start(1, json!({ "type": "text", "text": "" })));
@@ -2416,10 +2526,19 @@ mod tests {
         let mut link = Link::new();
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_1", "name": "Read" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_1", "name": "Read" }),
+            ),
         );
-        link.stream(None, block_delta(0, json!({ "partial_json": "{\"file_path\":" })));
-        link.stream(None, block_delta(0, json!({ "partial_json": "\"/tmp/x\"}" })));
+        link.stream(
+            None,
+            block_delta(0, json!({ "partial_json": "{\"file_path\":" })),
+        );
+        link.stream(
+            None,
+            block_delta(0, json!({ "partial_json": "\"/tmp/x\"}" })),
+        );
         link.stream(None, block_stop(0));
 
         let calls = link.of_kind(EventKind::ToolCall);
@@ -2436,9 +2555,15 @@ mod tests {
         let mut link = Link::new();
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_1", "name": "Read" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_1", "name": "Read" }),
+            ),
         );
-        link.stream(None, block_delta(0, json!({ "partial_json": "{\"file_pa" })));
+        link.stream(
+            None,
+            block_delta(0, json!({ "partial_json": "{\"file_pa" })),
+        );
         link.stream(None, block_stop(0));
         let closed = *link.of_kind(EventKind::ToolCall).last().unwrap();
         assert_eq!(data_of(closed)["input"], json!("{\"file_pa"));
@@ -2452,7 +2577,10 @@ mod tests {
         let mut link = Link::new();
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_t", "name": "Task" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_t", "name": "Task" }),
+            ),
         );
         for fragment in ["{\"subagent_", "type\":\"Explore\"}"] {
             link.stream(None, block_delta(0, json!({ "partial_json": fragment })));
@@ -2543,7 +2671,10 @@ mod tests {
         // with extra steps.
         assert_eq!(task_label(&json!({ "input": "{\"subagent_ty" })), None);
         // An empty string is absent, not a name.
-        assert_eq!(task_label(&json!({ "input": { "subagent_type": "" } })), None);
+        assert_eq!(
+            task_label(&json!({ "input": { "subagent_type": "" } })),
+            None
+        );
     }
 
     // ---- Stability, which structure depends on --------------------------------
@@ -2564,7 +2695,11 @@ mod tests {
             json!({ "task_id": "t1", "patch": { "status": "completed" } }),
         );
         for phase in link.phases_of("t1") {
-            assert!(phase.is_stable(), "{:?} must reach the journal", phase.phase);
+            assert!(
+                phase.is_stable(),
+                "{:?} must reach the journal",
+                phase.phase
+            );
         }
     }
 
@@ -2574,11 +2709,17 @@ mod tests {
         let mut link = Link::new();
         link.stream(
             None,
-            block_start(0, json!({ "type": "tool_use", "id": "toolu_t", "name": "Task" })),
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_t", "name": "Task" }),
+            ),
         );
         link.stream(
             None,
-            block_delta(0, json!({ "partial_json": "{\"subagent_type\":\"Explore\"}" })),
+            block_delta(
+                0,
+                json!({ "partial_json": "{\"subagent_type\":\"Explore\"}" }),
+            ),
         );
         link.stream(None, block_stop(0));
         link.results(None, tool_result("toolu_t", "done", false));
@@ -2602,7 +2743,10 @@ mod tests {
     #[test]
     fn a_compact_boundary_is_recorded_with_its_metadata() {
         let mut link = Link::new();
-        link.system("compact_boundary", json!({ "compact_metadata": { "trigger": "auto" } }));
+        link.system(
+            "compact_boundary",
+            json!({ "compact_metadata": { "trigger": "auto" } }),
+        );
         let compact = link.of_kind(EventKind::Compact);
         assert_eq!(compact.len(), 1);
         assert_eq!(compact[0].data.as_ref().unwrap()["trigger"], json!("auto"));

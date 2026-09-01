@@ -216,9 +216,7 @@ pub fn is_offered(decision: &Decision, available: &[Value]) -> bool {
         // An object variant matches on its member *name*: the payload the vendor offered
         // is the one to send back, so a caller echoing it is right and a caller
         // constructing a different amendment is not silently accepted.
-        (Value::Object(sent), Value::Object(offer)) => {
-            sent.keys().next() == offer.keys().next()
-        }
+        (Value::Object(sent), Value::Object(offer)) => sent.keys().next() == offer.keys().next(),
         (sent, offer) => sent == offer,
     })
 }
@@ -365,10 +363,9 @@ pub fn thread_start_params(spec: &RunSpec) -> Result<(&'static str, Value)> {
         // **`thread/resume` is also the subscribe.** A client that starts a thread and
         // never resumes sees zero `item/*` events; for `run` the start implies the
         // subscription, so only this branch names the method explicitly.
-        RequestedNativeId::Resume(id) => (
-            method::THREAD_RESUME,
-            json!({ "threadId": id.as_str() }),
-        ),
+        RequestedNativeId::Resume(id) => {
+            (method::THREAD_RESUME, json!({ "threadId": id.as_str() }))
+        }
         RequestedNativeId::Dictate(id) => {
             // Refused rather than dropped: a server that believed it named the session
             // would hold an id no rollout has, so every later resume, prune, and
@@ -531,7 +528,11 @@ mod tests {
 
         assert_eq!(
             supported_efforts(&catalogue, "gpt-5.6-sol").as_deref(),
-            Some(["low", "medium", "high", "xhigh", "max", "ultra"].map(String::from).as_slice()),
+            Some(
+                ["low", "medium", "high", "xhigh", "max", "ultra"]
+                    .map(String::from)
+                    .as_slice()
+            ),
         );
         // A model the catalogue does not hold is `None`, which is not the same fact as
         // "offers no efforts" — the caller has to refuse it rather than offer an empty
@@ -574,7 +575,9 @@ mod tests {
 
         // A fourth variant this adapter does not offer reports as unknown rather than as
         // one of the three, so no checkmark lands on a mode the session is not in.
-        assert!(sandbox_mode_from_policy(&serde_json::json!({"type": "externalSandbox"})).is_none());
+        assert!(
+            sandbox_mode_from_policy(&serde_json::json!({"type": "externalSandbox"})).is_none()
+        );
         assert!(sandbox_policy("banana").is_none());
     }
 
@@ -588,7 +591,9 @@ mod tests {
             native_id,
             inject_identity: true,
             identity_preamble: Some("I am Sylph.".into()),
-            flags: [("effort".to_string(), "high".to_string())].into_iter().collect(),
+            flags: [("effort".to_string(), "high".to_string())]
+                .into_iter()
+                .collect(),
             permission_mode: None,
         };
 

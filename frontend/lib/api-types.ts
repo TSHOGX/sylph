@@ -49,11 +49,6 @@ export interface Session {
   id: string;
   /** Opaque environment id, minted at pairing. Never a hostname. */
   environment: string;
-  /**
-   * Display name for {@link environment}. Mutable and never a key: a rename must
-   * not destroy identity (`docs/environments.md` § Pairing).
-   */
-  environmentName: string;
   agent: string;
   /** The vendor's own id for this session, unchanged. */
   nativeId: string;
@@ -104,7 +99,6 @@ export type TurnStatus =
 export interface Turn {
   id: string;
   sessionId: string;
-  incarnationId: string | null;
   status: TurnStatus;
   /**
    * Who started this turn.
@@ -133,6 +127,8 @@ export interface Turn {
 /** A normalized journal/stream event. Mirrors the backend `StreamEvent`. */
 export interface StreamEvent {
   seq: number;
+  /** The turn on which the server received this event, independent of trajectory owner. */
+  arrivalTurnId?: string;
   kind: string;
   phase?: string;
   streamId?: string;
@@ -513,7 +509,10 @@ export function requestOptions(request: PendingRequest): RequestOption[] {
  */
 export interface Agent {
   name: string;
-  version: string;
+  /** Version is absent when the environment can only report PATH presence. */
+  version?: string | null;
+  /** Present on the local development endpoint; inclusion is the availability signal for paired envagents. */
+  available?: boolean;
   /**
    * The spawn-time option schema: what can be chosen *before* a session exists.
    *
@@ -534,6 +533,8 @@ export interface Agent {
  * environment.
  */
 export type EnvironmentOrigin =
+  /** The local development environment used before pairing is available. */
+  | "development"
   /** A user installed the envagent and paired it. A laptop, a build box. */
   | "self-installed"
   /** An existing envagent copied the binary to a host it can reach over SSH. */
@@ -729,8 +730,10 @@ export interface CreateTurnRequest {
 
 /** Where in a session the query matched. */
 export interface BestMatch {
-  kind?: string;
-  snippet?: string;
+  /** Sequence number to scroll to when opening the match. */
+  seq: number;
+  turnId?: string;
+  excerpt: string;
 }
 
 /**
@@ -756,10 +759,8 @@ export interface SearchResult {
 /**
  * `GET /search`.
  *
- * No `available` flag and no `detail`. Those existed because search ran against a
- * separate process that could be absent, so "no matches" and "cannot search" had to
- * be distinguishable; the store is owned in-process now and an unreachable index is
- * not a state this endpoint has. It never 503s and answers an empty array for a
+ * No `available` flag and no `detail`: the index is server-owned and opened with the
+ * history store. It never 503s for an empty result and answers an empty array for a
  * query that finds nothing (`docs/api-design.md` § Search).
  */
 export interface SearchResponse {

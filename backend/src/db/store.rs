@@ -1,13 +1,13 @@
+use crate::db::labels::summarize_line;
+use crate::error::{Error, Result};
+use crate::events::data_from_column;
+use crate::models::now_ms;
+use crate::models::{Event, PendingRequest, Session, Turn};
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
 };
 use std::path::Path;
-use crate::db::labels::summarize_line;
-use crate::error::{Error, Result};
-use crate::events::data_from_column;
-use crate::models::{Event, PendingRequest, Session, Turn};
 use sylph_protocol::SessionId;
-use crate::models::now_ms;
 
 #[derive(Clone)]
 pub struct JournalStore {
@@ -110,8 +110,8 @@ impl JournalStore {
     ///
     /// **The caller must have started the agent first.** A row exists only once a
     /// session has an identity (`docs/architecture.md` § Identity), so this is the
-    /// second half of `POST /sessions` rather than the whole of it — see
-    /// [`crate::links::LinkManager::open_session`], which owns that ordering.
+    /// second half of a prepared-session promotion rather than the whole of it — see
+    /// [`crate::links::LinkManager::promote_prepared_turn`], which owns that ordering.
     /// Nothing here can enforce it, and that is what the type is for: a [`Session`]
     /// cannot be constructed without a [`SessionId`], which only an agent's answer
     /// produces.
@@ -145,6 +145,64 @@ impl JournalStore {
         .fetch_one(&self.pool)
         .await
         .map_err(Error::Database)
+    }
+
+    /// Insert a newly promoted session and its first user turn atomically.
+    ///
+    /// A prepared link has no durable identity until promotion, so the session row and
+    /// first turn cannot be created independently: a crash between the two would leave
+    /// an empty history row, recreating the bug this lifecycle exists to remove.
+    pub async fn create_session_and_turn(
+        &self,
+        session: &Session,
+        turn: &Turn,
+    ) -> Result<(Session, Turn)> {
+        let mut tx = self.pool.begin().await.map_err(Error::Database)?;
+        let stored_session = sqlx::query_as::<_, Session>(
+            r#"INSERT INTO sessions (
+                environment, agent, native_id, workdir, title,
+                inject_identity, fidelity, flags_json, status, parent_session,
+                created_at_ms, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING *"#,
+        )
+        .bind(session.id.environment.as_str())
+        .bind(session.id.agent.as_str())
+        .bind(session.id.native_id.as_str())
+        .bind(&session.workdir)
+        .bind(&session.title)
+        .bind(session.inject_identity)
+        .bind(session.fidelity.to_string())
+        .bind(&session.flags_json)
+        .bind(&session.status)
+        .bind(&session.parent_session)
+        .bind(session.created_at_ms)
+        .bind(session.updated_at_ms)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(Error::Database)?;
+        let stored_turn = sqlx::query_as::<_, Turn>(
+            r#"INSERT INTO turns (
+                id, session_env, session_agent, session_native, status, origin,
+                request_text, command_invocation_id, idempotency_key, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING *"#,
+        )
+        .bind(&turn.id)
+        .bind(turn.session_id.environment.as_str())
+        .bind(turn.session_id.agent.as_str())
+        .bind(turn.session_id.native_id.as_str())
+        .bind(&turn.status)
+        .bind(&turn.origin)
+        .bind(&turn.request_text)
+        .bind(&turn.command_invocation_id)
+        .bind(&turn.idempotency_key)
+        .bind(turn.created_at_ms)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(Error::Database)?;
+        tx.commit().await.map_err(Error::Database)?;
+        Ok((stored_session, stored_turn))
     }
 
     pub async fn get_session(&self, id: &SessionId) -> Result<Option<Session>> {
@@ -193,14 +251,13 @@ impl JournalStore {
         environment: &sylph_protocol::EnvironmentId,
         agent: &str,
     ) -> Result<std::collections::HashSet<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT native_id FROM sessions WHERE environment = ? AND agent = ?",
-        )
-        .bind(environment.as_str())
-        .bind(agent)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(Error::Database)?;
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT native_id FROM sessions WHERE environment = ? AND agent = ?")
+                .bind(environment.as_str())
+                .bind(agent)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(Error::Database)?;
         Ok(rows.into_iter().map(|(native,)| native).collect())
     }
 
@@ -301,8 +358,8 @@ impl JournalStore {
         .bind(id.environment.as_str())
         .bind(id.agent.as_str())
         .bind(id.native_id.as_str())
-            .execute(&self.pool)
-            .await?;
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -456,8 +513,8 @@ impl JournalStore {
         .bind(id.environment.as_str())
         .bind(id.agent.as_str())
         .bind(id.native_id.as_str())
-            .execute(&self.pool)
-            .await?;
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -471,8 +528,8 @@ impl JournalStore {
         .bind(id.environment.as_str())
         .bind(id.agent.as_str())
         .bind(id.native_id.as_str())
-            .execute(&self.pool)
-            .await?;
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -515,11 +572,44 @@ impl JournalStore {
         .bind(id.environment.as_str())
         .bind(id.agent.as_str())
         .bind(id.native_id.as_str())
-            .execute(&self.pool)
-            .await?;
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
+    /// Replace one persisted launch flag without dropping settings written by another
+    /// control. The caller supplies an adapter-approved key/value pair; keeping the
+    /// read/merge here gives every runtime config endpoint one update rule.
+    pub async fn set_session_flag(&self, id: &SessionId, key: &str, value: &str) -> Result<()> {
+        // SQLite's JSON1 update is one write statement, so two controls changed at
+        // nearly the same time cannot lose each other's key as a read/merge/write
+        // sequence would. Rows produced by Sylph always contain an object, but the
+        // `json_valid` guard keeps a hand-edited store from turning a config change
+        // into an opaque database error.
+        let result = sqlx::query(
+            "UPDATE sessions
+                SET flags_json = json_patch(
+                      CASE WHEN json_valid(flags_json)
+                                AND json_type(flags_json) = 'object'
+                           THEN flags_json ELSE '{}' END,
+                      json_object(?, ?)),
+                    updated_at_ms = ?
+              WHERE environment = ? AND agent = ? AND native_id = ?",
+        )
+        .bind(key)
+        .bind(value)
+        .bind(now_ms())
+        .bind(id.environment.as_str())
+        .bind(id.agent.as_str())
+        .bind(id.native_id.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(Error::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(Error::SessionNotFound);
+        }
+        Ok(())
+    }
 
     // Turn lifecycle
 
@@ -656,11 +746,12 @@ impl JournalStore {
     /// was in flight — that turn is already terminal, so this reports `false` and the
     /// restart's account of it stands.
     pub async fn promote_settled_turn(&self, turn_id: &str, status: &str) -> Result<bool> {
-        let result = sqlx::query("UPDATE turns SET status = ? WHERE id = ? AND status = 'settling'")
-            .bind(status)
-            .bind(turn_id)
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE turns SET status = ? WHERE id = ? AND status = 'settling'")
+                .bind(status)
+                .bind(turn_id)
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -868,8 +959,7 @@ impl JournalStore {
                     // The same shape `settle` emits, so a client cannot tell which
                     // path closed a trajectory — and `abandoned` stays distinct from
                     // `failed`, because nobody reported an outcome here either.
-                    data_json: r#"{"closedBy":"server","reason":"backend_restarted"}"#
-                        .to_string(),
+                    data_json: r#"{"closedBy":"server","reason":"backend_restarted"}"#.to_string(),
                     is_error: true,
                     stability: "stable".to_string(),
                     source: "server".to_string(),
@@ -934,12 +1024,10 @@ impl JournalStore {
     }
 
     pub async fn count_sessions_by_status(&self) -> Result<Vec<(String, i64)>> {
-        sqlx::query_as::<_, (String, i64)>(
-            "SELECT status, COUNT(*) FROM sessions GROUP BY status",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(Error::Database)
+        sqlx::query_as::<_, (String, i64)>("SELECT status, COUNT(*) FROM sessions GROUP BY status")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Error::Database)
     }
 
     // Event journal
@@ -1486,10 +1574,10 @@ impl JournalStore {
         .bind(id.environment.as_str())
         .bind(id.agent.as_str())
         .bind(id.native_id.as_str())
-            .fetch_optional(&self.pool)
-            .await
-            .ok()
-            .flatten()
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
     }
 
     /// The turn currently executing on a session, if any.
@@ -1555,13 +1643,11 @@ impl JournalStore {
     /// Only consolidation wants this: the deltas are what it folds. A reader that
     /// used it for a transcript would show each token twice.
     pub async fn turn_events_for_consolidation(&self, turn_id: &str) -> Result<Vec<Event>> {
-        sqlx::query_as::<_, Event>(
-            "SELECT * FROM events WHERE turn_id = ? ORDER BY seq",
-        )
-        .bind(turn_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(Error::Database)
+        sqlx::query_as::<_, Event>("SELECT * FROM events WHERE turn_id = ? ORDER BY seq")
+            .bind(turn_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Error::Database)
     }
 
     /// Turns whose events are still in the journal, oldest first.
@@ -1765,7 +1851,13 @@ mod tests {
             .await
             .expect("host");
         store
-            .append_event(&span_event(2, "subagent", "delta", "task-a", Some("host-1")))
+            .append_event(&span_event(
+                2,
+                "subagent",
+                "delta",
+                "task-a",
+                Some("host-1"),
+            ))
             .await
             .expect("progress");
 
@@ -1807,7 +1899,13 @@ mod tests {
         let store = seeded(dir.path()).await;
 
         store
-            .append_event(&span_event(1, "subagent", "completed", "task-a", Some("elsewhere")))
+            .append_event(&span_event(
+                1,
+                "subagent",
+                "completed",
+                "task-a",
+                Some("elsewhere"),
+            ))
             .await
             .expect("a late outcome, naming a host from another turn");
 
@@ -1835,7 +1933,13 @@ mod tests {
             .await
             .expect("host");
         store
-            .append_event(&span_event(2, "thinking", "completed", "b1", Some("host-1")))
+            .append_event(&span_event(
+                2,
+                "thinking",
+                "completed",
+                "b1",
+                Some("host-1"),
+            ))
             .await
             .expect("child");
 
@@ -1862,7 +1966,13 @@ mod tests {
             .await
             .expect("host");
         store
-            .append_event(&span_event(2, "thinking", "completed", "b1", Some("host-1")))
+            .append_event(&span_event(
+                2,
+                "thinking",
+                "completed",
+                "b1",
+                Some("host-1"),
+            ))
             .await
             .expect("child");
         store
@@ -1916,7 +2026,13 @@ mod tests {
         store.append_event(&started).await.expect("open");
         // Progress, with no flag — the shape the vendor actually sends.
         store
-            .append_event(&span_event(2, "subagent", "delta", "bg-task", Some("host-1")))
+            .append_event(&span_event(
+                2,
+                "subagent",
+                "delta",
+                "bg-task",
+                Some("host-1"),
+            ))
             .await
             .expect("progress");
 
@@ -1953,7 +2069,10 @@ mod tests {
             "while the agent lives, this is work in progress"
         );
 
-        let closed = store.close_stale_trajectories().await.expect("startup sweep");
+        let closed = store
+            .close_stale_trajectories()
+            .await
+            .expect("startup sweep");
         assert_eq!(closed, 1, "once the agent is gone, nothing will report it");
     }
 
@@ -1968,13 +2087,22 @@ mod tests {
         let store = seeded(dir.path()).await;
 
         store
-            .append_event(&span_event(1, "subagent", "started", "fg-task", Some("host-1")))
+            .append_event(&span_event(
+                1,
+                "subagent",
+                "started",
+                "fg-task",
+                Some("host-1"),
+            ))
             .await
             .expect("open");
 
         let open = store.open_trajectories("turn-1").await.expect("query");
         let ids: Vec<&str> = open.iter().map(|row| row.0.as_str()).collect();
-        assert!(ids.contains(&"fg-task"), "an ordinary delegate is swept: {ids:?}");
+        assert!(
+            ids.contains(&"fg-task"),
+            "an ordinary delegate is swept: {ids:?}"
+        );
     }
 
     /// Many delegates under one host are many trajectories, not one.
@@ -1993,12 +2121,24 @@ mod tests {
             .expect("host");
         for (seq, task) in [(2, "task-a"), (3, "task-b")] {
             store
-                .append_event(&span_event(seq, "subagent", "started", task, Some("host-1")))
+                .append_event(&span_event(
+                    seq,
+                    "subagent",
+                    "started",
+                    task,
+                    Some("host-1"),
+                ))
                 .await
                 .expect("delegate");
         }
         store
-            .append_event(&span_event(4, "subagent", "completed", "task-a", Some("host-1")))
+            .append_event(&span_event(
+                4,
+                "subagent",
+                "completed",
+                "task-a",
+                Some("host-1"),
+            ))
             .await
             .expect("close one");
 
@@ -2026,7 +2166,13 @@ mod tests {
             .await
             .expect("open");
         store
-            .append_event(&span_event(2, "thinking", "completed", "b1", Some("task-a")))
+            .append_event(&span_event(
+                2,
+                "thinking",
+                "completed",
+                "b1",
+                Some("task-a"),
+            ))
             .await
             .expect("child");
 
@@ -2261,7 +2407,11 @@ mod tests {
         let store = seeded(dir.path()).await;
 
         assert!(store
-            .begin_settling("turn-1", Some("TURN_INTERRUPTED"), Some("Interrupted by user"))
+            .begin_settling(
+                "turn-1",
+                Some("TURN_INTERRUPTED"),
+                Some("Interrupted by user")
+            )
             .await
             .expect("first claim"));
         assert!(
@@ -2310,7 +2460,12 @@ mod tests {
             "a running turn cannot be promoted straight to terminal"
         );
         assert_eq!(
-            store.get_turn("turn-1").await.expect("read").expect("turn").status,
+            store
+                .get_turn("turn-1")
+                .await
+                .expect("read")
+                .expect("turn")
+                .status,
             "running"
         );
 
@@ -2328,7 +2483,12 @@ mod tests {
             "the restart's account stands"
         );
         assert_eq!(
-            store.get_turn("turn-1").await.expect("read").expect("turn").status,
+            store
+                .get_turn("turn-1")
+                .await
+                .expect("read")
+                .expect("turn")
+                .status,
             "interrupted"
         );
     }
@@ -2364,7 +2524,10 @@ mod tests {
 
         let turn = store.get_turn("turn-1").await.expect("read").expect("turn");
         assert_eq!(turn.status, "interrupted");
-        assert!(turn.is_terminal(), "nothing may be left reading as in flight");
+        assert!(
+            turn.is_terminal(),
+            "nothing may be left reading as in flight"
+        );
         assert_eq!(
             turn.completed_at_ms,
             Some(ended),

@@ -9,7 +9,6 @@ function session(id: string, updatedAtMs: number, workdir = "/tmp"): Session {
     // gave it, and a helper that composed it here would model the wrong contract.
     id: `env7fk2:e2e:${id}`,
     environment: "env7fk2",
-    environmentName: "laptop",
     agent: "e2e",
     nativeId: id,
     workdir,

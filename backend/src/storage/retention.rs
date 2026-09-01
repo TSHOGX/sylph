@@ -350,4 +350,3 @@ pub struct RetentionReport {
     /// because those call for opposite responses.
     pub withheld: Option<WithheldReason>,
 }
-

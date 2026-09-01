@@ -39,11 +39,11 @@ export interface SelectOption {
   /**
    * Second line under the label, and matched by the filter.
    *
-   * This is the field that let every richer picker join this engine rather than
+   * This is the field that lets every richer picker join this engine rather than
    * fork it. A workspace is identified by its *path*, not its leaf name — the
    * user's mental index of a project is often a middle segment (`huawei`,
-   * `sylph`) that no leaf carries — and an archived session by the directory it
-   * ran in. Both need a line the eye can read and the filter can reach, which
+   * `sylph`) that no leaf carries — and a durable session by the directory it ran in.
+   * Both need a line the eye can read and the filter can reach, which
    * `hint` could not be: it is trailing, mono, and width-capped for a shortcut.
    *
    * Being part of the searchable contract is why it lives here rather than in a
@@ -72,9 +72,9 @@ export interface SelectOption {
   /**
    * A third line: why this row matched, when that is not visible in the row itself.
    *
-   * Only the archive search has one. Its hits are ranked server-side by full-text
-   * search over the transcript, so the matched words are in event bodies the browser
-   * never loaded — and without the snippet an archive row is a title and a path with
+   * Only indexed search has one. Its hits are ranked server-side by full-text search
+   * over the transcript, so the matched words are in event bodies the browser never
+   * loaded — and without the excerpt a result row is a title and a path with
    * nothing saying why a query about a bug reached a session called "notes".
    *
    * Deliberately not matched, and not for `meta`'s reason. This text *is* the product

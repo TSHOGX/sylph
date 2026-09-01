@@ -211,9 +211,8 @@ pub fn seed(resolved: &Resolved) -> anyhow::Result<Vec<String>> {
         if let Some(parent) = resolved.config_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::write(&resolved.config_path, resolve::CONFIG_TEMPLATE).map_err(|e| {
-            anyhow::anyhow!("Cannot write {}: {e}", resolved.config_path.display())
-        })?;
+        std::fs::write(&resolved.config_path, resolve::CONFIG_TEMPLATE)
+            .map_err(|e| anyhow::anyhow!("Cannot write {}: {e}", resolved.config_path.display()))?;
         notes.push(format!(
             "Wrote a commented configuration file at {}",
             resolved.config_path.display()
@@ -314,7 +313,10 @@ mod tests {
             std::fs::read_to_string(&resolved.config_path).unwrap(),
             "[server]\nport = 9999\n"
         );
-        assert_eq!(std::fs::read_to_string(soul_of(&resolved)).unwrap(), "# mine");
+        assert_eq!(
+            std::fs::read_to_string(soul_of(&resolved)).unwrap(),
+            "# mine"
+        );
     }
 
     /// Deleting `SOUL.md` means "no identity", which the protocol reserves. An app
@@ -365,7 +367,10 @@ mod tests {
         std::fs::write(soul_of(&resolved), "# mine").unwrap();
 
         assert!(seed_soul(&resolved).unwrap().is_empty());
-        assert_eq!(std::fs::read_to_string(soul_of(&resolved)).unwrap(), "# mine");
+        assert_eq!(
+            std::fs::read_to_string(soul_of(&resolved)).unwrap(),
+            "# mine"
+        );
     }
 
     #[test]
@@ -424,5 +429,4 @@ mod tests {
         assert!(config.history_path.starts_with(&data));
         assert!(config.blobs_dir.starts_with(&config.data_dir));
     }
-
 }

@@ -20,10 +20,11 @@ use std::sync::Arc;
 pub use mock::{MockAgents, MockRunner};
 
 use axum::body::Body;
-use axum::http::{header, Request, Response, StatusCode};
+use axum::http::{header, Request, Response};
 use axum::Router;
-use serde_json::{json, Value};
-use sylph_web_backend::{config::Config, router, AppState};
+use serde_json::Value;
+use sylph_protocol::{AgentName, EnvironmentId, Fidelity, NativeId, SessionId};
+use sylph_web_backend::{config::Config, models::Session, router, AppState};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -75,11 +76,7 @@ impl TestBackend {
         Self::start_with(&[MockRunner::success("mock")], Some(text), &[]).await
     }
 
-    async fn start_with(
-        runners: &[MockRunner],
-        soul: Option<&str>,
-        extra_roots: &[&Path],
-    ) -> Self {
+    async fn start_with(runners: &[MockRunner], soul: Option<&str>, extra_roots: &[&Path]) -> Self {
         let temp = TempDir::new().expect("failed to create temp dir");
         let root = temp.path();
 
@@ -214,12 +211,10 @@ impl TestBackend {
     pub async fn restart(&mut self) {
         // The same source, so a restart keeps whatever a test uninstalled — which is what
         // a restart does to a machine whose CLI is gone.
-        let state = AppState::build_with_adapters(
-            self.config.clone(),
-            Arc::new(self.agents.clone()),
-        )
-        .await
-        .expect("failed to rebuild state");
+        let state =
+            AppState::build_with_adapters(self.config.clone(), Arc::new(self.agents.clone()))
+                .await
+                .expect("failed to rebuild state");
         self.router = router(state.clone());
         // Replaced too, or a test would keep querying the pre-restart store and
         // miss exactly the recovery it is asserting on.
@@ -431,12 +426,7 @@ impl TestBackend {
     }
 
     /// POST with an explicit `Idempotency-Key` header.
-    pub async fn post_authed_with_key(
-        &self,
-        path: &str,
-        body: Value,
-        key: &str,
-    ) -> Response<Body> {
+    pub async fn post_authed_with_key(&self, path: &str, body: Value, key: &str) -> Response<Body> {
         self.send(
             Request::builder()
                 .method("POST")
@@ -468,34 +458,48 @@ impl TestBackend {
     /// specifically in sibling directories whose paths are prefixes of one another, since
     /// that is the case a substring filter gets wrong.
     pub async fn create_session_in(&self, agent: &str, workdir: &str) -> String {
-        // Read back from the server rather than hardcoded — see `environment_id`.
-        let environment = self.environment_id().await;
-        let response = self
-            .post_authed(
-                "/api/v1/sessions",
-                json!({
-                    // Required now: an agent's availability is decided per machine, so
-                    // there is no global default that would be true anywhere.
-                    "environment": environment,
-                    "agent": agent,
-                    "workdir": workdir,
-                    "title": "Test session",
-                }),
-            )
-            .await;
-
-        let status = response.status();
-        let body = json_body(response).await;
-        assert_eq!(
-            status,
-            StatusCode::CREATED,
-            "session creation failed: {body}"
+        // Most tests need an existing durable session with an empty turn history so they
+        // can exercise a later request in isolation. The production API deliberately
+        // cannot create such a row: POST /sessions returns an in-memory draft and the
+        // first real turn atomically promotes it. Seed this fixture directly in the
+        // journal instead of smuggling a fake "fixture setup" turn through that API.
+        // Tests that cover the public lifecycle use the endpoint explicitly below.
+        let environment = EnvironmentId::parse(self.environment_id().await).unwrap();
+        let agent_name = AgentName::parse(agent.to_string()).unwrap();
+        let session_id = SessionId::new(
+            environment,
+            agent_name,
+            NativeId::new(format!("fixture-{}", uuid::Uuid::new_v4())),
         );
-
-        body["session"]["id"]
-            .as_str()
-            .expect("session id missing from response")
-            .to_string()
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        self.state
+            .store
+            .create_session(&Session {
+                id: session_id.clone(),
+                workdir: std::fs::canonicalize(workdir)
+                    .unwrap_or_else(|_| PathBuf::from(workdir))
+                    .display()
+                    .to_string(),
+                title: None,
+                inject_identity: true,
+                fidelity: Fidelity::Stream,
+                flags_json: "{}".to_string(),
+                status: "idle".to_string(),
+                parent_session: None,
+                created_at_ms: now,
+                updated_at_ms: now,
+            })
+            .await
+            .expect("fixture session insert failed");
+        self.state
+            .links
+            .ensure(&session_id)
+            .await
+            .expect("fixture link establishment failed");
+        session_id.encode()
     }
 
     /// The environment this harness's server reports.
@@ -525,10 +529,7 @@ impl TestBackend {
             let response = self.get_authed(&format!("/api/v1/turns/{}", turn_id)).await;
             let body = json_body(response).await;
             let status = body["turn"]["status"].as_str().unwrap_or("");
-            if matches!(
-                status,
-                "completed" | "failed" | "cancelled" | "interrupted"
-            ) {
+            if matches!(status, "completed" | "failed" | "cancelled" | "interrupted") {
                 return body;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;

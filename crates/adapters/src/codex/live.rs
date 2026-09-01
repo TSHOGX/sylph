@@ -8,7 +8,7 @@
 //! [`super::native`] maps a *stored* item to a [`Event`]; this maps a *live* frame to the
 //! same one. Where the two see the same content they emit the same event, deliberately —
 //! that is the property `docs/session-protocol.md` calls out and it is why
-//! [`Translator::frame`] is a pure function over a `Value`: the store parser is assertable
+//! `Translator::frame` is a pure function over a `Value`: the store parser is assertable
 //! from a fixture, and a live translator that needed a process to test would be the one
 //! half nobody checks.
 //!
@@ -38,8 +38,8 @@ use sylph_protocol::{
 use tokio::sync::{mpsc, Mutex, Notify};
 
 use super::appserver::{self, method, notification, Decision};
-use crate::process::{self, Child, Line};
 use crate::now_ms;
+use crate::process::{self, Child, Line};
 
 /// How long `set_config` waits for the vendor's confirming notification.
 ///
@@ -107,6 +107,13 @@ struct State {
     /// wrong thread — a wrong tree rather than a broken one, which nothing downstream can
     /// detect.
     thread: Option<String>,
+    /// Child thread -> the collaboration call that opened it. Codex emits child turn
+    /// boundaries on the parent's stdout but no dedicated delegation close record, so this
+    /// edge lets the server close the child trajectory instead of treating the boundary as
+    /// another root turn event.
+    delegation_hosts: HashMap<String, Option<String>>,
+    /// Child thread -> the latest name reported by its `subAgentActivity` item.
+    delegation_names: HashMap<String, Option<String>>,
 }
 
 /// A live codex session.
@@ -159,14 +166,16 @@ impl Translator {
         match method {
             notification::ITEM_STARTED => self.item(params, at_ms, Phase::Started).await,
             notification::ITEM_COMPLETED => self.item(params, at_ms, Phase::Completed).await,
-            notification::AGENT_MESSAGE_DELTA => delta(params, at_ms),
+            notification::AGENT_MESSAGE_DELTA => {
+                delta(params, at_ms, self.thread_span(params).await)
+            }
             notification::TURN_STARTED => self.turn_started(params, at_ms).await,
             notification::TURN_COMPLETED => self.turn_completed(params, at_ms).await,
             notification::SETTINGS_UPDATED => self.settings(params).await,
-            notification::TOKEN_USAGE => usage(params, at_ms),
-            notification::ERROR => turn_error(params, at_ms),
-            notification::WARNING => warning(params, at_ms),
-            notification::MCP_STARTUP => mcp_startup(params, at_ms),
+            notification::TOKEN_USAGE => usage(params, at_ms, self.thread_span(params).await),
+            notification::ERROR => turn_error(params, at_ms, self.thread_span(params).await),
+            notification::WARNING => warning(params, at_ms, self.thread_span(params).await),
+            notification::MCP_STARTUP => mcp_startup(params, at_ms, self.thread_span(params).await),
             notification::COMMAND_APPROVAL => self.approval(frame, params).await,
             notification::SERVER_REQUEST_RESOLVED => self.resolved(params).await,
             // **Deliberately dropped, and each one for a stated reason.** An unlisted
@@ -195,6 +204,7 @@ impl Translator {
         // parser measured these two id spaces disjoint for every item type except the two
         // collaboration ones; live, `id` is the only id an item carries.
         let stream_id = item.get("id").and_then(Value::as_str).map(str::to_string);
+        let thread_span = self.thread_span(params).await;
 
         let event = match kind {
             "agentMessage" => {
@@ -204,6 +214,7 @@ impl Translator {
                 // `completed` carries the whole text, which is what the journal keeps.
                 let mut event = Event::new(EventKind::Assistant, Some(phase), at_ms);
                 event.stream_id = stream_id;
+                event.span = thread_span;
                 event.text = text.to_string();
                 if let Some(phase_name) = item.get("phase").and_then(Value::as_str) {
                     // The vendor's own `phase` — `final_answer`, `commentary` — which is
@@ -226,15 +237,32 @@ impl Translator {
                 }
                 let mut event = Event::new(EventKind::Thinking, Some(phase), at_ms);
                 event.stream_id = stream_id;
+                event.span = thread_span;
                 event.text = text;
                 event
             }
             "commandExecution" | "fileChange" | "mcpToolCall" | "imageView" => {
-                return tool_item(item, kind, stream_id, at_ms, phase)
+                return tool_item(item, kind, stream_id, thread_span, at_ms, phase)
             }
             "subAgentActivity" => {
                 let own = self.state.lock().await.thread.clone();
-                return delegation(item, own.as_deref(), at_ms, phase);
+                let messages = delegation(item, own.as_deref(), at_ms, phase);
+                let mut state = self.state.lock().await;
+                for message in &messages {
+                    if let Ok(SessionMessage::Event(event)) = message {
+                        if event.kind == EventKind::Subagent {
+                            if let Some(child) = event.stream_id.clone() {
+                                state
+                                    .delegation_hosts
+                                    .insert(child.clone(), event.span.clone());
+                                state
+                                    .delegation_names
+                                    .insert(child.clone(), event.name.clone());
+                            }
+                        }
+                    }
+                }
+                return messages;
             }
             "collabAgentToolCall" => {
                 // **A barrier, not lineage** — `super::measured_facts` item 5. Both
@@ -247,6 +275,7 @@ impl Translator {
             "contextCompaction" => {
                 let mut event = Event::new(EventKind::Compact, Some(phase), at_ms);
                 event.stream_id = stream_id;
+                event.span = thread_span;
                 event
             }
             // The vocabulary has no `user` kind, and the server owns a turn's
@@ -259,6 +288,17 @@ impl Translator {
             _ => return Vec::new(),
         };
         vec![Ok(SessionMessage::Event(event))]
+    }
+
+    /// Map an app-server frame's emitting thread to the trajectory span used by Sylph.
+    ///
+    /// The app-server multiplexes child items onto the parent's stdout. Without reading
+    /// `params.threadId`, a child's command and assistant blocks become root rows. A missing
+    /// thread id remains compatible with older frames and means the root trajectory.
+    async fn thread_span(&self, params: &Value) -> Option<String> {
+        let thread = params.get("threadId").and_then(Value::as_str);
+        let own = self.state.lock().await.thread.clone();
+        span_for_thread(thread, own.as_deref())
     }
 
     /// A `subAgentActivity` item, whose edge direction decides whether it is a delegation
@@ -278,6 +318,13 @@ impl Translator {
     /// equivalent testable.
     async fn turn_started(&self, params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
         let turn = params.get("turn").unwrap_or(&Value::Null);
+        let thread = params.get("threadId").and_then(Value::as_str);
+        let own = self.state.lock().await.thread.clone();
+        if is_child_thread(thread, own.as_deref()) {
+            // Child turn boundaries describe the delegated trajectory. They must not become
+            // root `turn` events, or the server will treat a child as a second user turn.
+            return Vec::new();
+        }
         if let Some(id) = turn.get("id").and_then(Value::as_str) {
             self.state.lock().await.turn = Some(id.to_string());
         }
@@ -285,6 +332,32 @@ impl Translator {
         event.stream_id = turn.get("id").and_then(Value::as_str).map(str::to_string);
         vec![Ok(SessionMessage::Event(event))]
     }
+}
+
+fn span_for_thread(thread: Option<&str>, own: Option<&str>) -> Option<String> {
+    match (thread, own) {
+        (Some(thread), Some(own)) if thread != own => Some(thread.to_string()),
+        _ => None,
+    }
+}
+
+fn is_child_thread(thread: Option<&str>, own: Option<&str>) -> bool {
+    matches!((thread, own), (Some(thread), Some(own)) if thread != own)
+}
+
+/// Best-effort summary from a child turn's terminal payload.
+fn turn_summary(turn: &Value) -> String {
+    turn.get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .rev()
+        .find_map(|item| {
+            (item.get("type").and_then(Value::as_str) == Some("agentMessage"))
+                .then(|| item.get("text").and_then(Value::as_str).unwrap_or_default())
+        })
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn delegation(
@@ -357,12 +430,46 @@ impl Translator {
     /// `failed` carries `error.message`. All three are reported as themselves.
     async fn turn_completed(&self, params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
         let turn = params.get("turn").unwrap_or(&Value::Null);
-        self.state.lock().await.turn = None;
+        let thread = params.get("threadId").and_then(Value::as_str);
+        let (own, host, name) = {
+            let state = self.state.lock().await;
+            (
+                state.thread.clone(),
+                thread
+                    .and_then(|id| state.delegation_hosts.get(id).cloned())
+                    .flatten(),
+                thread
+                    .and_then(|id| state.delegation_names.get(id).cloned())
+                    .flatten(),
+            )
+        };
 
         let status = turn
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or("completed");
+
+        if is_child_thread(thread, own.as_deref()) {
+            let mut event = Event::new(EventKind::Subagent, Some(Phase::Completed), at_ms);
+            event.stream_id = thread.map(str::to_string);
+            event.span = host;
+            event.name = name;
+            event.is_error = status == "failed";
+            event.text = turn_summary(turn);
+            event.data = Some(json!({
+                "stopReason": status,
+                "errorMessage": turn.get("error").and_then(|error| error.get("message")),
+                "durationMs": turn.get("durationMs"),
+                "threadId": thread,
+            }));
+            event.started_at_ms = turn
+                .get("startedAt")
+                .and_then(Value::as_i64)
+                .map(|seconds| seconds * 1000);
+            return vec![Ok(SessionMessage::Event(event))];
+        }
+
+        self.state.lock().await.turn = None;
         let mut event = Event::new(EventKind::Turn, Some(Phase::Completed), at_ms);
         event.stream_id = turn.get("id").and_then(Value::as_str).map(str::to_string);
         // **`failed` and `interrupted` are both failures and neither is silence.** A turn
@@ -448,7 +555,10 @@ impl Translator {
             kind: RequestKind::Approval,
             // Pairs the dialog to the `tool_call` already on the timeline, which is what
             // keeps it from floating beside the call it is about.
-            tool_use_id: params.get("itemId").and_then(Value::as_str).map(str::to_string),
+            tool_use_id: params
+                .get("itemId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             tool: Some("exec".to_string()),
             title: match command {
                 Some(command) => format!("Run {command}"),
@@ -503,7 +613,7 @@ impl Translator {
 }
 
 /// A per-token delta, the one thing the live path has that the store does not.
-fn delta(params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
+fn delta(params: &Value, at_ms: i64, span: Option<String>) -> Vec<Result<SessionMessage>> {
     let Some(text) = params.get("delta").and_then(Value::as_str) else {
         return Vec::new();
     };
@@ -511,7 +621,11 @@ fn delta(params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
     // **`itemId` here, where the item frames say `id`.** The same block under two key
     // names in one vocabulary; reading `id` off a delta yields no stream id, so every
     // delta would open its own block and the message would render as one word per row.
-    event.stream_id = params.get("itemId").and_then(Value::as_str).map(str::to_string);
+    event.stream_id = params
+        .get("itemId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    event.span = span;
     event.text = text.to_string();
     vec![Ok(SessionMessage::Event(event))]
 }
@@ -526,6 +640,7 @@ fn tool_item(
     item: &Value,
     kind: &str,
     stream_id: Option<String>,
+    span: Option<String>,
     at_ms: i64,
     phase: Phase,
 ) -> Vec<Result<SessionMessage>> {
@@ -544,6 +659,7 @@ fn tool_item(
     };
     let mut event = Event::new(event_kind, Some(event_phase), at_ms);
     event.stream_id = stream_id;
+    event.span = span;
     event.name = Some(name.to_string());
     // **`status` is the discriminant, and an exit code is not enough on its own.** A
     // `fileChange` and an `mcpToolCall` carry no exit code at all, so reading only that
@@ -564,7 +680,14 @@ fn tool_item(
     }
     let mut detail = json!({});
     if let Some(object) = detail.as_object_mut() {
-        for field in ["command", "cwd", "exitCode", "durationMs", "status", "changes"] {
+        for field in [
+            "command",
+            "cwd",
+            "exitCode",
+            "durationMs",
+            "status",
+            "changes",
+        ] {
             if let Some(value) = item.get(field).filter(|value| !value.is_null()) {
                 object.insert(field.to_string(), value.clone());
             }
@@ -574,11 +697,12 @@ fn tool_item(
     vec![Ok(SessionMessage::Event(event))]
 }
 
-fn usage(params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
+fn usage(params: &Value, at_ms: i64, span: Option<String>) -> Vec<Result<SessionMessage>> {
     let Some(usage) = params.get("tokenUsage") else {
         return Vec::new();
     };
     let mut event = Event::new(EventKind::Usage, Some(Phase::Completed), at_ms);
+    event.span = span;
     event.data = Some(usage.clone());
     vec![Ok(SessionMessage::Event(event))]
 }
@@ -589,9 +713,10 @@ fn usage(params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
 /// ended answered 404 on every request and the observable result in Sylph was a turn that
 /// closed clean and said nothing — three causes with three different fixes and one
 /// appearance. `EventKind::Notice` is where the vendor's sentence goes.
-fn turn_error(params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
+fn turn_error(params: &Value, at_ms: i64, span: Option<String>) -> Vec<Result<SessionMessage>> {
     let error = params.get("error").unwrap_or(&Value::Null);
     let mut event = Event::new(EventKind::Notice, None, at_ms);
+    event.span = span;
     event.is_error = true;
     event.text = error
         .get("message")
@@ -614,11 +739,12 @@ fn turn_error(params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
 /// 'no-such-model-xyz' not found. Defaulting to fallback metadata`. Dropping it would
 /// leave a session running a fallback model while the picker showed a checkmark on a model
 /// that does not exist.
-fn warning(params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
+fn warning(params: &Value, at_ms: i64, span: Option<String>) -> Vec<Result<SessionMessage>> {
     let Some(message) = params.get("message").and_then(Value::as_str) else {
         return Vec::new();
     };
     let mut event = Event::new(EventKind::Notice, None, at_ms);
+    event.span = span;
     event.text = message.to_string();
     vec![Ok(SessionMessage::Event(event))]
 }
@@ -629,7 +755,7 @@ fn warning(params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
 /// every transcript for work the user did not ask about. A failure is different: an MCP
 /// server that did not come up removes tools the agent would otherwise have, and nothing
 /// else reports it.
-fn mcp_startup(params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
+fn mcp_startup(params: &Value, at_ms: i64, span: Option<String>) -> Vec<Result<SessionMessage>> {
     let failed = params.get("error").is_some_and(|value| !value.is_null())
         || params
             .get("failureReason")
@@ -642,6 +768,7 @@ fn mcp_startup(params: &Value, at_ms: i64) -> Vec<Result<SessionMessage>> {
         .and_then(Value::as_str)
         .unwrap_or("an MCP server");
     let mut event = Event::new(EventKind::Notice, None, at_ms);
+    event.span = span;
     event.is_error = true;
     event.text = format!("{name} failed to start");
     event.data = Some(json!({
@@ -761,7 +888,12 @@ fn config_options(settings: &Value, catalogue: &[Value]) -> Vec<ConfigOption> {
         // A model the catalogue does not hold — which a bogus `model` write produces —
         // leaves the ladder to the spawn-time list rather than empty, so the control stays
         // usable while the warning explains the model.
-        .unwrap_or_else(|| super::SPAWN_EFFORT_CHOICES.iter().map(|e| e.to_string()).collect());
+        .unwrap_or_else(|| {
+            super::SPAWN_EFFORT_CHOICES
+                .iter()
+                .map(|e| e.to_string())
+                .collect()
+        });
     options.push(ConfigOption {
         id: "effort".into(),
         name: "Reasoning effort".into(),
@@ -803,12 +935,7 @@ fn config_options(settings: &Value, catalogue: &[Value]) -> Vec<ConfigOption> {
     options
 }
 
-fn select(
-    id: &str,
-    name: &str,
-    current: Option<Value>,
-    choices: &[&str],
-) -> ConfigOption {
+fn select(id: &str, name: &str, current: Option<Value>, choices: &[&str]) -> ConfigOption {
     ConfigOption {
         id: id.to_string(),
         name: name.to_string(),
@@ -839,7 +966,10 @@ fn flatten_text(content: Option<&Value>) -> String {
             // Read by **presence of `text`** rather than by matching a `type` tag: this
             // vendor spells the same block `text`, `Text`, and `output_text` in its three
             // vocabularies, and a fourth casing would silently empty every message.
-            other => other.get("text").and_then(Value::as_str).map(str::to_string),
+            other => other
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         })
         .collect::<Vec<_>>()
         .join("")
@@ -958,9 +1088,7 @@ async fn open(child: Child, lines: mpsc::Receiver<Line>, spec: RunSpec) -> Resul
 
     // The catalogue, before the thread, because it is what validates a `model` or `effort`
     // write and the vendor validates neither.
-    let catalogue = request(
-        &child,
-        method::MODEL_LIST, json!({}))
+    let catalogue = request(&child, method::MODEL_LIST, json!({}))
         .await
         .ok()
         .and_then(|reply| {
@@ -972,9 +1100,7 @@ async fn open(child: Child, lines: mpsc::Receiver<Line>, spec: RunSpec) -> Resul
         })
         .unwrap_or_default();
 
-    let opened = request(
-        &child,
-        open_method, open_params)
+    let opened = request(&child, open_method, open_params)
         .await
         .with_context(|| {
             format!(
@@ -1051,13 +1177,13 @@ fn settings_from_open(result: &Value) -> Value {
 
 #[async_trait]
 impl Session for CodexSession {
-    fn native_id(&self) -> &NativeId {
-        &self.thread
+    fn native_id(&self) -> Option<NativeId> {
+        Some(self.thread.clone())
     }
 
     /// The surface the **vendor** last reported.
     ///
-    /// Built from [`State::settings`], which only ever holds a payload codex sent — the
+    /// Built from `State::settings`, which only ever holds a payload codex sent — the
     /// open reply or a `thread/settings/updated`. Never from what was last set: a session
     /// can also be steered by the agent's own TUI, and the vendor is the only thing that
     /// knows whether a write was honoured.
@@ -1137,9 +1263,7 @@ impl Session for CodexSession {
             }
         }
 
-        let reply = request(
-            &self.child,
-            method::TURN_START, params).await?;
+        let reply = request(&self.child, method::TURN_START, params).await?;
         // **The turn id is read from the reply, not awaited on the notification.** A steer
         // sent immediately after `send` needs `expectedTurnId`, and `turn/started` arrives
         // 13 ms later — measured. Waiting for the notification would make a fast client's
@@ -1153,6 +1277,14 @@ impl Session for CodexSession {
             self.state.lock().await.turn = Some(id.to_string());
         }
         Ok(())
+    }
+
+    /// Start a prepared link's first turn.  Codex assigns a thread id in
+    /// `thread/start`, before any turn exists, so sending the prompt does not need
+    /// an additional identity wait here.
+    async fn send_initial(&self, turn: TurnInput) -> Result<NativeId> {
+        self.send(turn).await?;
+        Ok(self.thread.clone())
     }
 
     /// End the running turn, keeping the session.
@@ -1180,19 +1312,16 @@ impl Session for CodexSession {
     /// asks for, implemented by the vendor rather than simulated here, so a steer racing a
     /// turn boundary is refused instead of landing in the next conversation.
     async fn steer(&self, text: &str, expected_turn_id: Option<&str>) -> Result<()> {
-        let turn = match expected_turn_id {
-            Some(id) => id.to_string(),
-            // `None` means "whatever is running", which is a coherent ask from a client
-            // with no turn in view. The adapter substitutes the turn it last saw the vendor
-            // report — still the vendor's value, so the precondition remains real.
-            None => self
-                .state
-                .lock()
-                .await
-                .turn
-                .clone()
-                .ok_or_else(|| anyhow!("no codex turn is running, so there is nothing to steer"))?,
-        };
+        let turn =
+            match expected_turn_id {
+                Some(id) => id.to_string(),
+                // `None` means "whatever is running", which is a coherent ask from a client
+                // with no turn in view. The adapter substitutes the turn it last saw the vendor
+                // report — still the vendor's value, so the precondition remains real.
+                None => self.state.lock().await.turn.clone().ok_or_else(|| {
+                    anyhow!("no codex turn is running, so there is nothing to steer")
+                })?,
+            };
         request(
             &self.child,
             method::TURN_STEER,
@@ -1399,6 +1528,17 @@ impl Session for CodexSession {
         // ([`appserver::SETTINGS_REPLY_IS_EMPTY`]).
         let _ = tokio::time::timeout(SETTINGS_ECHO_WAIT, echo).await;
         Ok(self.capabilities().await?.config)
+    }
+
+    fn launch_flag_for_config(&self, id: &str, value: &Value) -> Option<(String, String)> {
+        let value = value.as_str()?.to_string();
+        match id {
+            // `sandbox` is translated to an object only on the app-server wire. The
+            // launch flag is intentionally the protocol's stable string spelling.
+            "model" | "effort" | "approvalPolicy" | "sandbox" => Some((id.to_string(), value)),
+            // Personality is runtime-only: the CLI has no corresponding launch flag.
+            _ => None,
+        }
     }
 
     /// Answer an approval codex raised.
@@ -1730,7 +1870,10 @@ mod tests {
 
         let result = only_event(&translator, item("completed", json!("ok\n"), json!(0))).await;
         assert_eq!(result.kind, EventKind::ToolResult);
-        assert_eq!(result.stream_id.as_deref(), Some("exec-19dc1194-088e-48f3-9c95-1b6b38d0ed35"));
+        assert_eq!(
+            result.stream_id.as_deref(),
+            Some("exec-19dc1194-088e-48f3-9c95-1b6b38d0ed35")
+        );
         assert_eq!(result.text, "ok\n");
         assert_eq!(result.data.as_ref().unwrap()["exitCode"], json!(0));
         assert!(!result.is_error);
@@ -1750,7 +1893,10 @@ mod tests {
             }),
         )
         .await;
-        assert!(failed.is_error, "a failed item with no exit code is still a failure");
+        assert!(
+            failed.is_error,
+            "a failed item with no exit code is still a failure"
+        );
         assert_eq!(failed.name.as_deref(), Some("mcp"));
     }
 
@@ -1774,8 +1920,11 @@ mod tests {
 
         assert!(events(&translator, frame(json!([]))).await.is_empty());
 
-        let event = only_event(&translator, frame(json!([{"type": "text", "text": "weighing"}])))
-            .await;
+        let event = only_event(
+            &translator,
+            frame(json!([{"type": "text", "text": "weighing"}])),
+        )
+        .await;
         assert_eq!(event.kind, EventKind::Thinking);
         assert_eq!(event.text, "weighing");
     }
@@ -1827,12 +1976,19 @@ mod tests {
         .await;
         assert!(failed.is_error);
         assert_eq!(failed.data.as_ref().unwrap()["stopReason"], "failed");
-        assert!(failed.text.contains("banana"), "the vendor's sentence: {:?}", failed.text);
+        assert!(
+            failed.text.contains("banana"),
+            "the vendor's sentence: {:?}",
+            failed.text
+        );
 
         // `interrupted` is a real outcome and **not** a failure: a user's stop reported red
         // would present a deliberate stop as a broken turn.
         let interrupted = only_event(&translator, close("interrupted", Value::Null)).await;
-        assert_eq!(interrupted.data.as_ref().unwrap()["stopReason"], "interrupted");
+        assert_eq!(
+            interrupted.data.as_ref().unwrap()["stopReason"],
+            "interrupted"
+        );
         assert!(!interrupted.is_error);
     }
 
@@ -1920,12 +2076,143 @@ mod tests {
         // by naming our own thread, and by naming the primary agent's path.
         let child = translator(child_thread).await;
         assert!(
-            events(&child, item(child_thread, "/root/echo_task")).await.is_empty(),
+            events(&child, item(child_thread, "/root/echo_task"))
+                .await
+                .is_empty(),
             "our own thread as the other party is a record of the parent"
         );
         assert!(
-            events(&child, item("01a0462b-b919-7c33-9d9c-f8bec39c3cc8", "/root")).await.is_empty(),
+            events(
+                &child,
+                item("01a0462b-b919-7c33-9d9c-f8bec39c3cc8", "/root")
+            )
+            .await
+            .is_empty(),
             "an /root agentPath is the child's view upward"
+        );
+    }
+
+    /// Child items are multiplexed onto the parent's app-server stream, so their
+    /// `threadId` must become the trajectory span. Without it, the child command and
+    /// answer render as root rows beside an empty delegation card.
+    #[tokio::test]
+    async fn child_items_are_attributed_to_their_thread_trajectory() {
+        let translator = translator("parent").await;
+        let event = only_event(
+            &translator,
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "child",
+                    "item": {
+                        "type": "agentMessage",
+                        "id": "msg-child",
+                        "text": "child answer",
+                        "phase": "final_answer"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(event.kind, EventKind::Assistant);
+        assert_eq!(event.span.as_deref(), Some("child"));
+    }
+
+    /// A child `turn/completed` closes the delegated trajectory. It must not be emitted as a
+    /// root `turn` event, because the server uses that event to settle the parent's turn.
+    /// Session-scoped routing is still needed for a child boundary that arrives after the
+    /// parent has already settled; this adapter test pins the first half of that contract.
+    #[tokio::test]
+    async fn child_turn_completion_closes_the_trajectory_not_the_root_turn() {
+        let translator = translator("parent").await;
+        let _ = events(
+            &translator,
+            json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": "parent",
+                    "item": {
+                        "type": "subAgentActivity",
+                        "id": "call-spawn",
+                        "kind": "started",
+                        "agentThreadId": "child",
+                        "agentPath": "/root/worker"
+                    }
+                }
+            }),
+        )
+        .await;
+
+        let child_close = events(
+            &translator,
+            json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "child",
+                    "turn": {
+                        "id": "turn-child",
+                        "status": "completed",
+                        "items": [{"type": "agentMessage", "text": "all done"}],
+                        "startedAt": 1787883671i64,
+                        "durationMs": 1000
+                    }
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(child_close.len(), 1);
+        assert_eq!(child_close[0].kind, EventKind::Subagent);
+        assert_eq!(child_close[0].stream_id.as_deref(), Some("child"));
+        assert_eq!(child_close[0].span.as_deref(), Some("call-spawn"));
+        assert_eq!(child_close[0].text, "all done");
+    }
+
+    /// Replay the measured fork capture rather than a hand-written subset. The fixture's
+    /// ordering is the important part: the parent turn completes before the child's final
+    /// deltas and completion, and a later parent turn starts while those frames are still
+    /// arriving. A translator that routes by "currently active turn" turns the child close
+    /// into a second root turn, which is the source of the `unprompted` card.
+    #[tokio::test]
+    async fn measured_fork_capture_keeps_child_frames_out_of_root_turns() {
+        let parent = "01a0462b-b919-7c33-9d9c-f8bec39c3cc8";
+        let translator = translator(parent).await;
+        let capture =
+            include_str!("../../../../docs/measurements/codex/captures/s10_delegation_fork.jsonl");
+        let mut produced = Vec::new();
+        for line in capture.lines() {
+            let row: Value = serde_json::from_str(line).expect("capture row is JSON");
+            if row.get("dir").and_then(Value::as_str) != Some("in") {
+                continue;
+            }
+            let Some(frame) = row.get("frame") else {
+                continue;
+            };
+            produced.extend(events(&translator, frame.clone()).await);
+        }
+
+        let child = "01a0462b-cdb3-75e0-b609-0a218686b187";
+        assert!(
+            produced
+                .iter()
+                .any(|event| event.span.as_deref() == Some(child)),
+            "the measured child must have attributed interior events"
+        );
+        let child_close = produced.iter().find(|event| {
+            event.kind == EventKind::Subagent
+                && event.stream_id.as_deref() == Some(child)
+                && event.phase == Some(Phase::Completed)
+        });
+        assert!(
+            child_close.is_some(),
+            "the child close must survive the replay"
+        );
+        assert!(
+            produced.iter().all(|event| {
+                !(event.kind == EventKind::Turn
+                    && event.stream_id.as_deref() == Some("01a0462b-cde2-76d1-a20d-3613d4b20a7c"))
+            }),
+            "child turn/completed must never become a root turn event"
         );
     }
 
@@ -2053,10 +2340,16 @@ mod tests {
             "the request must pair to the tool_call already on the timeline"
         );
         let offered: Vec<&str> = request.options.iter().map(|o| o.id.as_str()).collect();
-        assert_eq!(offered, ["accept", "acceptWithExecpolicyAmendment", "cancel"]);
+        assert_eq!(
+            offered,
+            ["accept", "acceptWithExecpolicyAmendment", "cancel"]
+        );
         // The object variant is offered under its **member name**, which is what `resolve`
         // maps back to the payload the vendor sent.
-        assert!(request.options[1].persistent, "an amendment is a lasting grant");
+        assert!(
+            request.options[1].persistent,
+            "an amendment is a lasting grant"
+        );
         assert!(!request.options[0].persistent, "`accept` is once");
         assert!(request.allow_persistent);
         // An approval declares no form: its subject *is* one proposed tool input, which the
@@ -2138,9 +2431,16 @@ mod tests {
         assert_eq!(by_id("effort").current_value, Some(json!("low")));
         // **Per model.** The ladder is this model's `supportedReasoningEfforts`, not a
         // session-global list, so a two-effort model offers two rows.
-        let ladder: Vec<&str> = by_id("effort").options.iter().map(|c| c.value.as_str()).collect();
+        let ladder: Vec<&str> = by_id("effort")
+            .options
+            .iter()
+            .map(|c| c.value.as_str())
+            .collect();
         assert_eq!(ladder, ["low", "high"]);
-        assert_eq!(by_id("approvalPolicy").current_value, Some(json!("on-request")));
+        assert_eq!(
+            by_id("approvalPolicy").current_value,
+            Some(json!("on-request"))
+        );
         assert_eq!(by_id("personality").current_value, Some(json!("pragmatic")));
 
         // The translation this test exists for.
@@ -2195,7 +2495,10 @@ mod tests {
             other => panic!("expected a capability partial, got {other:?}"),
         };
         assert!(facets.config.is_some());
-        assert!(facets.commands.is_none(), "commands must not be cleared by a settings echo");
+        assert!(
+            facets.commands.is_none(),
+            "commands must not be cleared by a settings echo"
+        );
         assert!(facets.subagents.is_none());
         assert!(facets.permission_mode.is_none());
 
@@ -2230,7 +2533,8 @@ mod tests {
         // `format!` script took three attempts, each failing as a parse error that read as a
         // product bug rather than as a quoting one. A file has no layers to survive, and it
         // lets the test use the *measured* payload rather than a sanitized one.
-        let frame = std::env::temp_dir().join(format!("sylph-codex-approval-{}", std::process::id()));
+        let frame =
+            std::env::temp_dir().join(format!("sylph-codex-approval-{}", std::process::id()));
         std::fs::write(&frame, serde_json::to_string(&approval_frame(1)).unwrap()).unwrap();
 
         // Our first request is id 1, so the peer raises its approval as id 1 too — the
@@ -2318,7 +2622,10 @@ mod tests {
                 // decisions the vendor offered, so a frame that arrived stripped would be as
                 // useless as one that never arrived.
                 let offered: Vec<&str> = request.options.iter().map(|o| o.id.as_str()).collect();
-                assert_eq!(offered, ["accept", "acceptWithExecpolicyAmendment", "cancel"]);
+                assert_eq!(
+                    offered,
+                    ["accept", "acceptWithExecpolicyAmendment", "cancel"]
+                );
             }
             other => panic!("expected the early approval as a Request, got {other:?}"),
         }
@@ -2326,7 +2633,7 @@ mod tests {
         // And the session is usable afterwards, so recovering the frame did not cost the
         // open: the thread id landed even though a frame overtook it.
         assert_eq!(
-            session.native_id().as_str(),
+            session.native_id().as_ref().unwrap().as_str(),
             "01a0460c-c359-7ed3-9e13-212c0a33d6c0"
         );
         let _ = std::fs::remove_file(&frame);
@@ -2339,10 +2646,15 @@ mod tests {
     /// app-server does.
     #[tokio::test]
     async fn an_open_reports_the_thread_id_the_vendor_assigned() {
-        let session = open_against(SCRIPTED_APP_SERVER).await.expect("the peer opens");
+        let session = open_against(SCRIPTED_APP_SERVER)
+            .await
+            .expect("the peer opens");
         // Reported by the vendor, not minted here. `dictates_native_id` is false for this
         // agent, so this value is the only thing that makes the session resumable.
-        assert_eq!(session.native_id().as_str(), "01a0460c-c359-7ed3-9e13-212c0a33d6c0");
+        assert_eq!(
+            session.native_id().as_ref().unwrap().as_str(),
+            "01a0460c-c359-7ed3-9e13-212c0a33d6c0"
+        );
 
         // The opening surface comes from the open reply, whose member names differ from the
         // notification's — `reasoningEffort` there, `effort` here.
@@ -2379,7 +2691,7 @@ mod tests {
                 // than with `expect_err`.
                 Ok(session) => panic!(
                     "an open with no reported id must fail, but it answered with {}",
-                    session.native_id()
+                    session.native_id().as_ref().unwrap()
                 ),
                 Err(error) => error,
             };
@@ -2527,9 +2839,16 @@ mod tests {
 
         let session = open_against(&script).await.expect("the peer opens");
         // The open reports `reasoningEffort: "high"`, so this one is a real change.
-        session.set_config("effort", json!("low")).await.expect("a real change is written");
+        session
+            .set_config("effort", json!("low"))
+            .await
+            .expect("a real change is written");
         let after_first = std::fs::read_to_string(&log).unwrap_or_default();
-        assert_eq!(after_first.lines().count(), 1, "the first write reaches the vendor");
+        assert_eq!(
+            after_first.lines().count(),
+            1,
+            "the first write reaches the vendor"
+        );
 
         // The peer's notification reported `effort: "low"`, so this is now current.
         let refreshed = session
@@ -2572,8 +2891,14 @@ mod tests {
 
         // Both controls need the turn id, and both would fail with "nothing is running" if
         // the id had not been read from the reply.
-        session.steer("and stop", None).await.expect("a steer reaches the vendor");
-        session.interrupt().await.expect("an interrupt reaches the vendor");
+        session
+            .steer("and stop", None)
+            .await
+            .expect("a steer reaches the vendor");
+        session
+            .interrupt()
+            .await
+            .expect("an interrupt reaches the vendor");
     }
 
     /// **A turn with neither text nor an attachment is refused rather than sent empty.**

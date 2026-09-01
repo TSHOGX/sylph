@@ -124,9 +124,8 @@ mod tests {
 
     #[test]
     fn quoted_fields_keep_their_commas_and_newlines() {
-        let file = testing::write_temp(
-            b"name,note\n\"Smith, Alice\",\"line one\nline two\"\nBob,plain\n",
-        );
+        let file =
+            testing::write_temp(b"name,note\n\"Smith, Alice\",\"line one\nline two\"\nBob,plain\n");
         let grid = parse(file.path(), b',', Window::new(None, None, None)).unwrap();
 
         assert_eq!(grid.rows[1][0].as_ref().unwrap().v, "Smith, Alice");
@@ -184,7 +183,11 @@ mod tests {
         assert_eq!(parse_number("0.75"), Some(0.75));
 
         assert_eq!(parse_number("007"), None, "a zero-padded code stays text");
-        assert_eq!(parse_number("1e5"), None, "scientific notation is not plain");
+        assert_eq!(
+            parse_number("1e5"),
+            None,
+            "scientific notation is not plain"
+        );
         assert_eq!(parse_number("NaN"), None);
         assert_eq!(parse_number("inf"), None);
         assert_eq!(parse_number("12abc"), None);

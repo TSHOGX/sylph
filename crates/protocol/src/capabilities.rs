@@ -524,7 +524,11 @@ mod tests {
         facets.apply_to(&mut surface);
 
         assert_eq!(surface.permission_mode.as_deref(), Some("plan"));
-        assert_eq!(surface.commands.len(), 1, "commands must survive a mode-only update");
+        assert_eq!(
+            surface.commands.len(),
+            1,
+            "commands must survive a mode-only update"
+        );
         assert_eq!(surface.subagents.len(), 1);
         assert_eq!(surface.context_window, Some(1_000_000));
     }
@@ -549,7 +553,10 @@ mod tests {
         let facets: CapabilityFacets = serde_json::from_str("{}").unwrap();
         assert!(facets.is_empty());
         let named: CapabilityFacets = serde_json::from_str(r#"{"commands":[]}"#).unwrap();
-        assert!(!named.is_empty(), "an empty list is still a statement about commands");
+        assert!(
+            !named.is_empty(),
+            "an empty list is still a statement about commands"
+        );
     }
 
     /// `set_config` answers with a refreshed config array, and that answer must not be
@@ -588,9 +595,15 @@ mod tests {
         option.current_value = Some(json!("a"));
         let wire = serde_json::to_value(&option).unwrap();
         assert_eq!(wire["type"], "select");
-        assert!(wire.get("kind").is_none(), "the Rust field name must not leak");
+        assert!(
+            wire.get("kind").is_none(),
+            "the Rust field name must not leak"
+        );
         assert_eq!(wire["id"], "model", "the tag is a sibling, not a wrapper");
-        assert_eq!(serde_json::from_value::<ConfigOption>(wire).unwrap(), option);
+        assert_eq!(
+            serde_json::from_value::<ConfigOption>(wire).unwrap(),
+            option
+        );
     }
 
     /// A boolean's current value is a boolean. The spec spells this field

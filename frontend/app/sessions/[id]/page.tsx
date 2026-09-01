@@ -36,6 +36,11 @@ import { relayName, useEnvironments } from "@/lib/environments";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useSSE } from "@/lib/use-sse";
 import { useAgentSession } from "@/lib/use-agent-session";
+import { useSessionTrace } from "@/lib/use-session-trace";
+import {
+  buildSessionTrace,
+  projectSessionTurnsFromIndex,
+} from "@/lib/trace-index";
 import { ApprovalDialog } from "@/components/approval-dialog";
 import { type StagedAttachment } from "@/components/attachment-picker";
 import { Composer } from "@/components/composer";
@@ -93,6 +98,7 @@ export default function SessionPage() {
 
   const session = sessionQuery.data?.session;
   const history = useMemo(() => historyQuery.data?.turns ?? [], [historyQuery.data]);
+  const { events: traceEvents } = useSessionTrace(sessionId || undefined, Boolean(sessionId));
 
   // There is deliberately no empty-session cleanup here any more. `POST /sessions`
   // starts an agent rather than reserving a row, so a session has no identity until an
@@ -379,7 +385,7 @@ export default function SessionPage() {
           <FidelityMarker value={session.fidelity} />
           {environments.showEnvironment && (
             <EnvironmentChip
-              name={session.environmentName}
+              name={environments.nameOf(session.environment) ?? session.environment}
               reachableVia={relayName(session.environment, environments)}
             />
           )}
@@ -494,6 +500,7 @@ export default function SessionPage() {
           <ErrorBoundary label="the transcript">
             <Transcript
               history={history}
+              traceEvents={traceEvents}
               fidelity={session.fidelity}
               isPending={historyQuery.isPending}
               error={historyQuery.error}
@@ -747,6 +754,7 @@ function turnAsText(entry: TurnWithEvents): string {
 
 function Transcript({
   history,
+  traceEvents,
   fidelity,
   isPending,
   error,
@@ -760,6 +768,7 @@ function Transcript({
   onLiveTurnSettled,
 }: {
   history: TurnWithEvents[];
+  traceEvents: import("@/lib/api-types").StreamEvent[];
   /**
    * The session's, threaded to every `Timeline` below.
    *
@@ -779,8 +788,16 @@ function Transcript({
   filter: string | null;
   onLiveTurnSettled: (state: string) => void;
 }) {
+  const traceIndex = useMemo(
+    () => buildSessionTrace(history, traceEvents),
+    [history, traceEvents],
+  );
+  const projectedHistory = useMemo(
+    () => projectSessionTurnsFromIndex(history, traceIndex),
+    [history, traceIndex],
+  );
   const past = useMemo(() => {
-    const rows = history.filter((entry) => entry.turn.id !== liveTurnId);
+    const rows = projectedHistory.filter((entry) => entry.turn.id !== liveTurnId);
     const needle = filter?.trim().toLowerCase();
     if (!needle) return rows;
     return rows.filter(
@@ -788,7 +805,7 @@ function Transcript({
         entry.turn.requestText.toLowerCase().includes(needle) ||
         entry.events.some((event) => event.text?.toLowerCase().includes(needle)),
     );
-  }, [history, liveTurnId, filter]);
+  }, [projectedHistory, liveTurnId, filter]);
 
   if (isPending) {
     return (
@@ -857,6 +874,7 @@ function Transcript({
           // session streams events from a *file* the vendor is flushing, where the
           // record genuinely is coarse while the turn is genuinely live.
           fidelity={fidelity}
+          traceEvents={liveTurnId ? traceIndex.eventsByTurn.get(liveTurnId) ?? [] : []}
           isLive={isLive}
           onOpenFile={onOpenFile}
           expandAll={expandAll}
@@ -968,6 +986,7 @@ function TurnSection({
 function LiveTurn({
   turnId,
   fidelity,
+  traceEvents,
   isLive,
   onOpenFile,
   expandAll,
@@ -975,6 +994,8 @@ function LiveTurn({
 }: {
   turnId: string;
   fidelity: Fidelity;
+  /** Current-turn projection from the session trace; late child events are included. */
+  traceEvents: import("@/lib/api-types").StreamEvent[];
   isLive: boolean;
   onOpenFile: (path: string, line?: number) => void;
   expandAll: boolean | null;
@@ -988,7 +1009,19 @@ function LiveTurn({
   onSettled: (state: string) => void;
 }) {
   const t = useT();
-  const { events, status, settled } = useSSE({ turnId, enabled: isLive });
+  const { events: turnEvents, status, settled } = useSSE({ turnId, enabled: isLive });
+  const events = useMemo(() => {
+    // The session trace is the authoritative projection for rendering. Keep the
+    // turn stream as a compatibility tail while older backends roll out the new
+    // endpoint, and while a trace frame is still in flight. Sequence ids make the
+    // merge deterministic and prevent double-rendering the same tool delta.
+    const bySeq = new Map<number, import("@/lib/api-types").StreamEvent>();
+    for (const event of traceEvents) bySeq.set(event.seq, event);
+    for (const event of turnEvents) {
+      if (!bySeq.has(event.seq)) bySeq.set(event.seq, event);
+    }
+    return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+  }, [traceEvents, turnEvents]);
 
   // Report the close upward. A genuine external-system sync: the stream is the external
   // system, and the parent owns what a settled turn does to the rest of the page.

@@ -302,14 +302,20 @@ mod tests {
         // Header row: all text, no formulas anywhere in it.
         for cell in grid.rows[0].iter().flatten() {
             assert_eq!(cell.t, crate::documents::grid::CellType::Text, "{cell:?}");
-            assert!(cell.f.is_none(), "a header cell carries no formula: {cell:?}");
+            assert!(
+                cell.f.is_none(),
+                "a header cell carries no formula: {cell:?}"
+            );
         }
 
         // Body: the label and the number are untouched, only C is computed.
         let row = &grid.rows[1];
         assert_eq!(row[0].as_ref().unwrap().v, "APAC");
         assert!(row[0].as_ref().unwrap().f.is_none());
-        assert_eq!(row[1].as_ref().unwrap().t, crate::documents::grid::CellType::Number);
+        assert_eq!(
+            row[1].as_ref().unwrap().t,
+            crate::documents::grid::CellType::Number
+        );
         assert!(row[1].as_ref().unwrap().f.is_none());
 
         let computed = row[2].as_ref().unwrap();
@@ -333,7 +339,10 @@ mod tests {
         let missing = grid.rows[1][1]
             .as_ref()
             .expect("a formula with no cached value must not be dropped");
-        assert_eq!(missing.v, "=B1+C1", "the expression stands in for the value");
+        assert_eq!(
+            missing.v, "=B1+C1",
+            "the expression stands in for the value"
+        );
         assert_eq!(missing.f.as_deref(), Some("B1+C1"));
         assert_eq!(missing.t, crate::documents::grid::CellType::Formula);
 

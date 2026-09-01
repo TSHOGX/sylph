@@ -305,7 +305,10 @@ fn parse_rollout(path: &Path) -> Result<ParsedRollout> {
         }
         let at_ms = at_ms.unwrap_or(NO_RECORDED_TIME);
 
-        let kind = record.get("type").and_then(Value::as_str).unwrap_or_default();
+        let kind = record
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let Some(payload) = record.get("payload") else {
             // Every record in this store carries one. A record without it is a shape no
             // known era emits, and this counts rather than guesses.
@@ -834,8 +837,8 @@ fn legacy_delegation(
     // delegate because the vendor writes two; neither is optional, and 5 spawn records carry
     // neither a nickname nor a resolvable thread — those simply produce nothing rather than a
     // node with no identity.
-    let Some(thread) = string_at(payload, "new_thread_id")
-        .or_else(|| string_at(payload, "receiver_thread_id"))
+    let Some(thread) =
+        string_at(payload, "new_thread_id").or_else(|| string_at(payload, "receiver_thread_id"))
     else {
         return;
     };
@@ -890,12 +893,7 @@ fn legacy_delegation(
 /// A reader looking for a `status` string finds an object and reports nothing; a reader taking
 /// the object's truthiness reports every failure as a success, because `{"errored": …}` is as
 /// present as `{"completed": null}`. Both are silent.
-fn legacy_delegation_close(
-    payload: &Value,
-    subtype: &str,
-    at_ms: i64,
-    parsed: &mut ParsedRollout,
-) {
+fn legacy_delegation_close(payload: &Value, subtype: &str, at_ms: i64, parsed: &mut ParsedRollout) {
     // A close names one thread; a wait names N. `statuses` is keyed **by thread id**, which is
     // what makes a wait on three delegates close three trajectories rather than one — the
     // multiplexing rule `translate::TrajectoryId` exists for, in this vendor's spelling.
@@ -916,9 +914,7 @@ fn legacy_delegation_close(
         // The enum's tag. `errored` carries the vendor's own sentence as its value, which is
         // what a reader needs to know *what* failed.
         let (failed, message) = match status.as_object().and_then(|object| object.iter().next()) {
-            Some((tag, value)) if tag == "errored" => {
-                (true, value.as_str().map(str::to_string))
-            }
+            Some((tag, value)) if tag == "errored" => (true, value.as_str().map(str::to_string)),
             Some((tag, _)) if tag == "completed" => (false, None),
             // A tag this build does not know. **Not treated as a failure**: an unrecognized
             // outcome is not evidence of one, and colouring it red would report an unknown
@@ -983,8 +979,7 @@ fn item_completed(
             if text.is_empty() {
                 return;
             }
-            let mut event =
-                Event::new(EventKind::Assistant, Some(Phase::Completed), completed_ms);
+            let mut event = Event::new(EventKind::Assistant, Some(Phase::Completed), completed_ms);
             event.stream_id = string_at(item, "id");
             event.text = text;
             // **`content[].type` is `Text` here and `output_text` on the sibling
@@ -1073,7 +1068,14 @@ fn paginated_tool_item(item: &Value, started_ms: Option<i64>, at_ms: i64) -> Opt
         .unwrap_or_default();
     let mut detail = json!({});
     if let Some(object) = detail.as_object_mut() {
-        for field in ["command", "cwd", "exit_code", "duration", "status", "changes"] {
+        for field in [
+            "command",
+            "cwd",
+            "exit_code",
+            "duration",
+            "status",
+            "changes",
+        ] {
             if let Some(value) = item.get(field).filter(|value| !value.is_null()) {
                 object.insert(field.to_string(), value.clone());
             }
@@ -1358,9 +1360,9 @@ fn locate(id: &NativeId) -> Result<PathBuf> {
         if !name.contains(wanted) {
             continue;
         }
-        if header_of(&candidate).is_some_and(|header| {
-            header.native_id.as_ref().map(NativeId::as_str) == Some(wanted)
-        }) {
+        if header_of(&candidate)
+            .is_some_and(|header| header.native_id.as_ref().map(NativeId::as_str) == Some(wanted))
+        {
             return Ok(candidate.path);
         }
     }
@@ -1383,7 +1385,8 @@ fn locate(id: &NativeId) -> Result<PathBuf> {
 /// own `session_meta`, and can be resumed by that id, so hiding it would make 214 real
 /// resumable sessions unreachable. Its lineage travels in `parent_native_id` instead.
 fn is_rollout(path: &Path) -> bool {
-    path.extension().is_some_and(|extension| extension == "jsonl")
+    path.extension()
+        .is_some_and(|extension| extension == "jsonl")
         && path
             .file_name()
             .and_then(|name| name.to_str())
@@ -1450,7 +1453,7 @@ pub fn watch(id: &NativeId) -> Result<EventStream> {
 ///    wrong answer rather than a missing one.
 /// 3. **A rollout already carries the session-level equivalents.** `task_complete` records the
 ///    vendor's own `duration_ms` per turn (2900 of 4317 closes), and `turn_aborted` records an
-///    interruption — both projected as events by [`parse_rollout`], where a reader that wants
+///    interruption — both projected as events by `parse_rollout`, where a reader that wants
 ///    turn status can have it at full fidelity rather than as a listing summary.
 ///
 /// So the decision is: **the projection is not consulted, and the facts it holds are reached
@@ -1699,8 +1702,10 @@ mod tests {
             "the paginated fixture must yield assistant text at all"
         );
 
-        let distinct: std::collections::BTreeSet<_> =
-            assistants.iter().filter_map(|e| e.stream_id.as_deref()).collect();
+        let distinct: std::collections::BTreeSet<_> = assistants
+            .iter()
+            .filter_map(|e| e.stream_id.as_deref())
+            .collect();
         assert_eq!(
             distinct.len(),
             assistants.len(),
@@ -1736,7 +1741,10 @@ mod tests {
         let subagents = of_kind(&events, EventKind::Subagent);
         assert_eq!(subagents.len(), 3, "the fixture spawns three agents");
         for sub in &subagents {
-            let stream = sub.stream_id.as_deref().expect("a trajectory has a stream id");
+            let stream = sub
+                .stream_id
+                .as_deref()
+                .expect("a trajectory has a stream id");
             let span = sub.span.as_deref().expect("and names its hosting call");
             assert!(
                 span.starts_with("call_"),
@@ -1898,7 +1906,6 @@ mod tests {
             "and must not carry a start, or this test is asserting the wrong thing"
         );
     }
-
 
     /// The era discriminant, and why it is not the version.
     #[test]

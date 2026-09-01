@@ -232,37 +232,26 @@ impl Error {
                 StatusCode::CONFLICT,
                 "TURN_MOVED",
                 match running {
-                    Some(running) => format!(
-                        "Turn {} is no longer running; {} is",
-                        expected, running
-                    ),
+                    Some(running) => {
+                        format!("Turn {} is no longer running; {} is", expected, running)
+                    }
                     None => format!("Turn {} is no longer running", expected),
                 },
             ),
             // 502-ish in spirit but reported as 503: the agent is a dependency
             // this server starts, and the useful signal is "try again once it
             // can start" rather than "your request was malformed".
-            Error::LinkFailed(msg) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LINK_FAILED",
-                msg.clone(),
-            ),
-            Error::Unsupported(msg) => (
-                StatusCode::CONFLICT,
-                "AGENT_UNSUPPORTED",
-                msg.clone(),
-            ),
+            Error::LinkFailed(msg) => (StatusCode::SERVICE_UNAVAILABLE, "LINK_FAILED", msg.clone()),
+            Error::Unsupported(msg) => (StatusCode::CONFLICT, "AGENT_UNSUPPORTED", msg.clone()),
             Error::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 "UNAUTHORIZED",
                 "Authentication required".to_string(),
             ),
             Error::Forbidden(msg) => (StatusCode::FORBIDDEN, "POLICY_VIOLATION", msg.clone()),
-            Error::AttachmentInvalid(msg) => (
-                StatusCode::BAD_REQUEST,
-                "ATTACHMENT_INVALID",
-                msg.clone(),
-            ),
+            Error::AttachmentInvalid(msg) => {
+                (StatusCode::BAD_REQUEST, "ATTACHMENT_INVALID", msg.clone())
+            }
             // 502 rather than 500: the failure is in a process this server started,
             // not in the server, and the distinction is what tells an operator whether
             // to look at their agent install or at Sylph.
@@ -276,11 +265,9 @@ impl Error {
                 "SESSION_ALREADY_PRESENT",
                 "A session with that identity is already recorded".to_string(),
             ),
-            Error::NotImplemented(msg) => (
-                StatusCode::NOT_IMPLEMENTED,
-                "NOT_IMPLEMENTED",
-                msg.clone(),
-            ),
+            Error::NotImplemented(msg) => {
+                (StatusCode::NOT_IMPLEMENTED, "NOT_IMPLEMENTED", msg.clone())
+            }
             // The id is echoed because it is the client's own input and the whole fix:
             // a wrong native id is indistinguishable from a store that has been
             // pruned, and the message is where a user checks what they pasted.
@@ -305,9 +292,7 @@ impl Error {
                      from a machine whose envagent is reachable."
                 ),
             ),
-            Error::InvalidRequest(msg) => {
-                (StatusCode::BAD_REQUEST, "INVALID_REQUEST", msg.clone())
-            }
+            Error::InvalidRequest(msg) => (StatusCode::BAD_REQUEST, "INVALID_REQUEST", msg.clone()),
             // The message names the process rather than the path, because that
             // is where the fault always is: the caller asked for a route this
             // binary does not serve.
@@ -380,14 +365,8 @@ mod tests {
 
     #[test]
     fn conflict_variants_map_to_409() {
-        assert_eq!(
-            Error::SessionAlreadyRunning.status(),
-            StatusCode::CONFLICT
-        );
-        assert_eq!(
-            Error::StopAlreadyCompleted.status(),
-            StatusCode::CONFLICT
-        );
+        assert_eq!(Error::SessionAlreadyRunning.status(), StatusCode::CONFLICT);
+        assert_eq!(Error::StopAlreadyCompleted.status(), StatusCode::CONFLICT);
     }
 
     #[test]
@@ -449,8 +428,7 @@ mod tests {
     #[test]
     fn every_emitted_code_is_published_in_the_openapi_enum() {
         let schema = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../docs/api-v1.openapi.json"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/api-v1.openapi.json"),
         )
         .expect("the OpenAPI schema is part of the repo");
         let schema: serde_json::Value =
@@ -461,7 +439,12 @@ mod tests {
             .as_array()
             .expect("the ErrorResponse schema declares a code enum")
             .iter()
-            .map(|value| value.as_str().expect("enum members are strings").to_string())
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("enum members are strings")
+                    .to_string()
+            })
             .collect::<Vec<_>>();
 
         // Every variant, constructed so the match in `code()` is exercised.
@@ -498,7 +481,10 @@ mod tests {
             Error::RequestNotFound,
             Error::RequestAlreadyResolved,
             Error::LinkGone,
-            Error::TurnMoved { expected: "t".into(), running: None },
+            Error::TurnMoved {
+                expected: "t".into(),
+                running: None,
+            },
             Error::LinkFailed("x".into()),
             Error::Unsupported("x".into()),
             Error::Internal("x".into()),
@@ -556,7 +542,9 @@ mod tests {
         // wildcard arm, so a new `Outcome` fails to compile until it is listed.
         let outcomes = [
             Outcome::Completed { stop_reason: None },
-            Outcome::Failed { message: "x".into() },
+            Outcome::Failed {
+                message: "x".into(),
+            },
             Outcome::Interrupted,
             Outcome::LinkLost { detail: None },
         ];
@@ -597,10 +585,7 @@ mod tests {
             StatusCode::BAD_GATEWAY
         );
         // The primary key refused a second row for one conversation.
-        assert_eq!(
-            Error::SessionAlreadyPresent.status(),
-            StatusCode::CONFLICT
-        );
+        assert_eq!(Error::SessionAlreadyPresent.status(), StatusCode::CONFLICT);
         // Distinct from 500 on purpose: no retry completes an unimplemented operation,
         // so a client must not offer one.
         assert_eq!(

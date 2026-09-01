@@ -288,7 +288,9 @@ function EnvironmentsSection() {
                   {environment.agents.length === 0
                     ? t("settings.environments.noAgents")
                     : environment.agents
-                        .map((agent) => `${agent.name} ${agent.version}`)
+                        .map((agent) =>
+                          agent.version ? `${agent.name} ${agent.version}` : agent.name,
+                        )
                         .join(" · ")}
                 </p>
               </li>

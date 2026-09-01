@@ -16,6 +16,8 @@ use axum::{
 };
 use tower_http::trace::TraceLayer;
 
+/// Which agents this machine can run, and where the server gets an adapter from.
+pub mod adapters;
 pub mod api;
 pub mod attachments;
 pub mod config;
@@ -27,23 +29,21 @@ pub mod documents;
 /// The seam local fork/exec used to occupy implicitly.
 pub mod env;
 pub mod error;
+pub mod events;
 /// The pool of live agent sessions, and the one place a link's output becomes
 /// durable state.
 pub mod links;
-pub mod events;
 pub mod middleware;
 pub mod models;
 pub mod paths;
-/// Which agents this machine can run, and where the server gets an adapter from.
-pub mod adapters;
 /// Durable, replayable history: folded deltas, content-addressed blobs, and
 /// watermark-driven retention.
 pub mod storage;
 pub mod supervisor;
 
 use crate::config::Config;
-use crate::error::Error;
 use crate::db::JournalStore;
+use crate::error::Error;
 use crate::events::EventHub;
 
 #[cfg(test)]
@@ -239,15 +239,16 @@ impl AppState {
         // so separate writers would leave the fold reading a buffer nobody flushed.
         let writer = crate::db::JournalWriter::new(store.clone());
 
-        let links = crate::links::LinkManager::new(
-            store.clone(),
-            writer.clone(),
-            hub.clone(),
-            environment.clone(),
-            adapters.clone(),
+        let links = crate::links::LinkManager::new(crate::links::LinkManagerConfig {
+            store: store.clone(),
+            data_dir: config.data_dir.clone(),
+            writer: writer.clone(),
+            hub: hub.clone(),
+            environment: environment.clone(),
+            adapters: adapters.clone(),
             soul_path,
-            seq.clone(),
-        );
+            seq: seq.clone(),
+        });
 
         // Turns on a live link. The two reference each other — the supervisor
         // asks for a link, the manager settles the supervisor's turns — so the
@@ -255,8 +256,8 @@ impl AppState {
         // Adopting a native session writes through the same three collaborators the live
         // drain path uses, which is what makes an adopted row indistinguishable from a
         // live one downstream (`docs/architecture.md` § One authority).
-        let ingest =
-            crate::db::NativeIngest::new(store.clone(), writer.clone(), seq.clone());
+        let ingest = crate::db::NativeIngest::new(store.clone(), writer.clone(), seq.clone())
+            .with_hub(hub.clone());
 
         let turns = crate::supervisor::turn::LinkedSupervisor::new(
             store.clone(),
@@ -346,6 +347,47 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/sessions",
             get(api::sessions::list).post(api::sessions::create),
+        )
+        .route(
+            "/api/v1/sessions/draft/{id}/capabilities",
+            get(api::links::prepared_capabilities),
+        )
+        .route(
+            "/api/v1/sessions/draft/{id}",
+            get(api::sessions::prepared_get).delete(api::links::discard_prepared),
+        )
+        .route(
+            "/api/v1/sessions/draft/{id}/turns",
+            post(api::turns::create_prepared),
+        )
+        .route(
+            "/api/v1/sessions/draft/{id}/config",
+            post(api::links::prepared_set_config),
+        )
+        // A prepared link already knows its contained workdir, even though it has
+        // no durable identity yet.  Reuse the session file handlers; `resolve`
+        // distinguishes the server-issued draft handle from an encoded session id.
+        .route(
+            "/api/v1/sessions/draft/{id}/files",
+            get(api::files::tree)
+                .post(api::files::upload)
+                .delete(api::files::remove),
+        )
+        .route(
+            "/api/v1/sessions/draft/{id}/files/directory",
+            post(api::files::mkdir),
+        )
+        .route(
+            "/api/v1/sessions/draft/{id}/files/content",
+            get(api::files::content),
+        )
+        .route(
+            "/api/v1/sessions/draft/{id}/files/document",
+            get(api::files::document),
+        )
+        .route(
+            "/api/v1/sessions/draft/{id}/files/raw",
+            get(api::files::raw),
         )
         // Bring in a session an agent already has, from that agent's own native
         // store. Replaces `POST /sessions/import`, which named a row in a separate
@@ -445,6 +487,12 @@ pub fn router(state: AppState) -> Router {
         // a request raised. Distinct from the turn stream, which only exists while
         // a turn does.
         .route("/api/v1/sessions/{id}/events", get(api::links::events))
+        // Complete reconnectable session trace, including turn and delegated trajectory
+        // events. The facts stream above remains a lightweight invalidation channel.
+        .route(
+            "/api/v1/sessions/{id}/trace/events",
+            get(api::links::trace_events),
+        )
         .route("/api/v1/turns/{id}", get(api::turns::get))
         .route("/api/v1/turns/{id}/events", get(api::turns::events))
         .route("/api/v1/turns/{id}/stop", post(api::turns::stop))

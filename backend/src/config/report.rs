@@ -237,12 +237,20 @@ mod tests {
     fn each_entry_names_its_source_and_its_override_variable() {
         let report = report(&[("HOME", "/home/u"), ("SYLPH_PORT", "4400")]);
 
-        let port = report.entries.iter().find(|e| e.key == "server.port").unwrap();
+        let port = report
+            .entries
+            .iter()
+            .find(|e| e.key == "server.port")
+            .unwrap();
         assert_eq!(port.value, "4400");
         assert_eq!(port.source, Source::Env);
         assert_eq!(port.env_var, "SYLPH_PORT");
 
-        let host = report.entries.iter().find(|e| e.key == "server.host").unwrap();
+        let host = report
+            .entries
+            .iter()
+            .find(|e| e.key == "server.host")
+            .unwrap();
         assert_eq!(host.source, Source::Default);
         assert_eq!(host.env_var, "SYLPH_HOST");
     }
@@ -253,7 +261,11 @@ mod tests {
     fn a_path_that_does_not_exist_is_reported_as_missing() {
         let report = report(&[("HOME", "/no/such/home")]);
 
-        let data = report.entries.iter().find(|e| e.key == "paths.data_dir").unwrap();
+        let data = report
+            .entries
+            .iter()
+            .find(|e| e.key == "paths.data_dir")
+            .unwrap();
         assert_eq!(data.exists, Some(false));
         assert!(report.render().contains("MISSING"));
     }
@@ -264,7 +276,12 @@ mod tests {
     fn settings_that_are_not_paths_report_no_existence_at_all() {
         let report = report(&[("HOME", "/home/u")]);
 
-        for key in ["server.host", "server.port", "log.level", "paths.browse_roots"] {
+        for key in [
+            "server.host",
+            "server.port",
+            "log.level",
+            "paths.browse_roots",
+        ] {
             let entry = report.entries.iter().find(|e| e.key == key).unwrap();
             assert_eq!(entry.exists, None, "{key} is not a path");
         }
@@ -281,9 +298,17 @@ mod tests {
             .collect();
         let report = Report::build(&Resolved::from_parts(&env, &FileConfig::default(), false));
 
-        let soul = report.entries.iter().find(|e| e.key == "paths.soul").unwrap();
+        let soul = report
+            .entries
+            .iter()
+            .find(|e| e.key == "paths.soul")
+            .unwrap();
         assert_eq!(soul.exists, None, "there is no path to check");
-        assert!(soul.value.contains("none"), "says so plainly: {}", soul.value);
+        assert!(
+            soul.value.contains("none"),
+            "says so plainly: {}",
+            soul.value
+        );
         assert_eq!(soul.source, Source::Env);
     }
 

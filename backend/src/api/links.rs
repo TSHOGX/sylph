@@ -5,9 +5,15 @@
 //! from a live link rather than from a static descriptor, and an approval is a
 //! resource a client resolves rather than a message it happened to witness.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::Json;
+use serde::Deserialize;
+use std::convert::Infallible;
 use tokio_stream::StreamExt;
+use tokio_stream::{self as stream, wrappers::BroadcastStream};
 
 use sylph_protocol::SessionId;
 
@@ -15,6 +21,64 @@ use crate::error::{Error, Result};
 use crate::links::LinkState;
 use crate::models::{PendingRequest, ResolveRequest};
 use crate::AppState;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedConfigRequest {
+    pub id: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+pub struct TraceEventsQuery {
+    #[serde(default = "default_trace_after_seq")]
+    pub after_seq: i32,
+}
+
+fn default_trace_after_seq() -> i32 {
+    -1
+}
+
+/// POST /api/v1/sessions/draft/{id}/config
+pub async fn prepared_set_config(
+    State(state): State<AppState>,
+    Path(draft_id): Path<String>,
+    Json(body): Json<PreparedConfigRequest>,
+) -> Result<Json<crate::links::LinkState>> {
+    state
+        .links
+        .prepared_set_config(&draft_id, &body.id, body.value)
+        .await
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    let link = state
+        .links
+        .prepared_state(&draft_id)
+        .await
+        .ok_or(Error::SessionNotFound)?;
+    Ok(Json(link))
+}
+
+/// DELETE /api/v1/sessions/draft/{id}
+pub async fn discard_prepared(
+    State(state): State<AppState>,
+    Path(draft_id): Path<String>,
+) -> Result<StatusCode> {
+    state.links.discard_prepared(&draft_id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/v1/sessions/draft/{id}/capabilities
+pub async fn prepared_capabilities(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::links::LinkState>> {
+    let link = state
+        .links
+        .prepared_state(&id)
+        .await
+        .ok_or(Error::SessionNotFound)?;
+    Ok(Json(link))
+}
 
 /// What this session's agent can do right now.
 ///
@@ -39,7 +103,9 @@ pub async fn capabilities(
         // an agent that simply declares no commands, so the only honest thing it
         // could render was nothing at all.
         tracing::warn!("Could not establish a link for {}: {:#}", session_id, error);
-        return Ok(Json(state.links.state_after_failure(&session_id, &error).await));
+        return Ok(Json(
+            state.links.state_after_failure(&session_id, &error).await,
+        ));
     }
 
     Ok(Json(state.links.state(&session_id).await))
@@ -241,7 +307,9 @@ pub async fn steer(
     let session_id = require_session(&state, &session_id).await?;
 
     if body.text.trim().is_empty() {
-        return Err(Error::InvalidRequest("Steering text cannot be empty".into()));
+        return Err(Error::InvalidRequest(
+            "Steering text cannot be empty".into(),
+        ));
     }
 
     // Checked here as well as by the adapter: the server knows which turn is
@@ -339,9 +407,11 @@ pub async fn set_config(
         return Err(Error::InvalidRequest("A config id is required".into()));
     }
 
-    let link = state.links.ensure(&session_id).await.map_err(|error| {
-        Error::LinkFailed(format!("{:#}", error))
-    })?;
+    let link = state
+        .links
+        .ensure(&session_id)
+        .await
+        .map_err(|error| Error::LinkFailed(format!("{:#}", error)))?;
 
     // The option has to be one the agent offered, for the same reason a request
     // option is validated: an id the adapter does not recognize reaches the vendor
@@ -378,9 +448,9 @@ pub async fn set_config(
     // be fine. `claude` reports exactly this shape when a permission mode is refused
     // for a reason the session cannot change, and reporting it as unsupported sent the
     // last investigation to the picker.
-    link.set_config(&body.config_id, body.value)
+    link.set_config_and_persist(&state.store, &session_id, &body.config_id, body.value)
         .await
-        .map_err(|error| refusal_or(error, Error::Unsupported))?;
+        .map_err(config_error)?;
 
     // Published so every other attached client sees the change rather than only the
     // one that made it — the same reason a capability update is pushed at all.
@@ -427,6 +497,21 @@ fn refusal_or(error: anyhow::Error, otherwise: fn(String) -> Error) -> Error {
     }
 }
 
+/// Classify a config operation without mistaking a persistence failure for an
+/// adapter refusal. The latter is actionable by the picker; the former means the
+/// live change succeeded but the durable preference could not be recorded.
+fn config_error(error: anyhow::Error) -> Error {
+    match error.downcast_ref::<sylph_protocol::AdapterError>() {
+        Some(refusal) if refusal.code == sylph_protocol::RefusalCode::InvalidValue => {
+            Error::InvalidRequest(refusal.message.clone())
+        }
+        Some(refusal) => Error::Unsupported(refusal.message.clone()),
+        None => Error::Internal(format!(
+            "Could not persist session configuration: {error:#}"
+        )),
+    }
+}
+
 /// Session-scoped facts, as SSE.
 ///
 /// Separate from the turn stream because links, capability changes, and requests
@@ -449,7 +534,9 @@ pub async fn events(
         .map(|event| {
             let data = serde_json::to_string(&event).unwrap_or_default();
             Ok::<axum::response::sse::Event, std::convert::Infallible>(
-                axum::response::sse::Event::default().event(&event.kind).data(data),
+                axum::response::sse::Event::default()
+                    .event(&event.kind)
+                    .data(data),
             )
         });
 
@@ -461,9 +548,81 @@ pub async fn events(
             ("Cache-Control", "no-cache, no-store, no-transform"),
             ("X-Accel-Buffering", "no"),
         ],
-        axum::response::sse::Sse::new(stream)
-            .keep_alive(axum::response::sse::KeepAlive::default()),
+        axum::response::sse::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()),
     ))
+}
+
+/// GET /api/v1/sessions/{id}/trace/events — one reconnectable stream for the whole session.
+///
+/// Unlike the older `/sessions/{id}/events` notification stream, this carries normalized
+/// turn events as well. That distinction matters when a child trajectory reports after its
+/// parent turn has settled: a turn-scoped subscriber is gone, while a session trace can
+/// route the event back to the existing trajectory without inventing an `agent` turn.
+pub async fn trace_events(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<TraceEventsQuery>,
+) -> Result<impl IntoResponse> {
+    let session = require_session(&state, &session_id).await?;
+    let encoded = session.encode();
+    let after_seq = query.after_seq;
+
+    // Subscribe before reading either durable tier. The live receiver buffers anything
+    // emitted while the history snapshot is assembled, closing the replay/live gap.
+    let attachment = state.hub.attach_trace(&encoded, after_seq).await;
+
+    let mut by_seq = std::collections::BTreeMap::<i32, crate::events::StreamEvent>::new();
+    for block in state
+        .history
+        .blocks(&encoded, after_seq)
+        .await
+        .unwrap_or_default()
+    {
+        by_seq
+            .entry(block.seq)
+            .or_insert_with(|| crate::api::sessions::block_to_event(&block));
+    }
+    for row in state
+        .store
+        .session_events_after(&session, after_seq)
+        .await?
+    {
+        by_seq
+            .entry(row.seq)
+            .or_insert_with(|| crate::events::StreamEvent::from_row(&row));
+    }
+    for event in attachment.projection {
+        by_seq.entry(event.seq).or_insert(event);
+    }
+
+    // Keep the sequence ids that are about to be replayed. The receiver was
+    // subscribed before reading storage, so a stable event can legitimately be
+    // present in both the snapshot and the broadcast buffer when it lands between
+    // those reads. Filtering by the replay set removes that duplicate without using
+    // a high-water mark: an ephemeral event may have a lower seq than a later stable
+    // event and still only exist in the live projection.
+    let replay_seq = by_seq
+        .keys()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let replay = by_seq.into_values().map(sse_trace_event);
+    let live = BroadcastStream::new(attachment.live)
+        .filter_map(|result| result.ok())
+        .filter(move |event| event.seq > after_seq && !replay_seq.contains(&event.seq))
+        .map(sse_trace_event);
+
+    Ok((
+        [
+            ("Cache-Control", "no-cache, no-store, no-transform"),
+            ("X-Accel-Buffering", "no"),
+        ],
+        Sse::new(stream::iter(replay).chain(live)).keep_alive(KeepAlive::default()),
+    ))
+}
+
+fn sse_trace_event(event: crate::events::StreamEvent) -> std::result::Result<Event, Infallible> {
+    let data = serde_json::to_string(&event).unwrap_or_default();
+    Ok(Event::default().event(&event.kind).data(data))
 }
 
 /// 404 for an unknown session before anything expensive happens.

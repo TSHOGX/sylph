@@ -303,6 +303,11 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
       api.sessions.setConfig(sessionId!, configId, value),
     onSuccess: (link) => {
       queryClient.setQueryData(["session", sessionId, "capabilities"], link);
+      // Launch-equivalent settings are persisted by the backend. Refresh the
+      // session projection as well so any consumer deriving labels or flags from
+      // `flagsJson` observes the same state immediately, rather than only after a
+      // full reload or a detach/reattach.
+      void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
     },
     onError: () => {
       void queryClient.invalidateQueries({

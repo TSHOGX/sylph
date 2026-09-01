@@ -155,7 +155,11 @@ pub fn env_snapshot() -> Env {
         "RUST_LOG",
     ];
     KEYS.iter()
-        .filter_map(|key| std::env::var(key).ok().map(|value| (key.to_string(), value)))
+        .filter_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|value| (key.to_string(), value))
+        })
         .collect()
 }
 
@@ -222,7 +226,11 @@ pub fn resolve_home(env: &Env) -> (PathBuf, PathBuf) {
         // than panicking, and `doctor` shows where it landed.
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let home = match env.get("SYLPH_HOME").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    let home = match env
+        .get("SYLPH_HOME")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         Some(raw) => expand_tilde(raw, &user_home.to_string_lossy()),
         None => user_home.join(DEFAULT_HOME_DIR),
     };
@@ -232,7 +240,11 @@ pub fn resolve_home(env: &Env) -> (PathBuf, PathBuf) {
 
 /// Where the config file is, given the root.
 pub fn resolve_config_path(env: &Env, home: &Path, user_home: &Path) -> PathBuf {
-    match env.get("SYLPH_CONFIG").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    match env
+        .get("SYLPH_CONFIG")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         Some(raw) => expand_tilde(raw, &user_home.to_string_lossy()),
         None => home.join("config.toml"),
     }
@@ -262,15 +274,16 @@ impl Resolved {
             }
         };
 
-        let path = |env_key: &str, from_file: Option<&String>, default: PathBuf| -> Origin<PathBuf> {
-            if let Some(value) = env.get(env_key).map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                return Origin::new(expand_tilde(value, &home_str), Source::Env);
-            }
-            match from_file.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                Some(value) => Origin::new(expand_tilde(value, &home_str), Source::File),
-                None => Origin::new(default, Source::Default),
-            }
-        };
+        let path =
+            |env_key: &str, from_file: Option<&String>, default: PathBuf| -> Origin<PathBuf> {
+                if let Some(value) = env.get(env_key).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    return Origin::new(expand_tilde(value, &home_str), Source::Env);
+                }
+                match from_file.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    Some(value) => Origin::new(expand_tilde(value, &home_str), Source::File),
+                    None => Origin::new(default, Source::Default),
+                }
+            };
 
         let host = string("SYLPH_HOST", file.server.host.as_ref(), "127.0.0.1");
 
@@ -279,7 +292,10 @@ impl Resolved {
         // starts on the default port is more useful than one that refuses to run
         // because of a typo in a number. The file's own parse is strict, so this
         // only catches a malformed environment variable.
-        let port = match env.get("SYLPH_PORT").and_then(|v| v.trim().parse::<u16>().ok()) {
+        let port = match env
+            .get("SYLPH_PORT")
+            .and_then(|v| v.trim().parse::<u16>().ok())
+        {
             Some(value) => Origin::new(value, Source::Env),
             None => match file.server.port {
                 Some(value) => Origin::new(value, Source::File),
@@ -287,7 +303,11 @@ impl Resolved {
             },
         };
 
-        let data_dir = path("SYLPH_DATA_DIR", file.paths.data_dir.as_ref(), home.join("data"));
+        let data_dir = path(
+            "SYLPH_DATA_DIR",
+            file.paths.data_dir.as_ref(),
+            home.join("data"),
+        );
         // Note the default is the root, not the data directory: `SOUL.md` is
         // hand-edited configuration, and burying it inside the directory whose
         // documented purpose is "machine state you back up and never open" is how
@@ -337,7 +357,13 @@ impl Resolved {
             }
             Source::Env
         } else if !file.paths.browse_roots.is_empty() {
-            for part in file.paths.browse_roots.iter().map(|s| s.trim()).filter(|p| !p.is_empty()) {
+            for part in file
+                .paths
+                .browse_roots
+                .iter()
+                .map(|s| s.trim())
+                .filter(|p| !p.is_empty())
+            {
                 let path = expand_tilde(part, &home_str);
                 if !roots.contains(&path) {
                     roots.push(path);
@@ -354,7 +380,11 @@ impl Resolved {
         // gain.
         let log_level = if env.contains_key("SYLPH_LOG") {
             string("SYLPH_LOG", file.log.level.as_ref(), "info")
-        } else if let Some(value) = env.get("RUST_LOG").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        } else if let Some(value) = env
+            .get("RUST_LOG")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             Origin::new(value.to_string(), Source::Env)
         } else {
             string("SYLPH_LOG", file.log.level.as_ref(), "info")
@@ -403,7 +433,10 @@ mod tests {
     use super::*;
 
     fn env(pairs: &[(&str, &str)]) -> Env {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     fn resolve(pairs: &[(&str, &str)], file: FileConfig) -> Resolved {
@@ -418,14 +451,20 @@ mod tests {
         assert_eq!(r.config_path, PathBuf::from("/home/u/.sylph/config.toml"));
         assert_eq!(r.data_dir.value, PathBuf::from("/home/u/.sylph/data"));
         assert_eq!(r.soul.value, Some(PathBuf::from("/home/u/.sylph/SOUL.md")));
-        assert_eq!(r.quick_start_dir.value, PathBuf::from("/home/u/.sylph/scratch"));
+        assert_eq!(
+            r.quick_start_dir.value,
+            PathBuf::from("/home/u/.sylph/scratch")
+        );
     }
 
     /// The point of a single root: one variable relocates the whole install, so a
     /// supervisor propagates one thing and a second instance is one override.
     #[test]
     fn one_variable_relocates_every_derived_path() {
-        let r = resolve(&[("HOME", "/home/u"), ("SYLPH_HOME", "/opt/inst")], FileConfig::default());
+        let r = resolve(
+            &[("HOME", "/home/u"), ("SYLPH_HOME", "/opt/inst")],
+            FileConfig::default(),
+        );
 
         assert_eq!(r.data_dir.value, PathBuf::from("/opt/inst/data"));
         assert_eq!(r.soul.value, Some(PathBuf::from("/opt/inst/SOUL.md")));
@@ -435,7 +474,10 @@ mod tests {
 
     #[test]
     fn the_root_accepts_a_tilde_like_a_hand_edited_path_would() {
-        let r = resolve(&[("HOME", "/home/u"), ("SYLPH_HOME", "~/alt")], FileConfig::default());
+        let r = resolve(
+            &[("HOME", "/home/u"), ("SYLPH_HOME", "~/alt")],
+            FileConfig::default(),
+        );
         assert_eq!(r.home, PathBuf::from("/home/u/alt"));
     }
 
@@ -488,7 +530,10 @@ mod tests {
     /// the E2E suite, which sets it to `""` and asserts the UI reports no identity.
     #[test]
     fn an_empty_soul_means_no_identity_rather_than_the_default_path() {
-        let r = resolve(&[("HOME", "/home/u"), ("SYLPH_SOUL", "")], FileConfig::default());
+        let r = resolve(
+            &[("HOME", "/home/u"), ("SYLPH_SOUL", "")],
+            FileConfig::default(),
+        );
 
         assert_eq!(r.soul.value, None, "empty means decline, not unset");
         assert_eq!(r.soul.source, Source::Env);
@@ -514,7 +559,10 @@ mod tests {
             FileConfig::default(),
         );
 
-        assert_eq!(r.soul.value, Some(PathBuf::from("/home/u/identity/SOUL.md")));
+        assert_eq!(
+            r.soul.value,
+            Some(PathBuf::from("/home/u/identity/SOUL.md"))
+        );
         assert_eq!(r.soul.source, Source::Env);
     }
 
@@ -523,7 +571,10 @@ mod tests {
     #[test]
     fn browse_roots_always_include_home_and_add_the_configured_ones() {
         let r = resolve(
-            &[("HOME", "/home/u"), ("SYLPH_BROWSE_ROOTS", "/vol/a:~/b: :/vol/a")],
+            &[
+                ("HOME", "/home/u"),
+                ("SYLPH_BROWSE_ROOTS", "/vol/a:~/b: :/vol/a"),
+            ],
             FileConfig::default(),
         );
 
@@ -555,12 +606,19 @@ mod tests {
     /// debugging habit for nothing.
     #[test]
     fn rust_log_is_honoured_but_sylph_log_wins() {
-        let r = resolve(&[("HOME", "/home/u"), ("RUST_LOG", "debug")], FileConfig::default());
+        let r = resolve(
+            &[("HOME", "/home/u"), ("RUST_LOG", "debug")],
+            FileConfig::default(),
+        );
         assert_eq!(r.log_level.value, "debug");
         assert_eq!(r.log_level.source, Source::Env);
 
         let r = resolve(
-            &[("HOME", "/home/u"), ("RUST_LOG", "debug"), ("SYLPH_LOG", "trace")],
+            &[
+                ("HOME", "/home/u"),
+                ("RUST_LOG", "debug"),
+                ("SYLPH_LOG", "trace"),
+            ],
             FileConfig::default(),
         );
         assert_eq!(r.log_level.value, "trace");
@@ -628,7 +686,10 @@ mod tests {
         assert_eq!(expand_tilde("rel/x", "/home/u"), PathBuf::from("rel/x"));
         // `~other` is another user's home; resolving it needs passwd lookups for
         // a case a single-user loopback app never has. Left alone, not guessed.
-        assert_eq!(expand_tilde("~other/x", "/home/u"), PathBuf::from("~other/x"));
+        assert_eq!(
+            expand_tilde("~other/x", "/home/u"),
+            PathBuf::from("~other/x")
+        );
     }
 
     /// No `HOME` must not panic: a container or a stripped launchd environment is

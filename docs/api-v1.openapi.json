@@ -3,7 +3,7 @@
   "info": {
     "title": "Sylph Local Agent Runtime Service",
     "version": "0.1.0",
-    "description": "Loopback-only, versioned API for durable sessions, turns, normalized events, and runner capabilities. Backend and agent-native session identifiers are never exposed in ordinary session responses."
+    "description": "Loopback-only, versioned API for durable sessions, turns, normalized events, and runner capabilities. Durable sessions expose the vendor native id as part of the single identity triple; process-local draft ids are never durable session ids."
   },
   "servers": [
     {
@@ -35,7 +35,7 @@
     },
     "/api/v1/diagnostics": {
       "get": {
-        "description": "Runtime state: session and turn counts, discovered and broken agents, every agent root considered, archive totals, live child processes, and the last retention pass. Authenticated, unlike /health, because it carries counts and local filesystem paths. The retention block's withheld/terminal pair separates correct behaviour from a broken pass — a terminal session is supposed to keep everything, while a delegated session that keeps withholding means the archive is not confirming it, and an all-unchanged pass means ingestion has stopped advancing. Its byte fields answer which session is growing, which the counts cannot: forty small withheld sessions and one enormous one report identically. bytesHeld is the logical record across every measured session rather than the footprint on disk, so it exceeds what du reports — a ranking measure, not a disk gauge. grewBy is signed, since negative means pruning worked, and is absent when a session has been measured only once, because one observation is not a trend and reporting zero would claim stability. There is deliberately no configurable size bound: a terminal session's record is the only copy, so a size-triggered prune is a size-triggered deletion of data nothing else holds.",
+        "description": "Runtime state: session and turn counts, the agents compiled into this build, live supervisor turns, and the last retention pass. Authenticated because it carries counts and retention details; unauthenticated liveness stays in /health.",
         "responses": {
           "200": {
             "description": "Diagnostics snapshot",
@@ -97,7 +97,7 @@
             "$ref": "#/components/parameters/FilterAgent"
           },
           {
-            "$ref": "#/components/parameters/FilterOrigin"
+            "$ref": "#/components/parameters/FilterEnvironment"
           },
           {
             "$ref": "#/components/parameters/FilterWorkdir"
@@ -126,18 +126,16 @@
         }
       },
       "post": {
-        "description": "This starts an agent. It does not reserve a row. A session has no identity until an agent has assigned one, so there is nothing to create in advance: the CLI is spawned, the id it reports becomes the session's primary key, and the insert follows. That ordering is a behavioural change no schema can express, which is why it is stated here. What it deletes: DELETE /api/v1/sessions/{id} for empties, the frontend probe that called it on unmount, and the window in which a session existed with no native id and therefore could not be resumed. A failed spawn now reports at the start screen instead of leaving a dead row behind. 502 AGENT_START_FAILED is the CLI not starting, or starting and reporting no id — the latter is a failure rather than a degraded success, because without an id the session could never be resumed and every link death would make it permanently unlinkable. 409 SESSION_ALREADY_PRESENT is the agent reporting an id that already names a session, which the primary key refuses: two rows for one conversation is the state it exists to prevent. `workdir` is bounded by configuration: it must resolve inside paths.browse_roots or the Quick Start directory, checked on the canonical path so `..` and symlinks are resolved rather than pattern-matched. The bound exists because this field is the current_dir of a spawned agent process and a coding agent reads and writes the tree it is pointed at, so it decides where arbitrary code runs — existence, the only property it was previously checked for, says nothing about whether it should. The same root set /api/v1/fs/* browses, deliberately: that endpoint exists to name a workdir, so a second bound would be a second thing to keep equal. With environments this check belongs in the envagent, because only the machine holding a path can canonicalize it. 403 POLICY_VIOLATION is a workdir that exists outside the permitted roots, distinct from 400 because the request is well-formed and the fix is in config.toml; the message lists what is permitted. The canonical path is journalled, so two spellings of one directory do not become two workspaces. A session already recorded outside the roots stays fully readable — nothing re-checks a journalled workdir, since narrowing configuration must not orphan history.",
+        "description": "Starts an agent and returns a process-local draft handle. No sessions row is written until the first real turn, which atomically records the agent's native identity and that turn. Drafts are absent from listings and can be discarded without leaving history. `workdir` is canonicalized and bounded by the configured browse roots or Quick Start directory.",
         "requestBody": {
           "$ref": "#/components/requestBodies/CreateSession"
         },
         "responses": {
           "201": {
-            "$ref": "#/components/responses/SessionCreated",
+            "description": "Ephemeral draft handle; no durable session exists until the first turn.",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionEnvelope"
-                }
+                "schema": {"$ref": "#/components/schemas/PreparedSession"}
               }
             }
           },
@@ -147,15 +145,179 @@
           "403": {
             "$ref": "#/components/responses/Error"
           },
-          "409": {
-            "description": "SESSION_ALREADY_PRESENT: the agent reported an id that already names a session."
-          },
           "502": {
-            "description": "AGENT_START_FAILED: the CLI could not be started, or started and reported no id."
+            "description": "AGENT_START_FAILED: the CLI could not be started or did not answer the initial capability handshake. A draft may start without a native id; identity is acquired when its first real turn is promoted."
           },
           "503": {
             "description": "ENVIRONMENT_UNREACHABLE: no envagent is connected for that environment."
           }
+        }
+      }
+    },
+    "/api/v1/sessions/draft/{id}/capabilities": {
+      "get": {
+        "summary": "Read capabilities of a prepared link",
+        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
+        "responses": {
+          "200": {
+            "description": "Current capability surface of the prepared link",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LinkState"}}}
+          },
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/sessions/draft/{id}/turns": {
+      "post": {
+        "summary": "Promote a prepared link with its first turn",
+        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
+        "requestBody": {"$ref": "#/components/requestBodies/CreateTurn"},
+        "responses": {
+          "201": {"$ref": "#/components/responses/SessionCreated"},
+          "400": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/sessions/draft/{id}/config": {
+      "post": {
+        "summary": "Set configuration on a prepared link",
+        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PreparedConfigRequest"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Updated capability surface",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LinkState"}}}
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/sessions/draft/{id}": {
+      "get": {
+        "summary": "Read prepared-link metadata",
+        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
+        "responses": {
+          "200": {
+            "description": "Prepared-link metadata",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PreparedSession"}}}
+          },
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "delete": {
+        "summary": "Discard a prepared link",
+        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
+        "responses": {"204": {"description": "Discarded; no durable session was created"}}
+      }
+    },
+    "/api/v1/sessions/draft/{id}/files": {
+      "get": {
+        "summary": "List one directory level in a prepared session's working directory",
+        "parameters": [
+          {"$ref": "#/components/parameters/DraftId"},
+          {"name": "path", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Directory listing", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileTreeResponse"}}}},
+          "400": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "post": {
+        "summary": "Upload one file into a prepared session's working directory",
+        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileUpload"}}}},
+        "responses": {
+          "201": {"description": "The file as written", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileUploadResponse"}}}},
+          "400": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "delete": {
+        "summary": "Delete one file or directory from a prepared session's working directory",
+        "parameters": [
+          {"$ref": "#/components/parameters/DraftId"},
+          {"name": "path", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "recursive", "in": "query", "schema": {"type": "boolean", "default": false}}
+        ],
+        "responses": {
+          "204": {"description": "Deleted"},
+          "400": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/sessions/draft/{id}/files/directory": {
+      "post": {
+        "summary": "Create one directory in a prepared session's working directory",
+        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileMkdir"}}}},
+        "responses": {
+          "201": {"description": "The directory as created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileMkdirResponse"}}}},
+          "400": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/sessions/draft/{id}/files/content": {
+      "get": {
+        "summary": "Read one file from a prepared session's working directory",
+        "parameters": [
+          {"$ref": "#/components/parameters/DraftId"},
+          {"name": "path", "in": "query", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "File contents", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileContentResponse"}}}},
+          "400": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/sessions/draft/{id}/files/document": {
+      "get": {
+        "summary": "Read a document from a prepared session as structure",
+        "parameters": [
+          {"$ref": "#/components/parameters/DraftId"},
+          {"name": "path", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "sheet", "in": "query", "schema": {"type": "integer", "minimum": 0, "default": 0}},
+          {"name": "row", "in": "query", "schema": {"type": "integer", "minimum": 0, "default": 0}},
+          {"name": "rows", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200}}
+        ],
+        "responses": {
+          "200": {"description": "Parsed document structure", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileDocumentResponse"}}}},
+          "400": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/sessions/draft/{id}/files/raw": {
+      "get": {
+        "summary": "Read a prepared session file's bytes",
+        "parameters": [
+          {"$ref": "#/components/parameters/DraftId"},
+          {"name": "path", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "download", "in": "query", "schema": {"type": "boolean", "default": false}}
+        ],
+        "responses": {
+          "200": {"description": "The file's bytes"},
+          "400": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
         }
       }
     },
@@ -412,8 +574,8 @@
     },
     "/api/v1/search": {
       "get": {
-        "summary": "Full-text search across archived sessions",
-        "description": "FTS5 over the archive. Answers \"which archived session mentioned X\". Never 503 when the archive is unreachable — it is optional locally, and an empty result with availability reported elsewhere keeps a sidebar working. This is the one archive read that must never go per-row: search is ~200 ms while every other operation is microseconds to sub-millisecond. It covers only what a parser read, so it does not cover Sylph-born history whose native store the server never saw.",
+        "summary": "Full-text search across durable sessions",
+        "description": "FTS5 over the server-owned history store. Answers which durable session mentioned a query and carries the same Session object returned by listings. The endpoint never reports a separate archive-availability state: the index is opened with the server and an empty result is a valid answer.",
         "parameters": [
           {
             "name": "q",
@@ -430,13 +592,24 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
               "default": 20
+            }
+          },
+          {
+            "name": "environment",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Opaque environment id to narrow the search."
             }
           }
         ],
         "responses": {
           "200": {
-            "description": "Hits, or empty when the archive is unreachable",
+            "description": "Matching durable sessions, or an empty result",
             "content": {
               "application/json": {
                 "schema": {
@@ -548,18 +721,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "parameters": [
-          {
-            "name": "includeArchived",
-            "in": "query",
-            "required": false,
-            "description": "Also report directories that exist only in the TraceDB archive, with archivedCount set. Off by default: the sidebar polls this endpoint and needs only live sessions, while the scan walks every archived session. Surfaces where the user picks a directory pass it, because a project they are about to work in has no live session yet. An unreachable archive degrades to live-only rather than failing.",
-            "schema": {
-              "type": "boolean",
-              "default": false
-            }
-          }
-        ]
+        "parameters": []
       }
     },
     "/api/v1/sessions/{sessionId}/files": {
@@ -997,7 +1159,14 @@
         "description": "Replaces GET /api/v1/agents. Which agents exist is per environment, not global: a user picking an environment with no codex on it should learn that before creating the session rather than after, and a merged list would be true of nowhere. Availability is PATH, not a handshake. An agent is available when its CLI is on that machine's PATH. There is no discovery pass, no adapter directory, and therefore no broken map — that mechanism produced two total silent failures in this repo's history, the worse being that zero discovered agents made / a dead keystroke three layers from the cause. “Why can I not use this agent” now has one answer with one fix. reachableVia is not decoration: a non-null value means this environment is reachable only while the named one relays for it, so control dies when that machine leaves. Rendering it identically to a directly-connected environment would promise AFK continuity it cannot keep. An empty agents array is a real answer — an envagent with no vendor CLI on its PATH — and a client must render it as “nothing installed here” rather than as a loading state.",
         "responses": {
           "200": {
-            "description": "Every paired environment, whether it is connected, and its agents."
+            "description": "Every paired environment, whether it is connected, and its agents.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentsResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1027,7 +1196,7 @@
     "/api/v1/sessions/{sessionId}/capabilities": {
       "get": {
         "summary": "What this session's agent can do",
-        "description": "Establishes a link as a side effect. A failed handshake is 200 with `attached:false` and a typed `failure`, not 5xx: it is the agent's failure, not the request's, and the session's history stays readable. Do not cache indefinitely — see api-design.md § Links.",
+        "description": "Establishes a link as a side effect. A failed handshake is 200 with an unavailable control facet and a typed reason, not 5xx: it is the agent's failure, not the request's, and the session's history stays readable. Do not cache indefinitely — see api-design.md § Links.",
         "parameters": [
           {
             "name": "sessionId",
@@ -1041,7 +1210,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Link state, attached or detached-with-reason",
+            "description": "Link state with independent observe and control facets",
             "content": {
               "application/json": {
                 "schema": {
@@ -1420,7 +1589,7 @@
               }
             }
           },
-          "422": {
+          "409": {
             "description": "See ErrorResponse",
             "content": {
               "application/json": {
@@ -1495,6 +1664,48 @@
               "type": "string",
               "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
             }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/event-stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "See ErrorResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/trace/events": {
+      "get": {
+        "summary": "Reconnectable session trace as SSE",
+        "description": "The complete normalized trace for a session, including events from all turns and delegated trajectories. Stable history is replayed from storage and the live projection carries events that have not yet been consolidated. `arrivalTurnId` records where an event arrived; trajectory ownership is derived from `streamId` and `span`.",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment."
+            }
+          },
+          {
+            "$ref": "#/components/parameters/AfterSeq"
           }
         ],
         "responses": {
@@ -1627,16 +1838,6 @@
                 }
               }
             }
-          },
-          "422": {
-            "description": "See ErrorResponse",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
           }
         }
       }
@@ -1655,6 +1856,15 @@
         "name": "sessionId",
         "in": "path",
         "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "DraftId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Opaque process-local handle returned by POST /api/v1/sessions. It is not a durable session identity.",
         "schema": {
           "type": "string"
         }
@@ -1692,22 +1902,18 @@
           "type": "string"
         }
       },
-      "FilterOrigin": {
-        "name": "origin",
+      "FilterEnvironment": {
+        "name": "environment",
         "in": "query",
-        "description": "Closed set; an unknown value is rejected with 400 rather than yielding an empty list.",
+        "description": "Opaque environment id. An unknown or malformed id is rejected with 400 rather than yielding an empty list.",
         "schema": {
-          "type": "string",
-          "enum": [
-            "sylph",
-            "native"
-          ]
+          "type": "string"
         }
       },
       "FilterWorkdir": {
         "name": "workdir",
         "in": "query",
-        "description": "Case-insensitive substring of the working directory.",
+        "description": "Exact working-directory match after normalizing trailing slashes.",
         "schema": {
           "type": "string"
         }
@@ -1785,7 +1991,14 @@
         }
       },
       "SessionCreated": {
-        "description": "Session resource"
+        "description": "Durable session resource created when a prepared link is promoted.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SessionEnvelope"
+            }
+          }
+        }
       },
       "TurnAccepted": {
         "description": "Durable turn resource"
@@ -1826,11 +2039,6 @@
             "description": "Defaults to false: the transcript so far was produced without it."
           }
         }
-      },
-      "ArchiveCounts": {
-        "type": "object",
-        "description": "Archive-wide totals, or null when the archive is unreachable. Here rather than in /health because it is a count and /health is unauthenticated.",
-        "additionalProperties": true
       },
       "AuthTokenResponse": {
         "type": "object",
@@ -1933,7 +2141,7 @@
           },
           "exists": {
             "type": "boolean",
-            "description": "Whether the path is there. ABSENT rather than false for settings that are not paths — a log level rendered as missing reports a working setting as broken. A bare command name (the tracedb.bin default) is checked against PATH, since a filesystem check would call a working install absent."
+            "description": "Whether the path is there. ABSENT rather than false for settings that are not paths — a log level rendered as missing reports a working setting as broken. A bare command name is checked against PATH, since a filesystem check would call a working install absent."
           }
         }
       },
@@ -1998,7 +2206,7 @@
           "injectIdentity": {
             "type": "boolean",
             "default": true,
-            "description": "Whether SOUL.md is appended to the agent's prompt. Accepted here and refused by PATCH: a transcript records what produced it, so rewriting the flag would rewrite what the stored history means. This replaces identityMode and lifecycleMode, which were a pair of four-valued enumerations with exactly one behavioural read between them — the SOUL path choice. A boolean also keeps the property the closed enumeration existed for: a non-boolean is a 422 naming the field, rather than a value nothing downstream matches that would read as \"not sylph\" and silently disable injection."
+            "description": "Whether SOUL.md is appended to the agent's prompt. Accepted here and refused by PATCH: a transcript records what produced it, so rewriting the flag would rewrite what the stored history means."
           }
         }
       },
@@ -2027,8 +2235,8 @@
           "sessions",
           "turns",
           "agents",
-          "brokenAdapters",
-          "activeTurns"
+          "activeTurns",
+          "retention"
         ],
         "properties": {
           "ok": {
@@ -2062,16 +2270,6 @@
             "items": {
               "type": "string"
             }
-          },
-          "brokenAdapters": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          },
-          "tracedb": {
-            "$ref": "#/components/schemas/ArchiveCounts",
-            "nullable": true
           },
           "activeTurns": {
             "type": "integer",
@@ -2231,6 +2429,13 @@
           "seq": {
             "type": "integer"
           },
+          "arrivalTurnId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The turn on which the server received this event. It is provenance, not the owner of a delegated trajectory."
+          },
           "kind": {
             "type": "string",
             "enum": [
@@ -2297,12 +2502,7 @@
           },
           "source": {
             "type": "string",
-            "enum": [
-              "agent",
-              "server",
-              "tracedb",
-              "archive"
-            ]
+            "description": "Event producer: normally `agent` or `server`."
           }
         },
         "description": "A normalized stream or journal event. Kinds are additive by protocol, so a client must tolerate one it does not know rather than rejecting the stream."
@@ -2753,7 +2953,6 @@
           "ok",
           "apiVersion",
           "schemaVersion",
-          "tracedb",
           "agents"
         ],
         "properties": {
@@ -2768,18 +2967,6 @@
             "type": "integer",
             "format": "int64",
             "description": "Highest applied migration, read from `_sqlx_migrations`. It is not a hand-maintained number: an `app_meta` copy used to be bumped by migrations and four of them forgot, so the field answered its one question wrongly."
-          },
-          "tracedb": {
-            "type": "object",
-            "required": [
-              "available"
-            ],
-            "properties": {
-              "available": {
-                "type": "boolean",
-                "description": "Unreachable is a supported configuration, not a failure: live sessions work and archive features report themselves unavailable. Deleted when the archive becomes an embedded crate, since nothing external will answer."
-              }
-            }
           },
           "agents": {
             "type": "object",
@@ -2809,37 +2996,21 @@
           }
         }
       },
-      "LinkFailure": {
-        "type": "object",
-        "required": [
-          "code",
-          "message"
-        ],
-        "properties": {
-          "code": {
-            "type": "string",
-            "enum": [
-              "no_adapter",
-              "handshake_failed"
-            ],
-            "description": "Closed vocabulary so a UI can choose its own words and offer the right recovery. `no_adapter` is the one a retry cannot fix. Both values describe *Sylph's own spawn* failing, so neither can yet express an adopted session — a process running fine that is not ours to drive."
-          },
-          "message": {
-            "type": "string",
-            "description": "Always populated, so an unrecognized code still renders."
-          }
-        }
-      },
       "LinkState": {
         "type": "object",
         "required": [
-          "attached",
+          "link",
           "supports"
         ],
-        "description": "Live link state. An empty `supports` means Sylph cannot reach the agent, never that the agent has no capabilities — for an adopted session the process is alive and simply not ours.",
+        "description": "Live link state. Observe and control are independent facets, each available or unavailable with a typed reason. An empty `supports` means Sylph cannot reach the agent, never that the agent has no capabilities.",
         "properties": {
-          "attached": {
-            "type": "boolean"
+          "link": {
+            "type": "object",
+            "required": ["observe", "control"],
+            "properties": {
+              "observe": { "$ref": "#/components/schemas/LinkFacet" },
+              "control": { "$ref": "#/components/schemas/LinkFacet" }
+            }
           },
           "agent": {
             "type": "string"
@@ -2855,11 +3026,23 @@
             "type": "object",
             "additionalProperties": true,
             "description": "Commands, config, permission mode, context window. Facet-scoped by protocol: an unmentioned facet is never cleared."
-          },
-          "failure": {
-            "$ref": "#/components/schemas/LinkFailure",
-            "nullable": true,
-            "description": "Present only when establishing was tried and failed. Not cached — the next read tries again."
+          }
+        }
+      },
+      "LinkFacet": {
+        "type": "object",
+        "required": ["available"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "no_agent",
+              "environment_unreachable",
+              "not_ours_to_drive",
+              "handshake_failed"
+            ],
+            "description": "Present exactly when available is false. Retryability is defined by the protocol vocabulary."
           }
         }
       },
@@ -2945,7 +3128,7 @@
           },
           "sessionId": {
             "type": "string",
-            "format": "uuid"
+            "description": "Encoded session identity triple, not a UUID."
           },
           "turnId": {
             "type": "string",
@@ -3059,132 +3242,121 @@
       },
       "RetentionPassReport": {
         "type": "object",
-        "description": "The last retention pass. Reported because retention's correct behaviour is usually 'nothing was dropped', which is indistinguishable from a broken pass without the counts: `withheld` beside `terminal` separates a session that is supposed to keep everything from one the archive is not confirming, and an all-`unchanged` pass means ingestion has stopped advancing.",
-        "additionalProperties": true
-      },
-      "SearchHit": {
-        "type": "object",
-        "description": "One lineage-collapsed archived session. TraceDB scoring internals (score, scoreBreakdown, bm25) are deliberately not exposed: they carry no UI meaning and would couple this API to TraceDB's ranking implementation.",
+        "description": "The last retention pass. `withheld` and `withheldReasons` distinguish a correct terminal/no-source result from a pass that could not ask an environment; byte fields report logical record growth rather than disk usage.",
         "required": [
-          "id",
-          "agent"
+          "ranAtMs",
+          "examined",
+          "confirmed",
+          "withheld",
+          "withheldReasons",
+          "terminal",
+          "blocksPruned",
+          "blobsSwept",
+          "bytesHeld",
+          "sessionsMeasured",
+          "bytesGrewBy",
+          "largestSessions",
+          "failed",
+          "environmentsReachable"
         ],
         "properties": {
-          "id": {
+          "ranAtMs": {"type": "integer", "format": "int64"},
+          "examined": {"type": "integer", "minimum": 0},
+          "confirmed": {"type": "integer", "minimum": 0},
+          "withheld": {"type": "integer", "minimum": 0},
+          "withheldReasons": {
+            "type": "object",
+            "additionalProperties": {"type": "integer", "minimum": 0}
+          },
+          "terminal": {"type": "integer", "minimum": 0},
+          "blocksPruned": {"type": "integer", "format": "int64", "minimum": 0},
+          "blobsSwept": {"type": "integer", "format": "int64", "minimum": 0},
+          "bytesHeld": {"type": "integer", "format": "int64", "minimum": 0},
+          "sessionsMeasured": {"type": "integer", "format": "int64", "minimum": 0},
+          "bytesGrewBy": {"type": "integer", "format": "int64"},
+          "largestSessions": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/SessionBytes"}
+          },
+          "failed": {"type": "integer", "minimum": 0},
+          "environmentsReachable": {
+            "type": "object",
+            "additionalProperties": {"type": "boolean"}
+          }
+        }
+      },
+      "SessionBytes": {
+        "type": "object",
+        "required": ["sessionId", "bytes", "blocks", "measuredAtMs"],
+        "properties": {
+          "sessionId": {"type": "string", "description": "Encoded durable session identity triple."},
+          "bytes": {"type": "integer", "format": "int64", "minimum": 0},
+          "blocks": {"type": "integer", "format": "int64", "minimum": 0},
+          "measuredAtMs": {"type": "integer", "format": "int64"},
+          "grewBy": {"type": "integer", "format": "int64", "nullable": true},
+          "grewOverMs": {"type": "integer", "format": "int64", "nullable": true}
+        }
+      },
+      "BestMatch": {
+        "type": "object",
+        "required": ["seq", "excerpt"],
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "description": "Sequence number of the matching event, suitable for timeline navigation."
+          },
+          "turnId": {
             "type": "string",
-            "description": "TraceDB session id, e.g. claude:uuid/agent-suffix"
+            "nullable": true
           },
-          "agent": {
-            "type": "string"
-          },
-          "title": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "ask": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Opening user request"
-          },
-          "cwd": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "outcome": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "excerpt": {
+            "type": "string",
+            "description": "Text excerpt containing the match."
+          }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "required": ["session"],
+        "description": "One durable session matching the query. Search uses the same server-owned history store as listings.",
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/Session"
           },
           "bestMatch": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string"
-              },
-              "snippet": {
-                "type": "string"
-              }
-            }
+            "$ref": "#/components/schemas/BestMatch",
+            "nullable": true
           },
           "hits": {
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "startedAtMs": {
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "endedAtMs": {
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "lineageRootId": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "sessionId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Live session id when this archived session was already imported, so the UI can offer open instead of a duplicate import."
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
           }
         }
       },
       "SearchResponse": {
         "type": "object",
-        "required": [
-          "results",
-          "available"
-        ],
+        "required": ["results"],
         "properties": {
           "results": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/SearchHit"
+              "$ref": "#/components/schemas/SearchResult"
             }
-          },
-          "available": {
-            "type": "boolean",
-            "description": "False when TraceDB could not be reached at all."
-          },
-          "detail": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why the archive is unavailable. Absent when available."
           }
         }
       },
       "Session": {
         "type": "object",
-        "description": "A session as every session-returning endpoint serializes it. Mirrors `backend/src/models/session.rs`. Note `nativeSessionId`: the field is `backend_session_id` in Rust and renamed on the wire, so a reader looking for the Rust name in this document will not find it.",
+        "description": "A durable session as every session-returning endpoint serializes it. Its id is the encoded identity triple `(environment, agent, nativeId)`; there is no server-minted UUID or separate archive id.",
         "required": [
           "id",
-          "origin",
-          "identityMode",
-          "lifecycleMode",
+          "environment",
           "agent",
+          "nativeId",
           "workdir",
+          "injectIdentity",
+          "fidelity",
           "flagsJson",
           "status",
           "createdAtMs",
@@ -3193,59 +3365,49 @@
         "properties": {
           "id": {
             "type": "string",
-            "format": "uuid",
-            "description": "Sylph's own id, and the only id any route uses. Disjoint from the archive's `<agent>:<native-id>` space; comparing the two is silently always-false."
+            "description": "Encoded identity triple used as the route key. Treat it as opaque; use the separate identity fields rather than parsing it."
           },
-          "origin": {
+          "environment": {
             "type": "string",
-            "enum": [
-              "sylph",
-              "native"
-            ],
-            "description": "`sylph` means Sylph spawned the adapter and holds its stdio; `native` means somebody else started the process. Immutable after creation, and the axis every capability question resolves on."
-          },
-          "identityMode": {
-            "type": "string",
-            "enum": [
-              "sylph",
-              "preserve"
-            ],
-            "description": "Whether `SOUL.md` is injected. Fixed at creation and refused by PATCH, because it describes what stored history was produced by."
-          },
-          "lifecycleMode": {
-            "type": "string",
-            "description": "Written to the journal and read by nothing today. See architecture.md § Session Origins before relying on it."
+            "description": "Opaque environment id minted at pairing."
           },
           "agent": {
             "type": "string",
             "description": "Adapter name, e.g. `claude`."
           },
-          "nativeSessionId": {
+          "nativeId": {
             "type": "string",
-            "description": "The agent's own session id, used to resume. Absent until the agent reports one."
-          },
-          "traceSessionId": {
-            "type": "string",
-            "description": "Archive id this session was imported from, `<agent>:<native-id>`. Present only for an imported session, and serialized so the archive browser can tell an archived row is the same conversation as a live one."
+            "description": "The vendor's own durable session id, unchanged."
           },
           "workdir": {
             "type": "string",
             "description": "Canonical working directory of the spawned agent, derived from the containment check rather than from the request string."
           },
           "title": {
+            "type": ["string", "null"]
+          },
+          "injectIdentity": {
+            "type": "boolean",
+            "description": "Whether SOUL.md was appended when this session began. Immutable after creation."
+          },
+          "fidelity": {
             "type": "string",
-            "nullable": true
+            "enum": ["stream", "blocks", "messages"],
+            "description": "Resolution of the stored record, not who started it."
           },
           "flagsJson": {
             "type": "string",
             "description": "Agent flags as a JSON string, not an object. Serialized as stored."
           },
+          "parentSession": {
+            "type": "string",
+            "description": "Encoded identity triple of the delegated or forked parent, when the vendor recorded one."
+          },
           "status": {
             "type": "string",
             "enum": [
               "idle",
-              "running",
-              "error"
+              "running"
             ]
           },
           "createdAtMs": {
@@ -3268,6 +3430,87 @@
           "session": {
             "$ref": "#/components/schemas/Session"
           }
+        }
+      },
+      "PreparedSession": {
+        "type": "object",
+        "description": "Process-local draft handle. It is not a durable session id and is absent from listings until its first turn.",
+        "required": ["draftId", "environment", "agent", "workdir", "injectIdentity"],
+        "properties": {
+          "draftId": {"type": "string"},
+          "environment": {"type": "string"},
+          "agent": {"type": "string"},
+          "workdir": {"type": "string"},
+          "title": {"type": ["string", "null"]},
+          "injectIdentity": {"type": "boolean"}
+        }
+      },
+      "PreparedConfigRequest": {
+        "type": "object",
+        "required": ["id", "value"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Adapter-declared configuration id, opaque to the server and client."
+          },
+          "value": {
+            "description": "Value accepted by the adapter's capability surface."
+          }
+        }
+      },
+      "EnvironmentsResponse": {
+        "type": "object",
+        "required": ["environments"],
+        "properties": {
+          "environments": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Environment" }
+          }
+        }
+      },
+      "Environment": {
+        "type": "object",
+        "required": ["id", "name", "connected", "origin", "agents"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Opaque environment id minted at pairing; never a hostname."
+          },
+          "name": { "type": "string" },
+          "connected": { "type": "boolean" },
+          "origin": {
+            "type": "string",
+            "enum": ["development", "self-installed", "ssh-bootstrapped", "sandbox-provisioned"]
+          },
+          "reachableVia": {
+            "type": "string",
+            "nullable": true
+          },
+          "agents": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/EnvironmentAgent" }
+          }
+        }
+      },
+      "EnvironmentAgent": {
+        "type": "object",
+        "required": ["name", "flags", "supports", "available"],
+        "properties": {
+          "name": { "type": "string" },
+          "version": { "type": "string", "nullable": true },
+          "flags": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["choices", "description"],
+              "properties": {
+                "choices": { "type": "array", "items": { "type": "string" } },
+                "description": { "type": "string" }
+              }
+            }
+          },
+          "supports": { "type": "array", "items": { "type": "string" } },
+          "available": { "type": "boolean" }
         }
       },
       "SessionListResponse": {
@@ -3356,7 +3599,7 @@
       },
       "Turn": {
         "type": "object",
-        "description": "A turn as the API serializes it. Mirrors `backend/src/models/turn.rs`. `origin` is the field that stops a client rendering an answer to a message the user never wrote: an `agent` turn is one nobody asked for, opened when an agent speaks after its previous turn settled, and its `requestText` is empty by construction.",
+        "description": "A turn as the API serializes it. Mirrors `backend/src/models/turn.rs`. `origin` is turn-level provenance: an `agent` turn is one nobody asked for, opened when an agent speaks after its previous turn settled, and its `requestText` is empty by construction.",
         "required": [
           "id",
           "sessionId",
@@ -3372,11 +3615,7 @@
           },
           "sessionId": {
             "type": "string",
-            "format": "uuid"
-          },
-          "incarnationId": {
-            "type": "string",
-            "nullable": true
+            "description": "Encoded session identity triple, not a UUID."
           },
           "status": {
             "type": "string",
@@ -3400,7 +3639,7 @@
               "agent"
             ],
             "default": "user",
-            "description": "Who started it. Not a synonym for the session's `origin`."
+            "description": "Who started this turn. This turn-level provenance is independent of session identity."
           },
           "requestText": {
             "type": "string",
@@ -3499,7 +3738,7 @@
           "runningCount",
           "lastUsedMs",
           "isQuickStart",
-          "archivedCount"
+          "environment"
         ],
         "properties": {
           "path": {
@@ -3525,9 +3764,9 @@
             "type": "boolean",
             "description": "True for the configured Quick Start directory, which the sidebar lists separately."
           },
-          "archivedCount": {
-            "type": "integer",
-            "description": "Archived sessions TraceDB holds for this directory. Always 0 unless the request passed includeArchived, so 0 means \"not counted\" rather than \"no history\"."
+          "environment": {
+            "type": "string",
+            "description": "Opaque environment id owning this workspace. Paths are scoped per environment, so identical paths on two machines are distinct workspaces."
           }
         }
       },

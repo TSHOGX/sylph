@@ -290,7 +290,10 @@ mod tests {
         let (store, _dir, turn_id) = journal().await;
         let writer = JournalWriter::new(store.clone());
 
-        writer.append(&stable(&turn_id, 0, "settled"), true).await.unwrap();
+        writer
+            .append(&stable(&turn_id, 0, "settled"), true)
+            .await
+            .unwrap();
 
         assert_eq!(writer.buffered(&turn_id).await, 0, "nothing was buffered");
         assert_eq!(
@@ -314,14 +317,22 @@ mod tests {
 
         assert_eq!(writer.buffered(&turn_id).await, 5);
         assert!(
-            store.turn_events_for_consolidation(&turn_id).await.unwrap().is_empty(),
+            store
+                .turn_events_for_consolidation(&turn_id)
+                .await
+                .unwrap()
+                .is_empty(),
             "the window has not committed yet"
         );
 
         writer.flush_turn(&turn_id).await;
 
         assert_eq!(
-            store.turn_events_for_consolidation(&turn_id).await.unwrap().len(),
+            store
+                .turn_events_for_consolidation(&turn_id)
+                .await
+                .unwrap()
+                .len(),
             5,
             "one transaction carried all five"
         );
@@ -342,7 +353,10 @@ mod tests {
                 .await
                 .unwrap();
         }
-        writer.append(&stable(&turn_id, 3, "I'll start now"), true).await.unwrap();
+        writer
+            .append(&stable(&turn_id, 3, "I'll start now"), true)
+            .await
+            .unwrap();
 
         writer.flush_turn(&turn_id).await;
 
@@ -389,12 +403,22 @@ mod tests {
     async fn flushing_twice_does_not_duplicate_or_fail() {
         let (store, _dir, turn_id) = journal().await;
         let writer = JournalWriter::new(store.clone());
-        writer.append(&ephemeral(&turn_id, 0, "one"), false).await.unwrap();
+        writer
+            .append(&ephemeral(&turn_id, 0, "one"), false)
+            .await
+            .unwrap();
 
         writer.flush_turn(&turn_id).await;
         writer.flush_turn(&turn_id).await;
 
-        assert_eq!(store.turn_events_for_consolidation(&turn_id).await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .turn_events_for_consolidation(&turn_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// A fast agent can outrun the window, and an unbounded buffer would hold a
@@ -417,7 +441,11 @@ mod tests {
             "the cap forced a commit rather than growing without bound"
         );
         assert_eq!(
-            store.turn_events_for_consolidation(&turn_id).await.unwrap().len(),
+            store
+                .turn_events_for_consolidation(&turn_id)
+                .await
+                .unwrap()
+                .len(),
             MAX_BATCH
         );
     }
@@ -429,11 +457,18 @@ mod tests {
         let (store, _dir, turn_id) = journal().await;
         let writer = JournalWriter::new(store.clone());
 
-        writer.append(&ephemeral(&turn_id, 0, "quiet"), false).await.unwrap();
+        writer
+            .append(&ephemeral(&turn_id, 0, "quiet"), false)
+            .await
+            .unwrap();
         tokio::time::sleep(WINDOW * 4).await;
 
         assert_eq!(
-            store.turn_events_for_consolidation(&turn_id).await.unwrap().len(),
+            store
+                .turn_events_for_consolidation(&turn_id)
+                .await
+                .unwrap()
+                .len(),
             1,
             "no explicit flush happened, so the timer had to do it"
         );
@@ -457,7 +492,14 @@ mod tests {
         // Ten events, one commit, ten rows. A per-event timer would have committed
         // partial windows and left the buffer empty at different moments; the
         // observable consequence either way is the row count, which must be exact.
-        assert_eq!(store.turn_events_for_consolidation(&turn_id).await.unwrap().len(), 10);
+        assert_eq!(
+            store
+                .turn_events_for_consolidation(&turn_id)
+                .await
+                .unwrap()
+                .len(),
+            10
+        );
         assert_eq!(writer.buffered(&turn_id).await, 0);
     }
 
@@ -479,10 +521,20 @@ mod tests {
     async fn flush_all_commits_every_open_window() {
         let (store, _dir, turn_id) = journal().await;
         let writer = JournalWriter::new(store.clone());
-        writer.append(&ephemeral(&turn_id, 0, "a"), false).await.unwrap();
+        writer
+            .append(&ephemeral(&turn_id, 0, "a"), false)
+            .await
+            .unwrap();
 
         writer.flush_all().await;
 
-        assert_eq!(store.turn_events_for_consolidation(&turn_id).await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .turn_events_for_consolidation(&turn_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

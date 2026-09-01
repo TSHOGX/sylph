@@ -31,8 +31,7 @@ pub(crate) fn triple_from_row(
     Ok(SessionId::new(
         EnvironmentId::parse(row.try_get::<String, _>(environment)?)
             .map_err(|error| decode(environment, error))?,
-        AgentName::parse(row.try_get::<String, _>(agent)?)
-            .map_err(|error| decode(agent, error))?,
+        AgentName::parse(row.try_get::<String, _>(agent)?).map_err(|error| decode(agent, error))?,
         NativeId::new(row.try_get::<String, _>(native)?),
     ))
 }
