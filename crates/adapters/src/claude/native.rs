@@ -3039,6 +3039,14 @@ mod tests {
                     && event.phase == Some(Phase::Completed)
                     && event.stream_id.as_deref() == Some("agent-42")
                     && event.text == "finished the investigation"
+                    && event.data.as_ref().and_then(|data| data.get("output_file"))
+                        == Some(&json!("/tmp/agent-42.txt"))
+                    && event
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("usage"))
+                        .and_then(|usage| usage.get("output_tokens"))
+                        == Some(&json!(34))
         )));
     }
 }

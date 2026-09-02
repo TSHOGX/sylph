@@ -946,6 +946,8 @@ const FORWARDED_TASK_FIELDS: &[&str] = &[
     "spawn_depth",
     "task_type",
     "is_backgrounded",
+    "output_file",
+    "usage",
 ];
 
 impl Correlation {
