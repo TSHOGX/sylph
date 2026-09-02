@@ -722,7 +722,7 @@ fn native_record(path: &Path, version: u64, record: &Value) -> NativeRecord {
         blobs.push(read_native_blob(&sidecar));
     }
     NativeRecord {
-        source: path.to_string_lossy().into_owned(),
+        source: native_source(path),
         version,
         payload: record.clone(),
         blobs,
@@ -749,14 +749,25 @@ fn read_native_blob(name: &str) -> NativeBlob {
 fn sidecar_record(path: &Path) -> Option<NativeRecord> {
     let payload = read_sidecar(path)?;
     Some(NativeRecord {
-        source: path
-            .with_extension("meta.json")
-            .to_string_lossy()
-            .into_owned(),
+        source: native_source(&path.with_extension("meta.json")),
         version: 1,
         payload,
         blobs: Vec::new(),
     })
+}
+
+/// Stable logical source name, relative to the session bundle rather than the host's home.
+fn native_source(path: &Path) -> String {
+    let components: Vec<_> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    for marker in ["subagents", "workflows"] {
+        if let Some(index) = components.iter().position(|component| *component == marker) {
+            return components[index..].join("/");
+        }
+    }
+    "root.jsonl".to_string()
 }
 
 /// Every string value nested in a native record.
@@ -1498,7 +1509,7 @@ impl BundleFollowState {
             );
             if let Some(payload) = read_workflow_manifest(&manifest) {
                 messages.push(SessionMessage::NativeRecord(NativeRecord {
-                    source: manifest.to_string_lossy().into_owned(),
+                    source: native_source(&manifest),
                     version,
                     payload,
                     blobs: Vec::new(),
@@ -2939,6 +2950,12 @@ mod tests {
         assert!(first.iter().any(|message| matches!(
             message,
             SessionMessage::Event(event) if event.text == "first"
+        )));
+        assert!(first.iter().any(|message| matches!(
+            message,
+            SessionMessage::NativeRecord(record)
+                if record.source == "subagents/agent-late.jsonl"
+                    && record.payload["type"] == "assistant"
         )));
 
         let mut file = std::fs::OpenOptions::new()
