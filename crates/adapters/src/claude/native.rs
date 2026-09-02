@@ -32,6 +32,7 @@
 //! <project>/<session-uuid>.jsonl                                     the session
 //! <project>/<session-uuid>/subagents/agent-<hash>.jsonl              a delegate
 //! <project>/<session-uuid>/subagents/agent-<hash>.meta.json          its sidecar
+//! <project>/<session-uuid>/workflows/wf_<id>.json                    workflow manifest
 //! <project>/<session-uuid>/subagents/workflows/wf_<id>/agent-*.jsonl a workflow's delegate
 //! <project>/<session-uuid>/subagents/workflows/wf_<id>/journal.jsonl phase outcomes
 //! ```
@@ -163,7 +164,8 @@ fn is_root_transcript(path: &Path) -> bool {
     true
 }
 
-/// One session's files: its transcript, and the delegates recorded beside it.
+/// One session's files: its transcript, delegates, workflow manifests, and journals recorded
+/// beside it.
 #[derive(Debug, Clone)]
 struct SessionFiles {
     transcript: PathBuf,
@@ -176,6 +178,8 @@ struct SessionFiles {
     delegates: Vec<PathBuf>,
     /// `subagents/workflows/wf_<id>/journal.jsonl`.
     journals: Vec<PathBuf>,
+    /// `workflows/wf_<id>.json`, the snapshot that joins a workflow run to its phase agents.
+    manifests: Vec<PathBuf>,
 }
 
 /// Find one session's files by its native id.
@@ -198,12 +202,13 @@ fn locate(id: &NativeId) -> Result<SessionFiles> {
     Ok(collect(transcript))
 }
 
-/// The delegates and journals sitting beside one transcript.
+/// The delegates, workflow manifests, and journals sitting beside one transcript.
 fn collect(transcript: PathBuf) -> SessionFiles {
     // `<session>.jsonl` has its delegates under `<session>/subagents/`.
     let interior = transcript.with_extension("");
     let mut delegates = Vec::new();
     let mut journals = Vec::new();
+    let mut manifests = Vec::new();
     if interior.is_dir() {
         for candidate in candidates(&interior, |path| {
             path.extension().is_some_and(|ext| ext == "jsonl")
@@ -220,14 +225,39 @@ fn collect(transcript: PathBuf) -> SessionFiles {
             }
         }
     }
+    // A workflow manifest is a snapshot rewritten in place under `workflows/`, rather than
+    // JSONL inside `subagents/`. Keep the directory boundary explicit so a nested sidecar
+    // named `wf_*.json` cannot be mistaken for the run manifest.
+    let workflow_dir = interior.join("workflows");
+    if workflow_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&workflow_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let is_manifest = entry
+                    .file_type()
+                    .map(|kind| kind.is_file())
+                    .unwrap_or(false)
+                    && path.extension().is_some_and(|ext| ext == "json")
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("wf_"));
+                if is_manifest {
+                    manifests.push(path);
+                }
+            }
+        }
+    }
     // Oldest first, so a delegate that spawned another is parsed before its child and the
     // trajectory tree is built in one pass rather than needing a second attachment pass.
     delegates.sort();
     journals.sort();
+    manifests.sort();
     SessionFiles {
         transcript,
         delegates,
         journals,
+        manifests,
     }
 }
 
@@ -412,8 +442,9 @@ fn string_at(payload: &Value, key: &str) -> Option<String> {
 ///
 /// # The shape of the pass
 ///
-/// The transcript is parsed first, then each delegate, then the workflow journals. Each
-/// file gets its **own** [`Correlation`], because the correlation state is per-stream: a
+/// The root transcript is parsed first, collecting workflow joins, then each delegate, then
+/// the workflow journals. Each file gets its **own** [`Correlation`], because the correlation
+/// state is per-stream: a
 /// delegate's content-block indices are its own, and sharing one map across files would
 /// reintroduce the index collision `translate::BlockKey` exists to prevent, here between
 /// files rather than between concurrent delegates.
@@ -422,9 +453,9 @@ fn string_at(payload: &Value, key: &str) -> Option<String> {
 /// what [`delegate_spans`] resolves.
 fn parse_session(session: &SessionFiles) -> Result<Vec<SessionMessage>> {
     let mut messages = Vec::new();
-    let spans = delegate_spans(session);
 
     let root = parse_transcript(&session.transcript, None)?;
+    let spans = delegate_spans(session, &root.workflow_hosts);
     messages.extend(root.messages);
 
     for delegate in &session.delegates {
@@ -475,6 +506,9 @@ struct ParsedFile {
     messages: Vec<SessionMessage>,
     /// The first timestamp seen, for the synthesized trajectory declaration above.
     started_at_ms: i64,
+    /// Workflow run ids and their host `tool_use` ids found in the root transcript.
+    /// `None` marks a conflicting duplicate, which is ambiguous and must not choose a host.
+    workflow_hosts: HashMap<String, Option<String>>,
 }
 
 /// Project one JSONL file through the live translator.
@@ -485,6 +519,7 @@ fn parse_transcript(path: &Path, span: Option<String>) -> Result<ParsedFile> {
     let mut correlation = Correlation::new();
     let mut messages = Vec::new();
     let mut started_at_ms = 0;
+    let mut workflow_hosts: HashMap<String, Option<String>> = HashMap::new();
 
     let stats = for_each_json_line(path, |record| {
         let at_ms = record
@@ -494,6 +529,26 @@ fn parse_transcript(path: &Path, span: Option<String>) -> Result<ParsedFile> {
             .unwrap_or(started_at_ms);
         if started_at_ms == 0 {
             started_at_ms = at_ms;
+        }
+
+        // A root `toolUseResult` records the workflow run id while the nested
+        // `tool_result` block records the host `tool_use_id`. Keep this join as metadata on
+        // the same parse pass so `parse_session` does not scan the root transcript twice.
+        if span.is_none() {
+            if let Some((run_id, host)) = workflow_host(&record) {
+                match workflow_hosts.get_mut(&run_id) {
+                    // A conflicting duplicate is not a choice to make: keeping either host
+                    // would turn a malformed native record into a plausible wrong tree. Keep
+                    // the ambiguity latched so a later duplicate cannot silently revive it.
+                    Some(existing) if existing.as_ref().is_some_and(|value| value != &host) => {
+                        *existing = None;
+                    }
+                    Some(_) => {}
+                    None => {
+                        workflow_hosts.insert(run_id, Some(host));
+                    }
+                }
+            }
         }
 
         for message in project_record(&mut correlation, &record, at_ms) {
@@ -534,7 +589,27 @@ fn parse_transcript(path: &Path, span: Option<String>) -> Result<ParsedFile> {
     Ok(ParsedFile {
         messages,
         started_at_ms,
+        workflow_hosts,
     })
+}
+
+/// The root transcript's join key for a workflow manifest.
+fn workflow_host(record: &Value) -> Option<(String, String)> {
+    let run_id = record
+        .get("toolUseResult")
+        .and_then(|result| string_at(result, "runId"))?;
+    let host = record
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|blocks| {
+            blocks.iter().find_map(|block| {
+                (block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                    .then(|| string_at(block, "tool_use_id"))
+                    .flatten()
+            })
+        })?;
+    Some((run_id, host))
 }
 
 /// One native record, projected onto events.
@@ -960,7 +1035,7 @@ fn read_sidecar(path: &Path) -> Option<Value> {
 
 /// Which trajectory each delegate's work belongs inside, keyed by `agentId`.
 ///
-/// # `parentAgentId`, not directory nesting
+/// # A recorded join, not directory nesting
 ///
 /// The files sit **flat** in one `subagents/` directory however deep the delegation went, so
 /// reading one path component up to find a parent attributes every delegate to the root
@@ -970,37 +1045,66 @@ fn read_sidecar(path: &Path) -> Option<Value> {
 /// depth-1 delegate spawns one depth-2 child.
 ///
 /// A delegate's trajectory id **is its `agentId`**, so this map answers the other question:
-/// which trajectory *contains* it. Three routes, in order of how directly the store states
+/// which trajectory *contains* it. Four routes, in order of how directly the store states
 /// it:
 ///
-/// 1. `parentAgentId` → the parent delegate's trajectory. The only route that expresses
-///    depth, and the one whose absence caused the flattening.
-/// 2. `toolUseId` → the delegating `tool_use` in the parent's transcript, which promotes
-///    that call in place (`docs/session-protocol.md` § Promotion). 599 of 2209 sidecars.
-/// 3. `toolUseResult.agentId` in the parent's transcript, which pairs a delegate to the call
-///    whose result announced it. 583 records, and it overlaps route 2 rather than extending
-///    it — measured, it adds **zero** delegates route 2 misses, so it is *not* consulted.
-///    Recorded here because its uselessness is the measurement: a reader would otherwise
-///    reasonably add it.
+/// 1. `toolUseId` → the delegating `tool_use` in the parent's transcript, which promotes
+///    that call in place (`docs/session-protocol.md` § Promotion).
+/// 2. A workflow manifest's `runId` → the root `toolUseResult.runId` → its nested
+///    `tool_result.tool_use_id`, the vendor's explicit join for `Workflow` delegates.
+/// 3. `parentAgentId` → the parent delegate's trajectory. This is the fallback for a
+///    depth-2 delegate whose sidecar names its parent but not the call inside it.
+/// 4. `toolUseResult.agentId` in the parent's transcript is deliberately not consulted:
+///    it overlaps the sidecar `toolUseId` route rather than extending it.
 ///
-/// **1613 of 2212 delegates have no route at all**, and that is a real limit rather than a
-/// gap to paper over: 1379 are workflow delegates whose sidecars carry neither field, and
-/// 234 are plain delegates whose sidecars carry only `agentType` or a `taskKind` of
-/// `in_process_teammate`. Their events are emitted at the **root**, because an unknown span
-/// renders at the root and dropping them would lose work exactly where structure is least
-/// reliable.
+/// Delegates with no route are emitted at the **root**, because an unknown span renders at the
+/// root and dropping them would lose work exactly where structure is least reliable. Before the
+/// workflow join, this included every workflow delegate whose sidecar carried neither field.
 ///
-/// A workflow delegate is deliberately **not** attached to its host `Workflow` call by
-/// guessing. The `wf_<id>` directory name appears **nowhere** in the parent transcript
-/// (measured: 0 of 23), and 11 of 20 workflow directories sit in sessions whose count of
-/// `Workflow` calls differs from their count of `wf_` directories — so pairing them by
-/// position would be a guess that is wrong whenever a session ran more than one workflow,
-/// and wrong invisibly.
-fn delegate_spans(session: &SessionFiles) -> HashMap<String, String> {
+/// The `wf_<id>` directory name is not the join key: the root transcript carries the same id
+/// in `toolUseResult.runId`, and the manifest repeats it as `runId`. Pairing by directory
+/// position would be a guess that is wrong whenever a session ran more than one workflow.
+fn delegate_spans(
+    session: &SessionFiles,
+    root_workflow_hosts: &HashMap<String, Option<String>>,
+) -> HashMap<String, String> {
     // `agentId` → the `tool_use` id that spawned it, when a sidecar names one.
     let mut by_tool_use: HashMap<String, String> = HashMap::new();
     // `agentId` → its parent delegate's `agentId`, when a sidecar names one.
     let mut by_parent: HashMap<String, String> = HashMap::new();
+    // `agentId` → the root `Workflow` tool_use id joined through a manifest's run id.
+    let mut by_workflow: HashMap<String, Option<String>> = HashMap::new();
+
+    for manifest in &session.manifests {
+        let Some(payload) = read_workflow_manifest(manifest) else {
+            continue;
+        };
+        let Some(run_id) = string_at(&payload, "runId") else {
+            continue;
+        };
+        let Some(host) = root_workflow_hosts.get(&run_id).and_then(Option::as_ref) else {
+            continue;
+        };
+        let Some(progress) = payload.get("workflowProgress").and_then(Value::as_array) else {
+            continue;
+        };
+        for entry in progress {
+            if let Some(agent) = string_at(entry, "agentId") {
+                match by_workflow.get_mut(&agent) {
+                    Some(existing) if existing.as_ref().is_some_and(|value| value != host) => {
+                        // A delegate appearing in two manifests with different hosts is
+                        // ambiguous; leave it unresolved instead of attaching it wrongly, and
+                        // keep the ambiguity latched across later snapshots.
+                        *existing = None;
+                    }
+                    Some(_) => {}
+                    None => {
+                        by_workflow.insert(agent, Some(host.clone()));
+                    }
+                }
+            }
+        }
+    }
 
     for delegate in &session.delegates {
         let Some(agent) = agent_id_of(delegate) else {
@@ -1040,6 +1144,7 @@ fn delegate_spans(session: &SessionFiles) -> HashMap<String, String> {
         let container = by_tool_use
             .get(&agent)
             .cloned()
+            .or_else(|| by_workflow.get(&agent).and_then(Clone::clone))
             // 10 of 2209 sidecars name a parent and no call. The parent's trajectory is its
             // `agentId`, so the child nests one level too shallow — inside its parent rather
             // than inside the call within it — which is the honest answer when the store
@@ -1050,6 +1155,12 @@ fn delegate_spans(session: &SessionFiles) -> HashMap<String, String> {
         }
     }
     spans
+}
+
+/// Read one workflow manifest snapshot.
+fn read_workflow_manifest(path: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// Parse, then follow the transcript as it grows.
@@ -1601,7 +1712,8 @@ mod tests {
             6,
             "three depth-1 and three depth-2"
         );
-        let spans = delegate_spans(&session);
+        let parsed_root = parse_transcript(&session.transcript, None).unwrap();
+        let spans = delegate_spans(&session, &parsed_root.workflow_hosts);
 
         // Every delegate is contained by the `Agent` call that spawned it — depth-1 by a call
         // in the root transcript, depth-2 by a call inside its parent's. The pairs come from
@@ -1739,10 +1851,9 @@ mod tests {
 
     /// A delegate with no recorded link is emitted at the **root**, not dropped.
     ///
-    /// *Measured: 1613 of 2212 delegates have no attribution route at all* — 1379 workflow
-    /// delegates whose sidecars carry neither `toolUseId` nor `parentAgentId`, and 234 plain
-    /// ones carrying only `agentType` or an `in_process_teammate` `taskKind`. That is a real
-    /// limit of the store. `docs/session-protocol.md`: an unknown span renders at the root,
+    /// A sidecar can still have no attribution route when it carries neither `toolUseId` nor
+    /// `parentAgentId`, and not every workflow manifest is guaranteed to be present. That is a
+    /// real limit of the store. `docs/session-protocol.md`: an unknown span renders at the root,
     /// because dropping loses work exactly where structure is least reliable.
     #[test]
     fn an_unattributable_delegate_is_kept_at_the_root() {
@@ -1790,7 +1901,7 @@ mod tests {
         let session_files = collect(root.join(format!("{session}.jsonl")));
         assert_eq!(session_files.delegates.len(), 1);
         assert!(
-            delegate_spans(&session_files).is_empty(),
+            delegate_spans(&session_files, &HashMap::new()).is_empty(),
             "this delegate genuinely has no recorded link"
         );
 
@@ -1886,6 +1997,153 @@ mod tests {
                 .any(|event| event.stream_id.as_deref() == Some("ab020b248dc2d843d")),
             "an unreported phase must not be closed by this parser"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A workflow delegate is joined to its host by `runId`, not by the order of files.
+    ///
+    /// The vendor records the workflow run on the root `toolUseResult`, writes the matching
+    /// manifest under `workflows/`, and puts each phase agent under the corresponding
+    /// `subagents/workflows/` directory. Two workflows are deliberately staged in a different
+    /// order from their manifest paths: pairing by position would attach both delegates to the
+    /// wrong `Workflow` call while still producing plausible spans.
+    #[test]
+    fn workflow_delegates_join_to_their_host_by_run_id() {
+        let root = std::env::temp_dir().join(format!(
+            "sylph-claude-native-workflow-join-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = "3c4d5e6f-7081-92a3-b4c5-d6e7f8091234";
+        let session_dir = root.join(session);
+        let subagents = session_dir.join("subagents").join("workflows");
+        let manifests = session_dir.join("workflows");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::create_dir_all(&manifests).unwrap();
+
+        let host_one = "toolu_workflow_host_one";
+        let host_two = "toolu_workflow_host_two";
+        let run_one = "wf_run_one";
+        let run_two = "wf_run_two";
+        let root_records = [
+            // The root observes run two first, so a directory-position pairing is wrong.
+            json!({
+                "type": "assistant", "uuid": "root-1", "sessionId": session,
+                "timestamp": "2026-08-27T00:00:01.000Z",
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": host_two, "name": "Workflow", "input": {}}
+                ]}
+            }),
+            json!({
+                "type": "user", "uuid": "root-2", "sessionId": session,
+                "timestamp": "2026-08-27T00:00:02.000Z",
+                "toolUseResult": {"runId": run_two},
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": host_two, "content": "started"}
+                ]}
+            }),
+            json!({
+                "type": "assistant", "uuid": "root-3", "sessionId": session,
+                "timestamp": "2026-08-27T00:00:03.000Z",
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": host_one, "name": "Workflow", "input": {}}
+                ]}
+            }),
+            json!({
+                "type": "user", "uuid": "root-4", "sessionId": session,
+                "timestamp": "2026-08-27T00:00:04.000Z",
+                "toolUseResult": {"runId": run_one},
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": host_one, "content": "started"}
+                ]}
+            }),
+        ];
+        let transcript = root.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            root_records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        for (run_id, agent_id) in [
+            (run_one, "workflow_agent_one"),
+            (run_two, "workflow_agent_two"),
+        ] {
+            let workflow_dir = subagents.join(run_id);
+            std::fs::create_dir_all(&workflow_dir).unwrap();
+            std::fs::write(
+                workflow_dir.join(format!("agent-{agent_id}.jsonl")),
+                format!(
+                    "{}\n",
+                    json!({
+                        "type": "assistant", "uuid": format!("{agent_id}-record"),
+                        "sessionId": session, "isSidechain": true, "agentId": agent_id,
+                        "timestamp": "2026-08-27T00:00:05.000Z",
+                        "message": {"role": "assistant", "content": [
+                            {"type": "text", "text": format!("work by {agent_id}")}
+                        ]}
+                    })
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                manifests.join(format!("{run_id}.json")),
+                json!({
+                    "runId": run_id,
+                    "workflowProgress": [
+                        {"type": "workflow_phase", "index": 1},
+                        {"type": "workflow_agent", "agentId": agent_id, "state": "done"}
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
+        let session = collect(transcript);
+        assert_eq!(
+            session.manifests.len(),
+            2,
+            "both workflow manifests must be collected"
+        );
+        let parsed_root = parse_transcript(&session.transcript, None).unwrap();
+        let spans = delegate_spans(&session, &parsed_root.workflow_hosts);
+        assert_eq!(
+            spans.get("workflow_agent_one").map(String::as_str),
+            Some(host_one),
+            "run one must resolve to the root tool_use carrying its runId"
+        );
+        assert_eq!(
+            spans.get("workflow_agent_two").map(String::as_str),
+            Some(host_two),
+            "run two must resolve to the root tool_use carrying its runId"
+        );
+
+        let messages = parse_session(&session).expect("the staged workflow must parse");
+        for (agent, host) in [
+            ("workflow_agent_one", host_one),
+            ("workflow_agent_two", host_two),
+        ] {
+            let opened = messages.iter().any(|message| match message {
+                SessionMessage::Event(event) => {
+                    event.kind == EventKind::Subagent
+                        && event.phase == Some(Phase::Started)
+                        && event.stream_id.as_deref() == Some(agent)
+                        && event.span.as_deref() == Some(host)
+                }
+                _ => false,
+            });
+            assert!(
+                opened,
+                "{agent} must be nested under its Workflow host {host}"
+            );
+        }
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
