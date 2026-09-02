@@ -1419,7 +1419,7 @@ struct JsonlCursor {
 
 /// Cursor for a manifest snapshot rewritten in place.
 struct ManifestCursor {
-    fingerprint: Option<(u64, i64)>,
+    fingerprint: Option<(u64, u128)>,
     version: u64,
 }
 
@@ -1477,7 +1477,7 @@ impl BundleFollowState {
             let Some(meta) = std::fs::metadata(&manifest).ok() else {
                 continue;
             };
-            let fingerprint = (meta.len(), file_modified_ms(&meta));
+            let fingerprint = (meta.len(), file_modified_nanos(&meta));
             let changed = self
                 .manifests
                 .get(&manifest)
@@ -1716,11 +1716,11 @@ impl BundleFollowState {
     }
 }
 
-fn file_modified_ms(meta: &std::fs::Metadata) -> i64 {
+fn file_modified_nanos(meta: &std::fs::Metadata) -> u128 {
     meta.modified()
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|since| since.as_millis() as i64)
+        .map(|since| since.as_nanos())
         .unwrap_or(0)
 }
 
