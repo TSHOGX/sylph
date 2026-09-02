@@ -49,6 +49,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use futures::StreamExt;
 use serde_json::{json, Map, Value};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};
@@ -289,6 +290,12 @@ struct Shared {
     /// the refreshed surface immediately.  The next vendor `system/init` is
     /// authoritative and clears this value before rebuilding capabilities.
     pending_model: Mutex<Option<String>>,
+    /// Trajectories already observed on live stdout. The native bundle reader uses this
+    /// set to suppress the duplicate `Task` sidecar stream while retaining disjoint
+    /// `Agent`/`Workflow` interiors.
+    live_trajectories: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Stops the bundle follower when the live session closes.
+    closed: std::sync::atomic::AtomicBool,
 }
 
 /// A live `claude` session.
@@ -444,6 +451,17 @@ async fn pump(
                     });
                 }
                 for message in emission.messages {
+                    if let SessionMessage::Event(event) = &message {
+                        if event.kind == sylph_protocol::EventKind::Subagent {
+                            if let Some(stream_id) = &event.stream_id {
+                                shared
+                                    .live_trajectories
+                                    .lock()
+                                    .await
+                                    .insert(stream_id.clone());
+                            }
+                        }
+                    }
                     if out.send(Ok(message)).await.is_err() {
                         return;
                     }
@@ -468,6 +486,58 @@ async fn pump(
                 .error("claude exited while a turn was still running")
                 .await))
             .await;
+    }
+}
+
+/// Follow Claude's on-disk bundle while the live stdout pump is running.
+///
+/// The root transcript is intentionally skipped by `watch_live`: stdout already carries
+/// the root at stream fidelity. The follower waits for `system/init` to reveal the native
+/// id (for `New` sessions), retries a bundle that has not been flushed yet, and then keeps
+/// forwarding newly-created delegate/journal files until the session closes.
+async fn bundle_pump(out: mpsc::Sender<Result<SessionMessage>>, shared: Arc<Shared>) {
+    let mut current: Option<NativeId> = None;
+    let mut stream: Option<EventStream> = None;
+
+    loop {
+        if shared.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+
+        let native = shared.native_id.read().ok().and_then(|id| id.clone());
+        if native != current {
+            current = native.clone();
+            stream = native.and_then(|id| {
+                super::native::watch_live(&id, shared.live_trajectories.clone()).ok()
+            });
+        }
+
+        if let Some(bundle) = stream.as_mut() {
+            tokio::select! {
+                item = bundle.next() => {
+                    match item {
+                        Some(Ok(message)) => {
+                            if out.send(Ok(message)).await.is_err() {
+                                return;
+                            }
+                        }
+                        Some(Err(error)) => {
+                            if out.send(Err(error)).await.is_err() {
+                                return;
+                            }
+                        }
+                        None => {
+                            // `watch_live` normally stays open for the session's lifetime;
+                            // a transient file error should not disable the reader forever.
+                            stream = None;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 }
 
@@ -589,7 +659,8 @@ pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Sess
     // Bounded. A turn streams thousands of deltas, and a channel small enough to block
     // would make the pump's backpressure part of what a duration measures.
     let (tx, rx) = mpsc::channel(1024);
-    tokio::spawn(pump(lines, tx, control.clone(), shared.clone()));
+    tokio::spawn(pump(lines, tx.clone(), control.clone(), shared.clone()));
+    tokio::spawn(bundle_pump(tx.clone(), shared.clone()));
 
     // The handshake that turns a process into a session. This is where the project's real
     // command list comes from, and where the dialog kinds are declared — the declaration is
@@ -987,6 +1058,9 @@ impl Session for ClaudeSession {
     /// would leak a process for the server's life, and signalling an already-exited group
     /// is defined to be harmless.
     async fn close(&self) -> Result<()> {
+        self.shared
+            .closed
+            .store(true, std::sync::atomic::Ordering::Release);
         self.control.child.close().await;
         if let Some(path) = &self.preamble {
             // Best effort: a leftover file in the temp directory is not worth failing a

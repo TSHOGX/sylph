@@ -40,8 +40,9 @@
 //! The root is hardcoded: a native store's location is a vendor fact with no configuration
 //! key, and inventing one would offer a lever that cannot be right.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -80,10 +81,23 @@ pub fn adopt(id: &NativeId) -> Result<EventStream> {
     )))
 }
 
-/// Parse, then follow the transcript as it grows.
+/// Parse, then follow the complete native bundle as it grows.
 pub fn watch(id: &NativeId) -> Result<EventStream> {
     let session = locate(id)?;
-    Ok(follow(session))
+    Ok(follow(session, None))
+}
+
+/// Follow a native bundle alongside Claude's live stdout.
+///
+/// Built-in `Task` output is forwarded on stdout and written to a delegate JSONL file.
+/// The live trajectory ids observed by the stdout pump are supplied so the file copy can
+/// be suppressed while `Agent` and `Workflow` interiors remain readable from disk.
+pub fn watch_live(
+    id: &NativeId,
+    live_trajectories: Arc<tokio::sync::Mutex<HashSet<String>>>,
+) -> Result<EventStream> {
+    let session = locate(id)?;
+    Ok(follow(session, Some(live_trajectories)))
 }
 
 /// Which native sessions this machine's store holds.
@@ -1168,84 +1182,328 @@ fn read_workflow_manifest(path: &Path) -> Option<Value> {
 /// # Why a poll and not a filesystem watch
 ///
 /// A watch would need a per-platform notification API and would still have to re-read from
-/// an offset on every event, because the vendor appends rather than rewriting. The poll is
-/// the same read with a timer in front of it, and it also handles the case a watch does not:
-/// a file that does not exist yet. `claude` creates a transcript on the first record, so a
-/// session opened and not yet spoken to has no file, and **an absent file is not an absent
-/// session** (`sylph_protocol::Adapter::watch`).
+/// an offset on every event, because Claude appends JSONL files and creates delegate files
+/// after a turn starts. The poll is the same read with a timer in front of it, and it also
+/// handles files that do not exist yet. The root transcript is optional on the live path:
+/// stdout already carries it at stream fidelity and reading it again would double every
+/// root block.
 ///
-/// The correlation state is held **across** polls, not rebuilt per poll. Rebuilding would
-/// re-emit the whole history on every tick; holding it means each poll projects only what
-/// arrived. The offset is in bytes and only advances past a **complete** line, so a poll that
-/// catches a half-written record re-reads it next time rather than skipping it — which is the
-/// mid-write hazard `crate::native::for_each_json_line` documents, handled here by not
-/// committing the offset rather than by tolerating a broken record.
-fn follow(session: SessionFiles) -> EventStream {
+/// The reader owns one cursor per source and keeps one `Correlation` per JSONL file. A
+/// correlation cannot be shared between files because Claude numbers content blocks per
+/// message, so two delegates both opening index zero would otherwise share block state.
+/// Manifest files are different: they are snapshots rewritten in place, so their cursor is
+/// a `(size, mtime)` fingerprint and a monotonically increasing version rather than a byte
+/// offset. Re-scanning the directory on every pass is what discovers delegates and journals
+/// created after the first pass.
+fn follow(
+    session: SessionFiles,
+    live_trajectories: Option<Arc<tokio::sync::Mutex<HashSet<String>>>>,
+) -> EventStream {
     /// Fast enough to feel live against a store that flushes per content block, slow enough
     /// that an idle session costs one `stat` per interval.
     const POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
     Box::pin(futures::stream::unfold(
-        FollowState {
-            session,
-            offset: 0,
-            correlation: Correlation::new(),
-            replayed: false,
-            pending: std::collections::VecDeque::new(),
-        },
+        BundleFollowState::new(session, live_trajectories),
         |mut state| async move {
             loop {
                 if let Some(message) = state.pending.pop_front() {
                     return Some((Ok(message), state));
                 }
 
-                // The first pass covers the delegates and journals too, so a watched session
-                // starts from everything already recorded rather than from the next append.
-                if !state.replayed {
-                    state.replayed = true;
-                    match parse_session(&state.session) {
-                        Ok(messages) => {
-                            state.offset = std::fs::metadata(&state.session.transcript)
-                                .map(|meta| meta.len())
-                                .unwrap_or(0);
-                            state.pending.extend(messages);
-                            continue;
-                        }
-                        Err(error) => return Some((Err(error), state)),
-                    }
-                }
-
-                match read_appended(&state.session.transcript, state.offset) {
-                    Some((bytes, next_offset)) if !bytes.is_empty() => {
-                        state.offset = next_offset;
-                        for record in json_lines(&bytes, Edge::Head) {
-                            let at_ms = record
-                                .get("timestamp")
-                                .and_then(Value::as_str)
-                                .and_then(epoch_millis_from_iso)
-                                .unwrap_or(0);
-                            let projected = project_record(&mut state.correlation, &record, at_ms);
-                            state.pending.extend(projected);
-                        }
+                match state.poll() {
+                    Ok(messages) if !messages.is_empty() => {
+                        state.pending.extend(messages);
                         continue;
                     }
-                    // No file yet, or nothing new. Either way the session is not over: a
-                    // watcher ends when its consumer drops it, not when the agent goes quiet.
-                    _ => tokio::time::sleep(POLL).await,
+                    Ok(_) => tokio::time::sleep(POLL).await,
+                    Err(error) => return Some((Err(error), state)),
                 }
             }
         },
     ))
 }
 
-/// What one `watch` remembers between polls.
-struct FollowState {
-    session: SessionFiles,
-    /// Bytes of the transcript already projected. Only advanced past a complete line.
+/// Cursor for one append-only JSONL source.
+struct JsonlCursor {
     offset: u64,
     correlation: Correlation,
-    replayed: bool,
-    pending: std::collections::VecDeque<SessionMessage>,
+    opened: bool,
+}
+
+/// Cursor for a manifest snapshot rewritten in place.
+struct ManifestCursor {
+    fingerprint: Option<(u64, i64)>,
+    version: u64,
+}
+
+/// State for the dynamic multi-file bundle reader.
+struct BundleFollowState {
+    session: SessionFiles,
+    root: JsonlCursor,
+    root_metadata_offset: u64,
+    delegates: HashMap<PathBuf, JsonlCursor>,
+    journals: HashMap<PathBuf, u64>,
+    manifests: HashMap<PathBuf, ManifestCursor>,
+    workflow_hosts: HashMap<String, Option<String>>,
+    pending: VecDeque<SessionMessage>,
+    live_trajectories: Option<Arc<tokio::sync::Mutex<HashSet<String>>>>,
+    skip_root: bool,
+}
+
+impl BundleFollowState {
+    fn new(
+        session: SessionFiles,
+        live_trajectories: Option<Arc<tokio::sync::Mutex<HashSet<String>>>>,
+    ) -> Self {
+        Self {
+            session,
+            root: JsonlCursor {
+                offset: 0,
+                correlation: Correlation::new(),
+                opened: true,
+            },
+            root_metadata_offset: 0,
+            delegates: HashMap::new(),
+            journals: HashMap::new(),
+            manifests: HashMap::new(),
+            workflow_hosts: HashMap::new(),
+            pending: VecDeque::new(),
+            skip_root: live_trajectories.is_some(),
+            live_trajectories,
+        }
+    }
+
+    fn poll(&mut self) -> Result<Vec<SessionMessage>> {
+        self.session = collect(self.session.transcript.clone());
+        let mut messages = Vec::new();
+
+        // Manifests are snapshots, not append-only logs. Re-read a changed file in full and
+        // retain its version in the cursor so a later projection can distinguish revisions.
+        let manifests = self.session.manifests.clone();
+        for manifest in manifests {
+            let Some(meta) = std::fs::metadata(&manifest).ok() else {
+                continue;
+            };
+            let fingerprint = (meta.len(), file_modified_ms(&meta));
+            let changed = self
+                .manifests
+                .get(&manifest)
+                .is_none_or(|cursor| cursor.fingerprint != Some(fingerprint));
+            if !changed {
+                continue;
+            }
+            let version = self
+                .manifests
+                .get(&manifest)
+                .map_or(1, |cursor| cursor.version + 1);
+            self.manifests.insert(
+                manifest.clone(),
+                ManifestCursor {
+                    fingerprint: Some(fingerprint),
+                    version,
+                },
+            );
+        }
+
+        if !self.skip_root {
+            messages.extend(self.read_root()?);
+        } else {
+            // The live path does not project root records (stdout already does), but it still
+            // needs the root's workflow run-id join to place Workflow delegates correctly.
+            self.read_root_metadata();
+        }
+
+        // Resolve spans from the current manifest/sidecar view every pass. This is what
+        // makes a manifest rewritten after watch() started visible without a restart.
+        let spans = delegate_spans(&self.session, &self.workflow_hosts);
+        let delegates = self.session.delegates.clone();
+        for delegate in delegates {
+            let Some(agent) = agent_id_of(&delegate) else {
+                continue;
+            };
+            messages.extend(self.read_delegate(&delegate, spans.get(&agent).cloned())?);
+        }
+        let journals = self.session.journals.clone();
+        for journal in journals {
+            messages.extend(self.read_journal(&journal)?);
+        }
+        Ok(messages)
+    }
+
+    fn read_root_metadata(&mut self) {
+        let Some((bytes, next_offset)) =
+            read_appended(&self.session.transcript, self.root_metadata_offset)
+        else {
+            return;
+        };
+        if bytes.is_empty() {
+            return;
+        }
+        self.root_metadata_offset = next_offset;
+        for record in json_lines(&bytes, Edge::Head) {
+            if let Some((run_id, host)) = workflow_host(&record) {
+                self.workflow_hosts
+                    .entry(run_id)
+                    .and_modify(|existing| {
+                        if existing.as_ref().is_some_and(|old| old != &host) {
+                            *existing = None;
+                        }
+                    })
+                    .or_insert(Some(host));
+            }
+        }
+    }
+
+    fn read_root(&mut self) -> Result<Vec<SessionMessage>> {
+        let Some((bytes, next_offset)) = read_appended(&self.session.transcript, self.root.offset)
+        else {
+            return Ok(Vec::new());
+        };
+        if bytes.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.root.offset = next_offset;
+        let mut messages = Vec::new();
+        for record in json_lines(&bytes, Edge::Head) {
+            let at_ms = record
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(epoch_millis_from_iso)
+                .unwrap_or(0);
+            if let Some((run_id, host)) = workflow_host(&record) {
+                self.workflow_hosts
+                    .entry(run_id)
+                    .and_modify(|existing| {
+                        if existing.as_ref().is_some_and(|old| old != &host) {
+                            *existing = None;
+                        }
+                    })
+                    .or_insert(Some(host));
+            }
+            messages.extend(project_record(&mut self.root.correlation, &record, at_ms));
+        }
+        Ok(messages)
+    }
+
+    fn read_delegate(&mut self, path: &Path, span: Option<String>) -> Result<Vec<SessionMessage>> {
+        let Some(agent) = agent_id_of(path) else {
+            return Ok(Vec::new());
+        };
+        let entry = self
+            .delegates
+            .entry(path.to_path_buf())
+            .or_insert_with(|| JsonlCursor {
+                offset: 0,
+                correlation: Correlation::new(),
+                opened: false,
+            });
+
+        if !entry.opened {
+            if let Some(host) = delegate_tool_use_id(path) {
+                if let Some(live) = &self.live_trajectories {
+                    if live.blocking_lock().contains(&host) {
+                        entry.opened = true;
+                        entry.offset = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+                        return Ok(Vec::new());
+                    }
+                }
+            }
+        }
+
+        let mut messages = Vec::new();
+        if !entry.opened {
+            let Some(first) = read_first_json(path) else {
+                return Ok(Vec::new());
+            };
+            let at_ms = first
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(epoch_millis_from_iso)
+                .unwrap_or(0);
+            let mut opened = Event::new(EventKind::Subagent, Some(Phase::Started), at_ms);
+            opened.stream_id = Some(agent.clone());
+            opened.span = span.clone();
+            opened.name = delegate_name(path);
+            messages.push(SessionMessage::Event(opened));
+            entry.opened = true;
+        }
+
+        let Some((bytes, next_offset)) = read_appended(path, entry.offset) else {
+            return Ok(messages);
+        };
+        if bytes.is_empty() {
+            return Ok(messages);
+        }
+        entry.offset = next_offset;
+        for record in json_lines(&bytes, Edge::Head) {
+            let at_ms = record
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(epoch_millis_from_iso)
+                .unwrap_or(0);
+            for message in project_record(&mut entry.correlation, &record, at_ms) {
+                let message = match message {
+                    SessionMessage::Event(mut event) => {
+                        if event.span.is_none() {
+                            event.span = Some(span.clone().unwrap_or_else(|| agent.clone()));
+                        }
+                        SessionMessage::Event(event)
+                    }
+                    other => other,
+                };
+                messages.push(message);
+            }
+        }
+        Ok(messages)
+    }
+
+    fn read_journal(&mut self, path: &Path) -> Result<Vec<SessionMessage>> {
+        let offset = *self.journals.entry(path.to_path_buf()).or_insert(0);
+        let Some((bytes, next_offset)) = read_appended(path, offset) else {
+            return Ok(Vec::new());
+        };
+        if bytes.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.journals.insert(path.to_path_buf(), next_offset);
+        let mut messages = Vec::new();
+        for record in json_lines(&bytes, Edge::Head) {
+            if record.get("type").and_then(Value::as_str) != Some("result") {
+                continue;
+            }
+            let Some(agent) = string_at(&record, "agentId") else {
+                continue;
+            };
+            let mut event = Event::new(EventKind::Subagent, Some(Phase::Completed), 0);
+            event.stream_id = Some(agent);
+            event.text = match record.get("result") {
+                Some(Value::String(text)) => text.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            };
+            messages.push(SessionMessage::Event(event));
+        }
+        Ok(messages)
+    }
+}
+
+fn file_modified_ms(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn read_first_json(path: &Path) -> Option<Value> {
+    let bytes = read_span(path, 0, 64 * 1024)?;
+    let first = json_lines(&bytes, Edge::Head).next();
+    first
+}
+
+fn delegate_tool_use_id(path: &Path) -> Option<String> {
+    string_at(&read_sidecar(path)?, "toolUseId")
 }
 
 /// Whole lines appended since `offset`, and the offset past the last complete one.
@@ -2408,5 +2666,110 @@ mod tests {
                 result.stream_id
             );
         }
+    }
+
+    /// The bundle reader discovers a delegate after its first pass and then follows only
+    /// the bytes appended after the cursor.  This is the regression that the old
+    /// `watch()` could never catch: it collected delegates once, then tailed only root.
+    #[test]
+    fn a_bundle_reader_discovers_and_follows_a_delegate_created_late() {
+        let dir = std::env::temp_dir().join(format!("sylph-claude-bundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("session.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"mode","mode":"normal","sessionId":"bundle-session"}
+"#,
+        )
+        .unwrap();
+        let mut state = BundleFollowState::new(collect(transcript.clone()), None);
+        assert!(
+            state.poll().unwrap().is_empty(),
+            "bookkeeping is not an event"
+        );
+
+        // Build the path from the transcript stem exactly as `collect` does.
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let delegate = subagents.join("agent-late.jsonl");
+        std::fs::write(
+            &delegate,
+            r#"{"type":"assistant","timestamp":"2026-09-02T00:00:00.001Z","message":{"role":"assistant","content":[{"type":"text","text":"first"}]}}
+"#,
+        )
+        .unwrap();
+
+        let first = state.poll().unwrap();
+        assert!(first.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some("late")
+        )));
+        assert!(first.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "first"
+        )));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&delegate)
+            .unwrap();
+        use std::io::Write;
+        writeln!(
+            file,
+            r#"{{"type":"assistant","timestamp":"2026-09-02T00:00:00.002Z","message":{{"role":"assistant","content":[{{"type":"text","text":"second"}}]}}}}"#
+        )
+        .unwrap();
+        let second = state.poll().unwrap();
+        assert!(second.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "second"
+        )));
+        assert!(second.iter().all(|message| !matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "first"
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Manifest cursors are versioned snapshots: an in-place rewrite produces a new
+    /// version instead of being mistaken for an append or silently replacing the previous
+    /// observation.
+    #[test]
+    fn a_manifest_rewrite_advances_its_snapshot_version() {
+        let dir =
+            std::env::temp_dir().join(format!("sylph-claude-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("session.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"mode","sessionId":"bundle-session"}
+"#,
+        )
+        .unwrap();
+        let workflow_dir = transcript.with_extension("").join("workflows");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+        let manifest = workflow_dir.join("wf_run.json");
+        std::fs::write(
+            &manifest,
+            r#"{"runId":"wf_run","workflowProgress":[{"agentId":"a1","state":"start"}]}
+"#,
+        )
+        .unwrap();
+        let mut state = BundleFollowState::new(collect(transcript), None);
+        state.poll().unwrap();
+        assert_eq!(state.manifests.get(&manifest).unwrap().version, 1);
+        std::fs::write(
+            &manifest,
+            r#"{"runId":"wf_run","workflowProgress":[{"agentId":"a1","state":"done"}]}
+"#,
+        )
+        .unwrap();
+        state.poll().unwrap();
+        assert_eq!(state.manifests.get(&manifest).unwrap().version, 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
