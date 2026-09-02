@@ -1234,17 +1234,29 @@ fn agent_id_of(path: &Path) -> Option<String> {
 
 /// What a delegate is called, from its sidecar.
 ///
-/// **`None` when the sidecar does not name it**, which is 1919 of 2209 measured sidecars.
-/// `name` is the agent's chosen label and `description` is its brief; `agentType` is
-/// deliberately **not** used as a fallback even though every sidecar has one, because it is
-/// the *kind* of agent (`general-purpose`, `Explore`, `workflow-subagent`) rather than what
-/// this delegation is — and a timeline of nine rows reading "general-purpose" is the
+/// **`None` when the sidecar does not name it**, which is most of them.
+///
+/// `agentType` is deliberately **not** a fallback even though every sidecar has one, because
+/// it is the *kind* of agent (`general-purpose`, `Explore`, `workflow-subagent`) rather than
+/// what this delegation is — and a timeline of nine rows reading "general-purpose" is the
 /// unreadable card `translate::task_label` already refuses to produce. A guess written here
 /// becomes permanent and is then indistinguishable from a name an agent chose
 /// (`docs/session-protocol.md` § `name` is absent when unknown).
+///
+/// # `description` before `name`, so the two sources agree
+///
+/// Both are present or only `description` is — measured, no sidecar carries a `name` without
+/// one — so this order never loses a label, and it is chosen to **match what stdout calls the
+/// same delegation.** A live `task_started` reads `description` first, and this file's
+/// declaration lands on the trajectory stdout already opened; because a later name overwrites
+/// an earlier one, reading `name` here relabelled the card a few hundred milliseconds after it
+/// appeared and left the slug as the durable label. Measured, that diverged for every one of
+/// the 91 sidecars carrying a `name` and none of the others, and the slug is the less
+/// informative half of the pair (`demo-b` against `后台演示任务B`). One fact with two spellings
+/// is a card that changes under the reader; the brief is also what a person would recognise.
 fn delegate_name(path: &Path) -> Option<String> {
     let sidecar = read_sidecar(path)?;
-    string_at(&sidecar, "name").or_else(|| string_at(&sidecar, "description"))
+    string_at(&sidecar, "description").or_else(|| string_at(&sidecar, "name"))
 }
 
 /// A delegate's `agent-<hash>.meta.json`, when it has one.
@@ -3332,6 +3344,51 @@ mod tests {
         assert!(
             retained.contains("FIRST_PREFIX") && retained.contains("LATER_SUFFIX"),
             "a suppressed delegate's records are still the only copy and must be retained"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A delegate is called what stdout calls it, so the card does not relabel itself.
+    ///
+    /// A sidecar carrying both fields is the case that matters: `description` is the brief a
+    /// live `task_started` also reads, and `name` is a slug only the file has. Reading the slug
+    /// here meant the file's declaration overwrote stdout's a poll later, so the card changed
+    /// under the reader and kept the less informative half.
+    #[test]
+    fn a_delegate_is_named_what_stdout_would_call_it() {
+        let root =
+            std::env::temp_dir().join(format!("sylph-claude-delegate-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let both = root.join("agent-both.jsonl");
+        std::fs::write(&both, "").unwrap();
+        std::fs::write(
+            root.join("agent-both.meta.json"),
+            json!({"name": "stage-a-slug", "description": "Stage A: remove IngestMode"})
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            delegate_name(&both).as_deref(),
+            Some("Stage A: remove IngestMode"),
+            "the brief is what stdout names the same delegation"
+        );
+
+        // No sidecar on this store carries a `name` without a `description`, but the fallback
+        // is kept so such a shape is named rather than anonymous.
+        let slug_only = root.join("agent-slug.jsonl");
+        std::fs::write(&slug_only, "").unwrap();
+        std::fs::write(
+            root.join("agent-slug.meta.json"),
+            json!({"name": "slug-only"}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            delegate_name(&slug_only).as_deref(),
+            Some("slug-only"),
+            "a slug is better than no name at all"
         );
 
         let _ = std::fs::remove_dir_all(&root);
