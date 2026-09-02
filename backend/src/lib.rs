@@ -241,6 +241,7 @@ impl AppState {
 
         let links = crate::links::LinkManager::new(crate::links::LinkManagerConfig {
             store: store.clone(),
+            history: history.clone(),
             data_dir: config.data_dir.clone(),
             writer: writer.clone(),
             hub: hub.clone(),
@@ -257,7 +258,8 @@ impl AppState {
         // drain path uses, which is what makes an adopted row indistinguishable from a
         // live one downstream (`docs/architecture.md` § One authority).
         let ingest = crate::db::NativeIngest::new(store.clone(), writer.clone(), seq.clone())
-            .with_hub(hub.clone());
+            .with_hub(hub.clone())
+            .with_history(history.clone());
 
         let turns = crate::supervisor::turn::LinkedSupervisor::new(
             store.clone(),

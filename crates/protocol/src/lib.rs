@@ -48,8 +48,8 @@ pub mod request;
 // this crate, not a namespace its consumers should have to learn. The modules stay
 // public so a doc link can name one.
 pub use adapter::{
-    normalize_workdir, Adapter, AgentInfo, EventStream, NativeSummary, RequestedNativeId, RunSpec,
-    Session, SessionMessage, StoreFilter, TurnInput,
+    normalize_workdir, Adapter, AgentInfo, EventStream, NativeBlob, NativeRecord, NativeSummary,
+    RequestedNativeId, RunSpec, Session, SessionMessage, StoreFilter, TurnInput,
 };
 pub use capabilities::{
     Capability, CapabilityFacets, CommandKind, CommandSpec, ConfigChoice, ConfigKind, ConfigOption,

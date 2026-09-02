@@ -270,6 +270,41 @@ pub struct NativeSummary {
     pub fidelity: Fidelity,
 }
 
+/// One vendor-native record preserved alongside its normalized projection.
+///
+/// Native stores evolve faster than the event vocabulary.  Keeping the complete payload
+/// (including fields the current projection ignores) makes a parser change a local
+/// re-projection rather than a second read of a vendor file that may already have rotated.
+/// `version` is an append ordinal for JSONL sources and a snapshot revision for manifests.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeRecord {
+    /// Stable source name relative to the native session bundle, never an absolute path.
+    pub source: String,
+    pub version: u64,
+    pub payload: serde_json::Value,
+    /// Large sidecar bodies referenced by this record.  The preview remains in `payload`;
+    /// the full bytes are externalized by the server into its content-addressed store.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blobs: Vec<NativeBlob>,
+}
+
+/// A sidecar body associated with a native record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeBlob {
+    pub name: String,
+    pub size: u64,
+    /// Present when the sidecar was readable.  The server stores these bytes in CAS and
+    /// clears the in-memory copy before handing the message onward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<Vec<u8>>,
+    /// Present when the sidecar could not be read; this is explicit state, not an absent
+    /// blob that a client must guess was never attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Anything an adapter has to tell the server about a session.
 ///
 /// # Why a stream of messages and not a stream of events
@@ -305,6 +340,8 @@ pub enum SessionMessage {
     /// in-process that would put one rule in three adapters, so the facets travel and
     /// the server applies them. An unmentioned facet is not changed.
     Capabilities(CapabilityFacets),
+    /// A complete vendor-native record, retained for lossless re-projection.
+    NativeRecord(NativeRecord),
 }
 
 /// A session's messages, as they arrive.

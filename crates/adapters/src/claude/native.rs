@@ -49,8 +49,8 @@ use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
 use serde_json::{json, Value};
 use sylph_protocol::{
-    normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeId, NativeSummary, Phase,
-    SessionMessage, StoreFilter,
+    normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeBlob, NativeId, NativeRecord,
+    NativeSummary, Phase, SessionMessage, StoreFilter,
 };
 
 use super::translate::Correlation;
@@ -505,6 +505,9 @@ fn parse_session(session: &SessionFiles) -> Result<Vec<SessionMessage>> {
         opened.span = container;
         opened.name = delegate_name(delegate);
         messages.push(SessionMessage::Event(opened));
+        if let Some(sidecar) = sidecar_record(delegate) {
+            messages.push(SessionMessage::NativeRecord(sidecar));
+        }
 
         messages.extend(parsed.messages);
     }
@@ -536,8 +539,13 @@ fn parse_transcript(path: &Path, span: Option<String>) -> Result<ParsedFile> {
     let mut messages = Vec::new();
     let mut started_at_ms = 0;
     let mut workflow_hosts: HashMap<String, Option<String>> = HashMap::new();
+    let mut version = 0u64;
 
     let stats = for_each_json_line(path, |record| {
+        version += 1;
+        messages.push(SessionMessage::NativeRecord(native_record(
+            path, version, &record,
+        )));
         let at_ms = record
             .get("timestamp")
             .and_then(Value::as_str)
@@ -702,6 +710,53 @@ fn project_record(
         // by [`summarize`] for a listing row instead, which is where they belong.
         _ => vec![],
     }
+}
+
+/// Preserve the exact native JSON object and any large sidecar it references.
+fn native_record(path: &Path, version: u64, record: &Value) -> NativeRecord {
+    let mut blobs = Vec::new();
+    if let Some(sidecar) = record
+        .get("toolUseResult")
+        .and_then(|result| string_at(result, "persistedOutputPath"))
+    {
+        blobs.push(read_native_blob(&sidecar));
+    }
+    NativeRecord {
+        source: path.to_string_lossy().into_owned(),
+        version,
+        payload: record.clone(),
+        blobs,
+    }
+}
+
+fn read_native_blob(name: &str) -> NativeBlob {
+    match std::fs::read(name) {
+        Ok(bytes) => NativeBlob {
+            name: name.to_string(),
+            size: bytes.len() as u64,
+            bytes: Some(bytes),
+            error: None,
+        },
+        Err(error) => NativeBlob {
+            name: name.to_string(),
+            size: std::fs::metadata(name).map(|meta| meta.len()).unwrap_or(0),
+            bytes: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn sidecar_record(path: &Path) -> Option<NativeRecord> {
+    let payload = read_sidecar(path)?;
+    Some(NativeRecord {
+        source: path
+            .with_extension("meta.json")
+            .to_string_lossy()
+            .into_owned(),
+        version: 1,
+        payload,
+        blobs: Vec::new(),
+    })
 }
 
 /// Every string value nested in a native record.
@@ -1357,6 +1412,7 @@ fn follow(
 /// Cursor for one append-only JSONL source.
 struct JsonlCursor {
     offset: u64,
+    version: u64,
     correlation: Correlation,
     opened: bool,
 }
@@ -1367,13 +1423,18 @@ struct ManifestCursor {
     version: u64,
 }
 
+struct JournalCursor {
+    offset: u64,
+    version: u64,
+}
+
 /// State for the dynamic multi-file bundle reader.
 struct BundleFollowState {
     session: SessionFiles,
     root: JsonlCursor,
     root_metadata_offset: u64,
     delegates: HashMap<PathBuf, JsonlCursor>,
-    journals: HashMap<PathBuf, u64>,
+    journals: HashMap<PathBuf, JournalCursor>,
     manifests: HashMap<PathBuf, ManifestCursor>,
     workflow_hosts: HashMap<String, Option<String>>,
     pending: VecDeque<SessionMessage>,
@@ -1390,6 +1451,7 @@ impl BundleFollowState {
             session,
             root: JsonlCursor {
                 offset: 0,
+                version: 0,
                 correlation: Correlation::new(),
                 opened: true,
             },
@@ -1434,6 +1496,14 @@ impl BundleFollowState {
                     version,
                 },
             );
+            if let Some(payload) = read_workflow_manifest(&manifest) {
+                messages.push(SessionMessage::NativeRecord(NativeRecord {
+                    source: manifest.to_string_lossy().into_owned(),
+                    version,
+                    payload,
+                    blobs: Vec::new(),
+                }));
+            }
         }
 
         if !self.skip_root {
@@ -1496,6 +1566,12 @@ impl BundleFollowState {
         self.root.offset = next_offset;
         let mut messages = Vec::new();
         for record in json_lines(&bytes, Edge::Head) {
+            self.root.version += 1;
+            messages.push(SessionMessage::NativeRecord(native_record(
+                &self.session.transcript,
+                self.root.version,
+                &record,
+            )));
             let at_ms = record
                 .get("timestamp")
                 .and_then(Value::as_str)
@@ -1525,6 +1601,7 @@ impl BundleFollowState {
             .entry(path.to_path_buf())
             .or_insert_with(|| JsonlCursor {
                 offset: 0,
+                version: 0,
                 correlation: Correlation::new(),
                 opened: false,
             });
@@ -1556,6 +1633,9 @@ impl BundleFollowState {
             opened.span = span.clone();
             opened.name = delegate_name(path);
             messages.push(SessionMessage::Event(opened));
+            if let Some(sidecar) = sidecar_record(path) {
+                messages.push(SessionMessage::NativeRecord(sidecar));
+            }
             entry.opened = true;
         }
 
@@ -1567,6 +1647,12 @@ impl BundleFollowState {
         }
         entry.offset = next_offset;
         for record in json_lines(&bytes, Edge::Head) {
+            entry.version += 1;
+            messages.push(SessionMessage::NativeRecord(native_record(
+                path,
+                entry.version,
+                &record,
+            )));
             let at_ms = record
                 .get("timestamp")
                 .and_then(Value::as_str)
@@ -1589,16 +1675,28 @@ impl BundleFollowState {
     }
 
     fn read_journal(&mut self, path: &Path) -> Result<Vec<SessionMessage>> {
-        let offset = *self.journals.entry(path.to_path_buf()).or_insert(0);
-        let Some((bytes, next_offset)) = read_appended(path, offset) else {
+        let cursor = self
+            .journals
+            .entry(path.to_path_buf())
+            .or_insert(JournalCursor {
+                offset: 0,
+                version: 0,
+            });
+        let Some((bytes, next_offset)) = read_appended(path, cursor.offset) else {
             return Ok(Vec::new());
         };
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
-        self.journals.insert(path.to_path_buf(), next_offset);
+        cursor.offset = next_offset;
         let mut messages = Vec::new();
         for record in json_lines(&bytes, Edge::Head) {
+            cursor.version += 1;
+            messages.push(SessionMessage::NativeRecord(native_record(
+                path,
+                cursor.version,
+                &record,
+            )));
             if record.get("type").and_then(Value::as_str) != Some("result") {
                 continue;
             }
@@ -2814,10 +2912,11 @@ mod tests {
         )
         .unwrap();
         let mut state = BundleFollowState::new(collect(transcript.clone()), None);
-        assert!(
-            state.poll().unwrap().is_empty(),
-            "bookkeeping is not an event"
-        );
+        assert!(state
+            .poll()
+            .unwrap()
+            .iter()
+            .all(|message| matches!(message, SessionMessage::NativeRecord(_))));
 
         // Build the path from the transcript stem exactly as `collect` does.
         let subagents = transcript.with_extension("").join("subagents");

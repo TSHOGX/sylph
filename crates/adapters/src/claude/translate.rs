@@ -1277,6 +1277,9 @@ mod tests {
                     SessionMessage::Request(_) => {
                         unreachable!("translation never raises a request")
                     }
+                    SessionMessage::NativeRecord(_) => {
+                        unreachable!("translation does not emit native records")
+                    }
                 }
             }
             if emission.refresh_capabilities {

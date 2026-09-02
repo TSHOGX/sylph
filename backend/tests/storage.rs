@@ -7,6 +7,7 @@
 mod common;
 
 use common::TestBackend;
+use sylph_protocol::{NativeBlob, NativeRecord};
 use sylph_web_backend::api::sessions::block_to_event;
 use sylph_web_backend::events::StreamEvent;
 use sylph_web_backend::models::Event;
@@ -21,6 +22,38 @@ async fn history_store() -> (HistoryStore, TempDir) {
         .await
         .unwrap();
     (store, dir)
+}
+
+#[tokio::test]
+async fn a_native_record_round_trips_unknown_fields_and_sidecar_bytes() {
+    let (history, _dir) = history_store().await;
+    let record = NativeRecord {
+        source: "root.jsonl".to_string(),
+        version: 7,
+        payload: serde_json::json!({
+            "type": "future_record",
+            "ignoredByProjection": {"answer": 42}
+        }),
+        blobs: vec![NativeBlob {
+            name: "/tmp/full-output.txt".to_string(),
+            size: 13,
+            bytes: Some(b"full sidecar".to_vec()),
+            error: None,
+        }],
+    };
+    let id = session_id().encode();
+    history.put_native_record(&id, &record).await.unwrap();
+    assert_eq!(
+        history.native_record(&id, "root.jsonl", 7).await.unwrap(),
+        Some(record.payload)
+    );
+    assert_eq!(
+        history
+            .native_blob(&id, "root.jsonl", 7, "/tmp/full-output.txt")
+            .await
+            .unwrap(),
+        Some(b"full sidecar".to_vec())
+    );
 }
 
 /// The session these fixtures hang off.

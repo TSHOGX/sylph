@@ -28,6 +28,7 @@ use crate::models::Event;
 use crate::storage::cas::{self, BlobStore, Payload};
 use crate::storage::fold::{self, Delta, Folded};
 use crate::supervisor::TrajectoryOutcome;
+use sylph_protocol::NativeRecord;
 
 /// One block as stored: a completed event plus how it streamed.
 #[derive(Debug, Clone)]
@@ -197,6 +198,105 @@ impl HistoryStore {
 
     pub fn blobs(&self) -> &BlobStore {
         &self.blobs
+    }
+
+    /// Store one complete vendor-native record and its sidecar bodies.
+    ///
+    /// Raw records have their own retention class and are deliberately outside the event
+    /// watermark path.  Re-projecting an event may need a field the current adapter ignores,
+    /// so replacing this row would be data loss; the `(session, source, version)` key is
+    /// append-only for JSONL and versioned for rewritten manifests.
+    pub async fn put_native_record(&self, session_id: &str, record: &NativeRecord) -> Result<()> {
+        let mut blobs = Vec::with_capacity(record.blobs.len());
+        for blob in &record.blobs {
+            let hash = match &blob.bytes {
+                Some(bytes) => Some(self.blobs.put(bytes).await?),
+                None => None,
+            };
+            blobs.push((blob, hash));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"INSERT OR IGNORE INTO native_records
+               (session_id, source, version, payload_json, created_at_ms, retention_class)
+               VALUES (?, ?, ?, ?, ?, 'raw')"#,
+        )
+        .bind(session_id)
+        .bind(&record.source)
+        .bind(record.version as i64)
+        .bind(record.payload.to_string().into_bytes())
+        .bind(now_ms())
+        .execute(&mut *tx)
+        .await?;
+
+        for (blob, hash) in blobs {
+            sqlx::query(
+                r#"INSERT OR IGNORE INTO native_blobs
+                   (session_id, source, version, name, hash, size, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+            )
+            .bind(session_id)
+            .bind(&record.source)
+            .bind(record.version as i64)
+            .bind(&blob.name)
+            .bind(hash)
+            .bind(blob.size as i64)
+            .bind(&blob.error)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Read the original JSON payload of one native record.
+    pub async fn native_record(
+        &self,
+        session_id: &str,
+        source: &str,
+        version: u64,
+    ) -> Result<Option<serde_json::Value>> {
+        let row = sqlx::query(
+            "SELECT payload_json FROM native_records WHERE session_id = ? AND source = ? AND version = ?",
+        )
+        .bind(session_id)
+        .bind(source)
+        .bind(version as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let bytes: Vec<u8> = row.try_get("payload_json")?;
+        Ok(Some(serde_json::from_slice(&bytes)?))
+    }
+
+    /// Read a native sidecar body on demand.  The timeline never inlines these bytes.
+    pub async fn native_blob(
+        &self,
+        session_id: &str,
+        source: &str,
+        version: u64,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query(
+            "SELECT hash FROM native_blobs WHERE session_id = ? AND source = ? AND version = ? AND name = ?",
+        )
+        .bind(session_id)
+        .bind(source)
+        .bind(version as i64)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let hash: Option<String> = row.try_get("hash")?;
+        match hash {
+            Some(hash) => self.blobs.get(&hash).await,
+            None => Ok(None),
+        }
     }
 
     /// Write blocks, then their blob references.

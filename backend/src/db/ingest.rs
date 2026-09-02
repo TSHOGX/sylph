@@ -105,6 +105,8 @@ pub struct IngestReport {
     /// under a vendor's `success` not being a promise. Counted so the drop is visible
     /// rather than silent.
     pub capability_partials: usize,
+    /// Complete native records retained for future re-projection.
+    pub raw_records: usize,
     /// The best candidate for the opening ask this stream carried, if any.
     ///
     /// **This is how much of the opening ask survives an adapter, and it is not much.**
@@ -165,6 +167,7 @@ pub struct NativeIngest {
     /// caller can read the journal after the response; a watch must also wake an
     /// already-open session trace as records arrive.
     hub: Option<EventHub>,
+    history: Option<crate::storage::HistoryStore>,
 }
 
 impl NativeIngest {
@@ -174,6 +177,7 @@ impl NativeIngest {
             writer,
             seq,
             hub: None,
+            history: None,
         }
     }
 
@@ -184,6 +188,12 @@ impl NativeIngest {
     /// need a one-shot adopt do not pay for a live registry they will never use.
     pub fn with_hub(mut self, hub: EventHub) -> Self {
         self.hub = Some(hub);
+        self
+    }
+
+    /// Attach the warm tier used for lossless native-record retention.
+    pub fn with_history(mut self, history: crate::storage::HistoryStore) -> Self {
+        self.history = Some(history);
         self
     }
 
@@ -243,6 +253,23 @@ impl NativeIngest {
                          in a recorded transcript was already answered",
                         session_id
                     );
+                    continue;
+                }
+                SessionMessage::NativeRecord(record) => {
+                    if let Some(history) = &self.history {
+                        if let Err(error) = history
+                            .put_native_record(&session_id.encode(), &record)
+                            .await
+                        {
+                            warn!(
+                                "Could not persist native record {}:{} for {}: {}",
+                                record.source, record.version, session_id, error
+                            );
+                        } else {
+                            report.raw_records += 1;
+                        }
+                    }
+                    // Raw native records do not open or close a turn container.
                     continue;
                 }
             };

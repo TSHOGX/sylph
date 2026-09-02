@@ -469,6 +469,7 @@ impl LinkState {
 #[derive(Clone)]
 pub struct LinkManager {
     store: JournalStore,
+    history: crate::storage::HistoryStore,
     /// Root for per-turn attachment staging.  Drafts use a separate namespace
     /// because they do not have a native session id yet.
     data_dir: PathBuf,
@@ -544,6 +545,7 @@ pub struct LinkManager {
 /// publication, environments, adapters, identity, and sequencing).
 pub struct LinkManagerConfig {
     pub store: JournalStore,
+    pub history: crate::storage::HistoryStore,
     pub data_dir: PathBuf,
     pub writer: crate::db::JournalWriter,
     pub hub: EventHub,
@@ -557,6 +559,7 @@ impl LinkManager {
     pub fn new(config: LinkManagerConfig) -> Self {
         let manager = Self {
             store: config.store,
+            history: config.history,
             data_dir: config.data_dir,
             writer: config.writer,
             hub: config.hub,
@@ -1362,6 +1365,21 @@ impl LinkManager {
                                     serde_json::to_value(&surface).unwrap_or_default(),
                                 )
                                 .await;
+                        }
+                    }
+                    Ok(SessionMessage::NativeRecord(record)) => {
+                        // Native records are not timeline events, but they are the lossless
+                        // source for future re-projection. Persist them in the warm tier and
+                        // keep them out of turn lifecycle accounting.
+                        if let Err(error) = manager
+                            .history
+                            .put_native_record(&session_id.encode(), &record)
+                            .await
+                        {
+                            warn!(
+                                "Could not persist native record {}:{} for {}: {}",
+                                record.source, record.version, session_id, error
+                            );
                         }
                     }
                     Err(error) => {
