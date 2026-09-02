@@ -1441,3 +1441,47 @@ async fn no_user_input_reaches_the_fts5_expression_parser() {
         );
     }
 }
+
+/// A trajectory keeps the parent that spawned it, not the one that last spoke to it.
+///
+/// A long-lived delegate is messaged again after it starts, and each message is a fresh host
+/// `tool_use`, so its later notifications name a different call than the one that spawned it.
+/// Measured on a real store: 29 delegates carry notifications from between 2 and 9 distinct
+/// hosts, and the spawning call is the first in 95% of them.
+///
+/// Folding kept the *latest* `started`/`delta`, which is right for a name or a progress
+/// snapshot and wrong for a span: it reparented the block under whichever call last spoke, so
+/// a card moved after its turn settled while the live tree — which keeps the first — still
+/// showed it where it belonged. One fact with two derivations, disagreeing at opposite ends.
+#[tokio::test]
+async fn a_trajectory_keeps_the_parent_that_spawned_it() {
+    let (history, _dir) = history_store().await;
+
+    let mut opened = event(1, "subagent", Some("started"), Some("s1"), "", 1000);
+    opened.span = Some("toolu_spawning_call".to_string());
+    opened.name = Some("reviewer".to_string());
+
+    // A later message to the same agent, under a different host call. It legitimately
+    // revises the name; it does not re-parent the delegation.
+    let mut messaged = event(2, "subagent", Some("delta"), Some("s1"), "", 1100);
+    messaged.span = Some("toolu_messaging_call".to_string());
+    messaged.name = Some("reviewer (round two)".to_string());
+
+    history
+        .put_blocks(&history::consolidate(&[opened, messaged]))
+        .await
+        .unwrap();
+
+    let stored = history.blocks(&session_id().encode(), -1).await.unwrap();
+    let trajectory = stored.iter().find(|b| b.kind == "subagent").unwrap();
+    assert_eq!(
+        trajectory.span.as_deref(),
+        Some("toolu_spawning_call"),
+        "a delegation has one parent, however many times it is spoken to afterwards"
+    );
+    assert_eq!(
+        trajectory.name.as_deref(),
+        Some("reviewer (round two)"),
+        "a later phase still revises the name, which is a snapshot rather than an identity"
+    );
+}

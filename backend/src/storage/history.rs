@@ -1106,6 +1106,18 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
     // matched as each `completed` event is reached.
     let mut pending: HashMap<String, Vec<Delta>> = HashMap::new();
     let mut first_arrival: HashMap<String, i64> = HashMap::new();
+    // The span the *first* phase gave a trajectory.
+    //
+    // **A span is an identity, not a snapshot**, which is what separates it from the fields
+    // beside it. A delegation is spawned by exactly one call, and a long-lived agent is then
+    // messaged again — each message a fresh host call — so its later notifications name a
+    // different `tool_use` than the one that started it. Measured, 29 delegates carry
+    // notifications from between 2 and 9 distinct hosts, and the spawning call is the first in
+    // 95% of them; keeping the latest reparented the consolidated block under whichever call
+    // last spoke to the agent, so a card moved after its turn settled while the live tree
+    // (which keeps the first) still showed it correctly. One fact, two derivations,
+    // disagreeing at opposite ends.
+    let mut first_span: HashMap<String, Option<String>> = HashMap::new();
     // The best name any phase gave a block, since not every phase carries one.
     let mut names: HashMap<String, String> = HashMap::new();
     // Trajectories declared here and never closed, keyed by id, holding the latest
@@ -1136,9 +1148,14 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
             Some("started") | Some("delta") => {
                 let Some(id) = stream_id else { continue };
                 if event.kind == "subagent" {
-                    // Latest wins: progress is a snapshot, and a later phase may carry
-                    // a name or a flag the first did not.
+                    // Latest wins for what a later phase legitimately revises — a name, a
+                    // flag, a progress snapshot. **Not for `span`**, which `first_span`
+                    // holds instead, because a trajectory has one parent however many
+                    // times it is spoken to afterwards.
                     open_trajectories.insert(id.clone(), event.clone());
+                    first_span
+                        .entry(id.clone())
+                        .or_insert_with(|| event.span.clone());
                 }
                 first_arrival
                     .entry(id.clone())
@@ -1246,7 +1263,11 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
             kind: declaring.kind.clone(),
             // The phase *is* the claim: this delegation has not reported an outcome.
             phase: Some("started".to_string()),
-            span: declaring.span.clone(),
+            // The spawning call, not whichever one last spoke to this agent.
+            span: first_span
+                .remove(&stream_id)
+                .flatten()
+                .or_else(|| declaring.span.clone()),
             name: declaring.name.clone().or_else(|| names.remove(&stream_id)),
             stream_id: Some(stream_id),
             text,
