@@ -40,9 +40,8 @@
 //! The root is hardcoded: a native store's location is a vendor fact with no configuration
 //! key, and inventing one would offer a lever that cannot be right.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use quick_xml::events::Event as XmlEvent;
@@ -86,20 +85,32 @@ pub fn adopt(id: &NativeId) -> Result<EventStream> {
 /// Parse, then follow the complete native bundle as it grows.
 pub fn watch(id: &NativeId) -> Result<EventStream> {
     let session = locate(id)?;
-    Ok(follow(session, None))
+    Ok(follow(session, RootSource::File))
 }
 
 /// Follow a native bundle alongside Claude's live stdout.
 ///
-/// Built-in `Task` output is forwarded on stdout and written to a delegate JSONL file.
-/// The live trajectory ids observed by the stdout pump are supplied so the file copy can
-/// be suppressed while `Agent` and `Workflow` interiors remain readable from disk.
-pub fn watch_live(
-    id: &NativeId,
-    live_trajectories: Arc<tokio::sync::Mutex<HashSet<String>>>,
-) -> Result<EventStream> {
+/// # What the second source may repeat, and how that is decided
+///
+/// Built-in `Task` output is forwarded on stdout *and* written to a delegate file, so its
+/// file copy would be a duplicate. `Agent` and `Workflow` forward nothing (`docs/agents.md`
+/// § `--forward-subagent-text` forwards only for the built-in `Task`), so for them the file
+/// is the **only** source and suppressing it loses the work this reader exists to recover.
+///
+/// The discriminant is therefore the **host call's tool name**, which is a fact recorded in
+/// the root transcript before the delegate file exists. It is read from the records this
+/// follower already parses for the workflow join, so no state is shared with the stdout pump
+/// and there is nothing to race: an `Agent` cannot be mistaken for a `Task` by arriving in a
+/// different order, because the order of two files is not what answers the question.
+///
+/// The rejected alternative was a set of live trajectory ids written by the stdout pump and
+/// read here. It answered "has stdout mentioned this yet?", which is a question about
+/// timing rather than about the vendor, so a delegate file polled before its notification
+/// arrived would answer it wrongly — and it required sharing a mutex across the two, which
+/// is what made the reader abort on a runtime thread.
+pub fn watch_live(id: &NativeId) -> Result<EventStream> {
     let session = locate(id)?;
-    Ok(follow(session, Some(live_trajectories)))
+    Ok(follow(session, RootSource::Stdout))
 }
 
 /// Which native sessions this machine's store holds.
@@ -1367,6 +1378,36 @@ fn delegate_spans(
     spans
 }
 
+/// The delegating tools whose interior Claude also forwards on stdout.
+///
+/// **A list, and deliberately a short one that fails safe.** `--forward-subagent-text`
+/// forwards for the built-in `Task` alone (`docs/agents.md`), so anything absent here is read
+/// from its file — which is the right default for a tool nobody has written yet, since an
+/// unlisted tool loses nothing and a wrongly listed one loses its whole interior. This is the
+/// inverse of `translate`'s promotion rule, where a *name* test could never be completed;
+/// here the name test is answering a different question — not "did this delegate?" but "is
+/// stdout already saying it?" — and that one the vendor's flag does settle.
+const STDOUT_FORWARDED_TOOLS: &[&str] = &["Task"];
+
+/// Record every `tool_use` id in this record against its tool name.
+fn collect_host_tools(record: &Value, into: &mut HashMap<String, String>) {
+    let Some(blocks) = record
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+            continue;
+        }
+        if let (Some(id), Some(name)) = (string_at(block, "id"), string_at(block, "name")) {
+            into.insert(id, name);
+        }
+    }
+}
+
 /// Read one workflow manifest snapshot.
 fn read_workflow_manifest(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -1391,16 +1432,13 @@ fn read_workflow_manifest(path: &Path) -> Option<Value> {
 /// a `(size, mtime)` fingerprint and a monotonically increasing version rather than a byte
 /// offset. Re-scanning the directory on every pass is what discovers delegates and journals
 /// created after the first pass.
-fn follow(
-    session: SessionFiles,
-    live_trajectories: Option<Arc<tokio::sync::Mutex<HashSet<String>>>>,
-) -> EventStream {
+fn follow(session: SessionFiles, root: RootSource) -> EventStream {
     /// Fast enough to feel live against a store that flushes per content block, slow enough
     /// that an idle session costs one `stat` per interval.
     const POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
     Box::pin(futures::stream::unfold(
-        BundleFollowState::new(session, live_trajectories),
+        BundleFollowState::new(session, root),
         |mut state| async move {
             loop {
                 if let Some(message) = state.pending.pop_front() {
@@ -1418,6 +1456,20 @@ fn follow(
             }
         },
     ))
+}
+
+/// Where a follower's root-transcript records come from.
+///
+/// On [`RootSource::Stdout`] the process stream already carries the root at stream fidelity,
+/// so projecting the file again would double every root block. The file is still *read* —
+/// its records are retained, and the workflow join and host tool names are taken from it —
+/// but nothing it holds is projected as an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootSource {
+    /// No process stream: this reader projects the root itself.
+    File,
+    /// A live session's stdout is projecting the root.
+    Stdout,
 }
 
 /// Cursor for one append-only JSONL source.
@@ -1443,39 +1495,40 @@ struct JournalCursor {
 struct BundleFollowState {
     session: SessionFiles,
     root: JsonlCursor,
-    root_metadata_offset: u64,
-    root_metadata_version: u64,
     delegates: HashMap<PathBuf, JsonlCursor>,
     journals: HashMap<PathBuf, JournalCursor>,
     manifests: HashMap<PathBuf, ManifestCursor>,
     workflow_hosts: HashMap<String, Option<String>>,
+    /// `tool_use` id → the tool's name, from the root transcript.
+    ///
+    /// This is what decides whether a delegate's interior is also on stdout, so it is read on
+    /// **both** root sources — the live path does not project root records but still needs
+    /// this fact from them.
+    host_tools: HashMap<String, String>,
     pending: VecDeque<SessionMessage>,
-    live_trajectories: Option<Arc<tokio::sync::Mutex<HashSet<String>>>>,
-    skip_root: bool,
+    root_source: RootSource,
 }
 
 impl BundleFollowState {
-    fn new(
-        session: SessionFiles,
-        live_trajectories: Option<Arc<tokio::sync::Mutex<HashSet<String>>>>,
-    ) -> Self {
+    fn new(session: SessionFiles, root_source: RootSource) -> Self {
         Self {
             session,
+            // **One cursor over the root, whichever source projects it.** Two offsets over
+            // one file is a state where advancing the wrong one silently skips records, and
+            // the difference between the modes is only whether a record is *projected*.
             root: JsonlCursor {
                 offset: 0,
                 version: 0,
                 correlation: Correlation::new(),
                 opened: true,
             },
-            root_metadata_offset: 0,
-            root_metadata_version: 0,
             delegates: HashMap::new(),
             journals: HashMap::new(),
             manifests: HashMap::new(),
             workflow_hosts: HashMap::new(),
+            host_tools: HashMap::new(),
             pending: VecDeque::new(),
-            skip_root: live_trajectories.is_some(),
-            live_trajectories,
+            root_source,
         }
     }
 
@@ -1519,13 +1572,7 @@ impl BundleFollowState {
             }
         }
 
-        if !self.skip_root {
-            messages.extend(self.read_root()?);
-        } else {
-            // The live path does not project root records (stdout already does), but it still
-            // needs the root's workflow run-id join to place Workflow delegates correctly.
-            messages.extend(self.read_root_metadata());
-        }
+        messages.extend(self.read_root());
 
         // Resolve spans from the current manifest/sidecar view every pass. This is what
         // makes a manifest rewritten after watch() started visible without a restart.
@@ -1544,45 +1591,19 @@ impl BundleFollowState {
         Ok(messages)
     }
 
-    fn read_root_metadata(&mut self) -> Vec<SessionMessage> {
-        let Some((bytes, next_offset)) =
-            read_appended(&self.session.transcript, self.root_metadata_offset)
-        else {
-            return Vec::new();
-        };
-        if bytes.is_empty() {
-            return Vec::new();
-        }
-        self.root_metadata_offset = next_offset;
-        let mut messages = Vec::new();
-        for record in json_lines(&bytes, Edge::Head) {
-            self.root_metadata_version += 1;
-            messages.push(SessionMessage::NativeRecord(native_record(
-                &self.session.transcript,
-                self.root_metadata_version,
-                &record,
-            )));
-            if let Some((run_id, host)) = workflow_host(&record) {
-                self.workflow_hosts
-                    .entry(run_id)
-                    .and_modify(|existing| {
-                        if existing.as_ref().is_some_and(|old| old != &host) {
-                            *existing = None;
-                        }
-                    })
-                    .or_insert(Some(host));
-            }
-        }
-        messages
-    }
-
-    fn read_root(&mut self) -> Result<Vec<SessionMessage>> {
+    /// Read the root transcript's appended records.
+    ///
+    /// Every record is **retained and mined** for the two facts the rest of the pass needs —
+    /// the workflow run-id join and the host tool names — on both root sources. Only
+    /// *projection* is conditional: on [`RootSource::Stdout`] the process stream is already
+    /// emitting these blocks, and emitting them again here would double every one.
+    fn read_root(&mut self) -> Vec<SessionMessage> {
         let Some((bytes, next_offset)) = read_appended(&self.session.transcript, self.root.offset)
         else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
         if bytes.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         self.root.offset = next_offset;
         let mut messages = Vec::new();
@@ -1608,15 +1629,45 @@ impl BundleFollowState {
                     })
                     .or_insert(Some(host));
             }
-            messages.extend(project_record(&mut self.root.correlation, &record, at_ms));
+            collect_host_tools(&record, &mut self.host_tools);
+            if self.root_source == RootSource::File {
+                messages.extend(project_record(&mut self.root.correlation, &record, at_ms));
+            }
         }
-        Ok(messages)
+        messages
     }
 
     fn read_delegate(&mut self, path: &Path, span: Option<String>) -> Result<Vec<SessionMessage>> {
         let Some(agent) = agent_id_of(path) else {
             return Ok(Vec::new());
         };
+        // **Suppressed only when stdout is carrying this delegate's interior too**, which is
+        // true for the built-in `Task` and false for every other delegating tool
+        // (`docs/agents.md`). The host's tool name comes from the root transcript, so the
+        // answer does not depend on which file this reader happened to poll first.
+        //
+        // An *unknown* host is read rather than suppressed, and that default is the whole
+        // safety argument: **the two errors are not symmetric.** Reading a duplicate shows
+        // work twice, and every consumer keys by `stream_id` and merges; suppressing wrongly
+        // loses an interior with nothing left to say it existed.
+        //
+        // The decision is latched — once a cursor is `opened` this is not re-asked — so the
+        // residual case is a delegate whose host name is not yet known at first sight. It is
+        // narrow: a delegate file is never written before its host call (measured over 454
+        // pairs, the delegate's first record follows its host's by a median of 5 ms and never
+        // precedes it), and `read_root` runs before this in the same pass. What remains is a
+        // host record still half-written when the root was read, which `read_appended`
+        // correctly holds back. That resolves next pass, but this cursor has already opened —
+        // so the outcome is one visible duplicate rather than a lost interior. Deferring
+        // instead would delay every nested delegate by a poll to protect a case that costs
+        // strictly less than the delay does.
+        //
+        // Decided before the cursor is borrowed, because the answer is read from `self`.
+        let suppress = self.root_source == RootSource::Stdout
+            && delegate_tool_use_id(path)
+                .and_then(|host| self.host_tools.get(&host))
+                .is_some_and(|tool| STDOUT_FORWARDED_TOOLS.contains(&tool.as_str()));
+
         let entry = self
             .delegates
             .entry(path.to_path_buf())
@@ -1627,16 +1678,10 @@ impl BundleFollowState {
                 opened: false,
             });
 
-        if !entry.opened {
-            if let Some(host) = delegate_tool_use_id(path) {
-                if let Some(live) = &self.live_trajectories {
-                    if live.blocking_lock().contains(&host) {
-                        entry.opened = true;
-                        entry.offset = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-                        return Ok(Vec::new());
-                    }
-                }
-            }
+        if suppress && !entry.opened {
+            entry.opened = true;
+            entry.offset = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+            return Ok(Vec::new());
         }
 
         let mut messages = Vec::new();
@@ -1667,6 +1712,11 @@ impl BundleFollowState {
             return Ok(messages);
         }
         entry.offset = next_offset;
+        // A delegate's own calls are host calls too: measured, 139 of 612 sidecars naming a
+        // `toolUseId` name a call that lives in *another delegate's* file rather than the
+        // root, so a root-only view leaves every nested delegation's host unnamed.
+        // Accumulated locally because `entry` is borrowed for the whole loop.
+        let mut nested_hosts = HashMap::new();
         for record in json_lines(&bytes, Edge::Head) {
             entry.version += 1;
             messages.push(SessionMessage::NativeRecord(native_record(
@@ -1679,6 +1729,7 @@ impl BundleFollowState {
                 .and_then(Value::as_str)
                 .and_then(epoch_millis_from_iso)
                 .unwrap_or(0);
+            collect_host_tools(&record, &mut nested_hosts);
             for message in project_record(&mut entry.correlation, &record, at_ms) {
                 let message = match message {
                     SessionMessage::Event(mut event) => {
@@ -1692,6 +1743,7 @@ impl BundleFollowState {
                 messages.push(message);
             }
         }
+        self.host_tools.extend(nested_hosts);
         Ok(messages)
     }
 
@@ -2932,7 +2984,7 @@ mod tests {
 "#,
         )
         .unwrap();
-        let mut state = BundleFollowState::new(collect(transcript.clone()), None);
+        let mut state = BundleFollowState::new(collect(transcript.clone()), RootSource::File);
         assert!(state
             .poll()
             .unwrap()
@@ -3015,7 +3067,7 @@ mod tests {
 "#,
         )
         .unwrap();
-        let mut state = BundleFollowState::new(collect(transcript), None);
+        let mut state = BundleFollowState::new(collect(transcript), RootSource::File);
         state.poll().unwrap();
         assert_eq!(state.manifests.get(&manifest).unwrap().version, 1);
         std::fs::write(
@@ -3075,5 +3127,98 @@ mod tests {
                         .and_then(|usage| usage.get("output_tokens"))
                         == Some(&json!(34))
         )));
+    }
+
+    /// The live bundle follower must survive a poll, and must suppress only what stdout
+    /// already carries.
+    ///
+    /// Both halves are one test because they share a fixture and the first hides the second:
+    /// the follower used to abort on its first poll, so the suppression rule below had never
+    /// executed in a running session. An `Agent` interior exists *only* on disk
+    /// (`docs/agents.md`: `--forward-subagent-text` forwards for the built-in `Task` alone),
+    /// so suppressing it loses work; a `Task` interior arrives on stdout too, so emitting it
+    /// from the file duplicates work.
+    #[tokio::test]
+    async fn a_live_bundle_follow_suppresses_only_what_stdout_carries() {
+        use futures::StreamExt;
+
+        let root =
+            std::env::temp_dir().join(format!("sylph-claude-live-follow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = "5f6a7b8c-9d0e-41f2-a3b4-c5d6e7f80912";
+        let subagents = root.join(session).join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+
+        // Two hosts in the root transcript: one `Task`, one `Agent`.
+        let transcript = root.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            [
+                json!({"type":"assistant","uuid":"r1","sessionId":session,
+                       "timestamp":"2026-08-27T00:00:01.000Z",
+                       "message":{"role":"assistant","content":[
+                           {"type":"tool_use","id":"toolu_task_host","name":"Task","input":{}}]}}),
+                json!({"type":"assistant","uuid":"r2","sessionId":session,
+                       "timestamp":"2026-08-27T00:00:02.000Z",
+                       "message":{"role":"assistant","content":[
+                           {"type":"tool_use","id":"toolu_agent_host","name":"Agent","input":{}}]}}),
+            ]
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        for (agent, host, text) in [
+            ("task0delegate", "toolu_task_host", "TASK_INTERIOR"),
+            ("agent0delegate", "toolu_agent_host", "AGENT_INTERIOR"),
+        ] {
+            std::fs::write(
+                subagents.join(format!("agent-{agent}.jsonl")),
+                format!(
+                    "{}\n",
+                    json!({"type":"assistant","uuid":format!("{agent}-1"),"sessionId":session,
+                           "isSidechain":true,"agentId":agent,
+                           "timestamp":"2026-08-27T00:00:03.000Z",
+                           "message":{"role":"assistant","content":[
+                               {"type":"text","text":text}]}})
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                subagents.join(format!("agent-{agent}.meta.json")),
+                json!({"toolUseId": host, "agentType": "general-purpose"}).to_string(),
+            )
+            .unwrap();
+        }
+
+        // `follow` rather than `watch_live`: the latter resolves through the real store
+        // root, and a test must not depend on the developer's own `~/.claude`.
+        let mut stream = follow(collect(transcript), RootSource::Stdout);
+
+        // Drain one poll's worth. A panic inside the follower fails here rather than
+        // surfacing three layers away as a dead observe facet.
+        let mut text = String::new();
+        for _ in 0..64 {
+            match tokio::time::timeout(std::time::Duration::from_millis(400), stream.next()).await {
+                Ok(Some(Ok(SessionMessage::Event(event)))) => text.push_str(&event.text),
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(error))) => panic!("the follower reported {error}"),
+                Ok(None) | Err(_) => break,
+            }
+        }
+
+        assert!(
+            text.contains("AGENT_INTERIOR"),
+            "an Agent interior exists only on disk and must be read from the file"
+        );
+        assert!(
+            !text.contains("TASK_INTERIOR"),
+            "a Task interior arrives on stdout, so the file copy must be suppressed"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -290,10 +290,6 @@ struct Shared {
     /// the refreshed surface immediately.  The next vendor `system/init` is
     /// authoritative and clears this value before rebuilding capabilities.
     pending_model: Mutex<Option<String>>,
-    /// Trajectories already observed on live stdout. The native bundle reader uses this
-    /// set to suppress the duplicate `Task` sidecar stream while retaining disjoint
-    /// `Agent`/`Workflow` interiors.
-    live_trajectories: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Stops the bundle follower when the live session closes.
     closed: std::sync::atomic::AtomicBool,
 }
@@ -451,35 +447,6 @@ async fn pump(
                     });
                 }
                 for message in emission.messages {
-                    if let SessionMessage::Event(event) = &message {
-                        if event.kind == sylph_protocol::EventKind::Subagent {
-                            if let Some(stream_id) = &event.stream_id {
-                                let mut live = shared.live_trajectories.lock().await;
-                                live.insert(stream_id.clone());
-                                // A Task notification reuses the host tool id as its
-                                // trajectory while its sidecar is named with `task_id`.
-                                // Remember that second id only when the payload confirms
-                                // the reuse; Agent/Workflow notifications must remain
-                                // readable from their disjoint sidecars.
-                                if event
-                                    .data
-                                    .as_ref()
-                                    .and_then(|data| data.get("tool_use_id"))
-                                    .and_then(Value::as_str)
-                                    == Some(stream_id.as_str())
-                                {
-                                    if let Some(task_id) = event
-                                        .data
-                                        .as_ref()
-                                        .and_then(|data| data.get("task_id"))
-                                        .and_then(Value::as_str)
-                                    {
-                                        live.insert(task_id.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
                     if out.send(Ok(message)).await.is_err() {
                         return;
                     }
@@ -528,9 +495,7 @@ async fn bundle_pump(out: mpsc::Sender<Result<SessionMessage>>, shared: Arc<Shar
         let native = shared.native_id.read().ok().and_then(|id| id.clone());
         if native != current {
             current = native.clone();
-            stream = native.and_then(|id| {
-                super::native::watch_live(&id, shared.live_trajectories.clone()).ok()
-            });
+            stream = native.and_then(|id| super::native::watch_live(&id).ok());
         }
 
         if let Some(bundle) = stream.as_mut() {
