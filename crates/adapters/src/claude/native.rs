@@ -1651,16 +1651,18 @@ impl BundleFollowState {
         // work twice, and every consumer keys by `stream_id` and merges; suppressing wrongly
         // loses an interior with nothing left to say it existed.
         //
-        // The decision is latched — once a cursor is `opened` this is not re-asked — so the
-        // residual case is a delegate whose host name is not yet known at first sight. It is
-        // narrow: a delegate file is never written before its host call (measured over 454
-        // pairs, the delegate's first record follows its host's by a median of 5 ms and never
-        // precedes it), and `read_root` runs before this in the same pass. What remains is a
-        // host record still half-written when the root was read, which `read_appended`
-        // correctly holds back. That resolves next pass, but this cursor has already opened —
-        // so the outcome is one visible duplicate rather than a lost interior. Deferring
-        // instead would delay every nested delegate by a poll to protect a case that costs
-        // strictly less than the delay does.
+        // **Re-asked every pass**, because a tool name can arrive after the file it describes.
+        // The window is narrow — a delegate file is never written before its host call
+        // (measured over 454 pairs: the delegate's first record follows its host's by a median
+        // of 5 ms, and never precedes it), and `read_root` runs before this in the same pass —
+        // but it is not empty, since a host record still half-written when the root was read is
+        // correctly held back by `read_appended` until the next pass. In that case a prefix is
+        // projected before the answer is known and the rest is withheld once it is. That is
+        // bounded and merged by consumers, where deferring instead would delay every nested
+        // delegate by a poll to protect a case costing strictly less than the delay.
+        //
+        // What must *not* happen is deciding once and latching: suppression describes a file,
+        // and a delegate grows for as long as its subagent runs.
         //
         // Decided before the cursor is borrowed, because the answer is read from `self`.
         let suppress = self.root_source == RootSource::Stdout
@@ -1678,14 +1680,15 @@ impl BundleFollowState {
                 opened: false,
             });
 
-        if suppress && !entry.opened {
-            entry.opened = true;
-            entry.offset = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-            return Ok(Vec::new());
-        }
-
         let mut messages = Vec::new();
-        if !entry.opened {
+        // **Suppression withholds events, and never records.** A delegate is written while its
+        // subagent runs, so this has to hold for the whole file rather than for the bytes that
+        // existed when it was first seen — a rule that fired once at first sight would suppress
+        // one poll interval's worth and project the entire rest, leaving the prefix and the
+        // suffix disagreeing about what the rule was. And the records are kept because they are
+        // the only copy: projection is the half stdout duplicates (`AGENTS.md`
+        // § Compatibility). This is the same split [`BundleFollowState::read_root`] makes.
+        if !entry.opened && !suppress {
             let Some(first) = read_first_json(path) else {
                 return Ok(Vec::new());
             };
@@ -1730,7 +1733,13 @@ impl BundleFollowState {
                 .and_then(epoch_millis_from_iso)
                 .unwrap_or(0);
             collect_host_tools(&record, &mut nested_hosts);
+            // Still correlated when suppressed, so the cursor's state stays consistent with
+            // the bytes it has consumed; only the resulting events are dropped. A correlation
+            // fed a gap would mis-key whatever followed it if suppression ever lifted.
             for message in project_record(&mut entry.correlation, &record, at_ms) {
+                if suppress {
+                    continue;
+                }
                 let message = match message {
                     SessionMessage::Event(mut event) => {
                         if event.span.is_none() {
@@ -3217,6 +3226,112 @@ mod tests {
         assert!(
             !text.contains("TASK_INTERIOR"),
             "a Task interior arrives on stdout, so the file copy must be suppressed"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A suppressed delegate stays suppressed as it grows, and its records are still kept.
+    ///
+    /// Suppression covers a *file*, not the bytes that happened to exist when it was first
+    /// seen. A delegate is written while its subagent runs, so a rule that fires once at
+    /// first sight suppresses whatever landed inside one poll interval and duplicates the
+    /// whole remaining interior — which is worse than not suppressing at all, because the
+    /// prefix and the suffix disagree about what the rule was.
+    ///
+    /// The raw records are the other half: projection is what stdout already carries, and a
+    /// vendor record is the one thing that cannot be recovered later (`AGENTS.md`
+    /// § Compatibility). So the file is always read losslessly and only its *events* are
+    /// withheld — the same split `read_root` makes for the root transcript.
+    #[test]
+    fn a_suppressed_delegate_stays_suppressed_as_it_grows() {
+        let root = std::env::temp_dir().join(format!(
+            "sylph-claude-suppressed-growth-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = "7a8b9c0d-1e2f-43a4-b5c6-d7e8f9012345";
+        let subagents = root.join(session).join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+
+        let transcript = root.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","uuid":"r1","sessionId":session,
+                       "timestamp":"2026-08-27T00:00:01.000Z",
+                       "message":{"role":"assistant","content":[
+                           {"type":"tool_use","id":"toolu_task","name":"Task","input":{}}]}})
+            ),
+        )
+        .unwrap();
+
+        let delegate = subagents.join("agent-grower.jsonl");
+        std::fs::write(
+            &delegate,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","uuid":"g-1","sessionId":session,"isSidechain":true,
+                       "agentId":"grower","timestamp":"2026-08-27T00:00:02.000Z",
+                       "message":{"role":"assistant","content":[
+                           {"type":"text","text":"FIRST_PREFIX"}]}})
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            subagents.join("agent-grower.meta.json"),
+            json!({"toolUseId":"toolu_task","agentType":"general-purpose"}).to_string(),
+        )
+        .unwrap();
+
+        let mut state = BundleFollowState::new(collect(transcript), RootSource::Stdout);
+        let first = state.poll().expect("the first pass must succeed");
+
+        // The subagent keeps writing after that first poll.
+        {
+            use std::io::Write;
+            let mut handle = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&delegate)
+                .unwrap();
+            writeln!(
+                handle,
+                "{}",
+                json!({"type":"assistant","uuid":"g-2","sessionId":session,"isSidechain":true,
+                       "agentId":"grower","timestamp":"2026-08-27T00:00:03.000Z",
+                       "message":{"role":"assistant","content":[
+                           {"type":"text","text":"LATER_SUFFIX"}]}})
+            )
+            .unwrap();
+        }
+        let second = state.poll().expect("the second pass must succeed");
+
+        let projected: String = first
+            .iter()
+            .chain(second.iter())
+            .filter_map(|message| match message {
+                SessionMessage::Event(event) => Some(event.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !projected.contains("FIRST_PREFIX") && !projected.contains("LATER_SUFFIX"),
+            "stdout carries this Task interior, so no pass may project it; got {projected:?}"
+        );
+
+        let retained: Vec<String> = first
+            .iter()
+            .chain(second.iter())
+            .filter_map(|message| match message {
+                SessionMessage::NativeRecord(record) => Some(record.payload.to_string()),
+                _ => None,
+            })
+            .collect();
+        let retained = retained.join(" ");
+        assert!(
+            retained.contains("FIRST_PREFIX") && retained.contains("LATER_SUFFIX"),
+            "a suppressed delegate's records are still the only copy and must be retained"
         );
 
         let _ = std::fs::remove_dir_all(&root);
