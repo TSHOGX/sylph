@@ -1700,6 +1700,26 @@ impl BundleFollowState {
         // suffix disagreeing about what the rule was. And the records are kept because they are
         // the only copy: projection is the half stdout duplicates (`AGENTS.md`
         // § Compatibility). This is the same split [`BundleFollowState::read_root`] makes.
+        //
+        // # Declaring is not forwarding, and the declaration is emitted either way
+        //
+        // Two independent facts, and the three delegating tools disagree about both. Measured
+        // over the dev store, by whether a delegate's `agentId` is ever announced as a
+        // `<task-id>`:
+        //
+        // | host | stdout declares it | stdout forwards its interior |
+        // | --- | --- | --- |
+        // | `Task` | yes | yes |
+        // | `Agent` | yes — 369 of 857 flat delegates | no |
+        // | `Workflow` | **no — 0 of 1379** | no |
+        //
+        // So for an `Agent` the declaration below duplicates one stdout already sent, and it is
+        // emitted anyway. Withholding it would save a row that every consumer merges on
+        // `stream_id`, and would risk the node itself: stdout announces a delegation once, at
+        // its `task_started`, so a session Sylph attaches to mid-flight has no such frame to
+        // merge with and the interior would arrive under a trajectory nothing ever opened.
+        // Same asymmetry as above — a duplicate is merged, an absence is lost — and for every
+        // workflow delegate this declaration is the *only* one there will ever be.
         if !entry.opened && !suppress {
             let Some(first) = read_first_json(path) else {
                 return Ok(Vec::new());
