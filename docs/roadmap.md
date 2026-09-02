@@ -99,15 +99,31 @@ being terminal.
 
 ## Known bugs
 
-None outstanding.
+**A workflow phase's close carries no recorded time and renders as a measured zero.**
+`parse_journal` is right to refuse a fabricated timestamp — journal records carry none — and
+the server stamps only its own events, so an adapter's `created_at_ms` of `0` reaches the
+frontend intact. `timeline-waterfall.ts` then computes `endMs: Math.max(startMs, endMs)`,
+which for a real open and a zero close yields `endMs === startMs`: a phase that ran for a
+minute shows as zero duration. A visibly wrong bar would at least invite the question. The fix
+separates the vendor's **recorded** time from the server's **arrival** time from **source
+order**, so an absent duration is reported absent rather than as zero.
 
 ## Recently fixed, worth knowing
 
 **Claude native ingestion now follows the complete live bundle.** The reader keeps a cursor
 per JSONL source, rescans for delegates and journals created after `watch()` starts, and
-re-reads workflow manifests as versioned snapshots. The live path skips the root transcript
-because stdout already carries it, while suppressing the overlapping `Task` sidecar stream;
-`Agent` and `Workflow` interiors remain disjoint and visible. Native records are retained
+re-reads workflow manifests as versioned snapshots. The live path reads the root transcript
+for the facts it carries but does not project it, because stdout already does.
+
+**Which sidecar stream to suppress is decided from the host call's tool name**, not from state
+shared with the stdout pump. `--forward-subagent-text` forwards for the built-in `Task` alone,
+so the host's name is the vendor's own answer to "is stdout already carrying this interior?",
+and it is recorded before the delegate file exists. The rejected design — a set of trajectory
+ids the stdout pump wrote and the follower read — asked instead whether stdout had *mentioned*
+the delegate yet, which is a question about arrival order rather than about the vendor, and it
+required a mutex the follower could not take from its runtime thread. An unknown host is read
+rather than suppressed, because a duplicate is merged by every consumer keying on `stream_id`
+while a wrong suppression loses an interior with no other source. Native records are retained
 losslessly in `history.db` with a dedicated `raw` retention class, and large persisted-output
 sidecars are content-addressed for on-demand reads. Embedded `<task-notification>` XML is
 projected through the same correlation handler as live notifications, so an async close lands
