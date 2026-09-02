@@ -56,6 +56,36 @@ async fn a_native_record_round_trips_unknown_fields_and_sidecar_bytes() {
     );
 }
 
+#[tokio::test]
+async fn raw_native_records_survive_event_retention() {
+    let (history, _dir) = history_store().await;
+    let record = NativeRecord {
+        source: "manifest.json".to_string(),
+        version: 1,
+        payload: serde_json::json!({"ignored": "must survive"}),
+        blobs: vec![NativeBlob {
+            name: "missing-output".to_string(),
+            size: 99,
+            bytes: None,
+            error: Some("permission denied".to_string()),
+        }],
+    };
+    let id = session_id().encode();
+    history.put_native_record(&id, &record).await.unwrap();
+    // Event retention operates on folded blocks and CAS references only. A raw source
+    // record has its own retention class and must not disappear when the event watermark
+    // advances (or when the blob sweep runs).
+    history.prune_below(&id, i32::MAX).await.unwrap();
+    history.sweep_unreferenced_blobs().await.unwrap();
+    assert_eq!(
+        history
+            .native_record(&id, "manifest.json", 1)
+            .await
+            .unwrap(),
+        Some(serde_json::json!({"ignored": "must survive"}))
+    );
+}
+
 /// The session these fixtures hang off.
 ///
 /// A `SessionId` cannot be built from a bare string — it goes through the protocol's own

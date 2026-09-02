@@ -232,9 +232,13 @@ impl HistoryStore {
 
         for (blob, hash) in blobs {
             sqlx::query(
-                r#"INSERT OR IGNORE INTO native_blobs
+                r#"INSERT INTO native_blobs
                    (session_id, source, version, name, hash, size, error)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(session_id, source, version, name) DO UPDATE SET
+                     hash = excluded.hash,
+                     size = excluded.size,
+                     error = excluded.error"#,
             )
             .bind(session_id)
             .bind(&record.source)
