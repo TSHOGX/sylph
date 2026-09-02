@@ -624,13 +624,18 @@ has not landed.
 
 Two things this does **not** license. It is not permission to break a *vendor's*
 contract — an agent CLI is a real external dependency with real users, and an adapter
-still adapts. And it is not permission to lose a user's data: a local journal is disposable because it is
-re-derivable from agent-native logs, so verify the source still exists before discarding
-it. Once Sylph is deployed
-and holding data with no other copy — which multi-host upload makes true, since a
-remote host's native store may be unreachable — this section's first paragraph stops
-applying to *that* data specifically. Treat the presence of irreplaceable installed
-state, not a date, as the signal.
+still adapts. And it is not permission to **ingest** lossily: Sylph's store is the
+authority (`docs/architecture.md` § One authority), while a vendor's native store is that
+vendor's to prune, rotate, and reshape. So a parser reads and keeps the vendor's whole
+record, including the fields it has no use for yet — the record is the one thing that
+cannot be recovered later, and keeping it is what makes a schema break cheap: the store
+rebuilds by re-projection.
+
+Discarding the store itself is free, and the project is in the phase where that is the
+normal answer to schema churn: wipe it, re-adopt, move on. When Sylph holds records with
+no other copy, the first paragraph stops applying to those records — the presence of
+irreplaceable state is the signal, not a date. Until then, no migration, no compatibility
+branch, no dual spelling.
 
 ## Testing
 
