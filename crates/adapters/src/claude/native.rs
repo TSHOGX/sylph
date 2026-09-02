@@ -1444,6 +1444,7 @@ struct BundleFollowState {
     session: SessionFiles,
     root: JsonlCursor,
     root_metadata_offset: u64,
+    root_metadata_version: u64,
     delegates: HashMap<PathBuf, JsonlCursor>,
     journals: HashMap<PathBuf, JournalCursor>,
     manifests: HashMap<PathBuf, ManifestCursor>,
@@ -1467,6 +1468,7 @@ impl BundleFollowState {
                 opened: true,
             },
             root_metadata_offset: 0,
+            root_metadata_version: 0,
             delegates: HashMap::new(),
             journals: HashMap::new(),
             manifests: HashMap::new(),
@@ -1522,7 +1524,7 @@ impl BundleFollowState {
         } else {
             // The live path does not project root records (stdout already does), but it still
             // needs the root's workflow run-id join to place Workflow delegates correctly.
-            self.read_root_metadata();
+            messages.extend(self.read_root_metadata());
         }
 
         // Resolve spans from the current manifest/sidecar view every pass. This is what
@@ -1542,17 +1544,24 @@ impl BundleFollowState {
         Ok(messages)
     }
 
-    fn read_root_metadata(&mut self) {
+    fn read_root_metadata(&mut self) -> Vec<SessionMessage> {
         let Some((bytes, next_offset)) =
             read_appended(&self.session.transcript, self.root_metadata_offset)
         else {
-            return;
+            return Vec::new();
         };
         if bytes.is_empty() {
-            return;
+            return Vec::new();
         }
         self.root_metadata_offset = next_offset;
+        let mut messages = Vec::new();
         for record in json_lines(&bytes, Edge::Head) {
+            self.root_metadata_version += 1;
+            messages.push(SessionMessage::NativeRecord(native_record(
+                &self.session.transcript,
+                self.root_metadata_version,
+                &record,
+            )));
             if let Some((run_id, host)) = workflow_host(&record) {
                 self.workflow_hosts
                     .entry(run_id)
@@ -1564,6 +1573,7 @@ impl BundleFollowState {
                     .or_insert(Some(host));
             }
         }
+        messages
     }
 
     fn read_root(&mut self) -> Result<Vec<SessionMessage>> {
