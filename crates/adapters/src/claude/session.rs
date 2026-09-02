@@ -479,6 +479,9 @@ async fn pump(
     // not to answer, or the process died. So the one case that needs explaining gets an
     // `Err` before the end, which is where `Adapter::run`'s contract puts a failure that
     // needs explaining.
+    shared
+        .closed
+        .store(true, std::sync::atomic::Ordering::Release);
     if correlation.turn_is_open() {
         let _ = out
             .send(Err(control

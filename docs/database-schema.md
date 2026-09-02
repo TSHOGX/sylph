@@ -377,7 +377,8 @@ backend/migrations/                 journal.db
   001_initial_schema.sql            everything above: sessions, turns, events, requests
 
 backend/migrations/history/         history.db
-  001_history.sql                   blocks, cas_refs, watermarks, session_bytes, blocks_fts
+  001_history.sql                   blocks, cas_refs, native_records, native_blobs,
+                                    watermarks, session_bytes, blocks_fts
 ```
 
 `docs/storage.md` § Schema owns the `history/` tables, because they only make sense

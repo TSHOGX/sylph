@@ -360,6 +360,30 @@ CREATE TABLE cas_refs (
 
 CREATE INDEX cas_refs_by_block ON cas_refs(session_id, seq);
 
+-- Lossless vendor-native source records. These are separate from projected blocks because
+-- re-projection needs fields the current adapter ignores, and raw records are never safe to
+-- prune using an event watermark.
+CREATE TABLE native_records (
+  session_id      TEXT NOT NULL,
+  source          TEXT NOT NULL,
+  version         INTEGER NOT NULL,
+  payload_json    BLOB NOT NULL,
+  created_at_ms   INTEGER NOT NULL,
+  retention_class TEXT NOT NULL DEFAULT 'raw',
+  PRIMARY KEY (session_id, source, version)
+) WITHOUT ROWID;
+
+CREATE TABLE native_blobs (
+  session_id TEXT NOT NULL,
+  source     TEXT NOT NULL,
+  version    INTEGER NOT NULL,
+  name       TEXT NOT NULL,
+  hash       TEXT,
+  size       INTEGER NOT NULL,
+  error      TEXT,
+  PRIMARY KEY (session_id, source, version, name)
+) WITHOUT ROWID;
+
 CREATE TABLE watermarks (
   session_id    TEXT PRIMARY KEY,
   authority     TEXT NOT NULL,        -- 'envagent' | 'terminal'
