@@ -454,11 +454,29 @@ async fn pump(
                     if let SessionMessage::Event(event) = &message {
                         if event.kind == sylph_protocol::EventKind::Subagent {
                             if let Some(stream_id) = &event.stream_id {
-                                shared
-                                    .live_trajectories
-                                    .lock()
-                                    .await
-                                    .insert(stream_id.clone());
+                                let mut live = shared.live_trajectories.lock().await;
+                                live.insert(stream_id.clone());
+                                // A Task notification reuses the host tool id as its
+                                // trajectory while its sidecar is named with `task_id`.
+                                // Remember that second id only when the payload confirms
+                                // the reuse; Agent/Workflow notifications must remain
+                                // readable from their disjoint sidecars.
+                                if event
+                                    .data
+                                    .as_ref()
+                                    .and_then(|data| data.get("tool_use_id"))
+                                    .and_then(Value::as_str)
+                                    == Some(stream_id.as_str())
+                                {
+                                    if let Some(task_id) = event
+                                        .data
+                                        .as_ref()
+                                        .and_then(|data| data.get("task_id"))
+                                        .and_then(Value::as_str)
+                                    {
+                                        live.insert(task_id.to_string());
+                                    }
+                                }
                             }
                         }
                     }
