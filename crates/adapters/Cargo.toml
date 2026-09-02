@@ -36,6 +36,9 @@ base64 = { workspace = true }
 # One `debug!` on a benign signal race. The crate is a library, so it declares
 # the facade and never installs a subscriber.
 tracing = "0.1"
+# Claude embeds XML task notifications inside transcript text. `quick-xml` keeps the
+# parser small while correctly decoding entities in summaries and output paths.
+quick-xml = "0.41"
 
 [features]
 # The deterministic E2E agent. Behind a feature because it is a test fixture that

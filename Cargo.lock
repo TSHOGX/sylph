@@ -2091,6 +2091,7 @@ dependencies = [
  "chrono",
  "futures",
  "libc",
+ "quick-xml",
  "serde",
  "serde_json",
  "sylph-protocol",

@@ -45,6 +45,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use quick_xml::events::Event as XmlEvent;
+use quick_xml::Reader as XmlReader;
 use serde_json::{json, Value};
 use sylph_protocol::{
     normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeId, NativeSummary, Phase,
@@ -671,7 +673,18 @@ fn project_record(
             if has_tool_result(record) {
                 // Straight through: the live `user` payload and this record are the same
                 // shape, which is the fact the whole reuse rests on.
-                return correlation.translate(record, at_ms).messages;
+                let mut messages = correlation.translate(record, at_ms).messages;
+                // Claude serializes the close for an `Agent`/`Workflow` inside the tool
+                // result's text as XML.  Feed the parsed payload back through the live
+                // task-notification handler so native and stdout paths share one close
+                // projection.
+                for text in string_values(record) {
+                    for notification in task_notifications(&text) {
+                        let emission = correlation.translate(&notification, at_ms);
+                        messages.extend(emission.messages);
+                    }
+                }
+                return messages;
             }
             // Something the person typed. Not projected as an event: the vocabulary has no
             // `user` kind, and the server owns a turn's `request_text`
@@ -688,6 +701,123 @@ fn project_record(
         // are 30% of all records and none of them is a transcript event — several are read
         // by [`summarize`] for a listing row instead, which is where they belong.
         _ => vec![],
+    }
+}
+
+/// Every string value nested in a native record.
+///
+/// Task notifications have appeared in tool-result content, assistant text, and a few
+/// bookkeeping fields across Claude versions. Walking values rather than naming one path
+/// keeps the reader tolerant of those envelope moves while the XML root remains the one
+/// structural discriminator.
+fn string_values(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(text) => vec![text.clone()],
+        Value::Array(values) => values.iter().flat_map(string_values).collect(),
+        Value::Object(values) => values.values().flat_map(string_values).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Parse embedded `<task-notification>` XML into the payload shape used by the live path.
+///
+/// The XML is deliberately parsed as a small generic tree instead of deserializing a fixed
+/// struct: Claude has added fields to this element over time, and preserving them in the
+/// intermediate value lets the one normalizer decide which ones are meaningful. Scalar
+/// numbers and booleans are recovered as JSON scalars so `usage` remains queryable.
+fn task_notifications(text: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut search_from = 0;
+    while let Some(start) = text[search_from..].find("<task-notification") {
+        let start = search_from + start;
+        let Some(end_rel) = text[start..].find("</task-notification>") else {
+            break;
+        };
+        let end = start + end_rel + "</task-notification>".len();
+        if let Some(value) = parse_task_notification_xml(&text[start..end]) {
+            let mut payload = serde_json::Map::new();
+            payload.insert("type".to_string(), Value::String("system".to_string()));
+            payload.insert(
+                "subtype".to_string(),
+                Value::String("task_notification".to_string()),
+            );
+            if let Value::Object(fields) = value {
+                payload.extend(fields);
+            }
+            out.push(Value::Object(payload));
+        }
+        search_from = end;
+    }
+    out
+}
+
+fn parse_task_notification_xml(xml: &str) -> Option<Value> {
+    let mut reader = XmlReader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut stack: Vec<(String, serde_json::Map<String, Value>, String)> = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(XmlEvent::Start(tag)) => {
+                let name = xml_field_name(tag.local_name().as_ref());
+                stack.push((name, serde_json::Map::new(), String::new()));
+            }
+            Ok(XmlEvent::Text(text)) => {
+                let current = stack.last_mut()?;
+                current.2.push_str(&text.decode().ok()?);
+            }
+            Ok(XmlEvent::CData(text)) => {
+                let current = stack.last_mut()?;
+                current.2.push_str(&String::from_utf8_lossy(&text));
+            }
+            Ok(XmlEvent::End(_)) => {
+                let (name, fields, text) = stack.pop()?;
+                let value = if fields.is_empty() {
+                    xml_scalar(text.trim())
+                } else {
+                    let mut object = fields;
+                    if !text.trim().is_empty() {
+                        object.insert("text".to_string(), xml_scalar(text.trim()));
+                    }
+                    Value::Object(object)
+                };
+                if let Some(parent) = stack.last_mut() {
+                    parent.1.insert(name, value);
+                } else {
+                    return Some(value);
+                }
+            }
+            Ok(XmlEvent::Eof) | Err(_) => return None,
+            Ok(XmlEvent::Empty(tag)) => {
+                let name = xml_field_name(tag.local_name().as_ref());
+                if let Some(parent) = stack.last_mut() {
+                    parent.1.insert(name, Value::String(String::new()));
+                } else {
+                    return None;
+                }
+            }
+            Ok(XmlEvent::Comment(_))
+            | Ok(XmlEvent::Decl(_))
+            | Ok(XmlEvent::PI(_))
+            | Ok(XmlEvent::DocType(_))
+            | Ok(XmlEvent::GeneralRef(_)) => {}
+        }
+    }
+}
+
+fn xml_field_name(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw).replace('-', "_")
+}
+
+fn xml_scalar(text: &str) -> Value {
+    match text {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        "null" => Value::Null,
+        _ => text
+            .parse::<i64>()
+            .map(Value::from)
+            .or_else(|_| text.parse::<f64>().map(Value::from))
+            .unwrap_or_else(|_| Value::String(text.to_string())),
     }
 }
 
@@ -2771,5 +2901,45 @@ mod tests {
         state.poll().unwrap();
         assert_eq!(state.manifests.get(&manifest).unwrap().version, 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Native Agent closes arrive as XML embedded in a tool result. The parser must feed
+    /// the exact live notification shape to `Correlation`, including the numeric usage
+    /// payload, so the close lands on the delegate rather than becoming assistant prose.
+    #[test]
+    fn an_embedded_task_notification_closes_the_agent_trajectory() {
+        let text = r#"<task-notification>
+<task-id>agent-42</task-id>
+<tool-use-id>toolu_agent</tool-use-id>
+<status>completed</status>
+<summary>finished the investigation</summary>
+<output-file>/tmp/agent-42.txt</output-file>
+<usage><input_tokens>12</input_tokens><output_tokens>34</output_tokens></usage>
+</task-notification>"#;
+        let notifications = task_notifications(text);
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0]["subtype"], "task_notification");
+        assert_eq!(notifications[0]["task_id"], "agent-42");
+        assert_eq!(notifications[0]["usage"]["output_tokens"], 34);
+
+        let mut correlation = Correlation::new();
+        // The host call is what makes the close a trajectory rather than a root notice.
+        let host = json!({
+            "type": "stream_event",
+            "event": {"type": "content_block_start", "index": 0,
+                "content_block": {"type": "tool_use", "id": "toolu_agent", "name": "Agent"}}
+        });
+        let _ = correlation.translate(&host, 1);
+        let mut notification = notifications[0].clone();
+        notification["task_type"] = json!("local_agent");
+        let events = correlation.translate(&notification, 2).messages;
+        assert!(events.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.phase == Some(Phase::Completed)
+                    && event.stream_id.as_deref() == Some("agent-42")
+                    && event.text == "finished the investigation"
+        )));
     }
 }
