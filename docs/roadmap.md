@@ -103,6 +103,16 @@ None outstanding.
 
 ## Recently fixed, worth knowing
 
+**Claude native ingestion now follows the complete live bundle.** The reader keeps a cursor
+per JSONL source, rescans for delegates and journals created after `watch()` starts, and
+re-reads workflow manifests as versioned snapshots. The live path skips the root transcript
+because stdout already carries it, while suppressing the overlapping `Task` sidecar stream;
+`Agent` and `Workflow` interiors remain disjoint and visible. Native records are retained
+losslessly in `history.db` with a dedicated `raw` retention class, and large persisted-output
+sidecars are content-addressed for on-demand reads. Embedded `<task-notification>` XML is
+projected through the same correlation handler as live notifications, so an async close lands
+on its trajectory rather than being mistaken for assistant prose.
+
 **A terminal turn status now means the record is finished.** `TurnCloser::close` used to
 commit the turn row terminal and *then* run the settle sweep, so `status` was answering two
 questions with one column — what the turn produced, and whether its record was complete —
