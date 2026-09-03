@@ -379,17 +379,18 @@ backend/migrations/                 journal.db
 backend/migrations/history/         history.db
   001_history.sql                   blocks, cas_refs, native_records, native_blobs,
                                     watermarks, session_bytes, blocks_fts
+  002_native_blob_locator.sql       deferred native sidecar locators
 ```
 
 `docs/storage.md` § Schema owns the `history/` tables, because they only make sense
 alongside the consolidation and retention rules that write them.
 
-**One migration per database, stating the current shape — not a chain that adds columns and
-later drops them.** `AGENTS.md` § Compatibility is why: there is no other consumer and no
-irreplaceable installed state, so a chain would document intermediate states nobody should
-reconstruct. The one precondition before collapsing a chain is to verify a store's data is
-re-derivable — for the journal, that means the agents' native stores still hold the
-sessions in it.
+**Migrations describe the current shape without preserving obsolete intermediate states.**
+The initial schema is deliberately compact, while deployed databases receive only additive
+migrations such as the native-blob locator. `AGENTS.md` § Compatibility still forbids
+keeping compatibility branches for states no caller can produce. The precondition before
+collapsing a chain is to verify a store's data is re-derivable — for the journal, that means
+the agents' native stores still hold the sessions in it.
 
 Attachments and commands need no migration of their own: attachments are staged on disk
 under the data directory rather than in a table, and a command invocation is a column on
@@ -408,7 +409,7 @@ a literal in the test is a third copy, and it would agree with a wrong value as 
 the code did.
 
 Migration rules:
-- Each migration is idempotent (use `IF NOT EXISTS`)
+- New migrations are applied once by SQLx; use `IF NOT EXISTS` where the operation supports it
 - Migrations are append-only (never edit a deployed migration)
 - Before deployment, schemas are disposable (change in place). Treat installed
   state, not a date, as the signal that this has flipped

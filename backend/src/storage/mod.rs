@@ -22,7 +22,7 @@ pub mod scheduler;
 
 pub use consolidator::Consolidator;
 pub use fold::{Delta, Folded};
-pub use history::{Block, HistoryStore, SearchHit, SessionBytes};
+pub use history::{Block, HistoryStore, NativeBlobState, SearchHit, SessionBytes};
 pub use retention::{
     Confirmation, EnvagentAuthority, NativeSourceState, Resolved, RetentionAuthority,
     TerminalAuthority, WithheldReason,

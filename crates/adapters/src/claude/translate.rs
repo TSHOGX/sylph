@@ -402,6 +402,42 @@ impl Correlation {
         self.turn_open
     }
 
+    /// Close an Agent/Workflow whose native transcript records completion directly on
+    /// `toolUseResult` rather than emitting a `task_notification`.
+    ///
+    /// The discriminant is deliberately the complete native shape: `agentId`,
+    /// `isAsync: false`, and `status: completed`. In particular, `status` alone is not
+    /// sufficient because asynchronous launches also report a status field and must stay
+    /// open until their later notification.
+    pub fn native_agent_completed(
+        &mut self,
+        agent_id: &str,
+        host_tool_use_id: Option<&str>,
+        summary: String,
+        at_ms: i64,
+        out: &mut Emission,
+    ) {
+        let trajectory = TrajectoryId::new(agent_id.to_string());
+        if self.closed_trajectories.contains(&trajectory) {
+            return;
+        }
+        let span = host_tool_use_id
+            .map(TrajectoryId::new)
+            .filter(|host| host.as_str() != trajectory.as_str())
+            .or_else(|| self.task_hosts.get(&trajectory).map(HostId::as_trajectory))
+            .or_else(|| self.subagent_parent.get(&trajectory).cloned().flatten());
+
+        self.closed_trajectories.insert(trajectory.clone());
+        self.opened_trajectories.remove(&trajectory);
+
+        let mut event = Event::new(EventKind::Subagent, Some(Phase::Completed), at_ms);
+        event.stream_id = Some(agent_id.to_string());
+        event.span = span.map(|id| id.as_str().to_string());
+        event.name = self.tool_names.get(agent_id).cloned().flatten();
+        event.text = summary;
+        out.push(event);
+    }
+
     /// One vendor stdout payload, projected.
     ///
     /// # What is deliberately not here

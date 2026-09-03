@@ -110,10 +110,15 @@ order**, so an absent duration is reported absent rather than as zero.
 
 ## Recently fixed, worth knowing
 
-**Claude native ingestion now follows the complete live bundle.** The reader keeps a cursor
-per JSONL source, rescans for delegates and journals created after `watch()` starts, and
-re-reads workflow manifests as versioned snapshots. The live path reads the root transcript
-for the facts it carries but does not project it, because stdout already does.
+**Claude native ingestion now follows one bundle reader in every mode.** `adopt`, `watch`,
+and live stdout attachment share source discovery, cursor advancement, manifest revisions,
+sidecar classification, and projection. A resumed live session seeds a current-state
+baseline for every existing source, so historical delegates are never projected again;
+only later appends are live. Root stdout and native-only completion facts share one
+adapter-level correlation state, which is what lets synchronous Agent closes and embedded
+task notifications arrive exactly once. Sidecars are retained as validated, on-demand
+resources rather than read wholesale on the event path, and raw persistence failures are
+counted in diagnostics.
 
 **Which sidecar stream to suppress is decided from the host call's tool name**, not from state
 shared with the stdout pump. `--forward-subagent-text` forwards for the built-in `Task` alone,

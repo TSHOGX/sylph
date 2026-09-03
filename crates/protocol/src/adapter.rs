@@ -282,6 +282,10 @@ pub struct NativeRecord {
     /// Stable source name relative to the native session bundle, never an absolute path.
     pub source: String,
     pub version: u64,
+    /// Original JSONL bytes when the source is line-oriented. Keeping lexical bytes avoids
+    /// losing whitespace, key order, duplicate keys, and escape spelling during re-projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_json: Option<Vec<u8>>,
     pub payload: serde_json::Value,
     /// Large sidecar bodies referenced by this record.  The preview remains in `payload`;
     /// the full bytes are externalized by the server into its content-addressed store.
@@ -295,10 +299,16 @@ pub struct NativeRecord {
 pub struct NativeBlob {
     pub name: String,
     pub size: u64,
-    /// Present when the sidecar was readable.  The server stores these bytes in CAS and
-    /// clears the in-memory copy before handing the message onward.
+    /// Present when the sidecar is small enough to inline. The server stores these bytes in
+    /// CAS before committing the native record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<Vec<u8>>,
+    /// Opaque source locator for a large sidecar. The preview remains in the native payload;
+    /// a resource fetcher may resolve this later without putting the full body on the event
+    /// stream. It is intentionally optional because a remote envagent can replace it with a
+    /// handle that has meaning only on that machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
     /// Present when the sidecar could not be read; this is explicit state, not an absent
     /// blob that a client must guess was never attempted.
     #[serde(default, skip_serializing_if = "Option::is_none")]

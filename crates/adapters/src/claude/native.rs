@@ -43,7 +43,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+#[cfg(test)]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
 use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
 use serde_json::{json, Value};
@@ -53,7 +55,9 @@ use sylph_protocol::{
 };
 
 use super::translate::Correlation;
-use crate::native::{candidates, epoch_millis_from_iso, for_each_json_line, SessionCandidate};
+#[cfg(test)]
+use crate::native::for_each_json_line;
+use crate::native::{candidates, epoch_millis_from_iso, SessionCandidate};
 
 /// Where `claude` keeps its transcripts, `$HOME`-relative.
 fn store_root() -> Option<PathBuf> {
@@ -76,7 +80,11 @@ const NATIVE_FIDELITY: Fidelity = Fidelity::Blocks;
 /// The stream ends when the pass does.
 pub fn adopt(id: &NativeId) -> Result<EventStream> {
     let session = locate(id)?;
-    let messages = parse_session(&session)?;
+    // Snapshot and follow share the same source inventory, cursor and projection state.
+    // Keeping adoption on the bundle reader is important: a reload must not silently
+    // traverse a different set of files than a live watcher.
+    let mut reader = BundleFollowState::new(session, RootSource::File);
+    let messages = reader.poll()?;
     Ok(Box::pin(futures::stream::iter(
         messages.into_iter().map(Ok),
     )))
@@ -108,9 +116,22 @@ pub fn watch(id: &NativeId) -> Result<EventStream> {
 /// timing rather than about the vendor, so a delegate file polled before its notification
 /// arrived would answer it wrongly — and it required sharing a mutex across the two, which
 /// is what made the reader abort on a runtime thread.
-pub fn watch_live(id: &NativeId) -> Result<EventStream> {
+pub fn watch_live(
+    id: &NativeId,
+    resumed: bool,
+    root_correlation: std::sync::Arc<std::sync::Mutex<Correlation>>,
+) -> Result<EventStream> {
     let session = locate(id)?;
-    Ok(follow(session, RootSource::Stdout))
+    Ok(follow_from_with_correlation(
+        session,
+        RootSource::Stdout,
+        if resumed {
+            FollowBaseline::Current
+        } else {
+            FollowBaseline::Empty
+        },
+        Some(root_correlation),
+    ))
 }
 
 /// Which native sessions this machine's store holds.
@@ -453,6 +474,32 @@ fn json_lines(bytes: &[u8], edge: Edge) -> impl DoubleEndedIterator<Item = Value
         .into_iter()
 }
 
+/// The parsed JSON plus the exact line bytes that produced it. Raw retention uses the latter
+/// so a future projection can recover lexical details serde_json normalizes away.
+fn json_lines_with_raw(
+    bytes: &[u8],
+    edge: Edge,
+) -> impl DoubleEndedIterator<Item = (Value, Vec<u8>)> + use<'_> {
+    let mut lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
+    if edge == Edge::Tail && !lines.is_empty() {
+        lines.remove(0);
+    }
+    lines
+        .into_iter()
+        .filter_map(|line| {
+            if line.is_empty() {
+                return None;
+            }
+            let raw = line.to_vec();
+            let trimmed = String::from_utf8_lossy(line);
+            serde_json::from_str::<Value>(trimmed.trim())
+                .ok()
+                .map(|value| (value, raw))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
 /// A string field, treating `""` as absent.
 ///
 /// Same rule as `translate::text_field`, for the same reason: the vendor sends `""` and
@@ -478,6 +525,7 @@ fn string_at(payload: &Value, key: &str) -> Option<String> {
 ///
 /// A delegate's events are then re-parented onto the trajectory that spawned it, which is
 /// what [`delegate_spans`] resolves.
+#[cfg(test)]
 fn parse_session(session: &SessionFiles) -> Result<Vec<SessionMessage>> {
     let mut messages = Vec::new();
 
@@ -532,6 +580,7 @@ fn parse_session(session: &SessionFiles) -> Result<Vec<SessionMessage>> {
 
 /// One file's records, projected.
 #[derive(Debug)]
+#[cfg(test)]
 struct ParsedFile {
     messages: Vec<SessionMessage>,
     /// The first timestamp seen, for the synthesized trajectory declaration above.
@@ -545,6 +594,7 @@ struct ParsedFile {
 ///
 /// `span` is the trajectory every event in this file belongs to — set for a delegate,
 /// `None` for the session's own transcript.
+#[cfg(test)]
 fn parse_transcript(path: &Path, span: Option<String>) -> Result<ParsedFile> {
     let mut correlation = Correlation::new();
     let mut messages = Vec::new();
@@ -676,6 +726,23 @@ fn project_record(
     record: &Value,
     at_ms: i64,
 ) -> Vec<SessionMessage> {
+    project_record_inner(correlation, record, at_ms, true)
+}
+
+fn project_record_without_native_facts(
+    correlation: &mut Correlation,
+    record: &Value,
+    at_ms: i64,
+) -> Vec<SessionMessage> {
+    project_record_inner(correlation, record, at_ms, false)
+}
+
+fn project_record_inner(
+    correlation: &mut Correlation,
+    record: &Value,
+    at_ms: i64,
+    include_native_facts: bool,
+) -> Vec<SessionMessage> {
     let kind = record
         .get("type")
         .and_then(Value::as_str)
@@ -683,33 +750,22 @@ fn project_record(
     // The delegating call whose output this is, when the record is a delegate's. Live, this
     // rides on the envelope as `parent_tool_use_id`; natively the store spells the same
     // fact `agentId`, and it is resolved to a trajectory by the caller rather than here.
-    match kind {
+    let mut messages = match kind {
         // `user` carries tool results, an interrupt, or something the person typed.
         "user" => {
             if let Some(interrupt) = user_interrupt(record, at_ms) {
-                return vec![SessionMessage::Event(interrupt)];
-            }
-            if has_tool_result(record) {
+                vec![SessionMessage::Event(interrupt)]
+            } else if has_tool_result(record) {
                 // Straight through: the live `user` payload and this record are the same
                 // shape, which is the fact the whole reuse rests on.
-                let mut messages = correlation.translate(record, at_ms).messages;
-                // Claude serializes the close for an `Agent`/`Workflow` inside the tool
-                // result's text as XML.  Feed the parsed payload back through the live
-                // task-notification handler so native and stdout paths share one close
-                // projection.
-                for text in string_values(record) {
-                    for notification in task_notifications(&text) {
-                        let emission = correlation.translate(&notification, at_ms);
-                        messages.extend(emission.messages);
-                    }
-                }
-                return messages;
+                correlation.translate(record, at_ms).messages
+            } else {
+                // Something the person typed. Not projected as an event: the vocabulary has no
+                // `user` kind, and the server owns a turn's `request_text`
+                // (`docs/database-schema.md`). Inventing a kind is what
+                // `crates/adapters/src/lib.rs` forbids an adapter from doing.
+                vec![]
             }
-            // Something the person typed. Not projected as an event: the vocabulary has no
-            // `user` kind, and the server owns a turn's `request_text`
-            // (`docs/database-schema.md`). Inventing a kind is what
-            // `crates/adapters/src/lib.rs` forbids an adapter from doing.
-            vec![]
         }
         "assistant" => assistant_blocks(correlation, record, at_ms),
         "system" => system_record(correlation, record, at_ms),
@@ -720,11 +776,95 @@ fn project_record(
         // are 30% of all records and none of them is a transcript event — several are read
         // by [`summarize`] for a listing row instead, which is where they belong.
         _ => vec![],
+    };
+    // Native-only completion facts and embedded task XML may appear in more than one
+    // vendor record kind across Claude releases. The correlation's closed-trajectory set
+    // makes this scan idempotent, while scanning every record avoids coupling correctness
+    // to whether Claude chose `user`, `assistant`, or a bookkeeping envelope for the fact.
+    if include_native_facts {
+        messages.extend(project_native_facts(correlation, record, at_ms));
     }
+    messages
+}
+
+/// Project only facts that are present in the native transcript and absent from the live
+/// root stream. The root bundle reader uses this in `RootSource::Stdout`; the regular file
+/// reader calls it after the ordinary record projection. Both paths share the same
+/// `Correlation`, so a fact observed on stdout and then on disk closes exactly once.
+fn project_native_facts(
+    correlation: &mut Correlation,
+    record: &Value,
+    at_ms: i64,
+) -> Vec<SessionMessage> {
+    let mut messages = Vec::new();
+    if let Some((agent, host, summary)) = synchronous_agent_result(record) {
+        let mut emission = super::translate::Emission::default();
+        correlation.native_agent_completed(&agent, host.as_deref(), summary, at_ms, &mut emission);
+        messages.extend(emission.messages);
+    }
+    // Claude serializes the close for an Agent/Workflow inside the tool result's text as XML.
+    // Feed the parsed payload back through the live task-notification handler so native and
+    // stdout paths share one close projection.
+    for text in string_values(record) {
+        for notification in task_notifications(&text) {
+            let emission = correlation.translate(&notification, at_ms);
+            messages.extend(emission.messages);
+        }
+    }
+    messages
+}
+
+/// Extract the native-only completion shape for a synchronous Agent invocation.
+///
+/// Claude writes asynchronous launches with `isAsync: true` and
+/// `status: async_launched`; those are intentionally not closes.  The content block's
+/// `tool_use_id` is the only stable route back to the host trajectory when the native
+/// result does not repeat it in `toolUseResult`.
+fn synchronous_agent_result(record: &Value) -> Option<(String, Option<String>, String)> {
+    let result = record.get("toolUseResult")?.as_object()?;
+    if result.get("isAsync")?.as_bool()? || result.get("status")?.as_str()? != "completed" {
+        return None;
+    }
+    let result_value = Value::Object(result.clone());
+    let agent = string_at(&result_value, "agentId")?;
+    let content = record
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array);
+    let host = content.and_then(|blocks| {
+        blocks.iter().find_map(|block| {
+            (block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                .then(|| string_at(block, "tool_use_id"))
+                .flatten()
+        })
+    });
+    let summary = string_at(&result_value, "stdout")
+        .or_else(|| string_at(&result_value, "summary"))
+        .or_else(|| {
+            content.and_then(|blocks| {
+                blocks.iter().find_map(|block| {
+                    (block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                        .then(|| block.get("content").map(Value::to_string))
+                        .flatten()
+                })
+            })
+        })
+        .unwrap_or_default();
+    Some((agent, host, summary))
 }
 
 /// Preserve the exact native JSON object and any large sidecar it references.
+#[cfg(test)]
 fn native_record(path: &Path, version: u64, record: &Value) -> NativeRecord {
+    native_record_with_raw(path, version, record, None)
+}
+
+fn native_record_with_raw(
+    path: &Path,
+    version: u64,
+    record: &Value,
+    raw_json: Option<Vec<u8>>,
+) -> NativeRecord {
     let mut blobs = Vec::new();
     if let Some(sidecar) = record
         .get("toolUseResult")
@@ -735,36 +875,82 @@ fn native_record(path: &Path, version: u64, record: &Value) -> NativeRecord {
     NativeRecord {
         source: native_source(path),
         version,
+        raw_json,
         payload: record.clone(),
         blobs,
     }
 }
 
 fn read_native_blob(name: &str) -> NativeBlob {
-    match std::fs::read(name) {
-        Ok(bytes) => NativeBlob {
+    let path = Path::new(name);
+    let Some(root) = store_root().and_then(|root| std::fs::canonicalize(root).ok()) else {
+        return NativeBlob {
             name: name.to_string(),
-            size: bytes.len() as u64,
-            bytes: Some(bytes),
-            error: None,
-        },
-        Err(error) => NativeBlob {
-            name: name.to_string(),
-            size: std::fs::metadata(name).map(|meta| meta.len()).unwrap_or(0),
+            size: 0,
             bytes: None,
-            error: Some(error.to_string()),
-        },
+            locator: None,
+            error: Some("native store root is unavailable".to_string()),
+        };
+    };
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(path) if path.starts_with(&root) => path,
+        Ok(path) => {
+            return NativeBlob {
+                name: name.to_string(),
+                size: std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
+                bytes: None,
+                locator: None,
+                error: Some("persisted output path is outside the native store".to_string()),
+            }
+        }
+        Err(error) => {
+            return NativeBlob {
+                name: name.to_string(),
+                size: std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
+                bytes: None,
+                locator: None,
+                error: Some(error.to_string()),
+            }
+        }
+    };
+    let size = std::fs::metadata(&canonical)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    NativeBlob {
+        name: name.to_string(),
+        size,
+        bytes: None,
+        locator: Some(canonical.to_string_lossy().to_string()),
+        error: None,
     }
 }
 
+#[cfg(test)]
 fn sidecar_record(path: &Path) -> Option<NativeRecord> {
-    let payload = read_sidecar(path)?;
+    let (payload, raw) = read_sidecar_with_raw(path)?;
     Some(NativeRecord {
         source: native_source(&path.with_extension("meta.json")),
-        version: 1,
+        version: revision_bytes(&raw),
+        raw_json: Some(raw),
         payload,
         blobs: Vec::new(),
     })
+}
+
+fn revision_bytes(bytes: &[u8]) -> u64 {
+    // Stable FNV-1a keeps snapshot identity independent of process lifetime and platform.
+    // The database still checks payload equality on collision rather than silently replacing
+    // a different revision.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn manifest_revision(path: &Path) -> Option<u64> {
+    Some(revision_bytes(&std::fs::read(path).ok()?))
 }
 
 /// Stable logical source name, relative to the session bundle rather than the host's home.
@@ -1170,6 +1356,7 @@ fn system_record(correlation: &mut Correlation, record: &Value, at_ms: i64) -> V
 /// what closes an unreported trajectory, and it records that as `abandoned` — distinct from
 /// `failed`, which is the distinction that keeps an interrupted turn from reading as a
 /// broken one.
+#[cfg(test)]
 fn parse_journal(path: &Path) -> Result<Vec<SessionMessage>> {
     let mut messages = Vec::new();
     // `journal.jsonl` records carry **no timestamp** — measured, 1379 `started` and 1353
@@ -1261,9 +1448,14 @@ fn delegate_name(path: &Path) -> Option<String> {
 
 /// A delegate's `agent-<hash>.meta.json`, when it has one.
 fn read_sidecar(path: &Path) -> Option<Value> {
+    read_sidecar_with_raw(path).map(|(payload, _)| payload)
+}
+
+fn read_sidecar_with_raw(path: &Path) -> Option<(Value, Vec<u8>)> {
     let sidecar = path.with_extension("meta.json");
-    let text = std::fs::read_to_string(sidecar).ok()?;
-    serde_json::from_str(&text).ok()
+    let raw = std::fs::read(sidecar).ok()?;
+    let payload = serde_json::from_slice(&raw).ok()?;
+    Some((payload, raw))
 }
 
 /// Which trajectory each delegate's work belongs inside, keyed by `agentId`.
@@ -1445,12 +1637,33 @@ fn read_workflow_manifest(path: &Path) -> Option<Value> {
 /// offset. Re-scanning the directory on every pass is what discovers delegates and journals
 /// created after the first pass.
 fn follow(session: SessionFiles, root: RootSource) -> EventStream {
+    follow_from(session, root, FollowBaseline::Empty)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowBaseline {
+    /// Read every complete record currently in the bundle.
+    Empty,
+    /// Attach to the current end of every source and only publish later appends.
+    Current,
+}
+
+fn follow_from(session: SessionFiles, root: RootSource, baseline: FollowBaseline) -> EventStream {
+    follow_from_with_correlation(session, root, baseline, None)
+}
+
+fn follow_from_with_correlation(
+    session: SessionFiles,
+    root: RootSource,
+    baseline: FollowBaseline,
+    root_correlation: Option<std::sync::Arc<std::sync::Mutex<Correlation>>>,
+) -> EventStream {
     /// Fast enough to feel live against a store that flushes per content block, slow enough
     /// that an idle session costs one `stat` per interval.
     const POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
     Box::pin(futures::stream::unfold(
-        BundleFollowState::new(session, root),
+        BundleFollowState::new_with_correlation(session, root, baseline, root_correlation),
         |mut state| async move {
             loop {
                 if let Some(message) = state.pending.pop_front() {
@@ -1512,6 +1725,16 @@ struct SidecarCursor {
     ingested: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DelegateProjection {
+    Project,
+    Suppress,
+    /// The sidecar is the source of truth for the host tool.  Do not consume the delegate
+    /// cursor until it exists: otherwise a late Task sidecar would arrive after a duplicate
+    /// prefix had already been published, and the protocol has no retract operation.
+    Pending,
+}
+
 /// State for the dynamic multi-file bundle reader.
 struct BundleFollowState {
     session: SessionFiles,
@@ -1530,11 +1753,29 @@ struct BundleFollowState {
     host_tools: HashMap<String, String>,
     pending: VecDeque<SessionMessage>,
     root_source: RootSource,
+    root_correlation: Option<std::sync::Arc<std::sync::Mutex<Correlation>>>,
 }
 
 impl BundleFollowState {
     fn new(session: SessionFiles, root_source: RootSource) -> Self {
-        Self {
+        Self::new_with_baseline(session, root_source, FollowBaseline::Empty)
+    }
+
+    fn new_with_baseline(
+        session: SessionFiles,
+        root_source: RootSource,
+        baseline: FollowBaseline,
+    ) -> Self {
+        Self::new_with_correlation(session, root_source, baseline, None)
+    }
+
+    fn new_with_correlation(
+        session: SessionFiles,
+        root_source: RootSource,
+        baseline: FollowBaseline,
+        root_correlation: Option<std::sync::Arc<std::sync::Mutex<Correlation>>>,
+    ) -> Self {
+        let mut state = Self {
             session,
             // **One cursor over the root, whichever source projects it.** Two offsets over
             // one file is a state where advancing the wrong one silently skips records, and
@@ -1553,6 +1794,113 @@ impl BundleFollowState {
             host_tools: HashMap::new(),
             pending: VecDeque::new(),
             root_source,
+            root_correlation,
+        };
+        if baseline == FollowBaseline::Current {
+            state.seed_current_baseline();
+        }
+        state
+    }
+
+    /// Establish the live boundary for a resumed native session.
+    ///
+    /// A resumed process already has a complete native bundle. Starting every JSONL cursor
+    /// at zero would project old delegate files again, while starting only the root cursor at
+    /// the end would lose the host-tool metadata needed to suppress Task's duplicate file.
+    /// The baseline therefore advances every existing source and mines its metadata without
+    /// emitting records or events. Files created after this pass remain ordinary live sources.
+    fn seed_current_baseline(&mut self) {
+        let transcript = self.session.transcript.clone();
+        if let Some((bytes, offset)) = read_appended(&transcript, 0) {
+            let records: Vec<Value> = json_lines(&bytes, Edge::Head).collect();
+            self.root.offset = offset;
+            self.root.version = records.len() as u64;
+            for record in records {
+                self.remember_root_metadata(&record);
+                self.hydrate_root(&record);
+            }
+        }
+
+        for delegate in self.session.delegates.clone() {
+            let Some((bytes, offset)) = read_appended(&delegate, 0) else {
+                continue;
+            };
+            let records: Vec<Value> = json_lines(&bytes, Edge::Head).collect();
+            let mut cursor = JsonlCursor {
+                offset,
+                version: records.len() as u64,
+                correlation: Correlation::new(),
+                opened: true,
+            };
+            // Keep host-tool discovery complete for nested delegates that are created after
+            // the resume boundary.
+            for record in &records {
+                collect_host_tools(record, &mut self.host_tools);
+                let _ = project_record_without_native_facts(&mut cursor.correlation, record, 0);
+            }
+            cursor.opened = true;
+            self.delegates.insert(delegate, cursor);
+        }
+
+        for journal in self.session.journals.clone() {
+            if let Some((bytes, offset)) = read_appended(&journal, 0) {
+                let version = json_lines(&bytes, Edge::Head).count() as u64;
+                self.journals
+                    .insert(journal, JournalCursor { offset, version });
+            }
+        }
+
+        for manifest in self.session.manifests.clone() {
+            let Some(meta) = std::fs::metadata(&manifest).ok() else {
+                continue;
+            };
+            self.manifests.insert(
+                manifest.clone(),
+                ManifestCursor {
+                    fingerprint: Some((meta.len(), file_modified_nanos(&meta))),
+                    version: manifest_revision(&manifest).unwrap_or(1),
+                },
+            );
+            // `delegate_spans` reads the current snapshot on every pass, so no projection is
+            // needed here; this cursor only prevents the baseline snapshot from being emitted.
+        }
+
+        for delegate in self.session.delegates.clone() {
+            let sidecar = delegate.with_extension("meta.json");
+            let Some(meta) = std::fs::metadata(&sidecar).ok() else {
+                continue;
+            };
+            self.sidecars.insert(
+                sidecar,
+                SidecarCursor {
+                    fingerprint: Some((meta.len(), file_modified_nanos(&meta))),
+                    ingested: true,
+                },
+            );
+        }
+    }
+
+    fn remember_root_metadata(&mut self, record: &Value) {
+        if let Some((run_id, host)) = workflow_host(record) {
+            self.workflow_hosts
+                .entry(run_id)
+                .and_modify(|existing| {
+                    if existing.as_ref().is_some_and(|old| old != &host) {
+                        *existing = None;
+                    }
+                })
+                .or_insert(Some(host));
+        }
+        collect_host_tools(record, &mut self.host_tools);
+    }
+
+    fn hydrate_root(&mut self, record: &Value) {
+        if let Some(correlation) = &self.root_correlation {
+            if let Ok(mut correlation) = correlation.lock() {
+                let _ = project_record(&mut correlation, record, 0);
+            }
+        } else {
+            let _ = project_record(&mut self.root.correlation, record, 0);
         }
     }
 
@@ -1575,10 +1923,11 @@ impl BundleFollowState {
             if !changed {
                 continue;
             }
-            let version = self
-                .manifests
-                .get(&manifest)
-                .map_or(1, |cursor| cursor.version + 1);
+            let version = manifest_revision(&manifest).unwrap_or_else(|| {
+                self.manifests
+                    .get(&manifest)
+                    .map_or(1, |cursor| cursor.version.saturating_add(1))
+            });
             self.manifests.insert(
                 manifest.clone(),
                 ManifestCursor {
@@ -1590,6 +1939,7 @@ impl BundleFollowState {
                 messages.push(SessionMessage::NativeRecord(NativeRecord {
                     source: native_source(&manifest),
                     version,
+                    raw_json: std::fs::read(&manifest).ok(),
                     payload,
                     blobs: Vec::new(),
                 }));
@@ -1615,18 +1965,32 @@ impl BundleFollowState {
         // Phase 1: Collect host tools from all new appended bytes
         self.collect_all_host_tools();
 
-        // Phase 2: Read and project with suppression decisions now stable
-        messages.extend(self.read_root());
-
         // Resolve spans from the current manifest/sidecar view every pass. This is what
         // makes a manifest rewritten after watch() started visible without a restart.
         let spans = delegate_spans(&self.session, &self.workflow_hosts);
         let delegates = self.session.delegates.clone();
-        for delegate in delegates {
-            let Some(agent) = agent_id_of(&delegate) else {
-                continue;
-            };
-            messages.extend(self.read_delegate(&delegate, spans.get(&agent).cloned())?);
+        // On the live path, delegate declarations are the only source of a trajectory for
+        // Agent/Workflow calls. Process them before native-only root completion facts so a
+        // synchronous close cannot land in the journal before its trajectory is opened.
+        if self.root_source == RootSource::Stdout {
+            for delegate in &delegates {
+                let Some(agent) = agent_id_of(delegate) else {
+                    continue;
+                };
+                messages.extend(self.read_delegate(delegate, spans.get(&agent).cloned())?);
+            }
+        }
+
+        // Phase 2: Read and project with suppression decisions now stable
+        messages.extend(self.read_root());
+
+        if self.root_source == RootSource::File {
+            for delegate in &delegates {
+                let Some(agent) = agent_id_of(delegate) else {
+                    continue;
+                };
+                messages.extend(self.read_delegate(delegate, spans.get(&agent).cloned())?);
+            }
         }
         let journals = self.session.journals.clone();
         for journal in journals {
@@ -1651,22 +2015,28 @@ impl BundleFollowState {
             };
 
             let fingerprint = (meta.len(), file_modified_nanos(&meta));
-            let cursor = self.sidecars.entry(sidecar_path.clone()).or_insert(SidecarCursor {
-                fingerprint: None,
-                ingested: false,
-            });
+            let cursor = self
+                .sidecars
+                .entry(sidecar_path.clone())
+                .or_insert(SidecarCursor {
+                    fingerprint: None,
+                    ingested: false,
+                });
 
             // Check if this sidecar is new or changed
-            let changed = cursor.fingerprint.is_none_or(|old_fp| old_fp != fingerprint);
+            let changed = cursor
+                .fingerprint
+                .is_none_or(|old_fp| old_fp != fingerprint);
             if !changed {
                 continue;
             }
 
             // Ingest the sidecar
-            if let Some(payload) = read_sidecar(&delegate) {
+            if let Some((payload, raw)) = read_sidecar_with_raw(&delegate) {
                 messages.push(SessionMessage::NativeRecord(NativeRecord {
                     source: native_source(&sidecar_path),
-                    version: 1,
+                    version: revision_bytes(&raw),
+                    raw_json: Some(raw),
                     payload,
                     blobs: Vec::new(),
                 }));
@@ -1736,12 +2106,13 @@ impl BundleFollowState {
         }
         self.root.offset = next_offset;
         let mut messages = Vec::new();
-        for record in json_lines(&bytes, Edge::Head) {
+        for (record, raw) in json_lines_with_raw(&bytes, Edge::Head) {
             self.root.version += 1;
-            messages.push(SessionMessage::NativeRecord(native_record(
+            messages.push(SessionMessage::NativeRecord(native_record_with_raw(
                 &self.session.transcript,
                 self.root.version,
                 &record,
+                Some(raw),
             )));
             let at_ms = record
                 .get("timestamp")
@@ -1769,11 +2140,20 @@ impl BundleFollowState {
             collect_host_tools(&record, &mut self.host_tools);
             if self.root_source == RootSource::File {
                 messages.extend(project_record(&mut self.root.correlation, &record, at_ms));
+            } else if let Some(correlation) = &self.root_correlation {
+                if let Ok(mut correlation) = correlation.lock() {
+                    messages.extend(project_native_facts(&mut correlation, &record, at_ms));
+                }
+            } else {
+                messages.extend(project_native_facts(
+                    &mut self.root.correlation,
+                    &record,
+                    at_ms,
+                ));
             }
         }
         messages
     }
-
 
     fn read_delegate(&mut self, path: &Path, span: Option<String>) -> Result<Vec<SessionMessage>> {
         let Some(agent) = agent_id_of(path) else {
@@ -1784,29 +2164,30 @@ impl BundleFollowState {
         // (`docs/agents.md`). The host's tool name comes from the root transcript, so the
         // answer does not depend on which file this reader happened to poll first.
         //
-        // An *unknown* host is read rather than suppressed, and that default is the whole
-        // safety argument: **the two errors are not symmetric.** Reading a duplicate shows
-        // work twice, and every consumer keys by `stream_id` and merges; suppressing wrongly
-        // loses an interior with nothing left to say it existed.
+        // A host classification is held until its sidecar exists. **The two errors are not
+        // symmetric:** publishing before classification can create an unretractable duplicate,
+        // while waiting one poll costs latency but preserves a deterministic tree. Once the
+        // sidecar is present, an unknown or non-forwarded host is projected; only a known
+        // stdout-forwarded tool is suppressed.
         //
         // **Re-asked every pass**, because a tool name can arrive after the file it describes.
         // The window is narrow — a delegate file is never written before its host call
         // (measured over 454 pairs: the delegate's first record follows its host's by a median
         // of 5 ms, and never precedes it), and `read_root` runs before this in the same pass —
         // but it is not empty, since a host record still half-written when the root was read is
-        // correctly held back by `read_appended` until the next pass. In that case a prefix is
-        // projected before the answer is known and the rest is withheld once it is. That is
-        // bounded and merged by consumers, where deferring instead would delay every nested
-        // delegate by a poll to protect a case costing strictly less than the delay.
+        // correctly held back by `read_appended` until the next pass. The delegate cursor is
+        // not advanced while classification is pending, so a late sidecar cannot leave a
+        // projected prefix that the protocol has no retract operation for.
         //
         // What must *not* happen is deciding once and latching: suppression describes a file,
         // and a delegate grows for as long as its subagent runs.
         //
         // Decided before the cursor is borrowed, because the answer is read from `self`.
-        let suppress = self.root_source == RootSource::Stdout
-            && delegate_tool_use_id(path)
-                .and_then(|host| self.host_tools.get(&host))
-                .is_some_and(|tool| STDOUT_FORWARDED_TOOLS.contains(&tool.as_str()));
+        let projection = self.delegate_projection(path);
+        if projection == DelegateProjection::Pending {
+            return Ok(Vec::new());
+        }
+        let suppress = projection == DelegateProjection::Suppress;
 
         let entry = self
             .delegates
@@ -1877,12 +2258,13 @@ impl BundleFollowState {
         // root, so a root-only view leaves every nested delegation's host unnamed.
         // Accumulated locally because `entry` is borrowed for the whole loop.
         let mut nested_hosts = HashMap::new();
-        for record in json_lines(&bytes, Edge::Head) {
+        for (record, raw) in json_lines_with_raw(&bytes, Edge::Head) {
             entry.version += 1;
-            messages.push(SessionMessage::NativeRecord(native_record(
+            messages.push(SessionMessage::NativeRecord(native_record_with_raw(
                 path,
                 entry.version,
                 &record,
+                Some(raw),
             )));
             let at_ms = record
                 .get("timestamp")
@@ -1893,7 +2275,9 @@ impl BundleFollowState {
             // Still correlated when suppressed, so the cursor's state stays consistent with
             // the bytes it has consumed; only the resulting events are dropped. A correlation
             // fed a gap would mis-key whatever followed it if suppression ever lifted.
-            for message in project_record(&mut entry.correlation, &record, at_ms) {
+            for message in
+                project_record_without_native_facts(&mut entry.correlation, &record, at_ms)
+            {
                 if suppress {
                     continue;
                 }
@@ -1913,6 +2297,27 @@ impl BundleFollowState {
         Ok(messages)
     }
 
+    fn delegate_projection(&self, path: &Path) -> DelegateProjection {
+        if self.root_source != RootSource::Stdout {
+            return DelegateProjection::Project;
+        }
+        let sidecar = path.with_extension("meta.json");
+        // Do not guess while the metadata file is still arriving.  The vendor writes a
+        // delegate sidecar for every delegate shape we support; holding the cursor is the
+        // only way to make late metadata deterministic without retracting published events.
+        if !sidecar.is_file() {
+            return DelegateProjection::Pending;
+        }
+        let suppress = delegate_tool_use_id(path)
+            .and_then(|host| self.host_tools.get(&host))
+            .is_some_and(|tool| STDOUT_FORWARDED_TOOLS.contains(&tool.as_str()));
+        if suppress {
+            DelegateProjection::Suppress
+        } else {
+            DelegateProjection::Project
+        }
+    }
+
     fn read_journal(&mut self, path: &Path) -> Result<Vec<SessionMessage>> {
         let cursor = self
             .journals
@@ -1929,12 +2334,13 @@ impl BundleFollowState {
         }
         cursor.offset = next_offset;
         let mut messages = Vec::new();
-        for record in json_lines(&bytes, Edge::Head) {
+        for (record, raw) in json_lines_with_raw(&bytes, Edge::Head) {
             cursor.version += 1;
-            messages.push(SessionMessage::NativeRecord(native_record(
+            messages.push(SessionMessage::NativeRecord(native_record_with_raw(
                 path,
                 cursor.version,
                 &record,
+                Some(raw),
             )));
             if record.get("type").and_then(Value::as_str) != Some("result") {
                 continue;
@@ -3235,7 +3641,7 @@ mod tests {
         .unwrap();
         let mut state = BundleFollowState::new(collect(transcript), RootSource::File);
         state.poll().unwrap();
-        assert_eq!(state.manifests.get(&manifest).unwrap().version, 1);
+        let first_revision = state.manifests.get(&manifest).unwrap().version;
         std::fs::write(
             &manifest,
             r#"{"runId":"wf_run","workflowProgress":[{"agentId":"a1","state":"done"}]}
@@ -3243,7 +3649,8 @@ mod tests {
         )
         .unwrap();
         state.poll().unwrap();
-        assert_eq!(state.manifests.get(&manifest).unwrap().version, 2);
+        let second_revision = state.manifests.get(&manifest).unwrap().version;
+        assert_ne!(first_revision, second_revision);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3293,6 +3700,164 @@ mod tests {
                         .and_then(|usage| usage.get("output_tokens"))
                         == Some(&json!(34))
         )));
+    }
+
+    #[test]
+    fn a_synchronous_native_agent_result_closes_once() {
+        let mut correlation = Correlation::new();
+        let host = json!({
+            "type": "stream_event",
+            "event": {"type": "content_block_start", "index": 0,
+                "content_block": {"type": "tool_use", "id": "toolu_agent", "name": "Agent"}}
+        });
+        let _ = correlation.translate(&host, 1);
+        let record = json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "toolu_agent", "content": "done"
+            }]},
+            "toolUseResult": {"agentId": "agent-sync", "isAsync": false, "status": "completed", "stdout": "done"}
+        });
+        let messages = project_record(&mut correlation, &record, 2);
+        let closes: Vec<&Event> = messages
+            .iter()
+            .filter_map(|message| match message {
+                SessionMessage::Event(event)
+                    if event.kind == EventKind::Subagent
+                        && event.phase == Some(Phase::Completed) =>
+                {
+                    Some(event)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0].stream_id.as_deref(), Some("agent-sync"));
+        assert_eq!(closes[0].span.as_deref(), Some("toolu_agent"));
+
+        // The async launch shape is explicitly not a close.
+        let async_record = json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "toolu_agent", "content": "launched"
+            }]},
+            "toolUseResult": {"agentId": "agent-async", "isAsync": true, "status": "async_launched"}
+        });
+        let messages = project_record(&mut correlation, &async_record, 3);
+        assert!(!messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some("agent-async")
+                    && event.phase == Some(Phase::Completed)
+        )));
+    }
+
+    #[test]
+    fn a_resumed_bundle_starts_after_the_existing_delegate_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-resume-baseline-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "8a8b8c8d-1e2f-43a4-b5c6-d7e8f9012345";
+        let transcript = dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{}}]}})
+            ),
+        )
+        .unwrap();
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let delegate = subagents.join("agent-old.jsonl");
+        std::fs::write(
+            &delegate,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","agentId":"old","message":{"role":"assistant","content":[{"type":"text","text":"old-history"}]}})
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            subagents.join("agent-old.meta.json"),
+            r#"{"toolUseId":"toolu_agent"}"#,
+        )
+        .unwrap();
+
+        let mut state = BundleFollowState::new_with_baseline(
+            collect(transcript),
+            RootSource::Stdout,
+            FollowBaseline::Current,
+        );
+        let initial = state.poll().unwrap();
+        assert!(!initial.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "old-history"
+        )));
+
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(&delegate).unwrap(),
+            "{}",
+            json!({"type":"assistant","agentId":"old","message":{"role":"assistant","content":[{"type":"text","text":"new-live"}]}})
+        )
+        .unwrap();
+        let appended = state.poll().unwrap();
+        assert!(appended.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "new-live"
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn late_sidecar_classification_does_not_publish_a_duplicate_prefix() {
+        let dir =
+            std::env::temp_dir().join(format!("sylph-claude-late-sidecar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "9a9b9c9d-1e2f-43a4-b5c6-d7e8f9012345";
+        let transcript = dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_task","name":"Task","input":{}}]}})
+            ),
+        )
+        .unwrap();
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let delegate = subagents.join("agent-late.jsonl");
+        std::fs::write(
+            &delegate,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","agentId":"late","message":{"role":"assistant","content":[{"type":"text","text":"prefix"}]}})
+            ),
+        )
+        .unwrap();
+        let mut state = BundleFollowState::new(collect(transcript), RootSource::Stdout);
+        let first = state.poll().unwrap();
+        assert!(!first.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "prefix"
+        )));
+        std::fs::write(
+            subagents.join("agent-late.meta.json"),
+            r#"{"toolUseId":"toolu_task"}"#,
+        )
+        .unwrap();
+        let second = state.poll().unwrap();
+        assert!(!second.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "prefix"
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The live bundle follower must survive a poll, and must suppress only what stdout

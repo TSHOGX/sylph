@@ -12,7 +12,7 @@ use sylph_web_backend::api::sessions::block_to_event;
 use sylph_web_backend::events::StreamEvent;
 use sylph_web_backend::models::Event;
 use sylph_web_backend::storage::cas::BlobStore;
-use sylph_web_backend::storage::history::{self, HistoryStore};
+use sylph_web_backend::storage::history::{self, HistoryStore, NativeBlobState};
 use tempfile::TempDir;
 
 async fn history_store() -> (HistoryStore, TempDir) {
@@ -30,6 +30,7 @@ async fn a_native_record_round_trips_unknown_fields_and_sidecar_bytes() {
     let record = NativeRecord {
         source: "root.jsonl".to_string(),
         version: 7,
+        raw_json: None,
         payload: serde_json::json!({
             "type": "future_record",
             "ignoredByProjection": {"answer": 42}
@@ -38,6 +39,7 @@ async fn a_native_record_round_trips_unknown_fields_and_sidecar_bytes() {
             name: "/tmp/full-output.txt".to_string(),
             size: 13,
             bytes: Some(b"full sidecar".to_vec()),
+            locator: None,
             error: None,
         }],
     };
@@ -52,8 +54,54 @@ async fn a_native_record_round_trips_unknown_fields_and_sidecar_bytes() {
             .native_blob(&id, "root.jsonl", 7, "/tmp/full-output.txt")
             .await
             .unwrap(),
-        Some(b"full sidecar".to_vec())
+        NativeBlobState::Available(b"full sidecar".to_vec())
     );
+}
+
+#[tokio::test]
+async fn native_record_bytes_keep_the_vendor_lexical_payload() {
+    let (history, _dir) = history_store().await;
+    let raw = br#"{ "b": 2, "a": "\\u0061", "b": 3 }"#.to_vec();
+    let record = NativeRecord {
+        source: "root.jsonl".to_string(),
+        version: 8,
+        raw_json: Some(raw.clone()),
+        payload: serde_json::from_slice(&raw).unwrap(),
+        blobs: Vec::new(),
+    };
+    let id = session_id().encode();
+    history.put_native_record(&id, &record).await.unwrap();
+    assert_eq!(
+        history
+            .native_record_bytes(&id, "root.jsonl", 8)
+            .await
+            .unwrap(),
+        Some(raw)
+    );
+}
+
+#[tokio::test]
+async fn native_record_revision_collision_is_reported() {
+    let (history, _dir) = history_store().await;
+    let id = session_id().encode();
+    let first = NativeRecord {
+        source: "manifest.json".to_string(),
+        version: 123,
+        raw_json: Some(br#"{"state":"old"}"#.to_vec()),
+        payload: serde_json::json!({"state": "old"}),
+        blobs: Vec::new(),
+    };
+    let second = NativeRecord {
+        source: "manifest.json".to_string(),
+        version: 123,
+        raw_json: Some(br#"{"state":"new"}"#.to_vec()),
+        payload: serde_json::json!({"state": "new"}),
+        blobs: Vec::new(),
+    };
+    history.put_native_record(&id, &first).await.unwrap();
+    let error = history.put_native_record(&id, &second).await.unwrap_err();
+    assert!(error.to_string().contains("revision collision"));
+    assert_eq!(history.native_record_failures(), 1);
 }
 
 #[tokio::test]
@@ -62,11 +110,13 @@ async fn raw_native_records_survive_event_retention() {
     let record = NativeRecord {
         source: "manifest.json".to_string(),
         version: 1,
+        raw_json: None,
         payload: serde_json::json!({"ignored": "must survive"}),
         blobs: vec![NativeBlob {
             name: "missing-output".to_string(),
             size: 99,
             bytes: None,
+            locator: None,
             error: Some("permission denied".to_string()),
         }],
     };
@@ -84,6 +134,61 @@ async fn raw_native_records_survive_event_retention() {
             .unwrap(),
         Some(serde_json::json!({"ignored": "must survive"}))
     );
+}
+
+#[tokio::test]
+async fn native_only_blob_survives_the_cas_sweep() {
+    let (history, _dir) = history_store().await;
+    let record = NativeRecord {
+        source: "root.jsonl".to_string(),
+        version: 9,
+        raw_json: None,
+        payload: serde_json::json!({"type": "tool_result"}),
+        blobs: vec![NativeBlob {
+            name: "output.txt".to_string(),
+            size: 12,
+            bytes: Some(b"native-only".to_vec()),
+            locator: None,
+            error: None,
+        }],
+    };
+    let id = session_id().encode();
+    history.put_native_record(&id, &record).await.unwrap();
+    assert_eq!(history.sweep_unreferenced_blobs().await.unwrap(), 0);
+    assert_eq!(
+        history
+            .native_blob(&id, "root.jsonl", 9, "output.txt")
+            .await
+            .unwrap(),
+        NativeBlobState::Available(b"native-only".to_vec())
+    );
+}
+
+#[tokio::test]
+async fn deferred_native_blob_is_read_and_cached_on_demand() {
+    let (history, _dir) = history_store().await;
+    let sidecar = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(sidecar.path(), b"deferred body").unwrap();
+    let record = NativeRecord {
+        source: "root.jsonl".to_string(),
+        version: 10,
+        raw_json: None,
+        payload: serde_json::json!({"type": "tool_result"}),
+        blobs: vec![NativeBlob {
+            name: "output.txt".to_string(),
+            size: 13,
+            bytes: None,
+            locator: Some(sidecar.path().to_string_lossy().to_string()),
+            error: None,
+        }],
+    };
+    let id = session_id().encode();
+    history.put_native_record(&id, &record).await.unwrap();
+    assert!(matches!(
+        history.native_blob(&id, "root.jsonl", 10, "output.txt").await.unwrap(),
+        NativeBlobState::Available(bytes) if bytes == b"deferred body"
+    ));
+    assert_eq!(history.sweep_unreferenced_blobs().await.unwrap(), 0);
 }
 
 /// The session these fixtures hang off.

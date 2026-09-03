@@ -292,6 +292,12 @@ struct Shared {
     pending_model: Mutex<Option<String>>,
     /// Stops the bundle follower when the live session closes.
     closed: std::sync::atomic::AtomicBool,
+    /// One root correlation state shared by stdout and the native bundle reader.
+    ///
+    /// Native-only task facts can arrive from the file after stdout has already emitted the
+    /// surrounding turn. Sharing this state makes the two producers one merger and lets a
+    /// duplicate close be discarded by trajectory identity rather than by timing.
+    root_correlation: std::sync::Arc<std::sync::Mutex<Correlation>>,
 }
 
 /// A live `claude` session.
@@ -326,8 +332,6 @@ async fn pump(
     control: Arc<Control>,
     shared: Arc<Shared>,
 ) {
-    let mut correlation = Correlation::new();
-
     while let Some(line) = lines.recv().await {
         let payload = match line {
             Ok(payload) => payload,
@@ -411,7 +415,21 @@ async fn pump(
                         *native = Some(NativeId::new(id));
                     }
                 }
-                let emission = correlation.translate(&payload, now_ms());
+                let emission = match shared.root_correlation.lock() {
+                    Ok(mut correlation) => Ok(correlation.translate(&payload, now_ms())),
+                    Err(_) => Err(()),
+                };
+                let emission = match emission {
+                    Ok(emission) => emission,
+                    Err(()) => {
+                        let _ = out
+                            .send(Err(anyhow::anyhow!(
+                                "claude root correlation state was poisoned"
+                            )))
+                            .await;
+                        return;
+                    }
+                };
                 let observed_model = emission.observed_model;
                 if let Some(ref model) = observed_model {
                     *shared.observed_model.lock().await = Some(model.clone());
@@ -467,7 +485,12 @@ async fn pump(
     shared
         .closed
         .store(true, std::sync::atomic::Ordering::Release);
-    if correlation.turn_is_open() {
+    let turn_is_open = shared
+        .root_correlation
+        .lock()
+        .map(|correlation| correlation.turn_is_open())
+        .unwrap_or(false);
+    if turn_is_open {
         let _ = out
             .send(Err(control
                 .child
@@ -483,7 +506,11 @@ async fn pump(
 /// the root at stream fidelity. The follower waits for `system/init` to reveal the native
 /// id (for `New` sessions), retries a bundle that has not been flushed yet, and then keeps
 /// forwarding newly-created delegate/journal files until the session closes.
-async fn bundle_pump(out: mpsc::Sender<Result<SessionMessage>>, shared: Arc<Shared>) {
+async fn bundle_pump(
+    out: mpsc::Sender<Result<SessionMessage>>,
+    shared: Arc<Shared>,
+    resumed: bool,
+) {
     let mut current: Option<NativeId> = None;
     let mut stream: Option<EventStream> = None;
     let mut consecutive_failures = 0u32;
@@ -506,7 +533,7 @@ async fn bundle_pump(out: mpsc::Sender<Result<SessionMessage>>, shared: Arc<Shar
         // `watch_live` is idempotent — it opens read-only cursors over immutable history.
         if native != current {
             if let Some(ref id) = native {
-                match super::native::watch_live(id) {
+                match super::native::watch_live(id, resumed, shared.root_correlation.clone()) {
                     Ok(new_stream) => {
                         current = Some(id.clone());
                         stream = Some(new_stream);
@@ -517,7 +544,7 @@ async fn bundle_pump(out: mpsc::Sender<Result<SessionMessage>>, shared: Arc<Shar
 
                         // Log on first failure and every 10th thereafter to avoid flooding,
                         // but always track the count so diagnostics can surface it.
-                        if consecutive_failures == 1 || consecutive_failures % 10 == 0 {
+                        if consecutive_failures == 1 || consecutive_failures.is_multiple_of(10) {
                             tracing::debug!(
                                 native_id = %id,
                                 consecutive_failures,
@@ -688,7 +715,8 @@ pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Sess
     // would make the pump's backpressure part of what a duration measures.
     let (tx, rx) = mpsc::channel(1024);
     tokio::spawn(pump(lines, tx.clone(), control.clone(), shared.clone()));
-    tokio::spawn(bundle_pump(tx.clone(), shared.clone()));
+    let resumed = matches!(spec.native_id, RequestedNativeId::Resume(_));
+    tokio::spawn(bundle_pump(tx.clone(), shared.clone(), resumed));
 
     // The handshake that turns a process into a session. This is where the project's real
     // command list comes from, and where the dialog kinds are declared — the declaration is

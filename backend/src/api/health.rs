@@ -109,6 +109,11 @@ pub struct DiagnosticsResponse {
     /// keeps withholding means the archive is not confirming it — and an
     /// all-`unchanged` pass means the ingestion daemon has stopped advancing.
     retention: Option<crate::storage::PassReport>,
+    /// Raw native records that failed to reach durable history since startup.
+    ///
+    /// A timeline can still look healthy after this counter increments, but its
+    /// re-projection source is incomplete; exposing the count makes that loss actionable.
+    native_record_failures: u64,
 }
 
 /// GET /api/v1/diagnostics
@@ -139,5 +144,6 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         agents: state.adapters.available(),
         active_turns: state.turns.active_turn_count().await,
         retention: state.retention.last_pass().await,
+        native_record_failures: state.history.native_record_failures(),
     }))
 }

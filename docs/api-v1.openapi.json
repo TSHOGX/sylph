@@ -2236,7 +2236,8 @@
           "turns",
           "agents",
           "activeTurns",
-          "retention"
+          "retention",
+          "nativeRecordFailures"
         ],
         "properties": {
           "ok": {
@@ -2278,6 +2279,12 @@
           "retention": {
             "$ref": "#/components/schemas/RetentionPassReport",
             "nullable": true
+          },
+          "nativeRecordFailures": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Raw native records that failed to reach durable history since startup."
           }
         }
       },

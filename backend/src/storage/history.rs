@@ -14,6 +14,8 @@
 //! refcount sweep collects. One of those is a bug and the other is housekeeping.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use sqlx::sqlite::{
@@ -29,6 +31,15 @@ use crate::storage::cas::{self, BlobStore, Payload};
 use crate::storage::fold::{self, Delta, Folded};
 use crate::supervisor::TrajectoryOutcome;
 use sylph_protocol::NativeRecord;
+
+/// The result of reading a native sidecar, keeping absence distinct from a recorded error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeBlobState {
+    Available(Vec<u8>),
+    Deferred { size: u64, locator: String },
+    Unreadable { size: u64, error: String },
+    Missing,
+}
 
 /// One block as stored: a completed event plus how it streamed.
 #[derive(Debug, Clone)]
@@ -139,6 +150,7 @@ fn session_bytes_from_row(row: sqlx::sqlite::SqliteRow) -> SessionBytes {
 pub struct HistoryStore {
     pool: SqlitePool,
     blobs: BlobStore,
+    native_record_failures: Arc<AtomicU64>,
 }
 
 impl HistoryStore {
@@ -193,20 +205,47 @@ impl HistoryStore {
             .await
             .context("History migrations failed")?;
 
-        Ok(Self { pool, blobs })
+        Ok(Self {
+            pool,
+            blobs,
+            native_record_failures: Arc::new(AtomicU64::new(0)),
+        })
     }
 
     pub fn blobs(&self) -> &BlobStore {
         &self.blobs
     }
 
-    /// Store one complete vendor-native record and its sidecar bodies.
+    /// Number of native records that could not be durably retained since this store opened.
+    ///
+    /// Raw retention is a correctness contract. A warning in a log is not enough because
+    /// the process may continue to serve a timeline whose re-projection source is gone.
+    pub fn native_record_failures(&self) -> u64 {
+        self.native_record_failures.load(Ordering::Relaxed)
+    }
+
+    /// Store one complete vendor-native record and its sidecar references.
     ///
     /// Raw records have their own retention class and are deliberately outside the event
     /// watermark path.  Re-projecting an event may need a field the current adapter ignores,
     /// so replacing this row would be data loss; the `(session, source, version)` key is
-    /// append-only for JSONL and versioned for rewritten manifests.
+    /// append-only for JSONL and content-versioned for rewritten manifests. Deferred sidecars
+    /// remain locators until [`Self::native_blob`] is called, keeping large reads off ingest.
     pub async fn put_native_record(&self, session_id: &str, record: &NativeRecord) -> Result<()> {
+        // A file may be observed while SQLite is checkpointing or while the vendor's
+        // sidecar is being rotated. One bounded retry handles those transient failures
+        // without turning a bad record into an unbounded ingest loop.
+        let mut result = self.put_native_record_inner(session_id, record).await;
+        if result.is_err() {
+            result = self.put_native_record_inner(session_id, record).await;
+        }
+        if result.is_err() {
+            self.native_record_failures.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    async fn put_native_record_inner(&self, session_id: &str, record: &NativeRecord) -> Result<()> {
         let mut blobs = Vec::with_capacity(record.blobs.len());
         for blob in &record.blobs {
             let hash = match &blob.bytes {
@@ -217,26 +256,53 @@ impl HistoryStore {
         }
 
         let mut tx = self.pool.begin().await?;
+        let payload = record
+            .raw_json
+            .clone()
+            .unwrap_or_else(|| record.payload.to_string().into_bytes());
         sqlx::query(
-            r#"INSERT OR IGNORE INTO native_records
+            r#"INSERT INTO native_records
                (session_id, source, version, payload_json, created_at_ms, retention_class)
-               VALUES (?, ?, ?, ?, ?, 'raw')"#,
+               VALUES (?, ?, ?, ?, ?, 'raw')
+               ON CONFLICT(session_id, source, version) DO NOTHING"#,
         )
         .bind(session_id)
         .bind(&record.source)
         .bind(record.version as i64)
-        .bind(record.payload.to_string().into_bytes())
+        .bind(&payload)
         .bind(now_ms())
         .execute(&mut *tx)
         .await?;
 
+        // A revision collision must be loud. `INSERT OR IGNORE` alone made a changed
+        // manifest or a restarted reader look successful while silently retaining the old
+        // payload.
+        let stored: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload_json FROM native_records
+             WHERE session_id = ? AND source = ? AND version = ?",
+        )
+        .bind(session_id)
+        .bind(&record.source)
+        .bind(record.version as i64)
+        .fetch_one(&mut *tx)
+        .await?;
+        if stored != payload {
+            return Err(anyhow::anyhow!(
+                "native record revision collision for {}:{}:{}",
+                session_id,
+                record.source,
+                record.version
+            ));
+        }
+
         for (blob, hash) in blobs {
             sqlx::query(
                 r#"INSERT INTO native_blobs
-                   (session_id, source, version, name, hash, size, error)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   (session_id, source, version, name, hash, locator, size, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(session_id, source, version, name) DO UPDATE SET
                      hash = excluded.hash,
+                     locator = excluded.locator,
                      size = excluded.size,
                      error = excluded.error"#,
             )
@@ -245,6 +311,7 @@ impl HistoryStore {
             .bind(record.version as i64)
             .bind(&blob.name)
             .bind(hash)
+            .bind(&blob.locator)
             .bind(blob.size as i64)
             .bind(&blob.error)
             .execute(&mut *tx)
@@ -276,6 +343,30 @@ impl HistoryStore {
         Ok(Some(serde_json::from_slice(&bytes)?))
     }
 
+    /// Read the lexical bytes retained for one native record.
+    ///
+    /// This is intentionally separate from [`Self::native_record`], whose parsed value is
+    /// convenient for re-projection but cannot preserve whitespace, key order, duplicate
+    /// keys, or escape spelling.
+    pub async fn native_record_bytes(
+        &self,
+        session_id: &str,
+        source: &str,
+        version: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query(
+            "SELECT payload_json FROM native_records WHERE session_id = ? AND source = ? AND version = ?",
+        )
+        .bind(session_id)
+        .bind(source)
+        .bind(version as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| row.try_get("payload_json"))
+            .transpose()
+            .map_err(Into::into)
+    }
+
     /// Read a native sidecar body on demand.  The timeline never inlines these bytes.
     pub async fn native_blob(
         &self,
@@ -283,9 +374,10 @@ impl HistoryStore {
         source: &str,
         version: u64,
         name: &str,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<NativeBlobState> {
         let row = sqlx::query(
-            "SELECT hash FROM native_blobs WHERE session_id = ? AND source = ? AND version = ? AND name = ?",
+            "SELECT hash, locator, size, error FROM native_blobs
+             WHERE session_id = ? AND source = ? AND version = ? AND name = ?",
         )
         .bind(session_id)
         .bind(source)
@@ -294,12 +386,66 @@ impl HistoryStore {
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
-            return Ok(None);
+            return Ok(NativeBlobState::Missing);
         };
         let hash: Option<String> = row.try_get("hash")?;
+        let locator: Option<String> = row.try_get("locator")?;
+        let size: u64 = row.try_get::<i64, _>("size")?.max(0) as u64;
+        let error: Option<String> = row.try_get("error")?;
+        if let Some(error) = error {
+            return Ok(NativeBlobState::Unreadable { size, error });
+        }
         match hash {
-            Some(hash) => self.blobs.get(&hash).await,
-            None => Ok(None),
+            Some(hash) => match self.blobs.get(&hash).await? {
+                Some(bytes) => Ok(NativeBlobState::Available(bytes)),
+                None => Ok(NativeBlobState::Missing),
+            },
+            None => match locator {
+                Some(locator) => {
+                    const MAX_NATIVE_BLOB_BYTES: u64 = 256 * 1024 * 1024;
+                    let path = std::path::PathBuf::from(&locator);
+                    let read = tokio::task::spawn_blocking(move || {
+                        let meta = std::fs::metadata(&path)?;
+                        if meta.len() > MAX_NATIVE_BLOB_BYTES {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::FileTooLarge,
+                                format!(
+                                    "native blob is {} bytes; limit is {}",
+                                    meta.len(),
+                                    MAX_NATIVE_BLOB_BYTES
+                                ),
+                            ));
+                        }
+                        std::fs::read(path)
+                    })
+                    .await
+                    .map_err(|error| anyhow::anyhow!("native blob read task failed: {error}"))?;
+                    let bytes = match read {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            return Ok(NativeBlobState::Unreadable {
+                                size,
+                                error: error.to_string(),
+                            });
+                        }
+                    };
+                    let hash = self.blobs.put(&bytes).await?;
+                    sqlx::query(
+                        "UPDATE native_blobs SET hash = ?, locator = NULL, size = ?, error = NULL
+                         WHERE session_id = ? AND source = ? AND version = ? AND name = ?",
+                    )
+                    .bind(&hash)
+                    .bind(bytes.len() as i64)
+                    .bind(session_id)
+                    .bind(source)
+                    .bind(version as i64)
+                    .bind(name)
+                    .execute(&self.pool)
+                    .await?;
+                    Ok(NativeBlobState::Available(bytes))
+                }
+                None => Ok(NativeBlobState::Missing),
+            },
         }
     }
 
@@ -681,33 +827,33 @@ impl HistoryStore {
     /// the same file read in two sessions is one blob, and it survives until both
     /// have let go.
     pub async fn sweep_unreferenced_blobs(&self) -> Result<u64> {
-        let orphans: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT hash FROM cas_refs
-              WHERE NOT EXISTS (
-                SELECT 1 FROM blocks
-                 WHERE blocks.session_id = cas_refs.session_id
-                   AND blocks.seq = cas_refs.seq
-              )",
+        let candidates: Vec<String> = sqlx::query_scalar(
+            "SELECT hash FROM cas_refs
+             UNION
+             SELECT hash FROM native_blobs WHERE hash IS NOT NULL",
         )
         .fetch_all(&self.pool)
         .await?;
 
         let mut removed = 0;
-        for hash in orphans {
-            // Still referenced by a *live* block elsewhere? Then only this row is
-            // stale, not the object.
-            let live: i64 = sqlx::query_scalar(
+        for hash in candidates {
+            let live_blocks: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM cas_refs
-                  WHERE hash = ?
-                    AND EXISTS (
-                      SELECT 1 FROM blocks
-                       WHERE blocks.session_id = cas_refs.session_id
-                         AND blocks.seq = cas_refs.seq
-                    )",
+                 WHERE hash = ?
+                   AND EXISTS (
+                     SELECT 1 FROM blocks
+                      WHERE blocks.session_id = cas_refs.session_id
+                        AND blocks.seq = cas_refs.seq
+                   )",
             )
             .bind(&hash)
             .fetch_one(&self.pool)
             .await?;
+            let live_native: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM native_blobs WHERE hash = ?")
+                    .bind(&hash)
+                    .fetch_one(&self.pool)
+                    .await?;
 
             sqlx::query(
                 "DELETE FROM cas_refs WHERE hash = ? AND NOT EXISTS (
@@ -720,7 +866,7 @@ impl HistoryStore {
             .execute(&self.pool)
             .await?;
 
-            if live == 0 {
+            if live_blocks == 0 && live_native == 0 {
                 self.blobs.remove(&hash).await?;
                 removed += 1;
             }

@@ -360,6 +360,12 @@ CREATE TABLE cas_refs (
 
 CREATE INDEX cas_refs_by_block ON cas_refs(session_id, seq);
 
+Native records retain both the parsed JSON and, for JSONL sources, the original line bytes.
+The parsed value drives projection; the raw bytes preserve lexical details that a JSON value
+cannot represent (key order, duplicate keys, whitespace, and escape spelling). Large
+`persistedOutputPath` sidecars are recorded as validated locators and fetched into CAS only
+when a caller asks for the body, so ingest never blocks on an eager full-file read.
+
 -- Lossless vendor-native source records. These are separate from projected blocks because
 -- re-projection needs fields the current adapter ignores, and raw records are never safe to
 -- prune using an event watermark.
@@ -367,7 +373,7 @@ CREATE TABLE native_records (
   session_id      TEXT NOT NULL,
   source          TEXT NOT NULL,
   version         INTEGER NOT NULL,
-  payload_json    BLOB NOT NULL,
+  payload_json    BLOB NOT NULL,       -- original JSON bytes; parse on read for projection
   created_at_ms   INTEGER NOT NULL,
   retention_class TEXT NOT NULL DEFAULT 'raw',
   PRIMARY KEY (session_id, source, version)
@@ -379,6 +385,7 @@ CREATE TABLE native_blobs (
   version    INTEGER NOT NULL,
   name       TEXT NOT NULL,
   hash       TEXT,
+  locator    TEXT,                    -- deferred sidecar source handle, when not ingested yet
   size       INTEGER NOT NULL,
   error      TEXT,
   PRIMARY KEY (session_id, source, version, name)
