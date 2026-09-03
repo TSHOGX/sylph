@@ -2430,7 +2430,9 @@
           "seq",
           "kind",
           "stability",
-          "source"
+          "source",
+          "arrivalAtMs",
+          "createdAtMs"
         ],
         "properties": {
           "seq": {
@@ -2483,6 +2485,20 @@
             ],
             "description": "The delegated trajectory this event happened in; absent is the root turn. A subagent event's streamId is itself a trajectory id, so a nested delegation names another here. See docs/session-protocol.md, Delegated trajectories."
           },
+          "interiorState": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "forwards_nothing",
+              "pending",
+              "partial",
+              "full",
+              "unreadable"
+            ],
+            "description": "Producer-authored reachability state for a delegated trajectory's interior."
+          },
           "name": {
             "type": [
               "string",
@@ -2510,6 +2526,28 @@
           "source": {
             "type": "string",
             "description": "Event producer: normally `agent` or `server`."
+          },
+          "arrivalAtMs": {
+            "type": "integer",
+            "description": "When Sylph received this fact, on the server clock."
+          },
+          "recordedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Timestamp recorded by the vendor/source, absent when the source carried none."
+          },
+          "createdAtMs": {
+            "type": "integer",
+            "description": "Legacy effective timestamp. Use arrivalAtMs and recordedAtMs for new code."
+          },
+          "startedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Start anchor for a consolidated block, in the same clock domain as its end when measurable."
           }
         },
         "description": "A normalized stream or journal event. Kinds are additive by protocol, so a client must tolerate one it does not know rather than rejecting the stream."

@@ -419,10 +419,10 @@ impl JournalStore {
             r#"
             INSERT INTO events (
                 session_env, session_agent, session_native, turn_id, seq, kind,
-                phase, stream_id, span, name, text, data_json, is_error,
-                stability, source, created_at_ms
+                phase, stream_id, span, interior_state, name, text, data_json, is_error,
+                stability, source, arrival_at_ms, recorded_at_ms, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
@@ -435,12 +435,15 @@ impl JournalStore {
         .bind(&event.phase)
         .bind(&event.stream_id)
         .bind(&event.span)
+        .bind(&event.interior_state)
         .bind(&event.name)
         .bind(&event.text)
         .bind(&event.data_json)
         .bind(event.is_error)
         .bind(&event.stability)
         .bind(&event.source)
+        .bind(event.arrival_at_ms)
+        .bind(event.recorded_at_ms)
         .bind(event.created_at_ms)
         .fetch_one(&self.pool)
         .await
@@ -954,6 +957,7 @@ impl JournalStore {
                     phase: Some("completed".to_string()),
                     stream_id: Some(stream_id),
                     span,
+                    interior_state: None,
                     name,
                     text: String::new(),
                     // The same shape `settle` emits, so a client cannot tell which
@@ -963,6 +967,8 @@ impl JournalStore {
                     is_error: true,
                     stability: "stable".to_string(),
                     source: "server".to_string(),
+                    arrival_at_ms: now_ms(),
+                    recorded_at_ms: None,
                     created_at_ms: now_ms(),
                 };
                 self.append_event(&event).await?;
@@ -1065,10 +1071,10 @@ impl JournalStore {
             r#"
             INSERT INTO events (
                 session_env, session_agent, session_native, turn_id, seq, kind,
-                phase, stream_id, span, name, text, data_json, is_error,
-                stability, source, created_at_ms
+                phase, stream_id, span, interior_state, name, text, data_json, is_error,
+                stability, source, arrival_at_ms, recorded_at_ms, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(event.session_id.environment.as_str())
@@ -1080,12 +1086,15 @@ impl JournalStore {
         .bind(&event.phase)
         .bind(&event.stream_id)
         .bind(&event.span)
+        .bind(&event.interior_state)
         .bind(&event.name)
         .bind(&event.text)
         .bind(&event.data_json)
         .bind(event.is_error)
         .bind(&event.stability)
         .bind(&event.source)
+        .bind(event.arrival_at_ms)
+        .bind(event.recorded_at_ms)
         .bind(event.created_at_ms)
         .execute(&self.pool)
         .await?;
@@ -1115,10 +1124,10 @@ impl JournalStore {
                 r#"
                 INSERT INTO events (
                     session_env, session_agent, session_native, turn_id, seq, kind,
-                    phase, stream_id, span, name, text, data_json, is_error,
-                    stability, source, created_at_ms
+                    phase, stream_id, span, interior_state, name, text, data_json, is_error,
+                    stability, source, arrival_at_ms, recorded_at_ms, created_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(event.session_id.environment.as_str())
@@ -1130,12 +1139,15 @@ impl JournalStore {
             .bind(&event.phase)
             .bind(&event.stream_id)
             .bind(&event.span)
+            .bind(&event.interior_state)
             .bind(&event.name)
             .bind(&event.text)
             .bind(&event.data_json)
             .bind(event.is_error)
             .bind(&event.stability)
             .bind(&event.source)
+            .bind(event.arrival_at_ms)
+            .bind(event.recorded_at_ms)
             .bind(event.created_at_ms)
             .execute(&mut *tx)
             .await?;
@@ -1749,12 +1761,15 @@ mod tests {
             phase: Some(phase.to_string()),
             stream_id: Some(stream.to_string()),
             span: span.map(str::to_string),
+            interior_state: None,
             name: None,
             text: String::new(),
             data_json: "{}".to_string(),
             is_error: false,
             stability: "stable".to_string(),
             source: "agent".to_string(),
+            arrival_at_ms: seq as i64,
+            recorded_at_ms: Some(seq as i64),
             created_at_ms: seq as i64,
         }
     }

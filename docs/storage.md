@@ -344,12 +344,21 @@ CREATE TABLE blocks (
   data_hash    TEXT,
   is_error     INTEGER NOT NULL DEFAULT 0,
   source       TEXT NOT NULL DEFAULT 'agent',
+  arrival_at_ms INTEGER NOT NULL,
+  recorded_at_ms INTEGER,
   started_at_ms INTEGER NOT NULL,     -- first delta, or the event itself
   created_at_ms INTEGER NOT NULL,     -- completion
   PRIMARY KEY (session_id, seq)
 ) WITHOUT ROWID;
 
 CREATE INDEX blocks_by_turn ON blocks(turn_id, seq);
+
+`seq` is the sole replay/order axis. `arrival_at_ms` is the server receipt clock and
+`recorded_at_ms` is the vendor clock, when present. `created_at_ms` remains the legacy
+effective timestamp for older clients. A consolidated block's `started_at_ms` is paired
+with `recorded_at_ms` when the source supplied a recorded close; for a stream record it
+is paired with `arrival_at_ms`. A native source with no recorded close therefore cannot
+claim a duration merely because its row has an arrival timestamp.
 
 CREATE TABLE cas_refs (
   hash       TEXT NOT NULL,
@@ -605,6 +614,7 @@ CREATE TABLE session_bytes (
   previous_measured_at_ms INTEGER
 ) WITHOUT ROWID;
 ```
+
 
 `/diagnostics` then reports `bytesHeld`, `sessionsMeasured`, `bytesGrewBy`, and a
 bounded `largestSessions` list, each row carrying its own `grewBy` and

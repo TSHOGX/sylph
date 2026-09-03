@@ -268,9 +268,12 @@ mod tests {
             is_error: false,
             stability: "ephemeral".to_string(),
             source: "agent".to_string(),
+            arrival_at_ms: 2000 + seq as i64,
+            recorded_at_ms: None,
             created_at_ms: 2000 + seq as i64,
             // Root turn: these fixtures test batching, not delegation.
             span: None,
+            interior_state: None,
         }
     }
 

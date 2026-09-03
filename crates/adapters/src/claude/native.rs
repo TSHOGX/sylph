@@ -48,8 +48,8 @@ use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
 use serde_json::{json, Value};
 use sylph_protocol::{
-    normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeBlob, NativeId, NativeRecord,
-    NativeSummary, Phase, SessionMessage, StoreFilter,
+    normalize_workdir, Event, EventKind, EventStream, Fidelity, InteriorState, NativeBlob,
+    NativeId, NativeRecord, NativeSummary, Phase, SessionMessage, StoreFilter,
 };
 
 use super::translate::Correlation;
@@ -649,6 +649,13 @@ fn project_record_inner(
     if include_native_facts {
         messages.extend(project_native_facts(correlation, record, at_ms));
     }
+    if at_ms != 0 {
+        for message in &mut messages {
+            if let SessionMessage::Event(event) = message {
+                event.recorded_at_ms = Some(at_ms);
+            }
+        }
+    }
     messages
 }
 
@@ -674,6 +681,13 @@ fn project_native_facts(
         for notification in task_notifications(&text) {
             let emission = correlation.translate(&notification, at_ms);
             messages.extend(emission.messages);
+        }
+    }
+    if at_ms != 0 {
+        for message in &mut messages {
+            if let SessionMessage::Event(event) = message {
+                event.recorded_at_ms = Some(at_ms);
+            }
         }
     }
     messages
@@ -1635,6 +1649,9 @@ struct JsonlCursor {
     version: u64,
     correlation: Correlation,
     opened: bool,
+    /// Last reachability state emitted for this source, so finalization upgrades a live
+    /// `partial` declaration exactly once.
+    interior_state: Option<InteriorState>,
 }
 
 /// Cursor for a manifest snapshot rewritten in place.
@@ -1736,6 +1753,7 @@ impl BundleFollowState {
                 version: 0,
                 correlation: Correlation::new(),
                 opened: true,
+                interior_state: None,
             },
             delegates: HashMap::new(),
             journals: HashMap::new(),
@@ -1788,6 +1806,7 @@ impl BundleFollowState {
                     // manifest/sidecar can still publish the declaration needed to build a
                     // resumable trajectory tree.
                     opened: false,
+                    interior_state: None,
                 },
             );
         }
@@ -2149,6 +2168,18 @@ impl BundleFollowState {
             return Ok(Vec::new());
         }
         let suppress = projection == DelegateProjection::Suppress;
+        let sidecar_unreadable = matches!(sidecar, SidecarSource::Partial)
+            && self
+                .sidecars
+                .get(&path.with_extension("meta.json"))
+                .is_some_and(|cursor| cursor.terminal_unreadable);
+        let source_state = if sidecar_unreadable {
+            InteriorState::Unreadable
+        } else if self.finalizing {
+            InteriorState::Full
+        } else {
+            InteriorState::Partial
+        };
         let declaration_span = if let Some(span) = span.clone() {
             // A recorded route is only usable when the corresponding host tool is present in
             // this bundle. During live follow, an absent host may still arrive in a later root
@@ -2183,12 +2214,13 @@ impl BundleFollowState {
                 version: 0,
                 correlation: Correlation::new(),
                 opened: false,
+                interior_state: None,
             });
         let mut messages = Vec::new();
         let mut declaration: Option<Event> = None;
 
         if !entry.opened && !suppress {
-            if let Some(declaration_span) = declaration_span {
+            if let Some(declaration_span) = declaration_span.clone() {
                 let Some(first) = read_first_json(path) else {
                     return Ok(Vec::new());
                 };
@@ -2199,7 +2231,11 @@ impl BundleFollowState {
                     .unwrap_or(0);
                 let mut opened = Event::new(EventKind::Subagent, Some(Phase::Started), at_ms);
                 opened.stream_id = Some(agent.clone());
-                opened.span = declaration_span;
+                opened.span = declaration_span.clone();
+                // The file is readable and is this reader's native interior source. A live
+                // follower has a current prefix only; a final pass has the complete source.
+                opened.interior_state = Some(source_state);
+                entry.interior_state = Some(source_state);
                 opened.name = match &sidecar {
                     SidecarSource::Ready { payload, .. } => {
                         string_at(payload, "description").or_else(|| string_at(payload, "name"))
@@ -2208,6 +2244,20 @@ impl BundleFollowState {
                 };
                 declaration = Some(opened);
             }
+        }
+
+        // A source that stayed open during the live pass becomes complete at finalization.
+        // Emit the transition once even when the declaration was already sent earlier.
+        if entry.opened
+            && entry.interior_state != Some(source_state)
+            && entry.interior_state.is_some()
+        {
+            let mut update = Event::new(EventKind::Subagent, Some(Phase::Delta), 0);
+            update.stream_id = Some(agent.clone());
+            update.span = declaration_span.clone().flatten();
+            update.interior_state = Some(source_state);
+            messages.push(SessionMessage::Event(update));
+            entry.interior_state = Some(source_state);
         }
 
         // A resume boundary is consumed only after suppression is known. Keeping it separate
@@ -3760,6 +3810,13 @@ mod tests {
             message,
             SessionMessage::Event(event) if event.text == "kept"
         )));
+        assert!(final_messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some("partial")
+                    && event.interior_state == Some(InteriorState::Unreadable)
+        )));
         assert!(!state
             .poll()
             .unwrap()
@@ -3814,6 +3871,75 @@ mod tests {
                     && event.stream_id.as_deref() == Some("unknown")
                     && event.span.is_none()
         )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_live_delegate_upgrades_partial_interior_to_full_at_finalization() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-interior-transition-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "ad9b9c9d-1e2f-43a4-b5c6-d7e8f9012345";
+        let host = "toolu_agent";
+        let transcript = dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({
+                    "type": "assistant",
+                    "sessionId": session,
+                    "message": {"role": "assistant", "content": [{
+                        "type": "tool_use", "id": host, "name": "Agent", "input": {}
+                    }]}
+                })
+            ),
+        )
+        .unwrap();
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let delegate = subagents.join("agent-live.jsonl");
+        std::fs::write(
+            &delegate,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","agentId":"live","message":{"role":"assistant","content":[{"type":"text","text":"content"}]}})
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            delegate.with_extension("meta.json"),
+            json!({"toolUseId": host}).to_string(),
+        )
+        .unwrap();
+
+        let mut state = BundleFollowState::new(collect(transcript), RootSource::Stdout);
+        let live = state.poll().unwrap();
+        assert!(live.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some("live")
+                    && event.interior_state == Some(InteriorState::Partial)
+        )));
+
+        state.finalizing = true;
+        let final_messages = state.poll().unwrap();
+        assert!(final_messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some("live")
+                    && event.interior_state == Some(InteriorState::Full)
+        )));
+        assert!(!state
+            .poll()
+            .unwrap()
+            .iter()
+            .any(|message| matches!(message, SessionMessage::Event(event) if event.stream_id.as_deref() == Some("live"))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

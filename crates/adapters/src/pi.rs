@@ -2531,6 +2531,7 @@ pub mod native {
                 ended_at_ms = outer_ms;
             }
 
+            let before = messages.len();
             match record.get("type").and_then(Value::as_str) {
                 Some("session") => {
                     if header.is_none() {
@@ -2571,7 +2572,22 @@ pub mod native {
                         messages.push(SessionMessage::Event(event));
                     }
                 }
-                Some("message") => message_events(&record, outer_ms, &mut messages),
+                Some("message") => {
+                    let before = messages.len();
+                    message_events(&record, outer_ms, &mut messages);
+                    let message_ms = record
+                        .get("message")
+                        .and_then(|message| message.get("timestamp"))
+                        .and_then(|value| epoch_millis_from_json(value, defect_timestamp_unit()))
+                        .or(outer_ms);
+                    if let Some(at_ms) = message_ms {
+                        for message in &mut messages[before..] {
+                            if let SessionMessage::Event(event) = message {
+                                event.recorded_at_ms = Some(at_ms);
+                            }
+                        }
+                    }
+                }
                 // Every other entry type the vendor documents — `compaction`,
                 // `branch_summary`, `custom`, `custom_message`, `label`, `session_info`.
                 // **None occurs in the measured store**, so there is no branch: one would be
@@ -2579,6 +2595,16 @@ pub mod native {
                 // repo's vendor-key defects happened. When one appears it arrives with the
                 // payload that proves its shape.
                 _ => {}
+            }
+            if let Some(at_ms) = outer_ms {
+                for message in &mut messages[before..] {
+                    if let SessionMessage::Event(event) = message {
+                        if event.recorded_at_ms.is_some() {
+                            continue;
+                        }
+                        event.recorded_at_ms = Some(at_ms);
+                    }
+                }
             }
             Ok(())
         })
@@ -3819,7 +3845,7 @@ pub mod session {
         let mut last_model: Option<String> = None;
         while let Some(line) = state.lines.recv().await {
             let payload = match line {
-                Ok(payload) => payload,
+                Ok(line) => line.value,
                 Err(error) => {
                     if state.messages.send(Err(error)).await.is_err() {
                         break;

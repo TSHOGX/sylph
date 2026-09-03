@@ -90,7 +90,7 @@ describe("buildSessionTrace", () => {
 
     expect(trajectory?.ownerTurnId).toBe("t1");
     expect(trajectory?.name).toBe("Workflow");
-    expect(trajectory?.interiorAvailable).toBe(true);
+    expect(trajectory?.interiorState).toBe("full");
     expect(trajectory?.events.map((item) => item.seq)).toEqual([host.seq, child.seq]);
   });
 
@@ -130,5 +130,31 @@ describe("buildSessionTrace", () => {
     const duplicate = { ...item, arrivalTurnId: "t1" };
     const projected = projectSessionTurns([turn("t1", [item])], [duplicate]);
     expect(projected[0].events).toHaveLength(1);
+  });
+
+  it("keeps producer-authored terminal interior states distinct", () => {
+    const pending = event({
+      kind: "subagent",
+      phase: "started",
+      streamId: "agent",
+      interiorState: "pending",
+    });
+    const unreadable = event({
+      kind: "subagent",
+      phase: "delta",
+      streamId: "agent",
+      interiorState: "unreadable",
+    });
+    const index = buildSessionTrace([turn("t1", [pending, unreadable])]);
+    expect(index.trajectories.get("agent")?.interiorState).toBe("unreadable");
+
+    const hollow = event({
+      kind: "subagent",
+      phase: "completed",
+      streamId: "hollow",
+      interiorState: "forwards_nothing",
+    });
+    const hollowIndex = buildSessionTrace([turn("t2", [hollow])]);
+    expect(hollowIndex.trajectories.get("hollow")?.interiorState).toBe("forwards_nothing");
   });
 });

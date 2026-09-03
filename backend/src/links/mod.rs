@@ -1863,12 +1863,15 @@ impl LinkManager {
             // Session-scoped, so never inside a delegation: this fires between
             // turns, when no trajectory is open.
             span: None,
+            interior_state: None,
             name: None,
             text: String::new(),
             data: Some(data),
             is_error: false,
             stability: "stable".to_string(),
             source: "server".to_string(),
+            arrival_at_ms: now_ms(),
+            recorded_at_ms: None,
             created_at_ms: now_ms(),
             // A live session fact is one arrival.
             started_at_ms: None,

@@ -427,6 +427,20 @@ generalization rather than three features.
 `span` identifies the trajectory a block ran in. A `subagent` event is the one place
 they meet, because opening a trajectory is itself a block with a lifecycle.
 
+### Time axes are independent
+
+`seq` is the only total source/order axis. Timestamps can tie, arrive out of order, or
+come from different machines, so replay and producer merging must never sort by time.
+`arrivalAtMs` records when Sylph received the fact on the server clock and is always
+available on new rows. `recordedAtMs` is the vendor's own timestamp, when the native
+source supplied one; it is absent for records such as workflow journal closes that carry
+no timestamp. The legacy `createdAtMs` remains for compatibility, but its clock depends
+on the record mode and must not be used to infer a duration across live and native data.
+
+Durations are exact only when both endpoints are in one domain: arrival start/end for a
+live stream, or recorded start/end for native history. Missing recorded endpoints mean
+the duration is unknown, not zero.
+
 **A pointer, never nesting.** A child's events cannot arrive *nested inside* the parent
 event: an envelope must be closed before it is sent, and a trajectory streams for
 minutes. It also contradicts the journal, where an event is a row — a nested payload
@@ -566,15 +580,15 @@ otherwise the user must open every branch to learn something broke, which is the
 collapsing was supposed to save. A descendant failure escalates its ancestors' status,
 and a failed branch expands itself to the tool that failed.
 
-**A trajectory with no interior says so.** A vendor may report that delegated work
-exists while forwarding none of it — `claude` forwards a delegate's interior only for its
-built-in `Task`, so for every other delegating tool the interior cannot be attributed at
-all and the delegate's own work arrives indistinguishable from the root agent's. A
-*closed* trajectory with no children is therefore a real terminal state, not a loading
-one, and the card must say so: presented as expandable it invites opening a branch that
-can never fill, and saying it only after the click is the lossy collapse the tree exists
-to avoid. Note the two agents differ here, so an adapter must not carry one's conclusion
-across to the other (`docs/agents.md`).
+**Interior reachability is a typed trajectory fact, never a child-count inference.** A
+`subagent` phase may carry `interior_state`: `pending`, `partial`, `full`,
+`forwards_nothing`, or `unreadable`. The producer owns the transition: `pending` is a
+source expected but not yet readable; `partial` is a live readable prefix; `full` is a
+complete reachable source; `forwards_nothing` is a terminal vendor capability; and
+`unreadable` is an expected source that could not be read. A source that has ended must
+never leave `pending` in durable history. The frontend renders the reported fact; it may
+use actual children only to decide whether an expansion has content *now*, never to decide
+what absence means. Older rows lack this field and use the legacy fallback until rewritten.
 
 **Progress is a snapshot, not delta text.** A vendor's progress notification re-sends its
 whole current summary rather than a suffix, so appending each one repeats the same

@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::models::now_ms;
 use crate::models::Event;
+use sylph_protocol::InteriorState;
 
 pub mod seq;
 
@@ -100,6 +101,9 @@ pub struct StreamEvent {
     /// `subagent` event's `stream_id` is itself a trajectory id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<String>,
+    /// Typed state of a delegated trajectory's interior, when this phase reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interior_state: Option<InteriorState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "str::is_empty")]
@@ -110,6 +114,12 @@ pub struct StreamEvent {
     pub is_error: bool,
     pub stability: String,
     pub source: String,
+    /// Server receipt time. Unlike `created_at_ms`, this is always the server's clock.
+    pub arrival_at_ms: i64,
+    /// Vendor/source timestamp when one was actually recorded. `None` means the source
+    /// carried no usable timestamp; it is never synthesized from arrival.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at_ms: Option<i64>,
     pub created_at_ms: i64,
     /// When this block's *first* phase arrived, on a consolidated block only.
     ///
@@ -153,6 +163,7 @@ impl StreamEvent {
             phase: self.phase.clone(),
             stream_id: self.stream_id.clone(),
             span: self.span.clone(),
+            interior_state: self.interior_state.map(|state| state.to_string()),
             name: self.name.clone(),
             text: self.text.clone(),
             data_json: self
@@ -163,6 +174,8 @@ impl StreamEvent {
             is_error: self.is_error,
             stability: self.stability.clone(),
             source: self.source.clone(),
+            arrival_at_ms: self.arrival_at_ms,
+            recorded_at_ms: self.recorded_at_ms,
             created_at_ms: self.created_at_ms,
         }
     }
@@ -203,29 +216,37 @@ impl StreamEvent {
             now_ms(),
             // Straight from an adapter: one arrival.
             None,
+            None,
+            None,
         )
     }
 
     /// Build from the value an in-process adapter constructs for `adopt` and `watch`.
     ///
-    /// **The vendor's own `created_at_ms` survives, and that is the load-bearing
-    /// difference from [`Self::from_event`].** A live event's arrival *is* when it
-    /// happened. An adopted event happened when the vendor recorded it, possibly months
-    /// ago, and stamping now would make every adopted transcript claim to have occurred at
-    /// the moment it was adopted — collapsing a session's whole duration to zero and
-    /// ordering it into the sidebar as the newest thing on the machine. The parsers go to
-    /// real trouble to recover these stamps
+    /// **The vendor's own timestamp is preserved in `recorded_at_ms` and the legacy
+    /// `created_at_ms` field, while `arrival_at_ms` receives the server clock.** A live
+    /// event's arrival *is* when it happened. An adopted event happened when the vendor
+    /// recorded it, possibly months ago, and stamping the compatibility field with now
+    /// would make every adopted transcript claim to have occurred at the moment it was
+    /// adopted — collapsing a session's whole duration to zero and ordering it into the
+    /// sidebar as the newest thing on the machine. The parsers go to real trouble to recover
+    /// these stamps
     /// (`crates/adapters/src/native/timestamp.rs`), and this is where that work would
     /// have been discarded.
     ///
     /// `seq` is left at zero for the caller to assign, for the same reason as
     /// [`Self::from_event`]: ordering is the server's.
     pub fn from_protocol(event: &sylph_protocol::Event) -> Self {
+        let recorded_at_ms = event
+            .recorded_at_ms
+            .or_else(|| (event.created_at_ms != 0).then_some(event.created_at_ms));
         Self::from_protocol_parts(
             event,
             event.stability,
-            event.created_at_ms,
+            now_ms(),
             event.started_at_ms,
+            recorded_at_ms,
+            recorded_at_ms,
         )
     }
 
@@ -239,9 +260,15 @@ impl StreamEvent {
     fn from_protocol_parts(
         event: &sylph_protocol::Event,
         stability: sylph_protocol::Stability,
-        created_at_ms: i64,
+        arrival_at_ms: i64,
         started_at_ms: Option<i64>,
+        recorded_at_ms: Option<i64>,
+        legacy_created_at_ms: Option<i64>,
     ) -> Self {
+        // Keep the legacy field useful during rollout: native events retain their source
+        // timestamp, while an event with no source time uses server arrival rather than a
+        // sentinel zero. New consumers use the explicit pair below.
+        let created_at_ms = legacy_created_at_ms.unwrap_or(arrival_at_ms);
         Self {
             seq: 0,
             arrival_turn_id: None,
@@ -252,6 +279,7 @@ impl StreamEvent {
             // root event means the root, and a client comparing against a trajectory id
             // would otherwise look for one named "".
             span: event.span.clone().filter(|span| !span.is_empty()),
+            interior_state: event.interior_state,
             name: event.name.clone(),
             text: event.text.clone(),
             data: event.data.clone().filter(|data| !data.is_null()),
@@ -262,6 +290,8 @@ impl StreamEvent {
             }
             .to_string(),
             source: "agent".to_string(),
+            arrival_at_ms,
+            recorded_at_ms,
             created_at_ms,
             started_at_ms,
         }
@@ -281,16 +311,27 @@ impl StreamEvent {
             phase: row.phase.clone(),
             stream_id: row.stream_id.clone(),
             span: row.span.clone(),
+            interior_state: row.interior_state.as_deref().and_then(parse_interior_state),
             name: row.name.clone(),
             text: row.text.clone(),
             data: data_from_column(&row.data_json),
             is_error: row.is_error,
             stability: row.stability.clone(),
             source: row.source.clone(),
+            arrival_at_ms: if row.arrival_at_ms == 0 {
+                row.created_at_ms
+            } else {
+                row.arrival_at_ms
+            },
+            recorded_at_ms: row.recorded_at_ms,
             created_at_ms: row.created_at_ms,
             started_at_ms: None,
         }
     }
+}
+
+fn parse_interior_state(value: &str) -> Option<InteriorState> {
+    InteriorState::parse(value)
 }
 
 /// Live fan-out for one in-flight turn.
@@ -586,6 +627,7 @@ mod tests {
             phase: phase.map(str::to_string),
             stream_id: None,
             span: None,
+            interior_state: None,
             name: None,
             text: String::new(),
             data: None,
@@ -596,6 +638,8 @@ mod tests {
                 "ephemeral".to_string()
             },
             source: "runner".to_string(),
+            arrival_at_ms: 1_700_000_000_000,
+            recorded_at_ms: None,
             created_at_ms: 1_700_000_000_000,
             started_at_ms: None,
         }
@@ -655,6 +699,37 @@ mod tests {
     }
 
     #[test]
+    fn live_and_native_events_expose_distinct_time_axes() {
+        let live_source = sylph_protocol::Event::new(
+            sylph_protocol::EventKind::Assistant,
+            Some(sylph_protocol::Phase::Completed),
+            1_000,
+        );
+        let live = StreamEvent::from_event(&live_source);
+        assert_eq!(live.recorded_at_ms, None);
+        assert_eq!(live.created_at_ms, live.arrival_at_ms);
+
+        let native_source = sylph_protocol::Event::new(
+            sylph_protocol::EventKind::Assistant,
+            Some(sylph_protocol::Phase::Completed),
+            1_000,
+        );
+        let native = StreamEvent::from_protocol(&native_source);
+        assert_eq!(native.recorded_at_ms, Some(1_000));
+        assert_eq!(native.created_at_ms, 1_000);
+        assert!(native.arrival_at_ms >= native.created_at_ms);
+
+        let untimed = sylph_protocol::Event::new(
+            sylph_protocol::EventKind::Subagent,
+            Some(sylph_protocol::Phase::Completed),
+            0,
+        );
+        let untimed = StreamEvent::from_protocol(&untimed);
+        assert_eq!(untimed.recorded_at_ms, None);
+        assert_eq!(untimed.created_at_ms, untimed.arrival_at_ms);
+    }
+
+    #[test]
     fn completed_and_phaseless_events_are_stable() {
         assert!(event(1, "assistant", Some("completed")).is_stable());
         // Server-authored events carry no phase and are always durable.
@@ -685,6 +760,8 @@ mod tests {
         assert_eq!(restored.data, Some(serde_json::json!({"path": "/tmp/x"})));
         assert!(restored.is_error);
         assert_eq!(restored.created_at_ms, 1_700_000_000_000);
+        assert_eq!(restored.arrival_at_ms, 1_700_000_000_000);
+        assert_eq!(restored.recorded_at_ms, None);
     }
 
     #[test]

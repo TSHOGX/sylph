@@ -25,12 +25,15 @@ pub struct Event {
     /// names another — which is the whole of how arbitrary depth and parallel workflow
     /// phases are represented.
     pub span: Option<String>,
+    pub interior_state: Option<String>,
     pub name: Option<String>,
     pub text: String,
     pub data_json: String,
     pub is_error: bool,
     pub stability: String,
     pub source: String,
+    pub arrival_at_ms: i64,
+    pub recorded_at_ms: Option<i64>,
     pub created_at_ms: i64,
 }
 
@@ -50,12 +53,15 @@ impl FromRow<'_, sqlx::sqlite::SqliteRow> for Event {
             phase: row.try_get("phase")?,
             stream_id: row.try_get("stream_id")?,
             span: row.try_get("span")?,
+            interior_state: row.try_get("interior_state")?,
             name: row.try_get("name")?,
             text: row.try_get("text")?,
             data_json: row.try_get("data_json")?,
             is_error: row.try_get("is_error")?,
             stability: row.try_get("stability")?,
             source: row.try_get("source")?,
+            arrival_at_ms: row.try_get("arrival_at_ms")?,
+            recorded_at_ms: row.try_get("recorded_at_ms")?,
             created_at_ms: row.try_get("created_at_ms")?,
         })
     }

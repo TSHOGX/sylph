@@ -34,6 +34,7 @@
  */
 
 import type { StreamEvent } from "@/lib/api-types";
+import { mergeInteriorState } from "@/lib/interior-state";
 
 /** A displayable row: an event, plus the result paired to it when it is a call. */
 export interface TimelineRow {
@@ -47,6 +48,10 @@ export interface TimelineRow {
    * cannot report how long it took.
    */
   closedAtMs?: number;
+  /** Explicit arrival time of a trajectory close, when available. */
+  closedArrivalAtMs?: number;
+  /** Explicit recorded/source time of a trajectory close, when available. */
+  closedRecordedAtMs?: number;
   /**
    * A `subagent` close that arrived for a row which is not itself a `subagent`.
    *
@@ -95,6 +100,8 @@ export interface TimelineNode {
   rollup: Rollup;
   /** Resolved lifecycle of a trajectory. `undefined` for a plain event. */
   status?: TrajectoryStatus;
+  /** Producer-authored reachability state for this trajectory's interior. */
+  interiorState?: StreamEvent["interiorState"];
   key: string;
 }
 
@@ -189,6 +196,8 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
             ...rows[host],
             trajectoryClose: event,
             closedAtMs: rows[host].closedAtMs ?? event.createdAtMs,
+            closedArrivalAtMs: rows[host].closedArrivalAtMs ?? event.arrivalAtMs,
+            closedRecordedAtMs: rows[host].closedRecordedAtMs ?? event.recordedAtMs,
           };
         } else {
           // Progress on a promoted host. `data` replaces because a progress
@@ -212,6 +221,14 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
           ...rows[at],
           closedAtMs:
             event.phase === "completed" ? event.createdAtMs : rows[at].closedAtMs,
+          closedArrivalAtMs:
+            event.phase === "completed"
+              ? event.arrivalAtMs
+              : rows[at].closedArrivalAtMs,
+          closedRecordedAtMs:
+            event.phase === "completed"
+              ? event.recordedAtMs
+              : rows[at].closedRecordedAtMs,
           event: mergedEvent(event, {
             ...existing,
             phase: event.phase,
@@ -222,6 +239,9 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
             data: event.data ?? existing.data,
             isError: event.isError || existing.isError,
             span: existing.span ?? event.span,
+            interiorState: event.interiorState
+              ? mergeInteriorState(existing.interiorState, event.interiorState)
+              : existing.interiorState,
           }),
         };
         continue;
@@ -317,6 +337,7 @@ function sameEvent(a: StreamEvent, b: StreamEvent): boolean {
     a.seq === b.seq &&
     a.kind === b.kind &&
     a.streamId === b.streamId
+    && a.interiorState === b.interiorState
   );
 }
 
@@ -391,6 +412,10 @@ export function buildTree(rows: TimelineRow[]): TimelineNode[] {
       trajectory,
       children: [],
       rollup: EMPTY_ROLLUP,
+      interiorState:
+        row.event.interiorState && row.trajectoryClose?.interiorState
+          ? mergeInteriorState(row.event.interiorState, row.trajectoryClose.interiorState)
+          : row.event.interiorState ?? row.trajectoryClose?.interiorState,
       key: row.key,
     };
     built.push(node);
@@ -497,12 +522,15 @@ function canonicalize(
     cached &&
     cached.trajectory === node.trajectory &&
     cached.status === node.status &&
+    cached.interiorState === node.interiorState &&
     // The rest of the row. An event can be shared while what surrounds it changed:
     // a tool call gains a result, a trajectory gains a close. Compared by identity
     // for the same reason as the event itself — `buildRows` reuses these objects too.
     cached.row.result === node.row.result &&
     cached.row.trajectoryClose === node.row.trajectoryClose &&
     cached.row.closedAtMs === node.row.closedAtMs &&
+    cached.row.closedArrivalAtMs === node.row.closedArrivalAtMs &&
+    cached.row.closedRecordedAtMs === node.row.closedRecordedAtMs &&
     sameChildren(cached.children, node.children)
   ) {
     return cached;

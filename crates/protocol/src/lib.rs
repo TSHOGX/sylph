@@ -55,7 +55,7 @@ pub use capabilities::{
     Capability, CapabilityFacets, CommandKind, CommandSpec, ConfigChoice, ConfigKind, ConfigOption,
     FlagSchema, FlagSpec, SessionCapabilities, SubagentSpec,
 };
-pub use event::{Event, EventKind, Phase, Stability};
+pub use event::{Event, EventKind, InteriorState, Phase, Stability};
 pub use identity::{
     AgentName, EnvironmentId, Fidelity, IdentityError, NativeId, SessionId, ID_DELIMITER,
 };

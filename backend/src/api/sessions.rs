@@ -221,20 +221,33 @@ pub fn block_to_event(block: &crate::storage::Block) -> StreamEvent {
         phase: block.phase.clone(),
         stream_id: block.stream_id.clone(),
         span: block.span.clone(),
+        interior_state: block
+            .interior_state
+            .as_deref()
+            .and_then(parse_interior_state),
         name: block.name.clone(),
         text: block.text.clone(),
         data: block.data.clone(),
         is_error: block.is_error,
         stability: "stable".to_string(),
         source: block.source.clone(),
+        arrival_at_ms: block.arrival_at_ms,
+        recorded_at_ms: block.recorded_at_ms,
         created_at_ms: block.created_at_ms,
         // The block already carries this; it was simply never published. Without it a
         // settled block reports only when it closed, so every duration computed from
         // durable history was a reconstruction from whatever the interior happened to
         // forward — exact for a chatty delegate, a lower bound for a quiet one, and
         // absent entirely for one that forwarded nothing.
+        // The anchor is retained for both clock domains. The renderer chooses recorded
+        // start/end when `recordedAtMs` exists, otherwise arrival start/end for a stream
+        // record; block/message fidelity gates native arrival stamps before arithmetic.
         started_at_ms: Some(block.started_at_ms),
     }
+}
+
+fn parse_interior_state(value: &str) -> Option<sylph_protocol::InteriorState> {
+    sylph_protocol::InteriorState::parse(value)
 }
 
 /// Resolve a client-named working directory, or refuse it.

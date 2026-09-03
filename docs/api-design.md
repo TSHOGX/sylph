@@ -755,6 +755,10 @@ event: usage
 data: {"seq":7,"data":{"inputTokens":1234,"outputTokens":567}}
 ```
 
+Every event is ordered by `seq`. New records also expose `arrivalAtMs` (the server
+receipt clock) and optional `recordedAtMs` (the vendor clock); `createdAtMs` remains
+for compatibility. A duration may subtract only endpoints in the same clock domain.
+
 Delegated work carries `span`, naming the trajectory an event happened in; absent
 means the root turn. A `subagent` event's `streamId` *is* a trajectory id, so a
 nested delegation is one whose `span` names another — which is how a subagent, a

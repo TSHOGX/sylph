@@ -17,6 +17,7 @@
 //! same reason [`sylph_protocol::Session::events`] yields its stream once.
 
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -47,11 +48,28 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// panic alike.
 const STDERR_TAIL_BYTES: usize = 4096;
 
-/// One line the vendor wrote to stdout.
+/// One parsed line the vendor wrote to stdout, retaining its lexical payload.
 ///
-/// A parse failure is [`Err`] and **does not end the stream**: one malformed line must not
-/// fail a turn, and a vendor that has just started may print a banner before its protocol.
-pub type Line = Result<Value>;
+/// `value` is what adapters normally consume. `raw` is the exact line bytes, excluding only
+/// the framing newline, so a recorder can preserve whitespace, key order, duplicate keys, and
+/// escape spelling. A parse failure is [`Err`] and **does not end the stream**: one malformed
+/// line must not fail a turn, and a vendor that has just started may print a banner before its
+/// protocol.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessLine {
+    pub value: Value,
+    pub raw: Vec<u8>,
+}
+
+impl Deref for ProcessLine {
+    type Target = Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+pub type Line = Result<ProcessLine>;
 
 /// A held vendor process.
 pub struct Child {
@@ -225,15 +243,20 @@ impl Child {
         let closed = Arc::new(AtomicBool::new(false));
         let ended = closed.clone();
         tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
+            let mut reader = BufReader::new(stdout);
+            let mut raw = Vec::new();
             loop {
-                match reader.next_line().await {
-                    Ok(Some(raw)) => {
-                        let trimmed = raw.trim();
-                        if trimmed.is_empty() {
+                raw.clear();
+                match reader.read_until(b'\n', &mut raw).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if raw.last() == Some(&b'\n') {
+                            raw.pop();
+                        }
+                        if raw.iter().all(u8::is_ascii_whitespace) {
                             continue;
                         }
-                        let parsed: Value = match serde_json::from_str(trimmed) {
+                        let parsed: Value = match serde_json::from_slice(&raw) {
                             Ok(value) => value,
                             Err(error) => {
                                 // Reported, not fatal. A vendor may print a banner, and one
@@ -257,13 +280,18 @@ impl Child {
                                 }
                             }
                         }
-                        if line_tx.send(Ok(parsed)).await.is_err() {
+                        if line_tx
+                            .send(Ok(ProcessLine {
+                                value: parsed,
+                                raw: raw.clone(),
+                            }))
+                            .await
+                            .is_err()
+                        {
                             // The consumer is gone, which means the session was dropped.
                             break;
                         }
                     }
-                    // EOF: the vendor closed stdout. Terminal for this process.
-                    Ok(None) => break,
                     Err(error) => {
                         let _ = line_tx.send(Err(anyhow!("reading stdout: {error}"))).await;
                         break;
@@ -472,6 +500,20 @@ mod tests {
 
         assert_eq!(lines.recv().await.unwrap().unwrap()["n"], json!(1));
         assert_eq!(lines.recv().await.unwrap().unwrap()["n"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn stdout_lines_retain_lexical_json_bytes() {
+        let (_child, mut lines) = Child::spawn(spawn_sh(
+            r#"printf ' {"b":"\u0061", "a": 1}  \n'"#,
+            None,
+        ))
+        .await
+        .unwrap();
+
+        let line = lines.recv().await.unwrap().unwrap();
+        assert_eq!(line.value, json!({"b": "a", "a": 1}));
+        assert_eq!(line.raw, br#" {"b":"\u0061", "a": 1}  "#);
     }
 
     /// **An unparsable line is reported and the stream continues.**

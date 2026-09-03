@@ -1,4 +1,5 @@
-import type { StreamEvent, TurnWithEvents } from "@/lib/api-types";
+import type { InteriorState, StreamEvent, TurnWithEvents } from "@/lib/api-types";
+import { mergeInteriorState } from "@/lib/interior-state";
 
 /** A server event with its arrival turn made explicit for session projections. */
 export interface TraceEvent extends StreamEvent {
@@ -16,8 +17,8 @@ export interface TraceTrajectory {
   events: TraceEvent[];
   status: TraceStatus;
   name?: string;
-  /** True when the vendor forwarded interior work, not only lifecycle rows. */
-  interiorAvailable: boolean;
+  /** Producer-authored reachability state for this trajectory's interior. */
+  interiorState: InteriorState;
 }
 
 export interface SessionTraceIndex {
@@ -101,9 +102,21 @@ export function buildSessionTrace(
             ? "completed"
             : "running";
     const arrivalTurnIds = [...new Set(own.map((event) => event.arrivalTurnId))];
-    const interiorAvailable = own.some(
-      (event) => event.kind !== "subagent" && event.span === id,
-    );
+    const explicitState = own
+      .filter((event) => event.kind === "subagent" && event.interiorState)
+      .map((event) => event.interiorState!)
+      .reduce<InteriorState | undefined>(
+        (current, incoming) => mergeInteriorState(current, incoming),
+        undefined,
+      );
+    const hasInterior = own.some((event) => event.kind !== "subagent" && event.span === id);
+    // Old rows predate the typed state. Preserve their only reliable distinctions while
+    // making the fallback explicit: observed child events mean full, a still-live trajectory
+    // may acquire a source later, and a closed childless trajectory is the old vendor contract
+    // that forwards nothing.
+    const interiorState =
+      explicitState ??
+      (hasInterior ? "full" : status === "running" || status === "abandoned" ? "pending" : "forwards_nothing");
 
     trajectories.set(id, {
       id,
@@ -113,7 +126,7 @@ export function buildSessionTrace(
       events: own,
       status,
       name: names[names.length - 1],
-      interiorAvailable,
+      interiorState,
     });
   }
 

@@ -99,16 +99,28 @@ being terminal.
 
 ## Known bugs
 
-**A workflow phase's close carries no recorded time and renders as a measured zero.**
-`parse_journal` is right to refuse a fabricated timestamp — journal records carry none — and
-the server stamps only its own events, so an adapter's `created_at_ms` of `0` reaches the
-frontend intact. `timeline-waterfall.ts` then computes `endMs: Math.max(startMs, endMs)`,
-which for a real open and a zero close yields `endMs === startMs`: a phase that ran for a
-minute shows as zero duration. A visibly wrong bar would at least invite the question. The fix
-separates the vendor's **recorded** time from the server's **arrival** time from **source
-order**, so an absent duration is reported absent rather than as zero.
+None outstanding.
+
+The former workflow zero-duration defect is closed by the explicit time axes below: an absent
+vendor close remains absent rather than becoming a fabricated zero.
 
 ## Recently fixed, worth knowing
+
+**Trajectory interior reachability is explicit.** `InteriorState` distinguishes `pending`,
+`partial`, `full`, `forwards_nothing`, and `unreadable` across the protocol, journal, history,
+SSE, and frontend. Producers author transitions from source facts; consumers no longer infer
+meaning from an empty child list. A shared monotone merge keeps a late `pending` notification
+from erasing a native source already proven readable.
+
+**Event time has three independent axes.** `seq` is the only replay/order authority;
+`arrivalAtMs` is the server receipt clock; `recordedAtMs` is the vendor clock when present.
+`createdAtMs` remains a compatibility timestamp but is no longer used to mix live and native
+records or to infer a duration. The waterfall only subtracts endpoints in one domain.
+
+**Process stdout retains lexical native bytes.** The shared process reader yields a parsed value
+with the exact JSON line bytes. Claude stores those bytes in `NativeRecord.raw_json` before
+projecting an event, preserving whitespace, key order, duplicate keys, and escape spelling for
+future re-projection; Codex and Pi continue to consume only parsed values.
 
 **Claude native ingestion now follows one bundle reader in every mode.** `adopt`, `watch`,
 and live stdout attachment share source discovery, cursor advancement, manifest revisions,

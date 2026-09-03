@@ -217,6 +217,7 @@ CREATE TABLE events (
   phase TEXT,
   stream_id TEXT,
   span TEXT,
+  interior_state TEXT,                -- pending | partial | full | forwards_nothing | unreadable
   name TEXT,
   text TEXT NOT NULL DEFAULT '',
   data_json TEXT NOT NULL DEFAULT '{}',
@@ -225,6 +226,8 @@ CREATE TABLE events (
     CHECK (stability IN ('ephemeral', 'stable')),
   source TEXT NOT NULL DEFAULT 'server'
     CHECK (source IN ('agent', 'server')),
+  arrival_at_ms INTEGER NOT NULL,
+  recorded_at_ms INTEGER,
   created_at_ms INTEGER NOT NULL,
   UNIQUE(session_env, session_agent, session_native, seq),
   FOREIGN KEY (session_env, session_agent, session_native)

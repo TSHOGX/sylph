@@ -339,8 +339,8 @@ async fn pump(
     shared: Arc<Shared>,
 ) {
     while let Some(line) = lines.recv().await {
-        let payload = match line {
-            Ok(payload) => payload,
+        let (payload, raw) = match line {
+            Ok(line) => (line.value, line.raw),
             Err(error) => {
                 // Reported, not fatal — a vendor may print a banner, and one malformed line
                 // must not fail a turn. `Child` already guarantees the stream continues.
@@ -417,7 +417,7 @@ async fn pump(
                 // before the normalized event can be journaled or published. The bundle reader
                 // remains a separate source for native-only files, but stdout no longer has the
                 // P0 gap where it could publish an event with no retained source at all.
-                if !send_stdout_record(&out, &shared, &payload).await {
+                if !send_stdout_record(&out, &shared, &payload, raw).await {
                     return;
                 }
                 if let Some(id) = payload
@@ -519,6 +519,7 @@ async fn send_stdout_record(
     out: &mpsc::Sender<Result<SessionMessage>>,
     shared: &Shared,
     payload: &Value,
+    raw: Vec<u8>,
 ) -> bool {
     let version = shared
         .stdout_version
@@ -527,7 +528,7 @@ async fn send_stdout_record(
     out.send(Ok(SessionMessage::NativeRecord(NativeRecord {
         source: shared.stdout_source.clone(),
         version,
-        raw_json: Some(payload.to_string().into_bytes()),
+        raw_json: Some(raw),
         payload: payload.clone(),
         blobs: Vec::new(),
     })))

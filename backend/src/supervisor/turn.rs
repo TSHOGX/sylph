@@ -555,12 +555,15 @@ pub(crate) fn server_event(
         stream_id: None,
         // The server speaks about the turn, not from inside a delegation.
         span: None,
+        interior_state: None,
         name: None,
         text,
         data,
         is_error: false,
         stability: "stable".to_string(),
         source: "server".to_string(),
+        arrival_at_ms: now_ms(),
+        recorded_at_ms: None,
         created_at_ms: now_ms(),
         // Server-authored, so it happens once, now.
         started_at_ms: None,

@@ -227,6 +227,19 @@ describe("buildWaterfall", () => {
     expect(untimed).toBe(0);
   });
 
+  it("does not turn an untimed workflow journal close into a zero duration", () => {
+    const { rows } = waterfall([
+      closes("workflow", 9000, {
+        arrivalAtMs: 9000,
+        // The workflow journal has no vendor close timestamp. `createdAtMs` is the
+        // compatibility arrival value, not a recorded end in the source clock.
+      }),
+    ]);
+
+    expect(rows[0].extent).toEqual({ kind: "instant", atMs: 9000 });
+    expect(rows[0].durationMs).toBeUndefined();
+  });
+
   it("never crowns a row that did not finish, even when its arithmetic is exact", () => {
     // A trajectory still open when its turn ended can acquire an end timestamp — the
     // close the server wrote, or the turn's own end — so the subtraction is exact over

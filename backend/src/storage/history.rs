@@ -52,12 +52,16 @@ pub struct Block {
     pub stream_id: Option<String>,
     /// The delegated trajectory this block ran in; `None` is the root turn.
     pub span: Option<String>,
+    /// Latest typed interior reachability fact carried by a trajectory phase.
+    pub interior_state: Option<String>,
     pub name: Option<String>,
     pub text: String,
     pub folded: Option<Folded>,
     pub data: Option<serde_json::Value>,
     pub is_error: bool,
     pub source: String,
+    pub arrival_at_ms: i64,
+    pub recorded_at_ms: Option<i64>,
     pub started_at_ms: i64,
     pub created_at_ms: i64,
 }
@@ -492,13 +496,13 @@ impl HistoryStore {
             sqlx::query(
                 r#"
                 INSERT OR REPLACE INTO blocks (
-                    session_id, seq, turn_id, kind, phase, stream_id, span, name,
+                    session_id, seq, turn_id, kind, phase, stream_id, span, interior_state, name,
                     text_inline, text_hash, text_len, text_encoding,
                     delta_offsets, delta_timings,
-                    data_json, data_hash, is_error, source,
+                    data_json, data_hash, is_error, source, arrival_at_ms, recorded_at_ms,
                     started_at_ms, created_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&block.session_id)
@@ -508,6 +512,7 @@ impl HistoryStore {
             .bind(&block.phase)
             .bind(&block.stream_id)
             .bind(&block.span)
+            .bind(&block.interior_state)
             .bind(&block.name)
             .bind(text_inline)
             .bind(&text_hash)
@@ -519,6 +524,8 @@ impl HistoryStore {
             .bind(&data_hash)
             .bind(block.is_error)
             .bind(&block.source)
+            .bind(block.arrival_at_ms)
+            .bind(block.recorded_at_ms)
             .bind(block.started_at_ms)
             .bind(block.created_at_ms)
             .execute(&mut *tx)
@@ -669,12 +676,15 @@ impl HistoryStore {
             phase: row.try_get("phase")?,
             stream_id: row.try_get("stream_id")?,
             span: row.try_get("span")?,
+            interior_state: row.try_get("interior_state")?,
             name: row.try_get("name")?,
             text,
             folded,
             data,
             is_error: row.try_get::<i64, _>("is_error")? != 0,
             source: row.try_get("source")?,
+            arrival_at_ms: row.try_get("arrival_at_ms")?,
+            recorded_at_ms: row.try_get("recorded_at_ms")?,
             started_at_ms: row.try_get("started_at_ms")?,
             created_at_ms: row.try_get("created_at_ms")?,
         })
@@ -961,7 +971,8 @@ impl HistoryStore {
     /// (`docs/storage.md` § Deriving a native-source bound).
     pub async fn max_seq_at_or_before(&self, session_id: &str, at_ms: i64) -> Result<Option<i32>> {
         sqlx::query_scalar::<_, Option<i32>>(
-            "SELECT MAX(seq) FROM blocks WHERE session_id = ? AND created_at_ms <= ?",
+            "SELECT MAX(seq) FROM blocks
+             WHERE session_id = ? AND recorded_at_ms IS NOT NULL AND recorded_at_ms <= ?",
         )
         .bind(session_id)
         .bind(at_ms)
@@ -1266,6 +1277,11 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
     let mut first_span: HashMap<String, Option<String>> = HashMap::new();
     // The best name any phase gave a block, since not every phase carries one.
     let mut names: HashMap<String, String> = HashMap::new();
+    // The strongest interior reachability claim observed for each trajectory. A lifecycle
+    // notification can arrive after the bundle reader has already proved the source readable;
+    // retaining the last event verbatim would regress `partial` back to `pending` solely due to
+    // producer order. This fold is the one place that resolves phases into durable state.
+    let mut interiors: HashMap<String, String> = HashMap::new();
     // Trajectories declared here and never closed, keyed by id, holding the latest
     // `subagent` row that spoke about each.
     //
@@ -1302,10 +1318,13 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     first_span
                         .entry(id.clone())
                         .or_insert_with(|| event.span.clone());
+                    if let Some(state) = event.interior_state.as_deref() {
+                        remember_interior_state(&mut interiors, id.clone(), state);
+                    }
                 }
                 first_arrival
                     .entry(id.clone())
-                    .or_insert(event.created_at_ms);
+                    .or_insert(event.recorded_at_ms.unwrap_or(event.arrival_at_ms));
                 // A name given by an earlier phase is kept, because for some blocks
                 // that is the *only* phase that has it. A delegated trajectory is
                 // named on `started` — or renamed by the `delta` that carries its
@@ -1321,13 +1340,20 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 if !event.text.is_empty() {
                     pending.entry(id).or_default().push(Delta {
                         text: event.text.clone(),
-                        at_ms: event.created_at_ms,
+                        at_ms: event.recorded_at_ms.unwrap_or(event.arrival_at_ms),
                     });
                 }
             }
             // `completed`, or no phase at all: server-authored events are stable
             // and unstreamed.
             _ => {
+                if event.kind == "subagent" {
+                    if let (Some(id), Some(state)) =
+                        (stream_id.as_ref(), event.interior_state.as_deref())
+                    {
+                        remember_interior_state(&mut interiors, id.clone(), state);
+                    }
+                }
                 // This trajectory has an outcome, so it is no longer open. A
                 // `tool_result` counts as well as a `subagent` close: a promoted
                 // host's lifecycle is its result (§ Promotion).
@@ -1344,13 +1370,17 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 let started_at_ms = stream_id
                     .as_ref()
                     .and_then(|id| first_arrival.remove(id))
-                    .unwrap_or(event.created_at_ms);
+                    .unwrap_or(event.recorded_at_ms.unwrap_or(event.arrival_at_ms));
 
                 // Resolved before the id is moved into the block below.
                 let name = event
                     .name
                     .clone()
                     .or_else(|| stream_id.as_ref().and_then(|id| names.remove(id)));
+                let interior_state = stream_id
+                    .as_ref()
+                    .and_then(|id| interiors.remove(id))
+                    .or_else(|| event.interior_state.clone());
 
                 let folded = fold::fold(&deltas, &event.text, started_at_ms);
                 if folded.is_none() && !deltas.is_empty() {
@@ -1372,6 +1402,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     phase: event.phase.clone(),
                     stream_id,
                     span: event.span.clone(),
+                    interior_state,
                     // The completed event's own name wins when it has one; a name
                     // from an earlier phase fills in when it does not.
                     name,
@@ -1380,6 +1411,8 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     data: data_from_column(&event.data_json),
                     is_error: event.is_error,
                     source: event.source.clone(),
+                    arrival_at_ms: event.arrival_at_ms,
+                    recorded_at_ms: event.recorded_at_ms,
                     started_at_ms,
                     created_at_ms: event.created_at_ms,
                 });
@@ -1398,7 +1431,11 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
         let started_at_ms = first_arrival
             .get(&stream_id)
             .copied()
-            .unwrap_or(declaring.created_at_ms);
+                    .unwrap_or(
+                        declaring
+                            .recorded_at_ms
+                            .unwrap_or(declaring.arrival_at_ms),
+                    );
         let text: String = deltas.iter().map(|d| d.text.as_str()).collect();
         let folded = fold::fold(&deltas, &text, started_at_ms);
 
@@ -1414,8 +1451,9 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 .remove(&stream_id)
                 .flatten()
                 .or_else(|| declaring.span.clone()),
+            interior_state: interiors.remove(&stream_id).or(declaring.interior_state),
             name: declaring.name.clone().or_else(|| names.remove(&stream_id)),
-            stream_id: Some(stream_id),
+            stream_id: Some(stream_id.clone()),
             text,
             folded,
             // Carried forward because it is what says this was expected to outlive
@@ -1424,6 +1462,8 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
             data: data_from_column(&declaring.data_json),
             is_error: false,
             source: declaring.source.clone(),
+            arrival_at_ms: declaring.arrival_at_ms,
+            recorded_at_ms: declaring.recorded_at_ms,
             started_at_ms,
             created_at_ms: declaring.created_at_ms,
         });
@@ -1484,17 +1524,24 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 .iter()
                 .find(|e| e.stream_id.as_deref() == Some(stream_id.as_str()))
                 .and_then(|e| e.span.clone()),
+            interior_state: interiors.remove(&stream_id),
             // Same reason as the folded path: for a block whose only phases were
             // `started` and `delta`, that is the only place a name ever appeared.
             // A trajectory the agent abandoned is exactly this case, so leaving it
             // None would make the one delegation that needs explaining anonymous.
             name: names.remove(&stream_id),
-            stream_id: Some(stream_id),
+            stream_id: Some(stream_id.clone()),
             text,
             folded,
             data: None,
             is_error: false,
             source: "agent".to_string(),
+            arrival_at_ms: deltas.last().map(|_| last).unwrap_or(last),
+            recorded_at_ms: events
+                .iter()
+                .filter(|event| event.stream_id.as_deref() == Some(stream_id.as_str()))
+                .rev()
+                .find_map(|event| event.recorded_at_ms),
             started_at_ms,
             created_at_ms: last,
         });
@@ -1502,6 +1549,22 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
 
     blocks.sort_by_key(|block| block.seq);
     blocks
+}
+
+/// Keep the most informative reachability state for one trajectory.
+///
+/// `pending` is a temporary observation and must not overwrite evidence that readable content
+/// already arrived. `unreadable` is terminal and wins over non-terminal states; `full` is the
+/// strongest positive claim, while `partial` still says the source is reachable but incomplete.
+fn remember_interior_state(states: &mut HashMap<String, String>, id: String, state: &str) {
+    let Some(incoming) = sylph_protocol::InteriorState::parse(state) else {
+        return;
+    };
+    let merged = states
+        .get(&id)
+        .and_then(|existing| sylph_protocol::InteriorState::parse(existing))
+        .map_or(incoming, |current| current.merge(incoming));
+    states.insert(id, merged.to_string());
 }
 
 /// Move a turn from the journal into history.

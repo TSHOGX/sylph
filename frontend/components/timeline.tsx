@@ -416,12 +416,16 @@ function TrajectoryCard({
   const report = trajectoryReport(node);
 
   const empty = node.children.length === 0;
-  const unreported = empty && node.status === "abandoned";
-  const hollow = empty && !unreported && node.status !== "running";
+  const interiorState =
+    node.interiorState ??
+    (empty ? (node.status === "running" || node.status === "abandoned" ? "pending" : "forwards_nothing") : "full");
+  const unreported = empty && node.status === "abandoned" && interiorState === "pending";
+  const hollow = empty && interiorState === "forwards_nothing";
+  const unreadable = empty && interiorState === "unreadable";
   // A promoted host always has its own call to show, so it stays expandable even when
   // nothing was forwarded from inside it. The badge still says which of the two empty
   // states this is; what changes is that opening it is no longer pointless.
-  const openable = promoted || (!hollow && !unreported);
+  const openable = promoted || (!hollow && !unreported && !unreadable);
 
   return (
     <section
@@ -457,6 +461,15 @@ function TrajectoryCard({
             title="This host reported that delegated work ran, but forwarded none of its events."
           >
             no interior
+          </span>
+        )}
+
+        {unreadable && (
+          <span
+            className="shrink-0 rounded bg-hover px-1 text-3xs text-ink-muted"
+            title="The delegated interior was expected but its source could not be read."
+          >
+            interior unavailable
           </span>
         )}
 

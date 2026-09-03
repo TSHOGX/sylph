@@ -16,7 +16,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use sylph_protocol::{
     normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeId, NativeSummary, Phase,
-    SessionMessage, StoreFilter,
+    SessionMessage, StoreFilter, InteriorState,
 };
 
 use crate::native::{candidates, epoch_millis_from_iso, for_each_json_line, SessionCandidate};
@@ -316,6 +316,7 @@ fn parse_rollout(path: &Path) -> Result<ParsedRollout> {
             return Ok(());
         };
 
+        let before = parsed.messages.len();
         match kind {
             "session_meta" => {
                 // **The first one is this file's own thread; a later one is the parent's,
@@ -356,6 +357,13 @@ fn parse_rollout(path: &Path) -> Result<ParsedRollout> {
             // is a transcript event and neither carries text.
             "world_state" | "inter_agent_communication_metadata" => {}
             _ => parsed.unknown_records += 1,
+        }
+        if at_ms != NO_RECORDED_TIME {
+            for message in &mut parsed.messages[before..] {
+                if let SessionMessage::Event(event) = message {
+                    event.recorded_at_ms = Some(at_ms);
+                }
+            }
         }
         Ok(())
     })
@@ -858,6 +866,8 @@ fn legacy_delegation(
     event.span = string_at(payload, "call_id");
     event.name = string_at(payload, "new_agent_nickname")
         .or_else(|| string_at(payload, "receiver_agent_nickname"));
+    // Adoption reads an immutable rollout to EOF, so the forwarded interior is complete.
+    event.interior_state = Some(InteriorState::Full);
     // The brief. Plaintext in this era, and it is the delegate's whole assignment — a card
     // with a name and no brief says who ran and not what they were asked.
     event.text = string_at(payload, "prompt").unwrap_or_default();
@@ -928,6 +938,7 @@ fn legacy_delegation_close(payload: &Value, subtype: &str, at_ms: i64, parsed: &
         // [`ParsedRollout::failed_delegations`] — this is the ordering that makes the flag
         // necessary rather than defensive.
         event.is_error = failed || parsed.failed_delegations.contains(&thread);
+        event.interior_state = Some(InteriorState::Full);
         if let Some(text) = message {
             event.text = text;
         }
@@ -1126,6 +1137,8 @@ fn paginated_delegation(
     // this era ([`BRIEF_IS_CIPHERTEXT`]) and a placeholder written in its place is permanent
     // and afterwards indistinguishable from a real name.
     event.name = name;
+    // This is a complete native record, not a live prefix.
+    event.interior_state = Some(InteriorState::Full);
     // **No text, deliberately.** The delegate's assignment is the `spawn_agent` call's
     // `message`, which is a Fernet token in this era — putting it on the card would render
     // 3 KB of base64 as a delegation's description. `text` is empty rather than holding a
@@ -1750,6 +1763,7 @@ mod tests {
                 span.starts_with("call_"),
                 "the span must be the host tool call, got {span:?}"
             );
+            assert_eq!(sub.interior_state, Some(InteriorState::Full));
             assert_ne!(
                 stream, span,
                 "a trajectory keyed by its host cannot distinguish two delegates \

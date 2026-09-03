@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use sylph_protocol::{
     AdapterError, CapabilityFacets, ConfigChoice, ConfigKind, ConfigOption, Event, EventKind,
     EventStream, NativeId, Phase, Request, RequestKind, RequestOption, Resolution, RunSpec,
-    Session, SessionCapabilities, SessionMessage, TurnInput,
+    Session, SessionCapabilities, SessionMessage, TurnInput, InteriorState,
 };
 use tokio::sync::{mpsc, Mutex, Notify};
 
@@ -410,6 +410,7 @@ fn delegation(
             .and_then(|path| path.rsplit('/').next())
             .filter(|segment| !segment.is_empty())
             .map(str::to_string);
+        event.interior_state = Some(InteriorState::Partial);
         event.data = Some(json!({
             "kind": item.get("kind").cloned().unwrap_or(Value::Null),
             "agentPath": path,
@@ -454,6 +455,7 @@ impl Translator {
             event.stream_id = thread.map(str::to_string);
             event.span = host;
             event.name = name;
+            event.interior_state = Some(InteriorState::Full);
             event.is_error = status == "failed";
             event.text = turn_summary(turn);
             event.data = Some(json!({
@@ -1702,7 +1704,7 @@ async fn read_loop(
     let mut translator: Option<Translator> = None;
     while let Some(line) = lines.recv().await {
         let frame = match line {
-            Ok(frame) => frame,
+            Ok(line) => line.value,
             Err(error) => {
                 // **Reported, not fatal.** A malformed line must not fail a turn, and an
                 // `Err` on this stream is a failure *reading* the session rather than a
@@ -2068,6 +2070,7 @@ mod tests {
         assert_eq!(event.stream_id.as_deref(), Some(child_thread));
         assert_eq!(event.span.as_deref(), Some("call_sjYx0OwjkvGV93cWUKDX6Lmi"));
         assert_eq!(event.name.as_deref(), Some("echo_task"));
+        assert_eq!(event.interior_state, Some(InteriorState::Partial));
         // Stable at every phase: its `started` is where the trajectory's id, name, and
         // parent live, and dropped as ephemeral the reload flattens the subtree.
         assert!(event.is_stable());
@@ -2166,6 +2169,7 @@ mod tests {
         assert_eq!(child_close[0].stream_id.as_deref(), Some("child"));
         assert_eq!(child_close[0].span.as_deref(), Some("call-spawn"));
         assert_eq!(child_close[0].text, "all done");
+        assert_eq!(child_close[0].interior_state, Some(InteriorState::Full));
     }
 
     /// Replay the measured fork capture rather than a hand-written subset. The fixture's

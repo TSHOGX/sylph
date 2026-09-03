@@ -220,6 +220,7 @@ fn event(
         phase: phase.map(str::to_string),
         stream_id: stream.map(str::to_string),
         span: None,
+        interior_state: None,
         name: None,
         text: text.to_string(),
         data_json: "{}".to_string(),
@@ -230,6 +231,8 @@ fn event(
             "ephemeral".to_string()
         },
         source: "agent".to_string(),
+        arrival_at_ms: at_ms,
+        recorded_at_ms: Some(at_ms),
         created_at_ms: at_ms,
     }
 }
@@ -589,12 +592,15 @@ async fn a_journal_row_reports_no_start_because_it_is_one_arrival() {
         phase: Some("delta".to_string()),
         stream_id: Some("a1".to_string()),
         span: None,
+        interior_state: None,
         name: None,
         text: "partial".to_string(),
         data_json: "{}".to_string(),
         is_error: false,
         stability: "ephemeral".to_string(),
         source: "runner".to_string(),
+        arrival_at_ms: 1000,
+        recorded_at_ms: None,
         created_at_ms: 1000,
     };
 

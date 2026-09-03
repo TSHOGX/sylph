@@ -418,25 +418,84 @@ function measuredDuration(extent: Extent): number | undefined {
  */
 function extentOf(node: TimelineNode): Extent {
   const { row, status } = node;
-  const startMs = row.event.createdAtMs;
   const promoted = row.event.kind !== "subagent";
+  const arrival = (event: typeof row.event): number => event.arrivalAtMs ?? event.createdAtMs;
 
-  // A promoted host's own result is its close, and it survives consolidation because
-  // the call and the result are separate blocks with separate timestamps.
-  const endMs = row.closedAtMs ?? (promoted ? row.result?.createdAtMs : undefined);
+  // Live rows are measured on the server clock. This never mixes a vendor timestamp
+  // with a receipt timestamp, which would make a remote clock offset look like work.
+  const liveStartMs = arrival(row.event);
+  const liveEndMs =
+    row.closedArrivalAtMs ??
+    (promoted ? row.result && arrival(row.result) : undefined) ??
+    // Compatibility for pre-split live snapshots that had only `closedAtMs`.
+    (row.event.arrivalAtMs === undefined ? row.closedAtMs : undefined);
 
-  if (endMs !== undefined) {
+  if (liveEndMs !== undefined) {
     return {
       kind: "measured",
-      startMs,
-      // Clamped: a clock adjustment mid-turn would otherwise produce a negative
-      // width, which lays out as a bar running backwards off the left edge.
-      endMs: Math.max(startMs, endMs),
+      startMs: liveStartMs,
+      endMs: Math.max(liveStartMs, liveEndMs),
       bound: status === "abandoned" ? "stopped-listening" : "exact",
     };
   }
 
-  if (status === "running") return { kind: "open", startMs };
+  // Settled native blocks carry a source timestamp for the closing event and a
+  // `startedAtMs` anchor from the same source clock. Workflow journal closes have no
+  // recorded timestamp; those deliberately fall through to an unmeasured instant.
+  if (!promoted && row.event.recordedAtMs !== undefined && row.event.startedAtMs !== undefined) {
+    return {
+      kind: "measured",
+      startMs: row.event.startedAtMs,
+      endMs: Math.max(row.event.startedAtMs, row.event.recordedAtMs),
+      bound: "exact",
+    };
+  }
+
+  // A consolidated live stream has no vendor clock, but its first and closing
+  // arrivals are both on the server clock. `buildWaterfall` has already removed
+  // block/message-fidelity records before this function runs, so this cannot mistake
+  // a native flush time for a measured stream duration.
+  if (
+    !promoted &&
+    row.event.recordedAtMs === undefined &&
+    row.event.arrivalAtMs !== undefined &&
+    row.event.startedAtMs !== undefined
+  ) {
+    return {
+      kind: "measured",
+      startMs: row.event.startedAtMs,
+      endMs: Math.max(row.event.startedAtMs, row.event.arrivalAtMs),
+      bound: "exact",
+    };
+  }
+
+  // Compatibility for history snapshots written before explicit time axes existed.
+  // New rows always carry `arrivalAtMs`, so this branch cannot mix domains after rollout.
+  if (
+    !promoted &&
+    row.event.arrivalAtMs === undefined &&
+    row.event.recordedAtMs === undefined &&
+    row.event.startedAtMs !== undefined &&
+    row.event.startedAtMs < row.event.createdAtMs
+  ) {
+    return {
+      kind: "measured",
+      startMs: row.event.startedAtMs,
+      endMs: row.event.createdAtMs,
+      bound: "exact",
+    };
+  }
+
+  if (promoted && row.result?.recordedAtMs !== undefined && row.result.startedAtMs !== undefined) {
+    return {
+      kind: "measured",
+      startMs: row.result.startedAtMs,
+      endMs: Math.max(row.result.startedAtMs, row.result.recordedAtMs),
+      bound: "exact",
+    };
+  }
+
+  if (status === "running") return { kind: "open", startMs: liveStartMs };
 
   // Closed with no close timestamp: a *declared* trajectory whose phases were
   // consolidated into one row, so `createdAtMs` is its close.
@@ -452,10 +511,7 @@ function extentOf(node: TimelineNode): Extent {
   // bound, and a lower bound cannot be ranked — so the "slowest" answer this view
   // exists to give was withheld on all but a live turn.
   if (!promoted) {
-    const declaredStart = row.event.startedAtMs;
-    if (declaredStart !== undefined && declaredStart < startMs) {
-      return { kind: "measured", startMs: declaredStart, endMs: startMs, bound: "exact" };
-    }
+    const startMs = row.event.recordedAtMs ?? row.event.createdAtMs;
 
     // No `startedAtMs`: history written before the field was published, or a block
     // whose phases all arrived in one millisecond. The interior still bounds it from
@@ -469,7 +525,7 @@ function extentOf(node: TimelineNode): Extent {
   }
 
   // A promoted host with neither a result nor a close. Nothing said when it ended.
-  return { kind: "open", startMs };
+  return { kind: "open", startMs: liveStartMs };
 }
 
 /**

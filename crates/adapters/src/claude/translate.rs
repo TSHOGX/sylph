@@ -40,7 +40,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde_json::{json, Map, Value};
-use sylph_protocol::{CapabilityFacets, Event, EventKind, Phase, SessionMessage};
+use sylph_protocol::{CapabilityFacets, Event, EventKind, InteriorState, Phase, SessionMessage};
 
 /// A vendor `tool_use_id` in its role as the tag on forwarded output.
 ///
@@ -618,6 +618,11 @@ impl Correlation {
         } else {
             name
         };
+        if kind == EventKind::Subagent {
+            // Built-in Task forwards its delegate on stdout. The source is live at
+            // declaration time and becomes complete only when the delegated result closes.
+            event.interior_state = Some(InteriorState::Partial);
+        }
         event.text = text;
         out.push(event);
     }
@@ -877,6 +882,7 @@ impl Correlation {
                     .flatten()
                     .map(|span| span.as_str().to_string());
                 event.name = self.tool_names.get(&tool_id).cloned().flatten();
+                event.interior_state = Some(InteriorState::Full);
                 event.text = text;
                 event.is_error = is_error;
                 // So a `task_notification` arriving after the result cannot reopen what
@@ -1234,6 +1240,9 @@ impl Correlation {
         // journaled and, if no later phase carries a real name, becomes the trajectory's
         // durable name — see [`task_label`].
         event.name = name;
+        // Agent/Workflow lifecycle notices name work whose interior is expected from the
+        // bundle reader. Do not claim it is absent merely because it has not arrived yet.
+        event.interior_state = Some(InteriorState::Pending);
         event.data = data;
         out.push(event);
     }
@@ -1898,6 +1907,32 @@ mod tests {
         );
         // And nothing was minted from `task_id`, which is the node that used to spin.
         assert!(link.phases_of("inner").is_empty());
+    }
+
+    #[test]
+    fn a_forwarded_task_is_partial_until_its_result_closes() {
+        let mut link = Link::new();
+        link.stream(
+            None,
+            block_start(
+                0,
+                json!({ "type": "tool_use", "id": "toolu_task_state", "name": "Task" }),
+            ),
+        );
+        let declaration = link
+            .phases_of("toolu_task_state")
+            .into_iter()
+            .next()
+            .expect("Task declaration");
+        assert_eq!(declaration.interior_state, Some(InteriorState::Partial));
+
+        link.results(None, tool_result("toolu_task_state", "done", false));
+        let close = link
+            .phases_of("toolu_task_state")
+            .into_iter()
+            .last()
+            .expect("Task close");
+        assert_eq!(close.interior_state, Some(InteriorState::Full));
     }
 
     // ---- ForwardedOutputFindsItsDelegate ---------------------------------------

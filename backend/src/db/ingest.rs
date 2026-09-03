@@ -283,7 +283,8 @@ impl NativeIngest {
             };
 
             let mut wire = StreamEvent::from_protocol(&event);
-            report.last_event_ms = Some(wire.created_at_ms);
+            let event_time = wire.recorded_at_ms.unwrap_or(wire.arrival_at_ms);
+            report.last_event_ms = Some(event_time);
 
             // The opening ask, for whatever the parser managed to carry. See
             // `IngestReport::opening_status` for why this is `completed` and not
@@ -305,11 +306,11 @@ impl NativeIngest {
 
             let (turn_id, opened_at) = match &open_turn {
                 Some((id, opened_at)) => (id.clone(), *opened_at),
-                None => match self.open_container(session_id, wire.created_at_ms).await {
+                None => match self.open_container(session_id, event_time).await {
                     Some(id) => {
                         report.turns += 1;
-                        open_turn = Some((id.clone(), wire.created_at_ms));
-                        (id, wire.created_at_ms)
+                        open_turn = Some((id.clone(), event_time));
+                        (id, event_time)
                     }
                     // The session row is gone — adopt racing a delete. Dropping is the
                     // same answer the live drain gives, and for the same reason: an
@@ -360,7 +361,7 @@ impl NativeIngest {
                 // The vendor stated an outcome, so the container closes on the vendor's
                 // own terms. `finish_turn_at` records the status; the stop reason is
                 // already in the journaled `turn` event above, where a reader finds it.
-                self.settle(&turn_id, wire.is_error, opened_at, wire.created_at_ms)
+                self.settle(&turn_id, wire.is_error, opened_at, event_time)
                     .await;
                 open_turn = None;
             }

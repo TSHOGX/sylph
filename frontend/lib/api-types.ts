@@ -141,12 +141,18 @@ export interface StreamEvent {
    * parallel phases are carried by a single field.
    */
   span?: string;
+  /** Typed reachability state for a delegated trajectory's interior. */
+  interiorState?: InteriorState;
   name?: string;
   text?: string;
   data?: unknown;
   isError?: boolean;
   stability: string;
   source: string;
+  /** When Sylph received the fact; the server's clock, always present on new rows. */
+  arrivalAtMs?: number;
+  /** Vendor/source timestamp, absent when that source carried no usable time. */
+  recordedAtMs?: number;
   createdAtMs: number;
   /**
    * When a consolidated block's *first* phase arrived. Absent on a live event.
@@ -158,6 +164,13 @@ export interface StreamEvent {
    */
   startedAtMs?: number;
 }
+
+export type InteriorState =
+  | "forwards_nothing"
+  | "pending"
+  | "partial"
+  | "full"
+  | "unreadable";
 
 /** One turn plus its durable events, as returned by the history endpoint. */
 export interface TurnWithEvents {

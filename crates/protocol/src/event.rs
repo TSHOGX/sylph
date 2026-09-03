@@ -21,6 +21,80 @@
 
 use serde::{Deserialize, Serialize};
 
+/// What the producer knows about a delegated trajectory's interior.
+///
+/// This is a trajectory fact, not a fact about one block. `pending` means the source may still
+/// appear, `partial` means readable interior has arrived but the source is still live, `full`
+/// means the producer has a complete interior, `forwards_nothing` means the vendor explicitly
+/// offers no interior on this surface, and `unreadable` means an expected source could not be
+/// read. Keeping the state typed prevents a client from treating an absent child list as one
+/// meaning; absence used to collapse all five cases into `interiorAvailable: false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteriorState {
+    ForwardsNothing,
+    Pending,
+    Partial,
+    Full,
+    Unreadable,
+}
+
+impl InteriorState {
+    /// Stable wire/database spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ForwardsNothing => "forwards_nothing",
+            Self::Pending => "pending",
+            Self::Partial => "partial",
+            Self::Full => "full",
+            Self::Unreadable => "unreadable",
+        }
+    }
+
+    /// Parse the stable wire/database spelling.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "forwards_nothing" => Some(Self::ForwardsNothing),
+            "pending" => Some(Self::Pending),
+            "partial" => Some(Self::Partial),
+            "full" => Some(Self::Full),
+            "unreadable" => Some(Self::Unreadable),
+            _ => None,
+        }
+    }
+
+    /// Evidence strength used when observations from multiple producers are folded.
+    ///
+    /// A complete readable source is the strongest positive fact. A live readable prefix
+    /// outranks a terminal capability or diagnostic, while both terminal states outrank
+    /// merely waiting for a source. This is protocol-owned so backend and frontend folds
+    /// cannot silently disagree.
+    pub const fn strength(self) -> u8 {
+        match self {
+            Self::Pending => 1,
+            Self::ForwardsNothing => 2,
+            Self::Unreadable => 3,
+            Self::Partial => 4,
+            Self::Full => 5,
+        }
+    }
+
+    /// Merge two observations about one trajectory.
+    pub const fn merge(self, incoming: Self) -> Self {
+        if incoming.strength() >= self.strength() {
+            incoming
+        } else {
+            self
+        }
+    }
+}
+
+impl std::fmt::Display for InteriorState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// What an event is about.
 ///
 /// # Typed, with an escape hatch, and both halves are deliberate
@@ -192,6 +266,10 @@ pub struct Event {
     ///   Repair by reachability after attachment; no single pass detects it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<String>,
+    /// Typed trajectory interior state. Meaningful on `subagent` phases; absent on ordinary
+    /// blocks so a consumer never mistakes a block property for a trajectory property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interior_state: Option<InteriorState>,
     /// What this block is called, when the adapter knows.
     ///
     /// **Absent when unknown, and this is not a tidiness rule.** A guess written here
@@ -235,6 +313,14 @@ pub struct Event {
     ///
     /// [`Self::derive_stability`] is the one producer. Read this field everywhere else.
     pub stability: Stability,
+    /// Vendor/source timestamp, when the source recorded one. Live adapters leave this
+    /// absent; the server stamps the receipt time separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at_ms: Option<i64>,
+    /// Compatibility timestamp supplied by the adapter. Native adapters use the vendor
+    /// timestamp when present; live adapters may use their local arrival estimate. The
+    /// server exposes authoritative `arrivalAtMs` separately and does not use this field
+    /// to merge producers.
     pub created_at_ms: i64,
     /// When this block's *first* phase arrived, on a consolidated block only.
     ///
@@ -284,11 +370,13 @@ impl Event {
             phase,
             stream_id: None,
             span: None,
+            interior_state: None,
             name: None,
             text: String::new(),
             data: None,
             is_error: false,
             created_at_ms,
+            recorded_at_ms: None,
             started_at_ms: None,
         }
     }
@@ -337,6 +425,22 @@ mod tests {
         assert!(!event.is_stable());
         event.stability = Stability::Stable;
         assert!(event.is_stable());
+    }
+
+    #[test]
+    fn interior_state_parses_and_merges_by_evidence_strength() {
+        assert_eq!(InteriorState::parse("partial"), Some(InteriorState::Partial));
+        assert_eq!(InteriorState::parse("unknown"), None);
+        assert_eq!(InteriorState::Pending.merge(InteriorState::Partial), InteriorState::Partial);
+        assert_eq!(InteriorState::Partial.merge(InteriorState::Pending), InteriorState::Partial);
+        assert_eq!(
+            InteriorState::Unreadable.merge(InteriorState::Full),
+            InteriorState::Full
+        );
+        assert_eq!(
+            InteriorState::Full.merge(InteriorState::Unreadable),
+            InteriorState::Full
+        );
     }
 
     /// A kind this build does not model must reach a reader intact rather than
