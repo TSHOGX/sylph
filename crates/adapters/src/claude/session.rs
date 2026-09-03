@@ -486,6 +486,7 @@ async fn pump(
 async fn bundle_pump(out: mpsc::Sender<Result<SessionMessage>>, shared: Arc<Shared>) {
     let mut current: Option<NativeId> = None;
     let mut stream: Option<EventStream> = None;
+    let mut consecutive_failures = 0u32;
 
     loop {
         if shared.closed.load(std::sync::atomic::Ordering::Acquire) {
@@ -493,9 +494,47 @@ async fn bundle_pump(out: mpsc::Sender<Result<SessionMessage>>, shared: Arc<Shar
         }
 
         let native = shared.native_id.read().ok().and_then(|id| id.clone());
+
+        // **Only update `current` when `watch_live` succeeds.** The old code set `current`
+        // before attempting to create the stream, so a failed `watch_live()` on a native id
+        // that has not been flushed yet would latch permanently: `native == current` on the
+        // next poll, no retry, and the bundle reader never starts — while stdout continues
+        // working and nothing reports an error.
+        //
+        // Now: on failure, `current` stays `None` and the next poll retries. On success,
+        // state and stream move together. This is safe to retry indefinitely because
+        // `watch_live` is idempotent — it opens read-only cursors over immutable history.
         if native != current {
-            current = native.clone();
-            stream = native.and_then(|id| super::native::watch_live(&id).ok());
+            if let Some(ref id) = native {
+                match super::native::watch_live(id) {
+                    Ok(new_stream) => {
+                        current = Some(id.clone());
+                        stream = Some(new_stream);
+                        consecutive_failures = 0;
+                    }
+                    Err(error) => {
+                        consecutive_failures += 1;
+
+                        // Log on first failure and every 10th thereafter to avoid flooding,
+                        // but always track the count so diagnostics can surface it.
+                        if consecutive_failures == 1 || consecutive_failures % 10 == 0 {
+                            tracing::debug!(
+                                native_id = %id,
+                                consecutive_failures,
+                                error = %error,
+                                "bundle reader failed to start, will retry"
+                            );
+                        }
+
+                        stream = None;
+                    }
+                }
+            } else {
+                // Native id was cleared (session restart or error); reset state.
+                current = None;
+                stream = None;
+                consecutive_failures = 0;
+            }
         }
 
         if let Some(bundle) = stream.as_mut() {
@@ -515,7 +554,10 @@ async fn bundle_pump(out: mpsc::Sender<Result<SessionMessage>>, shared: Arc<Shar
                         None => {
                             // `watch_live` normally stays open for the session's lifetime;
                             // a transient file error should not disable the reader forever.
+                            // Clear both `stream` and `current` so the next poll retries
+                            // `watch_live` from scratch.
                             stream = None;
+                            current = None;
                         }
                     }
                 }

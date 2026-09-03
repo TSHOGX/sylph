@@ -1503,6 +1503,15 @@ struct JournalCursor {
     version: u64,
 }
 
+/// Cursor for a delegate's `.meta.json` sidecar.
+///
+/// Tracked independently from the delegate's JSONL cursor so that a sidecar appearing after
+/// the delegate's first open is still discovered and ingested.
+struct SidecarCursor {
+    fingerprint: Option<(u64, u128)>,
+    ingested: bool,
+}
+
 /// State for the dynamic multi-file bundle reader.
 struct BundleFollowState {
     session: SessionFiles,
@@ -1510,6 +1519,8 @@ struct BundleFollowState {
     delegates: HashMap<PathBuf, JsonlCursor>,
     journals: HashMap<PathBuf, JournalCursor>,
     manifests: HashMap<PathBuf, ManifestCursor>,
+    /// Tracks `.meta.json` sidecars independently from their delegate JSONL files.
+    sidecars: HashMap<PathBuf, SidecarCursor>,
     workflow_hosts: HashMap<String, Option<String>>,
     /// `tool_use` id → the tool's name, from the root transcript.
     ///
@@ -1537,6 +1548,7 @@ impl BundleFollowState {
             delegates: HashMap::new(),
             journals: HashMap::new(),
             manifests: HashMap::new(),
+            sidecars: HashMap::new(),
             workflow_hosts: HashMap::new(),
             host_tools: HashMap::new(),
             pending: VecDeque::new(),
@@ -1584,6 +1596,26 @@ impl BundleFollowState {
             }
         }
 
+        // **Two-phase poll to eliminate file-order dependency in suppression decisions.**
+        //
+        // The problem: a delegate's suppression depends on whether its host tool is in
+        // `STDOUT_FORWARDED_TOOLS`. That name comes from the root transcript or from a parent
+        // delegate. If delegates are processed in path-sorted order, a child may be reached
+        // before its parent's tool calls are collected, causing the child to be wrongly
+        // projected when it should have been suppressed.
+        //
+        // The fix: Phase 1 scans all new bytes in root and delegates to collect host tools,
+        // without advancing cursors or projecting. Phase 2 then reads and projects with the
+        // complete host_tools map available for suppression decisions.
+
+        // Scan delegate sidecars independently. A `.meta.json` may appear after its delegate
+        // JSONL was first opened, so this is polled every pass with its own fingerprint cursor.
+        messages.extend(self.scan_sidecars());
+
+        // Phase 1: Collect host tools from all new appended bytes
+        self.collect_all_host_tools();
+
+        // Phase 2: Read and project with suppression decisions now stable
         messages.extend(self.read_root());
 
         // Resolve spans from the current manifest/sidecar view every pass. This is what
@@ -1603,12 +1635,97 @@ impl BundleFollowState {
         Ok(messages)
     }
 
+    /// Scan delegate sidecars independently from their JSONL files.
+    ///
+    /// A `.meta.json` may appear after its delegate JSONL was first opened, so we poll every
+    /// delegate path for a sidecar every pass. This ensures late-arriving metadata is discovered.
+    fn scan_sidecars(&mut self) -> Vec<SessionMessage> {
+        let mut messages = Vec::new();
+        let delegates = self.session.delegates.clone();
+
+        for delegate in delegates {
+            let sidecar_path = delegate.with_extension("meta.json");
+
+            let Some(meta) = std::fs::metadata(&sidecar_path).ok() else {
+                continue;
+            };
+
+            let fingerprint = (meta.len(), file_modified_nanos(&meta));
+            let cursor = self.sidecars.entry(sidecar_path.clone()).or_insert(SidecarCursor {
+                fingerprint: None,
+                ingested: false,
+            });
+
+            // Check if this sidecar is new or changed
+            let changed = cursor.fingerprint.is_none_or(|old_fp| old_fp != fingerprint);
+            if !changed {
+                continue;
+            }
+
+            // Ingest the sidecar
+            if let Some(payload) = read_sidecar(&delegate) {
+                messages.push(SessionMessage::NativeRecord(NativeRecord {
+                    source: native_source(&sidecar_path),
+                    version: 1,
+                    payload,
+                    blobs: Vec::new(),
+                }));
+                cursor.fingerprint = Some(fingerprint);
+                cursor.ingested = true;
+            }
+        }
+
+        messages
+    }
+
+    /// Phase 1: Scan all new bytes in root and delegates for host tools without advancing cursors.
+    ///
+    /// This ensures that when Phase 2 makes suppression decisions, it has the complete picture
+    /// of all host tools in this poll cycle, regardless of file-sort order.
+    fn collect_all_host_tools(&mut self) {
+        // Scan root for new host tools
+        if let Some((bytes, _)) = read_appended(&self.session.transcript, self.root.offset) {
+            for record in json_lines(&bytes, Edge::Head) {
+                if let Some((run_id, host)) = workflow_host(&record) {
+                    self.workflow_hosts
+                        .entry(run_id)
+                        .and_modify(|existing| {
+                            if existing.as_ref().is_some_and(|old| old != &host) {
+                                *existing = None;
+                            }
+                        })
+                        .or_insert(Some(host));
+                }
+                collect_host_tools(&record, &mut self.host_tools);
+            }
+        }
+
+        // Scan all delegates for nested host tools
+        let delegates = self.session.delegates.clone();
+        for delegate in delegates {
+            let offset = self
+                .delegates
+                .get(&delegate)
+                .map(|cursor| cursor.offset)
+                .unwrap_or(0);
+
+            if let Some((bytes, _)) = read_appended(&delegate, offset) {
+                for record in json_lines(&bytes, Edge::Head) {
+                    collect_host_tools(&record, &mut self.host_tools);
+                }
+            }
+        }
+    }
+
     /// Read the root transcript's appended records.
     ///
     /// Every record is **retained and mined** for the two facts the rest of the pass needs —
     /// the workflow run-id join and the host tool names — on both root sources. Only
     /// *projection* is conditional: on [`RootSource::Stdout`] the process stream is already
     /// emitting these blocks, and emitting them again here would double every one.
+    ///
+    /// Host tools are collected in Phase 1 (`collect_all_host_tools`), so this phase focuses
+    /// on advancing the cursor, emitting native records, and conditionally projecting events.
     fn read_root(&mut self) -> Vec<SessionMessage> {
         let Some((bytes, next_offset)) = read_appended(&self.session.transcript, self.root.offset)
         else {
@@ -1631,6 +1748,14 @@ impl BundleFollowState {
                 .and_then(Value::as_str)
                 .and_then(epoch_millis_from_iso)
                 .unwrap_or(0);
+            // workflow_host and collect_host_tools were already done in Phase 1, but we still
+            // need to update workflow_hosts here for consistency (it may have changed between
+            // Phase 1 scan and Phase 2 projection if new data arrived). Actually no - Phase 1
+            // scanned the same bytes we're now reading, so the data is identical. We can skip
+            // the duplicate collection.
+            //
+            // Actually, let's keep it for safety: if collect_all_host_tools fails partway, at
+            // least read_root still collects from what it processes. The cost is negligible.
             if let Some((run_id, host)) = workflow_host(&record) {
                 self.workflow_hosts
                     .entry(run_id)
@@ -1648,6 +1773,7 @@ impl BundleFollowState {
         }
         messages
     }
+
 
     fn read_delegate(&mut self, path: &Path, span: Option<String>) -> Result<Vec<SessionMessage>> {
         let Some(agent) = agent_id_of(path) else {
@@ -1734,9 +1860,8 @@ impl BundleFollowState {
             opened.span = span.clone();
             opened.name = delegate_name(path);
             messages.push(SessionMessage::Event(opened));
-            if let Some(sidecar) = sidecar_record(path) {
-                messages.push(SessionMessage::NativeRecord(sidecar));
-            }
+            // Sidecar is now handled independently in `scan_sidecars()`, not here. This
+            // ensures a `.meta.json` that arrives after the delegate JSONL is still discovered.
             entry.opened = true;
         }
 
