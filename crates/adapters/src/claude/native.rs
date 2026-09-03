@@ -43,8 +43,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use anyhow::Context;
 use anyhow::{anyhow, Result};
 use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
@@ -55,8 +53,6 @@ use sylph_protocol::{
 };
 
 use super::translate::Correlation;
-#[cfg(test)]
-use crate::native::for_each_json_line;
 use crate::native::{candidates, epoch_millis_from_iso, SessionCandidate};
 
 /// Where `claude` keeps its transcripts, `$HOME`-relative.
@@ -84,6 +80,10 @@ pub fn adopt(id: &NativeId) -> Result<EventStream> {
     // Keeping adoption on the bundle reader is important: a reload must not silently
     // traverse a different set of files than a live watcher.
     let mut reader = BundleFollowState::new(session, RootSource::File);
+    // Adoption has no later poll in which a missing workflow manifest could arrive. Mark
+    // this one pass as final so a permanently absent manifest is represented as an honest
+    // root declaration rather than an undeclared trajectory that never becomes visible.
+    reader.finalizing = true;
     let messages = reader.poll()?;
     Ok(Box::pin(futures::stream::iter(
         messages.into_iter().map(Ok),
@@ -116,21 +116,19 @@ pub fn watch(id: &NativeId) -> Result<EventStream> {
 /// timing rather than about the vendor, so a delegate file polled before its notification
 /// arrived would answer it wrongly — and it required sharing a mutex across the two, which
 /// is what made the reader abort on a runtime thread.
-pub fn watch_live(
+pub(crate) fn watch_live(
     id: &NativeId,
-    resumed: bool,
+    baseline: BundleBaseline,
     root_correlation: std::sync::Arc<std::sync::Mutex<Correlation>>,
+    closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<EventStream> {
     let session = locate(id)?;
     Ok(follow_from_with_correlation(
         session,
         RootSource::Stdout,
-        if resumed {
-            FollowBaseline::Current
-        } else {
-            FollowBaseline::Empty
-        },
+        baseline,
         Some(root_correlation),
+        Some(closed),
     ))
 }
 
@@ -146,7 +144,7 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
     }
 
     let mut found = Vec::new();
-    for candidate in candidates(&root, is_root_transcript) {
+    for candidate in candidates(&root, |path| is_root_transcript(&root, path)) {
         let Some(summary) = summarize(&candidate) else {
             continue;
         };
@@ -193,7 +191,7 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
 /// cannot be adopted, cannot be resumed, and duplicates its parent's identity — the
 /// two-id-spaces failure `sylph_protocol::NativeId` exists to prevent. Delegates reach a
 /// reader as delegated trajectories inside their parent, which is what they are.
-fn is_root_transcript(path: &Path) -> bool {
+fn is_root_transcript(root: &Path, path: &Path) -> bool {
     if path.extension().is_none_or(|ext| ext != "jsonl") {
         return false;
     }
@@ -205,11 +203,13 @@ fn is_root_transcript(path: &Path) -> bool {
     if name.starts_with("agent-") || name == "journal.jsonl" {
         return false;
     }
-    // A session's transcript sits directly in its project directory. Anything nested
-    // deeper is interior structure whose name happens not to match the two rules above —
-    // measured, one `…orphaned-<epoch>-<hash>.jsonl` exists at the top level and is a real
-    // session, while nothing legitimate at depth 2 is.
-    true
+    // A session's transcript sits directly in one project directory, and that project
+    // directory sits directly under the Claude store root. The name exclusions above are
+    // useful documentation, but depth is the actual constraint: an unknown nested JSONL is
+    // interior even when its name is neither `agent-*` nor `journal.jsonl`.
+    path.parent()
+        .and_then(Path::parent)
+        .is_some_and(|parent| parent == root)
 }
 
 /// One session's files: its transcript, delegates, workflow manifests, and journals recorded
@@ -239,7 +239,7 @@ fn locate(id: &NativeId) -> Result<SessionFiles> {
     // The project directory is a mangled `cwd` and is **not derivable from the session
     // id**, so the store has to be walked. Measured over the whole store and well under the
     // per-session parse cost, which is why there is no index here to keep in sync.
-    let transcript = candidates(&root, is_root_transcript)
+    let transcript = candidates(&root, |path| is_root_transcript(&root, path))
         .into_iter()
         .find(|candidate| {
             candidate.path.file_name().and_then(|name| name.to_str()) == Some(wanted.as_str())
@@ -458,8 +458,8 @@ fn read_span(path: &Path, offset: u64, len: u64) -> Option<Vec<u8>> {
 ///
 /// A span cut out of the middle of a file has a partial line at each end, and which end
 /// depends on where the span started — so [`Edge`] says which fragment to drop rather than
-/// this guessing. A line that does not parse is skipped for the same reason
-/// [`for_each_json_line`] skips one: these are files the vendor is currently writing.
+/// this guessing. A line that does not parse is skipped here because a listing window can
+/// cut it; the production bundle cursor reads complete lines and fails on malformed ones.
 fn json_lines(bytes: &[u8], edge: Edge) -> impl DoubleEndedIterator<Item = Value> + use<'_> {
     let text = String::from_utf8_lossy(bytes);
     let mut lines: Vec<&str> = text.lines().collect();
@@ -474,30 +474,30 @@ fn json_lines(bytes: &[u8], edge: Edge) -> impl DoubleEndedIterator<Item = Value
         .into_iter()
 }
 
-/// The parsed JSON plus the exact line bytes that produced it. Raw retention uses the latter
-/// so a future projection can recover lexical details serde_json normalizes away.
-fn json_lines_with_raw(
-    bytes: &[u8],
-    edge: Edge,
-) -> impl DoubleEndedIterator<Item = (Value, Vec<u8>)> + use<'_> {
-    let mut lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
-    if edge == Edge::Tail && !lines.is_empty() {
-        lines.remove(0);
+/// Parse a span containing only complete JSONL records.
+///
+/// `read_appended` withholds a trailing partial line, so an unparseable line reaching this
+/// function is not a writer race that can heal on the next poll. Failing loudly prevents a
+/// malformed source from being advanced past and then reported as a successfully empty
+/// transcript. Enumeration windows use the tolerant `json_lines` helper because their first
+/// or last record may be cut by design; the production bundle cursor never does.
+fn parse_jsonl_records(path: &Path, bytes: &[u8]) -> Result<Vec<(Value, Vec<u8>)>> {
+    let mut records = Vec::new();
+    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value = serde_json::from_slice(line).map_err(|error| {
+            anyhow!(
+                "invalid complete JSON record {} in {}: {}",
+                index + 1,
+                path.display(),
+                error
+            )
+        })?;
+        records.push((value, line.to_vec()));
     }
-    lines
-        .into_iter()
-        .filter_map(|line| {
-            if line.is_empty() {
-                return None;
-            }
-            let raw = line.to_vec();
-            let trimmed = String::from_utf8_lossy(line);
-            serde_json::from_str::<Value>(trimmed.trim())
-                .ok()
-                .map(|value| (value, raw))
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
+    Ok(records)
 }
 
 /// A string field, treating `""` as absent.
@@ -510,172 +510,6 @@ fn string_at(payload: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-}
-
-/// One session's whole recorded history, as the events a live turn would have emitted.
-///
-/// # The shape of the pass
-///
-/// The root transcript is parsed first, collecting workflow joins, then each delegate, then
-/// the workflow journals. Each file gets its **own** [`Correlation`], because the correlation
-/// state is per-stream: a
-/// delegate's content-block indices are its own, and sharing one map across files would
-/// reintroduce the index collision `translate::BlockKey` exists to prevent, here between
-/// files rather than between concurrent delegates.
-///
-/// A delegate's events are then re-parented onto the trajectory that spawned it, which is
-/// what [`delegate_spans`] resolves.
-#[cfg(test)]
-fn parse_session(session: &SessionFiles) -> Result<Vec<SessionMessage>> {
-    let mut messages = Vec::new();
-
-    let root = parse_transcript(&session.transcript, None)?;
-    let spans = delegate_spans(session, &root.workflow_hosts);
-    messages.extend(root.messages);
-
-    for delegate in &session.delegates {
-        let Some(agent) = agent_id_of(delegate) else {
-            continue;
-        };
-        // **A delegate's trajectory id is its own `agentId`**, and the map answers the
-        // different question of what *contains* it. Those must not be conflated: using the
-        // containing call as the id makes `stream_id == span`, which is a node that is its
-        // own ancestor — unreachable, so no attachment pass can root it and the whole
-        // subtree vanishes with nothing reporting it missing (`Event::span`). It also
-        // collapses every delegate spawned by one call onto a single node, which is the
-        // multiplexing defect `translate::TrajectoryId` exists to prevent.
-        //
-        // `None` container when the store records no link — see [`delegate_spans`] for the
-        // measured population. Its work still reaches a reader, at the root: an unknown
-        // `span` renders at the root, because dropping loses work exactly where structure
-        // is least reliable.
-        let container = spans.get(&agent).cloned();
-        let parsed = parse_transcript(delegate, Some(agent.clone()))?;
-
-        // The delegate's own declaration, so a reader has a node to attach its work to even
-        // when the parent's transcript never named it. Emitted before its contents, because
-        // `started` is where a trajectory's identity lives.
-        let mut opened = Event::new(
-            EventKind::Subagent,
-            Some(Phase::Started),
-            parsed.started_at_ms,
-        );
-        opened.stream_id = Some(agent);
-        opened.span = container;
-        opened.name = delegate_name(delegate);
-        messages.push(SessionMessage::Event(opened));
-        if let Some(sidecar) = sidecar_record(delegate) {
-            messages.push(SessionMessage::NativeRecord(sidecar));
-        }
-
-        messages.extend(parsed.messages);
-    }
-
-    for journal in &session.journals {
-        messages.extend(parse_journal(journal)?);
-    }
-
-    Ok(messages)
-}
-
-/// One file's records, projected.
-#[derive(Debug)]
-#[cfg(test)]
-struct ParsedFile {
-    messages: Vec<SessionMessage>,
-    /// The first timestamp seen, for the synthesized trajectory declaration above.
-    started_at_ms: i64,
-    /// Workflow run ids and their host `tool_use` ids found in the root transcript.
-    /// `None` marks a conflicting duplicate, which is ambiguous and must not choose a host.
-    workflow_hosts: HashMap<String, Option<String>>,
-}
-
-/// Project one JSONL file through the live translator.
-///
-/// `span` is the trajectory every event in this file belongs to — set for a delegate,
-/// `None` for the session's own transcript.
-#[cfg(test)]
-fn parse_transcript(path: &Path, span: Option<String>) -> Result<ParsedFile> {
-    let mut correlation = Correlation::new();
-    let mut messages = Vec::new();
-    let mut started_at_ms = 0;
-    let mut workflow_hosts: HashMap<String, Option<String>> = HashMap::new();
-    let mut version = 0u64;
-
-    let stats = for_each_json_line(path, |record| {
-        version += 1;
-        messages.push(SessionMessage::NativeRecord(native_record(
-            path, version, &record,
-        )));
-        let at_ms = record
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .and_then(epoch_millis_from_iso)
-            .unwrap_or(started_at_ms);
-        if started_at_ms == 0 {
-            started_at_ms = at_ms;
-        }
-
-        // A root `toolUseResult` records the workflow run id while the nested
-        // `tool_result` block records the host `tool_use_id`. Keep this join as metadata on
-        // the same parse pass so `parse_session` does not scan the root transcript twice.
-        if span.is_none() {
-            if let Some((run_id, host)) = workflow_host(&record) {
-                match workflow_hosts.get_mut(&run_id) {
-                    // A conflicting duplicate is not a choice to make: keeping either host
-                    // would turn a malformed native record into a plausible wrong tree. Keep
-                    // the ambiguity latched so a later duplicate cannot silently revive it.
-                    Some(existing) if existing.as_ref().is_some_and(|value| value != &host) => {
-                        *existing = None;
-                    }
-                    Some(_) => {}
-                    None => {
-                        workflow_hosts.insert(run_id, Some(host));
-                    }
-                }
-            }
-        }
-
-        for message in project_record(&mut correlation, &record, at_ms) {
-            messages.push(message);
-        }
-        Ok(())
-    })
-    .with_context(|| format!("parsing {}", path.display()))?;
-
-    // A file with records that all failed to parse is a different fact from an empty one,
-    // and they look identical downstream (`crate::native::JsonLines`). This is the loud
-    // failure `AGENTS.md` § Compatibility asks for in place of tolerating a shape no known
-    // era emits.
-    if stats.parsed == 0 && stats.skipped > 0 {
-        return Err(anyhow!(
-            "no record in {} parsed as JSON ({} lines skipped); this is not a shape any \
-             known `claude` version writes",
-            path.display(),
-            stats.skipped
-        ));
-    }
-
-    // Every event in a delegate's file belongs to that delegate's trajectory. Applied
-    // after projection rather than inside it so the translator stays the live one, and
-    // applied only where the event does not already name a *deeper* span — a delegate that
-    // itself delegates has interior structure of its own, and overwriting it would flatten
-    // the very tree this is reconstructing.
-    if let Some(trajectory) = &span {
-        for message in &mut messages {
-            if let SessionMessage::Event(event) = message {
-                if event.span.is_none() {
-                    event.span = Some(trajectory.clone());
-                }
-            }
-        }
-    }
-
-    Ok(ParsedFile {
-        messages,
-        started_at_ms,
-        workflow_hosts,
-    })
 }
 
 /// The root transcript's join key for a workflow manifest.
@@ -695,6 +529,37 @@ fn workflow_host(record: &Value) -> Option<(String, String)> {
             })
         })?;
     Some((run_id, host))
+}
+
+/// A native launch/result names the delegate and the content block names its host call.
+/// This is the attribution source that keeps a late or permanently missing sidecar from
+/// leaving an otherwise fully recorded delegate undecidable.
+fn native_agent_host(record: &Value) -> Option<(String, String)> {
+    let agent = record
+        .get("toolUseResult")
+        .and_then(|result| string_at(result, "agentId"))?;
+    let host = record
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|blocks| {
+            blocks.iter().find_map(|block| {
+                (block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                    .then(|| string_at(block, "tool_use_id"))
+                    .flatten()
+            })
+        })?;
+    Some((agent, host))
+}
+
+fn remember_unique(map: &mut HashMap<String, Option<String>>, key: String, value: String) {
+    map.entry(key)
+        .and_modify(|existing| {
+            if existing.as_ref().is_some_and(|old| old != &value) {
+                *existing = None;
+            }
+        })
+        .or_insert(Some(value));
 }
 
 /// One native record, projected onto events.
@@ -853,12 +718,6 @@ fn synchronous_agent_result(record: &Value) -> Option<(String, Option<String>, S
     Some((agent, host, summary))
 }
 
-/// Preserve the exact native JSON object and any large sidecar it references.
-#[cfg(test)]
-fn native_record(path: &Path, version: u64, record: &Value) -> NativeRecord {
-    native_record_with_raw(path, version, record, None)
-}
-
 fn native_record_with_raw(
     path: &Path,
     version: u64,
@@ -923,18 +782,6 @@ fn read_native_blob(name: &str) -> NativeBlob {
         locator: Some(canonical.to_string_lossy().to_string()),
         error: None,
     }
-}
-
-#[cfg(test)]
-fn sidecar_record(path: &Path) -> Option<NativeRecord> {
-    let (payload, raw) = read_sidecar_with_raw(path)?;
-    Some(NativeRecord {
-        source: native_source(&path.with_extension("meta.json")),
-        version: revision_bytes(&raw),
-        raw_json: Some(raw),
-        payload,
-        blobs: Vec::new(),
-    })
 }
 
 fn revision_bytes(bytes: &[u8]) -> u64 {
@@ -1164,6 +1011,20 @@ fn assistant_blocks(
                 }
                 opening
             }
+            Some("thinking") => {
+                let mut opening = block.clone();
+                if let Some(object) = opening.as_object_mut() {
+                    object.remove("thinking");
+                }
+                opening
+            }
+            Some("text") => {
+                let mut opening = block.clone();
+                if let Some(object) = opening.as_object_mut() {
+                    object.remove("text");
+                }
+                opening
+            }
             _ => block.clone(),
         };
 
@@ -1356,56 +1217,6 @@ fn system_record(correlation: &mut Correlation, record: &Value, at_ms: i64) -> V
 /// what closes an unreported trajectory, and it records that as `abandoned` — distinct from
 /// `failed`, which is the distinction that keeps an interrupted turn from reading as a
 /// broken one.
-#[cfg(test)]
-fn parse_journal(path: &Path) -> Result<Vec<SessionMessage>> {
-    let mut messages = Vec::new();
-    // `journal.jsonl` records carry **no timestamp** — measured, 1379 `started` and 1353
-    // `result` records and not one `timestamp` field among them. So an outcome is ordered by
-    // its position in the file and carries no time of its own. `0` rather than a synthesized
-    // stamp: a fabricated timestamp is a lie a journal makes permanent, and the server
-    // stamps arrival anyway.
-    const NO_RECORDED_TIME: i64 = 0;
-
-    for_each_json_line(path, |record| {
-        let Some(agent) = string_at(&record, "agentId") else {
-            return Ok(());
-        };
-        // The delegate this outcome belongs to. **Its own `agentId` is the trajectory**, which
-        // is what its `agent-<hash>.jsonl` is named after and what `parse_session` declared —
-        // so the outcome closes the same node the delegate's work is inside.
-        //
-        // Deliberately *not* the containing trajectory: closing the container would report one
-        // delegate's outcome as the whole host's, and with a workflow fanning out to N
-        // delegates under one host the last outcome to arrive would win while the other N-1
-        // stayed open forever. That is the multiplexing collapse `translate::TrajectoryId`
-        // exists to prevent, and a workflow is exactly the N>1 case.
-        //
-        // Only `result`. `started` is not emitted here: the delegate's own file already
-        // declares the trajectory in `parse_session`, and a second `started` would be the
-        // duplicate node that rule exists to prevent.
-        if record.get("type").and_then(Value::as_str) == Some("result") {
-            let mut event = Event::new(
-                EventKind::Subagent,
-                Some(Phase::Completed),
-                NO_RECORDED_TIME,
-            );
-            event.stream_id = Some(agent);
-            // The phase's own answer. A string for most, an object for a structured result —
-            // serialized rather than dropped, because it is the delegate's whole output.
-            event.text = match record.get("result") {
-                Some(Value::String(text)) => text.clone(),
-                Some(other) => other.to_string(),
-                None => String::new(),
-            };
-            messages.push(SessionMessage::Event(event));
-        }
-        Ok(())
-    })
-    .with_context(|| format!("parsing workflow journal {}", path.display()))?;
-
-    Ok(messages)
-}
-
 /// The `agentId` a delegate's filename encodes.
 ///
 /// `agent-<hash>.jsonl` → `<hash>`. The filename is authoritative rather than the records
@@ -1441,6 +1252,7 @@ fn agent_id_of(path: &Path) -> Option<String> {
 /// the 91 sidecars carrying a `name` and none of the others, and the slug is the less
 /// informative half of the pair (`demo-b` against `后台演示任务B`). One fact with two spellings
 /// is a card that changes under the reader; the brief is also what a person would recognise.
+#[cfg(test)]
 fn delegate_name(path: &Path) -> Option<String> {
     let sidecar = read_sidecar(path)?;
     string_at(&sidecar, "description").or_else(|| string_at(&sidecar, "name"))
@@ -1456,6 +1268,32 @@ fn read_sidecar_with_raw(path: &Path) -> Option<(Value, Vec<u8>)> {
     let raw = std::fs::read(sidecar).ok()?;
     let payload = serde_json::from_slice(&raw).ok()?;
     Some((payload, raw))
+}
+
+fn sidecar_source(path: &Path) -> SidecarSource {
+    let sidecar = path.with_extension("meta.json");
+    if !sidecar.is_file() {
+        return SidecarSource::Missing;
+    }
+    let Ok(raw) = std::fs::read(sidecar) else {
+        return SidecarSource::Partial;
+    };
+    let Ok(payload) = serde_json::from_slice(&raw) else {
+        return SidecarSource::Partial;
+    };
+    SidecarSource::Ready { payload, raw }
+}
+
+fn workflow_run_of(path: &Path) -> Option<String> {
+    let components: Vec<_> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    let workflows = components.iter().position(|part| *part == "workflows")?;
+    components
+        .get(workflows + 1)
+        .filter(|run| run.starts_with("wf_"))
+        .map(|run| (*run).to_string())
 }
 
 /// Which trajectory each delegate's work belongs inside, keyed by `agentId`.
@@ -1637,37 +1475,127 @@ fn read_workflow_manifest(path: &Path) -> Option<Value> {
 /// offset. Re-scanning the directory on every pass is what discovers delegates and journals
 /// created after the first pass.
 fn follow(session: SessionFiles, root: RootSource) -> EventStream {
-    follow_from(session, root, FollowBaseline::Empty)
+    follow_from_with_correlation(session, root, BundleBaseline::default(), None, None)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FollowBaseline {
-    /// Read every complete record currently in the bundle.
-    Empty,
-    /// Attach to the current end of every source and only publish later appends.
-    Current,
+/// The complete source boundaries that existed before a resumed process was started.
+///
+/// Captured before spawn, not when `system/init` eventually reveals the id. A delegate may
+/// be created by the resumed turn in that interval; treating the later observation as the
+/// baseline silently skips new work. JSONL boundaries are the byte after the last newline,
+/// while rewritten snapshots retain their current fingerprint.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BundleBaseline {
+    root: u64,
+    /// The root bytes were hydrated into the live correlation before process launch.
+    ///
+    /// Resume startup performs this synchronously so stdout cannot race historical state. The
+    /// follower must then avoid hydrating the same bytes a second time.
+    root_hydrated: bool,
+    delegates: HashMap<PathBuf, u64>,
+    journals: HashMap<PathBuf, u64>,
+    manifests: HashMap<PathBuf, (u64, u128)>,
+    sidecars: HashMap<PathBuf, (u64, u128)>,
 }
 
-fn follow_from(session: SessionFiles, root: RootSource, baseline: FollowBaseline) -> EventStream {
-    follow_from_with_correlation(session, root, baseline, None)
+impl BundleBaseline {
+    fn capture(session: &SessionFiles) -> Self {
+        let mut baseline = Self {
+            root: complete_offset(&session.transcript),
+            root_hydrated: false,
+            ..Self::default()
+        };
+        for path in &session.delegates {
+            baseline
+                .delegates
+                .insert(path.clone(), complete_offset(path));
+            let sidecar = path.with_extension("meta.json");
+            if let Some(fingerprint) = file_fingerprint(&sidecar) {
+                baseline.sidecars.insert(sidecar, fingerprint);
+            }
+        }
+        for path in &session.journals {
+            baseline
+                .journals
+                .insert(path.clone(), complete_offset(path));
+        }
+        for path in &session.manifests {
+            if let Some(fingerprint) = file_fingerprint(path) {
+                baseline.manifests.insert(path.clone(), fingerprint);
+            }
+        }
+        baseline
+    }
+}
+
+/// Snapshot the bundle before launching a resumed Claude process.
+pub(crate) fn capture_live_baseline(id: &NativeId) -> Result<BundleBaseline> {
+    Ok(BundleBaseline::capture(&locate(id)?))
+}
+
+/// Hydrate the root portion of a resume baseline before the vendor process is started.
+///
+/// The live stdout pump and the bundle follower are independent producers. If this work is
+/// deferred until the follower's first poll, a newly emitted stdout frame can observe an empty
+/// correlation and be ordered ahead of the history that establishes its block state. Hydrating
+/// synchronously makes the pre-launch boundary an actual ordering barrier rather than a mutex
+/// that merely prevents simultaneous writes.
+pub(crate) fn hydrate_live_baseline(
+    id: &NativeId,
+    mut baseline: BundleBaseline,
+    root_correlation: &std::sync::Arc<std::sync::Mutex<Correlation>>,
+) -> Result<BundleBaseline> {
+    if baseline.root == 0 || baseline.root_hydrated {
+        baseline.root_hydrated = true;
+        return Ok(baseline);
+    }
+
+    let session = locate(id)?;
+    let bytes = read_complete_range(&session.transcript, 0, baseline.root).ok_or_else(|| {
+        anyhow!(
+            "could not read the captured Claude resume baseline from {}",
+            session.transcript.display()
+        )
+    })?;
+    let records = parse_jsonl_records(&session.transcript, &bytes)?;
+    let mut correlation = root_correlation
+        .lock()
+        .map_err(|_| anyhow!("claude root correlation state was poisoned during hydration"))?;
+    for (record, _) in records {
+        let _ = project_record(&mut correlation, &record, 0);
+    }
+    baseline.root_hydrated = true;
+    Ok(baseline)
 }
 
 fn follow_from_with_correlation(
     session: SessionFiles,
     root: RootSource,
-    baseline: FollowBaseline,
+    baseline: BundleBaseline,
     root_correlation: Option<std::sync::Arc<std::sync::Mutex<Correlation>>>,
+    closed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> EventStream {
     /// Fast enough to feel live against a store that flushes per content block, slow enough
     /// that an idle session costs one `stat` per interval.
     const POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
     Box::pin(futures::stream::unfold(
-        BundleFollowState::new_with_correlation(session, root, baseline, root_correlation),
+        BundleFollowState::new_with_correlation(session, root, baseline, root_correlation, closed),
         |mut state| async move {
             loop {
                 if let Some(message) = state.pending.pop_front() {
                     return Some((Ok(message), state));
+                }
+
+                if state
+                    .closed
+                    .as_ref()
+                    .is_some_and(|closed| closed.load(std::sync::atomic::Ordering::Acquire))
+                {
+                    if state.finalizing {
+                        return None;
+                    }
+                    state.finalizing = true;
                 }
 
                 match state.poll() {
@@ -1675,6 +1603,7 @@ fn follow_from_with_correlation(
                         state.pending.extend(messages);
                         continue;
                     }
+                    Ok(_) if state.finalizing => return None,
                     Ok(_) => tokio::time::sleep(POLL).await,
                     Err(error) => return Some((Err(error), state)),
                 }
@@ -1700,6 +1629,9 @@ enum RootSource {
 /// Cursor for one append-only JSONL source.
 struct JsonlCursor {
     offset: u64,
+    /// Bytes that predate a resumed process. They are hydrated into correlation state only
+    /// after attribution/suppression is decidable, never emitted or retained again.
+    baseline_offset: u64,
     version: u64,
     correlation: Correlation,
     opened: bool,
@@ -1722,7 +1654,15 @@ struct JournalCursor {
 /// the delegate's first open is still discovered and ingested.
 struct SidecarCursor {
     fingerprint: Option<(u64, u128)>,
-    ingested: bool,
+    /// A finalizing pass has made a partial sidecar a terminal unreadable source. This keeps
+    /// the follower from returning the same error forever on every subsequent poll.
+    terminal_unreadable: bool,
+}
+
+enum SidecarSource {
+    Missing,
+    Partial,
+    Ready { payload: Value, raw: Vec<u8> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1745,6 +1685,10 @@ struct BundleFollowState {
     /// Tracks `.meta.json` sidecars independently from their delegate JSONL files.
     sidecars: HashMap<PathBuf, SidecarCursor>,
     workflow_hosts: HashMap<String, Option<String>>,
+    /// Delegate `agentId` → its host `tool_use_id`, from native launch/results or embedded
+    /// task notifications. This is an independent attribution source when a sidecar is late
+    /// or permanently absent.
+    delegate_hosts: HashMap<String, Option<String>>,
     /// `tool_use` id → the tool's name, from the root transcript.
     ///
     /// This is what decides whether a delegate's interior is also on stdout, so it is read on
@@ -1753,35 +1697,42 @@ struct BundleFollowState {
     host_tools: HashMap<String, String>,
     pending: VecDeque<SessionMessage>,
     root_source: RootSource,
+    root_hydrated: bool,
     root_correlation: Option<std::sync::Arc<std::sync::Mutex<Correlation>>>,
+    closed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    finalizing: bool,
 }
 
 impl BundleFollowState {
     fn new(session: SessionFiles, root_source: RootSource) -> Self {
-        Self::new_with_baseline(session, root_source, FollowBaseline::Empty)
+        Self::new_with_baseline(session, root_source, BundleBaseline::default())
     }
 
     fn new_with_baseline(
         session: SessionFiles,
         root_source: RootSource,
-        baseline: FollowBaseline,
+        baseline: BundleBaseline,
     ) -> Self {
-        Self::new_with_correlation(session, root_source, baseline, None)
+        Self::new_with_correlation(session, root_source, baseline, None, None)
     }
 
     fn new_with_correlation(
         session: SessionFiles,
         root_source: RootSource,
-        baseline: FollowBaseline,
+        baseline: BundleBaseline,
         root_correlation: Option<std::sync::Arc<std::sync::Mutex<Correlation>>>,
+        closed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Self {
+        let root_baseline = baseline.root;
+        let root_hydrated = baseline.root_hydrated;
         let mut state = Self {
             session,
             // **One cursor over the root, whichever source projects it.** Two offsets over
             // one file is a state where advancing the wrong one silently skips records, and
             // the difference between the modes is only whether a record is *projected*.
             root: JsonlCursor {
-                offset: 0,
+                offset: if root_hydrated { root_baseline } else { 0 },
+                baseline_offset: root_baseline,
                 version: 0,
                 correlation: Correlation::new(),
                 opened: true,
@@ -1791,14 +1742,16 @@ impl BundleFollowState {
             manifests: HashMap::new(),
             sidecars: HashMap::new(),
             workflow_hosts: HashMap::new(),
+            delegate_hosts: HashMap::new(),
             host_tools: HashMap::new(),
             pending: VecDeque::new(),
             root_source,
+            root_hydrated,
             root_correlation,
+            closed,
+            finalizing: false,
         };
-        if baseline == FollowBaseline::Current {
-            state.seed_current_baseline();
-        }
+        state.install_baseline(baseline);
         state
     }
 
@@ -1809,78 +1762,63 @@ impl BundleFollowState {
     /// the end would lose the host-tool metadata needed to suppress Task's duplicate file.
     /// The baseline therefore advances every existing source and mines its metadata without
     /// emitting records or events. Files created after this pass remain ordinary live sources.
-    fn seed_current_baseline(&mut self) {
-        let transcript = self.session.transcript.clone();
-        if let Some((bytes, offset)) = read_appended(&transcript, 0) {
-            let records: Vec<Value> = json_lines(&bytes, Edge::Head).collect();
-            self.root.offset = offset;
-            self.root.version = records.len() as u64;
-            for record in records {
-                self.remember_root_metadata(&record);
-                self.hydrate_root(&record);
+    fn install_baseline(&mut self, baseline: BundleBaseline) {
+        if baseline.root_hydrated && baseline.root > 0 {
+            if let Some(bytes) = read_complete_range(&self.session.transcript, 0, baseline.root) {
+                if let Ok(records) = parse_jsonl_records(&self.session.transcript, &bytes) {
+                    for (record, _) in records {
+                        // Correlation was hydrated synchronously before process launch. These
+                        // records still need their metadata mined here so suppression and
+                        // attribution see the same historical host-tool map as a fresh reader.
+                        self.remember_record_metadata(&record);
+                    }
+                }
             }
         }
-
-        for delegate in self.session.delegates.clone() {
-            let Some((bytes, offset)) = read_appended(&delegate, 0) else {
-                continue;
-            };
-            let records: Vec<Value> = json_lines(&bytes, Edge::Head).collect();
-            let mut cursor = JsonlCursor {
-                offset,
-                version: records.len() as u64,
-                correlation: Correlation::new(),
-                opened: true,
-            };
-            // Keep host-tool discovery complete for nested delegates that are created after
-            // the resume boundary.
-            for record in &records {
-                collect_host_tools(record, &mut self.host_tools);
-                let _ = project_record_without_native_facts(&mut cursor.correlation, record, 0);
-            }
-            cursor.opened = true;
-            self.delegates.insert(delegate, cursor);
+        for (delegate, offset) in baseline.delegates {
+            self.delegates.insert(
+                delegate,
+                JsonlCursor {
+                    offset: 0,
+                    baseline_offset: offset,
+                    version: 0,
+                    correlation: Correlation::new(),
+                    // A baseline cursor means the bytes are historical, not that a
+                    // trajectory declaration was ever emitted. Keep this false so a later
+                    // manifest/sidecar can still publish the declaration needed to build a
+                    // resumable trajectory tree.
+                    opened: false,
+                },
+            );
         }
-
-        for journal in self.session.journals.clone() {
-            if let Some((bytes, offset)) = read_appended(&journal, 0) {
-                let version = json_lines(&bytes, Edge::Head).count() as u64;
-                self.journals
-                    .insert(journal, JournalCursor { offset, version });
-            }
+        for (journal, offset) in baseline.journals {
+            let version = read_complete_range(&journal, 0, offset)
+                .map(|bytes| json_lines(&bytes, Edge::Head).count() as u64)
+                .unwrap_or(0);
+            self.journals
+                .insert(journal, JournalCursor { offset, version });
         }
-
-        for manifest in self.session.manifests.clone() {
-            let Some(meta) = std::fs::metadata(&manifest).ok() else {
-                continue;
-            };
+        for (manifest, fingerprint) in baseline.manifests {
             self.manifests.insert(
                 manifest.clone(),
                 ManifestCursor {
-                    fingerprint: Some((meta.len(), file_modified_nanos(&meta))),
+                    fingerprint: Some(fingerprint),
                     version: manifest_revision(&manifest).unwrap_or(1),
                 },
             );
-            // `delegate_spans` reads the current snapshot on every pass, so no projection is
-            // needed here; this cursor only prevents the baseline snapshot from being emitted.
         }
-
-        for delegate in self.session.delegates.clone() {
-            let sidecar = delegate.with_extension("meta.json");
-            let Some(meta) = std::fs::metadata(&sidecar).ok() else {
-                continue;
-            };
+        for (sidecar, fingerprint) in baseline.sidecars {
             self.sidecars.insert(
                 sidecar,
                 SidecarCursor {
-                    fingerprint: Some((meta.len(), file_modified_nanos(&meta))),
-                    ingested: true,
+                    fingerprint: Some(fingerprint),
+                    terminal_unreadable: false,
                 },
             );
         }
     }
 
-    fn remember_root_metadata(&mut self, record: &Value) {
+    fn remember_record_metadata(&mut self, record: &Value) {
         if let Some((run_id, host)) = workflow_host(record) {
             self.workflow_hosts
                 .entry(run_id)
@@ -1892,6 +1830,19 @@ impl BundleFollowState {
                 .or_insert(Some(host));
         }
         collect_host_tools(record, &mut self.host_tools);
+        if let Some((agent, host)) = native_agent_host(record) {
+            remember_unique(&mut self.delegate_hosts, agent, host);
+        }
+        for text in string_values(record) {
+            for notification in task_notifications(&text) {
+                if let (Some(agent), Some(host)) = (
+                    string_at(&notification, "task_id"),
+                    string_at(&notification, "tool_use_id"),
+                ) {
+                    remember_unique(&mut self.delegate_hosts, agent, host);
+                }
+            }
+        }
     }
 
     fn hydrate_root(&mut self, record: &Value) {
@@ -1928,13 +1879,6 @@ impl BundleFollowState {
                     .get(&manifest)
                     .map_or(1, |cursor| cursor.version.saturating_add(1))
             });
-            self.manifests.insert(
-                manifest.clone(),
-                ManifestCursor {
-                    fingerprint: Some(fingerprint),
-                    version,
-                },
-            );
             if let Some(payload) = read_workflow_manifest(&manifest) {
                 messages.push(SessionMessage::NativeRecord(NativeRecord {
                     source: native_source(&manifest),
@@ -1943,6 +1887,13 @@ impl BundleFollowState {
                     payload,
                     blobs: Vec::new(),
                 }));
+                self.manifests.insert(
+                    manifest.clone(),
+                    ManifestCursor {
+                        fingerprint: Some(fingerprint),
+                        version,
+                    },
+                );
             }
         }
 
@@ -1960,14 +1911,19 @@ impl BundleFollowState {
 
         // Scan delegate sidecars independently. A `.meta.json` may appear after its delegate
         // JSONL was first opened, so this is polled every pass with its own fingerprint cursor.
-        messages.extend(self.scan_sidecars());
+        messages.extend(self.scan_sidecars()?);
 
         // Phase 1: Collect host tools from all new appended bytes
-        self.collect_all_host_tools();
+        self.collect_all_host_tools()?;
 
         // Resolve spans from the current manifest/sidecar view every pass. This is what
         // makes a manifest rewritten after watch() started visible without a restart.
-        let spans = delegate_spans(&self.session, &self.workflow_hosts);
+        let mut spans = delegate_spans(&self.session, &self.workflow_hosts);
+        for (agent, host) in &self.delegate_hosts {
+            if let Some(host) = host {
+                spans.entry(agent.clone()).or_insert_with(|| host.clone());
+            }
+        }
         let delegates = self.session.delegates.clone();
         // On the live path, delegate declarations are the only source of a trajectory for
         // Agent/Workflow calls. Process them before native-only root completion facts so a
@@ -1982,7 +1938,7 @@ impl BundleFollowState {
         }
 
         // Phase 2: Read and project with suppression decisions now stable
-        messages.extend(self.read_root());
+        messages.extend(self.read_root()?);
 
         if self.root_source == RootSource::File {
             for delegate in &delegates {
@@ -2003,7 +1959,7 @@ impl BundleFollowState {
     ///
     /// A `.meta.json` may appear after its delegate JSONL was first opened, so we poll every
     /// delegate path for a sidecar every pass. This ensures late-arriving metadata is discovered.
-    fn scan_sidecars(&mut self) -> Vec<SessionMessage> {
+    fn scan_sidecars(&mut self) -> Result<Vec<SessionMessage>> {
         let mut messages = Vec::new();
         let delegates = self.session.delegates.clone();
 
@@ -2020,7 +1976,7 @@ impl BundleFollowState {
                 .entry(sidecar_path.clone())
                 .or_insert(SidecarCursor {
                     fingerprint: None,
-                    ingested: false,
+                    terminal_unreadable: false,
                 });
 
             // Check if this sidecar is new or changed
@@ -2031,42 +1987,51 @@ impl BundleFollowState {
                 continue;
             }
 
+            if cursor.terminal_unreadable {
+                continue;
+            }
+
             // Ingest the sidecar
-            if let Some((payload, raw)) = read_sidecar_with_raw(&delegate) {
-                messages.push(SessionMessage::NativeRecord(NativeRecord {
-                    source: native_source(&sidecar_path),
-                    version: revision_bytes(&raw),
-                    raw_json: Some(raw),
-                    payload,
-                    blobs: Vec::new(),
-                }));
-                cursor.fingerprint = Some(fingerprint);
-                cursor.ingested = true;
+            match sidecar_source(&delegate) {
+                SidecarSource::Ready { payload, raw } => {
+                    messages.push(SessionMessage::NativeRecord(NativeRecord {
+                        source: native_source(&sidecar_path),
+                        version: revision_bytes(&raw),
+                        raw_json: Some(raw),
+                        payload,
+                        blobs: Vec::new(),
+                    }));
+                    cursor.fingerprint = Some(fingerprint);
+                }
+                SidecarSource::Partial
+                    if self.root_source == RootSource::File || self.finalizing =>
+                {
+                    // The source will never become complete after the producer has closed.
+                    // Record that decision in the cursor before returning the one diagnostic;
+                    // otherwise follow() yields the same Err forever and never reaches None.
+                    cursor.terminal_unreadable = true;
+                    cursor.fingerprint = Some(fingerprint);
+                    return Err(anyhow!(
+                        "delegate sidecar {} exists but is not complete JSON",
+                        sidecar_path.display()
+                    ));
+                }
+                SidecarSource::Missing | SidecarSource::Partial => {}
             }
         }
 
-        messages
+        Ok(messages)
     }
 
     /// Phase 1: Scan all new bytes in root and delegates for host tools without advancing cursors.
     ///
     /// This ensures that when Phase 2 makes suppression decisions, it has the complete picture
     /// of all host tools in this poll cycle, regardless of file-sort order.
-    fn collect_all_host_tools(&mut self) {
+    fn collect_all_host_tools(&mut self) -> Result<()> {
         // Scan root for new host tools
         if let Some((bytes, _)) = read_appended(&self.session.transcript, self.root.offset) {
-            for record in json_lines(&bytes, Edge::Head) {
-                if let Some((run_id, host)) = workflow_host(&record) {
-                    self.workflow_hosts
-                        .entry(run_id)
-                        .and_modify(|existing| {
-                            if existing.as_ref().is_some_and(|old| old != &host) {
-                                *existing = None;
-                            }
-                        })
-                        .or_insert(Some(host));
-                }
-                collect_host_tools(&record, &mut self.host_tools);
+            for (record, _) in parse_jsonl_records(&self.session.transcript, &bytes)? {
+                self.remember_record_metadata(&record);
             }
         }
 
@@ -2076,15 +2041,16 @@ impl BundleFollowState {
             let offset = self
                 .delegates
                 .get(&delegate)
-                .map(|cursor| cursor.offset)
+                .map(|cursor| cursor.offset.max(cursor.baseline_offset))
                 .unwrap_or(0);
 
             if let Some((bytes, _)) = read_appended(&delegate, offset) {
-                for record in json_lines(&bytes, Edge::Head) {
-                    collect_host_tools(&record, &mut self.host_tools);
+                for (record, _) in parse_jsonl_records(&delegate, &bytes)? {
+                    self.remember_record_metadata(&record);
                 }
             }
         }
+        Ok(())
     }
 
     /// Read the root transcript's appended records.
@@ -2096,17 +2062,33 @@ impl BundleFollowState {
     ///
     /// Host tools are collected in Phase 1 (`collect_all_host_tools`), so this phase focuses
     /// on advancing the cursor, emitting native records, and conditionally projecting events.
-    fn read_root(&mut self) -> Vec<SessionMessage> {
+    fn read_root(&mut self) -> Result<Vec<SessionMessage>> {
+        if self.root.offset < self.root.baseline_offset && !self.root_baseline_hydrated() {
+            if let Some(bytes) = read_complete_range(
+                &self.session.transcript,
+                self.root.offset,
+                self.root.baseline_offset,
+            ) {
+                for (record, _) in parse_jsonl_records(&self.session.transcript, &bytes)? {
+                    self.root.version += 1;
+                    self.remember_record_metadata(&record);
+                    self.hydrate_root(&record);
+                }
+                self.root.offset = self.root.baseline_offset;
+            }
+        }
         let Some((bytes, next_offset)) = read_appended(&self.session.transcript, self.root.offset)
         else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         if bytes.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        self.root.offset = next_offset;
+        // Parse the complete range before committing the cursor. A malformed complete line is
+        // retryable after the producer repairs it; advancing first would silently skip it.
+        let records = parse_jsonl_records(&self.session.transcript, &bytes)?;
         let mut messages = Vec::new();
-        for (record, raw) in json_lines_with_raw(&bytes, Edge::Head) {
+        for (record, raw) in records {
             self.root.version += 1;
             messages.push(SessionMessage::NativeRecord(native_record_with_raw(
                 &self.session.transcript,
@@ -2127,17 +2109,7 @@ impl BundleFollowState {
             //
             // Actually, let's keep it for safety: if collect_all_host_tools fails partway, at
             // least read_root still collects from what it processes. The cost is negligible.
-            if let Some((run_id, host)) = workflow_host(&record) {
-                self.workflow_hosts
-                    .entry(run_id)
-                    .and_modify(|existing| {
-                        if existing.as_ref().is_some_and(|old| old != &host) {
-                            *existing = None;
-                        }
-                    })
-                    .or_insert(Some(host));
-            }
-            collect_host_tools(&record, &mut self.host_tools);
+            self.remember_record_metadata(&record);
             if self.root_source == RootSource::File {
                 messages.extend(project_record(&mut self.root.correlation, &record, at_ms));
             } else if let Some(correlation) = &self.root_correlation {
@@ -2152,113 +2124,125 @@ impl BundleFollowState {
                 ));
             }
         }
-        messages
+        self.root.offset = next_offset;
+        Ok(messages)
+    }
+
+    fn root_baseline_hydrated(&self) -> bool {
+        self.root.baseline_offset == 0 || self.root_hydrated
     }
 
     fn read_delegate(&mut self, path: &Path, span: Option<String>) -> Result<Vec<SessionMessage>> {
         let Some(agent) = agent_id_of(path) else {
             return Ok(Vec::new());
         };
-        // **Suppressed only when stdout is carrying this delegate's interior too**, which is
-        // true for the built-in `Task` and false for every other delegating tool
-        // (`docs/agents.md`). The host's tool name comes from the root transcript, so the
-        // answer does not depend on which file this reader happened to poll first.
-        //
-        // A host classification is held until its sidecar exists. **The two errors are not
-        // symmetric:** publishing before classification can create an unretractable duplicate,
-        // while waiting one poll costs latency but preserves a deterministic tree. Once the
-        // sidecar is present, an unknown or non-forwarded host is projected; only a known
-        // stdout-forwarded tool is suppressed.
-        //
-        // **Re-asked every pass**, because a tool name can arrive after the file it describes.
-        // The window is narrow — a delegate file is never written before its host call
-        // (measured over 454 pairs: the delegate's first record follows its host's by a median
-        // of 5 ms, and never precedes it), and `read_root` runs before this in the same pass —
-        // but it is not empty, since a host record still half-written when the root was read is
-        // correctly held back by `read_appended` until the next pass. The delegate cursor is
-        // not advanced while classification is pending, so a late sidecar cannot leave a
-        // projected prefix that the protocol has no retract operation for.
-        //
-        // What must *not* happen is deciding once and latching: suppression describes a file,
-        // and a delegate grows for as long as its subagent runs.
-        //
-        // Decided before the cursor is borrowed, because the answer is read from `self`.
-        let projection = self.delegate_projection(path);
+        let sidecar = sidecar_source(path);
+
+        // Suppression and attribution are separate questions. Unknown suppression on the
+        // live overlap path holds the cursor because a duplicate cannot be retracted. Known
+        // projection with unknown attribution still consumes content: every event names the
+        // delegate trajectory itself, while only its parent-bearing declaration waits for a
+        // sidecar or workflow manifest. A tree builder can attach children that preceded
+        // their declaration; it cannot repair a declaration already emitted at the root.
+        let projection = self.delegate_projection(path, span.as_deref(), &sidecar);
         if projection == DelegateProjection::Pending {
             return Ok(Vec::new());
         }
         let suppress = projection == DelegateProjection::Suppress;
+        let declaration_span = if let Some(span) = span.clone() {
+            // A recorded route is only usable when the corresponding host tool is present in
+            // this bundle. During live follow, an absent host may still arrive in a later root
+            // append; after finalization it is definitively unattributed and must render at the
+            // root rather than preserving a dangling parent id.
+            if self.root_source == RootSource::File || self.host_tools.contains_key(&span) {
+                Some(Some(span))
+            } else if self.finalizing {
+                Some(None)
+            } else {
+                None
+            }
+        } else if workflow_run_of(path).is_some() && !self.finalizing {
+            None
+        } else if self.root_source != RootSource::Stdout {
+            // Adopt has no overlapping stdout source, so a missing sidecar is a complete
+            // source fact rather than a suppression decision. Declare the trajectory at the
+            // root and keep its content; no arbitrary wait is needed.
+            Some(None)
+        } else if matches!(sidecar, SidecarSource::Ready { .. }) || self.finalizing {
+            Some(None)
+        } else {
+            None
+        };
 
         let entry = self
             .delegates
             .entry(path.to_path_buf())
             .or_insert_with(|| JsonlCursor {
                 offset: 0,
+                baseline_offset: 0,
                 version: 0,
                 correlation: Correlation::new(),
                 opened: false,
             });
-
         let mut messages = Vec::new();
-        // **Suppression withholds events, and never records.** A delegate is written while its
-        // subagent runs, so this has to hold for the whole file rather than for the bytes that
-        // existed when it was first seen — a rule that fired once at first sight would suppress
-        // one poll interval's worth and project the entire rest, leaving the prefix and the
-        // suffix disagreeing about what the rule was. And the records are kept because they are
-        // the only copy: projection is the half stdout duplicates (`AGENTS.md`
-        // § Compatibility). This is the same split [`BundleFollowState::read_root`] makes.
-        //
-        // # Declaring is not forwarding, and the declaration is emitted either way
-        //
-        // Two independent facts, and the three delegating tools disagree about both. Measured
-        // over the dev store, by whether a delegate's `agentId` is ever announced as a
-        // `<task-id>`:
-        //
-        // | host | stdout declares it | stdout forwards its interior |
-        // | --- | --- | --- |
-        // | `Task` | yes | yes |
-        // | `Agent` | yes — 369 of 857 flat delegates | no |
-        // | `Workflow` | **no — 0 of 1379** | no |
-        //
-        // So for an `Agent` the declaration below duplicates one stdout already sent, and it is
-        // emitted anyway. Withholding it would save a row that every consumer merges on
-        // `stream_id`, and would risk the node itself: stdout announces a delegation once, at
-        // its `task_started`, so a session Sylph attaches to mid-flight has no such frame to
-        // merge with and the interior would arrive under a trajectory nothing ever opened.
-        // Same asymmetry as above — a duplicate is merged, an absence is lost — and for every
-        // workflow delegate this declaration is the *only* one there will ever be.
+        let mut declaration: Option<Event> = None;
+
         if !entry.opened && !suppress {
-            let Some(first) = read_first_json(path) else {
-                return Ok(Vec::new());
-            };
-            let at_ms = first
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(epoch_millis_from_iso)
-                .unwrap_or(0);
-            let mut opened = Event::new(EventKind::Subagent, Some(Phase::Started), at_ms);
-            opened.stream_id = Some(agent.clone());
-            opened.span = span.clone();
-            opened.name = delegate_name(path);
-            messages.push(SessionMessage::Event(opened));
-            // Sidecar is now handled independently in `scan_sidecars()`, not here. This
-            // ensures a `.meta.json` that arrives after the delegate JSONL is still discovered.
-            entry.opened = true;
+            if let Some(declaration_span) = declaration_span {
+                let Some(first) = read_first_json(path) else {
+                    return Ok(Vec::new());
+                };
+                let at_ms = first
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .and_then(epoch_millis_from_iso)
+                    .unwrap_or(0);
+                let mut opened = Event::new(EventKind::Subagent, Some(Phase::Started), at_ms);
+                opened.stream_id = Some(agent.clone());
+                opened.span = declaration_span;
+                opened.name = match &sidecar {
+                    SidecarSource::Ready { payload, .. } => {
+                        string_at(payload, "description").or_else(|| string_at(payload, "name"))
+                    }
+                    SidecarSource::Missing | SidecarSource::Partial => None,
+                };
+                declaration = Some(opened);
+            }
+        }
+
+        // A resume boundary is consumed only after suppression is known. Keeping it separate
+        // from `offset` prevents a delegate created between process spawn and `system/init`
+        // from being mistaken for old history, and hydrates correlation before live appends.
+        let mut nested_hosts = HashMap::new();
+        if entry.offset < entry.baseline_offset {
+            if let Some(bytes) = read_complete_range(path, entry.offset, entry.baseline_offset) {
+                for (record, _) in parse_jsonl_records(path, &bytes)? {
+                    entry.version += 1;
+                    collect_host_tools(&record, &mut nested_hosts);
+                    let _ = project_record_without_native_facts(&mut entry.correlation, &record, 0);
+                }
+                entry.offset = entry.baseline_offset;
+            }
         }
 
         let Some((bytes, next_offset)) = read_appended(path, entry.offset) else {
+            if let Some(opened) = declaration.take() {
+                messages.push(SessionMessage::Event(opened));
+                entry.opened = true;
+            }
             return Ok(messages);
         };
         if bytes.is_empty() {
+            if let Some(opened) = declaration.take() {
+                messages.push(SessionMessage::Event(opened));
+                entry.opened = true;
+            }
             return Ok(messages);
         }
-        entry.offset = next_offset;
-        // A delegate's own calls are host calls too: measured, 139 of 612 sidecars naming a
-        // `toolUseId` name a call that lives in *another delegate's* file rather than the
-        // root, so a root-only view leaves every nested delegation's host unnamed.
-        // Accumulated locally because `entry` is borrowed for the whole loop.
-        let mut nested_hosts = HashMap::new();
-        for (record, raw) in json_lines_with_raw(&bytes, Edge::Head) {
+        // Parse before committing the cursor. A malformed complete line must remain retryable
+        // after the producer repairs it; moving the offset first loses it permanently.
+        let records = parse_jsonl_records(path, &bytes)?;
+        for (record, raw) in records {
             entry.version += 1;
             messages.push(SessionMessage::NativeRecord(native_record_with_raw(
                 path,
@@ -2266,15 +2250,18 @@ impl BundleFollowState {
                 &record,
                 Some(raw),
             )));
+            if let Some(opened) = declaration.take() {
+                // Retain the source record first. The declaration is a projection of that
+                // record and must never reach the server ahead of the raw retention message.
+                messages.push(SessionMessage::Event(opened));
+                entry.opened = true;
+            }
             let at_ms = record
                 .get("timestamp")
                 .and_then(Value::as_str)
                 .and_then(epoch_millis_from_iso)
                 .unwrap_or(0);
             collect_host_tools(&record, &mut nested_hosts);
-            // Still correlated when suppressed, so the cursor's state stays consistent with
-            // the bytes it has consumed; only the resulting events are dropped. A correlation
-            // fed a gap would mis-key whatever followed it if suppression ever lifted.
             for message in
                 project_record_without_native_facts(&mut entry.correlation, &record, at_ms)
             {
@@ -2293,28 +2280,73 @@ impl BundleFollowState {
                 messages.push(message);
             }
         }
+        entry.offset = next_offset;
         self.host_tools.extend(nested_hosts);
         Ok(messages)
     }
 
-    fn delegate_projection(&self, path: &Path) -> DelegateProjection {
+    fn delegate_projection(
+        &self,
+        path: &Path,
+        span: Option<&str>,
+        sidecar: &SidecarSource,
+    ) -> DelegateProjection {
         if self.root_source != RootSource::Stdout {
             return DelegateProjection::Project;
         }
-        let sidecar = path.with_extension("meta.json");
-        // Do not guess while the metadata file is still arriving.  The vendor writes a
-        // delegate sidecar for every delegate shape we support; holding the cursor is the
-        // only way to make late metadata deterministic without retracting published events.
-        if !sidecar.is_file() {
-            return DelegateProjection::Pending;
+
+        if let Some(host) = span {
+            if let Some(tool) = self.host_tools.get(host) {
+                return if STDOUT_FORWARDED_TOOLS.contains(&tool.as_str()) {
+                    DelegateProjection::Suppress
+                } else {
+                    DelegateProjection::Project
+                };
+            }
+            if matches!(sidecar, SidecarSource::Ready { .. }) {
+                // A sidecar proves the delegate exists, not that its host is present in the
+                // root we have read so far. Keep the bytes pending while live input may still
+                // reveal that host; once the source is finalizing, release them at the root.
+                return if self.finalizing {
+                    DelegateProjection::Project
+                } else {
+                    DelegateProjection::Pending
+                };
+            }
         }
-        let suppress = delegate_tool_use_id(path)
-            .and_then(|host| self.host_tools.get(&host))
-            .is_some_and(|tool| STDOUT_FORWARDED_TOOLS.contains(&tool.as_str()));
-        if suppress {
-            DelegateProjection::Suppress
-        } else {
-            DelegateProjection::Project
+
+        // The directory names the workflow run before its manifest exists. The root runId
+        // join is enough to decide that stdout does not carry this interior; the manifest is
+        // still required before emitting the parent-bearing declaration.
+        if let Some(run) = workflow_run_of(path) {
+            if self
+                .workflow_hosts
+                .get(&run)
+                .and_then(Option::as_deref)
+                .and_then(|host| self.host_tools.get(host))
+                .is_some_and(|tool| tool == "Workflow")
+            {
+                return DelegateProjection::Project;
+            }
+        }
+
+        match sidecar {
+            SidecarSource::Ready { payload, .. } => {
+                let Some(host) = string_at(payload, "toolUseId") else {
+                    return DelegateProjection::Project;
+                };
+                match self.host_tools.get(&host) {
+                    Some(tool) if STDOUT_FORWARDED_TOOLS.contains(&tool.as_str()) => {
+                        DelegateProjection::Suppress
+                    }
+                    Some(_) => DelegateProjection::Project,
+                    None if self.finalizing => DelegateProjection::Project,
+                    None => DelegateProjection::Pending,
+                }
+            }
+            SidecarSource::Missing if self.finalizing => DelegateProjection::Project,
+            SidecarSource::Partial if self.finalizing => DelegateProjection::Project,
+            SidecarSource::Missing | SidecarSource::Partial => DelegateProjection::Pending,
         }
     }
 
@@ -2332,9 +2364,11 @@ impl BundleFollowState {
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
-        cursor.offset = next_offset;
+        // Parse before committing the cursor so a complete malformed line is retried rather
+        // than skipped on the next poll.
+        let records = parse_jsonl_records(path, &bytes)?;
         let mut messages = Vec::new();
-        for (record, raw) in json_lines_with_raw(&bytes, Edge::Head) {
+        for (record, raw) in records {
             cursor.version += 1;
             messages.push(SessionMessage::NativeRecord(native_record_with_raw(
                 path,
@@ -2357,6 +2391,7 @@ impl BundleFollowState {
             };
             messages.push(SessionMessage::Event(event));
         }
+        cursor.offset = next_offset;
         Ok(messages)
     }
 }
@@ -2369,14 +2404,15 @@ fn file_modified_nanos(meta: &std::fs::Metadata) -> u128 {
         .unwrap_or(0)
 }
 
+fn file_fingerprint(path: &Path) -> Option<(u64, u128)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), file_modified_nanos(&meta)))
+}
+
 fn read_first_json(path: &Path) -> Option<Value> {
     let bytes = read_span(path, 0, 64 * 1024)?;
     let first = json_lines(&bytes, Edge::Head).next();
     first
-}
-
-fn delegate_tool_use_id(path: &Path) -> Option<String> {
-    string_at(&read_sidecar(path)?, "toolUseId")
 }
 
 /// Whole lines appended since `offset`, and the offset past the last complete one.
@@ -2401,6 +2437,17 @@ fn read_appended(path: &Path, offset: u64) -> Option<(Vec<u8>, u64)> {
     Some((bytes[..complete].to_vec(), offset + complete as u64))
 }
 
+fn complete_offset(path: &Path) -> u64 {
+    read_appended(path, 0).map_or(0, |(_, offset)| offset)
+}
+
+fn read_complete_range(path: &Path, offset: u64, end: u64) -> Option<Vec<u8>> {
+    if end < offset {
+        return None;
+    }
+    read_span(path, offset, end - offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2415,11 +2462,15 @@ mod tests {
             .join(name)
     }
 
-    /// Project one fixture the way [`parse_session`] projects a transcript.
+    fn read_bundle(session: SessionFiles) -> Result<Vec<SessionMessage>> {
+        let mut reader = BundleFollowState::new(session, RootSource::File);
+        reader.poll()
+    }
+
+    /// Project one fixture through the same cursor reader adopt/watch use.
     fn project(name: &str) -> Vec<Event> {
-        let parsed = parse_transcript(&fixture(name), None).expect("the fixture must parse");
-        parsed
-            .messages
+        read_bundle(collect(fixture(name)))
+            .expect("the fixture must parse")
             .iter()
             .filter_map(|message| match message {
                 SessionMessage::Event(event) => Some(event.clone()),
@@ -2843,8 +2894,9 @@ mod tests {
             6,
             "three depth-1 and three depth-2"
         );
-        let parsed_root = parse_transcript(&session.transcript, None).unwrap();
-        let spans = delegate_spans(&session, &parsed_root.workflow_hosts);
+        let mut reader = BundleFollowState::new(session.clone(), RootSource::File);
+        reader.poll().unwrap();
+        let spans = delegate_spans(&session, &reader.workflow_hosts);
 
         // Every delegate is contained by the `Agent` call that spawned it — depth-1 by a call
         // in the root transcript, depth-2 by a call inside its parent's. The pairs come from
@@ -2896,7 +2948,7 @@ mod tests {
     #[test]
     fn a_delegates_own_work_carries_its_trajectory() {
         let session = stage_fanout("reparent");
-        let messages = parse_session(&session).expect("the staged session must parse");
+        let messages = read_bundle(session).expect("the staged session must parse");
         let events: Vec<&Event> = messages
             .iter()
             .filter_map(|message| match message {
@@ -3036,7 +3088,7 @@ mod tests {
             "this delegate genuinely has no recorded link"
         );
 
-        let messages = parse_session(&session_files).unwrap();
+        let messages = read_bundle(session_files).unwrap();
         let kept = messages.iter().any(|message| match message {
             SessionMessage::Event(event) => event.text.contains("orphaned work"),
             _ => false,
@@ -3103,7 +3155,7 @@ mod tests {
             "the journal must be read, not skipped"
         );
 
-        let outcomes = parse_journal(&session_files.journals[0]).unwrap();
+        let outcomes = read_bundle(session_files).unwrap();
         let closed: Vec<&Event> = outcomes
             .iter()
             .filter_map(|message| match message {
@@ -3242,8 +3294,9 @@ mod tests {
             2,
             "both workflow manifests must be collected"
         );
-        let parsed_root = parse_transcript(&session.transcript, None).unwrap();
-        let spans = delegate_spans(&session, &parsed_root.workflow_hosts);
+        let mut reader = BundleFollowState::new(session.clone(), RootSource::File);
+        reader.poll().unwrap();
+        let spans = delegate_spans(&session, &reader.workflow_hosts);
         assert_eq!(
             spans.get("workflow_agent_one").map(String::as_str),
             Some(host_one),
@@ -3255,7 +3308,7 @@ mod tests {
             "run two must resolve to the root tool_use carrying its runId"
         );
 
-        let messages = parse_session(&session).expect("the staged workflow must parse");
+        let messages = read_bundle(session).expect("the staged workflow must parse");
         for (agent, host) in [
             ("workflow_agent_one", host_one),
             ("workflow_agent_two", host_two),
@@ -3285,21 +3338,33 @@ mod tests {
     /// produces a row that duplicates its parent's identity and cannot be adopted.
     #[test]
     fn only_a_sessions_own_transcript_is_a_listing_candidate() {
-        assert!(is_root_transcript(Path::new("/p/9f1b2c3d.jsonl")));
+        let root = Path::new("/store");
+        assert!(is_root_transcript(
+            root,
+            Path::new("/store/project/9f1b2c3d.jsonl")
+        ));
         // A delegate, a workflow delegate, and a workflow journal are all interior structure.
-        assert!(!is_root_transcript(Path::new(
-            "/p/s/subagents/agent-af9bb.jsonl"
-        )));
-        assert!(!is_root_transcript(Path::new(
-            "/p/s/subagents/workflows/wf_1/agent-af9bb.jsonl"
-        )));
-        assert!(!is_root_transcript(Path::new(
-            "/p/s/subagents/workflows/wf_1/journal.jsonl"
-        )));
+        assert!(!is_root_transcript(
+            root,
+            Path::new("/store/project/s/subagents/agent-af9bb.jsonl")
+        ));
+        assert!(!is_root_transcript(
+            root,
+            Path::new("/store/project/s/subagents/workflows/wf_1/agent-af9bb.jsonl")
+        ));
+        assert!(!is_root_transcript(
+            root,
+            Path::new("/store/project/s/subagents/workflows/wf_1/journal.jsonl")
+        ));
         // A sidecar is not a transcript.
-        assert!(!is_root_transcript(Path::new(
-            "/p/s/subagents/agent-af9bb.meta.json"
-        )));
+        assert!(!is_root_transcript(
+            root,
+            Path::new("/store/project/s/subagents/agent-af9bb.meta.json")
+        ));
+        assert!(
+            !is_root_transcript(root, Path::new("/store/project/s/other-name.jsonl")),
+            "an arbitrary nested JSONL is interior even when its name is not agent-* or journal"
+        );
     }
 
     /// A listing row is built from a window, and every field it claims is the vendor's.
@@ -3363,20 +3428,45 @@ mod tests {
     /// An assistant record's blocks arrive as their own kinds, with a tool call's input parsed.
     #[test]
     fn thinking_prose_and_tool_calls_are_projected_as_their_own_kinds() {
-        let events = project("tool-call-and-result.jsonl");
+        // Drive the production cursor reader, not the test-only whole-file parser. This is
+        // the path adopt/watch use, including the synthetic start/delta/stop sequence that
+        // used to put the complete native body in both start and delta.
+        let mut reader = BundleFollowState::new(
+            collect(fixture("tool-call-and-result.jsonl")),
+            RootSource::File,
+        );
+        let messages = reader
+            .poll()
+            .expect("the production bundle reader must parse");
+        let events: Vec<Event> = messages
+            .into_iter()
+            .filter_map(|message| match message {
+                SessionMessage::Event(event) => Some(event),
+                _ => None,
+            })
+            .collect();
 
         let thinking = of_kind(&events, EventKind::Thinking);
-        assert!(
-            !thinking.is_empty(),
-            "the fixture opens with a thinking block"
-        );
-        assert!(thinking.iter().any(|event| event
-            .text
-            .contains("starting to explore the discord-me project")));
-
-        assert!(of_kind(&events, EventKind::Assistant)
+        let completed_thinking = thinking
             .iter()
-            .any(|event| event.text.contains("I'll start by exploring")));
+            .find(|event| event.phase == Some(Phase::Completed))
+            .expect("the fixture opens with a thinking block");
+        assert_eq!(
+            completed_thinking.text,
+            "I'm starting to explore the discord-me project by checking the memory and facts, then diving into the skill directory.",
+            "native thinking must be projected exactly once"
+        );
+
+        let assistant_events = of_kind(&events, EventKind::Assistant);
+        let assistant = assistant_events
+            .iter()
+            .find(|event| event.phase == Some(Phase::Completed))
+            .expect("the fixture holds assistant prose");
+        assert_eq!(
+            assistant.text,
+            "I'll start by exploring the discord-me project structure and understanding its current state before giving recommendations.",
+            "native assistant text must be projected exactly once"
+        );
 
         // A tool call's input reaches `data.input` as the **object** it is. The live stream
         // sends it as streamed partial JSON, so this is where the native shape and the live one
@@ -3402,6 +3492,11 @@ mod tests {
             input.get("file_path"),
             Some(&json!("/Users/hsw/.agents/skills/discord-me/SKILL.md")),
             "the input must arrive parsed, not as a JSON string"
+        );
+        assert_eq!(
+            input,
+            &json!({"file_path": "/Users/hsw/.agents/skills/discord-me/SKILL.md"}),
+            "native tool input must be projected exactly once"
         );
     }
 
@@ -3458,17 +3553,19 @@ mod tests {
 
         let broken = dir.join("broken.jsonl");
         std::fs::write(&broken, "not json\nalso not json\n").unwrap();
-        let error = parse_transcript(&broken, None).expect_err("this must not read as empty");
+        let mut reader = BundleFollowState::new(collect(broken.clone()), RootSource::File);
+        let error = reader.poll().expect_err("this must not read as empty");
         assert!(
-            error.to_string().contains("no record in"),
+            error.to_string().contains("invalid complete JSON record"),
             "the error must say what happened; got {error}"
         );
 
         // An genuinely empty file is a different, non-error fact: a session with no records yet.
         let empty = dir.join("empty.jsonl");
         std::fs::write(&empty, "").unwrap();
-        let parsed = parse_transcript(&empty, None).expect("an empty session is not an error");
-        assert!(parsed.messages.is_empty());
+        assert!(read_bundle(collect(empty))
+            .expect("an empty session is not an error")
+            .is_empty());
 
         // And a truncated final line — the normal state of a live session — costs nothing.
         let partial = dir.join("partial.jsonl");
@@ -3483,9 +3580,9 @@ mod tests {
             ),
         )
         .unwrap();
-        let parsed = parse_transcript(&partial, None).expect("a half-written line is normal");
+        let parsed = read_bundle(collect(partial)).expect("a half-written line is normal");
         assert!(
-            parsed.messages.iter().any(
+            parsed.iter().any(
                 |message| matches!(message, SessionMessage::Event(event) if event.text == "hi")
             ),
             "the records before a truncated line must survive"
@@ -3524,6 +3621,199 @@ mod tests {
         assert_eq!(read_appended(&path, next), Some((Vec::new(), next)));
         // An absent file is not an absent session.
         assert_eq!(read_appended(&dir.join("nope.jsonl"), 0), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A complete line that fails strict JSON parsing is still retryable. The cursor commits
+    /// only after the entire batch parses and projects; advancing before that point would make
+    /// a transient malformed write look like an empty, successfully consumed record.
+    #[test]
+    fn a_malformed_complete_record_does_not_advance_any_jsonl_cursor() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-malformed-cursor-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("session.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"mode\"}\n").unwrap();
+        let mut state = BundleFollowState::new(collect(transcript.clone()), RootSource::File);
+        state.poll().unwrap();
+        let root_offset = state.root.offset;
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap()
+            .write_all(b"not-json\n")
+            .unwrap();
+        assert!(state.poll().is_err());
+        assert_eq!(state.root.offset, root_offset);
+
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"mode\"}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"repaired\"}]}}\n",
+        )
+        .unwrap();
+        let repaired = state.poll().unwrap();
+        assert!(repaired.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "repaired"
+        )));
+
+        // The same transaction rule applies to a discovered delegate.
+        let delegate_dir = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&delegate_dir).unwrap();
+        let delegate = delegate_dir.join("agent-retry.jsonl");
+        std::fs::write(
+            &delegate,
+            "{\"type\":\"assistant\",\"agentId\":\"retry\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"prefix\"}]}}\n",
+        )
+        .unwrap();
+        state.read_delegate(&delegate, None).unwrap();
+        let delegate_offset = state.delegates.get(&delegate).unwrap().offset;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&delegate)
+            .unwrap()
+            .write_all(b"not-json\n")
+            .unwrap();
+        assert!(state.read_delegate(&delegate, None).is_err());
+        assert_eq!(
+            state.delegates.get(&delegate).unwrap().offset,
+            delegate_offset
+        );
+        std::fs::write(
+            &delegate,
+            "{\"type\":\"assistant\",\"agentId\":\"retry\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"prefix\"}]}}\n{\"type\":\"assistant\",\"agentId\":\"retry\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"delegate-repaired\"}]}}\n",
+        )
+        .unwrap();
+        assert!(state
+            .read_delegate(&delegate, None)
+            .unwrap()
+            .iter()
+            .any(|message| matches!(
+                message,
+                SessionMessage::Event(event) if event.text == "delegate-repaired"
+            )));
+
+        // And to workflow journals, whose result records are otherwise easy to lose because
+        // they carry no timestamp of their own.
+        let journal = transcript
+            .with_extension("")
+            .join("workflows")
+            .join("phase.jsonl");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        std::fs::write(&journal, "not-json\n").unwrap();
+        assert!(state.read_journal(&journal).is_err());
+        assert_eq!(state.journals.get(&journal).unwrap().offset, 0);
+        std::fs::write(
+            &journal,
+            "{\"type\":\"result\",\"agentId\":\"retry\",\"result\":\"journal-repaired\"}\n",
+        )
+        .unwrap();
+        assert!(state
+            .read_journal(&journal)
+            .unwrap()
+            .iter()
+            .any(|message| matches!(
+                message,
+                SessionMessage::Event(event) if event.text == "journal-repaired"
+            )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A finalizing partial sidecar is reported once, then becomes an explicit unreadable
+    /// source whose delegate content can still be projected at the root. It must not wedge the
+    /// follower in an endless error/pending loop.
+    #[test]
+    fn a_finalizing_partial_sidecar_is_terminal_after_one_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-final-partial-sidecar-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("session.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"mode\"}\n").unwrap();
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let delegate = subagents.join("agent-partial.jsonl");
+        std::fs::write(
+            &delegate,
+            "{\"type\":\"assistant\",\"agentId\":\"partial\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"kept\"}]}}\n",
+        )
+        .unwrap();
+        std::fs::write(delegate.with_extension("meta.json"), "{\"toolUseId\":").unwrap();
+
+        let mut state = BundleFollowState::new(collect(transcript), RootSource::Stdout);
+        state.poll().unwrap();
+        state.finalizing = true;
+        assert!(
+            state.poll().is_err(),
+            "the terminal sidecar is reported once"
+        );
+        let final_messages = state.poll().unwrap();
+        assert!(final_messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "kept"
+        )));
+        assert!(!state
+            .poll()
+            .unwrap()
+            .iter()
+            .any(|message| matches!(message, SessionMessage::Event(_))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A complete sidecar whose host id is absent from the root is a complete source with
+    /// missing attribution, not an eternal pending state. Finalization must release it at the
+    /// root so its durable content is not withheld forever.
+    #[test]
+    fn a_finalizing_ready_sidecar_with_unknown_host_projects_at_root() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-final-unknown-host-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("session.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"mode\"}\n").unwrap();
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let delegate = subagents.join("agent-unknown.jsonl");
+        std::fs::write(
+            &delegate,
+            "{\"type\":\"assistant\",\"agentId\":\"unknown\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"unknown-host-content\"}]}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            delegate.with_extension("meta.json"),
+            "{\"toolUseId\":\"host-not-in-root\"}",
+        )
+        .unwrap();
+
+        let mut state = BundleFollowState::new(collect(transcript), RootSource::Stdout);
+        assert!(!state
+            .poll()
+            .unwrap()
+            .iter()
+            .any(|message| matches!(message, SessionMessage::Event(_))));
+        state.finalizing = true;
+        let messages = state.poll().unwrap();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "unknown-host-content"
+        )));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some("unknown")
+                    && event.span.is_none()
+        )));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3577,14 +3867,18 @@ mod tests {
         let first = state.poll().unwrap();
         assert!(first.iter().any(|message| matches!(
             message,
-            SessionMessage::Event(event)
-                if event.kind == EventKind::Subagent
-                    && event.stream_id.as_deref() == Some("late")
-        )));
-        assert!(first.iter().any(|message| matches!(
-            message,
             SessionMessage::Event(event) if event.text == "first"
         )));
+        let first_event = first
+            .iter()
+            .position(|message| matches!(message, SessionMessage::Event(_)))
+            .expect("the delegate emits a projected event");
+        assert!(
+            first[..first_event]
+                .iter()
+                .any(|message| matches!(message, SessionMessage::NativeRecord(_))),
+            "delegate raw retention must precede its declaration/content projection"
+        );
         assert!(first.iter().any(|message| matches!(
             message,
             SessionMessage::NativeRecord(record)
@@ -3610,6 +3904,164 @@ mod tests {
         assert!(second.iter().all(|message| !matches!(
             message,
             SessionMessage::Event(event) if event.text == "first"
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_workflow_delegate_waits_for_a_late_manifest_and_keeps_its_parent_on_reload() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-late-workflow-manifest-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "ad9b9c9d-1e2f-43a4-b5c6-d7e8f9012345";
+        let host = "toolu_workflow";
+        let run = "wf_late";
+        let agent = "workflow_late";
+        let transcript = dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            [
+                json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","content":[{"type":"tool_use","id":host,"name":"Workflow","input":{}}]}}),
+                json!({"type":"user","sessionId":session,"toolUseResult":{"runId":run},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":host,"content":"started"}]}}),
+            ]
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let workflow = transcript
+            .with_extension("")
+            .join("subagents/workflows")
+            .join(run);
+        std::fs::create_dir_all(&workflow).unwrap();
+        std::fs::write(
+            workflow.join(format!("agent-{agent}.jsonl")),
+            format!(
+                "{}\n",
+                json!({"type":"assistant","agentId":agent,"message":{"role":"assistant","content":[{"type":"text","text":"workflow-interior"}]}})
+            ),
+        )
+        .unwrap();
+
+        let mut watch = BundleFollowState::new(collect(transcript.clone()), RootSource::File);
+        let before_manifest = watch.poll().unwrap();
+        assert!(
+            !before_manifest.iter().any(|message| matches!(
+                message,
+                SessionMessage::Event(event)
+                    if event.kind == EventKind::Subagent
+                        && event.stream_id.as_deref() == Some(agent)
+            )),
+            "a declaration emitted at the root cannot be retracted when the manifest arrives"
+        );
+        assert!(before_manifest.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.text == "workflow-interior"
+                    && event.span.as_deref() == Some(agent)
+        )));
+
+        let manifests = transcript.with_extension("").join("workflows");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(
+            manifests.join(format!("{run}.json")),
+            json!({"runId":run,"workflowProgress":[{"agentId":agent,"state":"start"}]}).to_string(),
+        )
+        .unwrap();
+        let after_manifest = watch.poll().unwrap();
+        assert!(after_manifest.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some(agent)
+                    && event.span.as_deref() == Some(host)
+        )));
+
+        // A fresh production reader is the reload/adopt shape. It must derive the same tree
+        // from the final bundle rather than depending on in-memory watch state.
+        let mut reload = BundleFollowState::new(collect(transcript), RootSource::File);
+        let reloaded = reload.poll().unwrap();
+        assert!(reloaded.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some(agent)
+                    && event.span.as_deref() == Some(host)
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_live_workflow_delegate_also_waits_for_its_manifest() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-live-late-workflow-manifest-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "ae9b9c9d-1e2f-43a4-b5c6-d7e8f9012345";
+        let host = "toolu_workflow";
+        let run = "wf_late";
+        let agent = "workflow_late";
+        let transcript = dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            [
+                json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","content":[{"type":"tool_use","id":host,"name":"Workflow","input":{}}]}}),
+                json!({"type":"user","sessionId":session,"toolUseResult":{"runId":run},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":host,"content":"started"}]}}),
+            ]
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let workflow = transcript
+            .with_extension("")
+            .join("subagents/workflows")
+            .join(run);
+        std::fs::create_dir_all(&workflow).unwrap();
+        std::fs::write(
+            workflow.join(format!("agent-{agent}.jsonl")),
+            format!(
+                "{}\n",
+                json!({"type":"assistant","agentId":agent,"message":{"role":"assistant","content":[{"type":"text","text":"workflow-interior"}]}})
+            ),
+        )
+        .unwrap();
+        let mut live = BundleFollowState::new(collect(transcript.clone()), RootSource::Stdout);
+        let before_manifest = live.poll().unwrap();
+        assert!(!before_manifest.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some(agent)
+        )));
+        assert!(before_manifest.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "workflow-interior"
+        )));
+
+        let manifests = transcript.with_extension("").join("workflows");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(
+            manifests.join(format!("{run}.json")),
+            json!({"runId":run,"workflowProgress":[{"agentId":agent,"state":"start"}]}).to_string(),
+        )
+        .unwrap();
+        let messages = live.poll().unwrap();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some(agent)
+                    && event.span.as_deref() == Some(host)
         )));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3754,6 +4206,80 @@ mod tests {
     }
 
     #[test]
+    fn the_production_bundle_reader_closes_sync_and_async_agents_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-agent-close-reader-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "a99b9c9d-1e2f-43a4-b5c6-d7e8f9012345";
+        let sync_host = "toolu_sync";
+        let async_host = "toolu_async";
+        let records = [
+            json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","content":[
+                {"type":"tool_use","id":sync_host,"name":"Agent","input":{}},
+                {"type":"tool_use","id":async_host,"name":"Agent","input":{}}
+            ]}}),
+            json!({"type":"user","sessionId":session,"toolUseResult":{"agentId":"agent-sync","isAsync":false,"status":"completed","stdout":"sync done"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":sync_host,"content":"sync done"}]}}),
+            json!({"type":"user","sessionId":session,"toolUseResult":{"agentId":"agent-async","isAsync":true,"status":"async_launched"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":async_host,"content":"launched"}]}}),
+            json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","content":[{"type":"text","text":"<task-notification><task-id>agent-async</task-id><tool-use-id>toolu_async</tool-use-id><status>completed</status><summary>async done</summary></task-notification>"}]}}),
+        ];
+        let transcript = dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let mut reader = BundleFollowState::new(collect(transcript), RootSource::File);
+        let messages = reader
+            .poll()
+            .expect("the production reader must parse agent closes");
+        let closes: Vec<&Event> = messages
+            .iter()
+            .filter_map(|message| match message {
+                SessionMessage::Event(event)
+                    if event.kind == EventKind::Subagent
+                        && event.phase == Some(Phase::Completed) =>
+                {
+                    Some(event)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            closes
+                .iter()
+                .filter(|event| event.stream_id.as_deref() == Some("agent-sync"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            closes
+                .iter()
+                .filter(|event| event.stream_id.as_deref() == Some("agent-async"))
+                .count(),
+            1
+        );
+        assert!(closes.iter().any(|event| {
+            event.stream_id.as_deref() == Some("agent-sync")
+                && event.span.as_deref() == Some(sync_host)
+                && event.text == "sync done"
+        }));
+        assert!(closes.iter().any(|event| {
+            event.stream_id.as_deref() == Some("agent-async")
+                && event.span.as_deref() == Some(async_host)
+                && event.text == "async done"
+        }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_resumed_bundle_starts_after_the_existing_delegate_bytes() {
         let dir = std::env::temp_dir().join(format!(
             "sylph-claude-resume-baseline-{}",
@@ -3788,15 +4314,22 @@ mod tests {
         )
         .unwrap();
 
-        let mut state = BundleFollowState::new_with_baseline(
-            collect(transcript),
-            RootSource::Stdout,
-            FollowBaseline::Current,
-        );
+        let session_files = collect(transcript);
+        let baseline = BundleBaseline::capture(&session_files);
+        let mut state =
+            BundleFollowState::new_with_baseline(session_files, RootSource::Stdout, baseline);
         let initial = state.poll().unwrap();
         assert!(!initial.iter().any(|message| matches!(
             message,
             SessionMessage::Event(event) if event.text == "old-history"
+        )));
+        assert!(initial.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.phase == Some(Phase::Started)
+                    && event.stream_id.as_deref() == Some("old")
+                    && event.span.as_deref() == Some("toolu_agent")
         )));
 
         use std::io::Write;
@@ -3856,6 +4389,275 @@ mod tests {
         assert!(!second.iter().any(|message| matches!(
             message,
             SessionMessage::Event(event) if event.text == "prefix"
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_partial_sidecar_is_not_valid_metadata_without_a_tool_use_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-partial-sidecar-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "aa9b9c9d-1e2f-43a4-b5c6-d7e8f9012345";
+        let transcript = dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_task","name":"Task","input":{}}]}})
+            ),
+        )
+        .unwrap();
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let delegate = subagents.join("agent-partial.jsonl");
+        std::fs::write(
+            &delegate,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","agentId":"partial","message":{"role":"assistant","content":[{"type":"text","text":"must-not-duplicate"}]}})
+            ),
+        )
+        .unwrap();
+        std::fs::write(subagents.join("agent-partial.meta.json"), "{\"toolUseId\":").unwrap();
+
+        let mut state = BundleFollowState::new(collect(transcript), RootSource::Stdout);
+        let partial = state.poll().unwrap();
+        assert!(
+            !partial.iter().any(|message| matches!(
+                message,
+                SessionMessage::Event(event) if event.text == "must-not-duplicate"
+            )),
+            "a half-written sidecar is not evidence that the host id is absent"
+        );
+
+        std::fs::write(
+            subagents.join("agent-partial.meta.json"),
+            r#"{"toolUseId":"toolu_task"}"#,
+        )
+        .unwrap();
+        let complete = state.poll().unwrap();
+        assert!(
+            !complete.iter().any(|message| matches!(
+                message,
+                SessionMessage::Event(event) if event.text == "must-not-duplicate"
+            )),
+            "once complete, the Task sidecar suppresses the whole delegate file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_permanently_missing_sidecar_uses_the_native_agent_result() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-missing-sidecar-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "ab9b9c9d-1e2f-43a4-b5c6-d7e8f9012345";
+        let host = "toolu_agent";
+        let transcript = dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            [
+                json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","content":[{"type":"tool_use","id":host,"name":"Agent","input":{}}]}}),
+                json!({"type":"user","sessionId":session,"toolUseResult":{"agentId":"missing","isAsync":true,"status":"async_launched"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":host,"content":"launched"}]}}),
+            ]
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-missing.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type":"assistant","agentId":"missing","message":{"role":"assistant","content":[{"type":"text","text":"agent-without-sidecar"}]}})
+            ),
+        )
+        .unwrap();
+
+        let mut state = BundleFollowState::new(collect(transcript), RootSource::Stdout);
+        let messages = state.poll().unwrap();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.text == "agent-without-sidecar"
+                    && event.span.as_deref() == Some("missing")
+        )));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some("missing")
+                    && event.span.as_deref() == Some(host)
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_resumed_delegate_with_missing_sidecar_keeps_its_live_tail() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-resume-missing-sidecar-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "ac9b9c9d-1e2f-43a4-b5c6-d7e8f9012345";
+        let host = "toolu_agent";
+        let transcript = dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            [
+                json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","content":[{"type":"tool_use","id":host,"name":"Agent","input":{}}]}}),
+                json!({"type":"user","sessionId":session,"toolUseResult":{"agentId":"resumed","isAsync":true,"status":"async_launched"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":host,"content":"launched"}]}}),
+            ]
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let delegate = subagents.join("agent-resumed.jsonl");
+        std::fs::write(
+            &delegate,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","agentId":"resumed","message":{"role":"assistant","content":[{"type":"text","text":"old-history"}]}})
+            ),
+        )
+        .unwrap();
+
+        let session_files = collect(transcript);
+        let baseline = BundleBaseline::capture(&session_files);
+        let mut state =
+            BundleFollowState::new_with_baseline(session_files, RootSource::Stdout, baseline);
+        assert!(!state.poll().unwrap().iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "old-history"
+        )));
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&delegate)
+                .unwrap(),
+            "{}",
+            json!({"type":"assistant","agentId":"resumed","message":{"role":"assistant","content":[{"type":"text","text":"new-live"}]}})
+        )
+        .unwrap();
+        let messages = state.poll().unwrap();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "new-live"
+        )));
+        assert!(!messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "old-history"
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_delegate_created_after_the_resume_boundary_is_not_skipped() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-resume-startup-race-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = "af9b9c9d-1e2f-43a4-b5c6-d7e8f9012345";
+        let host = "toolu_agent";
+        let transcript = dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","sessionId":session,"message":{"role":"assistant","content":[{"type":"tool_use","id":host,"name":"Agent","input":{}}]}})
+            ),
+        )
+        .unwrap();
+        let before_spawn = collect(transcript.clone());
+        let baseline = BundleBaseline::capture(&before_spawn);
+
+        // This file represents work written after process spawn but before `system/init`
+        // gives the bundle pump an id. Capturing at reader construction would classify it as
+        // old history and advance past it.
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-new.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type":"assistant","agentId":"new","message":{"role":"assistant","content":[{"type":"text","text":"created-during-startup"}]}})
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            subagents.join("agent-new.meta.json"),
+            json!({"toolUseId":host}).to_string(),
+        )
+        .unwrap();
+
+        let mut state =
+            BundleFollowState::new_with_baseline(collect(transcript), RootSource::Stdout, baseline);
+        let messages = state.poll().unwrap();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "created-during-startup"
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_permanently_missing_sidecar_is_released_when_the_live_source_closes() {
+        let dir = std::env::temp_dir().join(format!(
+            "sylph-claude-final-missing-sidecar-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("session.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"mode\",\"sessionId\":\"s\"}\n").unwrap();
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-orphan.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type":"assistant","agentId":"orphan","message":{"role":"assistant","content":[{"type":"text","text":"kept-at-root"}]}})
+            ),
+        )
+        .unwrap();
+
+        let mut state = BundleFollowState::new(collect(transcript), RootSource::Stdout);
+        assert!(state.poll().unwrap().iter().all(|message| !matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "kept-at-root"
+        )));
+        state.finalizing = true;
+        let final_messages = state.poll().unwrap();
+        assert!(final_messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event)
+                if event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some("orphan")
+                    && event.span.is_none()
+        )));
+        assert!(final_messages.iter().any(|message| matches!(
+            message,
+            SessionMessage::Event(event) if event.text == "kept-at-root"
         )));
         let _ = std::fs::remove_dir_all(&dir);
     }

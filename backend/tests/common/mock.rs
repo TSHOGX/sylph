@@ -32,8 +32,8 @@ use serde_json::{json, Value};
 use sylph_protocol::{
     Adapter, AdapterError, AgentInfo, Capability, CapabilityFacets, CommandKind, CommandSpec,
     ConfigChoice, ConfigKind, ConfigOption, Event, EventKind, EventStream, Fidelity, FlagSchema,
-    FlagSpec, NativeId, NativeSummary, Phase, RequestedNativeId, Resolution, RunSpec, Session,
-    SessionCapabilities, SessionMessage, StoreFilter, SubagentSpec, TurnInput,
+    FlagSpec, NativeId, NativeRecord, NativeSummary, Phase, RequestedNativeId, Resolution, RunSpec,
+    Session, SessionCapabilities, SessionMessage, StoreFilter, SubagentSpec, TurnInput,
 };
 use sylph_web_backend::adapters::AdapterSource;
 use tokio::sync::{mpsc, Mutex};
@@ -101,6 +101,9 @@ enum Behavior {
     /// now, and it is a genuinely different failure from an absent CLI: the binary is
     /// there and will not say what it is.
     BrokenProbe,
+    /// Emit two different native payloads at one source revision, then a normalized event.
+    /// The history store rejects the second record; the live drain must stop there.
+    RawRetentionFailure,
 }
 
 /// One agent the harness offers, named and with a behaviour.
@@ -176,6 +179,13 @@ impl MockRunner {
         Self {
             name: name.to_string(),
             behavior: Behavior::NoStore,
+        }
+    }
+
+    pub fn raw_retention_failure(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            behavior: Behavior::RawRetentionFailure,
         }
     }
 }
@@ -708,6 +718,32 @@ async fn run_turn(tx: mpsc::Sender<Result<SessionMessage>>, behavior: Behavior) 
 
     match behavior {
         Behavior::Success | Behavior::BrokenProbe | Behavior::NoStore => success(&tx).await,
+        Behavior::RawRetentionFailure => {
+            for value in ["first", "different"] {
+                let raw = format!(r#"{{"value":"{value}"}}"#).into_bytes();
+                let _ = tx
+                    .send(Ok(SessionMessage::NativeRecord(NativeRecord {
+                        source: "root.jsonl".to_string(),
+                        version: 1,
+                        raw_json: Some(raw),
+                        payload: json!({"value": value}),
+                        blobs: Vec::new(),
+                    })))
+                    .await;
+            }
+            emit(
+                &tx,
+                Ev::new(EventKind::Assistant, Some(Phase::Completed))
+                    .stream_id("after-raw-failure")
+                    .text("must not be projected"),
+            )
+            .await;
+            emit(
+                &tx,
+                Ev::new(EventKind::Turn, Some(Phase::Completed)).text("done"),
+            )
+            .await;
+        }
         Behavior::Failure => {
             emit(
                 &tx,

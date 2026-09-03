@@ -366,6 +366,12 @@ cannot represent (key order, duplicate keys, whitespace, and escape spelling). L
 `persistedOutputPath` sidecars are recorded as validated locators and fetched into CAS only
 when a caller asks for the body, so ingest never blocks on an eager full-file read.
 
+Raw retention is an ingestion prerequisite, not best-effort telemetry. Adopt and live-link
+drains persist each `NativeRecord` before projecting later messages. A write is retried once
+for a transient SQLite/sidecar race; if it still fails, adopt returns an explicit error and a
+live link closes with `LINK_LOST`. Normalized events are never silently kept without their
+source record, and the failure counter is diagnostic only rather than the semantic signal.
+
 -- Lossless vendor-native source records. These are separate from projected blocks because
 -- re-projection needs fields the current adapter ignores, and raw records are never safe to
 -- prune using an event watermark.

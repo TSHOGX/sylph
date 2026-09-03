@@ -257,9 +257,13 @@ impl AppState {
         // Adopting a native session writes through the same three collaborators the live
         // drain path uses, which is what makes an adopted row indistinguishable from a
         // live one downstream (`docs/architecture.md` § One authority).
-        let ingest = crate::db::NativeIngest::new(store.clone(), writer.clone(), seq.clone())
-            .with_hub(hub.clone())
-            .with_history(history.clone());
+        let ingest = crate::db::NativeIngest::new(
+            store.clone(),
+            writer.clone(),
+            seq.clone(),
+            history.clone(),
+        )
+        .with_hub(hub.clone());
 
         let turns = crate::supervisor::turn::LinkedSupervisor::new(
             store.clone(),

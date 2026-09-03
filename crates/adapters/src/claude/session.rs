@@ -55,8 +55,9 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};
 
 use sylph_protocol::{
-    AdapterError, CapabilityFacets, ConfigOption, EventStream, NativeId, RequestedNativeId,
-    Resolution, RunSpec, Session, SessionCapabilities, SessionMessage, TurnInput,
+    AdapterError, CapabilityFacets, ConfigOption, EventStream, NativeId, NativeRecord,
+    RequestedNativeId, Resolution, RunSpec, Session, SessionCapabilities, SessionMessage,
+    TurnInput,
 };
 
 use super::requests::{answer_payload, ask_from, AskKind};
@@ -291,13 +292,18 @@ struct Shared {
     /// authoritative and clears this value before rebuilding capabilities.
     pending_model: Mutex<Option<String>>,
     /// Stops the bundle follower when the live session closes.
-    closed: std::sync::atomic::AtomicBool,
+    closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// One root correlation state shared by stdout and the native bundle reader.
     ///
     /// Native-only task facts can arrive from the file after stdout has already emitted the
     /// surrounding turn. Sharing this state makes the two producers one merger and lets a
     /// duplicate close be discarded by trajectory identity rather than by timing.
     root_correlation: std::sync::Arc<std::sync::Mutex<Correlation>>,
+    /// Stable source key for raw records observed on this live stdout stream. A fresh key per
+    /// process prevents a resumed/relinked process from colliding with an earlier stream's
+    /// version ordinal while still making every stdout projection losslessly retainable.
+    stdout_source: String,
+    stdout_version: std::sync::atomic::AtomicU64,
 }
 
 /// A live `claude` session.
@@ -406,6 +412,14 @@ async fn pump(
                 }
             }
             _ => {
+                // The event and its source record travel through one bounded channel in this
+                // order. A downstream raw-retention failure therefore stops this producer
+                // before the normalized event can be journaled or published. The bundle reader
+                // remains a separate source for native-only files, but stdout no longer has the
+                // P0 gap where it could publish an event with no retained source at all.
+                if !send_stdout_record(&out, &shared, &payload).await {
+                    return;
+                }
                 if let Some(id) = payload
                     .get("session_id")
                     .and_then(Value::as_str)
@@ -500,6 +514,27 @@ async fn pump(
     }
 }
 
+/// Emit one lossless raw envelope before any normalized message derived from it.
+async fn send_stdout_record(
+    out: &mpsc::Sender<Result<SessionMessage>>,
+    shared: &Shared,
+    payload: &Value,
+) -> bool {
+    let version = shared
+        .stdout_version
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(1);
+    out.send(Ok(SessionMessage::NativeRecord(NativeRecord {
+        source: shared.stdout_source.clone(),
+        version,
+        raw_json: Some(payload.to_string().into_bytes()),
+        payload: payload.clone(),
+        blobs: Vec::new(),
+    })))
+    .await
+    .is_ok()
+}
+
 /// Follow Claude's on-disk bundle while the live stdout pump is running.
 ///
 /// The root transcript is intentionally skipped by `watch_live`: stdout already carries
@@ -509,17 +544,13 @@ async fn pump(
 async fn bundle_pump(
     out: mpsc::Sender<Result<SessionMessage>>,
     shared: Arc<Shared>,
-    resumed: bool,
+    baseline: super::native::BundleBaseline,
 ) {
     let mut current: Option<NativeId> = None;
     let mut stream: Option<EventStream> = None;
     let mut consecutive_failures = 0u32;
 
     loop {
-        if shared.closed.load(std::sync::atomic::Ordering::Acquire) {
-            return;
-        }
-
         let native = shared.native_id.read().ok().and_then(|id| id.clone());
 
         // **Only update `current` when `watch_live` succeeds.** The old code set `current`
@@ -533,7 +564,12 @@ async fn bundle_pump(
         // `watch_live` is idempotent — it opens read-only cursors over immutable history.
         if native != current {
             if let Some(ref id) = native {
-                match super::native::watch_live(id, resumed, shared.root_correlation.clone()) {
+                match super::native::watch_live(
+                    id,
+                    baseline.clone(),
+                    shared.root_correlation.clone(),
+                    shared.closed.clone(),
+                ) {
                     Ok(new_stream) => {
                         current = Some(id.clone());
                         stream = Some(new_stream);
@@ -579,6 +615,9 @@ async fn bundle_pump(
                             }
                         }
                         None => {
+                            if shared.closed.load(std::sync::atomic::Ordering::Acquire) {
+                                return;
+                            }
                             // `watch_live` normally stays open for the session's lifetime;
                             // a transient file error should not disable the reader forever.
                             // Clear both `stream` and `current` so the next poll retries
@@ -591,6 +630,9 @@ async fn bundle_pump(
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             }
         } else {
+            if shared.closed.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
@@ -653,6 +695,23 @@ pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Sess
         RequestedNativeId::Dictate(id) | RequestedNativeId::Resume(id) => Some(id.clone()),
         RequestedNativeId::New => None,
     };
+    // Capture the resume boundary before the process can write. Waiting for `system/init`
+    // makes the snapshot late: the resumed turn may already have created a delegate, which
+    // would then be mistaken for historical bytes and skipped permanently.
+    let mut bundle_baseline = match &spec.native_id {
+        RequestedNativeId::Resume(id) => super::native::capture_live_baseline(id)?,
+        RequestedNativeId::Dictate(_) | RequestedNativeId::New => {
+            super::native::BundleBaseline::default()
+        }
+    };
+    // Resume history must be installed before either producer can emit. The bundle follower
+    // used to hydrate on its first poll, which let a fast stdout frame observe an empty root
+    // correlation and race the baseline into a different semantic order.
+    let root_correlation = std::sync::Arc::new(std::sync::Mutex::new(Correlation::new()));
+    if let RequestedNativeId::Resume(id) = &spec.native_id {
+        bundle_baseline =
+            super::native::hydrate_live_baseline(id, bundle_baseline, &root_correlation)?;
+    }
 
     let (mut argv, warnings) = super::ClaudeAdapter::argv_for(&spec);
     for warning in warnings {
@@ -708,6 +767,8 @@ pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Sess
     let control = Arc::new(Control { child });
     let shared = Arc::new(Shared {
         native_id: std::sync::RwLock::new(native_id.clone()),
+        root_correlation,
+        stdout_source: format!("live/stdout/{}.jsonl", uuid::Uuid::new_v4()),
         pending_model: Mutex::new(spec.flags.get("model").cloned()),
         ..Shared::default()
     });
@@ -715,8 +776,7 @@ pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Sess
     // would make the pump's backpressure part of what a duration measures.
     let (tx, rx) = mpsc::channel(1024);
     tokio::spawn(pump(lines, tx.clone(), control.clone(), shared.clone()));
-    let resumed = matches!(spec.native_id, RequestedNativeId::Resume(_));
-    tokio::spawn(bundle_pump(tx.clone(), shared.clone(), resumed));
+    tokio::spawn(bundle_pump(tx.clone(), shared.clone(), bundle_baseline));
 
     // The handshake that turns a process into a session. This is where the project's real
     // command list comes from, and where the dialog kinds are declared — the declaration is
@@ -2015,6 +2075,45 @@ done
             messages.iter().any(|message| matches!(message,
                 SessionMessage::Event(event) if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed))),
             "the result emitted while waiting for the id must remain available"
+        );
+    }
+
+    /// Every live stdout projection is preceded by the raw vendor envelope that produced it.
+    /// This is the adapter-side half of the lossless-ingest contract: if the server cannot
+    /// retain the raw record, it sees that failure before it can journal the normalized event.
+    #[tokio::test]
+    async fn live_stdout_retains_raw_before_projecting_the_event() {
+        let mut peer = peer("raw-before-event").await;
+        let stream = peer.session.events().expect("the stream yields once");
+        peer.session
+            .send(TurnInput {
+                text: "raw ordering".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("the vendor accepts the turn");
+
+        let messages = collect(stream, |message| {
+            matches!(
+                message,
+                SessionMessage::Event(event)
+                    if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed)
+            )
+        })
+        .await;
+        let first_event = messages
+            .iter()
+            .position(|message| matches!(message, SessionMessage::Event(_)))
+            .expect("the peer emits a normalized event");
+        assert!(
+            first_event > 0,
+            "the normalized event must not be the first message on the stream"
+        );
+        assert!(
+            messages[..first_event]
+                .iter()
+                .any(|message| matches!(message, SessionMessage::NativeRecord(_))),
+            "a raw stdout envelope must precede the first normalized event"
         );
     }
 

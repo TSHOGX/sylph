@@ -1087,14 +1087,19 @@ pub async fn adopt(
             ))
         })?;
         tokio::spawn(async move {
-            let report = ingest.drain(&watched, stream).await;
-            tracing::info!(
-                "Watched {}: {} event(s) in {} turn(s), {} read error(s)",
-                watched,
-                report.events,
-                report.turns,
-                report.read_errors
-            );
+            match ingest.drain(&watched, stream).await {
+                Ok(report) => tracing::info!(
+                    "Watched {}: {} event(s) in {} turn(s), {} read error(s)",
+                    watched,
+                    report.events,
+                    report.turns,
+                    report.read_errors
+                ),
+                Err(error) => tracing::error!(
+                    "Stopped watching {} because lossless native ingest failed: {error:#}",
+                    watched
+                ),
+            }
         });
         return Ok((
             StatusCode::CREATED,
@@ -1109,7 +1114,15 @@ pub async fn adopt(
             "Could not read {agent}'s native session: {error:#}"
         ))
     })?;
-    let report = state.ingest.drain(&session_id, stream).await;
+    let report = state
+        .ingest
+        .drain(&session_id, stream)
+        .await
+        .map_err(|error| {
+            Error::Internal(format!(
+                "Could not retain {agent}'s native session losslessly: {error:#}"
+            ))
+        })?;
     tracing::info!(
         "Adopted {}: {} event(s) in {} turn(s), {} read error(s)",
         session_id,

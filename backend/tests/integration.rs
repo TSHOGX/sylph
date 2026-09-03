@@ -1059,6 +1059,43 @@ async fn runner_failure_is_reported_as_a_failed_turn() {
 }
 
 #[tokio::test]
+async fn raw_retention_failure_stops_a_live_link_before_projection() {
+    let backend =
+        TestBackend::start_with_runners(&[MockRunner::raw_retention_failure("mock")]).await;
+    let session_id = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{session_id}/turns"),
+            json!({"text": "exercise raw retention"}),
+        )
+        .await;
+    let turn_id = json_body(response).await["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let finished = backend.await_turn(&turn_id).await;
+    assert_eq!(finished["turn"]["status"], "failed");
+    assert_eq!(finished["turn"]["errorCode"], "LINK_LOST");
+    assert!(finished["turn"]["errorMessage"]
+        .as_str()
+        .is_some_and(|message| message.contains("native record root.jsonl:1")));
+
+    let history = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{session_id}/turns"))
+            .await,
+    )
+    .await;
+    assert!(history["turns"][0]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|event| event["text"] != "must not be projected"));
+}
+
+#[tokio::test]
 async fn an_agent_that_produces_nothing_still_ends_its_turn() {
     // v1 had a protocol violation to detect here: a runner that printed no final
     // envelope. v2 has no envelope to omit, because the turn event *is* the

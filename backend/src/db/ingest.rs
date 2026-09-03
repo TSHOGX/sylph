@@ -67,6 +67,7 @@
 //! event's own timestamp rather than `now()`, because that is a real observation about
 //! the transcript and `now()` is a fact about when someone clicked adopt.
 
+use anyhow::{Context, Result};
 use futures::StreamExt;
 use tracing::{debug, warn};
 
@@ -167,17 +168,22 @@ pub struct NativeIngest {
     /// caller can read the journal after the response; a watch must also wake an
     /// already-open session trace as records arrive.
     hub: Option<EventHub>,
-    history: Option<crate::storage::HistoryStore>,
+    history: crate::storage::HistoryStore,
 }
 
 impl NativeIngest {
-    pub fn new(store: JournalStore, writer: JournalWriter, seq: SeqAllocator) -> Self {
+    pub fn new(
+        store: JournalStore,
+        writer: JournalWriter,
+        seq: SeqAllocator,
+        history: crate::storage::HistoryStore,
+    ) -> Self {
         Self {
             store,
             writer,
             seq,
             hub: None,
-            history: None,
+            history,
         }
     }
 
@@ -191,18 +197,16 @@ impl NativeIngest {
         self
     }
 
-    /// Attach the warm tier used for lossless native-record retention.
-    pub fn with_history(mut self, history: crate::storage::HistoryStore) -> Self {
-        self.history = Some(history);
-        self
-    }
-
     /// Drain a native session's stream into the journal.
     ///
     /// Runs to the end of the stream. For `adopt` that is the end of one pass; for
     /// `watch` it is however long the adapter follows the file, which is why a caller
     /// that wants a response before then spawns this rather than awaiting it.
-    pub async fn drain(&self, session_id: &SessionId, mut stream: EventStream) -> IngestReport {
+    pub async fn drain(
+        &self,
+        session_id: &SessionId,
+        mut stream: EventStream,
+    ) -> Result<IngestReport> {
         let mut report = IngestReport::default();
         // The container currently accepting events, with the timestamp of the event that
         // opened it. `None` between turns and before the first one.
@@ -256,19 +260,23 @@ impl NativeIngest {
                     continue;
                 }
                 SessionMessage::NativeRecord(record) => {
-                    if let Some(history) = &self.history {
-                        if let Err(error) = history
-                            .put_native_record(&session_id.encode(), &record)
-                            .await
-                        {
-                            warn!(
-                                "Could not persist native record {}:{} for {}: {}",
-                                record.source, record.version, session_id, error
-                            );
-                        } else {
-                            report.raw_records += 1;
+                    if let Err(error) = self
+                        .history
+                        .put_native_record(&session_id.encode(), &record)
+                        .await
+                    {
+                        if let Some((turn_id, opened_at)) = open_turn.take() {
+                            let at = report.last_event_ms.unwrap_or(opened_at);
+                            self.settle(&turn_id, true, opened_at, at).await;
                         }
+                        return Err(error).with_context(|| {
+                            format!(
+                                "could not retain native record {}:{} for {}",
+                                record.source, record.version, session_id
+                            )
+                        });
                     }
+                    report.raw_records += 1;
                     // Raw native records do not open or close a turn container.
                     continue;
                 }
@@ -306,7 +314,7 @@ impl NativeIngest {
                     // The session row is gone — adopt racing a delete. Dropping is the
                     // same answer the live drain gives, and for the same reason: an
                     // unattributed write is worse than a missing one.
-                    None => return report,
+                    None => return Ok(report),
                 },
             };
             wire.arrival_turn_id = Some(turn_id.clone());
@@ -365,7 +373,7 @@ impl NativeIngest {
             self.settle(&turn_id, false, opened_at, at).await;
         }
 
-        report
+        Ok(report)
     }
 
     /// Open a container for events the vendor did not bracket.
@@ -464,7 +472,13 @@ mod tests {
             .expect("store");
         let writer = JournalWriter::new(store.clone());
         let seq = SeqAllocator::new(store.clone());
-        let ingest = NativeIngest::new(store.clone(), writer, seq);
+        let history = crate::storage::HistoryStore::open(
+            dir.path().join("history.db").to_str().unwrap(),
+            crate::storage::cas::BlobStore::new(dir.path().join("blobs")),
+        )
+        .await
+        .expect("history");
+        let ingest = NativeIngest::new(store.clone(), writer, seq, history);
 
         let id = crate::fixtures::test_session_id("adopted-1");
         // `events` has a foreign key onto `sessions`, so the row has to exist before
@@ -518,7 +532,10 @@ mod tests {
 
         let mut assistant = event(EventKind::Assistant, Some(Phase::Completed), 1000);
         assistant.text = "answer".to_string();
-        let report = ingest.drain(&id, stream(vec![assistant])).await;
+        let report = ingest
+            .drain(&id, stream(vec![assistant]))
+            .await
+            .expect("ingest");
 
         assert_eq!(report.events, 1);
         assert_eq!(report.turns, 1, "content must be reachable from a turn");
@@ -564,13 +581,22 @@ mod tests {
             store.clone(),
             JournalWriter::new(store.clone()),
             SeqAllocator::new(store),
+            crate::storage::HistoryStore::open(
+                dir.path().join("history.db").to_str().unwrap(),
+                crate::storage::cas::BlobStore::new(dir.path().join("blobs")),
+            )
+            .await
+            .expect("history"),
         )
         .with_hub(hub.clone());
         let mut trace = hub.attach_trace(&id.encode(), -1).await.live;
 
         let mut assistant = event(EventKind::Assistant, Some(Phase::Completed), 1000);
         assistant.text = "watched output".to_string();
-        ingest.drain(&id, stream(vec![assistant])).await;
+        ingest
+            .drain(&id, stream(vec![assistant]))
+            .await
+            .expect("ingest");
 
         let observed = tokio::time::timeout(std::time::Duration::from_secs(1), trace.recv())
             .await
@@ -603,7 +629,8 @@ mod tests {
                     500,
                 )]),
             )
-            .await;
+            .await
+            .expect("ingest");
 
         let turns = store.list_turns(&id, 10).await.expect("turns");
         assert_eq!(
@@ -636,7 +663,8 @@ mod tests {
                     close,
                 ]),
             )
-            .await;
+            .await
+            .expect("ingest");
 
         let turns = store.list_turns(&id, 10).await.expect("turns");
         assert_eq!(turns[0].started_at_ms, Some(opened));
@@ -671,7 +699,8 @@ mod tests {
                     event(EventKind::Turn, Some(Phase::Completed), 400),
                 ]),
             )
-            .await;
+            .await
+            .expect("ingest");
 
         assert_eq!(report.turns, 2);
         let turns = store.list_turns(&id, 10).await.expect("turns");
@@ -700,7 +729,8 @@ mod tests {
                     event(EventKind::Turn, Some(Phase::Completed), 300),
                 ]),
             )
-            .await;
+            .await
+            .expect("ingest");
 
         assert_eq!(report.turns, 1, "one container, not two");
         assert_eq!(store.list_turns(&id, 10).await.expect("turns").len(), 1);
@@ -719,7 +749,10 @@ mod tests {
         let mut close = event(EventKind::Turn, Some(Phase::Completed), 900);
         close.is_error = true;
         close.text = "the provider answered 404".to_string();
-        ingest.drain(&id, stream(vec![close])).await;
+        ingest
+            .drain(&id, stream(vec![close]))
+            .await
+            .expect("ingest");
 
         let turns = store.list_turns(&id, 10).await.expect("turns");
         assert_eq!(turns[0].status, "failed");
@@ -766,12 +799,54 @@ mod tests {
         ];
         let report = ingest
             .drain(&id, Box::pin(futures::stream::iter(items)))
-            .await;
+            .await
+            .expect("ingest");
 
         assert_eq!(report.read_errors, 1);
         assert_eq!(
             report.events, 2,
             "the event after the error must still land"
+        );
+    }
+
+    /// Raw retention is ordered before projection.  If the warm tier refuses a source
+    /// record, adopt stops at that record instead of journaling normalized events whose
+    /// only source is missing.
+    #[tokio::test]
+    async fn a_raw_retention_failure_stops_adopt_before_later_projection() {
+        let (ingest, store, id, _dir) = harness().await;
+        let history = ingest.history.clone();
+        let first = sylph_protocol::NativeRecord {
+            source: "root.jsonl".to_string(),
+            version: 1,
+            raw_json: Some(br#"{"value":"first"}"#.to_vec()),
+            payload: serde_json::json!({"value":"first"}),
+            blobs: Vec::new(),
+        };
+        history
+            .put_native_record(&id.encode(), &first)
+            .await
+            .expect("seed collision");
+        let conflicting = sylph_protocol::NativeRecord {
+            raw_json: Some(br#"{"value":"different"}"#.to_vec()),
+            payload: serde_json::json!({"value":"different"}),
+            ..first
+        };
+        let mut assistant = event(EventKind::Assistant, Some(Phase::Completed), 20);
+        assistant.text = "must not be projected".to_string();
+        let items: Vec<anyhow::Result<SessionMessage>> = vec![
+            Ok(SessionMessage::NativeRecord(conflicting)),
+            Ok(SessionMessage::Event(assistant)),
+        ];
+
+        let error = ingest
+            .drain(&id, Box::pin(futures::stream::iter(items)))
+            .await
+            .expect_err("raw retention failure must fail the adopt pass");
+        assert!(error.to_string().contains("root.jsonl:1"));
+        assert!(
+            store.list_turns(&id, 10).await.expect("turns").is_empty(),
+            "a failed source record must not leave a plausible adopted turn behind"
         );
     }
 
@@ -796,7 +871,8 @@ mod tests {
 
         let report = ingest
             .drain(&id, stream(vec![narration, thinking_level, ask]))
-            .await;
+            .await
+            .expect("ingest");
 
         assert_eq!(report.opening_status.as_deref(), Some("hi"));
     }
@@ -816,7 +892,10 @@ mod tests {
         let mut ask = event(EventKind::Status, Some(Phase::Completed), 20);
         ask.text = "fix the login bug".to_string();
 
-        let report = ingest.drain(&id, stream(vec![failure, ask])).await;
+        let report = ingest
+            .drain(&id, stream(vec![failure, ask]))
+            .await
+            .expect("ingest");
         assert_eq!(report.opening_status.as_deref(), Some("fix the login bug"));
     }
 
@@ -839,7 +918,8 @@ mod tests {
         ];
         let report = ingest
             .drain(&id, Box::pin(futures::stream::iter(items)))
-            .await;
+            .await
+            .expect("ingest");
 
         assert_eq!(report.capability_partials, 1);
         assert_eq!(report.events, 1);
@@ -863,7 +943,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_stream_opens_nothing() {
         let (ingest, store, id, _dir) = harness().await;
-        let report = ingest.drain(&id, stream(vec![])).await;
+        let report = ingest.drain(&id, stream(vec![])).await.expect("ingest");
 
         assert_eq!(report, IngestReport::default());
         assert!(store.list_turns(&id, 10).await.expect("turns").is_empty());
@@ -878,7 +958,7 @@ mod tests {
         let events: Vec<Event> = (0..6)
             .map(|n| event(EventKind::Assistant, Some(Phase::Completed), 100 + n))
             .collect();
-        ingest.drain(&id, stream(events)).await;
+        ingest.drain(&id, stream(events)).await.expect("ingest");
 
         let turns = store.list_turns(&id, 10).await.expect("turns");
         let mut seqs: Vec<i32> = store

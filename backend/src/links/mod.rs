@@ -1370,16 +1370,26 @@ impl LinkManager {
                     Ok(SessionMessage::NativeRecord(record)) => {
                         // Native records are not timeline events, but they are the lossless
                         // source for future re-projection. Persist them in the warm tier and
-                        // keep them out of turn lifecycle accounting.
+                        // keep them out of turn lifecycle accounting. A failed write is fatal
+                        // to this link: stdout may already have published the corresponding
+                        // projection, so continuing would knowingly extend a session whose
+                        // native source is incomplete. Closing makes that state explicit as
+                        // `LINK_LOST` and prevents every later event from widening the gap.
                         if let Err(error) = manager
                             .history
                             .put_native_record(&session_id.encode(), &record)
                             .await
                         {
-                            warn!(
-                                "Could not persist native record {}:{} for {}: {}",
-                                record.source, record.version, session_id, error
+                            let detail = format!(
+                                "could not retain native record {}:{}: {}",
+                                record.source, record.version, error
                             );
+                            error!("Stopping session {}: {}", session_id, detail);
+                            last_error = Some(detail);
+                            if let Some(link) = manager.get(session_id).await {
+                                link.close().await;
+                            }
+                            break;
                         }
                     }
                     Err(error) => {

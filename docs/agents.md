@@ -111,8 +111,28 @@ unknown type through**: guessing wrong that way costs a missing subtree, while t
 other way mislabels a tool call as an agent.
 
 **`--forward-subagent-text` forwards only for the built-in `Task`.** `Agent` and
-`Workflow` forward nothing, so their interior cannot be attributed at all and the
-lifecycle notifications are the whole record.
+`Workflow` forward nothing on stdout, so their interior must come from the native bundle;
+the `Task` delegate file is the overlapping copy and is suppressed only after its host tool
+is known.
+
+**Claude's native bundle is read by one cursor-driven reader in every mode.** `adopt`,
+`watch`, and live attachment share root/delegate/journal/manifest traversal and one
+projection. JSONL cursors advance only past complete lines; manifests are
+content-fingerprinted snapshots; sidecars have three source states: `missing`, `partial`,
+and `ready`. A partial sidecar is never treated as valid metadata, and a missing sidecar
+is not an eternal `pending` state: native launch/result records or task notifications are
+used when present, otherwise live close releases the delegate at the root. No timeout
+decides source meaning.
+
+**A resumed live reader captures its baseline before process launch.** Capturing after
+`system/init` can skip a delegate created between spawn and identity discovery. Existing
+bytes are hydrated into correlation state without re-emission; only bytes after the
+pre-launch boundary are projected live.
+
+**Workflow manifests may arrive after delegate files.** Delegate content is retained under
+its trajectory id while the parent-bearing declaration waits for the manifest's `runId`
+join. When the manifest arrives, the declaration is emitted once with the measured parent,
+so watch, live, and a later reload converge on the same tree without a retraction API.
 
 **`is_backgrounded` is reported on `task_started` and nowhere later**, so it must be
 re-attached to every subsequent phase.

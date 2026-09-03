@@ -112,13 +112,14 @@ order**, so an absent duration is reported absent rather than as zero.
 
 **Claude native ingestion now follows one bundle reader in every mode.** `adopt`, `watch`,
 and live stdout attachment share source discovery, cursor advancement, manifest revisions,
-sidecar classification, and projection. A resumed live session seeds a current-state
-baseline for every existing source, so historical delegates are never projected again;
-only later appends are live. Root stdout and native-only completion facts share one
-adapter-level correlation state, which is what lets synchronous Agent closes and embedded
-task notifications arrive exactly once. Sidecars are retained as validated, on-demand
-resources rather than read wholesale on the event path, and raw persistence failures are
-counted in diagnostics.
+sidecar classification, and projection. A resumed live session captures a pre-launch
+baseline for every existing source, so historical delegates are hydrated but never
+projected again; only later appends are live. Root stdout and native-only completion facts
+share one adapter-level correlation state, which is what lets synchronous Agent closes and
+embedded task notifications arrive exactly once. Sidecars are retained as validated,
+on-demand resources rather than read wholesale on the event path. Raw persistence is
+required: adopt fails explicitly and a live link closes with `LINK_LOST` when the source
+record cannot be retained, rather than continuing with an unrepeatable projection.
 
 **Which sidecar stream to suppress is decided from the host call's tool name**, not from state
 shared with the stdout pump. `--forward-subagent-text` forwards for the built-in `Task` alone,
