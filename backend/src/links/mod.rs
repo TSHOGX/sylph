@@ -453,7 +453,7 @@ impl LinkState {
     }
 
     /// Establishing a link was tried and failed, for a stated reason.
-    fn failed(reason: UnavailableReason) -> Self {
+    pub fn failed(reason: UnavailableReason) -> Self {
         Self {
             link: LinkFacets {
                 // Still readable: the record is the server's, and a failure to reach the
@@ -462,6 +462,38 @@ impl LinkState {
                 control: Facet::unavailable(reason),
             },
             ..Self::detached()
+        }
+    }
+
+    /// Build the detached state for callers outside the link manager, including
+    /// the remote envagent bridge. Observation remains available from the
+    /// server-owned store while control is unavailable.
+    pub fn detached_remote() -> Self {
+        Self::detached()
+    }
+
+    pub fn from_remote_capabilities(
+        agent: String,
+        capabilities: SessionCapabilities,
+        supports: Vec<String>,
+    ) -> Self {
+        Self::from_remote_capabilities_with_link(agent, capabilities, supports, None)
+    }
+
+    pub fn from_remote_capabilities_with_link(
+        agent: String,
+        capabilities: SessionCapabilities,
+        supports: Vec<String>,
+        link: Option<LinkFacets>,
+    ) -> Self {
+        Self {
+            link: link.unwrap_or(LinkFacets {
+                observe: Facet::available(),
+                control: Facet::available(),
+            }),
+            agent: Some(agent),
+            supports,
+            capabilities: Some(capabilities),
         }
     }
 }
@@ -1344,6 +1376,15 @@ impl LinkManager {
                     }
                     Ok(SessionMessage::Request(request)) => {
                         manager.absorb_request(session_id, request).await;
+                    }
+                    Ok(SessionMessage::TurnInput(_fact)) => {
+                        // Live turns receive their request text from the server's turn row.
+                        // A native-only adapter may recover it from a vendor store, but a
+                        // live link must not journal a second copy of that input.
+                        debug!(
+                            "Ignoring native turn-input fact on live session {}",
+                            session_id
+                        );
                     }
                     Ok(SessionMessage::Capabilities(facets)) => {
                         // The merge lives in one place (`LiveSession::apply`), and only a

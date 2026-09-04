@@ -6,6 +6,7 @@
 //! product invariant that this tier is authoritative only while a turn is active:
 //! the old filename claimed exactly the property the invariant limits.
 
+pub mod env;
 /// Writing an adapter's parse of a vendor's native store into this journal.
 ///
 /// Beside the store rather than in `api::sessions` because it is a *storage* decision:
@@ -24,6 +25,7 @@ pub mod store;
 /// depends on whether a reconnect can replay the event from anywhere else.
 pub mod writer;
 
+pub use env::{EnvIngestOutcome, EnvIngestResult, EnvReceipt, EnvironmentRow};
 pub use ingest::{IngestReport, NativeIngest};
 pub use store::JournalStore;
 pub use writer::JournalWriter;

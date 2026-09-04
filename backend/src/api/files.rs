@@ -48,6 +48,110 @@ use crate::{
     AppState,
 };
 
+enum RemoteTarget {
+    Draft {
+        environment: sylph_protocol::EnvironmentId,
+        draft_id: String,
+        workdir: String,
+    },
+    Session {
+        environment: sylph_protocol::EnvironmentId,
+        session_id: sylph_protocol::SessionId,
+        workdir: String,
+    },
+}
+
+async fn remote_target(state: &AppState, id: &str) -> Result<Option<RemoteTarget>> {
+    if id.starts_with("remote-draft-") {
+        let Some(draft) = state.env_bridge.remote_draft(id).await else {
+            return Err(Error::SessionNotFound);
+        };
+        return Ok(Some(RemoteTarget::Draft {
+            environment: draft.environment,
+            draft_id: id.to_string(),
+            workdir: draft.workdir,
+        }));
+    }
+    if id.starts_with("draft-") {
+        return Ok(None);
+    }
+    // Local draft handles are resolved by the legacy LinkManager below. A
+    // remote handle always carries the explicit remote prefix; never try to
+    // resolve a remote path on the server.
+    let session_id = crate::api::sessions::decode_id(id)?;
+    let Some(session) = state.store.get_session(&session_id).await? else {
+        return Err(Error::SessionNotFound);
+    };
+    if session_id.environment.as_str() == state.environment.descriptor().id {
+        return Ok(None);
+    }
+    Ok(Some(RemoteTarget::Session {
+        environment: session_id.environment.clone(),
+        session_id,
+        workdir: session.workdir,
+    }))
+}
+
+fn remote_parts(
+    target: &RemoteTarget,
+) -> (
+    &sylph_protocol::EnvironmentId,
+    Option<String>,
+    Option<sylph_protocol::SessionId>,
+    &str,
+) {
+    match target {
+        RemoteTarget::Draft {
+            environment,
+            draft_id,
+            workdir,
+        } => (environment, Some(draft_id.clone()), None, workdir),
+        RemoteTarget::Session {
+            environment,
+            session_id,
+            workdir,
+        } => (environment, None, Some(session_id.clone()), workdir),
+    }
+}
+
+fn map_remote_file_error(error: anyhow::Error) -> Error {
+    let text = format!("{error:#}");
+    if text.contains("DRAFT_NOT_FOUND") || text.contains("SESSION_NOT_HOSTED") {
+        Error::LinkGone
+    } else if text.contains("outside") || text.contains("escapes") {
+        Error::Forbidden("That path is outside the permitted directory.".into())
+    } else if text.contains("No such file") || text.contains("not found") {
+        Error::FileNotFound
+    } else {
+        Error::LinkFailed(text)
+    }
+}
+
+async fn remote_read_bytes(
+    state: &AppState,
+    target: &RemoteTarget,
+    relative: String,
+) -> Result<Vec<u8>> {
+    let (environment, draft_id, session_id, _) = remote_parts(target);
+    let value = state
+        .env_bridge
+        .remote_files(
+            environment,
+            draft_id,
+            session_id,
+            sylph_protocol::FileOperation::Read { relative },
+        )
+        .await
+        .map_err(map_remote_file_error)?;
+    serde_json::from_value(
+        value
+            .get("bytes")
+            .cloned()
+            .ok_or_else(|| Error::Internal("remote read returned no bytes".into()))?,
+    )
+    .map_err(|error| Error::Internal(format!("remote read returned malformed bytes: {error}")))
+}
+
 /// Largest file served inline.
 ///
 /// The Artifacts pane previews source files and images, and a browser cannot
@@ -120,6 +224,73 @@ pub async fn tree(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<TreeQuery>,
 ) -> Result<Json<TreeResponse>> {
+    if let Some(remote) = remote_target(&state, &id).await? {
+        let (environment, draft_id, session_id, workdir) = remote_parts(&remote);
+        let value = state
+            .env_bridge
+            .remote_files(
+                environment,
+                draft_id,
+                session_id,
+                sylph_protocol::FileOperation::List {
+                    relative: query.path.clone(),
+                },
+            )
+            .await
+            .map_err(map_remote_file_error)?;
+        let raw_entries = value.as_array().ok_or_else(|| {
+            Error::Internal("remote file listing returned a malformed payload".into())
+        })?;
+        let mut entries = Vec::with_capacity(raw_entries.len());
+        for entry in raw_entries {
+            let object = entry.as_object().ok_or_else(|| {
+                Error::Internal("remote file listing contained a malformed entry".into())
+            })?;
+            let name = object
+                .get("name")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| Error::Internal("remote file entry has no name".into()))?
+                .to_string();
+            let is_dir = object
+                .get("directory")
+                .and_then(|value| value.as_bool())
+                .ok_or_else(|| Error::Internal("remote file entry has no directory flag".into()))?;
+            let size = if is_dir {
+                None
+            } else {
+                Some(
+                    object
+                        .get("size")
+                        .and_then(|value| value.as_u64())
+                        .ok_or_else(|| Error::Internal("remote file entry has no size".into()))?,
+                )
+            };
+            entries.push(FileEntry {
+                path: paths::join_relative(&query.path, &name),
+                name: name.clone(),
+                is_dir,
+                size,
+                modified_at_ms: object
+                    .get("modifiedAtMs")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or(0),
+                is_symlink: object
+                    .get("symlink")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                preview_kind: (!is_dir)
+                    .then(|| crate::api::files::preview_kind(Path::new(&name)))
+                    .flatten(),
+            });
+        }
+        return Ok(Json(TreeResponse {
+            root: workdir.to_string(),
+            path: paths::normalize_relative(&query.path),
+            entries,
+            truncated: false,
+        }));
+    }
     let (root, target) = resolve(&state, &id, &query.path).await?;
 
     let metadata = std::fs::metadata(&target)
@@ -266,92 +437,134 @@ pub async fn content(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ContentQuery>,
 ) -> Result<Json<ContentResponse>> {
-    let (_root, target) = resolve(&state, &id, &query.path).await?;
-
-    let metadata =
-        std::fs::metadata(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
-    if metadata.is_dir() {
-        return Err(Error::InvalidRequest(
-            "That path is a directory, not a file.".to_string(),
-        ));
-    }
-
-    let size = metadata.len();
-    let mime_type = guess_mime(&target);
-    let is_image = mime_type.starts_with("image/");
-
-    // Images are all-or-nothing: a truncated image decodes to nothing useful,
-    // so an oversized one reports its size and offers no preview.
-    if is_image {
-        if size > MAX_PREVIEW_BYTES {
+    if let Some(remote) = remote_target(&state, &id).await? {
+        let path = paths::normalize_relative(&query.path);
+        let bytes = remote_read_bytes(&state, &remote, path.clone()).await?;
+        let size = bytes.len() as u64;
+        let mime_type = guess_mime(Path::new(&path));
+        let is_image = mime_type.starts_with("image/");
+        if is_image {
             return Ok(Json(ContentResponse {
+                path,
+                absolute_path: format!("{}/{}", remote_parts(&remote).3, query.path),
+                size,
+                encoding: "image".into(),
+                mime_type,
+                content: Some(base64_encode(&bytes)),
+                truncated: false,
+                modified_at_ms: 0,
+            }));
+        }
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(Json(ContentResponse {
+                path,
+                absolute_path: format!("{}/{}", remote_parts(&remote).3, query.path),
+                size,
+                encoding: "text".into(),
+                mime_type,
+                content: Some(text),
+                truncated: false,
+                modified_at_ms: 0,
+            })),
+            Err(_) => Ok(Json(ContentResponse {
+                path,
+                absolute_path: format!("{}/{}", remote_parts(&remote).3, query.path),
+                size,
+                encoding: "binary".into(),
+                mime_type,
+                content: None,
+                truncated: false,
+                modified_at_ms: 0,
+            })),
+        }
+    } else {
+        let (_root, target) = resolve(&state, &id, &query.path).await?;
+
+        let metadata = std::fs::metadata(&target)
+            .map_err(|e| paths::describe_io_error(&e, "read that file"))?;
+        if metadata.is_dir() {
+            return Err(Error::InvalidRequest(
+                "That path is a directory, not a file.".to_string(),
+            ));
+        }
+
+        let size = metadata.len();
+        let mime_type = guess_mime(&target);
+        let is_image = mime_type.starts_with("image/");
+
+        // Images are all-or-nothing: a truncated image decodes to nothing useful,
+        // so an oversized one reports its size and offers no preview.
+        if is_image {
+            if size > MAX_PREVIEW_BYTES {
+                return Ok(Json(ContentResponse {
+                    path: paths::normalize_relative(&query.path),
+                    absolute_path: target.display().to_string(),
+                    size,
+                    encoding: "binary".to_string(),
+                    mime_type,
+                    content: None,
+                    truncated: true,
+                    modified_at_ms: paths::modified_ms(&metadata),
+                }));
+            }
+            let bytes = std::fs::read(&target)
+                .map_err(|e| paths::describe_io_error(&e, "read that file"))?;
+            return Ok(Json(ContentResponse {
+                path: paths::normalize_relative(&query.path),
+                absolute_path: target.display().to_string(),
+                size,
+                encoding: "image".to_string(),
+                mime_type,
+                content: Some(base64_encode(&bytes)),
+                truncated: false,
+                modified_at_ms: paths::modified_ms(&metadata),
+            }));
+        }
+
+        let read_limit = size.min(MAX_PREVIEW_BYTES) as usize;
+        let bytes = read_prefix(&target, read_limit)?;
+
+        // UTF-8 validity, not the extension, decides whether this is text. An
+        // extension-based guess mislabels a `.log` holding binary output, and
+        // refuses a perfectly readable file with no extension at all.
+        match String::from_utf8(bytes) {
+            Ok(text) => {
+                let truncated = size > read_limit as u64;
+                let content = if truncated && text.len() > TRUNCATE_TO_BYTES {
+                    // Cut on a character boundary; slicing by byte index would panic
+                    // in the middle of a multi-byte codepoint.
+                    let end = text
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .take_while(|i| *i <= TRUNCATE_TO_BYTES)
+                        .last()
+                        .unwrap_or(0);
+                    text[..end].to_string()
+                } else {
+                    text
+                };
+                Ok(Json(ContentResponse {
+                    path: paths::normalize_relative(&query.path),
+                    absolute_path: target.display().to_string(),
+                    size,
+                    encoding: "text".to_string(),
+                    mime_type,
+                    content: Some(content),
+                    truncated,
+                    modified_at_ms: paths::modified_ms(&metadata),
+                }))
+            }
+            Err(_) => Ok(Json(ContentResponse {
                 path: paths::normalize_relative(&query.path),
                 absolute_path: target.display().to_string(),
                 size,
                 encoding: "binary".to_string(),
                 mime_type,
                 content: None,
-                truncated: true,
+                truncated: false,
                 modified_at_ms: paths::modified_ms(&metadata),
-            }));
+            })),
         }
-        let bytes =
-            std::fs::read(&target).map_err(|e| paths::describe_io_error(&e, "read that file"))?;
-        return Ok(Json(ContentResponse {
-            path: paths::normalize_relative(&query.path),
-            absolute_path: target.display().to_string(),
-            size,
-            encoding: "image".to_string(),
-            mime_type,
-            content: Some(base64_encode(&bytes)),
-            truncated: false,
-            modified_at_ms: paths::modified_ms(&metadata),
-        }));
-    }
-
-    let read_limit = size.min(MAX_PREVIEW_BYTES) as usize;
-    let bytes = read_prefix(&target, read_limit)?;
-
-    // UTF-8 validity, not the extension, decides whether this is text. An
-    // extension-based guess mislabels a `.log` holding binary output, and
-    // refuses a perfectly readable file with no extension at all.
-    match String::from_utf8(bytes) {
-        Ok(text) => {
-            let truncated = size > read_limit as u64;
-            let content = if truncated && text.len() > TRUNCATE_TO_BYTES {
-                // Cut on a character boundary; slicing by byte index would panic
-                // in the middle of a multi-byte codepoint.
-                let end = text
-                    .char_indices()
-                    .map(|(i, _)| i)
-                    .take_while(|i| *i <= TRUNCATE_TO_BYTES)
-                    .last()
-                    .unwrap_or(0);
-                text[..end].to_string()
-            } else {
-                text
-            };
-            Ok(Json(ContentResponse {
-                path: paths::normalize_relative(&query.path),
-                absolute_path: target.display().to_string(),
-                size,
-                encoding: "text".to_string(),
-                mime_type,
-                content: Some(content),
-                truncated,
-                modified_at_ms: paths::modified_ms(&metadata),
-            }))
-        }
-        Err(_) => Ok(Json(ContentResponse {
-            path: paths::normalize_relative(&query.path),
-            absolute_path: target.display().to_string(),
-            size,
-            encoding: "binary".to_string(),
-            mime_type,
-            content: None,
-            truncated: false,
-            modified_at_ms: paths::modified_ms(&metadata),
-        })),
     }
 }
 
@@ -390,6 +603,55 @@ pub async fn document(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<DocumentQuery>,
 ) -> Result<Json<DocumentResponse>> {
+    if let Some(remote) = remote_target(&state, &id).await? {
+        let path = paths::normalize_relative(&query.path);
+        let bytes = remote_read_bytes(&state, &remote, path.clone()).await?;
+        if bytes.len() as u64 > documents::MAX_DOCUMENT_BYTES {
+            return Err(Error::InvalidRequest(format!(
+                "This file is over the {} MiB document preview limit.",
+                documents::MAX_DOCUMENT_BYTES / 1024 / 1024
+            )));
+        }
+        // The parser is intentionally shared with local files.  The temporary
+        // copy is bounded by the envagent read limit and lives under the
+        // server's own temp directory; no remote path is ever opened by the
+        // server.
+        let suffix = Path::new(&path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| format!(".{value}"))
+            .unwrap_or_default();
+        let temporary_path = state.config.data_dir.join(format!(
+            "sylph-remote-document-{}{}",
+            uuid::Uuid::new_v4().simple(),
+            suffix
+        ));
+        std::fs::create_dir_all(&state.config.data_dir).map_err(|error| {
+            Error::Internal(format!("Could not stage remote document: {error}"))
+        })?;
+        std::fs::write(&temporary_path, &bytes).map_err(|error| {
+            Error::Internal(format!("Could not stage remote document: {error}"))
+        })?;
+        let window = Window::new(query.sheet, query.row, query.rows);
+        let parse_path = temporary_path.clone();
+        let parsed_result =
+            tokio::task::spawn_blocking(move || documents::parse(&parse_path, window))
+                .await
+                .map_err(|error| {
+                    tracing::error!("remote document parser panicked: {error}");
+                    Error::Internal("Failed to parse that remote document.".into())
+                })?;
+        let _ = std::fs::remove_file(&temporary_path);
+        let parsed = parsed_result?;
+        let (_, _, _, workdir) = remote_parts(&remote);
+        return Ok(Json(DocumentResponse {
+            path,
+            absolute_path: format!("{}/{}", workdir, query.path),
+            size: bytes.len() as u64,
+            modified_at_ms: 0,
+            document: parsed,
+        }));
+    }
     let (_root, target) = resolve(&state, &id, &query.path).await?;
 
     let metadata =
@@ -520,6 +782,44 @@ pub async fn raw(
     Query(query): Query<RawQuery>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response> {
+    if let Some(remote) = remote_target(&state, &id).await? {
+        let path = paths::normalize_relative(&query.path);
+        let bytes = remote_read_bytes(&state, &remote, path.clone()).await?;
+        let mime = guess_mime(Path::new(&path));
+        let inline = !query.download
+            && (INLINE_TYPES.contains(&mime.as_str())
+                || (!bytes.contains(&0) && std::str::from_utf8(&bytes).is_ok()));
+        let content_type = if inline {
+            if INLINE_TYPES.contains(&mime.as_str()) {
+                mime
+            } else {
+                "text/plain; charset=utf-8".into()
+            }
+        } else {
+            "application/octet-stream".into()
+        };
+        let filename = Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file");
+        let etag = format!("\"remote-{}\"", blake3::hash(&bytes).to_hex());
+        if headers
+            .get(header::IF_NONE_MATCH)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag))
+        {
+            return Ok((
+                StatusCode::NOT_MODIFIED,
+                hardened_headers(&etag, &content_type, inline, Some(filename)),
+            )
+                .into_response());
+        }
+        return Ok((
+            hardened_headers(&etag, &content_type, inline, Some(filename)),
+            bytes,
+        )
+            .into_response());
+    }
     let (_root, target) = resolve(&state, &id, &query.path).await?;
 
     let metadata =
@@ -861,6 +1161,48 @@ pub async fn upload(
     AxumPath(id): AxumPath<String>,
     Json(req): Json<UploadRequest>,
 ) -> Result<(StatusCode, Json<UploadResponse>)> {
+    if let Some(remote) = remote_target(&state, &id).await? {
+        let filename = crate::attachments::sanitize_filename(&req.name);
+        let relative = paths::join_relative(&req.path, &filename);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(req.data.as_bytes())
+            .map_err(|error| Error::AttachmentInvalid(format!("Invalid base64: {error}")))?;
+        if bytes.len() > crate::attachments::MAX_ATTACHMENT_BYTES {
+            return Err(Error::AttachmentInvalid(format!(
+                "'{}' is {} bytes (max {})",
+                req.name,
+                bytes.len(),
+                crate::attachments::MAX_ATTACHMENT_BYTES
+            )));
+        }
+        let (environment, draft_id, session_id, workdir) = remote_parts(&remote);
+        let value = state
+            .env_bridge
+            .remote_files(
+                environment,
+                draft_id,
+                session_id,
+                sylph_protocol::FileOperation::Write {
+                    relative: relative.clone(),
+                    bytes,
+                    overwrite: req.overwrite,
+                },
+            )
+            .await
+            .map_err(map_remote_file_error)?;
+        let size = value
+            .get("written")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        return Ok((
+            StatusCode::CREATED,
+            Json(UploadResponse {
+                path: relative.clone(),
+                absolute_path: format!("{workdir}/{relative}"),
+                size,
+            }),
+        ));
+    }
     // Resolves the *parent directory*, not the target: the file may not exist
     // yet, and `canonicalize` requires an existing path. Containment is therefore
     // established on the directory, and the filename is reduced to a single
@@ -993,6 +1335,30 @@ pub async fn mkdir(
     AxumPath(id): AxumPath<String>,
     Json(req): Json<MkdirRequest>,
 ) -> Result<(StatusCode, Json<MkdirResponse>)> {
+    if let Some(remote) = remote_target(&state, &id).await? {
+        let name = sanitize_component(&req.name)?;
+        let relative = paths::join_relative(&req.path, &name);
+        let (environment, draft_id, session_id, workdir) = remote_parts(&remote);
+        state
+            .env_bridge
+            .remote_files(
+                environment,
+                draft_id,
+                session_id,
+                sylph_protocol::FileOperation::Mkdir {
+                    relative: relative.clone(),
+                },
+            )
+            .await
+            .map_err(map_remote_file_error)?;
+        return Ok((
+            StatusCode::CREATED,
+            Json(MkdirResponse {
+                path: relative,
+                absolute_path: format!("{workdir}/{}", paths::join_relative(&req.path, &name)),
+            }),
+        ));
+    }
     let (root, parent) = resolve(&state, &id, &req.path).await?;
 
     let metadata = std::fs::metadata(&parent)
@@ -1070,6 +1436,24 @@ pub async fn remove(
         return Err(Error::Forbidden(
             "The session's working directory cannot be deleted.".to_string(),
         ));
+    }
+
+    if let Some(remote) = remote_target(&state, &id).await? {
+        let (environment, draft_id, session_id, _) = remote_parts(&remote);
+        state
+            .env_bridge
+            .remote_files(
+                environment,
+                draft_id,
+                session_id,
+                sylph_protocol::FileOperation::Remove {
+                    relative: cleaned,
+                    recursive: query.recursive,
+                },
+            )
+            .await
+            .map_err(map_remote_file_error)?;
+        return Ok(StatusCode::NO_CONTENT);
     }
 
     let (_root, target) = resolve_parent(&state, &id, &cleaned).await?;

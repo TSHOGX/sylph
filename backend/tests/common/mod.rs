@@ -398,6 +398,19 @@ impl TestBackend {
         .await
     }
 
+    pub async fn post(&self, path: &str, body: Value) -> Response<Body> {
+        self.send(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::HOST, "127.0.0.1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
     pub async fn patch_authed(&self, path: &str, body: Value) -> Response<Body> {
         self.send(
             Request::builder()

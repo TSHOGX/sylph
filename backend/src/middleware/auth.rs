@@ -28,7 +28,13 @@ const COOKIE_NAME: &str = "sylph_session";
 ///
 /// `/api/v1/health` is public by design (monitoring, uptime checks).
 /// `/api/v1/auth/token` bootstraps the cookie.
-const EXEMPT_PATHS: &[&str] = &["/api/v1/health", "/api/v1/auth/token"];
+const EXEMPT_PATHS: &[&str] = &[
+    "/api/v1/health",
+    "/api/v1/auth/token",
+    // The envagent has no browser cookie. The pairing code is short-lived
+    // and single-use, and this endpoint remains loopback-only.
+    "/api/v1/environments/pair",
+];
 
 /// Validate that the request comes from a loopback client and carries a valid
 /// session cookie (unless it's an exempt path).
@@ -49,8 +55,19 @@ pub async fn auth_middleware(
         }
     }
 
-    // Exempt paths skip cookie validation.
+    // Pairing has no browser cookie, but a cross-origin page must not be able
+    // to consume a one-shot pairing code.  Keep the exemption only for the
+    // credential check and still enforce a loopback Origin when one is sent.
     if EXEMPT_PATHS.contains(&path) {
+        if path == "/api/v1/environments/pair" {
+            if let Some(origin) = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok()) {
+                if !is_loopback_origin(origin) {
+                    return Err(Error::Forbidden(format!(
+                        "Non-loopback Origin rejected: {origin}"
+                    )));
+                }
+            }
+        }
         return Ok(next.run(request).await);
     }
 

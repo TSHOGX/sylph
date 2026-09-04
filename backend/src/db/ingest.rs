@@ -280,6 +280,14 @@ impl NativeIngest {
                     // Raw native records do not open or close a turn container.
                     continue;
                 }
+                SessionMessage::TurnInput(_) => {
+                    report.read_errors += 1;
+                    warn!(
+                        "Ignoring native turn-input fact from {} until adapter provenance is enabled",
+                        session_id
+                    );
+                    continue;
+                }
             };
 
             let mut wire = StreamEvent::from_protocol(&event);

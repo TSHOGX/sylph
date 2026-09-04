@@ -106,6 +106,27 @@ pub struct SessionResponse {
 }
 
 #[derive(Serialize)]
+pub struct SessionEdgesResponse {
+    pub edges: Vec<sylph_protocol::SessionEdge>,
+}
+
+/// GET /api/v1/sessions/{id}/edges
+pub async fn edges(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionEdgesResponse>> {
+    let id = decode_id(&id)?;
+    state
+        .store
+        .get_session(&id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+    Ok(Json(SessionEdgesResponse {
+        edges: state.store.list_session_edges(Some(&id)).await?,
+    }))
+}
+
+#[derive(Serialize)]
 pub struct PreparedSessionResponse {
     /// Opaque, process-local handle. It is intentionally not a SessionId and is not
     /// accepted by history/listing endpoints.
@@ -353,12 +374,68 @@ async fn create_prepared(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<PreparedSessionResponse>)> {
-    // The local build has exactly one environment, and future envagent-backed
-    // deployments will resolve this through the selected environment's connection.
+    // Paired environments are started through the real envagent bridge. The
+    // in-process link remains only for the local development environment and
+    // deterministic fixture tests.
     // Parsing alone is not enough: it would let a well-formed id for an unreachable
     // machine start a process locally and stamp the resulting session with a foreign
     // identity. Creation and adoption must share the same environment gate.
-    let environment = require_environment(&state, &req.environment)?;
+    let environment = require_environment(&state, &req.environment).await?;
+    if environment.as_str() != state.environment.descriptor().id
+        && state.env_bridge.environment_connected(&environment).await
+    {
+        let flags = req
+            .flags
+            .as_ref()
+            .and_then(|value| value.as_object().cloned())
+            .map(|map| {
+                map.into_iter()
+                    .filter_map(|(key, value)| value.as_str().map(|text| (key, text.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let title = req
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let identity_preamble = req
+            .inject_identity
+            .then(|| {
+                state
+                    .config
+                    .soul_path
+                    .as_ref()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+            })
+            .flatten();
+        let (draft_id, workdir) = state
+            .env_bridge
+            .prepare_remote(
+                &environment,
+                req.agent.clone(),
+                req.workdir.clone(),
+                title.clone(),
+                req.inject_identity,
+                flags,
+                identity_preamble,
+                None,
+            )
+            .await
+            .map_err(|error| Error::AgentStartFailed(anyhow::anyhow!("{error:#}")))?;
+        return Ok((
+            StatusCode::CREATED,
+            Json(PreparedSessionResponse {
+                draft_id,
+                environment,
+                agent: req.agent,
+                workdir,
+                title,
+                inject_identity: req.inject_identity,
+            }),
+        ));
+    }
     if !state
         .adapters
         .available()
@@ -420,6 +497,19 @@ pub async fn prepared_get(
     State(state): State<AppState>,
     Path(draft_id): Path<String>,
 ) -> Result<Json<PreparedSessionResponse>> {
+    if state.env_bridge.remote_draft_promoting(&draft_id).await {
+        return Err(Error::SessionAlreadyRunning);
+    }
+    if let Some(spec) = state.env_bridge.remote_draft(&draft_id).await {
+        return Ok(Json(PreparedSessionResponse {
+            draft_id,
+            environment: spec.environment,
+            agent: spec.agent,
+            workdir: spec.workdir,
+            title: spec.title,
+            inject_identity: spec.inject_identity,
+        }));
+    }
     let spec = state
         .links
         .prepared_spec(&draft_id)
@@ -554,12 +644,13 @@ pub async fn update(
 /// construction rather than by a connection check. That is the honest answer *now* and
 /// stays the honest answer afterwards, when the check becomes "is that envagent's
 /// connection live".
-fn require_environment(state: &AppState, requested: &str) -> Result<EnvironmentId> {
+async fn require_environment(state: &AppState, requested: &str) -> Result<EnvironmentId> {
     let environment = EnvironmentId::parse(requested.trim())
         .map_err(|error| Error::InvalidRequest(error.to_string()))?;
 
     let local = state.environment.descriptor().id;
-    if environment.as_str() != local {
+    if environment.as_str() != local && !state.env_bridge.environment_connected(&environment).await
+    {
         return Err(Error::EnvironmentUnreachable(environment.to_string()));
     }
     Ok(environment)
@@ -755,7 +846,90 @@ pub async fn enumerate(
     State(state): State<AppState>,
     Query(query): Query<EnumerateQuery>,
 ) -> Result<Json<EnumerateResponse>> {
-    let environment = require_environment(&state, &query.environment)?;
+    let environment = require_environment(&state, &query.environment).await?;
+    if environment.as_str() != state.environment.descriptor().id {
+        let agent = non_blank(query.agent.clone()).unwrap_or_else(|| "".into());
+        if agent.is_empty() {
+            return Err(Error::InvalidRequest(
+                "Remote enumeration requires an agent filter.".into(),
+            ));
+        }
+        let request_id = sylph_protocol::CommandRequestId::parse(format!(
+            "enumerate-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+        .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+        let command = sylph_protocol::Command::new(
+            request_id,
+            sylph_protocol::IdempotencyPolicy::Replayable,
+            sylph_protocol::EnvironmentCommand::Enumerate {
+                agent: agent.clone(),
+                workdir: non_blank(query.workdir.clone()),
+            },
+        );
+        let outcome = state
+            .env_bridge
+            .dispatch_and_wait(&environment, command, std::time::Duration::from_secs(30))
+            .await
+            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+        let value = match outcome {
+            sylph_protocol::CommandOutcome::Accepted {
+                result: Some(value),
+            } => value,
+            sylph_protocol::CommandOutcome::Accepted { result: None } => serde_json::json!([]),
+            sylph_protocol::CommandOutcome::Rejected { code, message } => {
+                return Err(Error::InvalidRequest(format!("{code}: {message}")))
+            }
+            sylph_protocol::CommandOutcome::Unknown { message } => {
+                return Err(Error::LinkFailed(format!(
+                    "remote enumeration outcome is unknown: {}",
+                    message.unwrap_or_default()
+                )))
+            }
+        };
+        let summaries: Vec<sylph_protocol::NativeSummary> =
+            serde_json::from_value(value).map_err(|error| {
+                Error::Internal(format!("remote enumeration was malformed: {error}"))
+            })?;
+        let offset = query
+            .cursor
+            .as_deref()
+            .and_then(|cursor| cursor.parse::<usize>().ok())
+            .unwrap_or(0);
+        let limit = query
+            .limit
+            .unwrap_or(ENUMERATE_DEFAULT_LIMIT)
+            .clamp(1, ENUMERATE_MAX_LIMIT);
+        let total = summaries.len();
+        let rows = summaries
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|summary| {
+                let agent_name = AgentName::parse(agent.clone())
+                    .map_err(|error| Error::Internal(error.to_string()))?;
+                Ok(NativeSessionRow {
+                    id: SessionId::new(environment.clone(), agent_name, summary.native_id.clone())
+                        .encode(),
+                    agent: agent.clone(),
+                    native_id: summary.native_id.to_string(),
+                    workdir: summary.workdir,
+                    title: summary.title,
+                    started_at_ms: summary.started_at_ms,
+                    ended_at_ms: summary.ended_at_ms,
+                    event_count: summary.event_count,
+                    parent_native_id: summary.parent_native_id.map(|id| id.to_string()),
+                    fidelity: summary.fidelity,
+                    blocked: None,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let next_cursor = (offset + rows.len() < total).then(|| (offset + rows.len()).to_string());
+        return Ok(Json(EnumerateResponse {
+            sessions: rows,
+            next_cursor,
+        }));
+    }
     let agents = require_agents(state.adapters.as_ref(), non_blank(query.agent).as_deref())?;
 
     let limit = query
@@ -962,8 +1136,167 @@ pub async fn adopt(
     State(state): State<AppState>,
     Json(req): Json<AdoptSessionRequest>,
 ) -> Result<(StatusCode, Json<SessionResponse>)> {
-    let environment = require_environment(&state, &req.environment)?;
+    let environment = require_environment(&state, &req.environment).await?;
     let agent = req.agent.trim().to_string();
+
+    if environment.as_str() != state.environment.descriptor().id {
+        let requested_agent = AgentName::parse(agent.clone())
+            .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+        let requested_native = NativeId::new(req.native_id.trim());
+        let requested_session_id = SessionId::new(
+            environment.clone(),
+            requested_agent.clone(),
+            requested_native.clone(),
+        );
+        let _session_command_guard = state
+            .env_bridge
+            .session_command_lock(&requested_session_id)
+            .await
+            .lock_owned()
+            .await;
+        if req.native_id.trim().is_empty() {
+            return Err(Error::InvalidRequest(
+                "Adopting a session needs the agent's own session id.".into(),
+            ));
+        }
+        let remote_session_id = requested_session_id.clone();
+        if state.store.get_session(&remote_session_id).await?.is_some() {
+            return Err(Error::SessionAlreadyPresent);
+        }
+        let command_payload = serde_json::json!({
+            "environment": environment,
+            "agent": agent,
+            "nativeId": req.native_id.trim(),
+            "watch": req.watch,
+        });
+        let request_id = sylph_protocol::CommandRequestId::parse(format!(
+            "adopt-{}",
+            blake3::hash(command_payload.to_string().as_bytes()).to_hex()
+        ))
+        .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+        let native_id_for_command = remote_session_id.native_id.clone();
+        let command_kind = if req.watch {
+            sylph_protocol::EnvironmentCommand::Watch {
+                session_id: SessionId::new(
+                    environment.clone(),
+                    AgentName::parse(agent.clone())
+                        .map_err(|error| Error::InvalidRequest(error.to_string()))?,
+                    native_id_for_command.clone(),
+                ),
+                agent: agent.clone(),
+                native_id: native_id_for_command.clone(),
+                turn_id: None,
+            }
+        } else {
+            sylph_protocol::EnvironmentCommand::Adopt {
+                session_id: SessionId::new(
+                    environment.clone(),
+                    AgentName::parse(agent.clone())
+                        .map_err(|error| Error::InvalidRequest(error.to_string()))?,
+                    native_id_for_command.clone(),
+                ),
+                agent: agent.clone(),
+                native_id: native_id_for_command.clone(),
+                turn_id: None,
+            }
+        };
+        let command = sylph_protocol::Command::new(
+            request_id,
+            sylph_protocol::IdempotencyPolicy::AtMostOnce,
+            command_kind,
+        );
+        let outcome = state
+            .env_bridge
+            .dispatch_and_wait(&environment, command, std::time::Duration::from_secs(30))
+            .await
+            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+        let result = match outcome {
+            sylph_protocol::CommandOutcome::Accepted {
+                result: Some(value),
+            } => value,
+            sylph_protocol::CommandOutcome::Accepted { result: None } => {
+                return Err(Error::LinkFailed("remote adopt returned no session".into()))
+            }
+            sylph_protocol::CommandOutcome::Rejected { code, message } => {
+                return Err(Error::InvalidRequest(format!("{code}: {message}")))
+            }
+            sylph_protocol::CommandOutcome::Unknown { message } => {
+                return Err(Error::LinkFailed(format!(
+                    "remote adopt outcome is unknown: {}",
+                    message.unwrap_or_default()
+                )))
+            }
+        };
+        let session_id: SessionId = serde_json::from_value(
+            result
+                .get("sessionId")
+                .cloned()
+                .ok_or_else(|| Error::LinkFailed("remote adopt returned no session id".into()))?,
+        )
+        .map_err(|error| Error::LinkFailed(format!("remote adopt returned invalid id: {error}")))?;
+        if session_id != requested_session_id {
+            return Err(Error::LinkFailed(
+                "remote adopt returned a different session identity".into(),
+            ));
+        }
+        let workdir = result
+            .get("workdir")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| Error::LinkFailed("remote adopt returned no workdir".into()))?
+            .to_string();
+        let now = now_ms();
+        let record = Session {
+            id: session_id.clone(),
+            workdir,
+            title: result
+                .get("title")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            inject_identity: req.inject_identity,
+            fidelity: result
+                .get("fidelity")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or(sylph_protocol::Fidelity::Messages),
+            flags_json: "{}".into(),
+            status: "idle".into(),
+            parent_session: result
+                .get("parentNativeId")
+                .and_then(|value| value.as_str())
+                .map(|parent| {
+                    SessionId::new(
+                        session_id.environment.clone(),
+                        session_id.agent.clone(),
+                        NativeId::new(parent),
+                    )
+                    .encode()
+                }),
+            created_at_ms: result
+                .get("startedAtMs")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(now),
+            updated_at_ms: result
+                .get("endedAtMs")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(now),
+        };
+        let stored = match state.store.create_session(&record).await {
+            Ok(stored) => stored,
+            Err(error) => {
+                let _ = state.env_bridge.close_remote_session(&session_id).await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = state.env_bridge.activate_remote(&session_id).await {
+            let _ = state.env_bridge.close_remote_session(&session_id).await;
+            return Err(Error::LinkFailed(format!("{error:#}")));
+        }
+        return Ok((
+            StatusCode::CREATED,
+            Json(SessionResponse { session: stored }),
+        ));
+    }
 
     let native_raw = req.native_id.trim();
     if native_raw.is_empty() {

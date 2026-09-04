@@ -17,9 +17,15 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+pub mod bridge;
 pub mod local;
+pub mod registry;
 
+pub use bridge::{DispatchResult, EnvBridge, IngestResult};
 pub use local::LocalEnvironment;
+pub use registry::{
+    EnvironmentRegistry, EnvironmentSnapshot, PairingGrant, PairingOffer, RegistryError,
+};
 
 /// What an environment is, as reported to clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

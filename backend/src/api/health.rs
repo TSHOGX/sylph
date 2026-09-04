@@ -45,12 +45,32 @@ pub struct HealthResponse {
     /// Zero agents is a silent total failure three layers from its symptom, so it is
     /// reported here explicitly (`AGENTS.md` § Rules that keep costing time).
     agents: AgentsHealth,
+    /// Per-environment connectivity and inventory summary. Detailed paths and
+    /// session counts remain authenticated on diagnostics/environments.
+    environments: Vec<EnvironmentHealthLine>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentsHealth {
     available: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentHealthLine {
+    id: String,
+    name: String,
+    connected: bool,
+    agents: Vec<AgentHealthLine>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentHealthLine {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
 }
 
 /// GET /api/v1/health
@@ -60,6 +80,42 @@ pub struct AgentsHealth {
 /// reports only availability, never counts or paths.
 pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>> {
     let schema_version = state.store.schema_version().await.unwrap_or(0);
+    let mut environments = Vec::new();
+    let local = state.environment.descriptor();
+    environments.push(EnvironmentHealthLine {
+        id: local.id,
+        name: local.label,
+        connected: state.environment.probe().await.available,
+        agents: state
+            .adapters
+            .available()
+            .into_iter()
+            .map(|name| AgentHealthLine {
+                name,
+                version: None,
+            })
+            .collect(),
+    });
+    for environment in state
+        .env_bridge
+        .list_environments()
+        .await
+        .unwrap_or_default()
+    {
+        environments.push(EnvironmentHealthLine {
+            id: environment.id.to_string(),
+            name: environment.name,
+            connected: environment.connected,
+            agents: environment
+                .agents
+                .into_iter()
+                .map(|agent| AgentHealthLine {
+                    name: agent.name,
+                    version: agent.version,
+                })
+                .collect(),
+        });
+    }
 
     Ok(Json(HealthResponse {
         ok: true,
@@ -68,6 +124,7 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse
         agents: AgentsHealth {
             available: !state.adapters.available().is_empty(),
         },
+        environments,
     }))
 }
 

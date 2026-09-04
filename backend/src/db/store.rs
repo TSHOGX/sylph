@@ -56,6 +56,15 @@ impl Default for SessionFilter {
 }
 
 impl JournalStore {
+    /// Internal access for the environment bridge's migration-backed tables.
+    ///
+    /// Keeping the pool private to the database module prevents API handlers
+    /// from issuing ad-hoc journal queries while still letting the bridge use
+    /// one connection pool and transaction boundary.
+    pub(crate) fn raw_pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     pub async fn new(path: &str) -> Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = Path::new(path).parent() {
@@ -390,6 +399,59 @@ impl JournalStore {
         .map_err(Error::Database)
     }
 
+    /// Insert a turn and claim the session's running slot atomically.  Remote
+    /// commands cannot rely on the in-process supervisor's mutex, so the
+    /// database is the compare-and-set boundary for concurrent HTTP writers.
+    pub async fn create_remote_turn(&self, turn: &Turn) -> Result<Option<Turn>> {
+        let mut tx = self.pool.begin().await.map_err(Error::Database)?;
+        let active: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM turns WHERE session_env = ? AND session_agent = ? AND session_native = ? \
+             AND status IN ('queued','starting','running','stopping','settling') LIMIT 1",
+        )
+        .bind(turn.session_id.environment.as_str())
+        .bind(turn.session_id.agent.as_str())
+        .bind(turn.session_id.native_id.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(Error::Database)?;
+        if active.is_some() {
+            tx.rollback().await.map_err(Error::Database)?;
+            return Ok(None);
+        }
+        let stored = sqlx::query_as::<_, Turn>(
+            r#"INSERT INTO turns (
+                id, session_env, session_agent, session_native, status, origin,
+                request_text, command_invocation_id, idempotency_key, created_at_ms
+            ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)
+            RETURNING *"#,
+        )
+        .bind(&turn.id)
+        .bind(turn.session_id.environment.as_str())
+        .bind(turn.session_id.agent.as_str())
+        .bind(turn.session_id.native_id.as_str())
+        .bind(&turn.origin)
+        .bind(&turn.request_text)
+        .bind(&turn.command_invocation_id)
+        .bind(&turn.idempotency_key)
+        .bind(turn.created_at_ms)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(Error::Database)?;
+        sqlx::query(
+            "UPDATE sessions SET status = 'running', updated_at_ms = ? \
+             WHERE environment = ? AND agent = ? AND native_id = ?",
+        )
+        .bind(now_ms())
+        .bind(turn.session_id.environment.as_str())
+        .bind(turn.session_id.agent.as_str())
+        .bind(turn.session_id.native_id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(Error::Database)?;
+        tx.commit().await.map_err(Error::Database)?;
+        Ok(Some(stored))
+    }
+
     pub async fn get_turn(&self, id: &str) -> Result<Option<Turn>> {
         sqlx::query_as::<_, Turn>("SELECT * FROM turns WHERE id = ?")
             .bind(id)
@@ -655,6 +717,49 @@ impl JournalStore {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Claim a queued turn and its session-running marker in one transaction.
+    ///
+    /// Readers use the turn status as the signal that work has begun. Updating
+    /// the two rows in separate statements lets a reader observe `running` on
+    /// the turn while the session still says `idle`, which is an impossible
+    /// state for the API and was exposed by restart/lifecycle polling. The
+    /// compare-and-set remains on the turn row; the session update is part of
+    /// the same commit, so either both facts become visible or neither does.
+    pub async fn claim_turn_running(&self, turn_id: &str, session_id: &SessionId) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            r#"
+            UPDATE turns
+            SET status = 'running', started_at_ms = ?
+            WHERE id = ? AND session_env = ? AND session_agent = ? AND session_native = ?
+              AND status IN ('queued', 'starting')
+            "#,
+        )
+        .bind(now_ms())
+        .bind(turn_id)
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "UPDATE sessions SET status = 'running', updated_at_ms = ? \
+             WHERE environment = ? AND agent = ? AND native_id = ?",
+        )
+        .bind(now_ms())
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     pub async fn mark_turn_stopping(&self, turn_id: &str) -> Result<bool> {
@@ -1601,7 +1706,8 @@ impl JournalStore {
     pub async fn running_turn_id(&self, session_id: &SessionId) -> Result<Option<String>> {
         sqlx::query_scalar::<_, String>(
             "SELECT id FROM turns
-              WHERE session_env = ? AND session_agent = ? AND session_native = ? AND status IN ('running', 'stopping')
+              WHERE session_env = ? AND session_agent = ? AND session_native = ?
+                AND status IN ('queued', 'starting', 'running', 'stopping', 'settling')
               ORDER BY created_at_ms DESC LIMIT 1",
         )
         .bind(session_id.environment.as_str())

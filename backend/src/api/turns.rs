@@ -47,6 +47,179 @@ pub async fn create_prepared(
             "A first turn needs text, a command, or an attachment".to_string(),
         ));
     }
+
+    // A remote draft already owns a live envagent session.  Send its first
+    // turn through the wire, create the canonical session/turn rows, and only
+    // then activate the envagent event pump.  This preserves the same
+    // promotion ordering as the in-process path while keeping server-owned
+    // attachment bytes out of a remote filesystem.
+    // A client retry with an idempotency key must reuse the same first-turn
+    // identity; without it, a second promotion is intentionally a conflict.
+    let proposed_turn_id = req
+        .idempotency_key
+        .as_deref()
+        .map(|key| format!("remote-turn-{}", blake3::hash(key.as_bytes()).to_hex()))
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // A remote promotion is serialized per draft.  The envagent command is
+    // non-idempotent (it may create a native session and consume the first
+    // prompt), so two HTTP retries must never execute it concurrently.
+    if let Some(previous) = state.env_bridge.remote_promotion_result(&draft_id).await {
+        if previous.turn_id != proposed_turn_id {
+            return Err(Error::SessionAlreadyRunning);
+        }
+        let session = state
+            .store
+            .get_session(&previous.session_id)
+            .await?
+            .ok_or(Error::SessionNotFound)?;
+        return Ok((
+            StatusCode::CREATED,
+            Json(crate::api::sessions::SessionResponse { session }),
+        ));
+    }
+    let _promotion_guard = if state.env_bridge.remote_draft_known(&draft_id).await {
+        Some(
+            state
+                .env_bridge
+                .remote_promotion_lock(&draft_id)
+                .await
+                .lock_owned()
+                .await,
+        )
+    } else {
+        None
+    };
+    if let Some(previous) = state.env_bridge.remote_promotion_result(&draft_id).await {
+        if previous.turn_id != proposed_turn_id {
+            return Err(Error::SessionAlreadyRunning);
+        }
+        let session = state
+            .store
+            .get_session(&previous.session_id)
+            .await?
+            .ok_or(Error::SessionNotFound)?;
+        return Ok((
+            StatusCode::CREATED,
+            Json(crate::api::sessions::SessionResponse { session }),
+        ));
+    }
+    match state
+        .env_bridge
+        .claim_remote_draft(&draft_id, proposed_turn_id.clone())
+        .await
+    {
+        crate::env::bridge::RemoteDraftClaim::Claimed { draft, turn_id } => {
+            if turn_id != proposed_turn_id {
+                return Err(Error::SessionAlreadyRunning);
+            }
+            if !attachments.is_empty() {
+                state.env_bridge.release_remote_draft_claim(&draft_id).await;
+                return Err(Error::AttachmentInvalid(
+                "attachments for a remote draft must be uploaded through its envagent files capability".into(),
+            ));
+            }
+            let (session_id, resolved_workdir) = match state
+                .env_bridge
+                .run_remote_initial(
+                    &draft,
+                    &turn_id,
+                    sylph_protocol::WireTurnInput {
+                        text: text.clone(),
+                        attachments: Vec::new(),
+                        command: req.command.clone(),
+                        args: req.args.clone().unwrap_or_default().into_iter().collect(),
+                        config: Default::default(),
+                    },
+                )
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    state.env_bridge.discard_remote_draft(&draft_id).await;
+                    return Err(Error::LinkFailed(format!("{error:#}")));
+                }
+            };
+
+            let now = now_ms();
+            let session = crate::models::Session {
+                id: session_id.clone(),
+                workdir: resolved_workdir,
+                title: draft
+                    .title
+                    .clone()
+                    .or_else(|| crate::db::labels::summarize_line(&text).into()),
+                inject_identity: draft.inject_identity,
+                fidelity: sylph_protocol::Fidelity::Stream,
+                flags_json: match serde_json::to_string(&draft.flags) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        state.env_bridge.discard_remote_draft(&draft_id).await;
+                        return Err(Error::Internal(format!("could not encode flags: {error}")));
+                    }
+                },
+                status: "running".into(),
+                parent_session: None,
+                created_at_ms: now,
+                updated_at_ms: now,
+            };
+            let turn = Turn {
+                id: turn_id.clone(),
+                session_id: session_id.clone(),
+                status: "running".into(),
+                origin: "user".into(),
+                request_text: text,
+                command_invocation_id: req.command,
+                idempotency_key: req.idempotency_key,
+                error_code: None,
+                error_message: None,
+                created_at_ms: now,
+                started_at_ms: Some(now),
+                completed_at_ms: None,
+                stopped_at_ms: None,
+            };
+            let (stored_session, _stored_turn) =
+                match state.store.create_session_and_turn(&session, &turn).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let _ = state.env_bridge.close_remote_session(&session_id).await;
+                        state.env_bridge.discard_remote_draft(&draft_id).await;
+                        return Err(error);
+                    }
+                };
+            if let Err(error) = state.env_bridge.activate_remote(&session_id).await {
+                let _ = state.env_bridge.close_remote_session(&session_id).await;
+                state.env_bridge.discard_remote_draft(&draft_id).await;
+                return Err(Error::LinkFailed(format!("{error:#}")));
+            }
+            state
+                .env_bridge
+                .remember_remote_promotion(
+                    &draft_id,
+                    crate::env::bridge::RemotePromotionResult {
+                        turn_id: turn_id.clone(),
+                        session_id: stored_session.id.clone(),
+                    },
+                )
+                .await;
+            state.env_bridge.forget_remote_draft(&draft_id).await;
+            return Ok((
+                StatusCode::CREATED,
+                Json(crate::api::sessions::SessionResponse {
+                    session: stored_session,
+                }),
+            ));
+        }
+        crate::env::bridge::RemoteDraftClaim::Conflict { .. }
+        | crate::env::bridge::RemoteDraftClaim::Busy => return Err(Error::SessionAlreadyRunning),
+        crate::env::bridge::RemoteDraftClaim::Missing => {
+            // A remote handle must never fall through to the local
+            // LinkManager. A stale remote draft is a missing resource, not a
+            // local draft with a coincidentally similar spelling.
+            if draft_id.starts_with("remote-draft-") {
+                return Err(Error::SessionNotFound);
+            }
+        }
+    }
     let turn_id = uuid::Uuid::new_v4().to_string();
     let staged_attachments =
         attachments::stage_draft(&state.config.data_dir, &draft_id, &turn_id, &attachments).await?;
@@ -108,6 +281,142 @@ pub async fn create(
             // Retried request; return the original turn.
             return Ok((StatusCode::OK, Json(TurnResponse { turn: existing })));
         }
+    }
+
+    if session_id.environment.as_str() != state.environment.descriptor().id {
+        let _session_command_guard = state
+            .env_bridge
+            .session_command_lock(&session_id)
+            .await
+            .lock_owned()
+            .await;
+        if let Some(key) = idempotency_key.as_deref() {
+            if let Some(existing) = state
+                .store
+                .find_turn_by_idempotency_key(&session_id, key)
+                .await?
+            {
+                return Ok((StatusCode::OK, Json(TurnResponse { turn: existing })));
+            }
+        }
+        let attachments = req.attachments.unwrap_or_default();
+        if !attachments.is_empty() {
+            return Err(Error::AttachmentInvalid(
+                "remote turns require files to be uploaded through the envagent capability".into(),
+            ));
+        }
+        let text = req.text.unwrap_or_default();
+        let now = now_ms();
+        let turn = Turn {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.clone(),
+            status: "queued".into(),
+            origin: "user".into(),
+            request_text: text.clone(),
+            command_invocation_id: req.command.clone(),
+            idempotency_key: idempotency_key.clone(),
+            error_code: None,
+            error_message: None,
+            created_at_ms: now,
+            started_at_ms: None,
+            completed_at_ms: None,
+            stopped_at_ms: None,
+        };
+        let created = match state.store.create_remote_turn(&turn).await? {
+            Some(created) => created,
+            None => {
+                // A concurrent request with the same idempotency key may have
+                // won the database CAS just before this one. Return that
+                // canonical turn rather than reporting a misleading active
+                // conflict; a different request still receives the conflict.
+                if let Some(key) = idempotency_key.as_deref() {
+                    if let Some(existing) = state
+                        .store
+                        .find_turn_by_idempotency_key(&session_id, key)
+                        .await?
+                    {
+                        return Ok((StatusCode::OK, Json(TurnResponse { turn: existing })));
+                    }
+                }
+                return Err(Error::SessionAlreadyRunning);
+            }
+        };
+        let request_id = sylph_protocol::CommandRequestId::parse(
+            idempotency_key
+                .as_deref()
+                .map(|key| format!("send-{}", blake3::hash(key.as_bytes()).to_hex()))
+                .unwrap_or_else(|| format!("send-{}", uuid::Uuid::new_v4().simple())),
+        )
+        .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+        let outcome = match state
+            .env_bridge
+            .dispatch_and_wait(
+                &session_id.environment,
+                sylph_protocol::Command::new(
+                    request_id,
+                    sylph_protocol::IdempotencyPolicy::AtMostOnce,
+                    sylph_protocol::EnvironmentCommand::Send {
+                        session_id: session_id.clone(),
+                        turn_id: created.id.clone(),
+                        input: sylph_protocol::WireTurnInput {
+                            text,
+                            attachments: Vec::new(),
+                            command: req.command,
+                            args: req.args.unwrap_or_default().into_iter().collect(),
+                            config: Default::default(),
+                        },
+                    },
+                ),
+                Duration::from_secs(30),
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = state
+                    .store
+                    .finish_turn_at(
+                        &created.id,
+                        "failed",
+                        Some("LINK_LOST"),
+                        Some(&format!("{error:#}")),
+                        now_ms(),
+                    )
+                    .await;
+                let _ = state.store.update_session_status(&session_id, "idle").await;
+                return Err(Error::LinkFailed(format!("{error:#}")));
+            }
+        };
+        match outcome {
+            sylph_protocol::CommandOutcome::Accepted { .. } => {}
+            sylph_protocol::CommandOutcome::Rejected { code, message } => {
+                let _ = state
+                    .store
+                    .finish_turn_at(&created.id, "failed", Some(&code), Some(&message), now_ms())
+                    .await;
+                let _ = state.store.update_session_status(&session_id, "idle").await;
+                return Err(Error::LinkFailed(format!("{code}: {message}")));
+            }
+            sylph_protocol::CommandOutcome::Unknown { message } => {
+                let _ = state
+                    .store
+                    .finish_turn_at(
+                        &created.id,
+                        "failed",
+                        Some("LINK_LOST"),
+                        message.as_deref(),
+                        now_ms(),
+                    )
+                    .await;
+                let _ = state.store.update_session_status(&session_id, "idle").await;
+                return Err(Error::LinkFailed(format!(
+                    "remote turn outcome is unknown: {}",
+                    message.unwrap_or_default()
+                )));
+            }
+        }
+        let updated = state.store.get_turn(&created.id).await?.unwrap_or(created);
+        return Ok((StatusCode::ACCEPTED, Json(TurnResponse { turn: updated })));
     }
 
     // One turn at a time per session.
@@ -329,6 +638,55 @@ pub async fn stop(
 
     if turn.is_terminal() {
         return Err(Error::StopAlreadyCompleted);
+    }
+
+    // Remote turns have no in-process waiter, so `LinkedSupervisor::stop`
+    // cannot see or settle them.  Claim the interrupted outcome through the
+    // shared closer first (the same ordering as local stop), then forward a
+    // turn-guarded interrupt to the envagent.  The guard prevents a delayed
+    // command from stopping a newer turn on the same long-lived session.
+    if turn.session_id.environment.as_str() != state.environment.descriptor().id {
+        let _session_command_guard = state
+            .env_bridge
+            .session_command_lock(&turn.session_id)
+            .await
+            .lock_owned()
+            .await;
+        let settled = state
+            .turns
+            .closer()
+            .close(
+                &turn.session_id,
+                &turn.id,
+                crate::supervisor::Outcome::Interrupted,
+            )
+            .await;
+        if !settled {
+            return Err(Error::StopAlreadyCompleted);
+        }
+        let outcome = state
+            .env_bridge
+            .remote_session_command(
+                &turn.session_id,
+                sylph_protocol::EnvironmentCommand::Interrupt {
+                    session_id: turn.session_id.clone(),
+                    expected_turn_id: Some(turn.id.clone()),
+                },
+                sylph_protocol::IdempotencyPolicy::AtMostOnce,
+            )
+            .await;
+        if let Err(error) = outcome {
+            tracing::warn!(
+                turn = %turn.id,
+                "remote interrupt could not be delivered after cancellation: {error:#}"
+            );
+        }
+        let updated = state
+            .store
+            .get_turn(&turn.id)
+            .await?
+            .ok_or(Error::TurnNotFound)?;
+        return Ok((StatusCode::ACCEPTED, Json(TurnResponse { turn: updated })));
     }
 
     if !state.turns.stop(&turn_id).await? {

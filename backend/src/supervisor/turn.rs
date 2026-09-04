@@ -212,7 +212,11 @@ impl LinkedSupervisor {
         // The row is inserted queued because the adapter had to run before identity was
         // available. Claim it before exposing the stream; the drain will then attribute every
         // buffered vendor event to this user turn.
-        match self.store.mark_turn_running(&turn_id).await {
+        match self
+            .store
+            .claim_turn_running(&turn_id, &promoted.session.id)
+            .await
+        {
             Ok(true) => {}
             Ok(false) => {
                 promoted.close().await;
@@ -227,17 +231,6 @@ impl LinkedSupervisor {
                 return Err(error.into());
             }
         }
-        if let Err(error) = self
-            .store
-            .update_session_status(&promoted.session.id, "running")
-            .await
-        {
-            promoted.close().await;
-            self.waiters.lock().await.remove(&turn_id);
-            self.hub.close(&turn_id).await;
-            return Err(error.into());
-        }
-
         if !prompt.is_empty() {
             if let Err(error) = self
                 .emit(
@@ -310,17 +303,13 @@ impl LinkedSupervisor {
         let (tx, rx) = oneshot::channel();
         self.waiters.lock().await.insert(turn_id.clone(), tx);
 
-        if !self.store.mark_turn_running(&turn_id).await? {
+        if !self.store.claim_turn_running(&turn_id, &session_id).await? {
             // Already claimed, stopped, or interrupted before it began.
             debug!("Turn {} was no longer queued; skipping", turn_id);
             self.waiters.lock().await.remove(&turn_id);
             self.hub.close(&turn_id).await;
             return Ok(());
         }
-        self.store
-            .update_session_status(&session_id, "running")
-            .await?;
-
         // The user's own message is durable transcript, journaled as an event
         // rather than living only in `turns.request_text`.
         if !prompt.is_empty() {

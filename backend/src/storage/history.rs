@@ -1431,11 +1431,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
         let started_at_ms = first_arrival
             .get(&stream_id)
             .copied()
-                    .unwrap_or(
-                        declaring
-                            .recorded_at_ms
-                            .unwrap_or(declaring.arrival_at_ms),
-                    );
+            .unwrap_or(declaring.recorded_at_ms.unwrap_or(declaring.arrival_at_ms));
         let text: String = deltas.iter().map(|d| d.text.as_str()).collect();
         let folded = fold::fold(&deltas, &text, started_at_ms);
 

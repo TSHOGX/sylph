@@ -18,11 +18,15 @@
 //! `/` is a dead keystroke three layers from the cause (`AGENTS.md` § Rules that keep
 //! costing time).
 
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 use futures::future::join_all;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use sylph_protocol::{AgentInfo, Capability, FlagSchema};
+use sylph_protocol::{AgentInfo, Capability, EnvironmentId, FlagSchema};
 use tokio::time::timeout;
 
 use crate::{error::Result, AppState};
@@ -37,6 +41,8 @@ pub struct Environment {
     /// Display-only and mutable. Never a key, for the same reason.
     pub name: String,
     pub connected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// How this envagent came to exist: `self-installed`, `ssh-bootstrapped`,
     /// `sandbox-provisioned`, or `development`.
     pub origin: String,
@@ -89,6 +95,70 @@ pub struct EnvironmentsResponse {
     pub environments: Vec<Environment>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairRequest {
+    pub code: String,
+    #[serde(default = "default_pair_name")]
+    pub name: String,
+    #[serde(default = "default_pair_origin")]
+    pub origin: String,
+    #[serde(default)]
+    pub agents: Vec<AgentInfo>,
+}
+
+fn default_pair_name() -> String {
+    "Environment".to_string()
+}
+
+fn default_pair_origin() -> String {
+    "self-installed".to_string()
+}
+
+/// POST /api/v1/environments/pairings
+pub async fn create_pairing(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<crate::env::PairingOffer>)> {
+    let offer = state
+        .env_bridge
+        .create_pairing()
+        .await
+        .map_err(|error| crate::error::Error::Internal(format!("{error:#}")))?;
+    Ok((StatusCode::CREATED, Json(offer)))
+}
+
+/// POST /api/v1/environments/pair
+///
+/// This endpoint accepts only a short-lived pairing code.  It is exempt from
+/// the browser cookie gate because the envagent has no browser session; the
+/// code is single-use and the server remains loopback-bound.
+pub async fn pair(
+    State(state): State<AppState>,
+    Json(request): Json<PairRequest>,
+) -> Result<(StatusCode, Json<crate::env::PairingGrant>)> {
+    let grant = state
+        .env_bridge
+        .claim_pairing(&request.code, request.name, request.origin, request.agents)
+        .await
+        .map_err(|error| crate::error::Error::InvalidRequest(error.to_string()))?;
+    Ok((StatusCode::CREATED, Json(grant)))
+}
+
+/// DELETE /api/v1/environments/{id}
+pub async fn unpair(State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode> {
+    let id = EnvironmentId::parse(id)
+        .map_err(|error| crate::error::Error::InvalidRequest(error.to_string()))?;
+    if !state
+        .env_bridge
+        .unpair(&id)
+        .await
+        .map_err(|error| crate::error::Error::Internal(format!("{error:#}")))?
+    {
+        return Err(crate::error::Error::SessionNotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// GET /api/v1/environments
 ///
 /// # Reporting an install that can run nothing
@@ -138,17 +208,39 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<EnvironmentsResp
     });
     let agents = join_all(probes).await;
 
-    Ok(Json(EnvironmentsResponse {
-        environments: vec![Environment {
-            id: descriptor.id.clone(),
-            name: descriptor.label.clone(),
-            connected: health.available,
-            origin: "development".to_string(),
-            // Directly connected: nothing relays for it.
-            reachable_via: None,
-            agents,
-        }],
-    }))
+    let mut environments = vec![Environment {
+        id: descriptor.id.clone(),
+        name: descriptor.label.clone(),
+        connected: health.available,
+        reason: health.reason,
+        origin: "development".to_string(),
+        // Directly connected: nothing relays for it.
+        reachable_via: None,
+        agents,
+    }];
+
+    for snapshot in state
+        .env_bridge
+        .list_environments()
+        .await
+        .map_err(|error| crate::error::Error::Internal(format!("{error:#}")))?
+    {
+        environments.push(Environment {
+            id: snapshot.id.to_string(),
+            name: snapshot.name,
+            connected: snapshot.connected,
+            reason: (!snapshot.connected).then(|| "envagent disconnected".to_string()),
+            origin: snapshot.origin,
+            reachable_via: snapshot.reachable_via,
+            agents: snapshot
+                .agents
+                .into_iter()
+                .map(AgentAvailability::from)
+                .collect(),
+        });
+    }
+
+    Ok(Json(EnvironmentsResponse { environments }))
 }
 
 impl From<AgentInfo> for AgentAvailability {

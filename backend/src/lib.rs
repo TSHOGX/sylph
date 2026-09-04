@@ -97,6 +97,10 @@ pub struct AppState {
     /// this machine's stores costs ~5.6 s, and an offset cursor into a store being
     /// written silently skips and duplicates rows. See `api::native_index`.
     pub native_index: crate::api::native_index::NativeIndex,
+    /// Inbound envagent protocol bridge. The local adapter seam remains in
+    /// place for compatibility fixtures; paired installations use this
+    /// bridge for durable ingest and command routing.
+    pub env_bridge: Arc<crate::env::EnvBridge>,
 }
 
 impl AppState {
@@ -233,6 +237,15 @@ impl AppState {
         // emit events for the same session, and separate counters would hand out
         // the same sequence number.
         let seq = crate::events::SeqAllocator::new(store.clone());
+        let environment_registry = crate::env::EnvironmentRegistry::new();
+        let env_bridge = Arc::new(crate::env::EnvBridge::new(
+            store.clone(),
+            history.clone(),
+            seq.clone(),
+            hub.clone(),
+            environment_registry,
+        ));
+        env_bridge.spawn_health_reaper();
 
         // Batches the journal's hot path. One instance, shared: the drain task
         // buffers a turn's deltas and the supervisor flushes them before the fold,
@@ -279,6 +292,11 @@ impl AppState {
         // would sit `running` forever and wedge its session, because the composer
         // refuses a message while a turn is live.
         links.set_closer(turns.closer()).await;
+        // Remote envagent event batches use the same terminal settlement path as
+        // in-process links. Install it only after the supervisor owns its
+        // consolidator so the bridge never grows a second definition of a
+        // finished turn.
+        env_bridge.set_turn_closer(turns.closer()).await;
         // And the half that reaches *backwards*: a delegation that outlived its turn
         // reports its outcome on a later one, and the record it corrects belongs to the
         // turn that opened it (`crate::supervisor::reconcile`). Both stores, because
@@ -315,6 +333,7 @@ impl AppState {
             retention,
             ingest,
             native_index: crate::api::native_index::NativeIndex::new(),
+            env_bridge,
         })
     }
 }
@@ -350,6 +369,15 @@ pub fn router(state: AppState) -> Router {
         // can run. This is what replaced `GET /agents`: availability is per machine,
         // so a merged global list would be true of nowhere.
         .route("/api/v1/environments", get(api::environments::list))
+        .route(
+            "/api/v1/environments/pairings",
+            post(api::environments::create_pairing),
+        )
+        .route("/api/v1/environments/pair", post(api::environments::pair))
+        .route(
+            "/api/v1/environments/{id}",
+            axum::routing::delete(api::environments::unpair),
+        )
         .route(
             "/api/v1/sessions",
             get(api::sessions::list).post(api::sessions::create),
@@ -416,6 +444,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/sessions/{id}/turns",
             get(api::sessions::history).post(api::turns::create),
         )
+        .route("/api/v1/sessions/{id}/edges", get(api::sessions::edges))
         // Files before `{id}` would be ambiguous the other way round: axum
         // matches literal segments before captures, so the more specific
         // `files/content` route must be registered, but order among these

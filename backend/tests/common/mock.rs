@@ -771,6 +771,11 @@ async fn run_turn(tx: mpsc::Sender<Result<SessionMessage>>, behavior: Behavior) 
                 Ev::new(EventKind::Status, Some(Phase::Started)).text("working"),
             )
             .await;
+            // Keep the stream alive until the test (or a real caller) sends an
+            // interrupt. Dropping this sender immediately would make the
+            // supervisor interpret a deliberately running turn as a link
+            // loss, creating a timing-dependent idle/running observation.
+            std::future::pending::<()>().await;
         }
     }
 }

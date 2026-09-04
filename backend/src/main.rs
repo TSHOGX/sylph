@@ -318,21 +318,43 @@ async fn serve() -> anyhow::Result<()> {
     // run, which is the fact that replaced it — and `GET /api/v1/environments` is where
     // per-machine availability is reported (`docs/environments.md`).
 
+    let env_bridge = state.env_bridge.clone();
     let app = router(state);
 
-    // Parsed from configuration rather than hardcoded to 127.0.0.1, because the
-    // host was already a setting that the bind ignored — a `server.host` that
-    // silently did nothing is worse than one that is not offered. Loopback is
-    // still the default, and anything else is a threat-model change the operator
-    // is making deliberately; the warning says so rather than the code refusing.
+    // The wire listener is opt-in so existing single-process installs do not
+    // expose an extra socket. Development and integration deployments set
+    // SYLPH_ENV_LISTEN (for example 127.0.0.1:4318) to exercise the real
+    // server-to-envagent path.
+    if let Some(raw) = std::env::var_os("SYLPH_ENV_LISTEN") {
+        let raw = raw.to_string_lossy();
+        let listener = tokio::net::TcpListener::bind(raw.as_ref()).await?;
+        let local_addr = listener.local_addr()?;
+        if !local_addr.ip().is_loopback() {
+            anyhow::bail!(
+                "SYLPH_ENV_LISTEN resolved to {local_addr}, but the development envagent \
+                 transport is plaintext and must remain loopback-only; configure TLS before \
+                 exposing it on a network interface"
+            );
+        }
+        tracing::info!("Envagent listener on {}", local_addr);
+        tokio::spawn(async move {
+            if let Err(error) = env_bridge.serve(listener).await {
+                tracing::error!("Envagent listener stopped: {error:#}");
+            }
+        });
+    }
+
+    // The cookie/bootstrap model is intentionally process-local.  Refuse a
+    // non-loopback bind until a separate authenticated/TLS deployment mode
+    // exists; warning while exposing a bearer bootstrap endpoint would make the
+    // security boundary aspirational rather than enforced.
     let ip: IpAddr = host
         .parse()
         .map_err(|_| anyhow::anyhow!("`server.host` is not an IP address: {host}"))?;
     if !ip.is_loopback() {
-        tracing::warn!(
-            "Bound to {ip}, which is not loopback. Sylph has no authentication story for a \
-             network-reachable deployment: the session cookie is the only credential and it \
-             is handed to whoever asks. Do not do this on an untrusted network."
+        anyhow::bail!(
+            "`server.host` resolved to {ip}, but network-reachable deployment is disabled: \
+             configure loopback or add the authenticated/TLS deployment mode"
         );
     }
     let addr = SocketAddr::new(ip, port);

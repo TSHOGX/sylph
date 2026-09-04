@@ -67,6 +67,14 @@ impl SeqAllocator {
 
         Ok(counter.fetch_add(1, Ordering::SeqCst))
     }
+
+    /// Forget an optimistic in-memory counter after a transaction fails.
+    ///
+    /// The next allocation is reseeded from the durable journal, so a failed
+    /// envagent ingest cannot permanently consume a canonical sequence.
+    pub async fn reset_session(&self, session_id: &SessionId) {
+        self.counters.write().await.remove(&session_id.encode());
+    }
 }
 
 #[cfg(test)]
