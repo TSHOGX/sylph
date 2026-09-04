@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CapabilityFacets, ConfigOption, Event, Fidelity, FlagSchema, NativeId, Request, Resolution,
-    SessionCapabilities,
+    SessionCapabilities, TurnInputFact,
 };
 
 /// What the local CLI reports about itself, plus what this module knows about it.
@@ -352,6 +352,10 @@ pub enum SessionMessage {
     Capabilities(CapabilityFacets),
     /// A complete vendor-native record, retained for lossless re-projection.
     NativeRecord(NativeRecord),
+    /// User input recovered from a native store. This is a container fact,
+    /// not a timeline event; the server uses it to populate the owning turn's
+    /// request text without fabricating a `user` event.
+    TurnInput(TurnInputFact),
 }
 
 /// A session's messages, as they arrive.

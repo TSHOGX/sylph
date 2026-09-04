@@ -38,10 +38,12 @@
 
 pub mod adapter;
 pub mod capabilities;
+pub mod env;
 pub mod event;
 pub mod identity;
 pub mod link;
 pub mod request;
+pub mod semantic;
 
 // Re-exported flat, because a caller wants `sylph_protocol::Event` rather than
 // `sylph_protocol::event::Event` — the modules are an organizing device for readers of
@@ -55,6 +57,13 @@ pub use capabilities::{
     Capability, CapabilityFacets, CommandKind, CommandSpec, ConfigChoice, ConfigKind, ConfigOption,
     FlagSchema, FlagSpec, SessionCapabilities, SubagentSpec,
 };
+pub use env::{
+    decode_message, negotiate, Ack, CapabilitySnapshot, Command, CommandResultMessage,
+    DecodedMessage, Diagnostic, DiagnosticLevel, EnvironmentCommand, EnvironmentHealth, EventBatch,
+    FileOperation, Heartbeat, Hello, Nack, ProtocolVersion, SourceState, Welcome, WireError,
+    WireMessage, WireTurnInput, DEFAULT_MAX_BATCH_EVENTS, PROTOCOL as ENV_PROTOCOL,
+    VERSION_MAJOR as ENV_VERSION_MAJOR, VERSION_MINOR as ENV_VERSION_MINOR,
+};
 pub use event::{Event, EventKind, InteriorState, Phase, Stability};
 pub use identity::{
     AgentName, EnvironmentId, Fidelity, IdentityError, NativeId, SessionId, ID_DELIMITER,
@@ -63,4 +72,9 @@ pub use link::{AdapterError, Facet, LinkFacets, RefusalCode, UnavailableReason};
 pub use request::{
     Choice, Field, FieldKind, Form, FormAnswer, NotesSpec, Request, RequestKind, RequestOption,
     Resolution, Risk, SelectMode,
+};
+pub use semantic::{
+    CommandOutcome, CommandRequest, CommandRequestId, CommandResult, IdempotencyPolicy, ProducerId,
+    ProducerKey, ProducerSeq, SemanticError, SequencedEvent, ServerSeq, SessionEdge,
+    SessionEdgeRelation, SourceCursor, TurnInputFact,
 };

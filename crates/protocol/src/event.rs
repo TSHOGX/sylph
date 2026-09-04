@@ -429,10 +429,19 @@ mod tests {
 
     #[test]
     fn interior_state_parses_and_merges_by_evidence_strength() {
-        assert_eq!(InteriorState::parse("partial"), Some(InteriorState::Partial));
+        assert_eq!(
+            InteriorState::parse("partial"),
+            Some(InteriorState::Partial)
+        );
         assert_eq!(InteriorState::parse("unknown"), None);
-        assert_eq!(InteriorState::Pending.merge(InteriorState::Partial), InteriorState::Partial);
-        assert_eq!(InteriorState::Partial.merge(InteriorState::Pending), InteriorState::Partial);
+        assert_eq!(
+            InteriorState::Pending.merge(InteriorState::Partial),
+            InteriorState::Partial
+        );
+        assert_eq!(
+            InteriorState::Partial.merge(InteriorState::Pending),
+            InteriorState::Partial
+        );
         assert_eq!(
             InteriorState::Unreadable.merge(InteriorState::Full),
             InteriorState::Full
