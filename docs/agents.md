@@ -358,6 +358,13 @@ switches shapes on a version stops reading the calls that matter.
 to its rollout many times over its life, the first append within a fraction of a second,
 interleaving reasoning, tool calls, and token counts.
 
+The Codex watcher follows complete JSONL lines with a generation-aware byte
+cursor, rediscovers child and fork rollouts as they appear, and preserves
+cursors when a rollout moves between date directories. Reload reconstructs
+delegation/fork edges from headers and measured team paths. Forwarded child
+items in the parent rollout are de-duplicated when the child's own rollout is
+present, so one normalized event has one owner.
+
 **Identity is the vendor's, structurally.** `thread/start` has no `threadId` parameter at
 all — the id comes back at `result.thread.id` — so "assigns its own" follows from the shape
 of the API rather than from observation. Resume keeps the id and appends to the same
@@ -440,6 +447,24 @@ minified bundle have been wrong about which events exist at all.
 mode `"w"` and no lock, so a reader can observe an empty or half-written file. And
 `_persist` buffers until the first assistant message, so the file **does not exist** early
 in a turn — an absent file is not an absent session.
+
+The Pi watcher therefore keeps a byte cursor only at complete-line boundaries, verifies the
+consumed prefix before each changed-file pass, and treats an inode replacement or prefix change
+as a new file generation. Unchanged record ids are de-duplicated across a rewrite; a record whose
+payload changed under the same id is projected once from the new generation. A missing or
+partial header remains a pending source and is rediscovered on the next pass. This is a
+source-specific rule: Claude's append-only bundle cursor and Codex's rollout cursor must not
+inherit Pi's rewrite assumptions.
+
+Pi's persistence writer terminates each `JSON.stringify(entry)` with `\n`; a valid JSON value
+without that terminator is consequently treated as an in-flight final line and retried rather
+than published early.
+
+Pi has no second-party control channel. A terminal-owned native watch is therefore
+`observe: available` with `control: unavailable (not_ours_to_drive)`; the live RPC session
+still advertises its own controls when Sylph launched the process. The adapter exposes this
+as a native-link facet for the environment bridge; the bridge, rather than the file parser,
+owns publication of the link state.
 
 **"Only at `message_end`" is true-but-trap.** A turn emits one per assistant message
 *and* per tool result, so a 5-tool turn writes ~11 times. That is message granularity,

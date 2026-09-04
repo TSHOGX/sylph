@@ -86,6 +86,7 @@ else, and no legacy location is consulted.
 | — | `SYLPH_CONFIG` | `<home>/config.toml` |
 | `server.host` | `SYLPH_HOST` | `127.0.0.1` |
 | `server.port` | `SYLPH_PORT` | `4317` |
+| — | `SYLPH_ENV_LISTEN` | *(none; opt-in loopback envagent ingress)* |
 | `paths.data_dir` | `SYLPH_DATA_DIR` | `<home>/data` |
 | `paths.soul` | `SYLPH_SOUL` | `<home>/SOUL.md` |
 | `paths.quick_start_dir` | `SYLPH_QUICK_START_DIR` | `<home>/scratch` |
@@ -104,7 +105,7 @@ lever they believe in.
 | `config.toml` | Environment | Default |
 | --- | --- | --- |
 | — | `SYLPH_ENV_HOME` | `~/.sylph-env` |
-| `server.url` | `SYLPH_ENV_SERVER` | *(none; required, written by `pair`)* |
+| `server.url` | `SYLPH_ENV_SERVER` | *(none; overrides the paired wire endpoint; `pair` derives HTTP-port + 1)* |
 | `paths.browse_roots` | `SYLPH_BROWSE_ROOTS` | *(none; `$HOME` always included)* |
 | `spool.max_bytes` | `SYLPH_ENV_SPOOL_MAX` | `512 MiB` |
 | `log.level` | `SYLPH_ENV_LOG`, then `RUST_LOG` | `info` |

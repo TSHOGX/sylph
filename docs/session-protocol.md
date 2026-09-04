@@ -708,3 +708,27 @@ An adapter reports what it knows and omits what it does not. Three rules:
   that completed and simply said nothing — the hardest outcome to debug, because silence
   looks identical whether the model errored, the agent chose not to answer, or the
   adapter dropped the stream. Any path that can end a turn without content must say why.
+
+## Environment wire semantics
+
+The machine boundary is `sylph.env.v1`, implemented by the serde-only values in
+`crates/protocol/src/env.rs` and the length-delimited runtime in
+`crates/envagent/src/transport.rs`.
+
+An envagent allocates `producer_id` and `producer_seq` before sending. It keeps
+each item in its WAL spool until the server has durably ingested it and replies
+with an `ack` for a contiguous prefix. The server assigns `server_seq` inside
+the event/receipt transaction; replaying a producer item is therefore an
+idempotent no-op and never creates a second canonical event.
+
+Hello/welcome carries version negotiation, environment identity, connection
+epoch, agent inventory, health, and the server's accepted cursors. A stale
+epoch cannot acknowledge a newer connection. Commands carry an opaque request
+id plus `replayable` or `at_most_once`; a result may be `accepted`, `rejected`,
+or `unknown`, and an unknown at-most-once command is never retried blindly.
+
+The wire reserves a `TurnInputFact` container message rather than a synthetic
+user event, and typed `SessionEdge` rows for delegation and fork provenance.
+The current adapter stream still emits only `Event`/`Request`/`Capabilities`/
+`NativeRecord`; carrying those two facts (and child events) into the wire is an
+explicit platform integration gate, not a synthesized timeline projection.

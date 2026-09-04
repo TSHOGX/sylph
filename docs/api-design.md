@@ -57,9 +57,9 @@ Health check with version information.
   "apiVersion": "1",
   "schemaVersion": 7,
   "environments": [
-    {"id": "env_7fk2", "name": "laptop", "connected": true,
+    {"id": "env7fk2", "name": "laptop", "connected": true,
      "agents": [{"name": "claude", "version": "2.1.247"}, {"name": "pi", "version": "0.84.3"}]},
-    {"id": "env_k9x1", "name": "build-box", "connected": false,
+    {"id": "envk9x1", "name": "build-box", "connected": false,
      "disconnectedSinceMs": 1724057000000}
   ]
 }
@@ -86,13 +86,13 @@ Detailed system state (sessions, turns, agents, retention).
     "failed": 0,
     "blocksPruned": 318,
     "blobsSwept": 4,
-    "environmentsReachable": {"env_7fk2": true, "env_k9x1": false},
+    "environmentsReachable": {"env7fk2": true, "envk9x1": false},
     "bytesHeld": 4183740928,
     "sessionsMeasured": 357,
     "bytesGrewBy": 12043776,
     "largestSessions": [
       {
-        "sessionId": "env_7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
+        "sessionId": "env7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
         "bytes": 1183741952,
         "blocks": 21044,
         "measuredAtMs": 1724058000000,
@@ -271,7 +271,7 @@ Every paired environment, whether it is connected, and what it can run.
 {
   "environments": [
     {
-      "id": "env_7fk2",
+      "id": "env7fk2",
       "name": "laptop",
       "connected": true,
       "origin": "self-installed",
@@ -291,11 +291,11 @@ Every paired environment, whether it is connected, and what it can run.
       ]
     },
     {
-      "id": "env_k9x1",
+      "id": "envk9x1",
       "name": "prod-builder",
       "connected": true,
       "origin": "ssh-bootstrapped",
-      "reachableVia": "env_7fk2",
+      "reachableVia": "env7fk2",
       "agents": [{"name": "codex", "version": "0.9.1", "flags": {}, "supports": [], "available": true}]
     }
   ]
@@ -327,22 +327,30 @@ model list, which is why `codex` correctly shows effort with no model selector.
 **`supports` is a closed vocabulary that drives the UI directly** — a composer must not
 offer interrupt to an agent that cannot interrupt.
 
-#### `POST /api/v1/environments/pairings` — designed, not built
+#### `POST /api/v1/environments/pairings`
 
 Mint a short-lived, single-use pairing code (`docs/environments.md` § Pairing). The
 envagent exchanges it for a durable credential and is assigned its opaque id.
 
 **Response 201:** `{"code": "…", "expiresAtMs": 1724054460000}`
 
-#### `DELETE /api/v1/environments/{id}` — designed, not built
+#### `POST /api/v1/environments/pair`
+
+The envagent exchanges the short-lived code for a durable credential. This
+loopback-only operation is exempt from the browser cookie because the envagent
+does not have a browser session; the code is consumed atomically and cannot be
+reused.
+
+#### `DELETE /api/v1/environments/{id}`
 
 Unpair. Sessions recorded from that environment stay readable — their history is in the
 server's store — but their **control** facet reports unavailable, and retention treats
 them as terminal, because no reachable native source can confirm a bound
 (`docs/storage.md`).
 
-Both arrive with `crates/envagent`; there is no route for either today, and the local
-environment needs no pairing.
+The routes are implemented by the server bridge. The local in-process fixture
+remains available for tests; a paired installation is selected by its opaque
+environment id and never by hostname.
 
 ### Sessions
 
@@ -360,8 +368,8 @@ the same store (`docs/architecture.md` § One authority).
 {
   "sessions": [
     {
-      "id": "env_7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
-      "environment": "env_7fk2",
+      "id": "env7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
+      "environment": "env7fk2",
       "agent": "claude",
       "nativeId": "9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
       "workdir": "/Users/hsw/Workspace/project",
@@ -407,7 +415,7 @@ pre-message state is an in-memory draft rather than a session record.
 **Request:**
 ```json
 {
-  "environment": "env_7fk2",
+  "environment": "env7fk2",
   "agent": "claude",
   "workdir": "/Users/hsw/Workspace/project",
   "title": "Feature implementation",
@@ -494,6 +502,10 @@ before the first message, without inventing a second session identity:
   resources. It always leaves no journal row; calling it for an already-discarded draft
   is harmless.
 
+Remote draft promotion is serialized per draft. A retry carrying the same
+`idempotencyKey` returns the original session after the first promotion; a
+different key conflicts rather than sending a second non-idempotent first turn.
+
 Draft file routes under `/sessions/draft/{id}/files/*` use the same containment rules as
 durable file routes and disappear with the draft. Reading or changing files never
 promotes a draft and never creates history.
@@ -506,7 +518,7 @@ native store. Replaces `POST /sessions/import`.
 **Request:**
 ```json
 {
-  "environment": "env_7fk2",
+  "environment": "env7fk2",
   "agent": "claude",
   "nativeId": "9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
   "watch": true
@@ -653,7 +665,7 @@ Create a turn (send message or attachment).
 {
   "turn": {
     "id": "t_ghi789",
-    "sessionId": "env_7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
+    "sessionId": "env7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
     "status": "queued",
     "requestText": "Implement feature X",
     "createdAtMs": 1724059200000
@@ -680,7 +692,7 @@ Get turn detail.
 {
   "turn": {
     "id": "t_ghi789",
-    "sessionId": "env_7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
+    "sessionId": "env7fk2:claude:9bdacb6e-1c4d-4f2a-8e11-2a7c3d4e5f60",
     "status": "completed",
     "origin": "user",
     "requestText": "Implement feature X",
@@ -1121,7 +1133,7 @@ listing returns.
       "runningCount": 1,
       "lastUsedMs": 1755600000000,
       "isQuickStart": false,
-      "environment": "env_7fk2"
+      "environment": "env7fk2"
     }
   ]
 }

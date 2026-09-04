@@ -336,7 +336,30 @@ meaningful rather than missing: a request with no form is an approval, whose sub
 is the one proposed tool input in `detail_json`. See `docs/session-protocol.md`
 § Request forms.
 
-## Search lives beside `history.db`
+### env_installations and env_pairings
+
+Paired environment credentials and connection leases are server-owned. Pairing
+codes are stored as hashes and consumed atomically; the bearer token itself is
+never written to the journal. A reconnect is accepted only for the current
+connection epoch. Unpairing removes the installation and active lease while
+leaving already-recorded sessions readable.
+
+### env_event_receipts
+
+This table is the durable deduplication boundary for envagent delivery.
+producer_seq is allocated and spooled on the environment; server_seq is
+allocated by the server in the same transaction that inserts the canonical
+event. The payload hash makes reuse of a producer sequence with different bytes
+a hard error rather than a second interpretation of one event.
+
+### session_edges
+
+Delegation and fork relationships are explicit server-owned edges. Events stay
+under the session that owns them; a trace reader joins this table rather than
+copying a child transcript into its parent. The relation vocabulary is
+delegation or fork, and self-edges are rejected by the protocol type.
+
+## Search lives beside history.db
 
 Full-text search is one FTS5 table beside `history.db`, over the same rows the timeline
 renders. Native history is parsed by an adapter into the same events a live turn emits, so
@@ -377,7 +400,8 @@ database:
 
 ```
 backend/migrations/                 journal.db
-  001_initial_schema.sql            everything above: sessions, turns, events, requests
+  001_initial_schema.sql            sessions, turns, events, requests
+  004_envagent.sql                  pairings, leases, receipts, session edges
 
 backend/migrations/history/         history.db
   001_history.sql                   blocks, cas_refs, native_records, native_blobs,

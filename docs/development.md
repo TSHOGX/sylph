@@ -79,7 +79,7 @@ Look for these lines in the backend tab output:
   INFO sylph_web_backend: Sylph home /Users/you/.sylph (config /Users/you/.sylph/config.toml)
   INFO sylph_web_backend: Database initialized at /Users/you/.sylph/data/journal.db
   INFO sylph_server: Listening on http://127.0.0.1:4317
-  INFO sylph_server::env: Environment env_7fk2 "dev" connected: claude 2.1.247, pi 0.84.3
+  INFO sylph_server::env: Environment env7fk2 "dev" connected: claude 2.1.247, pi 0.84.3
 
 ✗ Issues:
   - "address already in use" → Port 4317 is taken (change SYLPH_PORT)
@@ -105,7 +105,7 @@ Expected output:
   "apiVersion": "1",
   "schemaVersion": 7,
   "environments": [
-    {"id": "env_7fk2", "name": "dev", "connected": true,
+    {"id": "env7fk2", "name": "dev", "connected": true,
      "agents": [{"name": "claude", "version": "2.1.247"}]}
   ]
 }
@@ -229,14 +229,17 @@ npm run dev
 
 ### No environment connected
 
-**Symptom:** `/api/v1/health` reports an empty `environments` array, and no session can
-be created.
+**Symptom:** `/api/v1/health` reports no connected paired environment, and a remote
+session cannot be created.
 
 **Fix:** start the envagent and pair it. In development:
 
 ```sh
+# Terminal 1: HTTP plus the loopback envagent listener
+SYLPH_ENV_LISTEN=127.0.0.1:4318 cargo run -p sylph-web-backend
+# Terminal 2: obtain a code from POST /api/v1/environments/pairings, then pair
 cargo run -p sylph-envagent -- pair --server http://127.0.0.1:4317 --code <code>
-cargo run -p sylph-envagent
+SYLPH_ENV_SERVER=127.0.0.1:4318 cargo run -p sylph-envagent -- run
 ```
 
 Get the code from `POST /api/v1/environments/pairings`. The credential is written to

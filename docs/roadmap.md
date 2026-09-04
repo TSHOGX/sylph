@@ -10,7 +10,8 @@ history rather than here — this file is for orientation and for the decisions 
 | `crates/protocol` | the event vocabulary and the adapter contract, as types. No runtime. |
 | `crates/adapters` | `claude`, `codex`, `pi` — each owning its vendor process and native store, linked into the server |
 | `crates/fts5-jieba` | the FTS5 tokenizer, linked in so Chinese is searchable (`docs/storage.md` § Tokenization) |
-| `backend` | Rust, Axum, SQLx. HTTP and SSE on port 4317. Becomes `crates/server` when the envagent splits out. |
+| `backend` | Rust, Axum, SQLx. HTTP/SSE on port 4317 plus the opt-in envagent ingress bridge. |
+| `crates/envagent` | Rust envagent with v1 framing, WAL spool, reconnect epochs, local path policy, credentials, and adapter hosting. |
 | `frontend` | Next.js App Router, React, TanStack Query |
 | store | SQLite: `journal.db` hot, `history.db` warm with the full-text index, `blobs/` beside them |
 
@@ -45,16 +46,23 @@ already caused confusion twice.
 
 ## What remains
 
-**`crates/envagent` is the one substantial piece unbuilt** — the envagent that dials outward
-to the server, carrying the four capabilities `docs/environments.md` names: run, watch,
-files, health. Until it lands:
+**The envagent/runtime protocol foundation is implemented, but the product cutover is not.**
+The binary dials outward, hosts adapters, applies local path policy, and keeps an ack-gated
+WAL spool; the server has pairing, leases, durable producer receipts, session edges, and an
+opt-in framed ingress listener. The remaining work is the integration layer the platform
+closure gate requires:
 
-- There is exactly one implicit environment: the machine the server runs on.
-- Anything describing a paired remote machine, an SSH bootstrap, or a sandbox is intent
-  rather than description.
-- Retention **withholds rather than prunes**, because the authority that would confirm a
-  native source is the envagent holding it (`docs/storage.md`).
-- `POST /environments/pairings` and `DELETE /environments/{id}` are specified but unrouted.
+- Route session creation, turns, watch/adopt enumeration, files, health, and control through
+  `EnvBridge::dispatch`; today those API paths still use the in-process local adapter seam and
+  reject a paired environment as unreachable.
+- Carry native turn-input facts, source cursors, and child-session ownership from the adapter
+  stream into durable server records. The wire types exist, but the adapter message stream does
+  not yet produce those facts and Codex child events still arrive through the root stream.
+- Replace the default local execution path with a real envagent connection and add the
+  multi-process commit/ack/reconnect fault-injection and browser gates. `SYLPH_ENV_LISTEN`
+  currently enables an opt-in development ingress rather than that cutover.
+- Retention **withholds rather than prunes** when the paired native source cannot confirm a
+  bound (`docs/storage.md`).
 
 **A sandbox Template carrying the agent CLIs** is needed before the Khora path can be tested
 end to end, including whether a sandbox session's retention class resolves as the policy
@@ -99,7 +107,9 @@ being terminal.
 
 ## Known bugs
 
-None outstanding.
+No separately tracked product defect is outstanding. The incomplete platform integration
+listed under **What remains** is implementation work and blocks the platform milestone; it
+must not be read as a completed local cutover.
 
 The former workflow zero-duration defect is closed by the explicit time axes below: an absent
 vendor close remains absent rather than becoming a fabricated zero.

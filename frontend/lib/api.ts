@@ -16,7 +16,15 @@ import type {
   CreateSessionRequest, CreateTurnRequest, DocumentWindow, EnumerateFilters,
   EnumerateResponse, EnvironmentsResponse, FileContentResponse, FileDocumentResponse,
   FileTreeResponse, LinkState, MkdirRequest, MkdirResponse, PendingRequest, SearchResponse,
-  Session, SessionFilters, SoulResponse, Turn, TurnWithEvents, UploadFileRequest,
+  PairingGrant,
+  PairingOffer,
+  Session,
+  SessionEdge,
+  SessionFilters,
+  SoulResponse,
+  Turn,
+  TurnWithEvents,
+  UploadFileRequest,
   UploadFileResponse, WorkspacesResponse,
 } from "./api-types";
 
@@ -182,7 +190,7 @@ export function segment(id: string): string {
  * endpoint again).
  */
 function filesPath(id: string, suffix = ""): string {
-  const root = id.startsWith("draft-")
+  const root = id.startsWith("draft-") || id.startsWith("remote-draft-")
     ? `/sessions/draft/${segment(id)}/files`
     : `/sessions/${segment(id)}/files`;
   return `${root}${suffix}`;
@@ -240,6 +248,8 @@ export const api = {
     /** Full durable history: every turn in the session with its events. */
     history: (id: string) =>
       fetchAPI<{ turns: TurnWithEvents[] }>(`/sessions/${segment(id)}/turns`),
+    edges: (id: string) =>
+      fetchAPI<{ edges: SessionEdge[] }>(`/sessions/${segment(id)}/edges`),
     /**
      * Bring in a session an agent already has on some environment.
      *
@@ -495,6 +505,20 @@ export const api = {
    */
   environments: {
     list: () => fetchAPI<EnvironmentsResponse>("/environments"),
+    createPairing: () =>
+      fetchAPI<PairingOffer>("/environments/pairings", { method: "POST" }),
+    pair: (request: {
+      code: string;
+      name?: string;
+      origin?: "development" | "self-installed" | "ssh-bootstrapped" | "sandbox-provisioned";
+      agents?: unknown[];
+    }) =>
+      fetchAPI<PairingGrant>("/environments/pair", {
+        method: "POST",
+        body: JSON.stringify(request),
+      }),
+    unpair: (id: string) =>
+      fetchAPI<void>(`/environments/${segment(id)}`, { method: "DELETE" }),
   },
   /**
    * FTS5 over the server's own history.

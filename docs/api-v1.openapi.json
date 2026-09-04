@@ -572,6 +572,25 @@
         }
       }
     },
+    "/api/v1/sessions/{sessionId}/edges": {
+      "get": {
+        "summary": "List server-owned parent/child session edges",
+        "parameters": [
+          {"$ref": "#/components/parameters/SessionId"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Delegation and fork edges for this session",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/SessionEdgesResponse"}
+              }
+            }
+          },
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/api/v1/search": {
       "get": {
         "summary": "Full-text search across durable sessions",
@@ -1168,6 +1187,68 @@
               }
             }
           }
+        }
+      }
+    },
+    "/api/v1/environments/pairings": {
+      "post": {
+        "tags": ["Environments"],
+        "summary": "Create a one-shot envagent pairing code",
+        "description": "Creates a short-lived, single-use code. The code is exchanged by an envagent for a durable environment credential; it is not an environment identity.",
+        "responses": {
+          "201": {
+            "description": "Pairing code created",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/PairingOffer"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/environments/pair": {
+      "post": {
+        "security": [],
+        "tags": ["Environments"],
+        "summary": "Exchange a pairing code for an envagent credential",
+        "description": "Loopback-only exchange used by sylph-envagent. The code is consumed atomically and cannot be reused.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/PairRequest"}
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Durable environment credential",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/PairingGrant"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/environments/{id}": {
+      "delete": {
+        "tags": ["Environments"],
+        "summary": "Unpair an environment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string"}
+          }
+        ],
+        "responses": {
+          "204": {"description": "Environment unpaired"},
+          "404": {"$ref": "#/components/responses/Error"}
         }
       }
     },
@@ -2993,12 +3074,13 @@
       },
       "HealthResponse": {
         "type": "object",
-        "description": "Unauthenticated, so it reports availability only — never counts, names, or paths. `agents.available` is here because a server with zero agents answers every other probe successfully while no session can run and no command can be offered, so liveness alone reports healthy for a process that cannot do its job.",
+        "description": "Unauthenticated liveness plus per-environment connectivity and agent inventory. Paths, session counts, and retention details remain authenticated.",
         "required": [
           "ok",
           "apiVersion",
           "schemaVersion",
-          "agents"
+          "agents",
+          "environments"
         ],
         "properties": {
           "ok": {
@@ -3022,6 +3104,29 @@
               "available": {
                 "type": "boolean",
                 "description": "Whether any agent is usable at all. A boolean rather than a count, to keep this endpoint free of anything an unauthenticated caller should not learn."
+              }
+            }
+          },
+          "environments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "name", "connected", "agents"],
+              "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "connected": {"type": "boolean"},
+                "agents": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                      "name": {"type": "string"},
+                      "version": {"type": "string", "nullable": true}
+                    }
+                  }
+                }
               }
             }
           }
@@ -3513,6 +3618,41 @@
           }
         }
       },
+      "PairingOffer": {
+        "type": "object",
+        "required": ["code", "expiresAtMs"],
+        "properties": {
+          "code": {"type": "string"},
+          "expiresAtMs": {"type": "integer", "format": "int64"}
+        }
+      },
+      "PairRequest": {
+        "type": "object",
+        "required": ["code"],
+        "properties": {
+          "code": {"type": "string"},
+          "name": {"type": "string", "default": "Environment"},
+          "origin": {
+            "type": "string",
+            "enum": ["self-installed", "ssh-bootstrapped", "sandbox-provisioned", "development"],
+            "default": "self-installed"
+          },
+          "agents": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/EnvironmentAgent"}
+          }
+        }
+      },
+      "PairingGrant": {
+        "type": "object",
+        "required": ["environmentId", "installationId", "credential", "expiresAtMs"],
+        "properties": {
+          "environmentId": {"type": "string"},
+          "installationId": {"type": "string"},
+          "credential": {"type": "string"},
+          "expiresAtMs": {"type": "integer", "format": "int64"}
+        }
+      },
       "Environment": {
         "type": "object",
         "required": ["id", "name", "connected", "origin", "agents"],
@@ -3523,6 +3663,7 @@
           },
           "name": { "type": "string" },
           "connected": { "type": "boolean" },
+          "reason": { "type": "string", "nullable": true },
           "origin": {
             "type": "string",
             "enum": ["development", "self-installed", "ssh-bootstrapped", "sandbox-provisioned"]
@@ -3572,6 +3713,34 @@
           }
         },
         "description": "Capped server-side. Do not assert on a count against a shared home; assert on identity."
+      },
+      "SessionEdgesResponse": {
+        "type": "object",
+        "required": ["edges"],
+        "properties": {
+          "edges": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/SessionEdge"}
+          }
+        }
+      },
+      "SessionEdge": {
+        "type": "object",
+        "required": ["parent", "child", "relation"],
+        "properties": {
+          "parent": {"$ref": "#/components/schemas/SessionIdentity"},
+          "child": {"$ref": "#/components/schemas/SessionIdentity"},
+          "relation": {"type": "string", "enum": ["delegation", "fork"]}
+        }
+      },
+      "SessionIdentity": {
+        "type": "object",
+        "required": ["environment", "agent", "nativeId"],
+        "properties": {
+          "environment": {"type": "string"},
+          "agent": {"type": "string"},
+          "nativeId": {"type": "string"}
+        }
       },
       "SetConfigRequest": {
         "type": "object",

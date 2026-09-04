@@ -7,10 +7,21 @@ running. `docs/architecture.md` owns why the arrow points inward and why there i
 abstraction instead of three; this document owns the protocol, the spool, pairing, and the
 two provisioning paths.
 
-> **`crates/envagent` is designed, not built.** Everything below is the intended shape and
-> is stated in the present tense as a specification. Today adapters run in-process in the
-> server, so there is exactly one implicit environment — the machine the server is on.
-> `docs/roadmap.md` tracks what remains.
+The `crates/envagent` binary now implements the local v1 framing, durable spool,
+reconnect epochs, path containment, credential storage, and adapter hosting. The
+server bridge accepts the same framed connection when `SYLPH_ENV_LISTEN` is set.
+TLS termination, remote provisioning, and multi-user ownership remain explicit
+follow-on security work; the development transport is loopback-only.
+
+Native adopt/watch events without a server turn id are assigned one server-owned
+container when first ingested. This is not a synthesized vendor bracket: the
+vendor event stream remains unchanged, while the container makes each event
+reachable through the per-turn history API. A terminal event closes it, and a
+finite source emits an ordered close diagnostic at EOF.
+
+The generated wire-shape artifact is `docs/sylph.env.v1.schema.json`; semantic
+Rust types live in `crates/protocol/src/env.rs` and framing tests live beside
+the envagent runtime.
 
 ## The envagent is the whole abstraction
 
@@ -51,16 +62,18 @@ with the adapter contract, but nothing depends on a subprocess existing.
 | --- | --- | --- |
 | `hello` / `welcome` | env → server, server → env | version, agents present, machine facts, resume cursor |
 | `session.*` | server → env | open, send a turn, interrupt, steer, set config |
-| `event` | env → server | one normalized event, sequenced per session |
-| `ack` | server → env | durable through this sequence number, per session |
+| `event` | env → server | normalized events carrying producer sequence and source provenance |
+| `ack` | server → env | durable through a contiguous producer prefix |
 | `watch.*` | server → env | start or stop following a native session |
 | `adopt.*` | server → env | bring in what a native store already holds |
 | `files.*` | both | read, write, list, stat within a session's workdir |
 | `health` | both | probe and report |
 
-**Every event carries a per-session monotonic sequence, and the server acks by
-sequence.** That pair is what makes a dropped connection lossless rather than a hole
-in the record; § Spooling is why it cannot be skipped.
+**The producer sequence and canonical server sequence are distinct.** The envagent
+allocates a monotonic producer sequence before spooling; the server assigns the
+session's canonical sequence only inside its durable ingest transaction. A dropped
+connection therefore resumes from the first unacknowledged producer item rather than
+guessing from a remote clock or a server-side gap.
 
 ## Spooling, and why the record survives a dropped connection
 
@@ -105,7 +118,10 @@ file:
 
 1. A user asks the server for a pairing code — short-lived, single-use.
 2. `sylph-envagent pair --server <url> --code <code>` exchanges it for a durable
-   credential and an opaque environment id.
+   credential and an opaque environment id. The HTTP pairing URL is separate from
+   the framed wire endpoint; local development derives the latter as the adjacent
+   port (`4317` → `4318`), while `SYLPH_ENV_SERVER` overrides it for a custom
+   listener.
 3. The envagent stores the credential locally and dials in from then on.
 
 The environment id is **opaque and minted here**, never a hostname or a

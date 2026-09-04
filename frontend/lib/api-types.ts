@@ -562,6 +562,8 @@ export interface Environment {
   /** Display name. Mutable, and never a key. */
   name: string;
   connected: boolean;
+  /** Why a disconnected environment is unavailable, when the server knows. */
+  reason?: string | null;
   origin: EnvironmentOrigin;
   /**
    * The environment relaying for this one, when it is not reachable directly.
@@ -578,6 +580,30 @@ export interface Environment {
 
 export interface EnvironmentsResponse {
   environments: Environment[];
+}
+
+export interface PairingOffer {
+  code: string;
+  expiresAtMs: number;
+}
+
+export interface PairingGrant {
+  environmentId: string;
+  installationId: string;
+  credential: string;
+  expiresAtMs: number;
+}
+
+export interface SessionIdentity {
+  environment: string;
+  agent: string;
+  nativeId: string;
+}
+
+export interface SessionEdge {
+  parent: SessionIdentity;
+  child: SessionIdentity;
+  relation: "delegation" | "fork";
 }
 
 export interface CreateSessionRequest {
