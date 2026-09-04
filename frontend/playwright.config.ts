@@ -94,7 +94,7 @@ export default defineConfig({
       // (`crates/adapters/src/e2e.rs`). It is a feature rather than an environment
       // variable so a production binary has no code path that reaches the fixture at
       // all: "which agents exist" must not depend on a variable a running server reads.
-      command: "cargo run --quiet --features e2e",
+      command: "cargo run --quiet --features e2e --bin sylph-web-backend",
       cwd: path.join(__dirname, "..", "backend"),
       url: `http://127.0.0.1:${BACKEND_PORT}/api/v1/health`,
       reuseExistingServer: false,
