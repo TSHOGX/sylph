@@ -49,8 +49,8 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sylph_protocol::{
-    Adapter, AgentInfo, Capability, EventStream, FlagSpec, NativeId, NativeSummary, RunSpec,
-    Session, StoreFilter,
+    Adapter, AgentInfo, Capability, EventStream, Facet, FlagSpec, LinkFacets, NativeId,
+    NativeSummary, RunSpec, Session, StoreFilter, UnavailableReason,
 };
 
 pub use rpc::{model_key, split_model_key, ConfigId, MODEL_KEY_SEPARATOR};
@@ -81,6 +81,21 @@ pub struct PiAdapter;
 impl PiAdapter {
     pub fn new() -> Self {
         Self
+    }
+
+    /// The link facets for a session that was started outside Sylph.
+    ///
+    /// Pi exposes no second-party control channel: its RPC transport is stdio owned by the
+    /// process that spawned it. A native-store watcher can therefore observe a terminal-born
+    /// session, but it must not advertise `interrupt`, `steer`, queueing, or config writes.
+    /// Keeping this answer beside the adapter's measured control surface gives the envagent a
+    /// source-specific fact to map onto the protocol's two facets without weakening the live
+    /// `PiSession` surface used for sessions Sylph itself launched.
+    pub fn native_link_facets() -> LinkFacets {
+        LinkFacets {
+            observe: Facet::available(),
+            control: Facet::unavailable(UnavailableReason::NotOursToDrive),
+        }
     }
 
     /// Whether the vendor CLI is on this machine's `PATH`.
@@ -2061,7 +2076,10 @@ pub mod translate {
 /// The root is hardcoded: a native store's location is a vendor fact with no configuration
 /// key, and inventing one would offer a lever that cannot be right.
 pub mod native {
+    use std::collections::{HashMap, VecDeque};
+    use std::io::{Read, Seek, SeekFrom};
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use anyhow::{anyhow, Context, Result};
     use serde_json::{json, Value};
@@ -2334,6 +2352,20 @@ pub mod native {
                 });
             }
         }
+        // Message fields (`stopReason`, `toolCallId`, and friends) live one level below the
+        // JSONL entry. Check that object too, but do not recurse into arbitrary tool payloads:
+        // user text or tool output may legitimately mention both spellings as prose, and that
+        // is not evidence of a new Pi storage era.
+        if let Some(message) = record.get("message") {
+            for field in TWO_SPELLING_FIELDS {
+                if field.is_ambiguous(message) {
+                    return Err(ParseError::UnknownSpelling {
+                        snake: field.snake,
+                        camel: field.camel,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2512,15 +2544,6 @@ pub mod native {
             if failure.is_some() {
                 return Ok(());
             }
-            if let Err(error) = check_spellings(&record) {
-                // Held rather than returned, so the pass finishes and the caller learns that
-                // the store changed rather than getting a partially-read session with no
-                // explanation. `for_each_json_line`'s own tolerance is for a half-written
-                // line, which is a different fact.
-                failure = Some(error.into());
-                return Ok(());
-            }
-
             // The outer stamp, which is a string on every record. Used for the session-level
             // window and as the fallback for a record whose own message carries none.
             let outer_ms = record
@@ -2531,23 +2554,20 @@ pub mod native {
                 ended_at_ms = outer_ms;
             }
 
-            let before = messages.len();
+            if record.get("type").and_then(Value::as_str) == Some("session") && header.is_none() {
+                header = Some(Header {
+                    native_id: string_at(&record, "id").map(NativeId::new),
+                    workdir: string_at(&record, "cwd"),
+                    started_at_ms: outer_ms,
+                    fork_pointer: PARENT_SESSION
+                        .read(&record)
+                        .and_then(|(value, _)| value.as_str())
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_string),
+                    parent_native_id: None,
+                });
+            }
             match record.get("type").and_then(Value::as_str) {
-                Some("session") => {
-                    if header.is_none() {
-                        header = Some(Header {
-                            native_id: string_at(&record, "id").map(NativeId::new),
-                            workdir: string_at(&record, "cwd"),
-                            started_at_ms: outer_ms,
-                            fork_pointer: PARENT_SESSION
-                                .read(&record)
-                                .and_then(|(value, _)| value.as_str())
-                                .filter(|path| !path.is_empty())
-                                .map(str::to_string),
-                            parent_native_id: None,
-                        });
-                    }
-                }
                 Some("model_change") => {
                     // The last one wins, because a session can be re-modelled mid-run and
                     // measurably is — `ordinary-turn.jsonl` changes model between the header
@@ -2557,9 +2577,6 @@ pub mod native {
                     if let Some(id) = MODEL_ID.read(&record).and_then(|(value, _)| value.as_str()) {
                         model = Some(super::rpc::model_key(provider.as_deref(), id));
                     }
-                    if let Some(event) = change_event(&record, outer_ms, "model_change") {
-                        messages.push(SessionMessage::Event(event));
-                    }
                 }
                 Some("thinking_level_change") => {
                     if let Some(level) = THINKING_LEVEL
@@ -2568,43 +2585,12 @@ pub mod native {
                     {
                         thinking_level = Some(level.to_string());
                     }
-                    if let Some(event) = change_event(&record, outer_ms, "thinking_level_change") {
-                        messages.push(SessionMessage::Event(event));
-                    }
                 }
-                Some("message") => {
-                    let before = messages.len();
-                    message_events(&record, outer_ms, &mut messages);
-                    let message_ms = record
-                        .get("message")
-                        .and_then(|message| message.get("timestamp"))
-                        .and_then(|value| epoch_millis_from_json(value, defect_timestamp_unit()))
-                        .or(outer_ms);
-                    if let Some(at_ms) = message_ms {
-                        for message in &mut messages[before..] {
-                            if let SessionMessage::Event(event) = message {
-                                event.recorded_at_ms = Some(at_ms);
-                            }
-                        }
-                    }
-                }
-                // Every other entry type the vendor documents — `compaction`,
-                // `branch_summary`, `custom`, `custom_message`, `label`, `session_info`.
-                // **None occurs in the measured store**, so there is no branch: one would be
-                // written against a shape nobody has printed, which is how three of this
-                // repo's vendor-key defects happened. When one appears it arrives with the
-                // payload that proves its shape.
                 _ => {}
             }
-            if let Some(at_ms) = outer_ms {
-                for message in &mut messages[before..] {
-                    if let SessionMessage::Event(event) = message {
-                        if event.recorded_at_ms.is_some() {
-                            continue;
-                        }
-                        event.recorded_at_ms = Some(at_ms);
-                    }
-                }
+            match project_record(&record) {
+                Ok(projected) => messages.extend(projected),
+                Err(error) => failure = Some(error),
             }
             Ok(())
         })
@@ -2886,29 +2872,577 @@ pub mod native {
 
     /// Parse, then follow the file as it grows.
     ///
-    /// # Two hazards this vendor makes real, and neither is hypothetical
+    /// Pi's persistence is not append-only. `_rewriteFile()` opens the same path with mode
+    /// `"w"` and writes the selected branch again, while `_persist()` can delay creating the
+    /// path until the first assistant message. A byte offset that is treated as permanent
+    /// therefore either skips the beginning of a rewritten generation or reports `ENOENT` for
+    /// a session that is merely waiting to flush. `PiFollowState` keeps a source cursor at
+    /// complete-line boundaries, verifies the consumed prefix before every pass, and rediscovers
+    /// the path when a generation disappears or is replaced.
     ///
-    /// **`_rewriteFile()` truncate-rewrites with mode `"w"` and no lock**, so a reader can
-    /// observe an empty or half-written file at any moment. The correct response is to keep
-    /// reading rather than to declare the session over, which is why
-    /// `crate::native::for_each_json_line` counts a malformed line instead of failing the
-    /// pass, and why `sylph_protocol::EventStream` documents that an `Err` item is a failure
-    /// *reading* a session rather than a failure *of* one.
-    ///
-    /// **`_persist` buffers until the first assistant message**, so the file does not exist
-    /// early in a turn. **An absent file is not an absent session** — a watcher that errors
-    /// on `ENOENT` reports every session as missing for the first several seconds of its
-    /// first turn, which is exactly when someone is most likely to be watching.
-    ///
-    /// The follow loop itself lands with the envagent in step 4: it needs a filesystem
-    /// watcher and a task to own it, and this crate has neither. **The first pass is real**,
-    /// which is what makes this honest to call rather than a stub — a caller gets everything
-    /// the store holds, and the stream ends where `adopt`'s would.
+    /// The stream is intentionally unbounded. A terminal-owned session has no process handle
+    /// for Sylph to close, so the watcher keeps polling after a quiet period; the envagent owns
+    /// cancellation and backpressure when it hosts this adapter. Missing early files are a
+    /// pending source, not an error and not an empty session.
     pub fn watch(id: &NativeId) -> Result<EventStream> {
-        // Deliberately not an error: returning one would make `watch` unusable where `adopt`
-        // works, for a session whose whole history is already on disk. What is missing is the
-        // *following*, and a caller that needs it is the envagent.
-        adopt(id)
+        let root = store_root()
+            .ok_or_else(|| anyhow!("HOME is not set, so ~/.pi/agent/sessions cannot be located"))?;
+        Ok(follow(PiFollowState::new(root, id.clone())))
+    }
+
+    /// Construct the polling stream around one source-specific cursor.
+    fn follow(state: PiFollowState) -> EventStream {
+        // `message_end` is the native flush boundary. A 250ms poll keeps a watcher responsive
+        // without making an idle session perform a tight metadata loop; the envagent may later
+        // replace this timer with a platform file notification while retaining the cursor rules.
+        const POLL: Duration = Duration::from_millis(250);
+
+        Box::pin(futures::stream::unfold(state, |mut state| async move {
+            loop {
+                if let Some(message) = state.pending.pop_front() {
+                    return Some((Ok(message), state));
+                }
+
+                if state.backoff_after_error {
+                    // A complete malformed line is retryable (Pi may be in the middle of a
+                    // truncate-rewrite), but yielding it in a tight loop would turn one source
+                    // defect into an error flood and starve every other adapter pass.
+                    tokio::time::sleep(POLL).await;
+                    state.backoff_after_error = false;
+                }
+
+                match state.poll() {
+                    Ok(messages) if !messages.is_empty() => {
+                        state.pending.extend(messages);
+                        continue;
+                    }
+                    Ok(_) => tokio::time::sleep(POLL).await,
+                    Err(error) => {
+                        state.backoff_after_error = true;
+                        return Some((Err(error), state));
+                    }
+                }
+            }
+        }))
+    }
+
+    /// A cursor for Pi's one-file native source.
+    ///
+    /// The cursor is deliberately source-specific rather than shared with Claude's bundle
+    /// reader. Pi's file can be rewritten in place, and its records are projected directly from
+    /// whole messages; neither fact is true of Claude's append-only multi-file bundle. The
+    /// generic part is only the complete-line boundary and the poll scheduling.
+    #[derive(Debug)]
+    struct PiFollowState {
+        root: PathBuf,
+        id: NativeId,
+        path: Option<PathBuf>,
+        offset: u64,
+        /// FNV-1a state for the bytes through `offset`. Re-reading this prefix before a pass
+        /// detects a same-inode truncate-rewrite whose new size happens to be greater than the
+        /// old offset. It is intentionally cheap and deterministic; the source is local and the
+        /// hash is only a change detector, never an identity or security primitive.
+        prefix_hash: u64,
+        identity: Option<FileIdentity>,
+        /// Last `(size, mtime-nanos, ctime-nanos)` examined. An idle watcher returns after
+        /// `stat` instead of re-reading the whole consumed prefix every 250 ms.
+        observed: Option<(u64, u128, u128)>,
+        /// The source image and tail fingerprint whose parse error was already reported. A
+        /// permanent malformed line is announced once, then retried only after its bytes change
+        /// instead of producing ten identical errors per second.
+        failed: Option<((u64, u128, u128), u64)>,
+        /// Incremented whenever the source path is reset. It is not a server sequence; it makes
+        /// generation transitions inspectable in tests and available to a future source cursor.
+        generation: u64,
+        header_seen: bool,
+        /// Record ids and lexical fingerprints already projected. A rewrite repeats the
+        /// selected branch's prefix; unchanged records must not be published a second time,
+        /// while a record whose payload changed under the same id is projected once as the new
+        /// generation's update. Keep only a compact fingerprint rather than retaining every
+        /// tool-output `Value` in memory for the watcher's lifetime.
+        seen: HashMap<String, u64>,
+        pending: VecDeque<SessionMessage>,
+        backoff_after_error: bool,
+    }
+
+    impl PiFollowState {
+        fn new(root: PathBuf, id: NativeId) -> Self {
+            Self {
+                root,
+                id,
+                path: None,
+                offset: 0,
+                prefix_hash: FNV_OFFSET,
+                identity: None,
+                observed: None,
+                failed: None,
+                generation: 0,
+                header_seen: false,
+                seen: HashMap::new(),
+                pending: VecDeque::new(),
+                backoff_after_error: false,
+            }
+        }
+
+        #[cfg(test)]
+        fn generation(&self) -> u64 {
+            self.generation
+        }
+
+        /// One non-blocking pass. Empty means either that the source has not appeared yet, that
+        /// its final line is incomplete, or that it has not grown since the previous pass.
+        fn poll(&mut self) -> Result<Vec<SessionMessage>> {
+            if self.path.is_none() {
+                self.path = find_in_root(&self.root, &self.id);
+                if self.path.is_none() {
+                    // `_persist` intentionally delays creating a file until an assistant
+                    // message exists. Keep this source pending so a later file is discovered.
+                    return Ok(Vec::new());
+                }
+                self.reset_cursor(None);
+            }
+
+            let path = self.path.clone().expect("path set above");
+            let Some(metadata) = std::fs::metadata(&path).ok() else {
+                // A branch switch can unlink/replace the file between directory discovery and
+                // this pass. Drop the path and rediscover it by native id immediately when the
+                // replacement is already visible; otherwise the next scheduled pass remains
+                // pending.
+                if self.rediscover() {
+                    return self.poll();
+                }
+                return Ok(Vec::new());
+            };
+            let identity = FileIdentity::of(&metadata);
+            let size = metadata.len();
+            let fingerprint = metadata_fingerprint(&metadata);
+
+            let mut reset = self.identity.is_some_and(|old| Some(old) != identity);
+            if size < self.offset {
+                reset = true;
+            }
+            if !reset
+                && self.observed.is_some_and(|(old_size, ..)| old_size == size)
+                && self.observed != Some(fingerprint)
+            {
+                // A same-size metadata change cannot be an append. Treat it as a rewrite so a
+                // generation that only replaced the suffix is still re-evaluated, even when
+                // the consumed prefix happens to remain byte-identical.
+                reset = true;
+            }
+            if !reset {
+                if let Some((failed_fingerprint, failed_tail)) = self.failed {
+                    if failed_fingerprint == fingerprint {
+                        let current_tail = match read_span(&path, self.offset, size - self.offset) {
+                            Ok(current_tail) => current_tail,
+                            Err(error) if is_not_found(&error) => {
+                                self.path = None;
+                                self.reset_cursor(None);
+                                return Ok(Vec::new());
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        if hash_bytes(&current_tail) == failed_tail {
+                            return Ok(Vec::new());
+                        }
+                        self.failed = None;
+                    }
+                }
+            }
+            if !reset
+                && self.observed == Some(fingerprint)
+                && self.offset == size
+                && fingerprint.1 != 0
+            {
+                return Ok(Vec::new());
+            }
+            if !reset && self.offset > 0 {
+                // A same-inode rewrite can preserve both size and inode. Verify the bytes that
+                // the cursor has already consumed before trusting the offset.
+                let current = match read_span(&path, 0, self.offset) {
+                    Ok(current) => current,
+                    Err(error) if is_not_found(&error) => {
+                        if self.rediscover() {
+                            return self.poll();
+                        }
+                        return Ok(Vec::new());
+                    }
+                    Err(error) => return Err(error),
+                };
+                if current.len() as u64 != self.offset || hash_bytes(&current) != self.prefix_hash {
+                    reset = true;
+                }
+            }
+            if reset {
+                self.reset_cursor(identity);
+            } else if self.identity.is_none() {
+                self.identity = identity;
+            }
+
+            let (bytes, next_offset) = match read_complete_range(&path, self.offset, size) {
+                Ok(result) => result,
+                Err(error) if is_not_found(&error) => {
+                    if self.rediscover() {
+                        return self.poll();
+                    }
+                    return Ok(Vec::new());
+                }
+                Err(error) => return Err(error),
+            };
+            if bytes.is_empty() {
+                self.identity = identity;
+                self.observed = Some(fingerprint);
+                self.failed = None;
+                return Ok(Vec::new());
+            }
+            let records = match parse_complete_records(&path, &bytes) {
+                Ok(records) => records,
+                Err(error) => {
+                    self.failed = Some((fingerprint, hash_bytes(&bytes)));
+                    return Err(error);
+                }
+            };
+
+            // Stage all state changes until every complete line in this pass parses. A malformed
+            // line must remain retryable after Pi finishes rewriting it; advancing first would
+            // turn a transient writer race into permanent data loss.
+            let mut header_seen = self.header_seen;
+            let mut staged_seen = HashMap::new();
+            let mut updates = Vec::new();
+            let mut projected = Vec::new();
+            for (record, raw) in records {
+                if !header_seen {
+                    if record.get("type").and_then(Value::as_str) != Some("session") {
+                        // The header is always first in a valid Pi file. During a rewrite the
+                        // reader may observe the body before that first line is complete; hold
+                        // the bytes and retry rather than projecting under an unknown identity.
+                        return Ok(Vec::new());
+                    }
+                    let Some(native_id) = string_at(&record, "id") else {
+                        return Ok(Vec::new());
+                    };
+                    if native_id != self.id.as_str() {
+                        // The path now names another session. Do not consume its records under
+                        // this watcher; rediscovery will choose the requested id.
+                        self.path = None;
+                        self.reset_cursor(None);
+                        return Ok(Vec::new());
+                    }
+                    header_seen = true;
+                }
+
+                let key = record_key(&record, &raw);
+                let signature = value_signature(&record, &raw);
+                let unchanged = staged_seen
+                    .get(&key)
+                    .or_else(|| self.seen.get(&key))
+                    .is_some_and(|old| *old == signature);
+                if unchanged {
+                    continue;
+                }
+                // Project before committing the seen value. If field spelling is ambiguous or
+                // another parser error appears, the same record is retried on the next pass.
+                let messages = match project_record(&record) {
+                    Ok(messages) => messages,
+                    Err(error) => {
+                        self.failed = Some((fingerprint, hash_bytes(&bytes)));
+                        return Err(error);
+                    }
+                };
+                staged_seen.insert(key.clone(), signature);
+                updates.push((key, signature));
+                projected.extend(messages);
+            }
+
+            self.header_seen = header_seen;
+            self.offset = next_offset;
+            // After a reset the old hash is the FNV offset; extending it over the complete bytes
+            // is equivalent to hashing the newly consumed prefix. For a normal append, extending
+            // the previous state avoids a second full-file hash.
+            self.prefix_hash = extend_hash(self.prefix_hash, &bytes);
+            self.identity = identity;
+            self.observed = Some(fingerprint);
+            self.failed = None;
+            for (key, signature) in updates {
+                self.seen.insert(key, signature);
+            }
+            Ok(projected)
+        }
+
+        fn rediscover(&mut self) -> bool {
+            self.path = None;
+            self.reset_cursor(None);
+            let Some(path) = find_in_root(&self.root, &self.id) else {
+                return false;
+            };
+            self.path = Some(path);
+            true
+        }
+
+        fn reset_cursor(&mut self, identity: Option<FileIdentity>) {
+            self.offset = 0;
+            self.prefix_hash = FNV_OFFSET;
+            self.identity = identity;
+            self.observed = None;
+            self.failed = None;
+            self.header_seen = false;
+            self.generation = self.generation.saturating_add(1);
+        }
+    }
+
+    /// The file identity used to detect a rename/replacement that leaves size and content
+    /// looking unchanged. On non-Unix targets no stable inode is available through `std`, and
+    /// the prefix/size checks still cover truncate-rewrites.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct FileIdentity {
+        #[cfg(unix)]
+        dev: u64,
+        #[cfg(unix)]
+        ino: u64,
+    }
+
+    impl FileIdentity {
+        fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                Some(Self {
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                })
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = metadata;
+                None
+            }
+        }
+    }
+
+    fn modified_nanos(metadata: &std::fs::Metadata) -> u128 {
+        metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| since.as_nanos())
+            .unwrap_or(0)
+    }
+
+    fn changed_nanos(metadata: &std::fs::Metadata) -> u128 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let seconds = metadata.ctime();
+            let nanos = metadata.ctime_nsec();
+            if seconds < 0 || nanos < 0 {
+                0
+            } else {
+                (seconds as u128)
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(nanos as u128)
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            0
+        }
+    }
+
+    fn metadata_fingerprint(metadata: &std::fs::Metadata) -> (u64, u128, u128) {
+        (
+            metadata.len(),
+            modified_nanos(metadata),
+            changed_nanos(metadata),
+        )
+    }
+
+    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+    const FNV_PRIME: u64 = 1_099_511_628_211;
+
+    fn extend_hash(mut hash: u64, bytes: &[u8]) -> u64 {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
+    fn hash_bytes(bytes: &[u8]) -> u64 {
+        extend_hash(FNV_OFFSET, bytes)
+    }
+
+    fn is_not_found(error: &anyhow::Error) -> bool {
+        error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    /// Find a session by header id without turning a missing/partial file into an error.
+    fn find_in_root(root: &Path, id: &NativeId) -> Option<PathBuf> {
+        if !root.exists() {
+            return None;
+        }
+        candidates(root, is_session_file)
+            .into_iter()
+            .find_map(|candidate| {
+                read_header(&candidate.path, false)
+                    .ok()
+                    .filter(|header| header.native_id.as_ref() == Some(id))
+                    .map(|_| candidate.path)
+            })
+    }
+
+    /// Read only complete JSONL records from a byte range. The final unterminated line is
+    /// deliberately withheld; Pi may still be writing it and the next pass must retry it. A
+    /// normal pass is bounded to `MAX_BATCH_BYTES`; a single unusually large JSON record is
+    /// allowed to exceed that bound so it cannot be stranded forever without a newline.
+    fn read_complete_range(path: &Path, offset: u64, size: u64) -> Result<(Vec<u8>, u64)> {
+        if size <= offset {
+            return Ok((Vec::new(), offset));
+        }
+        const MAX_BATCH_BYTES: u64 = 4 * 1024 * 1024;
+        const MAX_LINE_BYTES: u64 = 64 * 1024 * 1024;
+        let remaining = size - offset;
+        let mut requested = remaining.min(MAX_BATCH_BYTES);
+        loop {
+            let bytes = read_span(path, offset, requested)?;
+            if bytes.len() as u64 != requested {
+                // The writer changed the file while it was being read. Keep the old cursor and
+                // let the next pass classify the resulting generation/size change.
+                return Ok((Vec::new(), offset));
+            }
+            if let Some(at) = bytes.iter().rposition(|byte| *byte == b'\n') {
+                let complete = at + 1;
+                return Ok((bytes[..complete].to_vec(), offset + complete as u64));
+            }
+            if requested == remaining {
+                // No complete line yet; retain the bytes implicitly by leaving `offset` alone.
+                return Ok((Vec::new(), offset));
+            }
+            if requested >= MAX_LINE_BYTES {
+                return Err(anyhow!(
+                    "an incomplete pi JSONL record at byte offset {offset} exceeds the \
+                     {MAX_LINE_BYTES}-byte watcher line bound"
+                ));
+            }
+            // The first record itself is larger than the ordinary batch. Keep extending until
+            // its newline appears; parsing a record requires holding that one record anyway, but
+            // the explicit line bound keeps a wedged writer from growing this task without end.
+            requested = requested
+                .saturating_add(MAX_BATCH_BYTES)
+                .min(remaining)
+                .min(MAX_LINE_BYTES);
+        }
+    }
+
+    fn read_span(path: &Path, offset: u64, length: u64) -> Result<Vec<u8>> {
+        let mut file = std::fs::File::open(path)
+            .with_context(|| format!("opening pi session file {}", path.display()))?;
+        file.seek(SeekFrom::Start(offset))
+            .with_context(|| format!("seeking pi session file {}", path.display()))?;
+        let mut bytes = Vec::new();
+        file.take(length)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("reading pi session file {}", path.display()))?;
+        Ok(bytes)
+    }
+
+    fn parse_complete_records(path: &Path, bytes: &[u8]) -> Result<Vec<(Value, Vec<u8>)>> {
+        let mut records = Vec::new();
+        for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let value = serde_json::from_slice(line).map_err(|error| {
+                anyhow!(
+                    "invalid complete JSON record {} in {}: {}",
+                    index + 1,
+                    path.display(),
+                    error
+                )
+            })?;
+            records.push((value, line.to_vec()));
+        }
+        Ok(records)
+    }
+
+    fn record_key(record: &Value, raw: &[u8]) -> String {
+        let record_type = record
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        record
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(|id| format!("{record_type}:{id}"))
+            .unwrap_or_else(|| format!("{record_type}:raw:{:016x}", value_signature(record, raw)))
+    }
+
+    fn value_signature(record: &Value, raw: &[u8]) -> u64 {
+        // `Value` equality is semantic, but retaining every value just to compare generations
+        // would make a long-lived watcher grow with tool-output size. JSON serialization gives
+        // us a compact semantic fingerprint; raw bytes are the fallback for an impossible
+        // serialization failure.
+        serde_json::to_vec(record)
+            .map(|bytes| hash_bytes(&bytes))
+            .unwrap_or_else(|_| hash_bytes(raw))
+    }
+
+    /// Project one complete native record using the same functions as `parse_session`.
+    ///
+    /// Keeping this small adapter-specific projection separate from the cursor means a rewrite
+    /// can replay changed records without reparsing the whole file, while field spelling and
+    /// timestamp rules remain exactly one implementation.
+    fn project_record(record: &Value) -> Result<Vec<SessionMessage>> {
+        check_spellings(record)?;
+        let outer_ms = record
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(epoch_millis_from_iso);
+        let mut messages = Vec::new();
+        let before = messages.len();
+        match record.get("type").and_then(Value::as_str) {
+            Some("model_change") => {
+                if let Some(event) = change_event(record, outer_ms, "model_change") {
+                    messages.push(SessionMessage::Event(event));
+                }
+            }
+            Some("thinking_level_change") => {
+                if let Some(event) = change_event(record, outer_ms, "thinking_level_change") {
+                    messages.push(SessionMessage::Event(event));
+                }
+            }
+            Some("message") => {
+                message_events(record, outer_ms, &mut messages);
+                let message_ms = record
+                    .get("message")
+                    .and_then(|message| message.get("timestamp"))
+                    .and_then(|value| epoch_millis_from_json(value, defect_timestamp_unit()))
+                    .or(outer_ms);
+                if let Some(at_ms) = message_ms {
+                    for message in &mut messages[before..] {
+                        if let SessionMessage::Event(event) = message {
+                            event.recorded_at_ms = Some(at_ms);
+                        }
+                    }
+                }
+            }
+            // The session header and currently unmeasured entry types carry metadata only. The
+            // raw record is still consumed so a later generation does not replay it forever.
+            _ => {}
+        }
+        if let Some(at_ms) = outer_ms {
+            for message in &mut messages[before..] {
+                if let SessionMessage::Event(event) = message {
+                    if event.recorded_at_ms.is_none() {
+                        event.recorded_at_ms = Some(at_ms);
+                    }
+                }
+            }
+        }
+        Ok(messages)
     }
 
     /// Find one session's file by its native id.
@@ -3226,6 +3760,28 @@ pub mod native {
             assert!(check_spellings(&plain).is_ok());
         }
 
+        #[test]
+        fn an_ambiguous_message_field_is_rejected_at_its_nested_record() {
+            let ambiguous = serde_json::json!({
+                "type": "message",
+                "id": "m1",
+                "timestamp": "2026-04-07T22:40:05.606817",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": "stop",
+                    "stop_reason": "stop"
+                }
+            });
+            assert!(matches!(
+                check_spellings(&ambiguous),
+                Err(ParseError::UnknownSpelling {
+                    snake: "stop_reason",
+                    camel: "stopReason"
+                })
+            ));
+        }
+
         /// **A `message.timestamp` of `1` or `2` is a test-session placeholder, not a
         /// timestamp.**
         ///
@@ -3294,6 +3850,327 @@ pub mod native {
                 !is_vendor_fixture(&real),
                 "a real session must not be filtered; without this the check above \
                  would pass for a filter that dropped everything"
+            );
+        }
+
+        fn watch_temp_dir(tag: &str) -> PathBuf {
+            let dir =
+                std::env::temp_dir().join(format!("sylph-pi-watch-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn watch_header(id: &str) -> String {
+            serde_json::json!({
+                "type": "session",
+                "version": 3,
+                "id": id,
+                "timestamp": "2026-09-03T00:00:00.000Z",
+                "cwd": "/tmp"
+            })
+            .to_string()
+        }
+
+        fn watch_message(id: &str, role: &str, text: &str, timestamp: i64) -> String {
+            let mut message = serde_json::json!({
+                "role": role,
+                "content": [{"type": "text", "text": text}],
+                "timestamp": timestamp
+            });
+            if role == "assistant" {
+                message["stopReason"] = serde_json::json!("stop");
+                message["usage"] = serde_json::json!({
+                    "input": 1,
+                    "output": 1,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "totalTokens": 2,
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
+                });
+            }
+            serde_json::json!({
+                "type": "message",
+                "id": id,
+                "parentId": serde_json::Value::Null,
+                "timestamp": "2026-09-03T00:00:01.000Z",
+                "message": message
+            })
+            .to_string()
+        }
+
+        fn event_texts(messages: &[SessionMessage]) -> Vec<String> {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    SessionMessage::Event(event) if !event.text.is_empty() => {
+                        Some(event.text.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn events(messages: &[SessionMessage]) -> Vec<Event> {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    SessionMessage::Event(event) => Some(event.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The watcher's first pass must be the same normalized projection as `adopt`; only
+        /// subsequent polls differ by following the source cursor.
+        #[test]
+        fn a_watchers_first_pass_matches_adopt() {
+            let source = fixture("ordinary-turn.jsonl");
+            let parsed = parse_session(&source).unwrap();
+            let id = parsed.header.native_id.clone().unwrap();
+            let dir = watch_temp_dir("parity");
+            let path = dir.join("session.jsonl");
+            std::fs::copy(&source, &path).unwrap();
+
+            let mut state = PiFollowState::new(dir.clone(), id);
+            let watched = events(&state.poll().unwrap());
+            let adopted = parsed
+                .messages
+                .iter()
+                .filter_map(|message| match message {
+                    SessionMessage::Event(event) => Some(event.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(watched, adopted);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A final JSON line without a newline is still being written. The cursor stays before
+        /// it, and appending the remainder later produces exactly one event rather than either
+        /// dropping the line or publishing a half-parsed message.
+        #[test]
+        fn a_watcher_retries_an_incomplete_final_line() {
+            let dir = watch_temp_dir("partial");
+            let path = dir.join("session.jsonl");
+            let id = NativeId::new("pi-watch-partial");
+            let header = watch_header(id.as_str());
+            let user = watch_message("user-1", "user", "hello", 1788000000000);
+            let assistant = watch_message("assistant-1", "assistant", "done", 1788000000100);
+            let split = assistant.len() / 2;
+            std::fs::write(&path, format!("{header}\n{user}\n{}", &assistant[..split])).unwrap();
+
+            let mut state = PiFollowState::new(dir.clone(), id);
+            let first = state.poll().unwrap();
+            assert_eq!(event_texts(&first), vec!["hello"]);
+            let generation = state.generation();
+
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(file, "{}", &assistant[split..]).unwrap();
+            let second = state.poll().unwrap();
+            assert_eq!(event_texts(&second), vec!["done"]);
+            assert_eq!(
+                state.generation(),
+                generation,
+                "an append is not a new generation"
+            );
+            assert!(state.poll().unwrap().is_empty(), "the line is emitted once");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// Pi's branch navigation rewrites a file in place. A changed record under an existing
+        /// id is projected as the new generation, while unchanged prefix records are not
+        /// duplicated.
+        #[test]
+        fn a_watcher_detects_a_same_inode_truncate_rewrite_without_replaying_the_prefix() {
+            let dir = watch_temp_dir("rewrite");
+            let path = dir.join("session.jsonl");
+            let id = NativeId::new("pi-watch-rewrite");
+            let header = watch_header(id.as_str());
+            let user = watch_message("user-1", "user", "hello", 1788000000000);
+            let old = watch_message("assistant-1", "assistant", "old", 1788000000100);
+            std::fs::write(&path, format!("{header}\n{user}\n{old}\n")).unwrap();
+
+            let mut state = PiFollowState::new(dir.clone(), id);
+            assert_eq!(event_texts(&state.poll().unwrap()), vec!["hello", "old"]);
+            let generation = state.generation();
+
+            let changed = watch_message("assistant-1", "assistant", "new", 1788000000100);
+            // `old` and `new` have the same byte length, so size-only cursors cannot detect this
+            // rewrite. The consumed-prefix hash must force a generation reset.
+            std::fs::write(&path, format!("{header}\n{user}\n{changed}\n")).unwrap();
+            let second = state.poll().unwrap();
+            assert_eq!(event_texts(&second), vec!["new"]);
+            assert!(state.generation() > generation);
+            assert!(state.poll().unwrap().is_empty());
+
+            // Even a byte-identical rewrite is a new source generation. It produces no second
+            // event because the record fingerprint is unchanged, but its cursor provenance is
+            // still advanced rather than silently treating the rewrite as an append.
+            let rewritten_generation = state.generation();
+            std::fs::write(&path, format!("{header}\n{user}\n{changed}\n")).unwrap();
+            assert!(state.poll().unwrap().is_empty());
+            assert!(state.generation() > rewritten_generation);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A rewrite can pass through an empty file before Pi has written the replacement
+        /// header. That transient generation must neither end the stream nor lose the later
+        /// complete record.
+        #[test]
+        fn a_watcher_survives_an_empty_intermediate_rewrite_generation() {
+            let dir = watch_temp_dir("empty-generation");
+            let path = dir.join("session.jsonl");
+            let id = NativeId::new("pi-watch-empty-generation");
+            let header = watch_header(id.as_str());
+            let user = watch_message("user-1", "user", "before", 1788000000000);
+            std::fs::write(&path, format!("{header}\n{user}\n")).unwrap();
+
+            let mut state = PiFollowState::new(dir.clone(), id);
+            assert_eq!(event_texts(&state.poll().unwrap()), vec!["before"]);
+
+            std::fs::write(&path, "").unwrap();
+            assert!(state.poll().unwrap().is_empty());
+
+            let after = watch_message("assistant-1", "assistant", "after", 1788000000100);
+            std::fs::write(&path, format!("{header}\n{user}\n{after}\n")).unwrap();
+            assert_eq!(event_texts(&state.poll().unwrap()), vec!["after"]);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A malformed complete line is reported once for the current source image. Re-polling
+        /// an unchanged image waits for a repair instead of flooding the consumer with copies
+        /// of the same diagnostic.
+        #[test]
+        fn a_watcher_reports_a_malformed_image_once_until_it_changes() {
+            let dir = watch_temp_dir("malformed");
+            let path = dir.join("session.jsonl");
+            let id = NativeId::new("pi-watch-malformed");
+            std::fs::write(&path, format!("{}\nnot-json\n", watch_header(id.as_str()))).unwrap();
+
+            let mut state = PiFollowState::new(dir.clone(), id);
+            assert!(state.poll().is_err());
+            assert!(state.poll().unwrap().is_empty());
+
+            let user = watch_message("user-1", "user", "repaired", 1788000000000);
+            std::fs::write(
+                &path,
+                format!("{}\n{}\n", watch_header("pi-watch-malformed"), user),
+            )
+            .unwrap();
+            assert_eq!(event_texts(&state.poll().unwrap()), vec!["repaired"]);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// Replacing the path with a new inode is a generation change even when its consumed
+        /// prefix is byte-identical. The watcher resets, skips the already-seen records, and
+        /// emits only the newly appended record from the replacement.
+        #[test]
+        fn a_watcher_handles_a_replaced_file_generation() {
+            let dir = watch_temp_dir("generation");
+            let path = dir.join("session.jsonl");
+            let replacement = dir.join("session.next.jsonl");
+            let id = NativeId::new("pi-watch-generation");
+            let header = watch_header(id.as_str());
+            let user = watch_message("user-1", "user", "hello", 1788000000000);
+            std::fs::write(&path, format!("{header}\n{user}\n")).unwrap();
+
+            let mut state = PiFollowState::new(dir.clone(), id);
+            assert_eq!(event_texts(&state.poll().unwrap()), vec!["hello"]);
+            let generation = state.generation();
+
+            let assistant = watch_message("assistant-1", "assistant", "after", 1788000000100);
+            std::fs::write(&replacement, format!("{header}\n{user}\n{assistant}\n")).unwrap();
+            std::fs::rename(&replacement, &path).unwrap();
+            let second = state.poll().unwrap();
+            assert_eq!(event_texts(&second), vec!["after"]);
+            assert!(state.generation() > generation);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_watcher_rediscovers_a_generation_moved_to_a_new_path() {
+            let dir = watch_temp_dir("moved-generation");
+            let path = dir.join("old.jsonl");
+            let replacement = dir.join("new.jsonl");
+            let id = NativeId::new("pi-watch-moved-generation");
+            let header = watch_header(id.as_str());
+            let user = watch_message("user-1", "user", "before", 1788000000000);
+            std::fs::write(&path, format!("{header}\n{user}\n")).unwrap();
+
+            let mut state = PiFollowState::new(dir.clone(), id);
+            assert_eq!(event_texts(&state.poll().unwrap()), vec!["before"]);
+
+            let assistant = watch_message("assistant-1", "assistant", "moved", 1788000000100);
+            std::fs::write(&replacement, format!("{header}\n{user}\n{assistant}\n")).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            // The replacement has a different filename; one poll must rediscover it rather than
+            // waiting for a second scheduler tick.
+            assert_eq!(event_texts(&state.poll().unwrap()), vec!["moved"]);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A watch started before Pi flushes its first assistant message keeps a pending source
+        /// and discovers the file on a later pass instead of returning `ENOENT` or ending.
+        #[test]
+        fn a_watcher_treats_a_delayed_file_as_pending() {
+            let dir = watch_temp_dir("delayed");
+            let path = dir.join("session.jsonl");
+            let id = NativeId::new("pi-watch-delayed");
+            let mut state = PiFollowState::new(dir.clone(), id.clone());
+            assert!(state.poll().unwrap().is_empty());
+
+            let header = watch_header(id.as_str());
+            let user = watch_message("user-1", "user", "late", 1788000000000);
+            std::fs::write(&path, format!("{header}\n{user}\n")).unwrap();
+            assert_eq!(event_texts(&state.poll().unwrap()), vec!["late"]);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// The public follow loop keeps waiting while the source is pending and yields as soon
+        /// as the delayed file appears; it does not terminate after the initial empty pass.
+        #[tokio::test]
+        async fn the_follow_stream_waits_for_a_delayed_source() {
+            use futures::StreamExt;
+
+            let dir = watch_temp_dir("delayed-stream");
+            let path = dir.join("session.jsonl");
+            let id = NativeId::new("pi-watch-delayed-stream");
+            let header = watch_header(id.as_str());
+            let user = watch_message("user-1", "user", "streamed", 1788000000000);
+            let writer = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                std::fs::write(&path, format!("{header}\n{user}\n")).unwrap();
+            });
+
+            let mut stream = follow(PiFollowState::new(dir.clone(), id));
+            let item = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .expect("the pending source should eventually appear")
+                .expect("the watcher remains open")
+                .expect("the delayed file is valid");
+            assert!(matches!(
+                item,
+                SessionMessage::Event(event) if event.text == "streamed"
+            ));
+            writer.await.unwrap();
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A native Pi watcher is observation-only. Live `PiSession` still advertises its own
+        /// controls; this facet is specifically for a terminal-owned source.
+        #[test]
+        fn a_terminal_owned_pi_session_is_observable_but_not_drivable() {
+            let facets = super::super::PiAdapter::native_link_facets();
+            assert!(facets.observe.available);
+            assert!(!facets.control.available);
+            assert_eq!(
+                facets.control.reason,
+                Some(sylph_protocol::UnavailableReason::NotOursToDrive)
             );
         }
     }

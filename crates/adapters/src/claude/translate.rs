@@ -1327,6 +1327,9 @@ mod tests {
                     SessionMessage::NativeRecord(_) => {
                         unreachable!("translation does not emit native records")
                     }
+                    SessionMessage::TurnInput(_) => {
+                        unreachable!("live translation does not emit native input facts")
+                    }
                 }
             }
             if emission.refresh_capabilities {

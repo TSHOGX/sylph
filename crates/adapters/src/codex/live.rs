@@ -32,8 +32,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use sylph_protocol::{
     AdapterError, CapabilityFacets, ConfigChoice, ConfigKind, ConfigOption, Event, EventKind,
-    EventStream, NativeId, Phase, Request, RequestKind, RequestOption, Resolution, RunSpec,
-    Session, SessionCapabilities, SessionMessage, TurnInput, InteriorState,
+    EventStream, InteriorState, NativeId, Phase, Request, RequestKind, RequestOption, Resolution,
+    RunSpec, Session, SessionCapabilities, SessionMessage, TurnInput,
 };
 use tokio::sync::{mpsc, Mutex, Notify};
 

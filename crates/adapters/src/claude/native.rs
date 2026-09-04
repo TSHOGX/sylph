@@ -625,10 +625,8 @@ fn project_record_inner(
                 // shape, which is the fact the whole reuse rests on.
                 correlation.translate(record, at_ms).messages
             } else {
-                // Something the person typed. Not projected as an event: the vocabulary has no
-                // `user` kind, and the server owns a turn's `request_text`
-                // (`docs/database-schema.md`). Inventing a kind is what
-                // `crates/adapters/src/lib.rs` forbids an adapter from doing.
+                // Native input provenance is reserved for the adapter integration stage once
+                // source cursors and turn ownership are wired.
                 vec![]
             }
         }

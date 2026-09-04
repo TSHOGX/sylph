@@ -2,21 +2,23 @@
 //!
 //! # Status
 //!
-//! Skeleton. [`adopt`], [`watch`], and [`enumerate`] are what `codex/mod.rs` calls, and
-//! their bodies are the parser. What is already settled — and is the expensive part —
+//! [`adopt`], [`watch`], and [`enumerate`] are what `codex/mod.rs` calls, and their bodies
+//! are the parser and generation-aware follower. What is already settled — and is the
+//! expensive part —
 //! is *what the store actually contains*, measured over every rollout on this
 //! machine rather than read off `docs/agents.md`, which was written from a second-hand
 //! description and is wrong in several places. Each measurement below is stated where
 //! the code that acts on it will go, because each one is a branch a reader would
 //! otherwise write from the document and each one fails silently.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use sylph_protocol::{
-    normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeId, NativeSummary, Phase,
-    SessionMessage, StoreFilter, InteriorState,
+    normalize_workdir, Event, EventKind, EventStream, Fidelity, InteriorState, NativeId,
+    NativeSummary, Phase, SessionMessage, StoreFilter,
 };
 
 use crate::native::{candidates, epoch_millis_from_iso, for_each_json_line, SessionCandidate};
@@ -147,6 +149,20 @@ pub const BRIEF_IS_CIPHERTEXT: &str =
 /// output reads `{"message":"Wait timed out.","timed_out":true}`. It marks a barrier,
 /// not a delegation.
 pub fn delegation_edge(activity: &Value, own_thread: &str) -> Option<Edge> {
+    delegation_edge_with_path(activity, own_thread, None)
+}
+
+/// Resolve a delegation edge with the reader's own team path when available.
+///
+/// The native record names the *other* party. Comparing only against a hard-coded `/root`
+/// path misclassifies a nested delegate whose parent is `/root/research`; path ancestry is the
+/// measured direction signal and still falls back to the historical root rule for old headers
+/// that did not record the reader's path.
+fn delegation_edge_with_path(
+    activity: &Value,
+    own_thread: &str,
+    own_path: Option<&str>,
+) -> Option<Edge> {
     let item = activity.get("item").unwrap_or(activity);
     if item.get("type").and_then(Value::as_str) != Some("SubAgentActivity") {
         return None;
@@ -166,15 +182,25 @@ pub fn delegation_edge(activity: &Value, own_thread: &str) -> Option<Edge> {
     // every one carries this field and it is never equal to the reader's own path.
     let other_path = string_at(item, "agent_path")?;
 
-    // **`/root` names the primary agent, so a record naming it is a record about this
-    // thread's parent.** That is the discriminant, and it is a property of the *path* rather
-    // than of `kind`: measured, all 11 records whose path is deeper than `/root` are the
-    // parent's view of a child, and all 31 whose path is exactly `/root` are a child's view
-    // of its parent — including the 2 whose `kind` is `interacted` in a parent's own
-    // rollout, which is why `kind` cannot decide this. `kind` is `started` or `interacted`
-    // only (`interrupted`/`completed` occur zero times), and both values appear on **both**
-    // sides of the edge, so branching on it inverts a real subset rather than a rare one.
-    if other_path == PRIMARY_AGENT_PATH {
+    // **The other path's ancestry names the direction.** A record naming an ancestor of the
+    // reader is the child's view of its parent; a descendant is the parent's view of a child.
+    // Older headers did not retain the reader path, so preserve the measured `/root` fallback
+    // for that population. This is deliberately path-based rather than `kind`-based: both
+    // `started` and `interacted` occur on both sides of the edge.
+    let names_parent = if let Some(path) = own_path {
+        if path_is_ancestor(&other_path, path) {
+            Some(true)
+        } else if path_is_ancestor(path, &other_path) {
+            Some(false)
+        } else {
+            // A record naming a sibling (or an unrelated team) is not enough evidence to
+            // attach a trajectory in this rollout.
+            None
+        }
+    } else {
+        Some(other_path == PRIMARY_AGENT_PATH)
+    }?;
+    if names_parent {
         // The reader is the delegate. Its parent is the named thread, and this record is
         // *not* an opening of a trajectory — it is an interaction with the thread above.
         // Reported as such rather than as a `span`, because a child's `span` is set by
@@ -208,6 +234,14 @@ pub fn delegation_edge(activity: &Value, own_thread: &str) -> Option<Edge> {
 
 /// The primary agent's path in a codex team. Everything deeper is a delegate.
 pub const PRIMARY_AGENT_PATH: &str = "/root";
+
+fn path_is_ancestor(candidate: &str, path: &str) -> bool {
+    candidate == path
+        || (candidate != "/"
+            && path
+                .strip_prefix(candidate)
+                .is_some_and(|rest| rest.starts_with('/')))
+}
 
 /// Which way a [`delegation_edge`] points.
 ///
@@ -274,6 +308,7 @@ const NO_RECORDED_TIME: i64 = 0;
 /// written once, whole, after the thing it describes finished. There are no deltas to
 /// accumulate, so there is no block map to key and therefore no index-collision hazard of the
 /// kind `translate::BlockKey` exists to prevent.
+#[allow(dead_code)]
 fn parse_rollout(path: &Path) -> Result<ParsedRollout> {
     let mut parsed = ParsedRollout::default();
     let mut era = None;
@@ -288,83 +323,7 @@ fn parse_rollout(path: &Path) -> Result<ParsedRollout> {
         std::collections::HashMap::new();
 
     let stats = for_each_json_line(path, |record| {
-        // **The outer stamp, which is a string on every record and always UTC.** Measured
-        // over all 343865 records in the store: 343865 are strings and every one ends in
-        // `Z`, so the offsetless hazard `native::timestamp` documents for `pi` does not
-        // arise here — but the decoder is shared anyway, because a second timestamp reader
-        // is how a unit defect gets a second chance.
-        let at_ms = record
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .and_then(epoch_millis_from_iso);
-        if let Some(stamp) = at_ms {
-            if parsed.started_at_ms.is_none() {
-                parsed.started_at_ms = Some(stamp);
-            }
-            parsed.ended_at_ms = Some(stamp);
-        }
-        let at_ms = at_ms.unwrap_or(NO_RECORDED_TIME);
-
-        let kind = record
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let Some(payload) = record.get("payload") else {
-            // Every record in this store carries one. A record without it is a shape no
-            // known era emits, and this counts rather than guesses.
-            parsed.unknown_records += 1;
-            return Ok(());
-        };
-
-        let before = parsed.messages.len();
-        match kind {
-            "session_meta" => {
-                // **The first one is this file's own thread; a later one is the parent's,
-                // replayed.** Measured: a minority of files carry two, and in every one the
-                // second is the *parent* session's header copied into a forked delegate. A
-                // reader that let the last one win would report a delegate's id, cwd, and
-                // era as its parent's — and since both are real headers, nothing would
-                // look wrong.
-                if parsed.header.is_none() {
-                    let header = Header::read(payload);
-                    era = Some(header.era);
-                    parsed.header = Some(header);
-                }
-            }
-            "event_msg" => {
-                let era = era.unwrap_or(Era::Legacy);
-                event_msg(payload, era, at_ms, &mut opened, &mut parsed);
-            }
-            "response_item" => {
-                let era = era.unwrap_or(Era::Legacy);
-                response_item(payload, era, at_ms, &mut call_names, &mut parsed);
-            }
-            // A compaction's *payload* — the replacement history the vendor substituted. It
-            // is paired one-to-one with the boundary announcement measured on both eras (57
-            // legacy files with `top=1 ev=1`, 6 paginated with `top=1 item=1`, and every
-            // multiple in step), so the boundary event is emitted from the announcement and
-            // this record contributes only its message. Emitting from both would draw two
-            // boundaries where context was condensed once.
-            "compacted" => {}
-            // `turn_context` restates the turn's model, sandbox, and approval policy on
-            // every turn (7843 records legacy, 240 paginated). Those are a session's
-            // *configuration* rather than transcript events, and the live half owns them
-            // (`super::appserver`) — a `status` per turn saying "the model is still
-            // gpt-5.6-sol" would bury the transcript in narration nobody asked for.
-            "turn_context" => {}
-            // `world_state` (183) is the collaboration-mode hint hash and
-            // `inter_agent_communication_metadata` (49) is a `trigger_turn` boolean. Neither
-            // is a transcript event and neither carries text.
-            "world_state" | "inter_agent_communication_metadata" => {}
-            _ => parsed.unknown_records += 1,
-        }
-        if at_ms != NO_RECORDED_TIME {
-            for message in &mut parsed.messages[before..] {
-                if let SessionMessage::Event(event) = message {
-                    event.recorded_at_ms = Some(at_ms);
-                }
-            }
-        }
+        project_record(&record, &mut era, &mut opened, &mut call_names, &mut parsed);
         Ok(())
     })
     .with_context(|| format!("parsing codex rollout {}", path.display()))?;
@@ -391,6 +350,85 @@ fn parse_rollout(path: &Path) -> Result<ParsedRollout> {
     }
 
     Ok(parsed)
+}
+
+/// Project one complete rollout record into the normalized event vocabulary.
+///
+/// Keeping this operation independent from file iteration is what lets adoption and the
+/// generation-aware follower share exactly one projection state. A watcher must not re-run a
+/// second, subtly different parser when a line arrives after its first poll: the era, call
+/// names, delegation set, and duplicate guards all belong to the rollout's cursor.
+fn project_record(
+    record: &Value,
+    era: &mut Option<Era>,
+    opened: &mut HashSet<String>,
+    call_names: &mut HashMap<String, String>,
+    parsed: &mut ParsedRollout,
+) {
+    // **The outer stamp, which is a string on every record and always UTC.** Measured over all
+    // 343865 records in the store: every one ends in `Z`, so the offsetless hazard documented
+    // for `pi` does not arise here — but the decoder is shared anyway, because a second
+    // timestamp reader is how a unit defect gets a second chance.
+    let at_ms = record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(epoch_millis_from_iso);
+    if let Some(stamp) = at_ms {
+        if parsed.started_at_ms.is_none() {
+            parsed.started_at_ms = Some(stamp);
+        }
+        parsed.ended_at_ms = Some(stamp);
+    }
+    let at_ms = at_ms.unwrap_or(NO_RECORDED_TIME);
+
+    let kind = record
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some(payload) = record.get("payload") else {
+        // Every record in this store carries one. A record without it is a shape no known era
+        // emits, and this counts rather than guesses.
+        parsed.unknown_records += 1;
+        return;
+    };
+
+    let before = parsed.messages.len();
+    match kind {
+        "session_meta" => {
+            // **The first one is this file's own thread; a later one is the parent's, replayed.**
+            // Measured: a minority of files carry two, and in every one the second is the
+            // parent's header copied into a forked delegate. A reader that let the last one win
+            // would report a delegate's id, cwd, and era as its parent's.
+            if parsed.header.is_none() {
+                let header = Header::read(payload);
+                *era = Some(header.era);
+                parsed.header = Some(header);
+            }
+        }
+        "event_msg" => {
+            let current_era = era.unwrap_or(Era::Legacy);
+            event_msg(payload, current_era, at_ms, opened, parsed);
+        }
+        "response_item" => {
+            let current_era = era.unwrap_or(Era::Legacy);
+            response_item(payload, current_era, at_ms, call_names, parsed);
+        }
+        // A compaction's payload is the replacement history. The paired boundary announcement
+        // emits the event, so this record contributes no second boundary.
+        "compacted" => {}
+        // `turn_context` restates model/sandbox/approval configuration, not transcript events.
+        "turn_context" => {}
+        // Collaboration-mode metadata carries no transcript content.
+        "world_state" | "inter_agent_communication_metadata" => {}
+        _ => parsed.unknown_records += 1,
+    }
+    if at_ms != NO_RECORDED_TIME {
+        for message in &mut parsed.messages[before..] {
+            if let SessionMessage::Event(event) = message {
+                event.recorded_at_ms = Some(at_ms);
+            }
+        }
+    }
 }
 
 /// What one pass over a rollout produced.
@@ -453,6 +491,17 @@ struct ParsedRollout {
     emitted_reasoning: std::collections::HashSet<String>,
 }
 
+/// Provenance of a rollout's parent pointer.
+///
+/// Codex uses the same native id field for delegated children and explicit forks. Keeping the
+/// distinction in the native graph prevents a fork from being advertised as a live delegated
+/// interior, while `NativeSummary::parent_native_id` can continue to expose the common parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineageKind {
+    Delegation,
+    Fork,
+}
+
 /// What one rollout's own `session_meta` says about it.
 #[derive(Debug, Clone)]
 struct Header {
@@ -461,6 +510,10 @@ struct Header {
     era: Era,
     /// The thread this one was delegated from or forked out of.
     parent_native_id: Option<NativeId>,
+    lineage_kind: Option<LineageKind>,
+    /// The rollout's team path, when Codex records one. This keeps nested delegation
+    /// direction independent of a fixed `/root` assumption.
+    agent_path: Option<String>,
     /// When this file was opened, from the **record's** outer timestamp.
     ///
     /// Filled by [`header_of`] rather than by [`Header::read`], because the payload carries a
@@ -483,18 +536,43 @@ impl Header {
             workdir: string_at(payload, "cwd"),
             era: Era::of(payload.get("history_mode").and_then(Value::as_str)),
             parent_native_id: Self::lineage(payload).map(NativeId::new),
-            // `agent_path` is deliberately **not** kept on this header even though a delegate's
-            // `session_meta` carries one (measured: 9 files, `/root/<task_name>`). The
-            // direction of a delegation edge is decided from the **record's** own
-            // `agent_path`, not the reader's, because that is the field present on all 42 real
-            // `SubAgentActivity` records while the header's is present on 9 files — so a
-            // header-based rule would be undecidable for most of the store while looking
-            // authoritative. See [`delegation_edge`].
+            lineage_kind: Self::lineage_kind(payload),
+            agent_path: Self::agent_path(payload),
+            // A delegate's own path is available on its nested thread-spawn metadata. Root
+            // rollouts omit it; activity records remain authoritative when this is absent.
             // Deliberately absent here: the payload's own `timestamp` is when the *thread* was
             // created, which on a resumed thread is up to 38 hours before this file's first
             // record. [`header_of`] fills this from the outer stamp.
             started_at_ms: None,
         }
+    }
+
+    fn agent_path(payload: &Value) -> Option<String> {
+        string_at(payload, "agent_path").or_else(|| {
+            payload
+                .get("source")
+                .and_then(|source| source.get("subagent"))
+                .and_then(|subagent| subagent.get("thread_spawn"))
+                .and_then(|spawn| string_at(spawn, "agent_path"))
+        })
+    }
+
+    fn lineage_kind(payload: &Value) -> Option<LineageKind> {
+        if payload
+            .get("parent_thread_id")
+            .and_then(Value::as_str)
+            .is_some()
+            || payload
+                .get("source")
+                .and_then(|source| source.get("subagent"))
+                .and_then(|subagent| subagent.get("thread_spawn"))
+                .and_then(|spawn| spawn.get("parent_thread_id"))
+                .and_then(Value::as_str)
+                .is_some()
+        {
+            return Some(LineageKind::Delegation);
+        }
+        string_at(payload, "forked_from_id").map(|_| LineageKind::Fork)
     }
 
     /// The thread this one came from, from the three fields that record it.
@@ -1119,7 +1197,12 @@ fn paginated_delegation(
         .get("thread_id")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let Some(Edge::Child { thread, host, name }) = delegation_edge(item, own) else {
+    let own_path = parsed
+        .header
+        .as_ref()
+        .and_then(|header| header.agent_path.as_deref());
+    let Some(Edge::Child { thread, host, name }) = delegation_edge_with_path(item, own, own_path)
+    else {
         return;
     };
 
@@ -1350,6 +1433,691 @@ fn flatten_content(content: Option<&Value>) -> String {
     }
 }
 
+/// Stateful projector shared by adoption and follow.
+#[derive(Default)]
+struct RolloutProjector {
+    era: Option<Era>,
+    opened: HashSet<String>,
+    call_names: HashMap<String, String>,
+    parsed: ParsedRollout,
+}
+
+impl RolloutProjector {
+    fn apply(&mut self, record: &Value) -> Vec<SessionMessage> {
+        let owner = self
+            .parsed
+            .header
+            .as_ref()
+            .and_then(|header| header.native_id.as_ref())
+            .map(NativeId::as_str)
+            .map(str::to_string);
+        let record_thread = record
+            .get("payload")
+            .and_then(|payload| payload.get("thread_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        project_record(
+            record,
+            &mut self.era,
+            &mut self.opened,
+            &mut self.call_names,
+            &mut self.parsed,
+        );
+        let mut messages = std::mem::take(&mut self.parsed.messages);
+        // Codex can forward a child's item records into its parent's rollout. Preserve that
+        // source-session provenance so a graph reader can deduplicate the forwarded copy when
+        // the child's own rollout is discovered later.
+        if let (Some(owner), Some(record_thread)) = (owner, record_thread) {
+            if owner != record_thread {
+                for message in &mut messages {
+                    if let SessionMessage::Event(event) = message {
+                        if event.span.is_none() {
+                            event.span = Some(record_thread.clone());
+                        }
+                    }
+                }
+            }
+        }
+        messages
+    }
+}
+
+/// A stable identity for one filesystem incarnation of a rollout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        FileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // Windows has no portable inode pair. A size/mtime token still catches the rewrite
+        // patterns this adapter can observe and keeps the type available on all targets.
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|time| time.as_nanos() as u64)
+            .unwrap_or(0);
+        FileIdentity {
+            device: modified,
+            inode: metadata.len(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct HeaderCacheEntry {
+    stamp: (FileIdentity, u64, u128),
+    header: Header,
+}
+
+fn file_stamp(path: &Path) -> Option<(FileIdentity, u64, u128)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|time| time.as_nanos())
+        .unwrap_or(0);
+    Some((file_identity(&metadata), metadata.len(), modified))
+}
+
+fn bytes_fingerprint(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// One append-only rollout cursor. `generation` advances whenever the file incarnation or
+/// immutable prefix changes; offsets are never committed past a complete, parseable line.
+struct RolloutCursor {
+    path: PathBuf,
+    identity: Option<FileIdentity>,
+    prefix_fingerprint: Option<u64>,
+    prefix_len: u64,
+    generation: u64,
+    offset: u64,
+    records: u64,
+    projector: RolloutProjector,
+    /// Complete-line fingerprints from the prior generation, keyed by byte offset. They let a
+    /// truncate-and-rewrite replay its unchanged prefix for state reconstruction without
+    /// publishing duplicate normalized events.
+    previous_lines: HashMap<u64, u64>,
+    line_fingerprints: HashMap<u64, u64>,
+    last_line: Option<(u64, usize, u64)>,
+}
+
+impl RolloutCursor {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            identity: None,
+            prefix_fingerprint: None,
+            prefix_len: 0,
+            generation: 0,
+            offset: 0,
+            records: 0,
+            projector: RolloutProjector::default(),
+            previous_lines: HashMap::new(),
+            line_fingerprints: HashMap::new(),
+            last_line: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn reset_generation(&mut self, identity: FileIdentity, prefix: Option<u64>, prefix_len: u64) {
+        self.generation = self.generation.saturating_add(1);
+        self.offset = 0;
+        self.records = 0;
+        self.projector = RolloutProjector::default();
+        self.previous_lines = std::mem::take(&mut self.line_fingerprints);
+        self.last_line = None;
+        self.identity = Some(identity);
+        self.prefix_fingerprint = prefix;
+        self.prefix_len = prefix_len;
+    }
+
+    fn poll(&mut self) -> Result<Vec<SessionMessage>> {
+        let Some(metadata) = std::fs::metadata(&self.path).ok() else {
+            return Ok(Vec::new());
+        };
+        let identity = file_identity(&metadata);
+        // Hash only a prefix that was already present on the previous poll. Hashing the whole
+        // file when it is shorter than 4 KiB would make every ordinary append look like a
+        // replacement and reset a healthy cursor on each item flush.
+        let prefix_len = if self.prefix_len == 0 {
+            metadata.len().min(4096)
+        } else {
+            self.prefix_len.min(metadata.len())
+        };
+        let prefix = read_span(&self.path, 0, prefix_len).map(|bytes| bytes_fingerprint(&bytes));
+
+        let last_line_changed = self
+            .last_line
+            .is_some_and(|(line_offset, length, previous)| {
+                read_span(&self.path, line_offset, length as u64)
+                    .map(|bytes| bytes_fingerprint(&bytes) != previous)
+                    .unwrap_or(true)
+            });
+        let changed = self.identity.is_some()
+            && (self.identity != Some(identity)
+                || metadata.len() < self.offset
+                || (self.offset > 0 && self.prefix_fingerprint != prefix)
+                || last_line_changed);
+        if changed {
+            self.reset_generation(identity, prefix, prefix_len);
+        } else {
+            self.identity = Some(identity);
+            self.prefix_fingerprint = prefix;
+            self.prefix_len = prefix_len;
+        }
+
+        let Some((records, next_offset)) = read_complete_records(&self.path, self.offset)? else {
+            return Ok(Vec::new());
+        };
+        let mut messages = Vec::new();
+        for record in records {
+            let fingerprint = bytes_fingerprint(&record.raw);
+            let replayed = self
+                .previous_lines
+                .get(&record.offset)
+                .is_some_and(|previous| *previous == fingerprint);
+            let projected = self.projector.apply(&record.value);
+            if !replayed {
+                messages.extend(projected);
+            }
+            self.line_fingerprints.insert(record.offset, fingerprint);
+            self.last_line = Some((record.offset, record.raw.len(), fingerprint));
+            self.records = self.records.saturating_add(1);
+        }
+        self.offset = next_offset;
+        // The prior-generation map is needed only while the rewritten prefix is consumed. Once
+        // this pass reaches the current end, future appends belong solely to this generation.
+        self.previous_lines.clear();
+        Ok(messages)
+    }
+}
+
+struct CompleteRecord {
+    offset: u64,
+    raw: Vec<u8>,
+    value: Value,
+}
+
+/// Read complete JSONL records after `offset`.
+///
+/// A final unterminated line is intentionally left unread. A complete malformed line is an
+/// error and leaves the cursor untouched, so a producer that was mid-write can repair it and be
+/// retried without silently losing a record.
+fn read_complete_records(path: &Path, offset: u64) -> Result<Option<(Vec<CompleteRecord>, u64)>> {
+    let Some(metadata) = std::fs::metadata(path).ok() else {
+        return Ok(None);
+    };
+    if metadata.len() < offset {
+        return Ok(Some((Vec::new(), offset)));
+    }
+    if metadata.len() == offset {
+        return Ok(Some((Vec::new(), offset)));
+    }
+    let bytes = read_span(path, offset, metadata.len() - offset)
+        .ok_or_else(|| anyhow!("reading codex rollout {}", path.display()))?;
+    let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
+        return Ok(Some((Vec::new(), offset)));
+    };
+    let complete_len = last_newline + 1;
+    let complete = &bytes[..complete_len];
+    let mut records = Vec::new();
+    let mut line_offset = offset;
+    for raw_line in complete.split_inclusive(|byte| *byte == b'\n') {
+        let end = line_offset.saturating_add(raw_line.len() as u64);
+        if raw_line.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            let value = serde_json::from_slice::<Value>(raw_line).map_err(|error| {
+                anyhow!(
+                    "malformed complete JSON record in {} at byte {}: {}",
+                    path.display(),
+                    line_offset,
+                    error
+                )
+            })?;
+            records.push(CompleteRecord {
+                offset: line_offset,
+                raw: raw_line.to_vec(),
+                value,
+            });
+        }
+        line_offset = end;
+    }
+    Ok(Some((records, offset + complete_len as u64)))
+}
+
+/// One child edge in a watched rollout graph.
+#[derive(Debug, Clone)]
+struct ChildLink {
+    relation: LineageKind,
+    host: Option<String>,
+    name: Option<String>,
+}
+
+fn event_key(event: &Event) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    event.kind.hash(&mut hasher);
+    event.phase.hash(&mut hasher);
+    event.stream_id.hash(&mut hasher);
+    event.span.hash(&mut hasher);
+    event.name.hash(&mut hasher);
+    event.text.hash(&mut hasher);
+    event.is_error.hash(&mut hasher);
+    if let Some(data) = &event.data {
+        // Data is not itself `Hash`; serialize only for the transient digest and retain the
+        // fixed-size key, rather than copying megabyte-scale tool output into a watcher's set.
+        if let Ok(bytes) = serde_json::to_vec(data) {
+            bytes.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Dynamic Codex rollout graph. The root is fixed by the requested native id; descendants are
+/// rediscovered from headers every poll so files created after `watch()` do not require restart.
+struct RolloutFollowState {
+    root_id: NativeId,
+    root_path: PathBuf,
+    store_root: PathBuf,
+    header_cache: HashMap<PathBuf, HeaderCacheEntry>,
+    sources: HashMap<PathBuf, RolloutCursor>,
+    links: HashMap<String, ChildLink>,
+    declared: HashSet<String>,
+    forwarded_events: HashSet<u64>,
+    child_events: HashSet<u64>,
+    pending: VecDeque<SessionMessage>,
+    finalizing: bool,
+    stopped: bool,
+    retry_after_error: bool,
+}
+
+impl RolloutFollowState {
+    fn new(root_id: NativeId, root_path: PathBuf, finalizing: bool) -> Self {
+        let store_root = store_root().unwrap_or_else(|| {
+            root_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        });
+        Self::new_with_root(root_id, root_path, store_root, finalizing)
+    }
+
+    fn new_with_root(
+        root_id: NativeId,
+        root_path: PathBuf,
+        store_root: PathBuf,
+        finalizing: bool,
+    ) -> Self {
+        let mut sources = HashMap::new();
+        sources.insert(root_path.clone(), RolloutCursor::new(root_path.clone()));
+        Self {
+            root_id,
+            root_path,
+            store_root,
+            header_cache: HashMap::new(),
+            sources,
+            links: HashMap::new(),
+            declared: HashSet::new(),
+            forwarded_events: HashSet::new(),
+            child_events: HashSet::new(),
+            pending: VecDeque::new(),
+            finalizing,
+            stopped: false,
+            retry_after_error: false,
+        }
+    }
+
+    fn poll(&mut self) -> Result<Vec<SessionMessage>> {
+        let inventory = self.discover()?;
+        if let Some((path, _)) = inventory.iter().find(|(_, header)| {
+            header
+                .native_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == self.root_id.as_str())
+        }) {
+            if path != &self.root_path {
+                if let Some(mut cursor) = self.sources.remove(&self.root_path) {
+                    cursor.path = path.clone();
+                    self.sources.insert(path.clone(), cursor);
+                } else {
+                    self.sources
+                        .insert(path.clone(), RolloutCursor::new(path.clone()));
+                }
+                self.root_path = path.clone();
+            }
+        }
+        // A rollout can be atomically moved to a new date directory while retaining its native
+        // id. Transfer the existing cursor by header identity so a path move is handled like a
+        // generation change instead of replaying the whole child history from byte zero.
+        for (path, header) in &inventory {
+            if self.sources.contains_key(path) {
+                continue;
+            }
+            let Some(id) = header.native_id.as_ref().map(NativeId::as_str) else {
+                continue;
+            };
+            let old_path = self.sources.iter().find_map(|(old_path, cursor)| {
+                (old_path != path
+                    && cursor
+                        .projector
+                        .parsed
+                        .header
+                        .as_ref()
+                        .and_then(|old| old.native_id.as_ref())
+                        .map(NativeId::as_str)
+                        == Some(id))
+                .then(|| old_path.clone())
+            });
+            if let Some(old_path) = old_path {
+                if let Some(mut cursor) = self.sources.remove(&old_path) {
+                    cursor.path = path.clone();
+                    self.sources.insert(path.clone(), cursor);
+                }
+            }
+        }
+        let mut paths: Vec<PathBuf> = inventory.iter().map(|(path, _)| path.clone()).collect();
+        // `discover` returns breadth-first order, so every parent is visited before its
+        // descendants. Only force the requested root to the front when a stale inventory order
+        // comes from a reload.
+        if let Some(root_at) = paths.iter().position(|path| path == &self.root_path) {
+            let root = paths.remove(root_at);
+            paths.insert(0, root);
+        }
+
+        let mut messages = Vec::new();
+        for path in paths {
+            let header = inventory
+                .iter()
+                .find(|(candidate, _)| candidate == &path)
+                .map(|(_, header)| header.clone());
+            let Some(header) = header else { continue };
+            let child = header
+                .native_id
+                .as_ref()
+                .filter(|id| id.as_str() != self.root_id.as_str())
+                .map(|id| id.as_str().to_string());
+
+            // A delegation child can be emitted safely only once its parent-side activity has
+            // supplied a host call. Hold its cursor at the boundary until that edge is known;
+            // otherwise a later parent record could not repair an already-rooted event.
+            if let Some(child_id) = &child {
+                if header.lineage_kind == Some(LineageKind::Delegation)
+                    && self
+                        .links
+                        .get(child_id)
+                        .is_none_or(|link| link.host.is_none())
+                    && !self.finalizing
+                {
+                    continue;
+                }
+            }
+
+            let cursor = self
+                .sources
+                .entry(path.clone())
+                .or_insert_with(|| RolloutCursor::new(path.clone()));
+            let mut projected = cursor.poll()?;
+            self.remember_projected_links(&mut projected);
+            self.rebuild_links(&inventory);
+
+            if let Some(child_id) = child.clone() {
+                if let Some(link) = self.links.get(&child_id).cloned() {
+                    if !self.declared.contains(&child_id) {
+                        let mut declaration = Event::new(
+                            EventKind::Subagent,
+                            Some(Phase::Started),
+                            header.started_at_ms.unwrap_or(NO_RECORDED_TIME),
+                        );
+                        declaration.stream_id = Some(child_id.clone());
+                        declaration.span = link.host.clone();
+                        declaration.name = link.name.clone();
+                        declaration.interior_state = Some(if self.finalizing {
+                            InteriorState::Full
+                        } else {
+                            InteriorState::Partial
+                        });
+                        declaration.data = Some(json!({
+                            "relation": match link.relation {
+                                LineageKind::Delegation => "delegation",
+                                LineageKind::Fork => "fork",
+                            },
+                            "parentNativeId": header
+                                .parent_native_id
+                                .as_ref()
+                                .map(NativeId::as_str),
+                        }));
+                        messages.push(SessionMessage::Event(declaration));
+                        self.declared.insert(child_id.clone());
+                    }
+                    for message in &mut projected {
+                        if let SessionMessage::Event(event) = message {
+                            // The child parser intentionally does not open a trajectory for its
+                            // own parent-side interaction. Attach every ordinary child event to
+                            // the parent-declared trajectory when it has no explicit span.
+                            if event.kind != EventKind::Subagent && event.span.is_none() {
+                                event.span = Some(child_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            let source_is_child = child.is_some();
+            let mut retained = Vec::with_capacity(projected.len());
+            for message in projected {
+                let SessionMessage::Event(event) = &message else {
+                    retained.push(message);
+                    continue;
+                };
+                let key = event_key(event);
+                if source_is_child {
+                    if self.forwarded_events.contains(&key) {
+                        continue;
+                    }
+                    self.child_events.insert(key);
+                } else if event.span.is_some() {
+                    if self.child_events.contains(&key) {
+                        continue;
+                    }
+                    self.forwarded_events.insert(key);
+                }
+                retained.push(message);
+            }
+            messages.extend(retained);
+        }
+        Ok(messages)
+    }
+
+    fn discover(&mut self) -> Result<Vec<(PathBuf, Header)>> {
+        let mut all = Vec::new();
+        let mut present = HashSet::new();
+        for candidate in candidates(&self.store_root, is_rollout) {
+            present.insert(candidate.path.clone());
+            let stamp = file_stamp(&candidate.path);
+            let header = stamp
+                .as_ref()
+                .and_then(|stamp| {
+                    self.header_cache
+                        .get(&candidate.path)
+                        .and_then(|cached| (cached.stamp == *stamp).then(|| cached.header.clone()))
+                })
+                .or_else(|| header_of(&candidate));
+            if let (Some(header), Some(stamp)) = (header, stamp) {
+                self.header_cache.insert(
+                    candidate.path.clone(),
+                    HeaderCacheEntry {
+                        stamp,
+                        header: header.clone(),
+                    },
+                );
+                all.push((candidate.path, header));
+            }
+        }
+        self.header_cache.retain(|path, _| present.contains(path));
+        let mut by_id: HashMap<String, (PathBuf, Header)> = HashMap::new();
+        for (path, header) in all {
+            let Some(id) = header.native_id.as_ref() else {
+                continue;
+            };
+            // Keep the newest path when a copied/replayed rollout carries the same id.
+            by_id
+                .entry(id.as_str().to_string())
+                .or_insert((path, header));
+        }
+        let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
+        for (id, (_path, header)) in &by_id {
+            if let Some(parent) = header.parent_native_id.as_ref() {
+                children_by_parent
+                    .entry(parent.as_str().to_string())
+                    .or_default()
+                    .push(id.clone());
+            }
+        }
+        for children in children_by_parent.values_mut() {
+            children.sort();
+        }
+        let mut selected = Vec::new();
+        let mut queue = VecDeque::from([self.root_id.as_str().to_string()]);
+        let mut seen = HashSet::new();
+        while let Some(id) = queue.pop_front() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some((path, header)) = by_id.get(&id).cloned() else {
+                continue;
+            };
+            selected.push((path, header));
+            if let Some(children) = children_by_parent.get(&id) {
+                queue.extend(children.iter().cloned());
+            }
+        }
+        Ok(selected)
+    }
+
+    fn rebuild_links(&mut self, inventory: &[(PathBuf, Header)]) {
+        let mut links = std::mem::take(&mut self.links);
+        // Header lineage keeps a child visible even when its parent activity was compacted or
+        // not yet flushed. It does not invent a host call; delegation remains pending until one
+        // appears, while forks are independent graph edges.
+        for (_path, header) in inventory {
+            let Some(id) = header.native_id.as_ref() else {
+                continue;
+            };
+            if header.parent_native_id.is_none() {
+                continue;
+            }
+            links
+                .entry(id.as_str().to_string())
+                .or_insert_with(|| ChildLink {
+                    relation: header.lineage_kind.unwrap_or(LineageKind::Fork),
+                    host: None,
+                    name: header
+                        .agent_path
+                        .as_deref()
+                        .and_then(|path| path.rsplit('/').next())
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string),
+                });
+        }
+        self.links = links;
+    }
+
+    fn remember_projected_links(&mut self, projected: &mut [SessionMessage]) {
+        for message in projected {
+            let SessionMessage::Event(event) = message else {
+                continue;
+            };
+            if event.kind != EventKind::Subagent || event.phase != Some(Phase::Started) {
+                continue;
+            }
+            let Some(child_id) = event.stream_id.as_ref() else {
+                continue;
+            };
+            // The parent rollout's declaration is already the canonical trajectory-open event;
+            // a later child-file discovery or generation replay must not emit a second
+            // `started` phase for it.
+            let already_declared = !self.declared.insert(child_id.clone());
+            if already_declared {
+                event.phase = Some(Phase::Delta);
+            }
+            if !self.finalizing {
+                // A native declaration is complete as a record, but the child rollout can
+                // continue growing. Watchers therefore expose a readable prefix until the
+                // caller performs a final/adopt pass.
+                event.interior_state = Some(InteriorState::Partial);
+            }
+            self.links.insert(
+                child_id.clone(),
+                ChildLink {
+                    relation: LineageKind::Delegation,
+                    host: event.span.clone(),
+                    name: event.name.clone(),
+                },
+            );
+        }
+    }
+}
+
+/// Follow a rollout until the caller drops the stream. A bounded poll keeps idle sessions cheap
+/// while still observing Codex's item-level flush cadence.
+fn follow_rollout(id: NativeId, path: PathBuf, finalizing: bool) -> EventStream {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(250);
+    Box::pin(futures::stream::unfold(
+        RolloutFollowState::new(id, path, finalizing),
+        |mut state| async move {
+            loop {
+                if state.stopped {
+                    return None;
+                }
+                if state.retry_after_error {
+                    state.retry_after_error = false;
+                    tokio::time::sleep(POLL).await;
+                }
+                if let Some(message) = state.pending.pop_front() {
+                    return Some((Ok(message), state));
+                }
+                match state.poll() {
+                    Ok(messages) if !messages.is_empty() => {
+                        state.pending.extend(messages);
+                        continue;
+                    }
+                    Ok(_) if state.finalizing => return None,
+                    Ok(_) => tokio::time::sleep(POLL).await,
+                    Err(error) => {
+                        // A finite adoption reports a malformed record once and then closes;
+                        // otherwise the ingest drain would retry the same permanent error
+                        // forever. A live watch keeps retrying after its caller asks for the
+                        // next item, allowing a producer to repair a mid-write record.
+                        state.stopped = state.finalizing;
+                        state.retry_after_error = !state.finalizing;
+                        return Some((Err(error), state));
+                    }
+                }
+            }
+        },
+    ))
+}
+
 /// Find one rollout by its native id.
 ///
 /// # The filename carries the id, and that is measured rather than assumed
@@ -1411,34 +2179,17 @@ fn is_rollout(path: &Path) -> bool {
 /// The stream ends when the pass does.
 pub fn adopt(id: &NativeId) -> Result<EventStream> {
     let path = locate(id)?;
-    let parsed = parse_rollout(&path)?;
-    Ok(Box::pin(futures::stream::iter(
-        parsed.messages.into_iter().map(Ok),
-    )))
+    Ok(follow_rollout(id.clone(), path, true))
 }
 
 /// Parse, then follow the rollout as it grows.
 ///
-/// # The pass is real; the following lands with the envagent
-///
-/// The same shape `pi`'s `watch` has, and for the same reason: a follow loop needs a task to
-/// own it and a timer, and this crate has neither until step 4 of `docs/roadmap.md`
-/// § Implementation order. Returning an error instead would make `watch` unusable where
-/// `adopt` works, for a session whose whole history is already on disk.
-///
-/// Two facts about this store that the eventual loop needs, both measured, and both recorded
-/// here rather than in a document that would drift from the code:
-///
-/// - **The vendor appends and never rewrites**, so a byte offset is a valid resume point. The
-///   projection's own `thread_history_projection_state` proves it: it tracks a
-///   `next_rollout_byte_offset` per thread and the checked-in row's `rollout_end_byte_offset`
-///   equals its file's size exactly.
-/// - **An offset must only advance past a complete line.** A poll that catches a half-written
-///   record must re-read it rather than skip it, which is the mid-write hazard
-///   `crate::native::for_each_json_line` documents — handled by not committing the offset, not
-///   by tolerating a broken record.
+/// Follow the rollout and any descendant rollouts as they grow. The cursor is generation-aware:
+/// a replacement or truncate-rewrite resets parsing to a new generation, while unchanged lines
+/// at the same offsets are replayed only for state reconstruction and are not emitted twice.
 pub fn watch(id: &NativeId) -> Result<EventStream> {
-    adopt(id)
+    let path = locate(id)?;
+    Ok(follow_rollout(id.clone(), path, false))
 }
 
 /// Which native sessions this machine's store holds.
@@ -1938,5 +2689,332 @@ mod tests {
     #[test]
     fn an_unknown_history_mode_degrades_to_legacy() {
         assert_eq!(Era::of(Some("something-new")), Era::Legacy);
+    }
+
+    fn watch_fixture_dir(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("sylph-codex-watch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("2026/09/03")).unwrap();
+        let parent = root.join("2026/09/03/rollout-parent.jsonl");
+        let child = root.join("2026/09/03/rollout-child.jsonl");
+        std::fs::copy(fixture("watch-parent.jsonl"), &parent).unwrap();
+        (root, parent, child)
+    }
+
+    fn watch_events(messages: &[SessionMessage]) -> Vec<Event> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                SessionMessage::Event(event) => Some(event.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A child rollout can be created after the parent watcher starts. The parent declaration
+    /// is emitted once, and the child's own records arrive later with the child trajectory as
+    /// their span. This is the path that a one-shot `adopt`/`watch` implementation misses.
+    #[test]
+    fn a_watcher_discovers_a_child_rollout_created_after_the_first_poll() {
+        let (root, parent, child) = watch_fixture_dir("late-child");
+        let id = NativeId::new("watch-parent");
+        let mut state = RolloutFollowState::new_with_root(id.clone(), parent, root.clone(), false);
+
+        let first = state.poll().unwrap();
+        let first_events = watch_events(&first);
+        assert!(first_events.iter().any(|event| {
+            event.kind == EventKind::Subagent
+                && event.stream_id.as_deref() == Some("watch-child")
+                && event.interior_state == Some(InteriorState::Partial)
+        }));
+        assert!(
+            first_events
+                .iter()
+                .all(|event| event.text != "child prefix"),
+            "the child file does not exist yet"
+        );
+
+        std::fs::copy(fixture("watch-child.jsonl"), &child).unwrap();
+        let second = state.poll().unwrap();
+        let second_events = watch_events(&second);
+        let child_messages: Vec<&Event> = second_events
+            .iter()
+            .filter(|event| event.text == "child prefix")
+            .collect();
+        assert_eq!(child_messages.len(), 1);
+        assert_eq!(child_messages[0].span.as_deref(), Some("watch-child"));
+        assert_eq!(
+            second_events
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::Subagent
+                        && event.stream_id.as_deref() == Some("watch-child")
+                })
+                .count(),
+            0,
+            "the parent-side declaration must not be duplicated on child discovery"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A fresh reader rebuilds the same parent/child graph from native headers and the parent
+    /// activity record. Reload must not depend on the in-memory links of an earlier watcher.
+    #[test]
+    fn a_reload_reconstructs_the_child_edge_and_trajectory_span() {
+        let (root, parent, child) = watch_fixture_dir("reload");
+        std::fs::copy(fixture("watch-child.jsonl"), &child).unwrap();
+        let id = NativeId::new("watch-parent");
+        let mut state = RolloutFollowState::new_with_root(id, parent, root.clone(), true);
+        let events = watch_events(&state.poll().unwrap());
+
+        let declarations: Vec<&Event> = events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some("watch-child")
+            })
+            .collect();
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].span.as_deref(), Some("call-watch-child"));
+        assert_eq!(declarations[0].interior_state, Some(InteriorState::Full));
+        let child = events
+            .iter()
+            .find(|event| event.text == "child prefix")
+            .expect("the reloaded child content must be projected");
+        assert_eq!(child.span.as_deref(), Some("watch-child"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_fork_child_keeps_fork_provenance_separate_from_delegation() {
+        let (root, parent, fork) = watch_fixture_dir("fork");
+        std::fs::copy(fixture("watch-fork.jsonl"), &fork).unwrap();
+        let id = NativeId::new("watch-parent");
+        let mut state = RolloutFollowState::new_with_root(id, parent, root.clone(), true);
+        let events = watch_events(&state.poll().unwrap());
+
+        let declaration = events
+            .iter()
+            .find(|event| {
+                event.kind == EventKind::Subagent
+                    && event.stream_id.as_deref() == Some("watch-fork")
+            })
+            .expect("the fork edge is represented");
+        assert_eq!(declaration.span, None);
+        assert_eq!(
+            declaration
+                .data
+                .as_ref()
+                .and_then(|data| data.get("relation")),
+            Some(&json!("fork"))
+        );
+        let content = events
+            .iter()
+            .find(|event| event.text == "fork content")
+            .expect("the fork rollout content is projected");
+        assert_eq!(content.span.as_deref(), Some("watch-fork"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Codex may forward a child's item into the parent rollout as well as writing the child's
+    /// own rollout. The graph reader keeps the parent copy's trajectory provenance and suppresses
+    /// the later duplicate from the child source.
+    #[test]
+    fn forwarded_child_items_are_not_emitted_twice_after_child_discovery() {
+        let (root, parent, child) = watch_fixture_dir("forwarded");
+        let id = NativeId::new("watch-parent");
+        let mut state = RolloutFollowState::new_with_root(id, parent.clone(), root.clone(), false);
+        let _ = state.poll().unwrap();
+
+        use std::io::Write;
+        let mut parent_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&parent)
+            .unwrap();
+        writeln!(
+            parent_file,
+            r#"{{"timestamp":"2026-09-03T00:00:00.700Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"watch-child","item":{{"type":"AgentMessage","id":"msg-watch-child","content":[{{"type":"Text","text":"child prefix"}}]}}}}}}"#
+        )
+        .unwrap();
+        let parent_events = watch_events(&state.poll().unwrap());
+        assert_eq!(
+            parent_events
+                .iter()
+                .filter(|event| event.text == "child prefix")
+                .count(),
+            1
+        );
+
+        std::fs::copy(fixture("watch-child.jsonl"), &child).unwrap();
+        let child_events = watch_events(&state.poll().unwrap());
+        assert_eq!(
+            child_events
+                .iter()
+                .filter(|event| event.text == "child prefix")
+                .count(),
+            0,
+            "the forwarded parent item already represents this child block"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A truncate/replace creates a new generation. Unchanged complete lines are replayed only
+    /// to rebuild the projector, while a newly appended line is emitted once.
+    #[test]
+    fn a_replaced_rollout_advances_generation_without_replaying_its_prefix() {
+        let (root, parent, _child) = watch_fixture_dir("generation");
+        let id = NativeId::new("watch-parent");
+        let mut state = RolloutFollowState::new_with_root(id, parent.clone(), root.clone(), false);
+        let _ = state.poll().unwrap();
+        assert_eq!(
+            state
+                .sources
+                .get(&parent)
+                .expect("root cursor")
+                .generation(),
+            0
+        );
+
+        let replacement = parent.with_extension("replacement.jsonl");
+        let mut contents = std::fs::read(&parent).unwrap();
+        contents.extend_from_slice(
+            br#"{"timestamp":"2026-09-03T00:00:01.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"watch-parent","item":{"type":"AgentMessage","id":"msg-watch-new","content":[{"type":"Text","text":"after reset"}]}}}
+"#,
+        );
+        std::fs::write(&replacement, contents).unwrap();
+        std::fs::rename(&replacement, &parent).unwrap();
+
+        let events = watch_events(&state.poll().unwrap());
+        assert_eq!(
+            state
+                .sources
+                .get(&parent)
+                .expect("root cursor")
+                .generation(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.text == "parent prefix")
+                .count(),
+            0,
+            "the unchanged prefix must not be published a second time"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.text == "after reset")
+                .count(),
+            1
+        );
+        assert!(events.iter().all(|event| {
+            !(event.kind == EventKind::Subagent
+                && event.stream_id.as_deref() == Some("watch-child")
+                && event.phase == Some(Phase::Started))
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An unterminated line is held at the cursor boundary; once the producer completes it, the
+    /// record is parsed and emitted. A complete malformed line is retried rather than skipped.
+    #[test]
+    fn a_partial_line_is_retried_at_the_same_cursor_boundary() {
+        let (root, parent, _child) = watch_fixture_dir("partial");
+        let id = NativeId::new("watch-parent");
+        let mut state = RolloutFollowState::new_with_root(id, parent.clone(), root.clone(), false);
+        let _ = state.poll().unwrap();
+
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&parent)
+            .unwrap();
+        write!(
+            file,
+            "{{\"timestamp\":\"2026-09-03T00:00:02.000Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"item_completed\",\"thread_id\":\"watch-parent\",\"item\":{{\"type\":\"AgentMessage\",\"id\":\"msg-partial\",\"content\":[{{\"type\":\"Text\",\"text\":\"partial\"}}]}}}}}}"
+        )
+        .unwrap();
+        let offset_before = state.sources.get(&parent).unwrap().offset;
+        assert!(watch_events(&state.poll().unwrap())
+            .iter()
+            .all(|event| event.text != "partial"));
+        assert_eq!(state.sources.get(&parent).unwrap().offset, offset_before);
+
+        writeln!(file).unwrap();
+        let events = watch_events(&state.poll().unwrap());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.text == "partial")
+                .count(),
+            1
+        );
+
+        // A complete malformed line must not advance the cursor. Repairing the line then lets
+        // the same poll boundary consume it.
+        writeln!(file, "{{not-json").unwrap();
+        let offset_before_bad = state.sources.get(&parent).unwrap().offset;
+        assert!(state.poll().is_err());
+        assert_eq!(
+            state.sources.get(&parent).unwrap().offset,
+            offset_before_bad
+        );
+
+        let bytes = std::fs::read(&parent).unwrap();
+        let repaired = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| *line != b"{not-json")
+            .flat_map(|line| line.iter().copied().chain(std::iter::once(b'\n')))
+            .collect::<Vec<_>>();
+        std::fs::write(&parent, repaired).unwrap();
+        let _ = state.poll().unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Nested teams use path ancestry, not a fixed `/root` literal, to decide which side of a
+    /// `SubAgentActivity` record the reader is on.
+    #[test]
+    fn nested_team_paths_resolve_delegation_direction() {
+        let child = json!({
+            "type": "SubAgentActivity",
+            "agent_thread_id": "parent",
+            "agent_path": "/root/research",
+            "kind": "interacted"
+        });
+        assert_eq!(
+            delegation_edge_with_path(&child, "child", Some("/root/research/db")),
+            Some(Edge::Parent("parent".to_string()))
+        );
+
+        let parent = json!({
+            "type": "SubAgentActivity",
+            "agent_thread_id": "child",
+            "agent_path": "/root/research/db",
+            "kind": "started"
+        });
+        assert!(matches!(
+            delegation_edge_with_path(&parent, "parent", Some("/root/research")),
+            Some(Edge::Child { thread, .. }) if thread == "child"
+        ));
+
+        let sibling = json!({
+            "type": "SubAgentActivity",
+            "agent_thread_id": "other",
+            "agent_path": "/root/operations",
+            "kind": "started"
+        });
+        assert_eq!(
+            delegation_edge_with_path(&sibling, "parent", Some("/root/research")),
+            None,
+            "a sibling path is not evidence of a parent/child edge"
+        );
     }
 }

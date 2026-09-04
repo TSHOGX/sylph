@@ -504,12 +504,10 @@ mod tests {
 
     #[tokio::test]
     async fn stdout_lines_retain_lexical_json_bytes() {
-        let (_child, mut lines) = Child::spawn(spawn_sh(
-            r#"printf ' {"b":"\u0061", "a": 1}  \n'"#,
-            None,
-        ))
-        .await
-        .unwrap();
+        let (_child, mut lines) =
+            Child::spawn(spawn_sh(r#"printf ' {"b":"\u0061", "a": 1}  \n'"#, None))
+                .await
+                .unwrap();
 
         let line = lines.recv().await.unwrap().unwrap();
         assert_eq!(line.value, json!({"b": "a", "a": 1}));

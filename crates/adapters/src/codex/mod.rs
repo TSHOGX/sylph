@@ -53,8 +53,8 @@ pub mod native;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sylph_protocol::{
-    Adapter, AgentInfo, Capability, EventStream, FlagSpec, NativeId, NativeSummary,
-    RequestedNativeId, RunSpec, Session, StoreFilter,
+    Adapter, AgentInfo, Capability, EventStream, Facet, FlagSpec, LinkFacets, NativeId,
+    NativeSummary, RequestedNativeId, RunSpec, Session, StoreFilter, UnavailableReason,
 };
 
 /// The name this adapter answers to, and the `PATH` binary that decides availability.
@@ -169,6 +169,15 @@ pub struct CodexAdapter;
 impl CodexAdapter {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Facets for a native-store-only watcher. An envagent may replace the
+    /// control facet when it has authenticated a live app-server socket.
+    pub fn native_link_facets() -> LinkFacets {
+        LinkFacets {
+            observe: Facet::available(),
+            control: Facet::unavailable(UnavailableReason::NotOursToDrive),
+        }
     }
 
     /// Whether the vendor CLI is on this machine's `PATH`.
@@ -429,6 +438,16 @@ async fn version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_store_observation_does_not_advertise_control() {
+        let facets = CodexAdapter::native_link_facets();
+        assert!(facets.observe.available);
+        assert_eq!(
+            facets.control.reason,
+            Some(UnavailableReason::NotOursToDrive)
+        );
+    }
     use sylph_protocol::NativeId;
 
     fn spec(native_id: RequestedNativeId) -> RunSpec {
