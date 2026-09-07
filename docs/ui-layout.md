@@ -458,9 +458,9 @@ so a user of those arrives expecting `Mod+Shift+O`.
 - The recorder **refuses** a reserved combo *naming what the browser will do*, which
   is the difference between a refusal a user can act on and an arbitrary
   restriction. That is why `reservedReason` returns a string rather than a boolean.
-- `pruneReserved` drops them at hydration — a **migration, not a filter**. A settings
-  write persists the whole merged map, so anyone who had ever opened that panel had
-  `Mod+N` stored and would keep hitting it.
+- `pruneReserved` **rewrites the stored map** at hydration rather than filtering the view of
+  it. A settings write persists the whole merged map, so a reserved combo already in
+  `localStorage` would keep firing.
 - `Mod+Q` and `Mod+W` are listed but must never be *offered*: they quit and close, so
   a page that captured them would trap the user.
 
@@ -468,11 +468,9 @@ so a user of those arrives expecting `Mod+Shift+O`.
 `Cmd+Enter` for newlines and `Mod` combos fire globally even inside a textarea, so
 it would have broken typing.
 
-**The suite could not have caught this**, which is the part worth remembering.
-Playwright's Chromium opens no real window, so 41 green specs pressed `Mod+N`
-happily — the same shape of blind spot as the mobile-breakpoint entry in `AGENTS.md`.
-The spec that covers it asserts on the recorder's refusal, which is observable,
-rather than on browser chrome, which is not.
+**A spec cannot observe a browser keeping a combo**, since Playwright's Chromium opens no
+real window. The spec asserts on the recorder's refusal instead, which is observable in the
+DOM.
 
 Bare-key combos (`Shift+E`) are suppressed while a text field has focus, so the
 composer keeps its keystrokes; `Mod`-prefixed combos are global on purpose.
@@ -598,76 +596,64 @@ axis it could filter on is already owned by a better surface: the sidebar groups
 workdir, `Mod+K` searches by content, and `Mod+Shift+K` pages one workspace's full history
 past any cap a single listing could show.
 
-So the start screen is deliberately *not* a general index. A second, weaker copy of
-navigation the shell already owns costs round trips on first paint and answers a question
-nobody asked on arrival.
-
-What replaced it has three tiers, and two properties that constrain the design:
+It has three tiers, and two properties that constrain the design:
 
 1. **Identity and what a session is.** One line: a session pairs an agent with a
-   working directory, and history exists for directories agents have run
-   in. This is the only place the app states it, and it is not guessable — a user
-   who does not know it points a session at the wrong tree.
+   working directory, and history exists for directories agents have run in. This is
+   the only place the app states it, and a user who does not know it points a session
+   at the wrong tree.
 2. **The two create paths**, as buttons running `runAction`, each showing its live
    binding. Not links to a route: creation is a mutation, and pending and failure
    belong in the shell's one banner.
 3. **The variable slot** — recents, or the first-run guide — then the key bindings.
 
-**It paints before any request settles.** Tiers 1, 2, and the key list are static.
-Only the middle slot waits on data, and it reserves its height rather than
-collapsing, because a start screen that reflows on every launch reads as broken.
+**It paints before any request settles**, since tiers 1, 2, and the key list are
+static. Only the middle slot waits on data, and it reserves its height rather than
+collapsing.
 
 **It adds no request.** The listing is the sidebar's, shared through
-`lib/sessions-query.ts` and deduped by TanStack. Rendering `/` costs zero extra
-round trips, which is what lets it be the default route.
+`lib/sessions-query.ts` and deduped by TanStack, which is what lets `/` be the default
+route.
 
 ### Pending is not empty
 
-`selectStartState` (`lib/welcome.ts`) exists because an in-flight listing and an
-app with no sessions are both an empty array, and rendering the onboarding guide
-for the first flashes "getting started" at a user with hundreds of sessions, on
-every navigation to `/`. A failed listing is treated the same way: failing to load
-sessions is not evidence that none exist, and the sidebar already reports the
-failure with a retry. It is a pure function with unit tests, because the branch is
-one line of JSX away from being wrong and E2E cannot economically hold a listing
-open.
+`selectStartState` (`lib/welcome.ts`) distinguishes three states an empty array cannot:
+settled-empty, pending, and failed. Only the first renders the onboarding guide. A failed
+listing is no evidence that no sessions exist, and the sidebar already reports it with a
+retry. It is a pure function with unit tests, since the branch is one line of JSX away from
+being wrong and E2E cannot economically hold a listing open.
 
 ### First run teaches the first task, not the feature set
 
-The empty state is three numbered steps — choose a directory, say what you want
-done, watch the work — plus a pointer to browsing existing agent history without
-creating anything. Numbered because the order is real: a directory must exist
-before a turn can run.
+The empty state is three numbered steps — choose a directory, say what you want done,
+watch the work — plus a pointer to browsing existing agent history without creating
+anything. Numbered because the order is real: a directory must exist before a turn can
+run.
 
-The Notion-style property worth borrowing is not the tour, it is that onboarding is
-**the empty state itself** rather than a dismissible layer. There is no "seen"
-flag, no banner, and no preference: the guide is what having no sessions looks
+Onboarding is **the empty state itself** rather than a dismissible layer. There is no
+"seen" flag, no banner, and no preference: the guide is what having no sessions looks
 like, so it disappears permanently after the first create and can never be stale.
 
 ### Recents are five *directories*, not five sessions
 
-The unit is the directory, because resuming work means returning to a place. One row
-per session looked right until a real listing was on screen: a directory worked in
-all week filled all five rows with entries differing only by a timestamp — and since
-`title` is set only by native import or the API, most sessions are untitled, so
-those rows were otherwise identical. Five rows for one destination, and every other
-place the user works pushed off the list.
+The unit is the directory, because resuming work means returning to a place. A row is
+a directory, labelled by its path, and it opens the newest session there — which is
+what "resume" means. The rest are a count (`3 sessions`); reaching a specific older
+one is the sidebar's job, and it lists them all under that same directory.
 
-So a row is a directory, labelled by its path, and it opens the newest session
-there — which is what "resume" means. The rest are a count (`3 sessions`); reaching a
-specific older one is the sidebar's job, and it lists them all under that same
-directory. `recentWorkspaces` normalizes trailing slashes, because the backend does
-not guarantee a spelling and `/w/app` beside `/w/app/` is the same duplication in
-another form.
+Per-session rows would spend all five on whichever directory was worked in most
+recently, since `title` is set only by native import or the API and untitled rows
+differ by nothing but a timestamp. `recentWorkspaces` normalizes trailing slashes for
+the same reason: the backend guarantees no spelling, and `/w/app` beside `/w/app/` is
+one destination twice.
 
 The path carries the row's identity rather than `sessionLabel`, whose `agent · leaf`
-fallback reads as the directory named twice once the path is beside it. `native`
-origin is badged because it changes identity and lifecycle policy and must be
-recognizable before opening; `sylph` is not, because a marker on every row carries no
-information.
+fallback reads as the directory named twice once the path is beside it. `fidelity` is
+marked when it is not `stream`, since that decides whether a duration is recoverable;
+nothing else on the row is badged.
 
-A longer list is not the improvement it appears to be: the sidebar lists everything
-grouped this same way, and `Mod+K` searches all of it.
+A longer list adds little: the sidebar lists everything grouped this same way, and
+`Mod+K` searches all of it.
 
 ### The pending slot reserves height; the loaded one does not
 
@@ -709,11 +695,8 @@ mechanism the virtualization decision rests on.
 
 ### Shared primitives
 
-`components/ui/` holds what was previously re-decided per file: roughly forty
-hand-written button class strings that were not identical — padding drifted
-between `px-2 py-1` and `px-2.5 py-1`, disabled state was sometimes `opacity-50`
-and sometimes nothing, and hover was `gray-100` in the top bar but `gray-200/60`
-in the sidebar for the same kind of control.
+`components/ui/` owns every recurring control, so padding, disabled state, and hover
+are decided once rather than per call site.
 
 | Module | Exports | Notes |
 | --- | --- | --- |
@@ -783,25 +766,19 @@ pickers, the command palette, search, and the history browser — is
 module because that is what makes them testable without a DOM: what is shown, what
 is elided, and what number each row carries.
 
-**The invariant is one cursor, assigned where the rows are built.** `buildRows`
-returns rows in render order, each already carrying its own index — or `null` when
-it cannot be chosen. No renderer computes one, so `activeIndex` cannot be
-interpreted against a second list. The bug this forecloses is specific: a cursor
-counted over *enabled items* against a renderer numbering *all rows* puts the
-highlight, `aria-activedescendant`, and the committed value on three different
-rows, and the symptom is a click that appears to do nothing three layers from the
-cause.
+**The invariant is one cursor, assigned where the rows are built.** `buildRows` returns rows
+in render order, each already carrying its own index — or `null` when it cannot be chosen. No
+renderer computes one, so `activeIndex` cannot be interpreted against a second list. A cursor
+counted over *enabled items* against a renderer numbering *all rows* would put the highlight,
+`aria-activedescendant`, and the committed value on three different rows.
 
-`useListNavigation` in `overlay.tsx` was the second engine and is **deleted**. It
-took a row count, so each caller numbered its own rows — the dual-index shape
-above, structurally — and it could not draw a group heading or host a filter field,
-so the palette hand-rolled grouping and four call sites each re-derived the
-combobox ARIA. Deleting rather than deprecating it is the point: a hook that still
-compiles is a pattern the next picker copies, and this one's failure mode is
-invisible until a list grows a non-selectable row.
+`useListNavigation` in `overlay.tsx` was a second engine and is **deleted** rather than
+deprecated, since a hook that still compiles is a pattern the next picker copies. It took a
+row count, so each caller numbered its own rows, and it could not draw a group heading or
+host a filter field — which is why the palette hand-rolled grouping and four call sites each
+re-derived the combobox ARIA.
 
-Three things the engine grew to absorb the last three callers, each because a
-migration would otherwise have lost a real capability:
+Three fields let the engine absorb the last three callers with their capabilities intact:
 
 | Field | For | Why it is shaped this way |
 | --- | --- | --- |
@@ -851,40 +828,29 @@ a system wheel with its own typography, which is exactly the
 assembled-from-parts quality this pass removed.
 
 Menus use `menu`/`menuitem` with `aria-activedescendant` for the virtual cursor,
-and `menuitemradio` + `aria-checked` where a group is a single choice. Two bugs
-found while building this are worth keeping:
+and `menuitemradio` + `aria-checked` where a group is a single choice. Two ordering
+rules the implementation depends on:
 
-- **A menu measured before it is placed cannot take focus.** The panel carries
-  `invisible` until its position is measured, and `visibility: hidden` elements
-  are not focusable — so focusing inside the measuring effect silently did
-  nothing, and Escape never reached the handler. Focus happens in a second
-  effect, once `position` commits.
-- **A dismiss-on-outside-pointerdown listener must be inert on the sheet path.**
-  The ref it tests is the popover's, which the sheet path never attaches, so
-  every `contains()` was false and the very pointerdown beginning a tap on a
-  menu item closed the sheet before the click landed. Selecting a model silently
-  did nothing on a phone.
+- **Focus moves in a second effect, once `position` commits.** The panel carries
+  `invisible` while it measures, and a `visibility: hidden` element is not focusable,
+  so focus taken during the measuring effect goes nowhere and Escape never reaches the
+  handler.
+- **Dismiss-on-outside-pointerdown is inert on the sheet path.** The ref it tests is
+  the popover's, which the sheet never attaches, so every `contains()` reads false and
+  the pointerdown beginning a tap closes the sheet before the click lands.
 
 ## Icons
 
 `components/icons.tsx` — 48 hand-authored icons on a 24-unit grid, drawn
 at 16px, stroked in `currentColor` at 1.75. No dependency.
 
-The app previously drew its entire interface with Unicode dingbats: `⚙ ⚡ ⌕ ▾ ⌗ ⑂
-⚠ ⛶ ✕ ↗ ↪ ✻ ❯ ✎ ◆ ▤ ▦ ▩ ▧ ◈ ▪ ▫ ▮ ⎘ 📎` and more. The budget reasoning behind
-that was sound — an icon package did not fit — but the conclusion was wrong,
-because those characters are **font data**: what they look like is decided by
-the platform, not by this project. `📎` and `⚡` render as full-colour emoji on
-iOS and macOS, several of the geometric shapes are absent from the default CJK
-fallback chain and came out as `.notdef` boxes, and the ones that did render
-were semantically arbitrary — `▩` for an image and `▧` for a PDF are shapes with
-no relationship to their meaning, so they had to be learned rather than
-recognized.
+Paths rather than Unicode glyphs, and rather than a package. A dingbat is **font
+data**: the platform decides what it looks like, so emoji presentation, `.notdef`
+boxes in a CJK fallback chain, and shapes with no relation to their meaning are all
+outside this project's control. Thirty-odd hand-authored paths cost about 2 KB and
+tree-shake per route, which is well inside the budget an icon package exceeded.
 
-The real choice was never "dingbats or a 40 KB package". Thirty-odd paths cost
-about 2 KB and tree-shake per route.
-
-Conventions worth keeping:
+Conventions:
 
 - **Every icon is `aria-hidden`.** None is ever the only thing carrying a
   meaning: the control around it has a label, or a text node sits beside it. One
@@ -910,10 +876,7 @@ Conventions worth keeping:
 transposed coordinate type-checks, renders, and is simply wrong; an E2E test
 asserts an icon is *present*, not that it depicts anything.
 `scripts/icon-sheet.mjs` renders every icon at 28px and 16px in both themes to
-`/tmp/icon-sheet-*.png`. Run it after touching an icon. It found five broken
-ones on its first run: `Command` was an inkblot, `Chip` a flower, `Tool` a
-dagger, `FileImage` read as "blocked", and `FolderOpen` was indistinguishable
-from `FolderIcon` — which is the one distinction the file tree depends on.
+`/tmp/icon-sheet-*.png`. Run it after touching an icon.
 
 That sheet re-parses the source, so it can misreport a shared sub-component.
 When an icon looks wrong there, screenshot the real component before changing
@@ -1081,12 +1044,8 @@ Every colour resolves through a semantic token declared in `app/globals.css`. No
 component names a palette step: `bg-gray-50` and `text-gray-500` do not appear
 outside that file, and a build that reintroduces one is a regression.
 
-This replaced 28 files that each hardcoded `gray-*`, 139 uses of **10
-different** ad-hoc pixel font sizes (including `9.5px`, `11.5px`, and `12.5px`),
-and 92 copies of one focus-ring class string. The cost of that structure was not
-aesthetic: it made every visual change a 28-file edit, which is why several had
-been applied inconsistently, and inconsistency at that scale is what reads as
-unfinished.
+One declaration site is what keeps a visual change a one-file edit. Hardcoded steps put it
+across every component that names one, at which point consistency is a matter of remembering.
 
 | Group | Tokens | Meaning |
 | --- | --- | --- |
@@ -1094,31 +1053,26 @@ unfinished.
 | Border | `line`, `line-strong` | Hairline, and the stronger edge for a control |
 | Ink | `ink`, `ink-soft`, `ink-muted`, `ink-faint` | By emphasis. `faint` is **decoration only** — it does not clear 4.5:1 on any surface |
 | Accent | `accent`, `accent-hover`, `accent-ink`, `accent-ink-muted` | The primary action and text placed on it. Inverts in dark mode, which is why `accent-ink` exists rather than a hardcoded `text-white` |
-| Status | `danger`, `success`, `warning`, `info`, `native`, each with `-bg`, `-line`, `-solid` | One ink per hue; the tint and edge derive from it |
+| Status | `danger`, `success`, `warning`, `info`, each with `-bg`, `-line`, `-solid` | One ink per hue; the tint and edge derive from it |
 | Focus | `focus` | Blue, not the accent grey — see below |
 
 `*-bg` and `*-line` are `color-mix()` against `--canvas` rather than hand-picked
 steps, so the dark theme gets correct tints for free: overriding the base hue
 and the canvas re-derives both.
 
-**The light palette is byte-identical to what it replaced.** It is Tailwind's
-own `gray`/`red`/`emerald`/`amber`/`blue`/`violet` steps copied verbatim in
-oklch. That was deliberate: several components carry measured WCAG contrast
-ratios in their comments ("gray-500 on gray-900 measures 3.66:1"), and a token
-that merely *looked* similar would silently invalidate every one of them. Only
-dark mode introduces new values.
+**The light palette is Tailwind's own `gray`/`red`/`emerald`/`amber`/`blue`/`violet` steps,
+copied verbatim in oklch.** Several components carry measured WCAG ratios in their comments,
+and a token that merely *looked* similar would invalidate every one of them. Only dark mode
+introduces new values.
 
-Two consolidations changed meaning rather than just spelling, and both were
-deliberate:
+Two tokens changed meaning rather than spelling:
 
 - **`ink-muted` is gray-600, not gray-500.** Both were in use for the same job.
   gray-500 measures 4.83:1 on white and fails on `sunken`; gray-600 is 7.4:1 and
   passes on both.
-- **`stopping` and `interrupted` share the warning hue.** They were amber and
-  orange — two adjacent hues, indistinguishable at badge size, carrying no
-  recoverable meaning. The distinction that matters is "is this still moving",
-  so `stopping` keeps the pulsing dot that `running` has, and hue is not asked
-  to carry it.
+- **`stopping` and `interrupted` share the warning hue.** Two adjacent hues are
+  indistinguishable at badge size, so the distinction that matters — whether this is still
+  moving — is carried by the pulsing dot `stopping` shares with `running`.
 
 ### Why the palette lives in plain `:root`
 
@@ -1154,26 +1108,17 @@ an explicit choice overrides permanently.
 
 ## Type scale
 
-Five steps, all on the scale: `text-3xs` (10px), `text-2xs` (11px), then
-Tailwind's `xs`, `sm`, `base`. The two smallest exist because dense chrome
-genuinely needs them; what did not need to exist was ten different sizes.
-Nothing smaller than `3xs` has a token, because it is not readable.
-
-Timeline density maps onto the same scale — compact `xs`, normal `sm`,
-comfortable `base` — replacing two one-off sizes (`13px`, `15px`) that existed
-only there and were within a pixel of a step.
+Five steps: `text-3xs` (10px), `text-2xs` (11px), then Tailwind's `xs`, `sm`, `base`. The two
+smallest exist for dense chrome, and nothing smaller than `3xs` has a token because it is not
+readable. Timeline density maps onto the same scale — compact `xs`, normal `sm`, comfortable
+`base`.
 
 ## Focus
 
-One utility, `focus-ring`, replacing 92 copies of `focus:outline-none
-focus-visible:ring-2 focus-visible:ring-gray-900`.
-
-It is an **outline**, not a ring, and that is a correctness fix rather than a
-preference: a ring is a `box-shadow`, so it is clipped by every
-`overflow-hidden` ancestor — which is why the focus indicator was invisible on
-file-tree rows and inside the code-block header. An outline is never clipped.
-The colour is blue rather than the accent grey, because a grey ring is invisible
-against the accent surfaces it has to appear on.
+One utility, `focus-ring`, and it is an **outline** rather than a ring. A ring is a
+`box-shadow`, so it is clipped by every `overflow-hidden` ancestor, which covers file-tree
+rows and the code-block header; an outline is never clipped. The colour is blue rather than
+the accent grey, since a grey ring is invisible against the accent surfaces it appears on.
 
 ## Typography
 
@@ -1181,9 +1126,7 @@ A system stack, no webfont: `system-ui`, then `-apple-system`, `Segoe UI
 Variable Text`, and CJK faces (`PingFang SC`, `Hiragino Sans GB`, `Microsoft
 YaHei`) before the generic fallback.
 
-Three reasons, in order of weight. A local-first app should not need the network
-to render text; an installed PWA must work offline; and `next build` runs in E2E
-on whatever machine is to hand, so a build-time font fetch is a build-time
-network dependency. The CJK entries matter because this project's users read
-Chinese — without them a mixed string falls back per-glyph and one line ends up
-in two faces.
+A local-first app renders text without the network, an installed PWA works offline, and
+`next build` runs in E2E on whatever machine is to hand — a build-time font fetch is a
+build-time network dependency. The CJK entries are what keep a mixed Chinese-English string in
+one face rather than falling back per glyph.

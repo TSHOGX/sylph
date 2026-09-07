@@ -4,7 +4,7 @@ Measured **2026-08-28** against **codex-cli 0.150.1** (`/opt/homebrew/bin/codex`
 store at `~/.codex/` holding 1258 `rollout-*.jsonl`.
 
 Every claim in the codex section of `docs/agents.md` should be traceable to a file
-here. `AGENTS.md` § "Reading a vendor payload" is the reason this directory
+here. `docs/agents.md` § "Reading a vendor payload" is the reason this directory
 exists: the most-repeated defect class in this repo is reading the wrong key off
 a vendor payload — eight instances, each one compiling — and the discipline that
 catches it is printing one real payload instead of inferring field names.
@@ -52,8 +52,13 @@ Store-wide censuses, which need no CLI and no tokens:
 
 | File | Settles |
 | --- | --- |
-| `store_meta_shapes.py` | `session_meta` key shapes across all 1258 rollouts, by `cli_version` |
+| `store_meta_shapes.py` | `session_meta` key shapes across all 1258 rollouts, grouped by `cli_version` |
 | `store_delegation.py` | `spawn_agent` / `agent_id` records and subagent lineage, from real files |
+
+The `cli_version` grouping is how the census **found** that one version appears in both
+record eras, which is why `docs/agents.md` names `session_meta.payload.history_mode` as the
+discriminant instead. The grouping is an axis for reading the store, not the axis a parser
+branches on.
 
 Helpers: `probe.py` (stdio JSON-RPC harness), `miniws.py` (minimal RFC6455
 client — see below), `redact_captures.py`, `strip_notify.py`,

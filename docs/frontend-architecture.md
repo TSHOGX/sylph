@@ -53,9 +53,8 @@ is reachable only through a relay.
   case here, and a state library would add a dependency for a store that holds
   about a dozen fields.
 - **Not the `EventSource` API.** SSE is read with `fetch` and a hand-written frame
-  parser (`lib/use-sse.ts`, `lib/sse-parse.ts`). `EventSource` dispatches by frame
-  name, so `onmessage` receives almost nothing; it also cannot carry a resume cursor
-  or be unit-tested. See **Why not EventSource** below.
+  parser (`lib/use-sse.ts`, `lib/sse-parse.ts`); § SSE Connection Management states
+  the three properties that reach.
 
 **UI components:**
 - Tailwind CSS 4 (utility-first styling)
@@ -112,80 +111,19 @@ There is no `src/` directory: the app, component, and library roots sit at the
 top of `frontend/`, which is what `create-next-app` produces and what the `@/`
 path alias resolves against.
 
-```
-frontend/
-├── app/
-│   ├── layout.tsx              # Root layout: providers + AppShell
-│   ├── page.tsx                # Start screen: begin, resume, learn the keys
-│   ├── search/page.tsx         # Full-text search over the server's history
-│   ├── sessions/[id]/page.tsx  # Conversation canvas
-│   └── globals.css
-│
-├── components/
-│   ├── app-shell.tsx           # Three-pane frame, top bar, Quick Start
-│   ├── workspace-sidebar.tsx   # Left pane: sessions grouped by workdir
-│   ├── artifacts-pane.tsx      # Right pane: file tree, swapping to the viewer
-│   ├── file-viewer.tsx         # Right pane: one file, header and viewer choice
-│   ├── file-viewer-overlay.tsx # The same viewer, full screen
-│   ├── viewers/
-│   │   ├── grid-view.tsx       # Spreadsheets and CSV
-│   │   ├── document-view.tsx   # Word and PowerPoint
-│   │   ├── html-view.tsx       # Sandboxed page rendering
-│   │   └── media-view.tsx      # Images and PDF
-│   ├── timeline.tsx            # The conversation canvas itself
-│   ├── markdown.tsx            # Markdown parser and renderer
-│   ├── code-block.tsx          # Code and command output
-│   ├── diff-view.tsx           # Unified inline diff
-│   ├── overlay.tsx             # Modal shell, focus trap, list navigation
-│   ├── search-overlay.tsx      # Cmd+K
-│   ├── command-palette.tsx     # Cmd+P
-│   ├── settings-panel.tsx      # Cmd+,
-│   ├── history-overlay.tsx     # Cmd+Shift+K
-│   ├── workspace-picker.tsx    # Known workspaces, ranked and filterable
-│   ├── directory-picker.tsx    # Server-enumerated folder chooser, filterable
-│   ├── composer.tsx            # Message entry, + menu, config controls, attachments
-│   ├── attachment-picker.tsx
-│   ├── slash-menu.tsx          # The agent's own commands, as the user types
-│   ├── config-picker.tsx       # Typed session config; what a control command opens
-│   ├── approval-dialog.tsx     # Answering what an agent is blocked on
-│   ├── badges.tsx              # Origin and status badges
-│   ├── icons.tsx               # ~40 hand-authored SVG paths, no dependency
-│   └── ui/
-│       ├── button.tsx          # Button, IconButton, Kbd
-│       ├── menu.tsx            # Context menu, dropdown, mobile sheet fork
-│       ├── dialog.tsx          # AlertDialog, PromptDialog (not window.confirm)
-│       └── sheet.tsx           # Bottom sheet and side drawer (mobile)
-│
-├── lib/
-│   ├── api.ts                  # Typed client; mirrors the wire shape exactly
-│   ├── providers.tsx           # QueryClient + AuthGate
-│   ├── settings.tsx            # Preferences over localStorage
-│   ├── create-session.ts       # Dialog-free session creation + default resolution
-│   ├── workspace-ui.tsx        # Panes, overlays, drawers, artifact selection
-│   ├── shortcuts.ts            # Combo grammar and platform resolution
-│   ├── theme.ts                # Pre-paint theme bootstrap + application
-│   ├── viewport.ts             # Is this a phone; the breakpoint constant
-│   ├── use-dialog.ts           # Focus trap, restoration, Escape
-│   ├── register-sw.tsx         # Service-worker registration (production only)
-│   ├── timeline-rows.test.ts   # (tests live beside the code they cover)
-│   ├── diff.ts                 # LCS line diff
-│   ├── tool-shape.ts           # Interprets tool_call payloads per agent
-│   ├── file-kind.ts            # Extension -> viewer family, in one table
-│   ├── file-operations.tsx     # New folder, upload, delete: one owner, one dialog
-│   ├── grid-format.ts          # Column labels, alignment, paging arithmetic
-│   ├── sandbox-html.ts         # CSP injection for previewed HTML
-│   ├── fuzzy.ts                # Subsequence ranking
-│   ├── use-sse.ts              # Streaming fetch reader with after_seq resume
-│   ├── sse-parse.ts            # Incremental event-stream frame decoder
-│   ├── use-debounced.ts
-│   ├── error-boundary.tsx
-│   └── format.ts
-│
-├── e2e/                        # Playwright specs + mock runner fixture
-├── next.config.ts              # Proxy rewrite, standalone output
-├── vitest.config.ts
-└── playwright.config.ts
-```
+Four roots, each with one responsibility. `docs/ui-layout.md` § Component Design covers what
+the components do; this is the shape they sit in.
+
+| Root | Holds | Owns |
+| --- | --- | --- |
+| `app/` | Four routes: start screen, search, `sessions/[id]`, and the root layout | Routing and the providers. A page renders its own scrolling content and nothing else |
+| `components/` | The shell, the panes, the timeline and its renderers, the overlays, the composer, and `ui/` primitives | Everything that draws. `viewers/` splits by file family so a route pays only for the format it opens |
+| `lib/` | The typed API client, the SSE reader and frame parser, the timeline fold and tree, settings and shell state, and the pure algorithms that replaced dependencies | Every rule enforced in code, with the reasoning in the comment beside it. React-free wherever a unit test wants it |
+| `e2e/` | Playwright specs and the reset script | Rendered behaviour, against a fixture agent |
+
+Configuration sits at the root: `next.config.ts` (proxy rewrite, standalone output),
+`vitest.config.ts`, `playwright.config.ts`. Unit tests live beside the code they cover
+rather than in a parallel tree.
 
 **Why the shell lives in the root layout.** `AppShell` wraps `children` in
 `app/layout.tsx` rather than being placed per page. A layout does not remount on
@@ -270,9 +208,9 @@ could disagree with storage when a write failed.
 
 ### Internationalization
 
-English is the source of truth and the fallback; Chinese is optional. The locale is
-a settings field, so it rides the store above — no provider, no context, and
-switching language re-renders exactly the components that read a translation.
+English is the source of truth and the fallback; Chinese is optional. The locale is a
+settings field, so it rides the store above — switching language re-renders exactly the
+components that read a translation.
 
 ```
 lib/i18n/locale.ts   Locale set, tags, message lookup, format, formatParts.
@@ -282,97 +220,63 @@ lib/i18n/zh.ts       zh — typed as a total `Dictionary`
 lib/i18n/index.ts    "use client": useT(), useLocale(), re-exports
 ```
 
-**The `locale.ts` / `index.ts` split is load-bearing, not cosmetic.** `lib/settings`
-must know what a `Locale` is in order to store and validate one, while `useT` must
-read `lib/settings` to know which locale is active. Keeping the primitives free of
-both React and the store makes the dependency run one way. It is also the half worth
-unit-testing: placeholder substitution and fallback are pure functions, testable
-without rendering.
+**The `locale.ts` / `index.ts` split makes the dependency run one way.** `lib/settings`
+needs the `Locale` type to store and validate one, and `useT` needs `lib/settings` to know
+which locale is active, so the primitives stay free of both React and the store. That half
+is the testable one: substitution and fallback are pure functions.
 
-**An untranslated key is a build error, not a surprise in the UI.** `zh` is typed as
-a total `Record` over the key set, so adding an English string without its
-translation fails `npm run build`. What the compiler *cannot* catch is a translation
-that drops a `{placeholder}` — that compiles and renders a sentence with a hole in it — so
-a unit test asserts placeholder agreement across catalogues.
+**An untranslated key is a build error**, since `zh` is typed as a total `Record` over the
+key set. Placeholder agreement across catalogues is a unit test, because dropping a
+`{placeholder}` still type-checks.
 
-Three rules that are easy to miss, each of which leaves a surface half-translated:
+Three rules keep a surface fully translated:
 
-- **A *rendered* group heading has to be a key**, not a literal that happens to be used for
-  sorting too.
+- **A rendered group heading is a key**, even when the same literal also drives sorting.
 - **A label built from a stored enum reads that enum's own translation**
-  (`settings.density.*`) rather than interpolating the raw value, or a translated sentence
-  carries an English word in the slot the user is reading.
-- **A component whose labels are translated must list `t` among its `useMemo`
-  dependencies.** Without it a language change leaves the labels the surface was opened
-  with while the filter matches the new ones, so typing selects a row whose visible text no
-  longer contains what was typed.
+  (`settings.density.*`) rather than interpolating the raw value.
+- **A component with translated labels lists `t` among its `useMemo` dependencies**, so a
+  language change repaints the labels a filter matches against.
+- **A sentence wrapping a value in a mono face is one key.** English precedes the value
+  ("Inside `src/`") and Chinese wraps it ("在 `src/` 内"), so the halves are not
+  independently translatable. `formatParts` splits the *translated* string around one
+  placeholder; `Around` in `lib/file-operations.tsx` renders the result.
+- **Pure modules take `t` as a parameter** rather than reading the locale, which puts their
+  plural rules in the catalogue and keeps them unit-testable; `describeKind` in
+  `lib/file-kind.ts` returns a `MessageKey` for the caller to translate. `next/dynamic`'s
+  `loading` fallbacks are the exception, created at module scope where no hook can run.
 
-**No framework.** `next-intl` and `next-i18next` are built around locale-in-the-URL:
-a `[locale]` segment, negotiating middleware, per-request catalogue loads on the
-server. None of it applies. This is one user's loopback tool, its language sits
-beside theme in `localStorage`, and every string lives in a client component.
-Adopting that model would mean restructuring `app/` around a segment carrying a
-value storage already holds. What a framework would genuinely buy — ICU
-MessageFormat, per-locale splitting, plural and date rules — is either already
-provided by `Intl` (see `lib/format.ts`) or not worth its weight at this size: both
-catalogues together are a few kilobytes gzipped, less than the machinery to load one
-lazily. Revisit at a third locale with translators who need a standard file format,
-or past roughly a thousand keys.
+**No framework.** `next-intl` and `next-i18next` are built around locale-in-the-URL — a
+`[locale]` segment, negotiating middleware, per-request catalogue loads — which would mean
+restructuring `app/` around a value `localStorage` already holds for one user's loopback
+tool. What they otherwise buy is either already in `Intl` (`lib/format.ts`) or lighter to
+inline: both catalogues together are smaller than the machinery to load one lazily.
+Revisit at a third locale with translators who need a standard file format, or past
+roughly a thousand keys.
 
-Three details that are easy to get wrong:
+Three details worth stating:
 
-- **Locale names are endonyms** (`English`, `中文`), so the picker's own labels are
-  deliberately untranslated. Someone who has switched into a language they cannot
-  read still needs a way back, which they only have if the entry they want is
-  written in the language they know.
-- **`<html lang>` syncs client-side** via `applyLocale`. The attribute is not
-  decoration: a screen reader picks its voice from it, so a Chinese UI still tagged
-  `en` is read aloud as English attempting Chinese. The document ships `lang="en"`,
-  correct for the default.
-- **Substitution is one regex pass, never a template literal or `eval`.** These
-  values reach the DOM, so a substitution that could execute would turn a
-  translation file into a script. An unmatched placeholder is left verbatim, which
-  is visible in the UI and therefore gets fixed.
+- **Locale names are endonyms** (`English`, `中文`), so the picker's labels stay
+  untranslated: someone who has switched into a language they cannot read finds the way
+  back only if the entry they want is written in the language they know.
+- **`<html lang>` syncs client-side** via `applyLocale`, because a screen reader picks its
+  voice from that attribute. The document ships `lang="en"` for the default.
+- **Substitution is one regex pass**, since these values reach the DOM. An unmatched
+  placeholder is left verbatim, so it surfaces in the UI.
 
-**A sentence with a value in a mono face cannot be a prefix key plus a suffix key.**
-English precedes the value ("Inside `src/`"), Chinese wraps it ("在 `src/` 内"), so
-the halves are not independently translatable and a translator cannot see the whole
-sentence. `formatParts` splits the *translated* string around one placeholder
-instead, keeping the sentence whole in the catalogue; `Around` in
-`lib/file-operations.tsx` renders the result. An absent slot yields the whole string
-as the prefix — visibly wrong rather than silently empty.
-
-**Pure modules take `t` as a parameter rather than reading the locale.**
-`describeWindow` and `describeBlocked` do, which moves their English plural rules
-("1 row" vs "2 rows") into the catalogue where a translator can see them while
-leaving both functions unit-testable. `describeKind` in `lib/file-kind.ts` returns a
-`MessageKey` and lets the caller translate it, for the same reason. The one
-exception is `next/dynamic`'s `loading` fallbacks: they are created at module scope
-where no hook can run, so `LoadingKind` reads the locale itself.
-
-**Backend `message` strings pass through untranslated, by design.** They are one
-process's report of what it refused; localizing them would mean cataloguing every
-string the API can emit. Both call sites say so in a comment.
+**Backend `message` strings pass through untranslated.** They are one process's report of
+what it refused, and localizing them would mean cataloguing every string the API can emit.
 
 ## Real-Time Event Streaming
 
 ### SSE Connection Management
 
-The stream is read with `fetch` and parsed in the client, **not** with `EventSource`.
-
-`EventSource` is the wrong primitive here for three reasons:
-
-1. Dispatch is by frame name, so a client must enumerate every kind it expects.
-   A kind the backend adds later is silently dropped — and silent event loss
-   renders identically to an agent that did nothing.
-2. A frame named `error` (which the backend emits for a failed turn) arrives as
-   the same `error` event the browser fires for a dropped socket, so a runner
-   failure and a network failure cannot be distinguished.
-3. It reconnects on its own with no way to advance `after_seq`, so resuming at a
-   cursor requires fighting its built-in retry.
-
-Reading the body directly fixes all three: the frame name is parsed but never
-used for dispatch, so every frame reaches the consumer whatever it is called.
+The stream is read with `fetch` and parsed in the client, which is what makes three
+properties reachable. `EventSource` dispatches by frame name, so a client would have to
+enumerate every kind and a kind added later would be dropped silently; a frame named `error`
+would arrive as the same event the browser fires for a dropped socket; and its built-in
+retry cannot advance `after_seq`. Reading the body parses the frame name without dispatching
+on it, so every frame reaches the consumer whatever it is called, and the parser is
+unit-testable on its own.
 
 ```ts
 const response = await fetch(
@@ -397,36 +301,19 @@ for (;;) {
 }
 ```
 
-**Compression must be refused, or none of this streams.** The backend sets
-`Cache-Control: no-cache, no-store, no-transform` on the event stream. The
-`no-transform` directive is load-bearing rather than cosmetic: Next.js proxies
-`/api/v1/*` through the standard `compression` middleware, which gzips any
-compressible content type including `text/event-stream`, and a gzip stream cannot
-be decoded until its block is flushed. With compression on, every event sat in
-the compressor until the turn ended — while `curl`, which sends no
-`Accept-Encoding`, saw perfectly paced frames and made the bug look like a client
-problem. The header lives on the backend response rather than in
-`next.config.ts` so the guarantee survives any proxy in front of the endpoint.
+**Compression must be refused, or none of this streams.** The backend sets `Cache-Control:
+no-cache, no-store, no-transform` on the event stream. `no-transform` is what forbids the
+re-encoding: a proxy that gzips `text/event-stream` holds every event in the compressor
+until its block flushes, and the whole turn then lands at once. The header belongs on the
+backend response so the guarantee survives any proxy, tunnel, or nginx in front of the
+endpoint.
 
-**Repaint is coalesced, not per-event.** Deltas arrive at token rate — the claude
-runner measures ~20ms between tool-input deltas — so one `setState` per delta is
-one React commit per token. Events are batched into a single flush per animation
-frame (16ms), which bounds repaints by the display rather than by the model's
-speed while staying far below the ~100ms at which a human perceives lag.
+**Repaint is coalesced, not per-event.** Deltas arrive at token rate — the claude runner
+measures ~20ms between tool-input deltas — so events are batched into one flush per
+animation frame, bounding repaints by the display rather than by the model's speed while
+staying far below the ~100ms at which a human perceives lag.
 
-**Event normalization:**
-- Parse JSON from `data` field
-- Track sequence numbers for replay
-- Distinguish `started` / `delta` / `completed` phases
-- Merge deltas into live projection
-- Persist only `completed` events
-
-**Reconnection strategy:**
-- Backoff: 500ms, 1s, 2s, 5s, 10s (capped, so a dead backend is polled gently)
-- Resume from the highest `seq` seen, via `after_seq`
-- Replay stable events from backend journal
-- A clean end-of-body means the turn finished; retrying there would loop
-- `AbortController` makes teardown immediate, which `EventSource` cannot offer
+Reconnection is covered in § Error handling.
 
 ### Event rendering
 
@@ -456,99 +343,74 @@ collapsed card; indentation stops at `MAX_INDENT`, past which a phone's content 
 narrower than a line of code and the indent destroys content rather than conveying
 structure; and focusing a trajectory **re-roots** the timeline with a breadcrumb back.
 
-**Collapsing is what makes it fast**, and it is why virtualization is still not needed. A
+**Collapsing is also what makes it fast**, and why virtualization stays unnecessary here. A
 closed card mounts none of its subtree, so DOM cost tracks what the user opened rather than
-what the agent did — a huge workflow costs the same as a small one until someone drills in.
-An indented rendering cannot have that property, because it must lay out every node to know
-where any node goes.
+what the agent did. An indented rendering cannot have that property, since it lays out every
+node to know where any node goes.
 
-**Every card reports its whole subtree.** `Rollup` carries failures, nested trajectory
-count, tool count, token usage, and duration, computed bottom-up, and a descendant failure
-escalates its ancestors' status even when their own result was clean. **No state reachable
-in the tree may be unreported at the root** — otherwise collapsing is lossy rather than
-deferred, and a user must open every branch to learn something broke, which is the work
-collapsing was supposed to save.
+**Every card reports its whole subtree.** `Rollup` carries failures, nested trajectory count,
+tool count, token usage, and duration, computed bottom-up, and a descendant failure escalates
+its ancestors' status even when their own result was clean. **No state reachable in the tree
+may be unreported at the root**, which is what makes collapsing deferral rather than loss.
 
-#### `abandoned` is not `failed`
+#### Rendering `abandoned` distinctly from `failed`
 
-A trajectory the server closed on turn termination says *nobody reported an outcome*; a
-failed one says the work reported an error. Colouring the first red reports an interrupted
-turn as a broken one. Three consequences, each of which is a way the distinction gets erased
-one level above the node that holds it:
+`docs/session-protocol.md` § Delegated trajectories defines the two statuses. Three rules
+carry the distinction through the tree, where a rollup is what erases it:
 
 - **A server-authored close is not a rollup failure.** The server marks its own closing
-  event `isError` so the row reads as unresolved rather than clean — but counting that as a
-  descendant failure badges every ancestor red, including a host whose own `tool_result`
-  succeeded. `rowFailed` excludes a server-closed row while the trajectory still reports
-  `abandoned` as its own status.
-- **"Forwarded no interior" and "outlived its turn" are different claims, and only one is a
-  measurement.** No interior means the host finished and forwarded nothing — a real terminal
-  state. Abandoned-and-empty means it was still running when we stopped listening, so
-  *nothing* is known about its interior. Rendering both badges states two things that cannot
-  both be the point.
-- **`abandoned` is not final**, because a late outcome is recorded against the turn that owns
-  the trajectory. The one terminal case is a restart, since a process that no longer exists
-  cannot report — and that must stay distinguishable from work still running in the
-  background.
-
-**A badge's explanation has to survive the behaviour it explains.** Saying an agent *cannot*
-report after its turn because its process exits is false — stdout stays open, and the agent
-opens a turn of its own to report (`docs/session-protocol.md` § An agent may start a turn).
-What is true is narrower: nobody has reported an outcome *yet*.
+  event `isError`, so the row reads as unresolved; counting that as a descendant failure
+  would badge every ancestor red, including a host whose own `tool_result` succeeded.
+  `rowFailed` excludes a server-closed row while the trajectory keeps `abandoned` as its own
+  status.
+- **"Forwarded no interior" and "outlived its turn" are separate claims**, and one card
+  states one of them. No interior is a terminal measurement: the host finished and forwarded
+  nothing. Abandoned-and-empty means nothing is known about the interior yet.
+- **A badge for `abandoned` says nobody has reported an outcome yet**, which stays true when
+  the agent later opens a turn of its own to report.
 
 #### A summary is the point of a collapsed card
 
-A card showing only a status and counts says work happened and nothing about what came of
-it. The delegate's own account is the card's first line, clamped, and is appended last to
-each overview row's accessible name so a reader scanning many rows hears the comparison
-before the prose. `trajectoryReport` owns two rules, both of which fail silently:
+A status and counts say work happened, not what came of it. The delegate's own account is the
+card's first line, clamped, and is appended last to each overview row's accessible name so a
+reader scanning many rows hears the comparison before the prose. `trajectoryReport` owns two
+rules:
 
-- **A promoted host's `text` is its tool arguments**, so a summary can only come from the
-  `subagent` close held beside the row. Reading `text` uniformly captions a workflow with a
-  JSON blob; reading only `text` leaves a host whose interior is never forwarded with
-  nothing at all.
-- **A close outranks progress**, because a progress snapshot describes a state the outcome
-  has superseded.
+- **The summary comes from the `subagent` close held beside the row**, since a promoted host's
+  `text` is its tool arguments.
+- **A close outranks progress**, because a progress snapshot describes a state the outcome has
+  superseded.
 
-**It may not read a promoted host's `tool_result`**, which is the obvious next step
-precisely because a promoted host's *lifecycle* is its result. A result is the tool's
-output, not the delegation's account of itself.
+**It may not read a promoted host's `tool_result`.** A result is the tool's output, not the
+delegation's account of itself.
 
 #### `trajectoryName` is the sole definition
 
-Duplicating it lets one node be named two ways, so a locator that finds one stops finding
-the other. Its fallback states what the row knows — nobody reported what this is — rather
-than restating a category the chrome already carries.
-
-**A fallback string must not be a substring of any real name.** A fallback that contains a
-tool name makes every `{ name: "<tool> delegation" }` locator ambiguous with it *by
-construction*, in exactly the states that render a nameless row — so it passes indefinitely
-and then fails under load, reading as a broken card. Choosing a fallback no tool name
-contains closes the class rather than guarding each instance.
+One definition keeps one node from being named two ways. Its fallback states what the row
+knows — nobody reported what this is — rather than restating a category the chrome already
+carries, and **contains no tool name**: a fallback that did would make every
+`{ name: "<tool> delegation" }` locator ambiguous with it by construction, in exactly the
+states that render a nameless row.
 
 #### A promoted host renders its own call
 
-The row keeps `kind: "tool_call"` precisely so the tool's name, arguments, and result
-survive promotion; a card drawing only trajectory chrome answers opening a workflow with an
-empty pane. The call renders above the work it dispatched, because that is the order it
-happened in.
+The row keeps `kind: "tool_call"`, so the tool's name, arguments, and result survive
+promotion, and the call renders above the work it dispatched in the order it happened.
 
-So a promoted host stays expandable even with nothing forwarded, while a *declared*
+A promoted host therefore stays expandable with nothing forwarded, while a *declared*
 trajectory with no interior keeps its disclosure suppressed — **`aria-expanded` on a control
 with nothing to expand is a promise the tree cannot keep.** Focus is the same question one
 level up: re-rooting to `children` is right for a declared `subagent` whose row carries no
-content of its own and wrong for a promoted host, so `Timeline` renders the focused row
-itself when it is not a `subagent`, and says why a pane is empty rather than leaving it
-blank.
+content of its own, so `Timeline` renders the focused row itself when it is not a `subagent`,
+and states why a pane is empty.
 
 #### Comparing siblings needs one shared axis
 
-A rollup describes one node against itself, so it answers "should I open this branch" and
-not "which of these twenty was slow" — and a user with a wide fan-out had to open every
-branch to find the expensive one. `lib/timeline-waterfall.ts` puts every trajectory in view
-on **one shared time axis**, which is what distributed tracing settled on for the same
-problem and the same `span`. A concurrent fan-out reads as bars stacked in one band, a
-sequential chain as a staircase; the slow one is the long bar.
+A rollup describes one node against itself, so it answers whether to open a branch rather
+than which of twenty was slow. `lib/timeline-waterfall.ts` puts every trajectory on **one
+shared time axis**, which is what distributed tracing settled on for the same problem and the
+same `span`. A concurrent fan-out reads as bars stacked in one band, a sequential chain as a
+staircase; the slow one is the long bar.
 
 `components/delegation-overview.tsx` renders it as `left`/`width` percentages — no chart
 library, no measuring pass — and is `next/dynamic`, so a route that never opens it pays
@@ -557,26 +419,21 @@ between the branch's own children, and it renders nothing below two trajectories
 delegation compares to nothing.
 
 Rows are buttons whose accessible name carries what the bar shows — name, status, elapsed,
-offset into the turn, depth — because a purely visual overview excludes the reader who most
-needs a summary. Native tab order, not a roving cursor: these are navigation targets, and
-`lib/select-list.ts` exists so a *choice list* does not grow a fourth cursor, not so a
-delegation is announced as an option nobody picked.
+offset into the turn, depth — so the summary reaches a reader who cannot see the bars. Native
+tab order rather than a roving cursor, since these are navigation targets rather than options
+to pick.
 
-**Most of the design is what it may not claim.** Three states are not measurable and each is
-rendered as itself rather than as a bar:
+**Three states are not measurable, and each renders as itself rather than as a bar:**
 
 - **Running** has no end. Deriving one from `Date.now()` would re-lay out every bar at clock
   rate inside a live stream, so the axis comes from the data and an open bar fades.
-- **Abandoned** ends when the turn terminated and we stopped listening — a lower bound,
-  labelled `≥`.
-- **A trajectory that forwarded nothing** has no bound at all and is drawn as a caret,
-  because a width there would be invented.
+- **Abandoned** ends where the turn terminated — a lower bound, labelled `≥`.
+- **A trajectory that forwarded nothing** has no bound at all and is drawn as a caret.
 
-**"Slowest" therefore requires that every row is exact.** A rank over lower bounds is not a
-rank: a delegate that ran nine seconds and forwarded its one event near the end bounds at a
-fraction of that, so ranking it against an exact figure names the wrong row — confidently,
-in answer to the only question the view exists for. When any row is a bound, figures are
-shown with their `≥` and no row is badged.
+**Ranking by duration therefore requires every row to be exact.** A delegate that ran nine
+seconds and forwarded its one event near the end bounds at a fraction of that, so ranking it
+against an exact figure names the wrong row. When any row is a bound, figures carry their `≥`
+and no row is badged.
 
 ## Data flow
 
@@ -598,32 +455,21 @@ out of history until the refetched history actually contains it, which closes th
 where it would otherwise vanish from both.
 
 **That refetch is sound because a terminal turn status means the record is finished** — a
-server guarantee, not a race the client wins (`docs/database-schema.md` § A terminal status
-means the record is finished). It is worth knowing it was not always: the turn row went
-terminal before the server closed what the turn left open, so ending the claim there tore
-down the stream before those closes arrived *and* refetched a journal that lacked them. Both
-halves of the handover failed on the same early signal, which is why a delegation the server
-had closed could render as running forever. A client needs no grace period here, and should
-not grow one.
+server guarantee rather than a race the client wins (`docs/database-schema.md` § A terminal
+status means the record is finished). A client therefore needs no grace period here.
 
-**A mutation with no error path turns any backend refusal into a phantom UI bug.** Where
-the only observable outcome of a rejected write is that clicking did nothing, every layer
-is behaving correctly and the layer that is *not* at fault is the one that gets debugged.
-So a refused write invalidates and renders its error; the E2E fixture refuses one config
-value on purpose to keep that path covered.
+**A refused write invalidates and renders its error.** Where the only observable outcome of a
+rejected write is that clicking did nothing, the layer at fault is invisible. The E2E fixture
+refuses one config value on purpose to keep that path covered.
 
 ## Sylph-Specific Features
 
-### There is no origin badge and no reset banner
+### What the UI does not draw
 
-Nothing in the UI says who started a session, because there is no such distinction to draw
-(`docs/architecture.md` § One class of session). A reader coming from an older screenshot
-will look for them.
-
-The general rule they violated is worth keeping: **do not render an absence as a feature.**
-A banner promising a session would not be reset described something nothing did, on every
-such session, forever. What replaces both is smaller and says more — the two facets below,
-and `fidelity`.
+Nothing says who started a session, because there is no such distinction
+(`docs/architecture.md` § One class of session), and nothing promises a session will not be
+reset. **Do not render an absence as a feature.** The two facets below and `fidelity` carry
+what those markers were reaching for.
 
 ### Two facets, each with a reason — and one field that is not a facet
 
@@ -633,9 +479,10 @@ the composer does not read the facet directly: it reads `controlBlock`, the serv
 answer that folds the caller's authorization together with Sylph's reach.
 
 ```tsx
-// Not a boolean, and not a third link state. The vendors do not sort into three
-// buckets: a terminal `pi` is observable and undrivable, `codex` is both, and
-// `claude` is observable and semi-drivable behind a human approval gate.
+// Not a boolean, and not a third link state. Drivability varies by vendor and by how
+// the session started: a terminal-adopted `claude` is observable and reports
+// `not_ours_to_drive`, since its control plane has no transport channel, while the same
+// agent launched by Sylph runs over stdio and reports `available`.
 //
 // Read `controlBlock`, not `link.control`. A facet says whether *Sylph* can reach the
 // environment — the same answer for every observer — while a grant says whether *you*
@@ -670,29 +517,15 @@ function DriveState({ block }: { block: ControlBlock | null }) {
 }
 ```
 
-Three rules the composer must follow, all learned from shipped defects:
+Two rules bind the composer:
 
-- **An empty capability surface means "we cannot reach it", never "there is nothing
-  there".** Those coincide for a session Sylph launched and are opposite for one running
-  under someone else.
-- **Do not cache a failed reach forever, and never cache authorization at all.**
-  `not_ours_to_drive` and `no_agent` are cacheable — no retry teaches a vendor a new
-  channel or installs a CLI — but `environment_unreachable` and `handshake_failed` must be
-  allowed to go stale, because a laptop wakes and an envagent redials. Caching all of them
-  under `staleTime: Infinity` made one failure permanent for the life of the page, which is
-  what made a deterministic config problem present as intermittent. `is_retryable` is the
-  single definition and this list mirrors it rather than re-deriving it.
-- **`authorization` and `controlBlock` are never cached under that rule**, because it is a
-  rule about facets and these are not facets. A withdrawn grant held like a success is a
-  denial outliving the grant it describes; a newly issued grant held the same way does not
-  take effect until the tab reloads. One is a stale refusal and the other is a stale
-  permission, and only the second is a security defect — which is why the field is separate
-  rather than sharing a policy that is right for a machine and wrong for a grant.
-
-An earlier draft of this section listed `environment_unreachable` among the cacheable
-reasons, disagreeing with `is_retryable` and with `docs/api-design.md`. That is the failure
-mode a mirrored rule invites: three copies, and the wrong one reads as authoritative
-because it is the one beside the code.
+- **An empty capability surface means Sylph cannot reach the session**, never that there is
+  nothing there.
+- **Cacheability comes from `is_retryable` on the wire, never from a list here.** A reason a
+  retry cannot change is cacheable; one that a waking laptop or a redialing envagent can
+  change must be allowed to go stale. `authorization` and `controlBlock` are outside that
+  rule entirely and are never cached, since a stale grant is a permission outliving its
+  issue.
 
 ### Fidelity gates what may be drawn
 
@@ -786,7 +619,7 @@ sidebar group whose `Browse all` was clicked.
 
 Filtering is deliberately local. Full-text search is already `Mod+K`, and re-querying it
 per keystroke would run an FTS5 query per character — measured at 174–260 ms each
-(`docs/api-design.md` § Search) — to answer a narrower question than the one already
+(`docs/api/sessions.md` § Search) — to answer a narrower question than the one already
 loaded. The footer says the filter covers loaded sessions only.
 
 **Paging is a footer control, not a row.** As the last child of the list it was both
@@ -852,13 +685,11 @@ So the page renders two **session-level** surfaces and nothing that imitates a t
 giving a fork its own wording; and a `Delegations` list at the top of the pane, each row
 linking to that session's own transcript.
 
-**Placing that list above the transcript rather than at guessed points inside it is the
-load-bearing choice.** Anchoring a delegation to the specific call that spawned it was
-measured and rejected: most child ids carry only a hash, so anchoring recovers a small
-fraction and misattributes on collisions — and nine in ten delegations sitting under the
-wrong tool call, while looking exactly like the live tree, is worse than an honest flat
-view. The panel says plainly that the source records no link to the exact call, which is
-what keeps a flat view honest rather than merely poorer.
+**That list sits above the transcript rather than at inferred points inside it.** Anchoring
+a delegation to the call that spawned it was measured and rejected: most child ids carry
+only a hash, so anchoring recovers a small fraction of them and misattributes on
+collisions. The panel states that the source records no link to the exact call, which is
+what makes a flat view honest.
 
 The list cannot be a disclosure inside a sidebar row, and that is an ARIA constraint
 rather than a layout preference: a history-overlay row is a `role="option"`, which may not
@@ -868,14 +699,13 @@ contain a button — the same rule that stops a `role="menu"` holding a text fie
 
 ### Bundle size management
 
-**The budget exists to protect first paint on a phone over a slow link.** It is not a
-score to keep down for its own sake, and it does not get to veto valuable work — but it is
-the number that triggers a look, so growth is deliberate rather than discovered.
+**The budget exists to protect first paint on a phone over a slow link.** It is the number
+that triggers a look, so growth is deliberate.
 
-**No figure is quoted here.** `scripts/measure-bundle.sh` takes the measurement, and it
-takes a `--route` because the routes are not comparable: the session route legitimately
-carries the timeline, the delegation tree, and the overview, so quoting one route's figure
-against another's budget has already caused confusion. The measurement script is the source for current numbers; the roadmap records sequencing, not bundle measurements.
+**Current numbers come from `scripts/measure-bundle.sh`**, which takes a `--route` because
+routes are not comparable: the session route legitimately carries the timeline, the
+delegation tree, and the overview. A figure quoted in prose here would be a second copy of
+a value that moves with every dependency change.
 
 ```sh
 cd frontend && SYLPH_WEB_BACKEND=http://localhost:4317 npm run build
@@ -889,21 +719,25 @@ prerendered route's served HTML is the only authority on what it actually loads,
 dynamic route emits no build-time HTML at all while Turbopack publishes no per-route chunk
 manifest for the App Router.
 
-**What the budget buys, stated as the trade it is.** The libraries declined in
-§ Technology Stack — a Markdown renderer, a syntax highlighter, a diff library, a
-component primitives library, a fuzzy matcher, an icon package — total well over the
-entire first-load budget. Each replacement is a bounded, well-understood algorithm
-carrying unit tests, and that test burden *is* the cost. This stays the right trade while
-the implemented subset serves the product; adopting a battle-tested library becomes
-correct if the budget rises or a primitive with real complexity is needed.
+**It refuses a busy port rather than measuring whatever holds it.** Killing a subshell does
+not kill what it exec'd, so a backgrounded `next start` survives and serves its own older
+build, whose HTML names chunk hashes the current build never produced. Three things together
+close that class: run the job in its own process group (`set -m`) and kill the group, refuse
+a busy port, and make a missing artifact name its likely cause. `lsof -ti tcp:PORT` answers
+it directly whenever output describes a tree that does not match disk.
+
+**The budget buys a trade.** The libraries declined in § Technology Stack total well over
+the entire first-load budget; each replacement is a bounded algorithm carrying unit tests,
+and that test burden is the cost. Adopting a battle-tested library becomes correct once the
+budget rises or a primitive with real complexity is needed.
 
 **Office formats are parsed server-side**, which is the largest single instance. The
 dominant JavaScript spreadsheet library is multiple megabytes unpacked, frozen on npm, and
 carries unpatched high-severity CVEs — prototype pollution and ReDoS — reachable on
 precisely the "parse a file we did not write" path this feature needs. `calamine` and
 `quick-xml` do the same work in Rust, where the cost is compile time rather than every
-page load, and the browser receives structure instead of bytes (`docs/api-design.md`
-§ Files).
+page load, and the browser receives structure instead of bytes (`docs/api/files.md`
+§ `GET /api/v1/sessions/{id}/files/document`).
 
 ### Code splitting
 
@@ -914,15 +748,15 @@ toggle, by which point the chunk has fetched. Measured, this is the difference b
 being over the budget and under it — the single largest lever available.
 
 The format viewers split again *beneath* the pane, so opening a `.ts` file never
-fetches the table or document code. With ~3 KB of headroom that is not an
-optimization but the condition for the feature existing: the grid viewer was
-confirmed absent from the first-load chunk set and fetched on demand at 1.5 KB.
+fetches the table or document code. Headroom against the budget is small enough that this
+is the condition for the feature existing rather than an optimization: the grid viewer was
+confirmed absent from the first-load chunk set and fetched on demand.
 
 ### Render cost
 
-**Measured: a 1000-event conversation cold-renders in well under the 2s budget**
-(`e2e/timeline.spec.ts`, on a reload so it covers durable history rather than
-incremental streaming).
+**A 1000-event conversation cold-renders in well under the 2s budget**
+(`e2e/timeline.spec.ts`, on a reload, so it covers durable history rather than incremental
+streaming).
 
 The mechanism is memoization by object identity, not windowing. `buildRows`
 produces a new row object only for rows whose content changed, and the row
@@ -963,12 +797,11 @@ What does scale is the initial build. Two things keep it bounded:
 
 - **The server windows the data** (200 rows by default, 500 max), so a 50 000-row
   sheet never arrives whole — it would be a ~50 MB payload and a ~600 ms parse.
-- **Paging replaces the window rather than accumulating rows.** Accumulation was
-  the first design and is wrong twice over: it needs the previous window as state,
-  which forces either an effect that cascades a render or a ref read during
-  render, and it grows the DOM without bound while `table-layout: auto` re-measures
-  every cell in the table on each append. Replacing keeps the table at one
-  window — 46 ms — no matter how far the user pages.
+- **Paging replaces the window rather than accumulating rows**, which keeps the table at one
+  window — 46 ms — however far the user pages. Accumulating needs the previous window as
+  state, forcing either an effect that cascades a render or a ref read during render, and it
+  grows the DOM without bound while `table-layout: auto` re-measures every cell on each
+  append.
 
 `table-layout: fixed` on wide sheets is load-bearing for the same reason: the
 default `auto` algorithm resolves column widths by measuring every cell, making
@@ -1007,16 +840,13 @@ conversation canvas holding tool calls, a diff, and a failed command with both
 sidebars open, the composer mid-turn, and each of the three overlays while open.
 `e2e/file-viewer.spec.ts` adds the file viewer in the pane and the fullscreen
 dialog, since a data table and an iframe are both new surface. Tags: `wcag2a`,
-`wcag2aa`, `wcag21a`, `wcag21aa`. **Currently zero violations.**
+`wcag2aa`, `wcag21a`, `wcag21aa`. The suite fails on any violation, so the current
+count is whatever `npm run e2e` reports.
 
-This is a floor, not a conformance claim. axe covers roughly a third of WCAG
-criteria; whether focus order makes sense and whether an alternative is
-*meaningful* are not machine-checkable. Full validation needs assistive-technology
-testing and expert review, which has not been done.
-
-The audit has already earned its place twice, catching a broken
-`aria-activedescendant` that pointed at no element, and 2.48:1 text that had been
-reviewed by eye and passed.
+This is a floor, not a conformance claim. axe covers roughly a third of WCAG criteria;
+whether focus order makes sense and whether an alternative is *meaningful* are not
+machine-checkable. Full validation needs assistive-technology testing and expert review,
+which has not been done.
 
 ### Colour
 
@@ -1060,7 +890,8 @@ Checked in a real browser, because none of it is verifiable statically:
   arrangement where typing and arrow-navigating do not fight over focus. It is also
   mandatory rather than chosen — a `role="menu"` may not contain a text field. Every
   picker, the palette, search, and the history browser are now the same code, so this
-  is one implementation rather than seven agreeing ones; see **One choice list**.
+  is one implementation rather than seven agreeing ones
+  (`docs/ui-layout.md` § One choice list).
 - Toggle buttons carry `aria-pressed`; the open session's sidebar link carries
   `aria-current="page"`.
 - Streaming status is announced through `aria-live="polite"`.
@@ -1070,9 +901,8 @@ Checked in a real browser, because none of it is verifiable statically:
 
 ### Not done
 
-- Systematic screen-reader passes with VoiceOver and NVDA. Ad-hoc VoiceOver testing has
-  found real defects an automated checker cannot (see § Automated), so this is the
-  highest-value gap.
+- Systematic screen-reader passes with VoiceOver and NVDA. This is the highest-value gap,
+  since ad-hoc passes find defects an automated checker cannot.
 - High-contrast and forced-colours modes.
 
 ## Error handling
@@ -1165,7 +995,7 @@ counts are not.
 | `workspace-picking.spec.ts` | The three "which directory" flows: filter focused on open, folder browsing filterable inside one focus trap, a typed path reaching an unlisted folder, Enter-opens vs `Mod+Enter`-chooses |
 | `select-list.spec.ts` | The shared choice list itself: filter appearing only past the threshold, cursor opening on the current value, one checkmark per group, a refused write surfacing |
 | `commands.spec.ts` | The slash menu after a completed turn, and a control command opening a picker rather than sending a message |
-| `settings-config.spec.ts` | The Configuration panel reporting what *this* backend resolved, a missing path called out, the adapter directory actually in use marked among those tried, and the panel offering no way to edit a path from the browser |
+| `settings-config.spec.ts` | The Configuration panel reporting what *this* backend resolved, a missing path called out, and the panel offering no way to edit a path from the browser |
 | `file-operations.spec.ts` | Folder creation and its in-place errors, deletes that ask first, uploads including drop and overwrite, context menus, the raw route, and axe over both dialogs |
 | `settings-identity-i18n.spec.ts` | Identity reporting when no `SOUL.md` resolves, language switching repainting and retagging (composer, skip link, file pane accessible names), a shortcut recorder refusing combos the browser keeps, and no *default* binding being one the browser would swallow |
 | `accessibility.spec.ts` | Skip link, focus trapping and restoration including a picker's own field not becoming the node focus returns to, axe-core audit of every surface including both start-screen states and every overlay's list open |
@@ -1173,70 +1003,49 @@ counts are not.
 
 #### Why a second project exists
 
-The three reported mobile failures — a composer wider than the viewport,
-sidebars leaving ~150px for the conversation, and scrolling dragging the whole
-shell into blank space — were all invisible to a 41-spec suite that was not
-careless. Every spec in it ran at 1280px, where the same code is at worst
-slightly cramped. A layout bug that manifests only below a breakpoint can only
-be observed below that breakpoint, so a viewport is not an optional variant
-here; it is the only instrument that sees the defect.
+A layout bug below a breakpoint is observable only below that breakpoint, so the phone
+viewport is the instrument that sees it rather than an optional variant.
 
-`devices["Pixel 7"]` rather than an iPhone profile. Only Chromium is installed
-in this checkout, and an iPhone profile silently runs *in Chromium* anyway —
-which would claim iOS coverage that does not exist. Pixel 7 is a Chromium
-device, so what it emulates is what actually runs: `pointer: coarse`, a 412px
-viewport, and a device pixel ratio above 1.
+`devices["Pixel 7"]`, because only Chromium is installed here and an iPhone profile runs
+in Chromium anyway — claiming iOS coverage it does not have. A Chromium device profile
+emulates what actually runs: `pointer: coarse`, a 412px viewport, and a device pixel ratio
+above 1. **iOS Safari is therefore untested**, specifically `100dvh` under a collapsing
+toolbar and zoom-on-small-input; a real device still wants a pass. The mobile specs assert
+the consequences a Chromium phone can observe — nothing overflows the viewport, the
+document has nothing to scroll, `window.scrollY` stays 0 after a 4000px wheel.
 
-**What it therefore does not cover** is iOS Safari specifically: `100dvh` under
-a collapsing toolbar, and zoom-on-small-input. Those are two of the mechanisms
-behind the scroll bug, so the specs assert the fix through consequences a
-Chromium phone *can* observe — nothing overflows the viewport, the document has
-nothing to scroll, `window.scrollY` stays 0 after a 4000px wheel — rather than
-by simulating a toolbar this browser does not have. A real device still wants a
-pass.
+**These specs assert invariants, not pixels.** `overflowingElements()` reports every
+element whose box extends past the right edge, which is the defect itself and stays
+actionable across padding changes.
 
-**These specs assert invariants, not pixels.** A spec that knows the composer is
-358px wide fails on the next padding change and says nothing about whether it is
-usable. `overflowingElements()` instead reports every element whose box extends
-past the right edge, which is both the actual defect and actionable when it
-regresses.
+#### Fixture state
 
-**`npm run e2e` wipes `.e2e-home/` before the run**, and the script is the only place
-that can. The journal was never cleared, and each spec's `mkdtemp` workdir becomes a
-permanent sidebar group — grouping is by workdir, so a directory used once and deleted
-still renders a group forever. At 151 groups (148 of them dead single-session
-directories) the suite ran 35 minutes instead of 1.5, and two or three specs failed per
-run on the 30s timeout: a different two or three each time, which reads as flakiness
-rather than as accumulated fixture state. Raising the timeout does not help, because the
-cost grows without bound. `SYLPH_E2E_KEEP_HOME=1` opts out to inspect a journal after a
-failure; leaving it on brings both symptoms back.
+**`npm run e2e` wipes `.e2e-home/` before the run, and the npm script is the only place
+that can.** Sidebar grouping is by workdir, so every spec's `mkdtemp` directory becomes a
+permanent group in an uncleared journal; the suite's runtime then grows without bound and
+specs start failing on their deadline in a rotating set, which reads as flakiness.
+`SYLPH_E2E_KEEP_HOME=1` opts out to inspect a journal after a failure.
 
-**Neither Playwright hook can do the wipe, and both fail the same way.** A `globalSetup`
-runs *after* `webServer`, because `webServer` is a plugin and plugin setup is ordered
-first; module scope in `playwright.config.ts` runs again in every worker process. Both
-therefore delete `journal.db` out from under a backend that has already opened it, and
-the suite answers `unable to open database file` and 500s — the module-scope variant
-eight seconds in, which reads as a mid-run database failure rather than as a fixture
-wiping itself. `e2e/reset-home.mjs` runs from the npm script: one process, once, before
-Playwright starts anything. A genuinely fresh home starts clean, so a first-run database
-error is this bug and not a product one.
+**Neither Playwright hook can do that wipe.** A `globalSetup` runs *after* `webServer`,
+since `webServer` is a plugin and plugin setup is ordered first, and module scope in
+`playwright.config.ts` re-runs in every worker process. Both delete `journal.db` under a
+backend that has already opened it, and the suite answers `unable to open database file`.
+`e2e/reset-home.mjs` runs from the npm script instead: one process, once, before Playwright
+starts anything. A fresh home starts clean, so a first-run database error names this
+hazard.
 
-**The wipe removes the trigger, not the hazard.** A single run creates over a hundred
-sessions of its own and the sidebar caps its listing at 200, so a spec late in the order
-can still meet the cap — past which a new session *displaces* an older row instead of
-adding one, and a "the group grew by one" assertion stays flat. Assert on identity
-("the session I just created is listed here", matched by id), or count against a
+**The wipe removes the trigger, not the hazard.** One run creates over a hundred sessions
+and the sidebar caps its listing at 200, so a spec late in the order can meet the cap —
+past which a new session displaces an older row instead of adding one, and a "the group
+grew by one" assertion stays flat. Assert on identity, matched by id, or count against a
 `mkdtemp` directory of the spec's own.
 
-**Clear the suite's ports before diagnosing a failure that happened before any spec
-ran.** A backend surviving on 4318 from an interrupted run makes the suite fail at
-startup, because `reuseExistingServer: false` correctly refuses to trust it. Playwright
-names the cause (`is already used`), so the cost is only the time it takes to read the
-message — but the same leftover-server class silently *measured* the wrong build in
-`scripts/measure-bundle.sh`, which is the expensive shape.
+**Clear the suite's ports before diagnosing a failure that happened before any spec ran.**
+A backend surviving on 4327 from an interrupted run makes the suite fail at startup,
+because `reuseExistingServer: false` refuses to trust it.
 
 ```sh
-for p in 4318 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done
+for p in 4327 4328 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done
 ```
 
 **`scripts/e2e-repeat.sh` separates a flake from a defect**, since a single red run
@@ -1264,60 +1073,69 @@ agent-initiated turn (`unprompted`), `paced`, and `fanout`. Its payloads mirror 
 shipped adapters emit, transcribed from their source — a fixture that emitted a
 tidier shape would test a protocol nothing speaks.
 
-Four properties of this fixture are load-bearing rather than incidental, and each was
-added because a green suite could not see a real defect without it.
+Four properties of the fixture are load-bearing, because each is the only way a suite can
+observe the property beside it.
 
-- **`paced` spaces its stages a second apart**, because an adapter that finishes inside
-  one render cannot distinguish streaming from batching.
-- **`fanout` is wide and genuinely slow.** Six delegates with real sleeps, ~2.6s total.
-  Width matters because the question the delegation overview answers is "which of these
-  was slow", and with two delegates that is visible without any overview. Duration
-  matters more: every other scenario emits its whole tree inside one millisecond, so
-  the server stamps one `createdAtMs` on all of it and every bar is the same length —
-  a client computing durations from the wrong field passed the whole suite.
-- **It declares two select options in the same `model` category**, one with two choices
-  and one with a long `CATALOGUE`. Below the filter threshold a config option is a
-  `menu` of `menuitemradio`s and above it a combobox over a `listbox` — a different
-  ARIA contract, not a different width. Both land on the composer's control row
-  together, so one screen asserts both. A fixture offering only the short shape cannot
-  observe a list-length bug at all.
-- **`set_config` refuses one value on purpose**, so the rejected-write path stays
-  covered. A mutation with no error path turns any backend refusal into a phantom UI
-  bug: the sole observable outcome is that clicking a model does nothing.
+- **`paced` spaces its stages a second apart**, so streaming is distinguishable from
+  batching.
+- **`fanout` is wide and genuinely slow** — six delegates with real sleeps, ~2.6s total.
+  Width is what the delegation overview's ranking needs, and duration is what gives each bar
+  a distinct length: every other scenario emits its whole tree inside one millisecond, under
+  a single `createdAtMs`.
+- **It declares two select options in the same `model` category**, one with two choices and
+  one with a long `CATALOGUE`. Below the filter threshold a config option is a `menu` of
+  `menuitemradio`s and above it a combobox over a `listbox` — a different ARIA contract, and
+  both land on the composer's control row together.
+- **`set_config` refuses one value on purpose**, keeping the rejected-write path covered.
 
-**A note on shortcut tests.** Pressing a shortcut immediately after `page.goto`
-races hydration: the listener is attached by an effect, so the key can land on
-static markup. Tests wait for a client-rendered control first. This is a real race
-on a cold load, not a test artifact.
+**Shortcut specs wait for a client-rendered control first.** The listener is attached by an
+effect, so a key pressed immediately after `page.goto` can land on static markup — a real
+race on a cold load.
+
+#### Writing a spec that fails for one reason
+
+Five rules, each of which a green suite cannot enforce.
+
+**Name matching is a case-insensitive substring**, so `getByRole({ name: "Explore" })`
+also matches "Focus Explore". Distinct names need `exact: true`. The costly form is a
+name that is a substring of a *fallback* name, since the collision exists only in the
+states that render a nameless node — the spec passes until it runs in a state that is
+never the one under test.
+
+**Assert on a container's own text, not its subtree.** `toContainText` walks descendants,
+so a negative assertion on a card is coupled to copy anywhere beneath it and can be
+satisfied for the wrong reason.
+
+**Wait on a control whose presence changes, not on a disabled state.** A disabled
+attribute usually encodes more than one fact — `Send` is disabled while a turn runs *and*
+whenever the composer is empty, which is the state a spec is in right after sending. The
+composer swaps Send for Stop while a turn is live, and `Stop` disappearing is a
+settled-turn signal (`docs/database-schema.md` § A terminal status means the record is
+finished).
+
+**Use an auto-retrying assertion where an element mounts asynchronously.** A one-shot
+`isVisible()` inside an `if` converts a lost race into a silently skipped step, and the
+failure then surfaces in whatever the caller asserted next. An `if` is right only where
+absence is a valid expected state.
+
+**Two browser contexts, not two tabs**, for anything reaching a *second* client. Tabs
+share a cookie jar.
+
+#### Reading a failure
+
+**An OOM kill reports zero failures.** Exit 137 or 143, no summary line, every spec green
+up to the cut — indistinguishable from an interrupt. Check free pages first, and run in
+groups rather than raising a timeout.
+
+**Rotating failures point at a shared dependency, not at the specs.** A signal carrying
+two facts under one name cannot be waited on, because a waiter cannot say which it got;
+the symptom is a different spec failing each run. Look at what the failing set shares.
 
 ## Development Workflow
 
-### Setup
-
-```sh
-cd frontend && npm install
-```
-
-That is the whole setup. `package.json` is the authority on dependencies: four at
-runtime — `next`, `react`, `react-dom`, `@tanstack/react-query` — plus the toolchain.
-
-### Development Server
-
-```sh
-# Terminal 1: Backend
-cd backend && cargo run
-
-# Terminal 2: Frontend
-cd frontend && npm run dev
-```
-
-Frontend: `http://localhost:3000`  
-Backend: `http://localhost:4317`
-
-`cargo` is not on the default `PATH` here; use `~/.cargo/bin/cargo` or export it
-first. For LAN or tunnel access, see `docs/development.md` — reaching `next dev` from a
-non-localhost hostname needs `SYLPH_WEB_DEV_ORIGINS`, and without it every `/_next/*`
-chunk 403s and the page freezes before React hydrates, which reads as a backend failure.
+`docs/development.md` owns the commands for running the stack. `package.json` is the
+authority on dependencies: four at runtime — `next`, `react`, `react-dom`,
+`@tanstack/react-query` — plus the toolchain.
 
 ### API Proxy
 
@@ -1353,9 +1171,15 @@ npm run e2e                         # Playwright, starts its own servers
 ```
 
 `npm run build` emits `output: "standalone"`. That bundle omits `.next/static` and
-`public`, so an install must copy both or the server starts cleanly and every asset
-404s; `scripts/install.sh` does it and fails the install if `static` is missing. The
-backend does not serve the frontend — there is no `dist/` to hand it.
+`public`, so an install copies both — otherwise the server starts cleanly and every asset
+404s. `scripts/install.sh` does it and fails the install if `static` is missing. The backend
+does not serve the frontend; there is no `dist/` to hand it.
+
+Two stale-state traps live in `.next`, which is gitignored and so invisible to
+`git status`. Deleting a route leaves `.next/dev/types/` behind, and the stale copy fails
+the type check naming a module in `app/` that no source file references. A compiler reading
+a half-written file reports line numbers that do not match the source. `rm -rf .next` and
+re-run before believing either.
 
 ## What is absent
 
@@ -1377,61 +1201,37 @@ on a large session, which indicates DOM size rather than render count.
 
 ## Decision Log
 
-### Why Next.js over Vite + React Router?
+Two decisions shape the client beyond what § Technology Stack records, and both carry a
+reversal condition.
 
-- SSR capability for future server components
-- Built-in API routes for backend proxy
-- Image optimization
-- Better TypeScript integration
-- Production-ready out of box
+### Primitives are built here rather than taken from a component library
 
-### Why TanStack Query over SWR?
+Radix is the better answer on accessibility defaults and edge-case coverage, at several
+times the first-load headroom. So the primitives live here: `lib/use-dialog.ts` (focus
+trap, Escape, focus restoration), `components/overlay.tsx` (the modal frame),
+`components/ui/menu.tsx` (arrow navigation, viewport clamping, outside-dismiss, and the
+mobile sheet fork), `components/ui/sheet.tsx` (drag-to-dismiss), native `<details>`, and
+the combobox pattern in the two pickers. The axe audit and the focus tests are what hold
+the decision honest.
 
-- More powerful mutation handling
-- Optimistic updates are first-class
-- Better DevTools
-- Wider ecosystem adoption
+Reverse it when the budget rises, or when a primitive with real complexity is needed — a
+date picker, a drag-and-drop tree, a virtualized listbox. Reverse it wholesale: one
+pattern throughout beats two.
 
-### Why no component library (neither Radix nor Headless UI)?
+### Client state is two contexts and one external store
 
-Radix would have been the right choice on accessibility defaults and edge-case coverage.
-It was not taken because the primitives needed here — modal, context menu, disclosure,
-listbox — cost several times the first-load headroom available when the decision was made.
+Shell state that must outlive navigation goes in context; preferences go in a
+`useSyncExternalStore` over `localStorage`. That covers every case, for a store holding
+about a dozen fields. `useSyncExternalStore` rather than state plus an effect, because it
+avoids a cascading render on mount, keeps the server snapshot separate so hydration cannot
+mismatch, and gets cross-tab sync from the `storage` event.
 
-What was built instead: `lib/use-dialog.ts` (focus trap, Escape, focus
-restoration), `components/overlay.tsx` (the modal frame), `components/ui/menu.tsx`
-(arrow navigation, viewport clamping, outside-dismiss, and the mobile sheet fork),
-`components/ui/sheet.tsx` (drag-to-dismiss), native `<details>`, and the combobox
-pattern in the two pickers. The axe audit and the focus tests exist to hold that decision
-honest, and they have already caught one ARIA bug a library would not have had.
-
-Reverse this if the budget rises or a primitive with real complexity is needed —
-a date picker, a drag-and-drop tree, a virtualized listbox. Do not reverse it
-piecemeal: a codebase with both patterns is worse than either.
-
-### Why context and an external store, not Zustand?
-
-Two contexts and one `useSyncExternalStore` cover the whole client state: shell
-state that must outlive navigation, and preferences over `localStorage`. Zustand's
-advantages — less boilerplate, selector-scoped re-renders — pay off at a scale this
-store has not reached; it holds about a dozen fields.
-
-`useSyncExternalStore` specifically, rather than state plus an effect: it avoids a
-cascading render on mount, cannot mismatch during hydration because the server
-snapshot is separate, and gets cross-tab sync from the `storage` event for free.
-
-### Why hand-rolled Markdown, diff, and fuzzy matching?
-
-See **Technology Stack** and **Performance Optimization**. Short version: the three
-libraries together cost several times the available headroom, and what each provides
-beyond the subset used — character-level diffs, patch formats, typo tolerance, full
-CommonMark — is not rendered by this UI. The cost is carrying the unit tests those
-libraries would have carried.
+Reverse it when selector-scoped re-renders start showing up in the render-cost budget.
 
 ## References
 
 - What the interface is: `docs/ui-layout.md`
-- Endpoint contracts: `docs/api-design.md`
+- Endpoint contracts: `docs/api/`
 - The event vocabulary an adapter emits: `docs/session-protocol.md`
-- Tables and migrations: `docs/database-schema.md`
+- Tables, indexes, ancestry: `docs/database-schema.md`
 - What is built and what is next: `docs/roadmap.md`

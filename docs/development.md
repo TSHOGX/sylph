@@ -76,8 +76,8 @@ Look for these lines in the backend tab output:
 
 ```
 ✓ Good:
-  INFO sylph_web_backend: Sylph home /Users/you/.sylph (config /Users/you/.sylph/config.toml)
-  INFO sylph_web_backend: Database initialized at /Users/you/.sylph/data/journal.db
+  INFO sylph_server: Sylph home /Users/you/.sylph (config /Users/you/.sylph/config.toml)
+  INFO sylph_server: Database initialized at /Users/you/.sylph/data/journal.db
   INFO sylph_server: Listening on http://127.0.0.1:4317
   INFO sylph_server::env: Environment env7fk2 "dev" connected: claude 2.1.247, pi 0.84.3
 
@@ -235,19 +235,21 @@ session cannot be created.
 **Fix:** start the envagent and pair it. In development:
 
 ```sh
-# Terminal 1: HTTP plus the loopback envagent listener
-SYLPH_ENV_LISTEN=127.0.0.1:4318 cargo run -p sylph-web-backend
+# Terminal 1: HTTP on 4317, envagent ingress on 4318
+cargo run -p sylph-server
 # Terminal 2: obtain a code from POST /api/v1/environments/pairings, then pair
 cargo run -p sylph-envagent -- pair --server http://127.0.0.1:4317 --code <code>
-SYLPH_ENV_SERVER=127.0.0.1:4318 cargo run -p sylph-envagent -- run
+cargo run -p sylph-envagent -- run
 ```
+
+Ingress binds one port above HTTP, and `pair` records the endpoint, so `run` needs no
+address (`docs/configuration.md` § Ports).
 
 Get the code from `POST /api/v1/environments/pairings`. The credential is written to
 `~/.sylph-env/`, so pairing is once per machine, not once per run.
 
-**The server does not embed an envagent**, deliberately (`docs/environments.md`), so
-"everything on one laptop" is still two processes. That is what keeps the server's own
-machine from being the one environment configured differently from every other.
+**The server does not embed an envagent**, so "everything on one laptop" is still two
+processes (`docs/environments.md`).
 
 ### An agent is missing from an environment
 
@@ -264,25 +266,30 @@ cargo run -p sylph-envagent -- doctor
 
 **Two questions that used to produce one empty list now answer separately**, because they
 have different fixes: `/api/v1/health` says whether the *environment* is connected, and
-the envagent's own report says which *CLIs* it found there. Collapsing them is what made
-a stale adapter tree present as a composer ignoring the `/` key — a symptom three layers
-from the cause.
+the envagent's own report says which *CLIs* it found there.
 
-**Backend:**
+## Running the checks
+
+Run the checks for every part of the repo a change touched. The two sides share a wire
+contract, so an edit on either can break the other's tests.
+
 ```sh
-cd backend
-cargo test --workspace                  # All crates
-cargo test -p sylph-adapters            # Vendor shape and native-store parsing
-cargo test --test integration adopt     # Adopting a native session
+cargo test --workspace
+cargo clippy --workspace --all-targets
+cargo doc --workspace --no-deps
 ```
 
-**Frontend:**
 ```sh
 cd frontend
-npm run build           # Verify production build works
-npm run lint            # TypeScript and ESLint
-npm run e2e             # End-to-end tests (spawns own servers)
+npm run build           # production build, and the TypeScript gate
+npx eslint .            # lint
+npm test                # Vitest
+npm run e2e             # end-to-end, spawning its own servers
 ```
+
+Narrower runs while iterating: `cargo test -p sylph-adapters` for vendor shape and
+native-store parsing, `cargo test --test integration adopt` for adopting a native session.
+`docs/frontend-architecture.md` § E2E owns how the browser suite is written and run.
 
 ## Architecture Notes
 
@@ -301,9 +308,8 @@ which is required for `SameSite=Strict` auth cookies to work.
 
 ### Port layout
 
-- `4317` — Backend API and SSE
-- `3000` — Frontend (Next.js dev server)
-- Both default to `127.0.0.1` (loopback only)
+`4317` HTTP and SSE, `4318` envagent ingress, `3000` frontend, all on `127.0.0.1`.
+`docs/configuration.md` § Ports owns the allocation and the offset rule.
 
 For remote access:
 - Route through the loopback reverse proxy + cpolar (see "Internet access via
@@ -331,7 +337,7 @@ To stop services:
 1. Press Ctrl-C in each pane
 2. Or kill processes:
    ```sh
-   pkill -f sylph-web-backend
+   pkill -f sylph-server
    pkill -f "next dev"
    ```
 

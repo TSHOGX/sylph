@@ -432,10 +432,13 @@ they meet, because opening a trajectory is itself a block with a lifecycle.
 `seq` is the only total source/order axis. Timestamps can tie, arrive out of order, or
 come from different machines, so replay and producer merging must never sort by time.
 `arrivalAtMs` records when Sylph received the fact on the server clock and is always
-available on new rows. `recordedAtMs` is the vendor's own timestamp, when the native
-source supplied one; it is absent for records such as workflow journal closes that carry
-no timestamp. The legacy `createdAtMs` remains for compatibility, but its clock depends
-on the record mode and must not be used to infer a duration across live and native data.
+present. `recordedAtMs` is the vendor's own timestamp, when the native source supplied
+one; it is absent for records such as workflow journal closes that carry no timestamp.
+
+**Two clocks, and no third field that merges them.** A single "effective timestamp" would
+have to pick one clock per record, so its meaning would depend on the record mode — and a
+reader subtracting two of them would get a number that looks like a duration and spans two
+machines.
 
 Durations are exact only when both endpoints are in one domain: arrival start/end for a
 live stream, or recorded start/end for native history. Missing recorded endpoints mean
@@ -654,7 +657,7 @@ complete reachable source; `forwards_nothing` is a terminal vendor capability; a
 `unreadable` is an expected source that could not be read. A source that has ended must
 never leave `pending` in durable history. The frontend renders the reported fact; it may
 use actual children only to decide whether an expansion has content *now*, never to decide
-what absence means. Older rows lack this field and use the legacy fallback until rewritten.
+what absence means.
 
 **Progress is a snapshot, not delta text.** A vendor's progress notification re-sends its
 whole current summary rather than a suffix, so appending each one repeats the same

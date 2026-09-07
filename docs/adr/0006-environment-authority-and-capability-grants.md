@@ -29,7 +29,7 @@ created it.
 | `grant_authority` | Who may authorize a Subject | Applies to |
 | --- | --- | --- |
 | `machine` | the OS-user of that machine, through a local command | self-installed, SSH-bootstrapped |
-| `server` | a Subject flagged `is_admin` (`docs/api-design.md` § The server administration capability) | Khora sandboxes |
+| `server` | a Subject flagged `is_admin` (`docs/api/admin.md` § The server administration capability) | Khora sandboxes |
 
 The value is derived from pairing provenance and is immutable thereafter, in the same way and for
 the same reason as `inject_identity`: it describes where the environment came from, and a record
@@ -64,8 +64,8 @@ operations whose state lives in two different places, so its carrier splits acco
 `browse_roots` and agent configuration are envagent-local and have no route at all — only the
 machine holding a path can canonicalize it — while grant revocation and unpairing change server
 tables and are therefore server routes, gated by the authority root rather than by a grant.
-`docs/api-design.md` § `administer` is ungrantable, which is not the same as having no route is
-authoritative for the split and for each gate.
+`docs/api/admin.md` § `administer` is ungrantable is authoritative for the split and for each
+gate.
 
 ### 3. Granting requires the authority root, so a grant cannot be re-granted
 
