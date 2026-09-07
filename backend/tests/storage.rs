@@ -1254,7 +1254,7 @@ async fn a_second_retention_pass_over_unchanged_history_changes_nothing() {
 
 // ------------------------------------------------------------------ search
 //
-// These pin the shape `docs/api-design.md` § Search defines, and the decisions that shape
+// These pin the shape `docs/api/sessions.md` § Search defines, and the decisions that shape
 // rests on.
 
 /// A block is findable by its text once consolidated, and the hit resolves to a position.

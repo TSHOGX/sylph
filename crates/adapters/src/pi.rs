@@ -2054,7 +2054,7 @@ pub mod translate {
 /// likely to get wrong, because each wrong version raises no error and yields a plausible
 /// record: [`native::defect_timestamp_unit`], [`native::defect_field_spelling`], and
 /// [`native::defect_fork_pointer`] name the tests that pin them, each asserting **the value
-/// that should have been found** (`AGENTS.md` § Reading a vendor payload).
+/// that should have been found** (`docs/agents.md` § Reading a vendor payload).
 ///
 /// # What the store holds, measured
 ///

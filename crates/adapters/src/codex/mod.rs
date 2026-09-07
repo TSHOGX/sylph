@@ -361,9 +361,9 @@ impl Adapter for CodexAdapter {
             // declares 153 client request methods, and `turn/interrupt` and `turn/steer`
             // were both watched driving a live turn a second client had not subscribed to.
             // So all three capabilities are real rather than inferred from a method's
-            // existence — `AGENTS.md` § "A type in a vendor's event union is not a promise
-            // that anything emits it" applies to methods as much as to events, which is why
-            // only the measured three are claimed out of the declared 153.
+            // existence — a declared type is not a promise that anything emits it
+            // (`docs/session-protocol.md` § Three rules about reading a vendor's answer),
+            // which is why only the measured three are claimed out of the declared 153.
             //
             // `Queue` is claimed on the same evidence standard: `thread/queue/add` was
             // *measured*, and its refusal naming `clientUserMessageId` is what proves the

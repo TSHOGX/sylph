@@ -3,8 +3,7 @@
 //! `docs/session-protocol.md` §§ An adapter is a trait, with three modes and What the
 //! adapter owns, and what it must not are authoritative.
 //!
-//! **Declarations only.** The implementations are step 2 of `docs/roadmap.md`
-//! § Implementation order.
+//! **Declarations only.** The implementations live in `crates/adapters`.
 
 use std::collections::BTreeMap;
 use std::pin::Pin;

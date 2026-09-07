@@ -1,8 +1,8 @@
 # The Rust side of Sylph, as one workspace.
 #
-# `docs/roadmap.md` § Implementation order names the crates this grows into:
-# `protocol`, `adapters`, `server`, `envagent`. `protocol` and `adapters` exist;
-# `backend` is the standing server until step 3 moves it.
+# `AGENTS.md` § Orientation names the crates this grows into: `protocol`, `adapters`,
+# `server`, `envagent`. `protocol` and `adapters` exist; `backend` is the standing
+# server until `docs/roadmap.md` § Milestone 1 moves it.
 #
 # One workspace rather than four independent crates because they share one
 # vocabulary and one dependency set. A shared `Cargo.lock` is the part that

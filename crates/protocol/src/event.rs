@@ -7,8 +7,7 @@
 //!
 //! This is the event **an adapter emits**. The server's own wire projection
 //! (`backend/src/events/mod.rs`) is this plus two fields that are not an adapter's to
-//! set, and it is left there until step 3 of `docs/roadmap.md` § Implementation order
-//! moves the server:
+//! set, and it is left there until `docs/roadmap.md` § Milestone 1 moves the server:
 //!
 //! - `seq`, because ordering is the server's to decide. An adapter numbering its own
 //!   events could not interleave correctly with the server's own — the user's message,

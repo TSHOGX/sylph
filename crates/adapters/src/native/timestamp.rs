@@ -1,9 +1,9 @@
 //! Decoding a vendor's timestamps. **One module, because a timestamp is where the
 //! wrong-unit defect lands, and the stores hold two shapes of it.**
 //!
-//! `AGENTS.md` § Reading a vendor payload: *"The right key in the wrong unit fails the
-//! same way, and is harder to catch. A wrong key yields absent, which a presence check
-//! finds; a wrong unit yields a value, which passes every such check."*
+//! `docs/agents.md` § Reading a vendor payload owns the rule: a wrong key yields
+//! *absent*, which a presence check finds, while a wrong unit yields a *value*, which
+//! passes every such check.
 //!
 //! The two hazards this module exists to make impossible, both measured on this machine
 //! on 2026-08-28 against the real stores:
@@ -43,7 +43,7 @@ use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 /// different amount elsewhere, so the damage never reproduces where it is investigated.
 ///
 /// This is the vendor-key defect family in its unit-rather-than-spelling form
-/// (`AGENTS.md` § "The right key in the wrong unit fails the same way"): a wrong zone
+/// (`docs/agents.md` § Reading a vendor payload): a wrong zone
 /// yields a plausible timestamp that no presence check can catch. What settles it is
 /// comparing against a sibling whose units are already known, which is why the census
 /// above is over *pairs* rather than over stamps.

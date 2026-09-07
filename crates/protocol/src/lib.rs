@@ -1,9 +1,9 @@
 //! The event vocabulary and the adapter contract, as types.
 //!
 //! `docs/session-protocol.md` is the governing spec and this crate is that document
-//! compiled. It is the foundation every other crate in `docs/roadmap.md`
-//! § Implementation order builds on: the adapters construct these values, the server
-//! stores and serves them, and the envagent carries them across a machine boundary.
+//! compiled. It is the foundation every other crate builds on: the adapters construct
+//! these values, the server stores and serves them, and the envagent carries them across
+//! a machine boundary.
 //!
 //! # What this crate is not
 //!

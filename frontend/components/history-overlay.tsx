@@ -16,7 +16,7 @@
  *
  * # A known limitation, and it is the server's to fix
  *
- * `GET /sessions` takes `limit` (max 200) and **no cursor** (`docs/api-design.md` §
+ * `GET /sessions` takes `limit` (max 200) and **no cursor** (`docs/api/sessions.md` §
  * Sessions), so this surface can no longer reach past the newest 200 sessions in a
  * directory — and a real directory holds over a thousand. That is a regression against
  * the paged archive this replaces, and it is stated on screen rather than hidden,

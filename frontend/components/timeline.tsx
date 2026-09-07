@@ -830,8 +830,8 @@ function ToolCall({
   const running = streaming || (!result && event.phase !== "completed");
 
   // Derived, not initial — the same repair the trajectory row above already carries, and
-  // this was the other half of it. `AGENTS.md` § "`useState(derived)` captures a snapshot"
-  // names both sites; only that one had been fixed.
+  // this was the other half of it: `useState(derived)` captures a snapshot, so a value
+  // that arrives later never reaches the row. Only the other site had been fixed.
   //
   // `status.failed` comes from the `tool_result`, which arrives *after* the `tool_call`
   // this row mounted on. So `useState(defaultOpen)` read the flag once, before the failure

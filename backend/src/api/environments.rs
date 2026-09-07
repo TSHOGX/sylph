@@ -2,7 +2,7 @@
 //!
 //! # Why there is no top-level agent list
 //!
-//! Which agents exist is **per environment, not global** (`docs/api-design.md`
+//! Which agents exist is **per environment, not global** (`docs/api/environments.md`
 //! § `GET /api/v1/environments`), so a merged list would be true of nowhere. A user
 //! picking an environment with no `codex` on it should learn that before creating the
 //! session rather than after.

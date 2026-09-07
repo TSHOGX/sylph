@@ -4,9 +4,8 @@ use sylph_protocol::SessionId;
 
 /// One journaled event.
 ///
-/// `reconciled_at_ms` is gone: `docs/roadmap.md` § Audit measured it vestigial, and a
-/// rewrite is when a vestigial column goes rather than being carried into a new
-/// schema.
+/// `reconciled_at_ms` is gone: it was measured vestigial, and a rewrite is when a
+/// vestigial column goes rather than being carried into a new schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Event {

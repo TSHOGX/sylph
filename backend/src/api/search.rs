@@ -83,8 +83,8 @@ pub struct SearchResponse {
 /// separate binary that might not be installed — a supported degraded state the UI had to
 /// render. One store means there is no such state: the index is beside `history.db`, which
 /// the server opened at startup or failed to boot. A flag that can only ever be `true` is
-/// a lever that changes nothing, and `AGENTS.md` records why offering one is worse than
-/// not.
+/// a lever that changes nothing, and a client rendering a degraded state that cannot occur
+/// is carrying code no test can reach.
 ///
 /// # Never 503, and empty is a real answer
 ///
@@ -98,15 +98,13 @@ pub struct SearchResponse {
 /// work and owning the store makes it no cheaper, so the cost model that governs every
 /// other endpoint does not transfer here. It is user-initiated by design.
 ///
-/// # The CJK limitation is stated rather than papered over
+/// # Chinese is searchable, and that is a property of the index
 ///
-/// The tokenizer is `unicode61`, which splits on non-alphanumerics — so a run of Han
-/// characters becomes **one token** and a query for a substring of it does not match. That
-/// matters here, because this project's own transcripts are substantially Chinese.
-/// `docs/storage.md` § "`blocks_fts` is standalone" carries the reasoning and names the
-/// reference implementation (a loadable jieba tokenizer) for when segmented CJK search is
-/// wanted; it is deliberately not adopted yet, because a loadable SQLite extension is a
-/// per-platform build artifact taken on for a capability that is currently zero.
+/// The tokenizer is `jieba` (`crates/fts5-jieba`), linked into this binary and registered
+/// per connection, because `unicode61` turns a whole run of Han characters into one token
+/// and this project's own transcripts are substantially Chinese. It is not a loadable
+/// extension: an index built with one tokenizer and queried with another returns nothing,
+/// so a fallback would answer wrongly rather than worse (`docs/storage.md` § Tokenization).
 pub async fn search(
     State(state): State<AppState>,
     Query(params): Query<SearchQuery>,

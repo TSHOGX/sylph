@@ -36,9 +36,9 @@ use serde::{Deserialize, Serialize};
 ///   observed behaviour is worse than no declaration. `Approval` additionally existed
 ///   for the `SERVER_ACCEPTS` handshake negotiation, which went away with the handshake.
 /// - **`Context` had no consumer at either end.** It backed the v3 `query` command,
-///   whose `Link::query` had zero callers — recorded as dead in `docs/roadmap.md`
-///   § Audit. Context usage is a real thing a user wants, and it comes back as
-///   `contextWindow` on the surface plus a `usage` event, not as a query verb.
+///   whose `Link::query` had zero callers. Context usage is a real thing a user wants,
+///   and it comes back as `contextWindow` on the surface plus a `usage` event, not as a
+///   query verb.
 /// - **`Fork` names an operation this trait does not have.** `codex` really can
 ///   `exec fork`, and `docs/architecture.md` uses a fork for moving work between
 ///   environments — but there is no `Adapter::fork`, so the variant would declare a
@@ -429,17 +429,17 @@ impl CapabilityFacets {
     /// implementations of "an unmentioned facet is not changed", so the next adapter
     /// author would rediscover the 46-erased-commands bug rather than inherit the fix;
     /// and the server, which is the authority on session state, would be holding a copy
-    /// it did not compute. `docs/session-protocol.md` § Announcing arrival without
-    /// announcing departure states the general form: one publisher every transition
-    /// calls, because three call sites each remembering is three chances to forget.
+    /// it did not compute. `docs/session-protocol.md` § Announce every departure states
+    /// the general form: one publisher every transition calls, because three call sites
+    /// each remembering is three chances to forget.
     ///
     /// **What is true today is not yet that.** `backend/src/adapter/link.rs` still
-    /// merges in the transport, because that is the shipped v3 path and step 1 of
-    /// `docs/roadmap.md` § Implementation order moves types rather than rewiring the
-    /// server. So there is exactly one merge site now and it is the wrong one; step 3
-    /// moves it, at which point the link is gone and this comment describes the whole
-    /// truth. Naming that rather than writing the aspiration as fact, because a reader
-    /// who trusts it would look for a server-side merge that is not there.
+    /// merges in the transport, because that is the shipped path and it is
+    /// `docs/roadmap.md` § Milestone 1 that moves the merge to the server. So there is
+    /// exactly one merge site now and it is the wrong one; after that milestone the link
+    /// is gone and this comment describes the whole truth. Naming that rather than
+    /// writing the aspiration as fact, because a reader who trusts it would look for a
+    /// server-side merge that is not there.
     pub fn apply_to(self, surface: &mut SessionCapabilities) {
         if let Some(commands) = self.commands {
             surface.commands = commands;

@@ -138,10 +138,10 @@ export function Overlay({
  * Scroll the active row into view without yanking the whole page.
  *
  * All that remains here of list behaviour: `useSelectList` owns cursor movement, headings,
- * filtering, and the combobox ARIA for every list in the app (`docs/ui-layout.md` § One
- * choice list). A second navigation hook taking a row *count* cannot coexist with it — the
- * caller then numbers rendered rows while the hook counts choosable ones, which is the
- * dual-index bug `lib/select-list.ts` exists to make unrepresentable.
+ * filtering, and the combobox ARIA for every list in the app (`docs/ui-layout.md`
+ * § One choice list). A second navigation hook taking a row *count* cannot coexist with
+ * it — the caller then numbers rendered rows while the hook counts choosable ones, which
+ * is the dual-index bug `lib/select-list.ts` exists to make unrepresentable.
  */
 export function scrollActiveIntoView(container: HTMLElement | null, index: number) {
   const row = container?.querySelector<HTMLElement>(`[data-index="${index}"]`);

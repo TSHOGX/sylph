@@ -21,7 +21,7 @@ use crate::{
 ///
 /// # Why every handler goes through this
 ///
-/// A path segment is the encoded triple (`docs/api-design.md` § A session id in a
+/// A path segment is the encoded triple (`docs/api/README.md` § A session id in a
 /// path), and a malformed one is a **400 rather than a 404**: the request is
 /// unintelligible, not pointing at something absent. Collapsing the two would tell a
 /// client with a typo'd id that the session does not exist, which sends the
@@ -636,11 +636,11 @@ pub async fn update(
 ///
 /// A well-formed environment id naming a machine no envagent is connected for is not a
 /// malformed request — it may be exactly right, and the fix is to bring the machine
-/// online (`docs/api-design.md`: "bring the machine online" is one of the six distinct
+/// online (`docs/api/sessions.md`: "bring the machine online" is one of the six distinct
 /// adopt fixes). Answering `400` would send a reader to their own request.
 ///
-/// Only the local environment exists until pairing lands (step 4 of
-/// `docs/roadmap.md` § Implementation order), so anything else is unreachable by
+/// Only the local environment exists until pairing lands
+/// (`docs/roadmap.md` § Milestone 1), so anything else is unreachable by
 /// construction rather than by a connection check. That is the honest answer *now* and
 /// stays the honest answer afterwards, when the check becomes "is that envagent's
 /// connection live".
@@ -732,9 +732,9 @@ pub struct NativeSessionRow {
     /// **A row is shown rather than hidden, and this is what makes that defensible.** A
     /// picker that silently omitted already-adopted sessions would leave a user hunting
     /// for a session that is plainly on the machine, and one that offered them would
-    /// hand out a `409` nobody can act on. `docs/api-design.md` § `GET
-    /// /api/v1/sessions/enumerate`: "A session already adopted is marked as such, so a
-    /// picker can show it rather than offering a duplicate that would `409`."
+    /// hand out a `409` nobody can act on. `docs/api/sessions.md`
+    /// § `GET /api/v1/sessions/enumerate`: "A session already adopted is marked as such,
+    /// so a picker can show it rather than offering a duplicate that would `409`."
     ///
     /// Typed rather than prose so a client branches on it — an `alreadyAdopted` row
     /// navigates, an `outsideRoots` row explains a configuration fix, and a `noWorkdir`
@@ -815,7 +815,7 @@ const ENUMERATE_MAX_LIMIT: usize = 200;
 /// GET /api/v1/sessions/enumerate
 ///
 /// What native sessions an environment holds, without adopting any of them
-/// (`docs/api-design.md` § `GET /api/v1/sessions/enumerate`). This is what makes adopt
+/// (`docs/api/sessions.md` § `GET /api/v1/sessions/enumerate`). This is what makes adopt
 /// offerable in a UI rather than requiring a user to know a vendor id.
 ///
 /// # Paging is server-side, because `StoreFilter` has no cursor
@@ -1086,7 +1086,7 @@ pub async fn enumerate(
 /// this goes through the same `contain_workdir` the create path uses, which
 /// canonicalizes once and uses **that** variable. A containment check paired with a path
 /// it did not produce is not a bound, and that exact shape was two separate holes in this
-/// repo a day apart (`AGENTS.md` § A write cannot canonicalize its own target).
+/// repo a day apart (`docs/architecture.md` § Filesystem exposure).
 ///
 /// # `fidelity` is what the vendor's store holds, never `stream`
 ///

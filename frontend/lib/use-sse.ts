@@ -84,7 +84,7 @@ export function terminalStateOf(event: StreamEvent): string | null {
  * # Why `fetch` rather than `EventSource`
  *
  * The backend names every SSE frame after its event kind (`event: thinking`,
- * `event: tool_call`), because that is what `docs/api-design.md` specifies and
+ * `event: tool_call`), because that is what `docs/api/sessions.md` specifies and
  * what makes the raw stream readable with `curl`. `EventSource` dispatches by
  * that name, which makes it the wrong tool three times over:
  *

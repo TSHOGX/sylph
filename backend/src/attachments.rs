@@ -23,7 +23,7 @@ use sylph_protocol::SessionId;
 use crate::error::{Error, Result};
 use crate::models::AttachmentData;
 
-/// Per-turn limits from `docs/api-design.md`.
+/// Per-turn limits from `docs/api/files.md`.
 const MAX_ATTACHMENTS: usize = 5;
 /// Per-file ceiling, shared with the workspace upload endpoint so a browser
 /// upload has one limit however it reaches disk.

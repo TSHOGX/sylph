@@ -15,8 +15,8 @@ use sylph_protocol::{AgentName, EnvironmentId, Fidelity, NativeId, SessionId};
 ///
 /// The alternative was tempting and wrong: substituting a placeholder id would make
 /// the row readable and make every comparison against it silently false, which is
-/// precisely the failure mode the triple exists to delete (`AGENTS.md` § Two id
-/// spaces). A row that cannot be identified must not be handed out as if it could.
+/// precisely the failure mode the triple exists to delete (`docs/architecture.md`
+/// § Identity). A row that cannot be identified must not be handed out as if it could.
 pub(crate) fn triple_from_row(
     row: &sqlx::sqlite::SqliteRow,
     environment: &str,
@@ -66,7 +66,7 @@ pub struct Session {
     /// The identity triple. Serialized three ways at once, which is deliberate: a
     /// client echoes `id` back as a path segment and reads `environment`, `agent`,
     /// and `nativeId` as fields, **so it never parses the id** to learn which agent
-    /// a session belongs to (`docs/api-design.md` § A session id in a path).
+    /// a session belongs to (`docs/api/README.md` § A session id in a path).
     #[serde(flatten, with = "session_id_fields")]
     pub id: SessionId,
     pub workdir: String,
@@ -147,7 +147,7 @@ impl Session {
 
 /// What a client asks for when starting a session.
 ///
-/// **This starts an agent** (`docs/api-design.md` § `POST /api/v1/sessions`). There is
+/// **This starts an agent** (`docs/api/sessions.md` § `POST /api/v1/sessions`). There is
 /// no id to supply, because a session has no identity until an agent has given it
 /// one — which is why `nativeId` is absent here and present on the adopt request.
 #[derive(Debug, Deserialize)]
