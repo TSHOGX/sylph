@@ -191,8 +191,8 @@ reader wants.
 - [**Frontend Architecture**](docs/frontend-architecture.md) — How the frontend is built
 - [**UI Layout**](docs/ui-layout.md) — What the interface is: panes, surfaces, tokens
 - [**Roadmap**](docs/roadmap.md) — Project status and what is next
-- [**API Design**](docs/api-design.md) — REST endpoints and SSE streaming
-- [**Database Schema**](docs/database-schema.md) — SQLite schema and migrations
+- [**API**](docs/api/README.md) — REST endpoints and SSE streaming, one file per resource
+- [**Database Schema**](docs/database-schema.md) — The journal, and the reasoning behind its shape
 
 See [**AGENTS.md**](AGENTS.md) for the project's development rules and conventions.
 

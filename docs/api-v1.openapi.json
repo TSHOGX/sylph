@@ -53,7 +53,7 @@
     "/api/v1/config": {
       "get": {
         "summary": "Read what configuration resolved to",
-        "description": "Returns every resolved setting with the source that supplied it,. The same report `sylph-web-backend doctor` renders, served so the terminal and the settings panel cannot disagree. It exists because every failure in this area has one shape: a path resolves somewhere nothing lives, the server starts, /health reports fine, and the symptom appears layers away as a dead slash key. There is no adapter directory to report: adapters are compiled in, so which agents exist is answered per environment by GET /environments. A resolved value alone cannot distinguish a wrong path from a path that is not being read, so each entry names its source and the variable that overrides it. Read-only, deliberately: paths.browse_roots bounds where a spawned agent's current_dir may be, and therefore where arbitrary code may run, so a loopback HTTP surface able to rewrite it is a materially larger threat model than one that displays it — the config file stays the durable, reviewable record. Authenticated, since every value is an absolute local filesystem path.",
+        "description": "Returns every resolved setting with the source that supplied it. The same report `sylph-server doctor` renders, served so the terminal and the settings panel cannot disagree. It exists because every failure in this area has one shape: a path resolves somewhere nothing lives, the server starts, /health reports fine, and the symptom appears layers away as a dead slash key. There is no adapter directory to report: adapters are compiled in, so which agents exist is answered per environment by GET /environments. A resolved value alone cannot distinguish a wrong path from a path that is not being read, so each entry names its source and the variable that overrides it. Read-only, deliberately: paths.browse_roots bounds where a spawned agent's current_dir may be, and therefore where arbitrary code may run, so a loopback HTTP surface able to rewrite it is a materially larger threat model than one that displays it — the config file stays the durable, reviewable record. Authenticated, since every value is an absolute local filesystem path.",
         "responses": {
           "200": {
             "description": "The resolved configuration and its provenance",
@@ -1277,7 +1277,7 @@
     "/api/v1/sessions/{sessionId}/capabilities": {
       "get": {
         "summary": "What this session's agent can do",
-        "description": "Establishes a link as a side effect. A failed handshake is 200 with an unavailable control facet and a typed reason, not 5xx: it is the agent's failure, not the request's, and the session's history stays readable. Do not cache indefinitely — see api-design.md § Links.",
+        "description": "Establishes a link as a side effect. A failed handshake is 200 with an unavailable control facet and a typed reason, not 5xx: it is the agent's failure, not the request's, and the session's history stays readable. Do not cache indefinitely — see api/sessions.md § Links.",
         "parameters": [
           {
             "name": "sessionId",

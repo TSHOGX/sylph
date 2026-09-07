@@ -41,21 +41,21 @@ Then, by subject:
 | Where a session's work runs, and the wire to it | [environments.md](environments.md) |
 | What an adapter may send, and when | [session-protocol.md](session-protocol.md) |
 | A vendor CLI's shapes, quirks, and control surface | [agents.md](agents.md) |
-| Endpoint contracts | [api-design.md](api-design.md) (evolving source); [api-v1.openapi.json](api-v1.openapi.json) (generated schema snapshot) |
-| Tables, indexes, migrations | [database-schema.md](database-schema.md) |
+| Endpoint contracts | [api/](api/README.md) |
+| Tables, indexes, ancestry | [database-schema.md](database-schema.md) |
 | How history is kept, replayed, pruned | [storage.md](storage.md) |
 | How the frontend is built | [frontend-architecture.md](frontend-architecture.md) |
 | Panes, surfaces, components, tokens | [ui-layout.md](ui-layout.md) |
 | Where files live, what a setting does | [configuration.md](configuration.md) |
 | How to install and deploy | [installation.md](installation.md) |
 | How to develop locally | [development.md](development.md) |
+| Why a vendor claim is believed | [measurements/](measurements/codex/README.md) |
+| A decision's context and rejected alternatives | [adr/](adr/) |
 
 ## Principles
 
 **One authority.** The server's store is the record. Everything else is a source it
-ingests from or a projection it serves. `AGENTS.md` § Compatibility governs the
-consequence: no other consumer exists, so schemas and wire formats change in place,
-and compatibility code is forbidden rather than merely discouraged.
+ingests from or a projection it serves.
 
 **Local-first is about dependencies, not geography.** A server on a remote host is
 still local-first, because the authority is its own store and not somebody else's API.
