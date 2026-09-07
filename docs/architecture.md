@@ -296,6 +296,52 @@ This is also what makes "another machine is read-only" fall out rather than bein
 rule anyone writes: **control is available exactly while that environment's envagent
 is connected.** Disconnected, observe still answers from the server's store.
 
+### A facet describes the environment, never the caller
+
+*Decision.* Both facets answer **"can Sylph drive this"** — a property of the
+environment and the vendor. Every `UnavailableReason` is of that kind: no CLI on that
+machine, no envagent connected, no channel this vendor offers a second party, a handshake
+that would not come up. **So one session has one link state, and every observer sees the
+same one.**
+
+A caller's own authorization is a *different* fact and gets a different field. When
+[ADR-0006](adr/0006-environment-authority-and-capability-grants.md) made grants revocable,
+the obvious implementation was to move the `control` facet to unavailable on revocation —
+and that would have made `control.available` answer two questions at once: *can Sylph
+drive this* and *may **you** drive it*. The first is shared; the second is per-Subject. The
+same session would then hold two different link states depending on who asked, and the
+invariant one paragraph above would be false.
+
+This is the rule AGENTS.md states generally — **a state carrying two facts cannot be
+waited on** — and it carries the same warning: the symptom never appears in the code that
+conflated them. Here the observable damage would have been in the cache. `no_agent` and
+`not_ours_to_drive` are declared cacheable like a success because no retry changes them
+(`docs/api-design.md` § `GET /api/v1/sessions/{id}/link`), and a withdrawn grant cached
+under that rule is a denial outliving the grant it describes — while a *newly issued* grant
+would not take effect until the tab reloaded. Two facts, one field, one cache policy, and
+only one of them is cacheable.
+
+So the wire carries three things and a client combines none of them itself:
+
+| Field | Answers | Same for every observer | Cacheable |
+| --- | --- | --- | --- |
+| `link.observe`, `link.control` | can Sylph reach it | yes | per `UnavailableReason::is_retryable` |
+| `authorization` | may this caller drive it | **no** | never |
+| `controlBlock` | the one answer a composer acts on | no, derived | never |
+
+`controlBlock` is **derived and transmitted**, not left to each client to compute, because
+one fact with two derivations diverges the moment either grows a case. It reports
+authorization before reachability — not as a severity ranking, but because telling an
+unauthorized caller that someone else's laptop is asleep answers a question they had no
+standing to ask.
+
+Revocation is therefore visible in two places, each permanent in a different sense. The
+link says only that this caller holds no grant, since revocation deletes the grant row
+(`docs/database-schema.md` § env_grants) and a deleted row cannot be distinguished from
+one never issued. What revocation *did* stays on the turn it cut short, as
+`close_reason = grant_revoked` (`docs/session-protocol.md` § Outcomes) — a record of the
+event rather than a per-caller projection of current state.
+
 ## Observation is multi-party; control is server-ordered
 
 Observation is concurrent. Multiple clients may subscribe to the same session and converge on the
@@ -392,7 +438,7 @@ That is adequate for a single-user local server and **is not an authentication
 system** — it knows a request came from a browser that completed a local handshake,
 not who is asking.
 
-Multi-user is a planned product milestone, with its boundary defined now by [ADR-0002](adr/0002-environment-workspace-subject.md): authenticated Subjects receive explicit Environment grants. Until that milestone lands, the bootstrap cookie remains a single-user development mechanism and non-loopback binding stays disabled. The future gate covers identity, transport security, CSRF, environment visibility, and who may operate an envagent. `browse_roots` remains an execution boundary enforced by the envagent.
+Multi-user is a planned product milestone, with its boundary defined now by [ADR-0002](adr/0002-environment-workspace-subject.md): authenticated Subjects receive explicit Environment grants. [ADR-0006](adr/0006-environment-authority-and-capability-grants.md) settles who may issue such a grant, and splits it into `observe` and `control` because a control grant reaches arbitrary code execution within `browse_roots` while an observe grant reads a transcript. Until that milestone lands, the bootstrap cookie remains a single-user development mechanism and non-loopback binding stays disabled. The remaining gate covers identity, transport security, and CSRF. `browse_roots` remains an execution boundary enforced by the envagent.
 
 Binding to a non-loopback interface stays a separate, explicit change and must not
 be reached by relaxing the bind address.

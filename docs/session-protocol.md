@@ -574,6 +574,72 @@ worse than a recorded failure. Keep `abandoned` distinct from `failed`: the serv
 closing a trajectory an adapter left open means nobody reported an outcome, and
 colouring that red reports an interrupted turn as a broken one.
 
+**A close reason is a closed vocabulary, `CloseReason`, and it is not the status.** The
+status says what the record became; the reason says what cut it short. They are
+independent, and conflating them is what the first version of this section did: the
+server's closer wrote `interrupted`, `abandoned`, `failed` into the reason field, which
+are the three outcomes re-spelled. A reason that restates its own status answers no
+question — and the two values other sections of these specs already depend on could not
+be expressed at all.
+
+| Value | Producer | What a reader learns |
+| --- | --- | --- |
+| `interrupted` | a person, through stop | the stop worked; the only value that is not a diagnostic |
+| `spool_full` | the envagent, on overflow | the buffer refused bytes the vendor kept (`docs/environments.md` § Overflow is a fact in the record) |
+| `grant_revoked` | the server, on revocation | authorization ended mid-flight ([ADR-0006](adr/0006-environment-authority-and-capability-grants.md) § Revocation reaches work already in flight) |
+| `link_lost` | the server, when an envagent's connection drops | nobody was draining the spool for the rest of the turn |
+| `agent_exited` | the supervisor, on an unexplained process exit | the vendor died without answering |
+| `adapter_silent` | the server's terminal sweep | the adapter opened a trajectory and never closed it |
+
+**Every value has a named producer, and no value is reserved speculatively.** A variant
+with no producer is one every renderer must handle and no test can reach, which is how a
+vocabulary acquires values that are always dead.
+
+The vocabulary is authoritative in `crates/protocol`, alongside `UnavailableReason`, for
+the same reason that one is: a reason spelled in one layer and matched in another is a
+comparison that silently never fires. `interrupted` is the one value a renderer must not
+colour as a fault.
+
+**A turn carries `close_reason`; a server-closed trajectory carries the same vocabulary in
+`data.reason` beside `data.closedBy`.** One vocabulary, two carriers, because a turn and a
+trajectory are cut short by the same six conditions — a second per-level vocabulary would
+diverge as soon as either grew a case.
+
+**Three of these conditions leave the turn's trajectories `abandoned` rather than
+`failed`**, because the vendor reported no failure: a full spool, a revoked grant, and a
+lost link.
+
+Note the level carefully, because the sections that introduced these two conditions both
+got it wrong and said "closes the turn `abandoned`". `abandoned` is a **trajectory**
+outcome; it is not in the `turns.status` vocabulary
+(`docs/database-schema.md` § turns), where the four terminal values are `completed`,
+`failed`, `cancelled`, and `interrupted`. So a spool that fills sets
+`turns.close_reason = spool_full` with a terminal `status`, and the trajectories the sweep
+closes carry `abandoned`. Writing `abandoned` at the turn level names a status that does
+not exist there — and a `CHECK` constraint rejecting it is the *good* outcome; the bad one
+is a renderer switching on a value it can never receive, which is a branch that never
+fires and nothing reports.
+
+Each stays non-final at the trajectory level, so work already dispatched that later
+produces a result is still recorded against the turn that owns it. A reason is required
+whenever a turn ends short: a turn that stops without saying why is indistinguishable from
+one that finished, which is the reading a renderer will otherwise give it.
+
+**Whether the vendor still holds bytes Sylph never received is a property of the reason,
+declared once.** `spool_full`, `grant_revoked`, `link_lost`, and `agent_exited` all mean
+the vendor's own store kept accumulating past the cut, so `adopt` on that session recovers
+it — the same mechanism that brings in any native history. `interrupted` and
+`adapter_silent` do not: the work ended, or the adapter had every byte and merely failed to
+emit a close, so re-projection yields exactly what is already recorded. Declaring this
+beside the vocabulary rather than inside a renderer is what keeps a second consumer from
+re-deriving it differently.
+
+`grant_revoked` is in that first group, which is deliberate. It is a fact about the
+*record*, not a prediction that the caller reading it may act on it — whether anyone may
+run `adopt` is the grant layer's question, and answering it in a field that describes
+durable history would put per-caller authorization into the record
+(`docs/architecture.md` § Identity).
+
 **A collapsed subtree must report what it hides.** Hiding a delegation's work by
 default is only defensible if a failure three levels down is still visible at the top;
 otherwise the user must open every branch to learn something broke, which is the work

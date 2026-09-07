@@ -10,9 +10,13 @@ two provisioning paths.
 The `crates/envagent` binary now implements the local v1 framing, durable spool,
 reconnect epochs, path containment, credential storage, and adapter hosting. The
 server bridge accepts the same framed connection when `SYLPH_ENV_LISTEN` is set.
-TLS termination and remote provisioning remain explicit follow-on work. Multi-user access is defined by
-[ADR-0002](adr/0002-environment-workspace-subject.md) but not yet implemented; the development
-transport is loopback-only.
+The transport is loopback-only until TLS lands: a non-loopback address is refused
+outright rather than downgraded, so the day it becomes reachable is a deliberate one.
+Milestone 3 owns that work along with authentication and grant enforcement, and
+Milestone 6 depends on it, since a Khora sandbox is necessarily off-host. Multi-user
+access is defined by [ADR-0002](adr/0002-environment-workspace-subject.md) and
+[ADR-0006](adr/0006-environment-authority-and-capability-grants.md); remote provisioning
+remains follow-on work.
 
 Native adopt/watch events without a server turn id are assigned one server-owned
 container when first ingested. This is not a synthesized vendor bracket: the
@@ -96,6 +100,39 @@ it is authoritative for nothing. Two durable records would reintroduce the "whic
 copy is the truth" question the authority model exists to answer. Its only contract
 is: nothing leaves it until the server has it.
 
+### Overflow is a fact in the record, not only in a log
+
+Stopping the agent bounds the damage; it does not describe it. A turn cut short by a full
+spool otherwise reaches the server as an ordinary turn that happens to be short, and
+nothing in the record distinguishes it from one that simply finished — the expensive shape,
+because it reads as a measurement rather than as an error.
+
+So overflow records `close_reason = spool_full` on the turn, a value of the `CloseReason`
+vocabulary (`docs/session-protocol.md` § Outcomes, and what a turn may close), and the
+trajectories the sweep closes carry `abandoned` rather than `failed`: the vendor reported
+no failure, and `abandoned` already carries "nobody reported an outcome" while staying
+non-final. A renderer therefore says the turn stopped because the spool filled, and a
+reader who asks "is anything missing here" gets an answer from the record instead of from a
+log on another machine.
+
+The two levels are worth keeping straight, since an earlier draft of this section put
+`abandoned` on the turn: the turn's own terminal statuses are `completed`, `failed`,
+`cancelled`, and `interrupted` (`docs/database-schema.md` § turns), and `abandoned` is a
+trajectory outcome. The reason is what the turn carries.
+
+The reason is one of a closed set rather than a string this section invents, because a
+dropped connection produces the same shape one layer over — `link_lost`, the envagent's
+connection gone while its agent kept producing — and two sections each naming their own
+reason is how one vocabulary becomes two that disagree.
+
+Two consequences follow. Stopping the agent is what the envagent must do — a reader loop
+that exits while the agent keeps producing converts a bounded gap into an unbounded one.
+And the vendor's own store still holds what the spool refused, so recovery is `adopt` on
+that session, which is the same mechanism that brings in any native history. That
+recoverability is not restated per condition: it is declared once as a property of the
+reason, since `spool_full`, `link_lost`, `agent_exited`, and `grant_revoked` all leave the
+vendor's store ahead of Sylph's, while a stop does not.
+
 This is the same shape as bringing in native sessions, differing only in what
 travels — live events rather than parsed history — which is why there is one
 mechanism and not two.
@@ -112,7 +149,7 @@ committed data in an orphaned WAL beside a database that no longer references it
 `PRAGMA wal_checkpoint(TRUNCATE)`, close every connection, move the main file alone,
 delete the emptied sidecars.
 
-## Pairing, and who owns an envagent
+## Pairing, and who may authorize an envagent
 
 An envagent joins by pairing, not by holding a long-lived shared secret in a config
 file:
@@ -133,12 +170,67 @@ metadata.
 *Measured 2026-08-27:* `codex remote-control pair` uses short-lived pairing codes for
 the same purpose, which is evidence the shape works rather than a guess.
 
-An envagent is an execution identity, not a user's personal agent. Multi-user access is
-granted explicitly from a Subject to an Environment; the grant covers the environment's
-sessions, native history, workspaces, and available control. This is a deliberate trust
-boundary, defined in [ADR-0002](adr/0002-environment-workspace-subject.md), and must be
-disclosed during pairing. Authentication, grant enforcement, and transport hardening remain
-Milestone 3 work in [roadmap.md](roadmap.md).
+An envagent is an execution identity, not a user's personal agent.
+[ADR-0006](adr/0006-environment-authority-and-capability-grants.md) is authoritative for
+who may authorize a Subject on it; the rest of this section is the resulting flow.
+
+### Authority is fixed at pairing
+
+Pairing derives the environment's `grant_authority` from how it came to exist and never
+changes it afterwards. `machine` means the OS-user of that machine authorizes; `server`
+means a Subject flagged `is_admin` does
+(`docs/api-design.md` § The server administration capability), which is what a Khora
+sandbox needs because no user is sitting beside it.
+
+### Three capabilities, two of them grantable
+
+`observe` reads. `control` drives a session and creates one within `browse_roots`.
+`administer` — editing `browse_roots`, agent configuration, issuing and revoking grants,
+unpairing — is the authority root itself and is never granted. So a Subject who holds a
+grant cannot pass one on: every new grant returns to the machine or to an `is_admin`
+Subject.
+
+`administer` is ungrantable, and that is a separate question from whether an operation is
+reachable over HTTP. Its carrier splits by where the state lives: `browse_roots` and agent
+configuration are this envagent's own config and have no route, because only the machine
+holding a path can canonicalize it; revoking a grant and unpairing change server tables and
+are server routes gated by the authority root.
+`docs/api-design.md` § `administer` is ungrantable, which is not the same as having no route
+is authoritative for both the split and each gate.
+
+The risk distinction and containment argument live in [ADR-0006](adr/0006-environment-authority-and-capability-grants.md) § Decisions; this section defines the wire and provisioning behavior.
+
+### Invite adds a Subject to an environment that already exists
+
+`sylph-envagent invite --capability observe --ttl 15m` mints a code; the Subject redeems it
+while authenticated, and the server records the grant. The command **runs on the machine and
+requires that machine's OS-user** — `sylph.env.v1` carries no message that issues a grant,
+because a wire message would let one compromised envagent admit new Subjects to itself.
+
+Invite and pair share the code shape and stay separate flows. An invite reaching the pairing
+path would mint a second environment id for a machine that already has one, and the id is a
+component of session identity.
+
+The server validates five properties on redemption: environment scope, capability, expiry,
+single consumption, and issuer provenance. Scope is the load-bearing one — a grant asserts
+only over the environment that issued it.
+
+### Revoking reaches work already in flight
+
+Revocation refuses new control, moves the link's `control` facet to unavailable with a typed
+reason, and records any dispatched vendor operation that cannot be recalled as `abandoned`
+with revocation as its reason. See [session-protocol.md](session-protocol.md) § Outcomes for the single definition of `abandoned`; revocation uses that vocabulary for in-flight work.
+
+### Disclosure happens twice
+
+Pairing states that this machine's sessions, transcripts, and native history will reach the
+server. An invite states the concrete reach being handed over: the resolved `browse_roots`,
+the agent CLIs present, the raw transcript exposure, and the capability conveyed. Pairing is a
+user configuring their own machine; an invite gives that reach to someone else, and only
+resolved values describe it truthfully.
+
+Authentication, grant enforcement, and transport hardening are Milestone 3 work in
+[roadmap.md](roadmap.md).
 
 ## How an envagent comes to exist
 

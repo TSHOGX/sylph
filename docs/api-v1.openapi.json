@@ -3152,7 +3152,7 @@
           "link",
           "supports"
         ],
-        "description": "Live link state. Observe and control are independent facets, each available or unavailable with a typed reason. An empty `supports` means Sylph cannot reach the agent, never that the agent has no capabilities.",
+        "description": "Live link state. Observe and control are independent facets, each available or unavailable with a typed reason. An empty `supports` means Sylph cannot reach the agent, never that the agent has no capabilities. The facets describe the environment and the vendor, never the caller: they read the same for every observer, which is what makes them cacheable. The caller's own authorization is `authorization`, and `controlBlock` is the derived answer a composer acts on.",
         "properties": {
           "link": {
             "type": "object",
@@ -3161,6 +3161,17 @@
               "observe": { "$ref": "#/components/schemas/LinkFacet" },
               "control": { "$ref": "#/components/schemas/LinkFacet" }
             }
+          },
+          "authorization": {
+            "type": "string",
+            "enum": [
+              "not_granted",
+              "expired"
+            ],
+            "description": "Absent exactly when this caller holds `control` on the environment. Per-Subject, so it is NEVER cached — unlike a facet reason. No value distinguishes revoked from never-granted: revocation deletes the grant row, so the store cannot tell them apart. What a revocation did stays on the turn it cut short, as `closeReason = grant_revoked`."
+          },
+          "controlBlock": {
+            "$ref": "#/components/schemas/ControlBlock"
           },
           "agent": {
             "type": "string"
@@ -3192,9 +3203,45 @@
               "not_ours_to_drive",
               "handshake_failed"
             ],
-            "description": "Present exactly when available is false. Retryability is defined by the protocol vocabulary."
+            "description": "Present exactly when available is false. Every value is a property of the environment or the vendor, never of the caller. Retryability is defined by the protocol vocabulary."
           }
         }
+      },
+      "ControlBlock": {
+        "type": "object",
+        "required": ["kind", "reason"],
+        "description": "Why this caller may not send a turn. Absent when control is admitted. Derived on the server rather than folded by each client, so the disclosure order is decided once: authorization is reported before reachability, so an unauthorized caller learns nothing about whether someone else's machine is awake. Never cached.",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["unauthorized", "unavailable"],
+            "description": "Which question failed. A renderer branches on this rather than on which optional field happens to be populated."
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "not_granted",
+              "expired",
+              "no_agent",
+              "environment_unreachable",
+              "not_ours_to_drive",
+              "handshake_failed"
+            ],
+            "description": "An `authorization` value when kind is `unauthorized`, an `UnavailableReason` when kind is `unavailable`. The two vocabularies share no spelling, so a client switching on one cannot silently match the other's value."
+          }
+        }
+      },
+      "CloseReason": {
+        "type": "string",
+        "enum": [
+          "interrupted",
+          "spool_full",
+          "grant_revoked",
+          "link_lost",
+          "agent_exited",
+          "adapter_silent"
+        ],
+        "description": "Why a turn or a server-closed trajectory ended without its producer reporting an outcome. Required whenever a turn ends short. This is NOT the status: the status says what the record became, the reason says what cut it short, and a reason that restates its status answers no question. `interrupted` is the only value that is not a diagnostic and must not be coloured as a fault. `spool_full`, `grant_revoked`, `link_lost`, and `agent_exited` mean the vendor's own store kept accumulating past the cut, so `adopt` recovers it; `interrupted` and `adapter_silent` do not. Authoritative in crates/protocol; see docs/session-protocol.md § Outcomes."
       },
       "NativeSessionRow": {
         "type": "object",
@@ -3875,6 +3922,11 @@
           "errorMessage": {
             "type": "string",
             "nullable": true
+          },
+          "closeReason": {
+            "allOf": [{ "$ref": "#/components/schemas/CloseReason" }],
+            "nullable": true,
+            "description": "Null exactly when the turn ran to its own end; required whenever it stopped short. Answers a different question from `status`: the status says what the record became, this says what cut it short. Note the level -- `abandoned` is a trajectory outcome, and is neither a value here nor a `status`."
           },
           "createdAtMs": {
             "type": "integer",

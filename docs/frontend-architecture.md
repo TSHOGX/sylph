@@ -625,39 +625,74 @@ A banner promising a session would not be reset described something nothing did,
 such session, forever. What replaces both is smaller and says more — the two facets below,
 and `fidelity`.
 
-### Two facets, each with a reason
+### Two facets, each with a reason — and one field that is not a facet
 
 A session's drivability is a property of its **link**, not of the session, and it has two
-independent halves (`docs/architecture.md` § One link, two typed capability facets):
+independent halves (`docs/architecture.md` § One link, two typed capability facets). But
+the composer does not read the facet directly: it reads `controlBlock`, the server-derived
+answer that folds the caller's authorization together with Sylph's reach.
 
 ```tsx
 // Not a boolean, and not a third link state. The vendors do not sort into three
 // buckets: a terminal `pi` is observable and undrivable, `codex` is both, and
 // `claude` is observable and semi-drivable behind a human approval gate.
-function DriveState({ link }: { link: LinkState }) {
-  if (link.control.available) return null
+//
+// Read `controlBlock`, not `link.control`. A facet says whether *Sylph* can reach the
+// environment — the same answer for every observer — while a grant says whether *you*
+// may drive it. Folding them here would put the disclosure order in the renderer, and
+// each renderer would pick its own.
+function DriveState({ block }: { block: ControlBlock | null }) {
+  if (!block) return null
 
-  const reason = {
-    environment_unreachable: "This machine is offline. History reads; nothing can be sent.",
-    not_ours_to_drive: "Running in a terminal. This agent offers no channel to a second party.",
-    no_agent: "The agent CLI is not installed on that machine.",
-  }[link.control.reason]
+  if (block.kind === "unauthorized") {
+    // Deliberately says nothing about the machine: an unauthorized caller has no
+    // standing to learn whether someone else's laptop is awake.
+    return (
+      <Notice icon="lock">
+        {{
+          not_granted: "You do not have control access to this environment.",
+          expired: "Your control access to this environment has expired.",
+        }[block.reason]}
+      </Notice>
+    )
+  }
 
-  return <Notice icon="eye">{reason}</Notice>
+  return (
+    <Notice icon="eye">
+      {{
+        environment_unreachable: "This machine is offline. History reads; nothing can be sent.",
+        not_ours_to_drive: "Running in a terminal. This agent offers no channel to a second party.",
+        no_agent: "The agent CLI is not installed on that machine.",
+        handshake_failed: "The agent would not start on that machine.",
+      }[block.reason]}
+    </Notice>
+  )
 }
 ```
 
-Two rules the composer must follow, both learned from shipped defects:
+Three rules the composer must follow, all learned from shipped defects:
 
 - **An empty capability surface means "we cannot reach it", never "there is nothing
   there".** Those coincide for a session Sylph launched and are opposite for one running
   under someone else.
-- **Do not cache a failed reach forever.** `environment_unreachable` and
-  `not_ours_to_drive` are cacheable — no retry wakes a laptop or teaches a vendor a new
-  channel — but a failed handshake against a *reachable* environment must be allowed to go
-  stale. Caching all of them under `staleTime: Infinity` made one failure permanent for
-  the life of the page, which is what made a deterministic config problem present as
-  intermittent.
+- **Do not cache a failed reach forever, and never cache authorization at all.**
+  `not_ours_to_drive` and `no_agent` are cacheable — no retry teaches a vendor a new
+  channel or installs a CLI — but `environment_unreachable` and `handshake_failed` must be
+  allowed to go stale, because a laptop wakes and an envagent redials. Caching all of them
+  under `staleTime: Infinity` made one failure permanent for the life of the page, which is
+  what made a deterministic config problem present as intermittent. `is_retryable` is the
+  single definition and this list mirrors it rather than re-deriving it.
+- **`authorization` and `controlBlock` are never cached under that rule**, because it is a
+  rule about facets and these are not facets. A withdrawn grant held like a success is a
+  denial outliving the grant it describes; a newly issued grant held the same way does not
+  take effect until the tab reloads. One is a stale refusal and the other is a stale
+  permission, and only the second is a security defect — which is why the field is separate
+  rather than sharing a policy that is right for a machine and wrong for a grant.
+
+An earlier draft of this section listed `environment_unreachable` among the cacheable
+reasons, disagreeing with `is_retryable` and with `docs/api-design.md`. That is the failure
+mode a mirrored rule invites: three copies, and the wrong one reads as authoritative
+because it is the one beside the code.
 
 ### Fidelity gates what may be drawn
 
@@ -840,8 +875,7 @@ the number that triggers a look, so growth is deliberate rather than discovered.
 **No figure is quoted here.** `scripts/measure-bundle.sh` takes the measurement, and it
 takes a `--route` because the routes are not comparable: the session route legitimately
 carries the timeline, the delegation tree, and the overview, so quoting one route's figure
-against another's budget has already caused confusion. `docs/roadmap.md` § Current state
-carries the current numbers.
+against another's budget has already caused confusion. The measurement script is the source for current numbers; the roadmap records sequencing, not bundle measurements.
 
 ```sh
 cd frontend && SYLPH_WEB_BACKEND=http://localhost:4317 npm run build

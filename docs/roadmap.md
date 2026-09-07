@@ -32,17 +32,32 @@ context: native correlation, dynamic source reading, and Codex watcher parity.
 **Exit gate:** session identity remains `(environment, agent, native_id)`; live and reload produce
 the same tree; remote path checks never occur in the server.
 
-## Milestone 3 — authentication and environment access
+## Milestone 3 — authentication, environment access, and envagent transport
 
 Replace the bootstrap cookie with registered-user Subjects, login/logout, and explicit
-`environment_access` grants. Filter sessions, search, workspaces, health, files, and raw records
-by accessible environments. Pairing may grant the pairing Subject. Environment access deliberately
-exposes all data and available control for that OS-user environment; directory ACLs and session
-owners are deferred.
+`environment_access` grants under [ADR-0006](adr/0006-environment-authority-and-capability-grants.md):
+`grant_authority` per environment, `observe`/`control` as separate grants, `administer` reserved to
+the authority root, invite issued locally on the machine, and the five redemption checks. Filter
+sessions, search, workspaces, health, files, and raw records by capability. Harden the
+`sylph.env.v1` transport with TLS so an envagent can pair from another machine.
 
-**Exit gate:** unauthenticated requests cannot read business data; two independent browser
-contexts observe the same authorized environment; unauthorized environments are absent from every
-read and control surface.
+Two pieces the authority model needs and nothing else provides. **The `subjects.is_admin` flag**,
+which is the authority root for every `grant_authority = server` environment — ADR-0006 assigns a
+whole class of power to it, so a milestone that ships grants without it leaves the `server` root
+unimplemented and its routes gated by whatever the bootstrap allowed
+(`docs/api-design.md` § The server administration capability). And the **two authority-root-gated
+routes**, grant revocation and unpairing: ungrantable is not the same as unreachable, and
+`DELETE /api/v1/environments/{id}` exists today with no gate defined for it.
+
+**Exit gate:** unauthenticated requests cannot read business data; two independent browser contexts
+observe the same authorized environment; unauthorized environments are absent from every read and
+control surface; an `observe` grant reaches no control route; revoking a grant refuses new control
+and lands in-flight vendor work as `abandoned` on a turn carrying `close_reason = grant_revoked`;
+two Subjects with different grants on one environment receive **identical** `link` facets and
+differing `controlBlock` values; an `is_admin` Subject can revoke a grant and unpair a `server`
+environment and can read no session it holds no `observe` grant on; a `machine` environment refuses
+both routes to a browser session with no local confirmation code; an envagent pairs and reconnects
+over TLS from a second host.
 
 ## Milestone 4 — lossless native ingestion
 
@@ -66,15 +81,19 @@ E2E covers ordering, queue rejection, and simultaneous approval.
 
 ## Milestone 6 — Khora sandbox and delegated execution
 
-Provision sandboxes as ordinary Environments with envagents. Add lifecycle, pause/resume, health,
-cost/retention policy, and completion notification. Do not introduce a sandbox-specific Session or
-Workspace model.
+Provision sandboxes as ordinary Environments with envagents, on `server` grant authority since no
+OS-user sits beside one. Add lifecycle, pause/resume, health, cost/retention policy, and completion
+notification. Do not introduce a sandbox-specific Session or Workspace model.
+
+Depends on the Milestone 3 transport: a sandbox is off-host, so it cannot dial in until the wire
+carries TLS.
 
 ## Milestone 7 — optional administration and finer permissions
 
-Only after real requirements: raw deletion and audit, fine-grained capabilities, sharing UI,
-directory scopes, separate observe/control grants, and controller handoff. Each addition requires
-its own ADR and threat-model review.
+Only after real requirements: raw deletion and audit, capabilities finer than the three in
+[ADR-0006](adr/0006-environment-authority-and-capability-grants.md), sharing UI, directory scopes,
+delegable granting, and controller handoff. Each addition requires its own ADR and threat-model
+review.
 
 ## Issue #1 disposition
 

@@ -20,6 +20,7 @@ below; implementation work is ordered by [roadmap.md](roadmap.md).
 - [ADR-0004](adr/0004-concurrent-control-ordering.md) — concurrent control requests and
   server ordering.
 - [ADR-0005](adr/0005-raw-retention.md) — lossless raw retention and future deletion.
+- [ADR-0006](adr/0006-environment-authority-and-capability-grants.md) — environment authority and capability grants.
 
 ## Read in this order
 
@@ -40,7 +41,7 @@ Then, by subject:
 | Where a session's work runs, and the wire to it | [environments.md](environments.md) |
 | What an adapter may send, and when | [session-protocol.md](session-protocol.md) |
 | A vendor CLI's shapes, quirks, and control surface | [agents.md](agents.md) |
-| Endpoint contracts | [api-design.md](api-design.md), [api-v1.openapi.json](api-v1.openapi.json) |
+| Endpoint contracts | [api-design.md](api-design.md) (evolving source); [api-v1.openapi.json](api-v1.openapi.json) (generated schema snapshot) |
 | Tables, indexes, migrations | [database-schema.md](database-schema.md) |
 | How history is kept, replayed, pruned | [storage.md](storage.md) |
 | How the frontend is built | [frontend-architecture.md](frontend-architecture.md) |

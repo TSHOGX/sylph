@@ -3,7 +3,7 @@
 Sylph Web exposes a versioned REST API with SSE streaming for real-time updates.
 
 This is a reference organized by resource, searched rather than read end to end.
-`docs/api-v1.openapi.json` is the machine-readable form and is authoritative for schemas.
+`docs/api-v1.openapi.json` is the generated machine-readable schema snapshot; this document is the evolving endpoint contract.
 
 ## Design Principles
 
@@ -315,7 +315,7 @@ directly-connected environment would promise AFK continuity it cannot keep.
 **Availability is `PATH`, not a handshake.** An agent is available when its CLI is on
 that machine's `PATH` and reports a version. There is no discovery pass, no adapter
 directory, and therefore no `broken` map — the two total failures that mechanism produced
-are recorded in `docs/session-protocol.md` § What changed. "Why can I not use this
+are recorded in `docs/session-protocol.md` § Availability and discovery. "Why can I not use this
 agent" now has one answer with one fix.
 
 **`flags` is the spawn-time option schema** — what can be chosen before a session
@@ -343,10 +343,39 @@ reused.
 
 #### `DELETE /api/v1/environments/{id}`
 
-Unpair. Sessions recorded from that environment stay readable — their history is in the
+Unpair. **Gated by the environment's authority root, not by any grant** — a `machine`
+environment requires a confirmation code minted by a local command on that machine, a
+`server` one requires an `is_admin` Subject (§ `administer` is ungrantable, which is not the
+same as having no route). A browser session alone never suffices on a `machine`
+environment, because unpairing is the one operation that ends Sylph's reach into someone's
+computer.
+
+Sessions recorded from that environment stay readable — their history is in the
 server's store — but their **control** facet reports unavailable, and retention treats
 them as terminal, because no reachable native source can confirm a bound
 (`docs/storage.md`).
+
+The facet is the right carrier here and the wrong one for revocation, which is worth
+noting because the two look alike. Unpairing removes the *environment's* reachability, so
+it reads identically for every observer; revoking a grant removes one Subject's
+authorization and reads differently per caller
+(`docs/architecture.md` § A facet describes the environment, never the caller).
+
+#### `DELETE /api/v1/environments/{id}/grants/{subject}`
+
+Revoke a grant. Same gate as unpairing, since issuing and revoking are the same authority.
+
+Three effects, in this order: the row is deleted from `env_grants`; new control from that
+Subject is refused; and in-flight vendor work whose `origin_subject` is that Subject leaves
+its trajectory `abandoned`, on a turn carrying `close_reason = grant_revoked`
+([ADR-0006](adr/0006-environment-authority-and-capability-grants.md) § Revocation reaches
+work already in flight). Work from other Subjects on the same environment is untouched.
+
+The route exists here rather than as a local command because `env_grants` is a server
+table, and a local command cannot delete a row it does not hold
+(`docs/architecture.md` § One authority). Issuing an invite is the mirror case and goes the
+other way for the same reason it is out-of-band at all: a wire message that issues a grant
+lets one compromised envagent admit Subjects to itself.
 
 The routes are implemented by the server bridge. The local in-process fixture
 remains available for tests; a paired installation is selected by its opaque
@@ -899,6 +928,35 @@ offline for the life of the page.
 client mirrors it rather than re-deriving the rule inside a cache policy. The vocabulary
 itself is authoritative in `crates/protocol/src/link.rs`.
 
+**That policy is sound only because a facet describes the environment rather than the
+caller**, and this is where a facet's scope stops being an abstract distinction. Every
+reason above is observer-independent, so caching one is caching a fact about a machine.
+The caller's own authorization is a sibling field and is **never cached** — a withdrawn
+grant held under the rule above would be a denial outliving the grant it describes, and a
+newly issued grant would not take effect until the tab reloaded
+(`docs/architecture.md` § A facet describes the environment, never the caller).
+
+So the response carries three fields with two cache rules:
+
+| Field | Shape | Cache |
+| --- | --- | --- |
+| `link.observe`, `link.control` | `{available, reason?}` with `reason` an `UnavailableReason` | per `is_retryable` |
+| `authorization` | absent when the caller holds `control`; otherwise `not_granted` or `expired` | never |
+| `controlBlock` | absent when control is admitted; otherwise `{kind, reason}` with `kind` of `unauthorized` or `unavailable` | never |
+
+`controlBlock` is derived on the server and reports authorization **before** reachability —
+not a severity ranking, but a disclosure rule: an unauthorized caller learns nothing about
+whether someone else's machine is awake. A client renders `controlBlock` and does not fold
+the other two itself, because one fact with two derivations diverges the moment either
+grows a case.
+
+`authorization` distinguishes `not_granted` from `expired` because the remedy differs — a
+first issuance against a renewal — and stops there. It does **not** distinguish "revoked"
+from "never granted": revocation deletes the row
+(`docs/database-schema.md` § env_grants), so the two are indistinguishable in the store and
+a third value would be a claim the store cannot support. What revocation did stays on the
+turn it cut short, as `close_reason = grant_revoked`.
+
 #### `POST /api/v1/sessions/{id}/link`
 
 Establishes a link eagerly and returns `LinkState`. Worth its own operation because
@@ -1031,7 +1089,7 @@ would let two frontends disagree about what the same history means.
 The inversion: the agent asks, and a human answers. A request is a resource rather
 than a stream message, because the agent blocks until it is answered — so it has to
 outlive every client and be answerable from a frontend that attached an hour later.
-`docs/session-protocol.md` § Requests the adapter sends governs the wire shape.
+`docs/session-protocol.md` § Requests: the agent asks, a human answers governs the wire shape.
 
 #### `GET /api/v1/sessions/{id}/requests`
 
@@ -1772,7 +1830,7 @@ alone, and that is only sound if every error has a code.
 `details` is optional and omitted when there is nothing structured to add.
 
 The full set of codes is the `ErrorResponse.error.code` enum in
-`docs/api-v1.openapi.json`, which is authoritative. The two router-level codes
+`docs/api-v1.openapi.json`; update the snapshot when the evolving contract settles. The two router-level codes
 are worth calling out here because no handler can produce them:
 
 | Code | Status | Meaning |
@@ -1789,13 +1847,95 @@ blaming the request.
 The current development authentication is a process-local HttpOnly cookie. It is a single-user
 bootstrap mechanism, not the final multi-user contract. Registered-user authentication and
 environment grants are specified by [ADR-0002](adr/0002-environment-workspace-subject.md) and
-scheduled in [roadmap.md](roadmap.md) Milestone 3. Required for every call except `GET /api/v1/health`
-and `GET /api/v1/auth/token`, which are exempt inside the middleware rather than
+[ADR-0006](adr/0006-environment-authority-and-capability-grants.md), and scheduled in
+[roadmap.md](roadmap.md) Milestone 3. Required for every call except `GET /api/v1/health`, `GET /api/v1/auth/token`,
+and `POST /api/v1/environments/pair`, which are exempt inside the middleware rather than
 registered outside it, so the exempt list sits next to the checks it bypasses.
 
-- Cookie: `sylph_web_auth={random_token}`; `Path=/`, `HttpOnly`, `SameSite=Strict`
+- Cookie: `sylph_session={random_token}`; `Path=/`, `HttpOnly`, `SameSite=Strict`
 - Origin must match loopback (`127.0.0.1`, `localhost`, `[::1]`)
 - Host header validated against the same allowlist
+
+### Authorization filters by capability
+
+Once grants exist, every route resolves the caller's capability on the environment owning the
+resource, and filters on that rather than on environment membership. `observe` covers sessions,
+turns, links, search, workspaces, lineage, health, and file reads. `control` covers turn
+submission, stop, approval, session creation, and file writes.
+
+Filtering by environment alone would give a read-only Subject every control route on any
+environment they can see, so the capability is the boundary and the environment is its scope.
+
+#### `administer` is ungrantable, which is not the same as having no route
+
+`administer` is never the subject of a grant
+([ADR-0006](adr/0006-environment-authority-and-capability-grants.md) § Three capabilities). But
+"ungrantable" bounds *who* may invoke an operation, not *whether an operation is reachable over
+HTTP* — and conflating the two produced a contradiction in this very document, which asserted that
+`administer` "has no route" while defining `DELETE /api/v1/environments/{id}` fourteen hundred lines
+earlier. What actually decides the question is **where the state being changed lives**:
+
+| Operation | State lives | Carrier |
+| --- | --- | --- |
+| edit `browse_roots` | the envagent's own config | local: `config.toml` on that machine, no route |
+| agent configuration | the machine's `PATH` and vendor files | local: no route |
+| issue an invite | minted on the machine, redeemed at the server | local: `sylph-envagent invite`, by design outside the wire |
+| revoke a grant | `env_grants`, a server table | **server route**, authority-root gated |
+| unpair an environment | server-held credentials and lease | **server route**, authority-root gated |
+
+The split is not a compromise; it is forced. Only the machine holding a path can canonicalize it
+or see whether a component is a symlink, so `browse_roots` cannot be edited from the server at all
+(`docs/configuration.md` § `browse_roots` bounds where agents run) — its absence of a route is a
+containment property, not an access rule. And a grant row lives only in the server's store
+(`docs/architecture.md` § One authority), so a local command *cannot* delete one. Each operation is
+reachable exactly where its state is; there was never a choice.
+
+So the two server-side administrative routes are gated by the environment's `grant_authority` root
+rather than by any capability a grant conveys:
+
+- `grant_authority = machine` — the caller must prove that machine's OS-user. The envagent holds
+  the machine's credential, so the proof is a short-lived confirmation code minted by a local
+  command, redeemed on the route in the same shape pairing and invite already use
+  (`docs/environments.md` § Pairing). A browser session alone never suffices, which is the whole
+  point: an attacker holding a Subject's cookie must still reach the machine.
+- `grant_authority = server` — the caller must hold the server administration capability, defined
+  below. A Khora sandbox has no OS-user to ask.
+
+**A route with no defined gate is worse than a missing route**, because the gate is what someone
+implementing it will supply from context. Recording "no route" while a route existed left
+`DELETE /api/v1/environments/{id}` gated by whatever the bootstrap cookie happened to allow, which
+today is everything.
+
+#### The server administration capability
+
+`grant_authority = server` requires an authorizing party that is not any machine's OS-user, and
+[ADR-0006](adr/0006-environment-authority-and-capability-grants.md) named it "the server
+administration surface" without defining it. It is **a flag on a Subject**, `subjects.is_admin`,
+not a separate process, port, or console.
+
+A flag rather than a service because there is nothing for a second surface to hold: the grant table
+and the environment rows are in the one store already, so a separate admin process would be a
+second writer to them — the "which copy is the truth" question the authority model exists to answer
+(`docs/architecture.md` § One authority). And a flag rather than an `administer` row in `env_grants`
+because that table is per-environment and this authority is not: it holds over every
+`grant_authority = server` environment, including ones provisioned after the flag was set. A row
+asserting it would also be a grant of the power to grant, which decision 3 forbids
+(`docs/database-schema.md` § env_grants).
+
+Three bounds, all of which follow from the flag being an authority root rather than a capability:
+
+- **It is not grantable and not delegable.** An admin Subject cannot confer it; it is set where
+  Subjects are provisioned.
+- **It confers no `observe` or `control` on any environment.** Administering a sandbox's grants is
+  not reading its transcripts, and bundling them would make the audit surface the largest reader.
+  An admin who wants to read a session grants themselves one, which leaves a row.
+- **It does nothing on a `machine` environment.** Authority there is physical, and a server flag
+  that could override it would make "the OS-user authorizes" false for anyone who could set the
+  flag.
+
+The single-Subject bootstrap satisfies this trivially — one Subject, `is_admin`, one loopback
+origin. That is why the flag can be specified now and carry no route of its own until Milestone 3
+provisions a second Subject.
 
 #### `GET /api/v1/auth/token`
 
@@ -1819,8 +1959,8 @@ loopback. See `docs/development.md`.
 
 ## OpenAPI Specification
 
-Full machine-readable spec: `docs/api-v1.openapi.json`, which is authoritative for the
-wire contract.
+The generated machine-readable snapshot is `docs/api-v1.openapi.json`; this document remains
+the evolving source for endpoint semantics.
 
 **Verify coverage by diffing, never by trusting a count.** A route added to
 `backend/src/lib.rs` without a matching path here is the recurring failure, and the check

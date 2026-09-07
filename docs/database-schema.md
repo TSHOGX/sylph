@@ -134,6 +134,10 @@ CREATE TABLE turns (
   idempotency_key TEXT,
   error_code TEXT,
   error_message TEXT,
+  close_reason TEXT CHECK (close_reason IN (
+    'interrupted', 'spool_full', 'grant_revoked',
+    'link_lost', 'agent_exited', 'adapter_silent'
+  )),
   created_at_ms INTEGER NOT NULL,
   started_at_ms INTEGER,
   completed_at_ms INTEGER,
@@ -152,6 +156,18 @@ CREATE INDEX turns_status_idx ON turns(status)
 **There is no per-turn exit code**, because an adapter is long-lived and a turn is a
 message on its link. A turn's outcome arrives as an event and is recorded in `status` with
 `error_code`/`error_message`; nothing reads a process exit.
+
+`close_reason` is nullable and answers a different question from `status`: the status says
+what the record became, the reason says what cut it short
+(`docs/session-protocol.md` § Outcomes, and what a turn may close). It is `NULL` exactly
+when a turn ran to its own end, and required whenever one stopped short — a turn that ends
+early with no reason is indistinguishable from one that finished.
+
+Two things the `CHECK` is doing. It keeps a status name out of the reason column: the
+values it rejects include `abandoned` and `failed`, which is what the server's closer
+originally wrote there, and a reason that restates its own status answers nothing. And it
+keeps `abandoned` at the level that has it — a trajectory outcome, never a `turns.status` —
+so the two vocabularies cannot be swapped by a writer that confuses the levels.
 
 `idempotency_key` is nullable, so a turn the server originates carries none while
 the `UNIQUE(session_env, session_agent, session_native, idempotency_key)` constraint
@@ -336,6 +352,23 @@ meaningful rather than missing: a request with no form is an approval, whose sub
 is the one proposed tool input in `detail_json`. See `docs/session-protocol.md`
 § Request forms.
 
+### subjects
+
+One row per authenticated actor ([ADR-0002](adr/0002-environment-workspace-subject.md)).
+Milestone 3 owns it; the bootstrap holds exactly one row.
+
+`is_admin` is the server administration authority — the party ADR-0006 assigns as the
+authority root for every `grant_authority = server` environment
+(`docs/api-design.md` § The server administration capability). It is a column here rather
+than a row in `env_grants` for two independent reasons: that table is keyed per
+environment and this authority is not, and a grantable `administer` would restore the
+escalation chain ADR-0006 decision 3 removes. Nothing sets it over the wire — it is
+written where Subjects are provisioned, so an admin cannot mint another admin.
+
+It confers no `observe` or `control` on any environment. An admin who wants to read a
+session grants themselves one, which leaves a row in `env_grants`; bundling reads into the
+administration authority would make the audit surface the largest unlogged reader.
+
 ### env_installations and env_pairings
 
 Paired environment credentials and connection leases are server-owned. Pairing
@@ -343,6 +376,45 @@ codes are stored as hashes and consumed atomically; the bearer token itself is
 never written to the journal. A reconnect is accepted only for the current
 connection epoch. Unpairing removes the installation and active lease while
 leaving already-recorded sessions readable.
+
+An installation carries `grant_authority`, `machine` or `server`, derived from pairing
+provenance and immutable thereafter
+([ADR-0006](adr/0006-environment-authority-and-capability-grants.md)). It records where
+authorization for this environment legitimately originates, and a value that could be
+re-pointed later would record nothing.
+
+### env_grants
+
+One row per `(subject, environment)` with a `capability` of `observe` or `control`, plus provenance: the local signing act that issued it (the invite code hash and
+consumption record), its expiry, and its consumption state. This is audit history of one
+issuance, not a second copy of the environment's `grant_authority` root. `administer` never appears here — it is the authority root itself, so a
+row asserting it would be a grant of the power to grant.
+
+The server administration authority is **not** a row here either, and not for the same
+reason. `administer` is excluded because a row asserting it would be self-referential; the
+`is_admin` flag is excluded because this table is keyed per environment and that authority
+is not — it holds over every `grant_authority = server` environment, including ones
+provisioned after the flag was set. It lives on the Subject
+(`docs/api-design.md` § The server administration capability).
+
+Expiry is what makes the link's `expired` distinguishable from `not_granted`: an expired
+row is still present and still proves the grant was once legitimate, so the remedy is a
+renewal rather than a first issuance. A revoked grant has no such row, which is why those
+two are one value and this is a third
+(`docs/architecture.md` § A facet describes the environment, never the caller).
+
+Invite codes share the pairing code's hashing and atomic consumption, and are validated on
+five properties: environment scope, capability, expiry, single consumption, and issuer
+provenance. Scope is stored rather than inferred from the redeeming connection, so a grant
+asserts only over the environment that issued it.
+
+Revocation deletes the row. Work already dispatched to a vendor cannot be recalled, so the
+turn's trajectory closes `abandoned` while the turn carries
+`close_reason = grant_revoked`, which keeps a late result recordable against the turn that
+owns it. Deleting rather than tombstoning is why the link reports only `not_granted`: a
+deleted row cannot be distinguished from one never issued, so "revoked" survives on the
+turn it cut short rather than in the grant table
+(`docs/architecture.md` § A facet describes the environment, never the caller).
 
 ### env_event_receipts
 
@@ -401,12 +473,16 @@ database:
 ```
 backend/migrations/                 journal.db
   001_initial_schema.sql            sessions, turns, events, requests
-  004_envagent.sql                  pairings, leases, receipts, session edges
+  002_interior_state.sql             interior state and trajectory bookkeeping
+  003_event_time_axes.sql            event time axes
+  004_envagent.sql                   pairings, leases, receipts, session edges
 
 backend/migrations/history/         history.db
   001_history.sql                   blocks, cas_refs, native_records, native_blobs,
                                     watermarks, session_bytes, blocks_fts
   002_native_blob_locator.sql       deferred native sidecar locators
+  003_event_time_axes.sql            history event time axes
+  004_retention.sql                  retention metadata and indexes
 ```
 
 `docs/storage.md` § Schema owns the `history/` tables, because they only make sense

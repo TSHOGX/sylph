@@ -19,7 +19,10 @@ those, and duplicating them here only creates a second copy to forget.
   opaque id minted at pairing, never a hostname. The delimiter is not `/`.
 - **What varies is the link, not the session:** two typed facets, `observe` and
   `control`, each able to report unavailable with a reason. An empty capability surface
-  means "Sylph cannot reach it", never "there is nothing there".
+  means "Sylph cannot reach it", never "there is nothing there". **A facet describes the
+  environment and the vendor, never the caller** — one session has one link state and every
+  observer sees the same one, which is what makes a facet reason cacheable. A Subject's own
+  authorization is a separate field, never cached.
 - **`fidelity` is a property of the record** (`stream` | `blocks` | `messages`), not of
   who started the session. A renderer reads it before drawing a duration.
 - **The server's store is the one authority, with one event vocabulary.** Native
@@ -48,18 +51,17 @@ those, and duplicating them here only creates a second copy to forget.
 - `docs/` — the governing specs. Read the relevant section before implementing.
 - `scripts/` — install and deployment tooling.
 
-**`crates/envagent` is not started**, so anything in `docs/` describing a paired remote
-machine, an SSH bootstrap, or a sandbox is intent rather than description; `docs/roadmap.md`
-§ What remains is the boundary. Everywhere else, treat a disagreement between `docs/` and
-the code as a bug in one of them, and read § Spec and Code Evolution before deciding
-which.
+`crates/envagent` implements the local framing, durable spool, reconnect epochs, path
+containment, credential storage, and adapter hosting. Remote provisioning, transport
+hardening, and multi-user authorization remain roadmap work; read `docs/roadmap.md` for
+the current boundary rather than inferring status from this guide.
 
 | Question | Authoritative source |
 | --- | --- |
 | What is built, what is next | `docs/roadmap.md` |
 | System design, session model, identity, authority | `docs/architecture.md` |
 | A vendor CLI's shapes, quirks, control surface | `docs/agents.md` |
-| Endpoint contracts | `docs/api-design.md`, `docs/api-v1.openapi.json` |
+| Endpoint contracts | `docs/api-design.md`; `docs/api-v1.openapi.json` is the generated schema snapshot and may lag the evolving spec |
 | Tables, indexes, migrations | `docs/database-schema.md` |
 | How the frontend is built | `docs/frontend-architecture.md` |
 | Panes, surfaces, components, tokens | `docs/ui-layout.md` |
@@ -208,6 +210,9 @@ this section points at them rather than restating them:
 | Delegation, `span`, promotion, `abandoned` vs `failed` | `docs/session-protocol.md` § Delegated trajectories |
 | Retention, watermarks, "cannot ask" ≠ "nothing is safe" | `docs/storage.md` § Retention is watermark-driven |
 | Identity, one id space, no session class | `docs/architecture.md` § Identity |
+| Why a turn stopped short: the `CloseReason` vocabulary, and reason vs status | `docs/session-protocol.md` § Outcomes, and what a turn may close |
+| Whether a fact is per-environment or per-caller, and what may be cached | `docs/architecture.md` § A facet describes the environment, never the caller |
+| Who may authorize, and whether ungrantable means unreachable | `docs/api-design.md` § `administer` is ungrantable, which is not the same as having no route |
 | Path containment, symlinks, where agents may run | `docs/configuration.md` § `browse_roots` bounds where agents run |
 | Layout, viewport, ARIA, choice lists | `docs/ui-layout.md` |
 

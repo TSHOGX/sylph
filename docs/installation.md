@@ -10,9 +10,14 @@ both, in one command — but they stay two products, because the server delibera
 not embed an envagent (`docs/environments.md`).
 
 The server binds to loopback by default. Exposing it beyond `127.0.0.1` requires an
-authentication and threat-model change first (`docs/architecture.md` § Security model),
-and that gate now also covers **who owns an envagent** — without it, one user could run
-agents on another user's machine.
+authentication and threat-model change first (`docs/architecture.md` § Security model).
+Who may authorize a Subject on an envagent is settled by
+[ADR-0006](adr/0006-environment-authority-and-capability-grants.md): authorization returns to
+the machine's own OS-user, and `control` is granted separately from `observe` because it
+reaches code execution within `browse_roots`.
+
+The envagent transport is loopback-only for the same reason, and refuses a non-loopback
+address rather than downgrading. Milestone 3 lands TLS alongside the grants.
 
 ## Requirements
 
