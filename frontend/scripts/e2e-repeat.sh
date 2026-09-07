@@ -43,7 +43,7 @@ for i in $(seq 1 "$RUNS"); do
   # Any orphaned server from a previous iteration would make `reuseExistingServer:
   # false` fail the whole run rather than one spec.
   pkill -f "next start -p 3101" 2>/dev/null
-  pkill -f "target/debug/sylph-web-backend" 2>/dev/null
+  pkill -f "target/debug/sylph-server" 2>/dev/null
   sleep 2
 
   PLAYWRIGHT_JSON_OUTPUT_NAME="$OUT/run-$i.json" \

@@ -24,7 +24,7 @@ use axum::http::{header, Request, Response};
 use axum::Router;
 use serde_json::Value;
 use sylph_protocol::{AgentName, EnvironmentId, Fidelity, NativeId, SessionId};
-use sylph_web_backend::{config::Config, models::Session, router, AppState};
+use sylph_server::{config::Config, models::Session, router, AppState};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -96,7 +96,7 @@ impl TestBackend {
         // Resolved from an explicit environment rather than the process's own, so
         // tests run concurrently: `std::env::set_var` is process-global and unsafe
         // in a threaded test binary.
-        let env: sylph_web_backend::config::resolve::Env = [
+        let env: sylph_server::config::resolve::Env = [
             ("HOME", root.display().to_string()),
             ("SYLPH_HOME", root.display().to_string()),
             // The harness root, not `$HOME`: browsing tests must resolve inside the
@@ -115,15 +115,15 @@ impl TestBackend {
         .map(|(k, v)| (k.to_string(), v))
         .collect();
 
-        let resolved = sylph_web_backend::config::Resolved::from_parts(
+        let resolved = sylph_server::config::Resolved::from_parts(
             &env,
-            &sylph_web_backend::config::resolve::FileConfig::default(),
+            &sylph_server::config::resolve::FileConfig::default(),
             false,
         );
         // Seeded like a first run, so the harness exercises the same directory
         // creation production does — and so `data_dir` exists before the store
         // opens. `SOUL.md` written above survives, since seeding never overwrites.
-        sylph_web_backend::config::seed(&resolved).unwrap();
+        sylph_server::config::seed(&resolved).unwrap();
         // A first run also *creates* a `SOUL.md`, which for the harness would
         // silently turn identity injection on for every test. Only the tests that
         // ask for one should have one, so the seeded copy is removed again — after

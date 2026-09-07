@@ -16,21 +16,21 @@ use std::path::{Path, PathBuf};
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use sylph_web_backend::{
+use sylph_server::{
     api,
     config::{report::Report, resolve, Config, Resolved},
     router, AppState,
 };
 
 const USAGE: &str = "\
-sylph-web-backend — the Sylph backend
+sylph-server — the Sylph server
 
 USAGE
-  sylph-web-backend [serve]              Start the server (default)
-  sylph-web-backend doctor               Show what configuration resolved to
-  sylph-web-backend config init          Create missing config.toml and SOUL.md
-  sylph-web-backend config path          Print the config file's path
-  sylph-web-backend migrate --from DIR   Copy an existing data directory in
+  sylph-server [serve]              Start the server (default)
+  sylph-server doctor               Show what configuration resolved to
+  sylph-server config init          Create missing config.toml and SOUL.md
+  sylph-server config path          Print the config file's path
+  sylph-server migrate --from DIR   Copy an existing data directory in
 
 Everything Sylph owns lives under one root, ~/.sylph by default. Point
 SYLPH_HOME elsewhere to move the whole install. See docs/configuration.md.
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("--version") | Some("-V") => {
-            println!("sylph-web-backend {}", env!("CARGO_PKG_VERSION"));
+            println!("sylph-server {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Some(other) => {
@@ -129,8 +129,8 @@ fn config_command(args: &[String]) -> anyhow::Result<()> {
         // back.
         None | Some("init") => {
             let resolved = resolved_only()?;
-            let mut notes = sylph_web_backend::config::seed(&resolved)?;
-            notes.extend(sylph_web_backend::config::seed_soul(&resolved)?);
+            let mut notes = sylph_server::config::seed(&resolved)?;
+            notes.extend(sylph_server::config::seed_soul(&resolved)?);
             if notes.is_empty() {
                 println!(
                     "Nothing to do — {} is already set up.",
@@ -281,7 +281,7 @@ async fn serve() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let seeded = sylph_web_backend::config::seed(&resolved)?;
+    let seeded = sylph_server::config::seed(&resolved)?;
     let first_run = !seeded.is_empty();
     for note in &seeded {
         tracing::info!("{note}");

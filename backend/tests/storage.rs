@@ -8,11 +8,11 @@ mod common;
 
 use common::TestBackend;
 use sylph_protocol::{NativeBlob, NativeRecord};
-use sylph_web_backend::api::sessions::block_to_event;
-use sylph_web_backend::events::StreamEvent;
-use sylph_web_backend::models::Event;
-use sylph_web_backend::storage::cas::BlobStore;
-use sylph_web_backend::storage::history::{self, HistoryStore, NativeBlobState};
+use sylph_server::api::sessions::block_to_event;
+use sylph_server::events::StreamEvent;
+use sylph_server::models::Event;
+use sylph_server::storage::cas::BlobStore;
+use sylph_server::storage::history::{self, HistoryStore, NativeBlobState};
 use tempfile::TempDir;
 
 async fn history_store() -> (HistoryStore, TempDir) {
@@ -458,7 +458,7 @@ async fn a_late_outcome_corrects_a_consolidated_trajectory() {
             &session_id().encode(),
             "bg-task",
             "turn-later",
-            &sylph_web_backend::supervisor::TrajectoryOutcome {
+            &sylph_server::supervisor::TrajectoryOutcome {
                 text: "worker finished",
                 is_error: false,
                 reported_on_turn_id: "turn-later",
@@ -1075,9 +1075,9 @@ async fn a_terminal_session_records_its_watermark_even_with_no_archive() {
         .await
         .unwrap();
 
-    let report = sylph_web_backend::storage::retention::run_retention(
+    let report = sylph_server::storage::retention::run_retention(
         &history,
-        &sylph_web_backend::storage::TerminalAuthority,
+        &sylph_server::storage::TerminalAuthority,
         &session_id(),
     )
     .await

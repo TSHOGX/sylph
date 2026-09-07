@@ -1,6 +1,6 @@
 //! `GET /api/v1/config` — what configuration resolved to, and who said so.
 //!
-//! The same report `sylph-web-backend doctor` renders, served to the settings
+//! The same report `sylph-server doctor` renders, served to the settings
 //! panel. One producer for both, because a panel that derived its own view of
 //! configuration would be a second answer free to disagree with the authoritative
 //! one — and the disagreement surfaces as a user fixing a path that was never the

@@ -1,5 +1,5 @@
 [package]
-name = "sylph-web-backend"
+name = "sylph-server"
 version = "0.1.0"
 edition = "2021"
 # 1.88 rather than 1.85 because calamine 0.36 requires it. Left at 1.85 this
@@ -123,11 +123,11 @@ tempfile = "3.14"
 tower = { version = "0.5", features = ["util"] }
 
 [lib]
-name = "sylph_web_backend"
+name = "sylph_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "sylph-web-backend"
+name = "sylph-server"
 path = "src/main.rs"
 
 [features]

@@ -35,7 +35,7 @@ use sylph_protocol::{
     FlagSpec, NativeId, NativeRecord, NativeSummary, Phase, RequestedNativeId, Resolution, RunSpec,
     Session, SessionCapabilities, SessionMessage, StoreFilter, SubagentSpec, TurnInput,
 };
-use sylph_web_backend::adapters::AdapterSource;
+use sylph_server::adapters::AdapterSource;
 use tokio::sync::{mpsc, Mutex};
 
 /// The value `set_config` refuses, so the classification path is reachable.

@@ -1485,7 +1485,7 @@ async fn session_trace_merges_history_journal_and_live_with_arrival_provenance()
         backend
             .state
             .store
-            .create_turn(&sylph_web_backend::models::Turn {
+            .create_turn(&sylph_server::models::Turn {
                 id: id.clone(),
                 session_id: session_id.clone(),
                 status: "completed".to_string(),
@@ -1507,7 +1507,7 @@ async fn session_trace_merges_history_journal_and_live_with_arrival_provenance()
     backend
         .state
         .history
-        .put_blocks(&[sylph_web_backend::storage::Block {
+        .put_blocks(&[sylph_server::storage::Block {
             session_id: encoded.clone(),
             seq: 1,
             turn_id: parent_turn_id.clone(),
@@ -1533,7 +1533,7 @@ async fn session_trace_merges_history_journal_and_live_with_arrival_provenance()
     backend
         .state
         .store
-        .append_event(&sylph_web_backend::models::Event {
+        .append_event(&sylph_server::models::Event {
             id: None,
             session_id: session_id.clone(),
             turn_id: Some(arrival_turn_id.clone()),
@@ -1602,7 +1602,7 @@ async fn session_trace_merges_history_journal_and_live_with_arrival_provenance()
         .hub
         .publish_trace(
             &encoded,
-            sylph_web_backend::events::StreamEvent {
+            sylph_server::events::StreamEvent {
                 seq: 3,
                 arrival_turn_id: Some(arrival_turn_id.clone()),
                 kind: "assistant".to_string(),
