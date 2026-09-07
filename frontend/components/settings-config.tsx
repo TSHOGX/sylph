@@ -14,7 +14,7 @@
  * lives, the server starts, health reports fine, and the symptom appears layers
  * away — a dead slash key, a Quick Start directory nothing can be created in.
  * The fix is trivial once you can see which path was used and who supplied it, and
- * the entire cost is in not being able to see it. `sylph-web-backend doctor` prints
+ * the entire cost is in not being able to see it. `sylph-server doctor` prints
  * this for a terminal; this renders the same report for someone who never opens
  * one.
  *
