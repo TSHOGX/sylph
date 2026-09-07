@@ -124,7 +124,7 @@ real agents. It needs no servers running beforehand, and refuses to run against 
 server left behind by an interrupted one — clear its ports if it complains:
 
 ```sh
-for p in 4318 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done
+for p in 4327 4328 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done
 ```
 
 ### Troubleshooting
