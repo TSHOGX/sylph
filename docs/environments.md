@@ -10,8 +10,9 @@ two provisioning paths.
 The `crates/envagent` binary now implements the local v1 framing, durable spool,
 reconnect epochs, path containment, credential storage, and adapter hosting. The
 server bridge accepts the same framed connection when `SYLPH_ENV_LISTEN` is set.
-TLS termination, remote provisioning, and multi-user ownership remain explicit
-follow-on security work; the development transport is loopback-only.
+TLS termination and remote provisioning remain explicit follow-on work. Multi-user access is defined by
+[ADR-0002](adr/0002-environment-workspace-subject.md) but not yet implemented; the development
+transport is loopback-only.
 
 Native adopt/watch events without a server turn id are assigned one server-owned
 container when first ingested. This is not a synthesized vendor bracket: the

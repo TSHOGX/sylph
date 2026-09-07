@@ -296,20 +296,16 @@ This is also what makes "another machine is read-only" fall out rather than bein
 rule anyone writes: **control is available exactly while that environment's envagent
 is connected.** Disconnected, observe still answers from the server's store.
 
-## Observation is multi-party; control is single-owner
+## Observation is multi-party; control is server-ordered
 
-Two questions get conflated because both read as "can two things touch one session".
+Observation is concurrent. Multiple clients may subscribe to the same session and converge on the
+server record. Control requests are also accepted concurrently, but the server assigns request ids
+and a deterministic session sequence before dispatching them. Idempotency prevents retries from
+executing a request twice; send, stop, cancel, and approval ordering is the server's ordering.
 
-**Observation may be concurrent.** Several clients, a terminal and a browser
-together, more than one person — all reading is safe, because reading creates no
-branch. This is what makes the AFK case work: the terminal keeps going while the
-phone watches.
-
-**Control must have one owner, with explicit handoff.** *Measured:* none of the
-agent CLIs takes a lock, and two writers to one session produce sibling branches off
-a single parent pointer with zero errors at the storage layer. The damage is purely
-semantic, which is why nothing catches it. `claude`'s own approval gate is a vendor
-implementing this same idea, which is evidence the shape is right.
+There is no controller owner, takeover, or handoff in the initial product. The request origin
+subject is retained for audit and UI provenance, not ownership. Queue support and unsupported
+control are typed outcomes. See [ADR-0004](adr/0004-concurrent-control-ordering.md).
 
 ## AFK degrades in a defined order
 
@@ -396,22 +392,7 @@ That is adequate for a single-user local server and **is not an authentication
 system** — it knows a request came from a browser that completed a local handshake,
 not who is asking.
 
-*Decision: multi-user gets a place in the model, not an implementation.* One person
-with a laptop, a phone, and a browser tab needs no identity model; they need the
-authority to be the server, which it now is. What stays so the door is not closed:
-every mutation is a server operation, so an authorization check has one home;
-request resolution records who resolved; and both environment binding and session
-ownership are per-session, which is the unit a boundary would follow.
-
-The topology this document describes makes three of the unsolved questions sharper,
-and **"many users reach it over the web" requires all of them answered first**:
-
-- Identity, per-user session visibility, transport security, CSRF beyond the
-  bootstrap cookie.
-- **Who owns an envagent.** New with this design and with no home in the current
-  model. Without it, one user can run agents on another user's laptop.
-- `browse_roots` becomes an **authorization boundary** rather than a convenience,
-  because it bounds where an agent may execute. It is currently per-install.
+Multi-user is a planned product milestone, with its boundary defined now by [ADR-0002](adr/0002-environment-workspace-subject.md): authenticated Subjects receive explicit Environment grants. Until that milestone lands, the bootstrap cookie remains a single-user development mechanism and non-loopback binding stays disabled. The future gate covers identity, transport security, CSRF, environment visibility, and who may operate an envagent. `browse_roots` remains an execution boundary enforced by the envagent.
 
 Binding to a non-loopback interface stays a separate, explicit change and must not
 be reached by relaxing the bind address.

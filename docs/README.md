@@ -5,7 +5,21 @@ session and owns all session policy; an **envagent** runs on each machine where 
 execute and dials back to the server; a **web frontend** is one transport onto the
 server.
 
-Start with [architecture.md](architecture.md). Everything else defers to it.
+Start with [architecture.md](architecture.md). Everything else defers to it. Cross-cutting
+decisions are recorded in [ADR-0001](adr/0001-foundation-semantics.md) and the ADRs listed
+below; implementation work is ordered by [roadmap.md](roadmap.md).
+
+## Architecture decisions
+
+- [ADR-0001](adr/0001-foundation-semantics.md) — protocol foundation, producer receipts,
+  session edges, adopted input, and command ambiguity.
+- [ADR-0002](adr/0002-environment-workspace-subject.md) — Subject, Environment, Workspace,
+  and environment-level access.
+- [ADR-0003](adr/0003-unified-envagent-execution.md) — envagent as the sole product execution
+  path, including the local machine.
+- [ADR-0004](adr/0004-concurrent-control-ordering.md) — concurrent control requests and
+  server ordering.
+- [ADR-0005](adr/0005-raw-retention.md) — lossless raw retention and future deletion.
 
 ## Read in this order
 
