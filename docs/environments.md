@@ -133,10 +133,12 @@ metadata.
 *Measured 2026-08-27:* `codex remote-control pair` uses short-lived pairing codes for
 the same purpose, which is evidence the shape works rather than a guess.
 
-**Who owns an envagent is unresolved and gates multi-user.** On a single-user install
-it does not arise. The moment a server has two principals, an unowned envagent means
-one user can run agents on another user's laptop —
-`docs/architecture.md` § Security model carries this with the rest of that gate.
+An envagent is an execution identity, not a user's personal agent. Multi-user access is
+granted explicitly from a Subject to an Environment; the grant covers the environment's
+sessions, native history, workspaces, and available control. This is a deliberate trust
+boundary, defined in [ADR-0002](adr/0002-environment-workspace-subject.md), and must be
+disclosed during pairing. Authentication, grant enforcement, and transport hardening remain
+Milestone 3 work in [roadmap.md](roadmap.md).
 
 ## How an envagent comes to exist
 

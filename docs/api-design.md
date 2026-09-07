@@ -1786,7 +1786,10 @@ blaming the request.
 
 ## Authentication
 
-Process-local HttpOnly cookie. Required for every call except `GET /api/v1/health`
+The current development authentication is a process-local HttpOnly cookie. It is a single-user
+bootstrap mechanism, not the final multi-user contract. Registered-user authentication and
+environment grants are specified by [ADR-0002](adr/0002-environment-workspace-subject.md) and
+scheduled in [roadmap.md](roadmap.md) Milestone 3. Required for every call except `GET /api/v1/health`
 and `GET /api/v1/auth/token`, which are exempt inside the middleware rather than
 registered outside it, so the exempt list sits next to the checks it bypasses.
 

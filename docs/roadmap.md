@@ -11,16 +11,6 @@ reconnect primitives. The formal product cutover is incomplete: most API paths s
 in-process adapter seam, and multi-user authentication and environment authorization do not yet
 exist.
 
-## Milestone 0 — architecture convergence
-
-Freeze the boundaries in ADR-0002 through ADR-0005 and make architecture, API, database, frontend,
-and environment documents agree. Reframe Issue #1 as a parent investigation with independently
-shippable native-ingestion children. No feature work advances until the documents have one meaning
-for Subject, Environment, Workspace, Session, raw retention, and control ordering.
-
-**Exit gate:** cross-document terminology and links are consistent; no document calls in-process
-adapters the formal product path; each later milestone has dependencies and acceptance tests.
-
 ## Milestone 1 — unified local envagent path
 
 Run the local machine through `Client → Server → EnvBridge → Envagent → Adapter`. Route session
