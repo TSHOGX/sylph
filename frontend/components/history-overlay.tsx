@@ -59,8 +59,11 @@ const WorkspacePicker = dynamic(
 /**
  * Rows requested, which is also the endpoint's maximum.
  *
- * Asked for in full rather than in pages because there is no cursor to continue with:
- * a smaller number would truncate more with nothing to reach the rest.
+ * Asked for in full rather than in pages because one workspace's history fits: the cap is
+ * reached by a store far larger than any workdir observed here. `updatedBeforeMs` is the
+ * keyset cursor if that stops being true — pass the last row's `updatedAtMs` to continue.
+ * It is inclusive, so a page re-reads the tied group at its edge and a client must dedupe
+ * by id; that overlap is what makes it lossless across a millisecond many sessions share.
  */
 const LIMIT = 200;
 
