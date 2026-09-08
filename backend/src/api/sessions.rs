@@ -773,6 +773,15 @@ pub struct NativeSessionRow {
     pub event_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_native_id: Option<String>,
+    /// Which relationship [`Self::parent_native_id`] is, when the vendor's key says.
+    ///
+    /// Sent because the pointer alone cannot be rendered: "forked from" and "delegated
+    /// by" are the two relationships a listing must not show under one label
+    /// (ADR-0001 § 2), and a picker holding only the id would have to pick one. Absent
+    /// where the vendor named a parent without saying how, which is also the case in
+    /// which no ancestry edge is journaled on adopt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_relation: Option<sylph_protocol::SessionEdgeRelation>,
     pub fidelity: sylph_protocol::Fidelity,
     /// The encoded triple this row *would* adopt as, always present.
     ///
@@ -971,6 +980,7 @@ pub async fn enumerate(
                     ended_at_ms: summary.ended_at_ms,
                     event_count: summary.event_count,
                     parent_native_id: summary.parent_native_id.map(|id| id.to_string()),
+                    parent_relation: summary.parent_relation,
                     fidelity: summary.fidelity,
                     blocked: None,
                 })
@@ -1097,6 +1107,7 @@ pub async fn enumerate(
                     .parent_native_id
                     .as_ref()
                     .map(|parent| parent.as_str().to_string()),
+                parent_relation: summary.parent_relation,
                 fidelity: summary.fidelity,
                 id: id.encode(),
                 blocked,

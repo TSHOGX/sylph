@@ -693,6 +693,15 @@ export interface NativeSessionRow {
   /** Delegation parent or fork origin, as the vendor recorded it. */
   parentNativeId?: string;
   /**
+   * Which relationship `parentNativeId` is, when the vendor's own key says.
+   *
+   * The pointer alone is unrenderable: "forked from" and "delegated by" must not appear
+   * under one label, so a row holding only the id would have to guess. Absent means the
+   * vendor named a parent without saying how — the same case in which the server writes
+   * no ancestry edge on adopt rather than a guessed one.
+   */
+  parentRelation?: "delegation" | "fork";
+  /**
    * What parsing this session would yield. Never `stream` — no care recovers a timing
    * that was never written, and a renderer reads this before drawing a duration.
    */
