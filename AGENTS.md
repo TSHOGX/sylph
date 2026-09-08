@@ -106,6 +106,23 @@ timing or ordering result from a direct invocation.
 `docs/frontend-architecture.md` § E2E owns the rest, including how to write a spec that
 fails for one reason.
 
+### Pointers are checked, so prose cannot rot quietly
+
+This file, `docs/`, and every comment cite each other three ways: a `path.md` § Heading
+pointer, a backticked repo path, and a markdown link. All three are checked mechanically,
+and a citation that resolves to nothing is a test failure in `cargo test --workspace`:
+
+```sh
+cargo run -p sylph-docs-check   # list what to fix, with file:line
+```
+
+It runs in the suite because rot has no other symptom — nothing reads prose, so a heading
+renamed today misleads a reader months later with no failure in between. Renaming a
+heading and running the suite tells you every citation of it. Prefer fixing the pointer to
+loosening the checker: a shortened form is already accepted (a pointer may name the part
+of a heading before its `:`, `,`, `—`, or `(`), and `fixtures/` is skipped on purpose,
+since a vendor payload legitimately contains paths that are not ours.
+
 ## Configuration
 
 Everything the server owns is under `~/.sylph` and configured in `~/.sylph/config.toml`;

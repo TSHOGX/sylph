@@ -51,6 +51,7 @@ Then, by subject:
 | How to develop locally | [development.md](development.md) |
 | Why a vendor claim is believed | [measurements/](measurements/codex/README.md) |
 | A decision's context and rejected alternatives | [adr/](adr/) |
+| Whether every pointer in the tree still resolves | `cargo run -p sylph-docs-check` |
 
 ## Principles
 
