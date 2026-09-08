@@ -53,6 +53,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -76,4 +77,38 @@ if (fs.existsSync(home)) {
   const before = Date.now();
   fs.rmSync(home, { recursive: true, force: true });
   console.log(`[e2e] wiped ${home} in ${Date.now() - before}ms`);
+}
+
+// The other half of symptom 2. Wiping the journal stops those directories from
+// becoming *sidebar groups*, which is what cost 35 minutes — but the directories
+// themselves are in `os.tmpdir()`, which is a `SYLPH_BROWSE_ROOTS` entry, and
+// nothing removed them. They accumulated at roughly seven per run and reached 164
+// here before anyone looked.
+//
+// That is a cliff rather than a slope: `MAX_ENTRIES` in `backend/src/api/fs.rs`
+// caps a listing at 2000, and past the cap a directory tree is *silently
+// truncated*. A spec looking for its own workdir would stop finding it, and which
+// entries survive depends on readdir order — so it would present as the same
+// rotating flakiness, from a machine's accumulated history rather than from
+// anything in the diff.
+//
+// A spec cannot be the one to fix this: a run that crashes or is interrupted never
+// reaches its own cleanup, and this script is the only place that runs once, before
+// anything, regardless of how the last run ended.
+const stale = fs
+  .readdirSync(os.tmpdir())
+  .filter((name) => /^sylph-(e2e|recents)-/.test(name));
+
+if (stale.length > 0) {
+  const before = Date.now();
+  let removed = 0;
+  for (const name of stale) {
+    // Guarded for the same reason the home path is: the prefix match is what makes
+    // this ours to delete, so it is re-checked at the point of deletion rather than
+    // trusted from the filter above.
+    if (!/^sylph-(e2e|recents)-/.test(name)) continue;
+    fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
+    removed += 1;
+  }
+  console.log(`[e2e] swept ${removed} stale workdir(s) in ${Date.now() - before}ms`);
 }
