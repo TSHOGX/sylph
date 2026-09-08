@@ -420,6 +420,43 @@ pub struct HostedSource {
     pub started_at_ms: Option<i64>,
     pub ended_at_ms: Option<i64>,
     pub parent_native_id: Option<NativeId>,
+    /// Which relationship [`Self::parent_native_id`] is, as the adapter read it.
+    ///
+    /// Carried beside the pointer rather than left for the server to infer, because
+    /// the vendor's *key* is what distinguishes a delegation from a fork and the
+    /// resulting id cannot (`sylph_protocol::NativeSummary::parent_relation`). The
+    /// server writes no ancestry edge without it, so dropping it here would silently
+    /// flatten every adopted tree — and look exactly like a vendor that recorded no
+    /// parent.
+    pub parent_relation: Option<sylph_protocol::SessionEdgeRelation>,
+}
+
+impl HostedSource {
+    /// What `Watch` and `Adopt` return to the server, from one producer.
+    ///
+    /// Both commands answered with their own hand-written `json!` object, and that is
+    /// how `parentRelation` came to be read by the server and written by neither: two
+    /// literals of one payload, so a field added to the struct is added to zero, one,
+    /// or both of them. The server treats a missing key as "the vendor recorded no
+    /// parent", which is indistinguishable from a real root — every remotely adopted
+    /// tree flattens and nothing errors.
+    ///
+    /// Keys are camelCase because this is a wire payload the server reads by name.
+    pub fn to_command_result(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sessionId": self.session_id,
+            "workdir": self.workdir,
+            "title": self.title,
+            "fidelity": self.fidelity,
+            "startedAtMs": self.started_at_ms,
+            "endedAtMs": self.ended_at_ms,
+            "parentNativeId": self.parent_native_id,
+            // Both halves or neither: the server refuses to journal an edge whose
+            // relation it would have to guess, so a pointer sent without its relation
+            // is a session it records as a root.
+            "parentRelation": self.parent_relation,
+        })
+    }
 }
 
 /// A prepared remote link owned by the envagent.  It has a process and a
@@ -886,6 +923,7 @@ impl EnvAgent {
             started_at_ms: summary.started_at_ms,
             ended_at_ms: summary.ended_at_ms,
             parent_native_id: summary.parent_native_id,
+            parent_relation: summary.parent_relation,
         })
     }
 
@@ -1182,17 +1220,9 @@ impl EnvAgent {
                 .start_native_source(&agent, native_id, true, true, turn_id)
                 .await
             {
-                Ok(source) => {
-                    sylph_protocol::CommandOutcome::accepted_with_result(serde_json::json!({
-                        "sessionId": source.session_id,
-                        "workdir": source.workdir,
-                        "title": source.title,
-                        "fidelity": source.fidelity,
-                        "startedAtMs": source.started_at_ms,
-                        "endedAtMs": source.ended_at_ms,
-                        "parentNativeId": source.parent_native_id,
-                    }))
-                }
+                Ok(source) => sylph_protocol::CommandOutcome::accepted_with_result(
+                    source.to_command_result(),
+                ),
                 Err(error) => sylph_protocol::CommandOutcome::Rejected {
                     code: "WATCH_FAILED".into(),
                     message: format!("{error:#}"),
@@ -1207,17 +1237,9 @@ impl EnvAgent {
                 .start_native_source(&agent, native_id, false, true, turn_id)
                 .await
             {
-                Ok(source) => {
-                    sylph_protocol::CommandOutcome::accepted_with_result(serde_json::json!({
-                        "sessionId": source.session_id,
-                        "workdir": source.workdir,
-                        "title": source.title,
-                        "fidelity": source.fidelity,
-                        "startedAtMs": source.started_at_ms,
-                        "endedAtMs": source.ended_at_ms,
-                        "parentNativeId": source.parent_native_id,
-                    }))
-                }
+                Ok(source) => sylph_protocol::CommandOutcome::accepted_with_result(
+                    source.to_command_result(),
+                ),
                 Err(error) => sylph_protocol::CommandOutcome::Rejected {
                     code: "ADOPT_FAILED".into(),
                     message: format!("{error:#}"),
@@ -2267,5 +2289,59 @@ mod tests {
         })
         .await;
         assert_eq!(send.await.unwrap(), 1);
+    }
+
+    /// The adopt payload carries the relation, read back the way the server reads it.
+    ///
+    /// **Asserting on the key would prove only that this test and the producer agree.**
+    /// The defect was a real mismatch across the seam — the server did
+    /// `result.get("parentRelation")` and deserialized into
+    /// `Option<SessionEdgeRelation>`, and nothing wrote the key — so what has to be
+    /// exercised is that expression, against this payload, for both a `delegation` and
+    /// an absent relation. A rename on either side then fails here rather than
+    /// flattening every adopted tree in silence.
+    #[test]
+    fn the_adopt_payload_carries_the_relation_the_server_deserializes() {
+        let source = HostedSource {
+            session_id: SessionId::new(
+                EnvironmentId::parse("env7fk2").unwrap(),
+                sylph_protocol::AgentName::parse("codex").unwrap(),
+                NativeId::new("child"),
+            ),
+            workdir: "/tmp/project".into(),
+            fidelity: sylph_protocol::Fidelity::Messages,
+            title: None,
+            started_at_ms: None,
+            ended_at_ms: None,
+            parent_native_id: Some(NativeId::new("parent")),
+            parent_relation: Some(sylph_protocol::SessionEdgeRelation::Delegation),
+        };
+
+        // Verbatim from `backend/src/api/sessions.rs`'s remote adopt path.
+        let read = |result: &serde_json::Value| -> Option<sylph_protocol::SessionEdgeRelation> {
+            result
+                .get("parentRelation")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+        };
+
+        assert_eq!(
+            read(&source.to_command_result()),
+            Some(sylph_protocol::SessionEdgeRelation::Delegation),
+            "the server cannot journal an edge whose relation it never received"
+        );
+        assert_eq!(
+            source.to_command_result()["parentNativeId"], "parent",
+            "a relation with no pointer is not an edge either"
+        );
+
+        // The other half of the contract: absent stays absent rather than defaulting to
+        // a relation, since a guessed one is not withdrawable once journaled.
+        let rootless = HostedSource {
+            parent_native_id: None,
+            parent_relation: None,
+            ..source
+        };
+        assert_eq!(read(&rootless.to_command_result()), None);
     }
 }
