@@ -29,8 +29,8 @@ pub mod translate;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sylph_protocol::{
-    Adapter, AgentInfo, Capability, EventStream, Fidelity, FlagSpec, NativeId, NativeSummary,
-    RunSpec, Session, StoreFilter,
+    Adapter, AgentInfo, Capability, EventStream, Facet, Fidelity, FlagSpec, LinkFacets, NativeId,
+    NativeSummary, RunSpec, Session, StoreFilter, UnavailableReason,
 };
 
 pub use translate::{Correlation, Emission};
@@ -194,6 +194,23 @@ pub struct ClaudeAdapter;
 impl ClaudeAdapter {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Facets for a session read from the native store rather than held by Sylph.
+    ///
+    /// **The discriminant is transport, not the approval gate.** `claude`'s control
+    /// surface is stdio, so a session Sylph started is fully drivable and a session
+    /// adopted from a terminal has *structurally no channel* for interrupt or steer —
+    /// no socket carries them and there is no pipe to the process. Deriving this from
+    /// the approval gate instead would be the expensive kind of wrong: the gate is
+    /// advisory and forgeable, so it would answer `available` for a session nothing
+    /// could reach, and the failure would land on a user pressing Stop
+    /// (`docs/agents.md` § `claude`).
+    pub fn native_link_facets() -> LinkFacets {
+        LinkFacets {
+            observe: Facet::available(),
+            control: Facet::unavailable(UnavailableReason::NotOursToDrive),
+        }
     }
 
     /// Whether the vendor CLI is on this machine's `PATH`.

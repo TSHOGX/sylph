@@ -29,7 +29,7 @@
 //! success. Nor synthesize a value the vendor did not give — a synthesized id, name, or
 //! timestamp is a lie a journal makes permanent.
 
-use sylph_protocol::Adapter;
+use sylph_protocol::{Adapter, Facet, LinkFacets, UnavailableReason};
 
 pub mod claude;
 pub mod codex;
@@ -116,6 +116,52 @@ pub fn known_agents() -> &'static [&'static str] {
     #[cfg(not(feature = "e2e"))]
     {
         &[claude::AGENT_NAME, codex::AGENT_NAME, pi::AGENT_NAME]
+    }
+}
+
+/// The link facets a session read from a native store may claim, per vendor.
+///
+/// # Why this exists rather than a literal at the call site
+///
+/// The envagent used to answer this with a hardcoded JSON object for *every* native
+/// source, while all three adapters declared the same answer in a
+/// `native_link_facets` nothing called. Two derivations of one fact, and the rule
+/// (`AGENTS.md` § Rules That Keep Costing Time) is that they diverge the moment
+/// either grows a case — which `codex` has already scheduled: its own facets note
+/// that an envagent *may replace the control facet once it has authenticated a live
+/// app-server socket*, because `codex` is drivable by a second party and the other
+/// two are not. On that day a literal meaning "no native source is drivable" is
+/// silently wrong for one vendor, and it is wrong in the direction that ships a
+/// Stop button which cannot work.
+///
+/// So the vendor owns the answer and this is the one place that asks. An unknown
+/// name gets the conservative facets rather than a panic: a journal written under a
+/// build that knew another agent must stay readable here (see [`is_known`]), and
+/// "cannot drive it" is the safe reading of a name this build cannot resolve.
+pub fn native_link_facets(agent: &str) -> LinkFacets {
+    #[cfg(not(feature = "e2e"))]
+    match agent {
+        claude::AGENT_NAME => claude::ClaudeAdapter::native_link_facets(),
+        codex::AGENT_NAME => codex::CodexAdapter::native_link_facets(),
+        pi::AGENT_NAME => pi::PiAdapter::native_link_facets(),
+        _ => conservative_native_facets(),
+    }
+
+    #[cfg(feature = "e2e")]
+    {
+        let _ = agent;
+        conservative_native_facets()
+    }
+}
+
+/// Observation from the server's own record, and no control.
+///
+/// The floor every vendor's native answer sits at or above: the store is Sylph's to
+/// read, and reaching the process is what a native source cannot assume.
+fn conservative_native_facets() -> LinkFacets {
+    LinkFacets {
+        observe: Facet::available(),
+        control: Facet::unavailable(UnavailableReason::NotOursToDrive),
     }
 }
 
@@ -291,5 +337,33 @@ mod tests {
     fn a_path_shaped_binary_name_is_not_searched_for() {
         assert!(!on_path("/nonexistent/sylph-not-a-real-binary"));
         assert!(!on_path("./also-not-real"));
+    }
+
+    /// Every agent this build knows answers for its own native facets.
+    ///
+    /// Exhaustive over `known_agents`, which is the list a stored session's agent name
+    /// is checked against — so an agent this build can resolve but the dispatch cannot
+    /// is the gap that would fall through to the conservative floor unnoticed.
+    #[test]
+    fn every_known_agent_answers_for_its_native_facets() {
+        for agent in known_agents() {
+            let facets = native_link_facets(agent);
+
+            // Observation is the invariant: the record is the server's, so a native
+            // source is always readable even when nothing can drive it.
+            assert!(
+                facets.observe.available,
+                "{agent} must stay observable from the store"
+            );
+
+            // Control must be a *stated* answer either way. An unavailable facet with
+            // no reason is the shape a renderer cannot explain to a user.
+            if !facets.control.available {
+                assert!(
+                    facets.control.reason.is_some(),
+                    "{agent} reports control unavailable without saying why"
+                );
+            }
+        }
     }
 }

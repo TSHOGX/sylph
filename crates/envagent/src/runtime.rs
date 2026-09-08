@@ -1233,14 +1233,16 @@ impl EnvAgent {
             ),
             EnvironmentCommand::Capabilities { session_id } => {
                 if self.native_sources.read().await.contains(&session_id) {
+                    // The vendor answers this, not a literal here. Hardcoding it meant
+                    // one object stood for every native source, which is only true while
+                    // no vendor is drivable by a second party — and `codex` is, over its
+                    // app-server (`sylph_adapters::native_link_facets`).
+                    let link = sylph_adapters::native_link_facets(&session_id.agent.to_string());
                     return sylph_protocol::CommandOutcome::accepted_with_result(
                         serde_json::json!({
                             "capabilities": {"commands": [], "config": []},
                             "supports": [],
-                            "link": {
-                                "observe": {"available": true},
-                                "control": {"available": false, "reason": "not_ours_to_drive"}
-                            }
+                            "link": link
                         }),
                     );
                 }
