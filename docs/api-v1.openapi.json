@@ -3241,7 +3241,7 @@
           "agent_exited",
           "adapter_silent"
         ],
-        "description": "Why a turn or a server-closed trajectory ended without its producer reporting an outcome. Required whenever a turn ends short. This is NOT the status: the status says what the record became, the reason says what cut it short, and a reason that restates its status answers no question. `interrupted` is the only value that is not a diagnostic and must not be coloured as a fault. `spool_full`, `grant_revoked`, `link_lost`, and `agent_exited` mean the vendor's own store kept accumulating past the cut, so `adopt` recovers it; `interrupted` and `adapter_silent` do not. Authoritative in crates/protocol; see docs/session-protocol.md § Outcomes."
+        "description": "Why a turn or a server-closed trajectory ended without its producer reporting an outcome. Required whenever a turn ends short. This is NOT the status: the status says what the record became, the reason says what cut it short, and a reason that restates its status answers no question. `interrupted` is the only value that is not a diagnostic and must not be coloured as a fault. `spool_full`, `grant_revoked`, `link_lost`, and `agent_exited` mean the vendor's own store kept accumulating past the cut, so `adopt` recovers it; `interrupted` and `adapter_silent` do not. Not yet built: no Rust type and no `turns` column, so every turn that stopped short currently reads as one that ran to its own end. docs/roadmap.md § Milestone 3 owns it; docs/session-protocol.md § Outcomes owns the vocabulary."
       },
       "NativeSessionRow": {
         "type": "object",

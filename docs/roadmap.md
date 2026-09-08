@@ -2,7 +2,9 @@
 
 This roadmap orders user-visible product milestones and owns project status. Finished
 implementation belongs in git history; architecture decisions belong in `docs/adr/`. An old
-issue never outranks this order.
+issue never outranks this order — every topic the original parent issue collected (native
+correlation, dynamic source reading, raw and blob retention, interior state, event-time axes,
+Codex parity) is scheduled below from the milestone that needs it, not run linearly.
 
 ## Current baseline
 
@@ -13,18 +15,19 @@ spooling, and reconnect primitives.
 ## What remains
 
 Four boundaries are specified in `docs/` and not yet true in code. They are the difference
-between reading a spec and reading the source.
+between reading a spec and reading the source. Each is a milestone below rather than a
+separate list, since a boundary restated in two places drifts in one of them.
 
-| Boundary | Specified | State |
+This project is spec-driven: `docs/` and the ADRs are written and settled before the code
+that satisfies them, so spec ahead of code is the normal state of an active milestone, not
+a defect to flag inline. This table is where that gap is tracked.
+
+| Boundary | Owner | State |
 | --- | --- | --- |
-| **The envagent is the only execution path** | [ADR-0003](adr/0003-unified-envagent-execution.md), `docs/environments.md` | most routes still reach an in-process adapter seam, and envagent ingress is opt-in rather than always bound |
-| **The server is `crates/server`** | `AGENTS.md` § Orientation | still `backend/`; the crate splits out with the cutover above |
+| **The envagent is the only execution path** | Milestone 1 | most routes still reach an in-process adapter seam, and envagent ingress is opt-in rather than always bound |
+| **The server is `crates/server`** | Milestone 1 | still `backend/`; the crate splits out with that cutover |
 | **Transport carries TLS and pairs from another host** | Milestone 3 | loopback only, so no off-host environment can dial in |
-| **Multi-user authentication and per-environment authorization** | [ADR-0006](adr/0006-environment-authority-and-capability-grants.md) | a single bootstrap Subject, no grants |
-
-Two schema residues go with the first: `sessions.parent_session`, superseded by the typed
-edge ([ADR-0001](adr/0001-foundation-semantics.md) § 2), and the in-process adapter
-registration that lets a route bypass the bridge.
+| **Multi-user authentication and per-environment authorization** | Milestone 3 | a single bootstrap Subject, no grants |
 
 ## Milestone 1 — the envagent is the only path
 
@@ -65,11 +68,28 @@ reserved to the authority root, an invite issued locally on the machine, and the
 redemption checks. Filter sessions, search, workspaces, health, files, and raw records by
 capability. Harden `sylph.env.v1` with TLS so an envagent can pair from another machine.
 
-Two pieces the authority model needs and nothing else provides: **`subjects.is_admin`**, the
-authority root for every `grant_authority = server` environment, without which that root is
-unimplemented and its routes stay gated by whatever the bootstrap allowed; and the **two
-authority-root-gated routes**, grant revocation and unpairing, since ungrantable is not the
-same as unreachable and `DELETE /api/v1/environments/{id}` exists today with no gate defined.
+Four pieces the authority model needs and nothing else provides:
+
+- **`subjects.is_admin`**, the authority root for every `grant_authority = server`
+  environment, without which that root is unimplemented and its routes stay gated by whatever
+  the bootstrap allowed.
+- The **two authority-root-gated routes**, grant revocation and unpairing, since ungrantable
+  is not the same as unreachable and `DELETE /api/v1/environments/{id}` exists today with no
+  gate defined.
+- **`CloseReason` itself.** The exit gate below reads `close_reason = grant_revoked`, and the
+  wire contract already publishes the six-value enum and calls it authoritative in
+  `crates/protocol`. It is in no Rust file and `turns` has no column for it, so today every
+  turn that stopped short is indistinguishable from one that ran to its own end — the defect
+  the vocabulary exists to prevent (`docs/session-protocol.md` § Outcomes). The type and the
+  column come first; `grant_revoked` is then one value of an existing vocabulary rather than a
+  reason revocation invents.
+- **Subject provenance on in-flight work.** [ADR-0004](adr/0004-concurrent-control-ordering.md)
+  decides the record retains `origin_subject`, and [ADR-0006](adr/0006-environment-authority-and-capability-grants.md)
+  scopes the revocation sweep by it. Nothing writes it: no column on `turns` or
+  `pending_requests`, no field on any type. Without it the sweep cannot distinguish work the
+  revoked grant authorized from unrelated turns on the same environment, and the only
+  behaviours available are terminating every turn on the environment or none — one over-reaches
+  and the other silently keeps authorizing revoked work, which is the plausible-looking answer.
 
 **Exit gate:** unauthenticated requests cannot read business data; two independent browser
 contexts observe the same authorized environment; an unauthorized environment is absent from
@@ -119,11 +139,3 @@ Only after real requirements: raw deletion and audit, capabilities finer than th
 [ADR-0006](adr/0006-environment-authority-and-capability-grants.md), sharing UI, directory
 scopes, delegable granting, and controller handoff. Each addition needs its own ADR and
 threat-model review.
-
-## Issue #1 disposition
-
-Issue #1 is a parent research topic rather than the project gate. Split it into native
-correlation, dynamic source reading, raw and blob retention, interior state, event-time axes,
-and Codex parity. Each child owns one implementation boundary, tests, review, and rollback.
-Schedule children from the milestone that needs them rather than executing the old issue plan
-linearly.

@@ -140,7 +140,17 @@ the turn carries `grant_revoked` as the permanent account of what stopped the wo
 `abandoned` is the existing vocabulary for "nobody reported an outcome", is distinct from `failed`,
 and is non-final, so a late result is still recorded against the turn that owns the trajectory
 (`docs/session-protocol.md` § Outcomes). A revocation-specific status would be a second name for a
-state the store already models, and the two would diverge as soon as either grew a case. `grant_revoked` is a value of the one `CloseReason` vocabulary rather than a reason this decision invents, which is what keeps it comparable with `spool_full` — two conditions that cut a turn short the same way. The revocation sweep is scoped to work whose authorization originated from the revoked grant, using the `origin_subject` recorded by [ADR-0004](0004-concurrent-control-ordering.md); it does not terminate unrelated turns on the same environment.
+state the store already models, and the two would diverge as soon as either grew a case.
+`grant_revoked` is a value of the one `CloseReason` vocabulary rather than a reason this
+decision invents, which is what keeps it comparable with `spool_full` — two conditions that
+cut a turn short the same way.
+
+The sweep is scoped to work whose authorization originated from the revoked grant, by the
+`origin_subject` [ADR-0004](0004-concurrent-control-ordering.md) decides the record retains;
+it does not terminate unrelated turns on the same environment. Neither that field nor
+`CloseReason` is built, and both are prerequisites this decision cannot supply for itself —
+`docs/roadmap.md` § Milestone 3 owns them, because an unscoped sweep would either kill every
+turn on the environment or none, and both look like a working revocation from the outside.
 
 ### 8. Disclosure happens twice, with different content
 

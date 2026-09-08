@@ -395,6 +395,12 @@ the path, since no other process can resolve a symlink it cannot see
 (`docs/configuration.md` § `browse_roots` bounds where agents run owns the bound and the
 check). A listing is therefore a bridge round trip, not a local `readdir`.
 
+Today it is still a local `readdir` in the server, against the server's own configuration
+(`backend/src/api/fs.rs`). That is the same in-process seam Milestone 1 removes, and
+`docs/roadmap.md` § Milestone 2 carries the exit gate that closes it: *no remote path
+check happens in the server.* Until then this endpoint answers correctly only for an
+environment on the server's own machine, which is the only kind that can be paired.
+
 Narrower than the session file API in three ways: only directories are listed, so file
 names stay undiscoverable; there is no content endpoint, so reading bytes stays
 session-scoped; and a symlink leaving the root is omitted from listings rather than
