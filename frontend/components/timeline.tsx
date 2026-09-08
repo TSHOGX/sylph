@@ -282,11 +282,7 @@ function FocusTrail({
  * every streaming re-render. Cost is then O(new rows) per token rather than
  * O(conversation length).
  *
- * This is deliberately not windowing. A virtualization library would cost most of
- * the remaining first-load budget, and profiling has not shown DOM node count to
- * be the bottleneck — re-render count was. Revisit if a session with thousands of
- * events shows scroll jank while idle, which is the signature of a DOM-size
- * problem rather than a render-count one.
+ * Why this is memoization rather than windowing is in the module comment above.
  */
 const MemoizedNode = memo(
   TimelineNodeView,

@@ -32,7 +32,6 @@ here depends on it.
 
 **Backend**
 ```sh
-export PATH="$HOME/.cargo/bin:$PATH"
 cd $REPO/backend
 cargo run
 ```
