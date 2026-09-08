@@ -1,8 +1,8 @@
-# Sylph Web
+# Sylph
 
-Local-first web interface for coding-agent sessions: `claude`, `codex`, and `pi`.
+Local-first workspace for coding-agent sessions: `claude`, `codex`, and `pi`.
 
-Sylph Web creates and runs sessions, streams tool and reasoning events as they happen,
+Sylph creates and runs sessions, streams tool and reasoning events as they happen,
 sends local attachments, searches every session it holds, and adopts sessions a vendor CLI
 created on this machine without changing their identity.
 
@@ -21,7 +21,7 @@ install beyond the vendor CLIs themselves. An agent is available when its CLI is
 
 ## Quick Start
 
-This runs Sylph Web from the checkout, which is what you want while developing.
+This runs Sylph from the checkout, which is what you want while developing.
 
 - **For herdr-based deployment** (recommended for development with remote access):
   see [**docs/development.md**](docs/development.md)

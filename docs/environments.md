@@ -289,6 +289,13 @@ like any other. **Provisioning is server-side**, since it needs Khora API creden
 must not depend on a client being online, while the running sandbox is an ordinary
 environment.
 
+Khora is a separate project, maintained at [TSHOGX/khora](https://github.com/TSHOGX/khora).
+Its development and deployment environment is the local OrbStack `sbx` microVM. When
+implementing or integrating the Khora side of this boundary, inspect and run the checkout
+inside `sbx` first; the host checkout of Sylph is not the authoritative Khora source. Sylph
+and Khora may need coordinated changes, so treat the two repositories as a joint development
+surface and verify the wire and lifecycle contract at their seam.
+
 That makes a sandbox the only environment needing no client online at all, which is the
 strongest AFK case in the system: start work from a phone, close everything, it keeps
 running.

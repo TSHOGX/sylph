@@ -1,10 +1,11 @@
 # Roadmap
 
 This roadmap orders user-visible product milestones and owns project status. Finished
-implementation belongs in git history; architecture decisions belong in `docs/adr/`. An old
-issue never outranks this order — every topic the original parent issue collected (native
-correlation, dynamic source reading, raw and blob retention, interior state, event-time axes,
-Codex parity) is scheduled below from the milestone that needs it, not run linearly.
+implementation belongs in git history; architecture decisions belong in `docs/adr/`. Earlier
+proposals or discussion threads do not outrank the repository specifications. The topics that
+shaped the early plan (native correlation, dynamic source reading, raw and blob retention,
+interior state, event-time axes, and Codex parity) are scheduled below from the milestone that
+needs them.
 
 ## Current baseline
 
@@ -18,9 +19,11 @@ Four boundaries are specified in `docs/` and not yet true in code. They are the 
 between reading a spec and reading the source. Each is a milestone below rather than a
 separate list, since a boundary restated in two places drifts in one of them.
 
-This project is spec-driven: `docs/` and the ADRs are written and settled before the code
-that satisfies them, so spec ahead of code is the normal state of an active milestone, not
-a defect to flag inline. This table is where that gap is tracked.
+This project is spec-driven: `docs/` and the ADRs are the source of truth for behavior and are
+written and settled before the code that satisfies them. Spec ahead of code is the normal state
+of an active milestone, not a defect to flag inline. This table is where that implementation
+gap is tracked. The roadmap records sequence and status; it is not a requirements backlog, and
+external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
@@ -107,7 +110,7 @@ an envagent pairs and reconnects over TLS from a second host.
 Implement raw vendor records, sidecar and blob references, interior observability states,
 event-time axes, re-projection, and retention classes under
 [ADR-0005](adr/0005-raw-retention.md). Complete Claude, Codex, and Pi parity as separate
-adapter issues. Large bodies stay out of default timeline payloads, and a missing or
+adapter work items. Large bodies stay out of default timeline payloads, and a missing or
 unreadable source is an explicit state.
 
 **Exit gate:** raw round-trip and blob integrity pass; retention never prunes raw; an absent
@@ -129,6 +132,9 @@ independent-browser E2E covers ordering, queue rejection, and simultaneous appro
 Provision sandboxes as ordinary environments with envagents, on `server` grant authority
 since no OS-user sits beside one. Add lifecycle, pause and resume, health, cost and retention
 policy, and completion notification. No sandbox-specific Session or Workspace model.
+Khora is developed in the separate [TSHOGX/khora](https://github.com/TSHOGX/khora) repository;
+its local development and deployment checkout lives in the OrbStack `sbx` microVM, so changes
+at this milestone may require coordinated implementation and verification across both repos.
 
 Depends on the Milestone 3 transport: a sandbox is off-host, so it cannot dial in until the
 wire carries TLS.

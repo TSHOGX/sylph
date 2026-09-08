@@ -1,4 +1,4 @@
-# Sylph Web Development Guide
+# Sylph Development Guide
 
 Sylph is a coding-agent workspace: a server holding the authoritative record of every
 session, an envagent on each machine that runs agents, and a web frontend as one
@@ -39,6 +39,11 @@ owns progress and status; `docs/` owns design.
   threat-model change, covering who owns an envagent.
 - **Three agents: `claude`, `codex`, `pi`.** Which of them an environment can run is a
   per-environment, time-varying fact discovered by that envagent.
+- **Khora is an external sandbox project.** Its source of truth is the checkout in the local
+  OrbStack `sbx` microVM, mirrored by [TSHOGX/khora](https://github.com/TSHOGX/khora), not this
+  repository. Changes at the Sylph–Khora seam may require coordinated work in both checkouts;
+  read [`docs/environments.md`](docs/environments.md) § Sandbox-provisioned (Khora) before
+  implementing that boundary.
 
 ## Orientation
 
