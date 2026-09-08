@@ -261,6 +261,20 @@ pub struct NativeSummary {
     /// of every listing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_native_id: Option<NativeId>,
+    /// Which relationship [`Self::parent_native_id`] is, when the vendor's own key says.
+    ///
+    /// The pointer above is deliberately one field for two relationships, so the relation
+    /// has to travel separately or be guessed. It is reported here rather than inferred by
+    /// the server because the *key* is what distinguishes them, and only the adapter that
+    /// read the key knows which one it was: `forkedFrom` and a fork pointer are forks,
+    /// `parent_thread_id` is a delegation. A server looking at the resulting id cannot
+    /// recover that.
+    ///
+    /// `None` where a vendor records a parent without saying how — the server writes no
+    /// edge rather than a guessed one, since a `relation` is not a field a later fix can
+    /// withdraw from rows already written (`AGENTS.md` § Rules That Keep Costing Time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_relation: Option<crate::SessionEdgeRelation>,
     /// What fidelity parsing this session would actually yield.
     ///
     /// Per session rather than only per agent, because a store can hold both: a session
@@ -575,7 +589,7 @@ pub struct TurnInput {
 /// for it*. Availability is whether the vendor CLI is on that machine's `PATH` — one
 /// question with one answer and an error message that can say it. The mechanism this
 /// replaces produced two total failures, both recorded in
-/// `docs/session-protocol.md` § What changed: zero discovered agents made `/` a dead
+/// `docs/environments.md` § Agent availability: zero discovered agents made `/` a dead
 /// keystroke three layers from the cause, and a stale fixture failed a whole E2E suite
 /// against an agent that did not exist.
 #[async_trait]

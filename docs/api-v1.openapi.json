@@ -3284,7 +3284,15 @@
           },
           "parentNativeId": {
             "type": "string",
-            "description": "The session this one was delegated from or forked out of, as the vendor recorded it. Not derived from an id-naming convention: the /agent- suffix recovers 8.8% and misattributes on a collision."
+            "description": "The session this one was delegated from or forked out of, as the vendor recorded it. Not derived from an id-naming convention: the /agent- suffix recovers 8.8% and misattributes on a collision. Read parentRelation for which relationship it is; absent there means the vendor did not say."
+          },
+          "parentRelation": {
+            "type": "string",
+            "enum": [
+              "delegation",
+              "fork"
+            ],
+            "description": "Which relationship parentNativeId is, when the vendor's own key says. Absent where a vendor names a parent without saying how, in which case the server writes no ancestry edge rather than a guessed one."
           },
           "fidelity": {
             "type": "string",
@@ -3595,10 +3603,6 @@
           "flagsJson": {
             "type": "string",
             "description": "Agent flags as a JSON string, not an object. Serialized as stored."
-          },
-          "parentSession": {
-            "type": "string",
-            "description": "Encoded identity triple of the delegated or forked parent, when the vendor recorded one."
           },
           "status": {
             "type": "string",

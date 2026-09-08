@@ -82,12 +82,6 @@ pub struct Session {
     /// `flags` here for a release and a client written from it read `undefined`.
     pub flags_json: String,
     pub status: String,
-    /// The delegation parent or fork origin, as an encoded triple.
-    ///
-    /// One column for two relationships, which the row it points at disambiguates
-    /// (`crate::db::labels::lineage`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_session: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -132,7 +126,6 @@ impl FromRow<'_, sqlx::sqlite::SqliteRow> for Session {
             fidelity: fidelity_from_row(row)?,
             flags_json: row.try_get("flags_json")?,
             status: row.try_get("status")?,
-            parent_session: row.try_get("parent_session")?,
             created_at_ms: row.try_get("created_at_ms")?,
             updated_at_ms: row.try_get("updated_at_ms")?,
         })

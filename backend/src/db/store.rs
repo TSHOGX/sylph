@@ -132,10 +132,10 @@ impl JournalStore {
             r#"
             INSERT INTO sessions (
                 environment, agent, native_id, workdir, title,
-                inject_identity, fidelity, flags_json, status, parent_session,
+                inject_identity, fidelity, flags_json, status,
                 created_at_ms, updated_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
@@ -148,7 +148,6 @@ impl JournalStore {
         .bind(session.fidelity.to_string())
         .bind(&session.flags_json)
         .bind(&session.status)
-        .bind(&session.parent_session)
         .bind(session.created_at_ms)
         .bind(session.updated_at_ms)
         .fetch_one(&self.pool)
@@ -170,9 +169,9 @@ impl JournalStore {
         let stored_session = sqlx::query_as::<_, Session>(
             r#"INSERT INTO sessions (
                 environment, agent, native_id, workdir, title,
-                inject_identity, fidelity, flags_json, status, parent_session,
+                inject_identity, fidelity, flags_json, status,
                 created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *"#,
         )
         .bind(session.id.environment.as_str())
@@ -184,7 +183,6 @@ impl JournalStore {
         .bind(session.fidelity.to_string())
         .bind(&session.flags_json)
         .bind(&session.status)
-        .bind(&session.parent_session)
         .bind(session.created_at_ms)
         .bind(session.updated_at_ms)
         .fetch_one(&mut *tx)
@@ -1830,7 +1828,6 @@ mod tests {
                 fidelity: sylph_protocol::Fidelity::Stream,
                 flags_json: "{}".to_string(),
                 status: "idle".to_string(),
-                parent_session: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
             })

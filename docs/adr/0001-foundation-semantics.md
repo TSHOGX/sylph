@@ -39,9 +39,14 @@ provenance rather than a copied child transcript.
 An edge is never inferred from an id suffix and never silently reversed. A missing endpoint
 may remain an unresolved read-model state until the corresponding native source is adopted.
 
-The `sessions.parent_session` column is residue from the single-pointer model and is to be
-deleted, not read: a string cannot carry relation type, provenance, and multiple edges at
-once, which is the conflation this decision removes.
+There is no ancestry column. A string cannot carry relation type, provenance, and multiple
+edges at once, which is the conflation this decision removes. The relation travels typed
+from the adapter that read the vendor's key, as `NativeSummary::parent_relation` beside the
+parent pointer, because the *key* is what distinguishes a delegation from a fork and the
+resulting id cannot. Where that field is absent the vendor named a parent without saying
+how, and **no edge is written**: a guessed relation would fold a fork into a count or
+replay a prefix that was never shared, and neither is withdrawable from rows already
+journaled.
 
 ### 3. Adopted user input is a fact, not an event
 
@@ -88,8 +93,12 @@ test named after the property it holds: `producer_and_server_sequences_are_disti
 `event_batches_require_one_contiguous_producer_prefix`, and
 `command_policy_and_unknown_outcome_are_explicit`.
 
-`sessions.parent_session` still exists in `001_initial_schema.sql` and is written as `None`.
-It is residue awaiting deletion, not a second ancestry source.
+The edge store has a producer: adopting a session journals the edge its vendor recorded
+(`record_adopted_lineage` in `backend/src/api/sessions.rs`). Before that it had a table, a
+route, and a wire message but nothing that wrote a row, so the decision was pinned by types
+and unreached by data — and the superseded column was still being written from all three
+adapters while this document claimed it held `None`. A write-only field is
+indistinguishable from a working one, which is how it survived the decision that deleted it.
 
 No raw native record becomes a public replay API here; raw retention stays an internal
 re-projection aid ([ADR-0005](0005-raw-retention.md)).

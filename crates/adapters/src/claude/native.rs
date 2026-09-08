@@ -421,6 +421,13 @@ fn summarize(candidate: &SessionCandidate) -> Option<NativeSummary> {
         // say cheaply", and a record count is not an event count anyway — one assistant
         // record can hold several content blocks.
         event_count: None,
+        // Always a fork on this vendor: `forkedFrom.sessionId` above is the only
+        // session-level pointer claude records, and a subagent's transcript carries no
+        // parent id at all (it is reached through its host's tool call). So there is no
+        // input here that could be a delegation, and the relation is a property of the key.
+        parent_relation: parent_native_id
+            .as_ref()
+            .map(|_| sylph_protocol::SessionEdgeRelation::Fork),
         parent_native_id,
         fidelity: NATIVE_FIDELITY,
     })

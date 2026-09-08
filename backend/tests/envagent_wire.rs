@@ -105,7 +105,6 @@ async fn process_peer_covers_prepare_run_activate_replay_and_rejection() {
                 fidelity: sylph_protocol::Fidelity::Stream,
                 flags_json: "{}".into(),
                 status: "running".into(),
-                parent_session: None,
                 created_at_ms: now,
                 updated_at_ms: now,
             },

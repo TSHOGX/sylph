@@ -820,9 +820,9 @@ somewhere other than its parent — the case worth showing.
 
 ### A fork and a delegation are different relationships
 
-`parentSession` names the ancestor and `relation` says which relationship it is, both read
-from the edge that records it (`docs/database-schema.md` § sessions). They must not be
-presented the same way:
+`parent` names the ancestor and `relation` says which relationship it is, both read from
+the edge that records it (`docs/database-schema.md` § sessions). They must not be presented
+the same way:
 
 - **Delegation** folds into the parent as a count.
 - **A fork** replays its origin's entire prefix and continues past it, so the two share

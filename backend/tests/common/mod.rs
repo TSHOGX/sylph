@@ -501,7 +501,6 @@ impl TestBackend {
                 fidelity: Fidelity::Stream,
                 flags_json: "{}".to_string(),
                 status: "idle".to_string(),
-                parent_session: None,
                 created_at_ms: now,
                 updated_at_ms: now,
             })

@@ -155,6 +155,7 @@ mod tests {
             ended_at_ms: None,
             event_count: None,
             parent_native_id: None,
+            parent_relation: None,
             fidelity: Fidelity::Blocks,
         }
     }

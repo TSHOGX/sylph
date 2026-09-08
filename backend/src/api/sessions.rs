@@ -126,6 +126,59 @@ pub async fn edges(
     }))
 }
 
+/// Journal the typed ancestry edge an adopted session's vendor recorded.
+///
+/// # Why this is not a column on the session row
+///
+/// It was, and `sessions.parent_session` is gone because a string cannot carry relation
+/// type, provenance, and more than one edge at once (ADR-0001 § 2). The column was also
+/// never read: it was written by both adopt paths, serialized as `parentSession`, and no
+/// reader anywhere consumed it — a field that only ever wrote is indistinguishable from a
+/// working one, which is why it survived.
+///
+/// # Nothing is written when the relation is unknown
+///
+/// `parent_relation` is `None` where a vendor names a parent without saying how, and this
+/// writes no edge for that case. A guessed `delegation` would render a fork as a folded
+/// count and a guessed `fork` would replay a prefix that was never shared, and neither is
+/// withdrawable once journaled — a later fix to this function cannot tell a guessed row
+/// from a real one. An unrecorded relation is the honest flat view.
+///
+/// # Failure is logged, not returned
+///
+/// The child row is already committed and the adopt succeeded. Ancestry is a read model
+/// (`session_edges` is documented as one), re-derivable by re-adopting, so failing the
+/// request here would refuse a session that exists over a decoration that does not.
+async fn record_adopted_lineage(
+    state: &AppState,
+    child: &sylph_protocol::SessionId,
+    parent_native_id: Option<&NativeId>,
+    relation: Option<sylph_protocol::SessionEdgeRelation>,
+) {
+    let (Some(parent_native_id), Some(relation)) = (parent_native_id, relation) else {
+        return;
+    };
+    // A vendor's parent id is on the same machine and from the same vendor by
+    // construction: it is a pointer within one native store.
+    let parent = sylph_protocol::SessionId::new(
+        child.environment.clone(),
+        child.agent.clone(),
+        parent_native_id.clone(),
+    );
+    // A store that names a session as its own parent is malformed, not a self-edge to
+    // journal. `SessionEdge::new` refuses it, and that refusal is the whole check.
+    let edge = match sylph_protocol::SessionEdge::new(parent, child.clone(), relation) {
+        Ok(edge) => edge,
+        Err(error) => {
+            tracing::warn!("Ignoring {child}'s recorded ancestry: {error}");
+            return;
+        }
+    };
+    if let Err(error) = state.store.insert_session_edge(&edge).await {
+        tracing::warn!("Could not journal {child}'s {relation} edge: {error:#}");
+    }
+}
+
 #[derive(Serialize)]
 pub struct PreparedSessionResponse {
     /// Opaque, process-local handle. It is intentionally not a SessionId and is not
@@ -475,7 +528,6 @@ async fn create_prepared(
             title: title.clone(),
             inject_identity,
             flags,
-            parent_session: None,
         })
         .await
         .map_err(Error::AgentStartFailed)?;
@@ -1261,17 +1313,7 @@ pub async fn adopt(
                 .unwrap_or(sylph_protocol::Fidelity::Messages),
             flags_json: "{}".into(),
             status: "idle".into(),
-            parent_session: result
-                .get("parentNativeId")
-                .and_then(|value| value.as_str())
-                .map(|parent| {
-                    SessionId::new(
-                        session_id.environment.clone(),
-                        session_id.agent.clone(),
-                        NativeId::new(parent),
-                    )
-                    .encode()
-                }),
+            // Lineage is a typed edge, written after the row exists (ADR-0001 § 2).
             created_at_ms: result
                 .get("startedAtMs")
                 .and_then(|v| v.as_i64())
@@ -1288,6 +1330,20 @@ pub async fn adopt(
                 return Err(error);
             }
         };
+        record_adopted_lineage(
+            &state,
+            &session_id,
+            result
+                .get("parentNativeId")
+                .and_then(|value| value.as_str())
+                .map(NativeId::new)
+                .as_ref(),
+            result
+                .get("parentRelation")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
+        )
+        .await;
         if let Err(error) = state.env_bridge.activate_remote(&session_id).await {
             let _ = state.env_bridge.close_remote_session(&session_id).await;
             return Err(Error::LinkFailed(format!("{error:#}")));
@@ -1393,17 +1449,8 @@ pub async fn adopt(
         fidelity: summary.fidelity,
         flags_json: "{}".to_string(),
         status: "idle".to_string(),
-        // The vendor's own recorded lineage, as the triple it names on this environment.
-        // **Not derived from an id-naming convention**: the `/agent-` suffix recovers 8.8%
-        // and misattributes on a collision, which is worse than an honest flat view.
-        parent_session: summary.parent_native_id.as_ref().map(|parent| {
-            SessionId::new(
-                session_id.environment.clone(),
-                session_id.agent.clone(),
-                parent.clone(),
-            )
-            .encode()
-        }),
+        // Lineage is not a column on this row. It is a typed edge, written below once the
+        // child exists (ADR-0001 § 2).
         // The store's own stamps where it kept them, so an adopted session sorts by when
         // the work happened rather than by when it was adopted.
         created_at_ms: summary.started_at_ms.unwrap_or(now),
@@ -1420,6 +1467,14 @@ pub async fn adopt(
         }
         Err(error) => return Err(error),
     };
+
+    record_adopted_lineage(
+        &state,
+        &session_id,
+        summary.parent_native_id.as_ref(),
+        summary.parent_relation,
+    )
+    .await;
 
     if req.watch {
         // Follows the store as it grows, so there is no end to await. Spawned rather than

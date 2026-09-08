@@ -118,8 +118,6 @@ pub struct OpenSpec {
     /// Whether to append `SOUL.md`. The server's decision, resolved before the spawn.
     pub inject_identity: bool,
     pub flags: HashMap<String, String>,
-    /// The delegation parent or fork origin, as an encoded triple.
-    pub parent_session: Option<String>,
 }
 
 /// A live agent that has not yet been promoted to the durable journal.
@@ -1226,7 +1224,6 @@ impl LinkManager {
             flags_json: serde_json::to_string(&prepared.spec.flags)
                 .unwrap_or_else(|_| "{}".to_string()),
             status: "running".to_string(),
-            parent_session: prepared.spec.parent_session.clone(),
             created_at_ms: now,
             updated_at_ms: now,
         };
@@ -1595,7 +1592,7 @@ impl LinkManager {
     /// A real turn, not a container: it consolidates, its events order by sequence,
     /// and it appears in the transcript where it happened. `origin` records that
     /// nobody prompted it, which a reader needs and an empty `request_text` cannot
-    /// say on its own (`migrations/006_turn_origin.sql`).
+    /// say on its own (`migrations/001_initial_schema.sql`).
     ///
     /// Opened on the *first* out-of-turn event of any kind rather than on a
     /// `turn`/`started`. The vendor's own turn boundary arrives partway through:

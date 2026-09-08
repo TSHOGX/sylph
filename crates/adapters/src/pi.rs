@@ -3563,6 +3563,14 @@ pub mod native {
                 ended_at_ms,
                 // Absent rather than estimated: see the note above.
                 event_count: None,
+                // Always a fork: the header's parent is resolved from `fork_pointer` and
+                // nothing else (`Header::parent_native_id`), so a delegation cannot reach
+                // this field. `parent_session`/`parentSession` occurs 0 times in the whole
+                // store, which is the measurement that makes the fork the only case.
+                parent_relation: header
+                    .parent_native_id
+                    .as_ref()
+                    .map(|_| sylph_protocol::SessionEdgeRelation::Fork),
                 parent_native_id: header.parent_native_id,
                 fidelity: NATIVE_FIDELITY,
             });

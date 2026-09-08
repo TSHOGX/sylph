@@ -501,7 +501,6 @@ mod tests {
                 fidelity: Fidelity::Blocks,
                 flags_json: "{}".to_string(),
                 status: "idle".to_string(),
-                parent_session: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
             })
@@ -580,7 +579,6 @@ mod tests {
                 fidelity: Fidelity::Blocks,
                 flags_json: "{}".to_string(),
                 status: "idle".to_string(),
-                parent_session: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
             })

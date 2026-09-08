@@ -13,10 +13,10 @@
 //!
 //! **Nothing here translates an id.** Identity is one space throughout
 //! (`docs/architecture.md` § Identity), so a helper bridging two of them has nothing to
-//! bridge. [`Lineage`](crate::db::labels::Lineage) belongs here because its *precedence*
-//! rule — a recorded parent outranks a fork origin — is a fact about vendors.
-
-use sylph_protocol::SessionId;
+//! bridge. Ancestry is not here either: a `Lineage` classifier used to re-derive from a
+//! parent id and a fork origin, and an adapter now reports the relation typed beside the
+//! pointer (`sylph_protocol::NativeSummary::parent_relation`), because the *key* it read
+//! is what distinguishes a delegation from a fork and the resulting id cannot.
 
 /// True when a user event is a harness-injected envelope rather than something the
 /// person actually typed.
@@ -128,84 +128,9 @@ pub fn envelope_summary(text: &str) -> Option<String> {
     Some(decoded)
 }
 
-/// How one session relates to another.
-///
-/// Two relationships, and they want opposite treatment in a listing.
-///
-/// A **subagent** is work the parent delegated. It is real, but it is not a separate
-/// conversation, so it belongs folded into its parent as a count.
-///
-/// A **fork** is the same conversation continued. Both sides replay an identical
-/// prefix of user turns, so listing both shows one conversation twice under one
-/// label — exactly the duplication a directory listing exists to avoid. Only one
-/// survives, and *which* one cannot be fixed in advance: of the two real cases
-/// measured, one had its newer work in the fork (1108 events against 389) and the
-/// other in the origin (2459 against 649). A listing keeps whichever ran more
-/// recently.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Lineage<'a> {
-    /// No recorded relationship: list it.
-    Root,
-    /// Delegated work. Fold into `parent`.
-    Subagent { parent: &'a SessionId },
-    /// The same conversation resumed.
-    Fork { origin: &'a SessionId },
-}
-
-/// Classify a session from the two ancestry facts a vendor may record.
-///
-/// **Precedence is deliberate and is the part worth preserving.**
-/// `parent_session_id` wins over `forked_from` because a subagent that was *also*
-/// resumed is still delegated work, and folding it into its parent is what keeps it
-/// out of the top level.
-///
-/// # What is gone, and why nothing replaced it
-///
-/// The original had a third, last-resort branch: an id-suffix test, because claude
-/// names a delegate `<parent>/agent-<name>`. That is not reachable here and would be
-/// wrong if it were. A `native_id` is the vendor's own string
-/// (`sylph_protocol::NativeId`), and `AGENTS.md` records the measurement that killed
-/// suffix-matching as a lineage signal: 1918 of 2104 suffixes are hash-only, so it
-/// recovers 8.8% and misattributes on a collision. Structure that is right for one
-/// delegation in eleven is worse than an honest flat view, because nothing on screen
-/// distinguishes them. An adapter reports `parent_native_id` from the vendor's own
-/// record instead (`sylph_protocol::NativeSummary`), which is a fact rather than an
-/// inference — `codex` in particular records a parent and carries no suffix at all.
-///
-/// No ratio is quoted for the two surviving branches, deliberately: a recorded
-/// parent and a recorded fork origin are independent signals and neither implies the
-/// other, which is the property this code depends on. A ratio measured against one
-/// store is not that property, and this repo previously carried two disagreeing
-/// figures for it.
-pub fn lineage<'a>(
-    parent_session: Option<&'a SessionId>,
-    forked_from: Option<&'a SessionId>,
-    self_id: &SessionId,
-) -> Lineage<'a> {
-    if let Some(parent) = parent_session {
-        return Lineage::Subagent { parent };
-    }
-    if let Some(origin) = forked_from {
-        if origin != self_id {
-            return Lineage::Fork { origin };
-        }
-    }
-    Lineage::Root
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sylph_protocol::{AgentName, EnvironmentId, NativeId};
-
-    fn id(native: &str) -> SessionId {
-        SessionId::new(
-            EnvironmentId::parse("env7fk2").unwrap(),
-            AgentName::parse("claude").unwrap(),
-            NativeId::new(native),
-        )
-    }
-
     /// The rule that raised recognizable labels from ~10% to 98%.
     #[test]
     fn an_injected_envelope_is_not_the_users_ask() {
@@ -264,34 +189,4 @@ mod tests {
         assert_eq!(envelope_summary("<teammate-message>"), None);
     }
 
-    /// A subagent that was *also* resumed is still delegated work, so folding it
-    /// into its parent is what keeps it out of the top level.
-    #[test]
-    fn a_recorded_parent_wins_over_a_recorded_fork_origin() {
-        let parent = id("parent");
-        let origin = id("origin");
-        let me = id("me");
-        assert_eq!(
-            lineage(Some(&parent), Some(&origin), &me),
-            Lineage::Subagent { parent: &parent }
-        );
-    }
-
-    #[test]
-    fn a_fork_origin_is_honoured_when_no_parent_is_recorded() {
-        let origin = id("origin");
-        let me = id("me");
-        assert_eq!(
-            lineage(None, Some(&origin), &me),
-            Lineage::Fork { origin: &origin }
-        );
-    }
-
-    /// A session naming itself is not a fork of itself; that is a root.
-    #[test]
-    fn a_self_referential_fork_origin_is_a_root() {
-        let me = id("me");
-        assert_eq!(lineage(None, Some(&me), &me), Lineage::Root);
-        assert_eq!(lineage(None, None, &me), Lineage::Root);
-    }
 }

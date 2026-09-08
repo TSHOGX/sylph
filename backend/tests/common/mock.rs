@@ -423,6 +423,7 @@ impl Adapter for MockAdapter {
             ended_at_ms: Some(1_700_000_060_000),
             event_count: Some(2),
             parent_native_id: None,
+            parent_relation: None,
             // **Never `Stream`.** No care recovers a timing that was never written, and the
             // handler refuses `stream` from a store outright — so a fixture reporting it
             // would be testing that refusal rather than the adopt path.
