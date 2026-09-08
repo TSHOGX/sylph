@@ -1,9 +1,9 @@
 //! What a session can do, and what is adjustable on it while it runs.
 //!
-//! Moved from `backend/src/adapter/wire.rs`, where it was the `sylph.agent.v3`
-//! payload vocabulary. The transport went away with the subprocess
-//! (`docs/session-protocol.md` § What changed); these shapes were right and are
-//! kept.
+//! Once the `sylph.agent.v3` payload vocabulary of a per-session adapter subprocess.
+//! That transport went away — an adapter is a linked-in module now
+//! (`docs/agents.md` § What every agent module must answer) — and these shapes were
+//! right, so they were kept.
 //!
 //! One rule governs the whole module and it is measured, not stylistic:
 //! **`serde`'s `rename_all` does not rename fields inside enum variants.** An
@@ -433,13 +433,10 @@ impl CapabilityFacets {
     /// the general form: one publisher every transition calls, because three call sites
     /// each remembering is three chances to forget.
     ///
-    /// **What is true today is not yet that.** `backend/src/adapter/link.rs` still
-    /// merges in the transport, because that is the shipped path and it is
-    /// `docs/roadmap.md` § Milestone 1 that moves the merge to the server. So there is
-    /// exactly one merge site now and it is the wrong one; after that milestone the link
-    /// is gone and this comment describes the whole truth. Naming that rather than
-    /// writing the aspiration as fact, because a reader who trusts it would look for a
-    /// server-side merge that is not there.
+    /// This is the only implementation, and every caller is the server: `Link::apply`
+    /// for an adapter-pushed update and `Link::set_config` for an accepted setting, both
+    /// under the one mutex guarding the merged surface (`backend/src/links/mod.rs`). An
+    /// adapter returns facets and never a surface, so it has nothing to merge with.
     pub fn apply_to(self, surface: &mut SessionCapabilities) {
         if let Some(commands) = self.commands {
             surface.commands = commands;

@@ -2,10 +2,11 @@
 //!
 //! `docs/agents.md` § `pi` is the governing spec and holds the measurement behind every
 //! quirk below. The vendor's own protocol is documented in the installed package at
-//! `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md` and
-//! `docs/session-format.md`, and **that unbundled source-mapped install is the evidence
-//! to prefer** — `AGENTS.md` records an earlier claim about this vendor that was wrong
-//! precisely because it was measured against a minified bundle.
+//! `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/`. Every pointer below names
+//! a file in it as `pi-coding-agent/docs/…`, package-relative, so a vendor's document is
+//! never mistakable for one of this repo's own. **That unbundled source-mapped install is
+//! the evidence to prefer**: `AGENTS.md` records an earlier claim about this vendor that
+//! was wrong precisely because it was measured against a minified bundle.
 //!
 //! # One file, five parts, and only one of them touches a process
 //!
@@ -521,7 +522,7 @@ pub mod rpc {
     /// One catalogue entry, as `get_available_models` and `get_state` both report it.
     ///
     /// Field names are the vendor's camelCase wire spellings, checked against
-    /// `docs/rpc.md` § Model: `{id, name, api, provider, baseUrl, reasoning, input,
+    /// `pi-coding-agent/docs/rpc.md` § Model: `{id, name, api, provider, baseUrl, reasoning, input,
     /// contextWindow, maxTokens, cost}`. Only what a surface needs is read; the rest is
     /// left in the payload rather than mirrored into a struct that would then have to be
     /// kept equal to it.
@@ -764,7 +765,7 @@ pub mod rpc {
             Self {
                 models,
                 // `get_state`'s `model` is a full Model object **or null**, per
-                // `docs/rpc.md`. Null is a real state — a session with no model selected —
+                // `pi-coding-agent/docs/rpc.md`. Null is a real state — a session with no model selected —
                 // and must stay absent rather than becoming an empty row.
                 current: state.get("model").and_then(Model::from_payload),
                 thinking_levels: levels
@@ -920,7 +921,7 @@ pub mod rpc {
     /// One `get_commands` entry, projected.
     ///
     /// **Every command pi reports is a prompt, and that is the vendor's own doing rather
-    /// than a classification this adapter makes.** `docs/rpc.md` § get_commands states that
+    /// than a classification this adapter makes.** `pi-coding-agent/docs/rpc.md` § get_commands states that
     /// built-in TUI commands are excluded because they "would not execute if sent via
     /// prompt" — so there is nothing left to separate. Model and thinking are config
     /// options here, not commands, which is why `CONTROL_COMMANDS` has no analogue in this
@@ -958,7 +959,7 @@ pub mod rpc {
 /// **Not a permission channel.** `pi` ships no tool-approval callback, so nothing here ever
 /// becomes a [`sylph_protocol::RequestKind::Approval`] — these arrive as `choice`, `dialog`,
 /// or `elicitation`, which matches what the adapter declared it can raise.
-/// `docs/rpc.md` § Extension UI Protocol governs.
+/// `pi-coding-agent/docs/rpc.md` § Extension UI Protocol governs.
 pub mod ui {
     use serde_json::{json, Value};
     use sylph_protocol::{
@@ -967,7 +968,7 @@ pub mod ui {
 
     /// The vendor methods that expect **no** reply.
     ///
-    /// From `docs/rpc.md`: dialog methods block until an `extension_ui_response` with a
+    /// From `pi-coding-agent/docs/rpc.md`: dialog methods block until an `extension_ui_response` with a
     /// matching id arrives; these do not. Answering one sends pi a response it is not
     /// waiting for, and ignoring the display is explicitly allowed.
     pub const FIRE_AND_FORGET: &[&str] = &[
@@ -1217,7 +1218,7 @@ pub mod ui {
     ///
     /// # The three shapes are not interchangeable
     ///
-    /// From `docs/rpc.md` § Extension UI Responses: a `select`/`input`/`editor` wants
+    /// From `pi-coding-agent/docs/rpc.md` § Extension UI Responses: a `select`/`input`/`editor` wants
     /// `value`, a `confirm` wants `confirmed`, and a dismissal wants `cancelled`. pi
     /// distinguishes **"the user said no" from "the user dismissed it"** — an extension
     /// receives `false` for the first and `undefined` for the second — so collapsing them
@@ -1318,7 +1319,7 @@ pub mod ui {
 /// # Time arrives as an argument
 ///
 /// [`sylph_protocol::Event::created_at_ms`] is required, and **pi's RPC events carry no
-/// timestamp at all** — checked against `docs/rpc.md` § Events, where every event shape is
+/// timestamp at all** — checked against `pi-coding-agent/docs/rpc.md` § Events, where every event shape is
 /// listed and none holds one. (Its *messages* do, which is what the native store reads; a
 /// live `message_update` carries `usage` and `assistantMessageEvent` and nothing else.) So
 /// the adapter stamps arrival, and the clock is a parameter: a test that cannot fix the
@@ -1399,7 +1400,7 @@ pub mod translate {
         stream_id: String,
         /// The deltas seen so far.
         ///
-        /// Accumulated because **pi never re-sends the cumulative text**: `docs/rpc.md` is
+        /// Accumulated because **pi never re-sends the cumulative text**: `pi-coding-agent/docs/rpc.md` is
         /// explicit that `message_update` omits the former cumulative `message` field and a
         /// client needing a partial must assemble it from `contentIndex`. So this is the
         /// fallback for an `_end` that carries no `content` of its own.
@@ -1722,7 +1723,7 @@ pub mod translate {
                     );
                     let mut event = Event::new(kind, Some(Phase::Started), at_ms);
                     event.stream_id = Some(stream_id);
-                    // `toolcall_start` carries `id` and `toolName` per `docs/rpc.md`, and the
+                    // `toolcall_start` carries `id` and `toolName` per `pi-coding-agent/docs/rpc.md`, and the
                     // name is worth publishing at open: a tool call whose name arrives only
                     // at `_end` renders as an unnamed spinner for however long its arguments
                     // take to stream.
@@ -1748,7 +1749,7 @@ pub mod translate {
                 "end" => {
                     let block = self.blocks.remove(&index);
                     // **`content` on the end event is authoritative where pi sends it**; the
-                    // accumulated deltas are the fallback. `docs/rpc.md` says to treat
+                    // accumulated deltas are the fallback. `pi-coding-agent/docs/rpc.md` says to treat
                     // `message_end.message` as authoritative for the same reason: a provider
                     // may correct or complete a block the deltas only approximated.
                     let text = delta
@@ -2272,7 +2273,7 @@ pub mod native {
         camel: "errorMessage",
     };
     /// The fork pointer, and the one field measured to occur **only** in snake_case — 407
-    /// files snake, 0 camel — even though `docs/session-format.md` documents it as
+    /// files snake, 0 camel — even though `pi-coding-agent/docs/session-format.md` documents it as
     /// `parentSession`. Both are read because the vendor's own documentation names the camel
     /// form, so a store written by a newer pi would carry it; the counts say which one a
     /// reader will actually meet today.
@@ -5029,7 +5030,7 @@ pub mod session {
 
     /// Epoch milliseconds now.
     ///
-    /// **pi's RPC events carry no timestamp at all** — checked against `docs/rpc.md`, where
+    /// **pi's RPC events carry no timestamp at all** — checked against `pi-coding-agent/docs/rpc.md`, where
     /// every event shape is listed and none holds one — so the adapter stamps arrival. That
     /// is why [`translate::Correlation::translate`] takes the clock as an argument: a test
     /// that cannot fix the stamps cannot assert on ordering.

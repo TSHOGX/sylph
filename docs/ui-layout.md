@@ -875,7 +875,7 @@ Conventions:
 **Hand-authored paths need a visual check, and nothing else substitutes.** A
 transposed coordinate type-checks, renders, and is simply wrong; an E2E test
 asserts an icon is *present*, not that it depicts anything.
-`scripts/icon-sheet.mjs` renders every icon at 28px and 16px in both themes to
+`frontend/scripts/icon-sheet.mjs` renders every icon at 28px and 16px in both themes to
 `/tmp/icon-sheet-*.png`. Run it after touching an icon.
 
 That sheet re-parses the source, so it can misreport a shared sub-component.
@@ -997,7 +997,7 @@ tab they have to find again.
 | --- | --- | --- |
 | Manifest | `app/manifest.ts` | A route handler, not a static file, so `theme_color` stays in step with the `--canvas` token from one place |
 | Icons | `public/icons/*.svg` + generated PNGs | 192 and 512 for the manifest, 180 for `apple-touch-icon`, plus a separate maskable 512 |
-| Generator | `scripts/generate-icons.mjs` | Rasterises the SVGs through Playwright's Chromium |
+| Generator | `frontend/scripts/generate-icons.mjs` | Rasterises the SVGs through Playwright's Chromium |
 | Service worker | `public/sw.js` | Installability on Android, and an honest offline page |
 | Offline page | `public/offline.html` | Standalone, hand-styled, cached by the worker |
 | iOS metadata | `app/layout.tsx` | iOS reads these rather than the manifest |

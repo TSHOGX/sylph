@@ -15,11 +15,10 @@
 //!
 //! So there is **no `v4`**. The vocabulary is versioned by the envagent wire protocol
 //! it travels on, because that is now the only place a version can disagree with
-//! anything. Nothing in this crate carries a protocol version string, and the framing —
-//! `Inbound`, `Outbound`, `parse_inbound`, and the handshake constants — stays in
-//! `backend/src/adapter/` until the envagent claims it in step 4. A reader looking for
-//! where the seam falls: **a value that describes an agent or a session is here; a value
-//! that describes how bytes are packed is not.**
+//! anything. The one version string is [`env::PROTOCOL`], beside the message envelope it
+//! versions, and the framing that reads it lives in `crates/envagent/src/transport.rs`.
+//! A reader looking for where the seam falls: **a value that describes an agent or a
+//! session is here; how a value is packed into bytes is the envagent's.**
 //!
 //! **Not a runtime.** No `tokio`, no `sqlx`, no `axum`. Every timestamp is an `i64` of
 //! epoch milliseconds, which is what the journal stores and what the wire carries.

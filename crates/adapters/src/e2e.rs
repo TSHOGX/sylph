@@ -245,7 +245,8 @@ fn initial_surface() -> SessionCapabilities {
 /// Behind the `e2e` feature because it is a test fixture that must never be reachable
 /// from a production build: [`crate::known_agents`] offering it would make "which agents
 /// exist" depend on how the server was compiled, and a fixture that can be reached by
-/// accident is the failure `docs/session-protocol.md` § What changed records twice.
+/// accident is one of the
+/// two silent failures `docs/environments.md` § Agent availability records.
 #[derive(Debug, Clone, Default)]
 pub struct E2eAdapter;
 

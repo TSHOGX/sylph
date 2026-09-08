@@ -1,7 +1,6 @@
 //! The inversion: the agent asks, and a human answers.
 //!
-//! Moved from `backend/src/adapter/wire.rs`. `docs/session-protocol.md` § Requests
-//! governs; `AdapterRequest` is renamed [`Request`] to match it, since nothing about
+//! `docs/session-protocol.md` § Requests governs; `AdapterRequest` is renamed [`Request`] to match it, since nothing about
 //! this shape is about an adapter subprocess any more.
 //!
 //! `rename_all_fields` on the tagged enum below is load-bearing, not tidiness — the

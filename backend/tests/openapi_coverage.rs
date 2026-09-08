@@ -10,7 +10,7 @@
 //!
 //! # Both sides are derived, neither is listed
 //!
-//! `AGENTS.md` § A hand-maintained list inside a test defeated the test is the reason
+//! `AGENTS.md` § Rules That Keep Costing Time — one fact with two derivations — is the reason
 //! this parses `lib.rs` rather than enumerating expected routes:
 //! `every_emitted_code_is_published_in_the_openapi_enum` read the schema from disk —
 //! correctly — and still missed six codes, because the list of *variants* it compared
