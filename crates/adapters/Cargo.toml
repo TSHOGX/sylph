@@ -44,6 +44,6 @@ quick-xml = "0.41"
 # The deterministic E2E agent. Behind a feature because it is a test fixture that
 # must never be reachable from a production build — `registry()` offering it
 # would make "which agents exist" depend on how the server was compiled, and a
-# fixture that can be discovered by accident is the failure
-# `docs/session-protocol.md` § What changed records twice.
+# fixture that can be discovered by accident is one of the two silent failures
+# `docs/environments.md` § Agent availability records.
 e2e = []

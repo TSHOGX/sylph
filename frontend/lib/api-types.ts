@@ -39,7 +39,7 @@ export interface Session {
   /**
    * The encoded identity triple, `<environment>:<agent>:<nativeId>`.
    *
-   * **Opaque by contract** (`docs/api-design.md` § A session id in a path is the
+   * **Opaque by contract** (`docs/api/README.md` § A session id in a path is the
    * identity triple): echo it back, never parse it. The three parts are separate
    * fields below precisely so nothing has to — reading them out of the id is how an
    * encoding change breaks a client with no error at any layer. Note also that the
@@ -353,8 +353,8 @@ export interface Facet {
 /**
  * A link's two facets.
  *
- * **One state, two facets** — not three link states (`docs/architecture.md` § One
- * link, two typed capability facets). The vendors do not sort into three buckets: a
+ * **One state, two facets** — not three link states (`docs/architecture.md`
+ * § One link, two typed capability facets). The vendors do not sort into three buckets: a
  * terminal `pi` is observable and undrivable, `codex` is both, `claude` is
  * observable and semi-drivable behind an approval gate. A third state would have to
  * pick one and misreport the others.
@@ -510,7 +510,7 @@ export function requestOptions(request: PendingRequest): RequestOption[] {
  * An agent CLI available on one environment.
  *
  * **There is no global agent list.** Which agents exist is decided per environment
- * by what is on that machine's `PATH` (`docs/api-design.md` § Agents and
+ * by what is on that machine's `PATH` (`docs/api/environments.md` § Agents and
  * environments), so a merged list would be true of nowhere — and a user picking an
  * environment with no `codex` on it should learn that before creating the session
  * rather than after. This type is therefore only ever reached through an
@@ -693,6 +693,15 @@ export interface NativeSessionRow {
   /** Delegation parent or fork origin, as the vendor recorded it. */
   parentNativeId?: string;
   /**
+   * Which relationship `parentNativeId` is, when the vendor's own key says.
+   *
+   * The pointer alone is unrenderable: "forked from" and "delegated by" must not appear
+   * under one label, so a row holding only the id would have to guess. Absent means the
+   * vendor named a parent without saying how — the same case in which the server writes
+   * no ancestry edge on adopt rather than a guessed one.
+   */
+  parentRelation?: "delegation" | "fork";
+  /**
    * What parsing this session would yield. Never `stream` — no care recovers a timing
    * that was never written, and a renderer reads this before drawing a duration.
    */
@@ -800,7 +809,7 @@ export interface SearchResult {
  *
  * No `available` flag and no `detail`: the index is server-owned and opened with the
  * history store. It never 503s for an empty result and answers an empty array for a
- * query that finds nothing (`docs/api-design.md` § Search).
+ * query that finds nothing (`docs/api/sessions.md` § Search).
  */
 export interface SearchResponse {
   results: SearchResult[];

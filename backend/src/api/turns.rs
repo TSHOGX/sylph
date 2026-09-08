@@ -158,7 +158,6 @@ pub async fn create_prepared(
                     }
                 },
                 status: "running".into(),
-                parent_session: None,
                 created_at_ms: now,
                 updated_at_ms: now,
             };

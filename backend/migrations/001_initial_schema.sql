@@ -40,7 +40,7 @@ CREATE TABLE app_meta (
 -- A composite key rather than one encoded text column because every listing filters
 -- on `environment` and most group by `workdir` within it. The encoded form
 -- (`<env>:<agent>:<native>`, delimiter `:` and never `/`) exists for a URL path
--- segment and for `parent_session`, not as the storage shape.
+-- segment and for `session_edges`' endpoints, not as the storage shape.
 --
 -- A row exists only once an agent has assigned the session an id, so `POST
 -- /sessions` starts an agent rather than reserving one. The "draft session with no
@@ -70,7 +70,6 @@ CREATE TABLE sessions (
   -- disambiguates: a delegation folds into its parent as a count, while a fork
   -- replays its origin's entire prefix and continues past it. A listing must not
   -- show both under one label. Holds an encoded triple.
-  parent_session   TEXT,
   created_at_ms    INTEGER NOT NULL,
   updated_at_ms    INTEGER NOT NULL,
 

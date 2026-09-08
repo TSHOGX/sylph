@@ -57,7 +57,7 @@ pub struct AppState {
     /// Where a session's work runs.
     ///
     /// One environment today, and it is held here rather than constructed per
-    /// caller so that pairing (step 4 of `docs/roadmap.md` § Implementation order)
+    /// caller so that pairing (`docs/roadmap.md` § Milestone 1)
     /// replaces one field instead of reaching into every consumer. This is also what
     /// `GET /environments` reports availability from — the surface that replaced
     /// discovery's `agents.available` and `broken_adapters`.
@@ -310,8 +310,8 @@ impl AppState {
             .await;
 
         // Retention's authority is now the **envagent that holds the vendor's own
-        // native store** rather than a separate archive (`docs/storage.md` § Two
-        // retention classes). The environment is passed rather than assumed inside so
+        // native store** rather than a separate archive (`docs/storage.md`
+        // § Two retention classes). The environment is passed rather than assumed inside so
         // a per-session environment later replaces an argument.
         let retention = crate::storage::RetentionScheduler::new(
             store.clone(),
@@ -340,7 +340,7 @@ impl AppState {
 
 /// Largest request body the API accepts.
 ///
-/// `docs/api-design.md` caps a turn at 10 MiB of attachments, and base64
+/// `docs/api/files.md` caps a turn at 10 MiB of attachments, and base64
 /// inflates that by about a third before JSON overhead, so the wire limit must
 /// exceed the payload limit or a valid upload would be rejected before
 /// [`attachments::stage`] could report which file was too large.
@@ -435,7 +435,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/sessions/enumerate", get(api::sessions::enumerate))
         // No `DELETE`: there is no empty draft to discard, because `POST /sessions`
         // now starts an agent and a row exists only once one has assigned an id
-        // (`docs/api-design.md` § `DELETE /api/v1/sessions/{id}` — removed).
+        // (`docs/api/sessions.md` § `DELETE /api/v1/sessions/{id}` — removed).
         .route(
             "/api/v1/sessions/{id}",
             get(api::sessions::get).patch(api::sessions::update),

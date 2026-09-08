@@ -42,7 +42,7 @@ pub enum Error {
     /// **Reporting no id is a failure rather than a degraded success**: without one the
     /// session can never be resumed, so every link death — the idle reaper, a restart,
     /// an explicit detach — would make it permanently unlinkable
-    /// (`docs/api-design.md` § `POST /api/v1/sessions`).
+    /// (`docs/api/sessions.md` § `POST /api/v1/sessions`).
     #[error("Could not start the agent: {0:#}")]
     AgentStartFailed(anyhow::Error),
 
@@ -79,7 +79,7 @@ pub enum Error {
     ///
     /// **Guessing a directory is not available as a fallback.** A workdir is the
     /// `current_dir` of a spawned agent, so inventing one decides where arbitrary code
-    /// runs (`docs/api-design.md` § `POST /api/v1/sessions/adopt`).
+    /// runs (`docs/api/sessions.md` § `POST /api/v1/sessions/adopt`).
     #[error("That native session recorded no working directory, so it cannot be resumed")]
     NativeSessionNotResumable,
 
@@ -595,7 +595,7 @@ mod tests {
     }
 
     /// Adopting fails six ways, and **collapsing any pair sends a reader to the wrong
-    /// layer** (`docs/api-design.md` § `POST /api/v1/sessions/adopt`).
+    /// layer** (`docs/api/sessions.md` § `POST /api/v1/sessions/adopt`).
     ///
     /// The six fixes are: nothing to do, widen configuration, wrong id, already done,
     /// unusable source, bring the machine online. Asserted as a set of distinct

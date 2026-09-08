@@ -1,0 +1,17 @@
+# The pointer checker for this repo's prose.
+#
+# A crate rather than a shell script so `cargo test --workspace` gates it: a
+# pointer that rots is then a red test on the commit that rotted it, which is the
+# one moment somebody is looking. No dependencies, because a lint that pulls a
+# parser in is a lint people disable.
+[package]
+name = "sylph-docs-check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "sylph-docs-check"
+path = "src/main.rs"
+
+[dependencies]

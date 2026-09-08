@@ -16,7 +16,7 @@
  *
  * # A known limitation, and it is the server's to fix
  *
- * `GET /sessions` takes `limit` (max 200) and **no cursor** (`docs/api-design.md` §
+ * `GET /sessions` takes `limit` (max 200) and **no cursor** (`docs/api/sessions.md` §
  * Sessions), so this surface can no longer reach past the newest 200 sessions in a
  * directory — and a real directory holds over a thousand. That is a regression against
  * the paged archive this replaces, and it is stated on screen rather than hidden,
@@ -59,8 +59,11 @@ const WorkspacePicker = dynamic(
 /**
  * Rows requested, which is also the endpoint's maximum.
  *
- * Asked for in full rather than in pages because there is no cursor to continue with:
- * a smaller number would truncate more with nothing to reach the rest.
+ * Asked for in full rather than in pages because one workspace's history fits: the cap is
+ * reached by a store far larger than any workdir observed here. `updatedBeforeMs` is the
+ * keyset cursor if that stops being true — pass the last row's `updatedAtMs` to continue.
+ * It is inclusive, so a page re-reads the tied group at its edge and a client must dedupe
+ * by id; that overlap is what makes it lossless across a millisecond many sessions share.
  */
 const LIMIT = 200;
 

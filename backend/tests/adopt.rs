@@ -30,7 +30,7 @@ use serde_json::json;
 ///
 /// **Collapsing any pair sends a reader to the wrong layer** — the six adopt fixes are
 /// nothing to do, widen configuration, wrong id, already done, unusable source, and bring
-/// the machine online (`docs/api-design.md`).
+/// the machine online (`docs/api/sessions.md`).
 #[tokio::test]
 async fn an_unreachable_environment_is_refused_as_unavailable_not_as_invalid() {
     let backend = TestBackend::start().await;
@@ -374,7 +374,8 @@ async fn a_listing_is_shaped_correctly_whatever_this_machine_holds() {
 /// A session Sylph already holds is **marked**, not hidden and not offered.
 ///
 /// Hiding it leaves a user hunting for a session plainly on the machine; offering it hands
-/// out a `409` nobody can act on (`docs/api-design.md` § `GET /sessions/enumerate`). This
+/// out a `409` nobody can act on (`docs/api/sessions.md`
+/// § `GET /api/v1/sessions/enumerate`). This
 /// is asserted through the classification the endpoint uses rather than against a native
 /// store, so it holds on a machine with no agents installed.
 #[tokio::test]

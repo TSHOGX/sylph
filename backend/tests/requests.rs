@@ -9,7 +9,7 @@ mod common;
 use axum::http::StatusCode;
 use common::{json_body, TestBackend};
 use serde_json::json;
-use sylph_web_backend::models::PendingRequest;
+use sylph_server::models::PendingRequest;
 
 /// Insert a request the way the link drain task would, so these tests exercise
 /// the API and the store without needing a live adapter process.

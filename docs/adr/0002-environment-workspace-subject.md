@@ -27,12 +27,17 @@ ambiguous.
 - Pairing creates an environment and may grant the pairing subject access. It does not create an
   implicit owner or a second session namespace.
 
+[ADR-0006](0006-environment-authority-and-capability-grants.md) refines the last two decisions
+without changing session identity: it settles who may issue a grant, splits the grant into
+`observe` and `control`, and reserves `administer` to the environment's authority root. The scope
+of an environment grant stays as stated here; what varies is which capability it conveys.
+
 ## Consequences
 
 Environment filtering becomes the common authorization boundary for sessions, search, workspaces,
-health, files, and raw records. Directory-level ACLs, session owners, and fine-grained grants are
-deferred until a concrete requirement exists. The schema should retain `subject`, `capability`,
-and grant provenance so that extension does not require changing session identity.
+health, files, and raw records. Directory-level ACLs and session owners are deferred until a
+concrete requirement exists. The schema should retain `subject`, `capability`, and grant
+provenance so that extension does not require changing session identity.
 
 ## Verification and rollback
 

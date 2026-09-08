@@ -92,7 +92,7 @@ export function SearchOverlay() {
   const environments = useEnvironments();
 
   // Gated on a query worth a full-text scan. Two characters rather than one,
-  // matching `docs/api-design.md` § Search: a single letter matches most of a real
+  // matching `docs/api/sessions.md` § Search: a single letter matches most of a real
   // store and answers a question nobody asked.
   const indexQuery = useQuery({
     queryKey: ["search", debounced],

@@ -4,58 +4,54 @@ Where a session's work runs, and the wire between there and the server.
 
 One authoritative record on the server; agents execute wherever an **envagent** is
 running. `docs/architecture.md` owns why the arrow points inward and why there is one
-abstraction instead of three; this document owns the protocol, the spool, pairing, and the
-two provisioning paths.
+abstraction instead of three. This document owns the protocol, the spool, pairing, agent
+availability, and the two provisioning paths.
 
-The `crates/envagent` binary now implements the local v1 framing, durable spool,
-reconnect epochs, path containment, credential storage, and adapter hosting. The
-server bridge accepts the same framed connection when `SYLPH_ENV_LISTEN` is set.
-TLS termination and remote provisioning remain explicit follow-on work. Multi-user access is defined by
-[ADR-0002](adr/0002-environment-workspace-subject.md) but not yet implemented; the development
-transport is loopback-only.
-
-Native adopt/watch events without a server turn id are assigned one server-owned
-container when first ingested. This is not a synthesized vendor bracket: the
-vendor event stream remains unchanged, while the container makes each event
-reachable through the per-turn history API. A terminal event closes it, and a
-finite source emits an ordered close diagnostic at EOF.
-
-The generated wire-shape artifact is `docs/sylph.env.v1.schema.json`; semantic
-Rust types live in `crates/protocol/src/env.rs` and framing tests live beside
-the envagent runtime.
+Wire shapes are generated into `docs/sylph.env.v1.schema.json`; the semantic types live
+in `crates/protocol/src/env.rs`.
 
 ## The envagent is the whole abstraction
 
-An envagent is a small binary that dials out to a server, authenticates, and then
-offers exactly four capabilities over one multiplexed connection:
+An envagent is a small binary that dials out to a server, authenticates, and then offers
+four capabilities over one multiplexed connection:
 
 | Capability | What the server asks for |
 | --- | --- |
 | **run** | start an agent session, carry its turns, report its events |
 | **watch** | follow a session this envagent did not start, from the vendor's native store |
 | **files** | read and write within a session's `workdir`, for attachments and the Artifacts pane |
-| **health** | is this machine reachable, does it have the agent CLIs, what does it report |
+| **health** | is this machine reachable, which agent CLIs does it have, at what versions |
 
-There is no `Environment` trait with one implementation per substrate. Local, SSH,
-and sandbox differ only in how an envagent came to exist, and after it exists they
-are the same case. The adapters are **linked into the envagent**, so vendor
-translation happens on the machine holding the vendor's files — the constraint that
-made a server-side SSH implementation unworkable.
+Local, SSH, and sandbox differ only in how an envagent came to exist; afterwards they are
+one case. The adapters are **linked into the envagent**, so vendor translation happens on
+the machine holding the vendor's files.
+
+### Every environment is an envagent, including the server's own machine
+
+There is no in-process path. A server with no envagent connected can hold and serve
+records but can run nothing, and it says so: session creation fails with a message naming
+the missing envagent and how to pair one, rather than falling back to spawning an agent
+beside itself.
+
+A single-machine install is therefore **two processes**, `sylph-server` and
+`sylph-envagent`, with two roots and two config files (`docs/configuration.md`).
 
 ## `sylph.env.v1`
 
-One TLS connection per envagent, initiated by the envagent, carrying framed
-messages in both directions with independent streams multiplexed over it. A stream
-is a session's event flow, a file transfer, or a control exchange.
+One connection per envagent, initiated by the envagent, carrying framed messages in both
+directions with independent streams multiplexed over it. A stream is a session's event
+flow, a file transfer, or a control exchange.
 
-*Decision: the envagent dials out.* A laptop behind NAT, an SSH host on a private
-network, and a sandbox that auto-pauses are then all one case; a server that had to
-reach in would work for exactly one of the three.
+The envagent dials out, so a laptop behind NAT, an SSH host on a private network, and a
+sandbox that auto-pauses are one case.
 
-*Decision: adapter framing is not the wire.* Inside the envagent, an adapter is a
-Rust call and events are values (`docs/session-protocol.md`). NDJSON survives only
-where bytes genuinely cross a machine boundary — here. So the vocabulary is shared
-with the adapter contract, but nothing depends on a subprocess existing.
+Adapter framing is not the wire. Inside the envagent an adapter is a Rust call and events
+are values (`docs/session-protocol.md`); NDJSON survives only where bytes cross a machine
+boundary. The vocabulary is shared with the adapter contract without anything depending
+on a subprocess.
+
+The transport is loopback-only until TLS lands, and a non-loopback address is refused
+rather than downgraded, so the day it becomes reachable is a deliberate one.
 
 ### Message classes
 
@@ -65,183 +61,280 @@ with the adapter contract, but nothing depends on a subprocess existing.
 | `session.*` | server → env | open, send a turn, interrupt, steer, set config |
 | `event` | env → server | normalized events carrying producer sequence and source provenance |
 | `ack` | server → env | durable through a contiguous producer prefix |
+| `agents` | env → server | the agent inventory changed (§ Agent availability) |
 | `watch.*` | server → env | start or stop following a native session |
 | `adopt.*` | server → env | bring in what a native store already holds |
 | `files.*` | both | read, write, list, stat within a session's workdir |
 | `health` | both | probe and report |
 
-**The producer sequence and canonical server sequence are distinct.** The envagent
-allocates a monotonic producer sequence before spooling; the server assigns the
-session's canonical sequence only inside its durable ingest transaction. A dropped
-connection therefore resumes from the first unacknowledged producer item rather than
-guessing from a remote clock or a server-side gap.
+**The producer sequence and the canonical server sequence are distinct.** The envagent
+allocates a monotonic producer sequence before spooling; the server assigns the session's
+canonical sequence inside its durable ingest transaction. A dropped connection resumes
+from the first unacknowledged producer item rather than guessing from a remote clock.
+
+Native adopt and watch events arrive without a server turn id, so ingest assigns one
+server-owned container per source. The vendor stream is unchanged; the container is what
+makes each event reachable through the per-turn history API. A terminal event closes it,
+and a finite source emits an ordered close diagnostic at EOF.
+
+## Agent availability
+
+Which agents an environment can run is discovered, not configured, and it is a fact about
+that one machine.
+
+**The server's adapter set is fixed at build time.** `sylph-server` knows the vendors its
+binary was compiled with, which bounds what any environment may report. The `e2e` cargo
+feature replaces that set with the fixture adapter rather than adding to it, so no
+production build has a path to it.
+
+**Availability is `PATH`, not a registry.** There is no discovery pass, no adapter
+directory, and so no map that can be wrong — the mechanism that had one produced this
+repo's two worst silent failures, and both are the same defect: a lookup that answered
+plausibly instead of failing. Zero discovered agents made `/` a dead keystroke three
+layers from its cause, and a fixture adapter left reachable failed an entire E2E suite
+against an agent that did not exist. "Why can I not use this agent" now has one answer,
+one fix, and an error message able to say both.
+
+**An environment's set is discovered per connection.** The envagent probes each vendor it
+was built with — is the CLI present, and does its version meet the adapter's floor — and
+carries the result in `hello`. A CLI that is present but too old is reported as
+unavailable *with its version*, which is a different fix from installing it.
+
+**It is re-discovered over the life of the connection.** An envagent watches for changes
+and sends an `agents` message when its inventory moves, so upgrading a vendor CLI or
+installing a new one takes effect without re-pairing or restarting the server. A machine
+that starts with only `claude` usable, then upgrades `codex` past the floor and installs
+`pi`, reports all three from that moment. Only the `hello` half of this is built; the
+watcher and the `agents` message are the Milestone 1 exit gate in `docs/roadmap.md`
+§ Milestone 1 — until they land, an inventory change is observed at the next connection.
+
+So availability is per environment and time-varying, and `GET /api/v1/environments` is
+where it is read. A picker offering an agent must name the environment it will run in,
+since the answer differs across environments and the failure otherwise arrives after
+creation rather than before it.
 
 ## Spooling, and why the record survives a dropped connection
 
-The old shape was `adapter stdout → server → journal`, in one process,
-synchronously. Now there is a network in the middle, and **a drop puts a hole in the
-journal exactly at the tail of a turn** — which is the part AFK exists to deliver.
+There is a network between the adapter and the journal, so a drop would put a hole in the
+journal at the tail of a turn — the part AFK exists to deliver.
 
-So an envagent keeps a **local durable spool**:
+An envagent therefore keeps a **local durable spool**:
 
 - Every event is appended to a local WAL-mode SQLite file **before** being sent.
 - Rows are deleted only when the server acks past them.
-- On reconnect, `hello` carries the last acked sequence per live session and the
-  envagent resumes from there.
-- The spool is bounded by size; on overflow the envagent stops the session's agent
-  rather than dropping events, because a silent gap is worse than a stopped turn.
+- On reconnect, `hello` carries the last acked sequence per live session and the envagent
+  resumes from there.
+- The spool is bounded by size; on overflow the envagent stops the session's agent rather
+  than dropping events.
 
-*Decision: the spool is not a second journal.* It is a bounded ack-gated buffer, and
-it is authoritative for nothing. Two durable records would reintroduce the "which
-copy is the truth" question the authority model exists to answer. Its only contract
-is: nothing leaves it until the server has it.
+The spool is a bounded, ack-gated buffer and is authoritative for nothing: two durable
+records would reintroduce the "which copy is the truth" question the authority model
+exists to answer. Its only contract is that nothing leaves it until the server has it.
 
-This is the same shape as bringing in native sessions, differing only in what
-travels — live events rather than parsed history — which is why there is one
-mechanism and not two.
+Three ordinary events exercise it, and it is a correctness requirement for all three:
+closing a laptop lid, switching Wi-Fi, and a sandbox auto-pausing on idle.
 
-Three ordinary events exercise it, and it is a correctness requirement for all
-three: closing a laptop lid, switching Wi-Fi, and a Khora sandbox auto-pausing on
-idle.
+### Overflow is a fact in the record
 
-### Renaming a WAL-mode SQLite file means checkpoint-then-rename
+Stopping the agent bounds the damage without describing it, so overflow records
+`close_reason = spool_full` on the turn (`docs/session-protocol.md` § Outcomes), and the
+trajectories the sweep closes carry `abandoned`: the vendor reported no failure, and
+`abandoned` already means "nobody reported an outcome" while staying non-final. A reader
+asking whether anything is missing gets the answer from the record rather than from a log
+on another machine.
 
-The spool is WAL-mode SQLite, so it inherits a rule this repo already paid for:
-moving three files is wrong. A crash between renaming `-wal` and `.db` strands
-committed data in an orphaned WAL beside a database that no longer references it.
-`PRAGMA wal_checkpoint(TRUNCATE)`, close every connection, move the main file alone,
-delete the emptied sidecars.
+The reason comes from the closed `CloseReason` set rather than a string this section
+invents, because a dropped connection produces the same shape one layer over
+(`link_lost`).
 
-## Pairing, and who owns an envagent
+Stopping the agent is what the envagent must do: a reader loop that exits while the agent
+keeps producing converts a bounded gap into an unbounded one. The vendor's own store
+still holds what the spool refused, so recovery is `adopt` on that session — the same
+mechanism that brings in any native history, and a property of the reason rather than of
+this condition, since `spool_full`, `link_lost`, `agent_exited`, and `grant_revoked` all
+leave the vendor's store ahead of Sylph's.
 
-An envagent joins by pairing, not by holding a long-lived shared secret in a config
-file:
+### Moving the spool means checkpoint-then-rename
+
+The spool is WAL-mode SQLite, so relocating it is not a move of three files. A crash
+between renaming `-wal` and `.db` strands committed data in an orphaned WAL beside a
+database that no longer references it. `PRAGMA wal_checkpoint(TRUNCATE)`, close every
+connection, move the main file alone, delete the emptied sidecars — an emptied sidecar
+left in place is adopted by the next database opened at that path.
+
+## Pairing, and who may authorize an envagent
+
+An envagent joins by pairing rather than by holding a long-lived shared secret in a
+config file:
 
 1. A user asks the server for a pairing code — short-lived, single-use.
 2. `sylph-envagent pair --server <url> --code <code>` exchanges it for a durable
-   credential and an opaque environment id. The HTTP pairing URL is separate from
-   the framed wire endpoint; local development derives the latter as the adjacent
-   port (`4317` → `4318`), while `SYLPH_ENV_SERVER` overrides it for a custom
-   listener.
+   credential and an opaque environment id, and records the wire endpoint (the HTTP port
+   plus one, per `docs/configuration.md` § Ports).
 3. The envagent stores the credential locally and dials in from then on.
 
-The environment id is **opaque and minted here**, never a hostname or a
-user-supplied name. `docs/architecture.md` § Identity is why: the id is in a
-session's key, so a rename would destroy identity. Display names are mutable
-metadata.
+The environment id is **opaque and minted here**, never a hostname or a user-supplied
+name: the id is in a session's key, so a rename would destroy identity
+(`docs/architecture.md` § Identity). Display names are mutable metadata.
 
-*Measured 2026-08-27:* `codex remote-control pair` uses short-lived pairing codes for
-the same purpose, which is evidence the shape works rather than a guess.
+An envagent is an execution identity rather than a user's personal agent.
+[ADR-0006](adr/0006-environment-authority-and-capability-grants.md) is authoritative for
+who may authorize a Subject on it; the rest of this section is the resulting flow.
 
-**Who owns an envagent is unresolved and gates multi-user.** On a single-user install
-it does not arise. The moment a server has two principals, an unowned envagent means
-one user can run agents on another user's laptop —
-`docs/architecture.md` § Security model carries this with the rest of that gate.
+### Authority is fixed at pairing
+
+Pairing derives the environment's `grant_authority` from how it came to exist and never
+changes it. `machine` means that machine's OS-user authorizes; `server` means a Subject
+flagged `is_admin` does, which is what a sandbox needs, since no user is sitting beside
+it.
+
+### Three capabilities, two of them grantable
+
+`observe` reads. `control` drives a session and creates one within `browse_roots`.
+`administer` — editing `browse_roots`, agent configuration, issuing and revoking grants,
+unpairing — is the authority root itself and is never granted, so a Subject holding a
+grant cannot pass one on.
+
+`administer` being ungrantable is separate from whether an operation has a route. Its
+carrier splits by where the state lives: `browse_roots` and agent configuration are the
+envagent's own config and have no route, because only the machine holding a path can
+canonicalize it; revoking a grant and unpairing change server tables and are server
+routes gated by the authority root. `docs/api/` is authoritative for both the
+split and each gate.
+
+### Invite adds a Subject to an environment that already exists
+
+`sylph-envagent invite --capability observe --ttl 15m` mints a code; the Subject redeems
+it while authenticated, and the server records the grant. The command **runs on the
+machine and requires that machine's OS-user** — `sylph.env.v1` carries no message that
+issues a grant, since a wire message would let one compromised envagent admit new
+Subjects to itself.
+
+Invite and pair share the code shape and stay separate flows: an invite reaching the
+pairing path would mint a second environment id for a machine that already has one, and
+that id is a component of session identity.
+
+The server validates five properties on redemption: environment scope, capability,
+expiry, single consumption, and issuer provenance. Scope is the load-bearing one — a
+grant asserts only over the environment that issued it.
+
+### Revoking reaches work already in flight
+
+Revocation refuses new control, and any dispatched vendor operation that cannot be
+recalled is recorded as `abandoned` with `close_reason = grant_revoked` on the turn it cut
+short. The caller's `authorization` becomes `not_granted`; the link's facets do not move,
+because a facet describes the environment rather than the caller
+(`docs/architecture.md` § A facet describes the environment, never the caller).
+
+### Disclosure happens twice
+
+Pairing states that this machine's sessions, transcripts, and native history will reach
+the server. An invite states the concrete reach being handed over: the resolved
+`browse_roots`, the agent CLIs present, the raw transcript exposure, and the capability
+conveyed. Pairing is a user configuring their own machine; an invite gives that reach to
+someone else, and only resolved values describe it truthfully.
+
+### Unpairing is the terminal operation, and it keeps every session
+
+`sylph-envagent unpair`, or `DELETE /api/v1/environments/{id}` from the authority root,
+ends the relationship: the credential is destroyed, the connection closes, and no future
+one is accepted.
+
+**Every session that environment produced is retained**, and this is the point of having
+the operation. The server's store is the authority (`docs/architecture.md` § One
+authority), so a record's survival cannot depend on the machine that produced it still
+being paired — a machine that has been decommissioned is exactly when its transcripts
+matter most.
+
+What changes is the link, not the record. Unpaired sessions report `observe` available
+from the store and `control` unavailable with `environment_unreachable`, the same as any
+disconnected environment, and they remain listable, readable, and searchable. Retention
+treats the environment as unreachable rather than as empty, so nothing is pruned on the
+strength of a question that can no longer be asked (`docs/storage.md` § Retention).
+
+Re-pairing that machine mints a **new** environment id and a new set of sessions.
+Sessions do not migrate between environments, and an id is not reissued.
 
 ## How an envagent comes to exist
 
 ### Self-installed
 
-A user installs `sylph-envagent` and pairs it. This is the case for a laptop, a
-workstation, a build box. Nothing else is special about it, including on the machine
-the server itself runs on — *decision: the server does not embed an envagent*, so
-"the server's own machine" is not a privileged environment with its own code path.
-That is the same class of special case as the session classes deleted in
-`docs/architecture.md`, and it would drift the same way.
+A user installs `sylph-envagent` and pairs it: a laptop, a workstation, a build box, and
+the server's own machine.
 
 ### SSH-bootstrapped
 
 An existing envagent copies the binary to a host it can already reach and starts it
-there. **The bootstrap runs from an envagent, not from the server** — which is the
-whole point: whatever your machine can reach by SSH, your session list can reach.
+there. **The bootstrap runs from an envagent, not from the server**, which is what makes
+whatever your machine can reach by SSH reachable from your session list.
 
-The requirement on the target is only what SSH already implies: a shell, a writable
-directory, and the agent CLIs the user wants to run.
+The requirement on the target is what SSH already implies: a shell, a writable directory,
+and the agent CLIs the user wants to run.
 
-Once started, the target has two possibilities, and they differ in **what AFK
-promises**:
+Once started, the target has two possibilities, and they differ in what AFK promises:
 
 | | Target can reach the server | Target cannot |
 | --- | --- | --- |
 | connection | target dials in directly | the bootstrapping envagent relays |
-| laptop may leave | yes | **no** — control dies with the relay |
+| laptop may leave | yes | no — control dies with the relay |
 | what a client shows | an ordinary environment | "reachable via <machine>" |
 
-Both are real. A UI that showed them identically would promise AFK continuity it
-cannot keep in the second case.
+Both are real, and a client must distinguish them: shown identically, the second promises
+AFK continuity it cannot keep.
 
 ### Sandbox-provisioned (Khora)
 
-The server asks Khora for a sandbox whose image contains an envagent, which then
-dials in like any other. **Provisioning is server-side** — it needs Khora API
-credentials and must not depend on any client being online — but the running sandbox
-is not a special environment.
+The server asks Khora for a sandbox whose image contains an envagent, which then dials in
+like any other. **Provisioning is server-side**, since it needs Khora API credentials and
+must not depend on a client being online, while the running sandbox is an ordinary
+environment.
 
-That makes a sandbox the **only** environment needing no client online at all, which
-is the strongest AFK case in the system: start work from a phone, close everything,
-it keeps running.
+That makes a sandbox the only environment needing no client online at all, which is the
+strongest AFK case in the system: start work from a phone, close everything, it keeps
+running.
 
-Two Khora properties shape the design rather than merely satisfying it:
+Two Khora properties shape the design:
 
 **The data plane exists only while `running`.** Pause closes admission, drains, then
-quiesces the guest. So auto-pause on idle is a feature, and a session's link dying is
-expected rather than a fault. This is what the spool and the ack cursor are for.
+quiesces the guest, so auto-pause on idle is a feature and a link dying is expected. This
+is what the spool and the ack cursor are for.
 
-**`Connect` replays a bounded tail and is explicitly not durable**, so it cannot be
-the record. It is a reconnect convenience; the server's store is the record. Without
-that distinction the sandbox path would quietly have weaker history than a laptop.
+**`Connect` replays a bounded tail and is explicitly not durable**, so it is a reconnect
+convenience rather than a record.
 
-Khora models no caller, account, or work unit by design, and Sylph must not push
-those into it. A sandbox is addressed by id; the mapping from session to sandbox lives
-in the server's store. A Sylph feature that needs Khora to know about Sylph is a Sylph
-bug.
+Khora models no caller, account, or work unit by design, and Sylph must not push those
+into it. A sandbox is addressed by id, and the mapping from session to sandbox lives in
+the server's store.
 
 ## Watching and adopting a native session
 
-Both bring in a session Sylph did not start, and they differ only in whether it is
-still running. Both are **explicit acts** (`docs/architecture.md` § Data travels one
-way).
+Both bring in a session Sylph did not start, and they differ only in whether it is still
+running. Both are explicit acts (`docs/architecture.md` § Data travels one way).
 
 **adopt** — the adapter parses what the native store already holds and emits it as
 normalized events. One pass, then done. Fidelity is whatever the vendor wrote.
 
-**watch** — the same parse, then follow the file as it grows, emitting events as they
-appear. All three supported agents flush mid-turn, so a watcher sees a turn in progress
-rather than only its end; `docs/agents.md` § Capability matrix has the per-vendor
-granularity. Two `pi` hazards are recorded there too, because a watcher must be built
-around them: it truncate-rewrites with no lock, so a reader can observe a half-written
-file, and the file does not exist at all before the first assistant message — **an absent
-file is not an absent session.**
+**watch** — the same parse, then follow the file as it grows. All three supported agents
+flush mid-turn, so a watcher sees a turn in progress rather than only its end;
+`docs/agents.md` § Capability matrix has the per-vendor granularity and the hazards a
+watcher must be built around.
 
-A watched session's **control** facet is whatever that vendor offers a second party,
-which is not universal (`docs/agents.md` has the table). Its **observe** facet works
-regardless. This is the facet pair from `docs/architecture.md`, and a watched session
-is not a third link state.
+A watched session's **control** facet is whatever that vendor offers a second party, which
+is not universal; its **observe** facet works regardless. This is the facet pair from
+`docs/architecture.md`, and a watched session is not a third link state.
 
-Offering "bring in everything on this machine" once, when an envagent first pairs, is
-the right shape for the bulk case. A recurring background sweep is not: it would
-publish sessions the user never associated with Sylph.
+Offering "bring in everything on this machine" once, when an envagent first pairs, is the
+right shape for the bulk case. A recurring background sweep would publish sessions the
+user never associated with Sylph.
 
 ## Health is per environment
 
-`/api/v1/health` reports each environment separately, because "the agent will not
-start" has a different cause and a different fix per machine: a missing CLI locally,
-an unreachable orchestrator or exhausted node for Khora, a dead connection for a
-laptop that went to sleep. Collapsing those into one boolean is what turns a
-five-second diagnosis into an hour.
+`/api/v1/health` reports each environment separately, because "the agent will not start"
+has a different cause and a different fix per machine: a missing CLI locally, an
+unreachable orchestrator or exhausted node for a sandbox, a dead connection for a laptop
+that went to sleep.
 
-An envagent reports which agent CLIs it found and their versions, so "which agents
-can I use" is answered per environment rather than globally. A user picking an
-environment with no `codex` on it should see that before creating the session, not
-after.
-
-## A degraded dependency is one fact per run, not one per attempt
-
-**An unreachable envagent is a persistent state, so report it once at `error` and at
-`debug` thereafter.** A per-attempt warning turns one missing dependency into thousands of
-identical lines, and this repo has rebuilt that flood twice at different layers.
-
-The fix belongs in **the client that holds the connection**, not in the handlers that poll
-it: a sidebar and a picker both polling will otherwise reproduce the flood one layer up.
-Let a caller ask whether the state was already reported rather than each caller
-remembering.
+**An unreachable envagent is one fact about the run, not one per attempt.** Report it once
+at `error` and at `debug` thereafter, in the client that holds the connection rather than
+in the handlers that poll it — a sidebar and a picker both polling would otherwise
+reproduce the flood one layer up.

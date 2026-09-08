@@ -198,8 +198,7 @@ CREATE INDEX IF NOT EXISTS native_records_by_session
 -- under `blobs/`. So an external-content index would index compressed bytes for some
 -- rows and nothing at all for the rows most worth finding — the large ones.
 -- Consolidation therefore inserts the *decoded* text, which costs a second copy of
--- it and is the price of the tier split (`docs/storage.md` § "`blocks_fts` is
--- standalone").
+-- it and is the price of the tier split (`docs/storage.md` § The index is standalone).
 --
 -- `session_id` and `seq` ride along `UNINDEXED` so a hit resolves to a block without
 -- a join back through a rowid mapping that would have to be maintained separately.

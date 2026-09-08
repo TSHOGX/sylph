@@ -132,10 +132,10 @@ impl JournalStore {
             r#"
             INSERT INTO sessions (
                 environment, agent, native_id, workdir, title,
-                inject_identity, fidelity, flags_json, status, parent_session,
+                inject_identity, fidelity, flags_json, status,
                 created_at_ms, updated_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
@@ -148,7 +148,6 @@ impl JournalStore {
         .bind(session.fidelity.to_string())
         .bind(&session.flags_json)
         .bind(&session.status)
-        .bind(&session.parent_session)
         .bind(session.created_at_ms)
         .bind(session.updated_at_ms)
         .fetch_one(&self.pool)
@@ -170,9 +169,9 @@ impl JournalStore {
         let stored_session = sqlx::query_as::<_, Session>(
             r#"INSERT INTO sessions (
                 environment, agent, native_id, workdir, title,
-                inject_identity, fidelity, flags_json, status, parent_session,
+                inject_identity, fidelity, flags_json, status,
                 created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *"#,
         )
         .bind(session.id.environment.as_str())
@@ -184,7 +183,6 @@ impl JournalStore {
         .bind(session.fidelity.to_string())
         .bind(&session.flags_json)
         .bind(&session.status)
-        .bind(&session.parent_session)
         .bind(session.created_at_ms)
         .bind(session.updated_at_ms)
         .fetch_one(&mut *tx)
@@ -289,7 +287,21 @@ impl JournalStore {
               AND (?3 IS NULL OR rtrim(workdir, '/') = rtrim(?3, '/'))
               AND (?4 IS NULL OR updated_at_ms >= ?4)
               AND (?5 IS NULL OR updated_at_ms <= ?5)
-            ORDER BY updated_at_ms DESC
+            -- The identity triple breaks ties, which makes this a **total** order.
+            -- `updated_at_ms` alone is not one: it is milliseconds, and adopting a
+            -- native store writes many sessions inside a single tick. Two rows sharing
+            -- a stamp then have no defined order, so a page boundary landing inside a
+            -- tied group returns rows in an order the next query need not agree with —
+            -- and `updatedBeforeMs` is exactly that next query, since it *is* the
+            -- keyset cursor for this listing. The result is a page that duplicates or
+            -- drops a session while looking entirely well-formed, which is the
+            -- expensive kind of defect: nothing errors.
+            --
+            -- The triple is the primary key, so it is unique and never null. Left off
+            -- `sessions_updated_idx` deliberately: a tied group is a handful of rows,
+            -- and sorting those inside the scan costs less than a wider index on every
+            -- write. Add one when a tie group is measured large, not before.
+            ORDER BY updated_at_ms DESC, environment DESC, agent DESC, native_id DESC
             LIMIT ?6
             "#,
         )
@@ -1830,7 +1842,6 @@ mod tests {
                 fidelity: sylph_protocol::Fidelity::Stream,
                 flags_json: "{}".to_string(),
                 status: "idle".to_string(),
-                parent_session: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
             })
@@ -2653,6 +2664,107 @@ mod tests {
             turn.completed_at_ms,
             Some(ended),
             "the turn ended when its outcome arrived, not when the backend came back"
+        );
+    }
+
+    /// Seed `natives` sessions that all share one `updated_at_ms`.
+    ///
+    /// The tie is written, not raced for. Creating sessions quickly enough to land
+    /// in one millisecond would pass or fail on machine speed, which is a test that
+    /// stops testing without saying so.
+    async fn tied_at(dir: &std::path::Path, stamp: i64, natives: &[&str]) -> JournalStore {
+        let store = JournalStore::new(dir.join("journal.db").to_str().unwrap())
+            .await
+            .expect("store");
+        for native in natives {
+            store
+                .create_session(&Session {
+                    id: crate::fixtures::test_session_id(native),
+                    workdir: "/tmp/project".to_string(),
+                    title: None,
+                    inject_identity: true,
+                    fidelity: sylph_protocol::Fidelity::Messages,
+                    flags_json: "{}".to_string(),
+                    status: "idle".to_string(),
+                    created_at_ms: stamp,
+                    updated_at_ms: stamp,
+                })
+                .await
+                .expect("session");
+        }
+        store
+    }
+
+    #[tokio::test]
+    async fn sessions_sharing_one_timestamp_list_in_the_same_order_every_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Inserted ascending, so rowid order is the reverse of the answer. Without a
+        // tiebreaker SQLite is free to return either, and the one it returns for a
+        // three-row table is not the one it returns under a different plan.
+        let store = tied_at(dir.path(), 1_700_000_000_000, &["a", "b", "c"]).await;
+
+        let natives = |rows: &[Session]| -> Vec<String> {
+            rows.iter()
+                .map(|s| s.id.native_id.as_str().to_string())
+                .collect()
+        };
+        let filter = SessionFilter::default();
+
+        let first = store.list_sessions(&filter).await.expect("list");
+        let second = store.list_sessions(&filter).await.expect("list again");
+
+        assert_eq!(
+            natives(&first),
+            vec!["c", "b", "a"],
+            "a tie breaks on the identity triple descending"
+        );
+        assert_eq!(
+            natives(&first),
+            natives(&second),
+            "one filter, two answers: the listing has no total order"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cursor_landing_inside_a_tie_still_reaches_every_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stamp = 1_700_000_000_000;
+        let store = tied_at(dir.path(), stamp, &["a", "b", "c", "d"]).await;
+
+        // A page that ends mid-tie. `updated_before_ms` is inclusive, so the next
+        // page re-reads the whole tied group — that overlap is only survivable
+        // because both pages agree on the order, which is what makes a client's
+        // dedupe by id correct rather than lossy.
+        let page = |limit: i64, before: Option<i64>| SessionFilter {
+            limit,
+            updated_before_ms: before,
+            ..SessionFilter::default()
+        };
+        let first = store.list_sessions(&page(2, None)).await.expect("page 1");
+        assert_eq!(first.len(), 2, "the limit bounds the page");
+
+        let cursor = first.last().expect("a row").updated_at_ms;
+        let second = store
+            .list_sessions(&page(4, Some(cursor)))
+            .await
+            .expect("page 2");
+
+        let mut seen: Vec<String> = first
+            .iter()
+            .chain(second.iter())
+            .map(|s| s.id.native_id.as_str().to_string())
+            .collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen,
+            vec!["a", "b", "c", "d"],
+            "walking the cursor across a tie must not drop a session"
+        );
+        assert_eq!(
+            second.iter().map(|s| s.id.native_id.as_str()).collect::<Vec<_>>(),
+            vec!["d", "c", "b", "a"],
+            "the second page repeats the first in the same order it was first served"
         );
     }
 }

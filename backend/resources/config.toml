@@ -84,6 +84,6 @@
 [log]
 
 # Verbosity, in `tracing` filter syntax. `debug` for troubleshooting, or a
-# per-module filter like "info,sylph_web_backend::adapter=debug".
+# per-module filter like "info,sylph_server::adapter=debug".
 #   env: SYLPH_LOG, then RUST_LOG
 # level = "info"

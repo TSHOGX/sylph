@@ -225,7 +225,6 @@ mod tests {
                 fidelity: sylph_protocol::Fidelity::Stream,
                 flags_json: "{}".to_string(),
                 status: "idle".to_string(),
-                parent_session: None,
                 created_at_ms: 1000,
                 updated_at_ms: 1000,
             })

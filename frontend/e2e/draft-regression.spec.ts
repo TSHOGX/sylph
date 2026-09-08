@@ -66,12 +66,24 @@ test("navigating from one empty draft discards the draft left behind", async ({ 
   // the replacement draft remains alive.
   await page.getByRole("button", { name: /Quick Sessions actions/ }).click();
   await page.getByRole("menu").getByRole("menuitem", { name: "New session here", exact: true }).click();
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/sessions/draft/(?!${firstDraft})`));
   const secondDraft = decodeURIComponent(page.url().split("/").pop()!);
+  // Wait for the replacement's own mount, not for a Message box: both drafts render
+  // one, so `getByLabel("Message")` is satisfied by the page being navigated away
+  // from and the spec runs on while React has yet to commit the unmount. That is the
+  // whole failure this spec had — it read the new id from a URL the router had
+  // already changed, then asserted 13ms before the browser sent the discard.
+  await expect(page.getByLabel("Message")).toBeVisible();
 
-  expect(
-    (await page.request.get(`/api/v1/sessions/draft/${encodeURIComponent(firstDraft)}`)).status(),
-  ).toBe(404);
+  // Discard is fire-and-forget by design: an unmount cleanup cannot await, and
+  // blocking navigation on a DELETE would make leaving a draft feel slow for a
+  // result the user never sees. So the contract is "shortly after", and polling is
+  // what states it. A cleanup that never fires still fails here, on the timeout.
+  await expect
+    .poll(async () =>
+      (await page.request.get(`/api/v1/sessions/draft/${encodeURIComponent(firstDraft)}`)).status(),
+    )
+    .toBe(404);
   expect(
     (await page.request.get(`/api/v1/sessions/draft/${encodeURIComponent(secondDraft)}`)).ok(),
   ).toBe(true);

@@ -9,17 +9,21 @@ import path from "node:path";
  * backend gets its own data directory and a deterministic mock runner, so E2E
  * never touches the developer's real journal, real archive, or real agents.
  *
- * Ports are offset from the defaults (4317 / 3000) so a run cannot collide with
- * a development server the user already has open.
+ * Ports come from the allocation in `docs/configuration.md` § Ports: a server
+ * instance owns an HTTP port and the port above it, which is where its envagent
+ * ingress binds. Instances are spaced ten apart, so the suite's 4327 sits clear
+ * of a development server on 4317 *and* of the 4318 that server's envagent
+ * ingress derives — the collision the previous 4318 here produced, which
+ * presented as a suite that failed to start whenever a dev envagent was running.
  *
- * Both are overridable because a worktree is a second checkout of this same
- * config: two suites running side by side would otherwise bind the same two
- * ports, and the loser reports a server that failed to start rather than a port
- * that was taken. Set `SYLPH_E2E_PORT_OFFSET` per worktree — one number moves
+ * Overridable because a worktree is a second checkout of this same config: two
+ * suites side by side would otherwise bind the same ports, and the loser reports
+ * a server that failed to start rather than a port that was taken. Set
+ * `SYLPH_E2E_PORT_OFFSET` to a multiple of ten per worktree — one number moves
  * both ports together, so they cannot be offset inconsistently.
  */
 const PORT_OFFSET = Number(process.env.SYLPH_E2E_PORT_OFFSET ?? 0);
-const BACKEND_PORT = 4318 + PORT_OFFSET;
+const BACKEND_PORT = 4327 + PORT_OFFSET;
 const FRONTEND_PORT = 3101 + PORT_OFFSET;
 /**
  * The suite's own Sylph home.
@@ -94,7 +98,7 @@ export default defineConfig({
       // (`crates/adapters/src/e2e.rs`). It is a feature rather than an environment
       // variable so a production binary has no code path that reaches the fixture at
       // all: "which agents exist" must not depend on a variable a running server reads.
-      command: "cargo run --quiet --features e2e --bin sylph-web-backend",
+      command: "cargo run --quiet --features e2e --bin sylph-server",
       cwd: path.join(__dirname, "..", "backend"),
       url: `http://127.0.0.1:${BACKEND_PORT}/api/v1/health`,
       reuseExistingServer: false,

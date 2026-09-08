@@ -53,7 +53,7 @@
     "/api/v1/config": {
       "get": {
         "summary": "Read what configuration resolved to",
-        "description": "Returns every resolved setting with the source that supplied it,. The same report `sylph-web-backend doctor` renders, served so the terminal and the settings panel cannot disagree. It exists because every failure in this area has one shape: a path resolves somewhere nothing lives, the server starts, /health reports fine, and the symptom appears layers away as a dead slash key. There is no adapter directory to report: adapters are compiled in, so which agents exist is answered per environment by GET /environments. A resolved value alone cannot distinguish a wrong path from a path that is not being read, so each entry names its source and the variable that overrides it. Read-only, deliberately: paths.browse_roots bounds where a spawned agent's current_dir may be, and therefore where arbitrary code may run, so a loopback HTTP surface able to rewrite it is a materially larger threat model than one that displays it — the config file stays the durable, reviewable record. Authenticated, since every value is an absolute local filesystem path.",
+        "description": "Returns every resolved setting with the source that supplied it. The same report `sylph-server doctor` renders, served so the terminal and the settings panel cannot disagree. It exists because every failure in this area has one shape: a path resolves somewhere nothing lives, the server starts, /health reports fine, and the symptom appears layers away as a dead slash key. There is no adapter directory to report: adapters are compiled in, so which agents exist is answered per environment by GET /environments. A resolved value alone cannot distinguish a wrong path from a path that is not being read, so each entry names its source and the variable that overrides it. Read-only, deliberately: paths.browse_roots bounds where a spawned agent's current_dir may be, and therefore where arbitrary code may run, so a loopback HTTP surface able to rewrite it is a materially larger threat model than one that displays it — the config file stays the durable, reviewable record. Authenticated, since every value is an absolute local filesystem path.",
         "responses": {
           "200": {
             "description": "The resolved configuration and its provenance",
@@ -1277,7 +1277,7 @@
     "/api/v1/sessions/{sessionId}/capabilities": {
       "get": {
         "summary": "What this session's agent can do",
-        "description": "Establishes a link as a side effect. A failed handshake is 200 with an unavailable control facet and a typed reason, not 5xx: it is the agent's failure, not the request's, and the session's history stays readable. Do not cache indefinitely — see api-design.md § Links.",
+        "description": "Establishes a link as a side effect. A failed handshake is 200 with an unavailable control facet and a typed reason, not 5xx: it is the agent's failure, not the request's, and the session's history stays readable. Do not cache indefinitely — see api/sessions.md § Links.",
         "parameters": [
           {
             "name": "sessionId",
@@ -3152,7 +3152,7 @@
           "link",
           "supports"
         ],
-        "description": "Live link state. Observe and control are independent facets, each available or unavailable with a typed reason. An empty `supports` means Sylph cannot reach the agent, never that the agent has no capabilities.",
+        "description": "Live link state. Observe and control are independent facets, each available or unavailable with a typed reason. An empty `supports` means Sylph cannot reach the agent, never that the agent has no capabilities. The facets describe the environment and the vendor, never the caller: they read the same for every observer, which is what makes them cacheable. The caller's own authorization is `authorization`, and `controlBlock` is the derived answer a composer acts on.",
         "properties": {
           "link": {
             "type": "object",
@@ -3161,6 +3161,17 @@
               "observe": { "$ref": "#/components/schemas/LinkFacet" },
               "control": { "$ref": "#/components/schemas/LinkFacet" }
             }
+          },
+          "authorization": {
+            "type": "string",
+            "enum": [
+              "not_granted",
+              "expired"
+            ],
+            "description": "Absent exactly when this caller holds `control` on the environment. Per-Subject, so it is NEVER cached — unlike a facet reason. No value distinguishes revoked from never-granted: revocation deletes the grant row, so the store cannot tell them apart. What a revocation did stays on the turn it cut short, as `closeReason = grant_revoked`."
+          },
+          "controlBlock": {
+            "$ref": "#/components/schemas/ControlBlock"
           },
           "agent": {
             "type": "string"
@@ -3192,9 +3203,45 @@
               "not_ours_to_drive",
               "handshake_failed"
             ],
-            "description": "Present exactly when available is false. Retryability is defined by the protocol vocabulary."
+            "description": "Present exactly when available is false. Every value is a property of the environment or the vendor, never of the caller. Retryability is defined by the protocol vocabulary."
           }
         }
+      },
+      "ControlBlock": {
+        "type": "object",
+        "required": ["kind", "reason"],
+        "description": "Why this caller may not send a turn. Absent when control is admitted. Derived on the server rather than folded by each client, so the disclosure order is decided once: authorization is reported before reachability, so an unauthorized caller learns nothing about whether someone else's machine is awake. Never cached.",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["unauthorized", "unavailable"],
+            "description": "Which question failed. A renderer branches on this rather than on which optional field happens to be populated."
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "not_granted",
+              "expired",
+              "no_agent",
+              "environment_unreachable",
+              "not_ours_to_drive",
+              "handshake_failed"
+            ],
+            "description": "An `authorization` value when kind is `unauthorized`, an `UnavailableReason` when kind is `unavailable`. The two vocabularies share no spelling, so a client switching on one cannot silently match the other's value."
+          }
+        }
+      },
+      "CloseReason": {
+        "type": "string",
+        "enum": [
+          "interrupted",
+          "spool_full",
+          "grant_revoked",
+          "link_lost",
+          "agent_exited",
+          "adapter_silent"
+        ],
+        "description": "Why a turn or a server-closed trajectory ended without its producer reporting an outcome. Required whenever a turn ends short. This is NOT the status: the status says what the record became, the reason says what cut it short, and a reason that restates its status answers no question. `interrupted` is the only value that is not a diagnostic and must not be coloured as a fault. `spool_full`, `grant_revoked`, `link_lost`, and `agent_exited` mean the vendor's own store kept accumulating past the cut, so `adopt` recovers it; `interrupted` and `adapter_silent` do not. Not yet built: no Rust type and no `turns` column, so every turn that stopped short currently reads as one that ran to its own end. docs/roadmap.md § Milestone 3 owns it; docs/session-protocol.md § Outcomes owns the vocabulary."
       },
       "NativeSessionRow": {
         "type": "object",
@@ -3237,7 +3284,15 @@
           },
           "parentNativeId": {
             "type": "string",
-            "description": "The session this one was delegated from or forked out of, as the vendor recorded it. Not derived from an id-naming convention: the /agent- suffix recovers 8.8% and misattributes on a collision."
+            "description": "The session this one was delegated from or forked out of, as the vendor recorded it. Not derived from an id-naming convention: the /agent- suffix recovers 8.8% and misattributes on a collision. Read parentRelation for which relationship it is; absent there means the vendor did not say."
+          },
+          "parentRelation": {
+            "type": "string",
+            "enum": [
+              "delegation",
+              "fork"
+            ],
+            "description": "Which relationship parentNativeId is, when the vendor's own key says. Absent where a vendor names a parent without saying how, in which case the server writes no ancestry edge rather than a guessed one."
           },
           "fidelity": {
             "type": "string",
@@ -3548,10 +3603,6 @@
           "flagsJson": {
             "type": "string",
             "description": "Agent flags as a JSON string, not an object. Serialized as stored."
-          },
-          "parentSession": {
-            "type": "string",
-            "description": "Encoded identity triple of the delegated or forked parent, when the vendor recorded one."
           },
           "status": {
             "type": "string",
@@ -3875,6 +3926,11 @@
           "errorMessage": {
             "type": "string",
             "nullable": true
+          },
+          "closeReason": {
+            "allOf": [{ "$ref": "#/components/schemas/CloseReason" }],
+            "nullable": true,
+            "description": "Null exactly when the turn ran to its own end; required whenever it stopped short. Answers a different question from `status`: the status says what the record became, this says what cut it short. Note the level -- `abandoned` is a trajectory outcome, and is neither a value here nor a `status`."
           },
           "createdAtMs": {
             "type": "integer",

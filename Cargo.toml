@@ -1,8 +1,8 @@
 # The Rust side of Sylph, as one workspace.
 #
-# `docs/roadmap.md` § Implementation order names the crates this grows into:
-# `protocol`, `adapters`, `server`, `envagent`. `protocol` and `adapters` exist;
-# `backend` is the standing server until step 3 moves it.
+# `AGENTS.md` § Orientation names the crates this grows into: `protocol`, `adapters`,
+# `server`, `envagent`. `protocol` and `adapters` exist; `backend` is the standing
+# server until `docs/roadmap.md` § Milestone 1 moves it.
 #
 # One workspace rather than four independent crates because they share one
 # vocabulary and one dependency set. A shared `Cargo.lock` is the part that
@@ -10,7 +10,14 @@
 # would be a wire mismatch nobody declared.
 [workspace]
 resolver = "2"
-members = ["backend", "crates/protocol", "crates/adapters", "crates/fts5-jieba", "crates/envagent"]
+members = [
+  "backend",
+  "crates/protocol",
+  "crates/adapters",
+  "crates/fts5-jieba",
+  "crates/envagent",
+  "crates/docs-check",
+]
 
 # Pins every member inherits with `.workspace = true`.
 #
@@ -38,5 +45,5 @@ async-trait = "0.1"
 # `ImageContent.data`, and `claude` the same — so every adapter that takes one
 # needs an encoder, and so does the backend for the upload endpoints. One pin
 # rather than three, and never a hand-rolled encoder: this is exactly the
-# battle-tested-library case `AGENTS.md` § Design Decisions names.
+# battle-tested-library case `AGENTS.md` § Spec and Code Evolution names.
 base64 = "0.22"

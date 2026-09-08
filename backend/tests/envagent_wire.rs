@@ -92,12 +92,12 @@ async fn process_peer_covers_prepare_run_activate_replay_and_rejection() {
     assert_eq!(resolved_session, config.session_id);
     assert_eq!(resolved_workdir, config.workdir);
 
-    let now = sylph_web_backend::models::now_ms();
+    let now = sylph_server::models::now_ms();
     backend
         .state
         .store
         .create_session_and_turn(
-            &sylph_web_backend::models::Session {
+            &sylph_server::models::Session {
                 id: resolved_session.clone(),
                 workdir: resolved_workdir,
                 title: Some("wire fixture".into()),
@@ -105,11 +105,10 @@ async fn process_peer_covers_prepare_run_activate_replay_and_rejection() {
                 fidelity: sylph_protocol::Fidelity::Stream,
                 flags_json: "{}".into(),
                 status: "running".into(),
-                parent_session: None,
                 created_at_ms: now,
                 updated_at_ms: now,
             },
-            &sylph_web_backend::models::Turn {
+            &sylph_server::models::Turn {
                 id: turn_id.into(),
                 session_id: resolved_session.clone(),
                 status: "running".into(),
@@ -231,7 +230,7 @@ struct RunningPeer {
 async fn spawn_peer(
     mode: &str,
     config: &PeerConfig,
-    bridge: &sylph_web_backend::env::EnvBridge,
+    bridge: &sylph_server::env::EnvBridge,
 ) -> RunningPeer {
     let mut child = Command::new(env!("CARGO_BIN_EXE_envagent-wire-peer"))
         .arg(mode)
@@ -288,7 +287,7 @@ async fn wait_for_completed(backend: &TestBackend, turn_id: &str) {
 }
 
 async fn wait_for_connected(
-    bridge: &sylph_web_backend::env::EnvBridge,
+    bridge: &sylph_server::env::EnvBridge,
     environment: &EnvironmentId,
 ) {
     for _ in 0..100 {

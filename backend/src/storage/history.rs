@@ -741,7 +741,7 @@ impl HistoryStore {
     ///
     /// # Grouped rather than flat, and the grouping happens in SQL
     ///
-    /// `docs/api-design.md` § Search defines a result as one **session** carrying its
+    /// `docs/api/sessions.md` § Search defines a result as one **session** carrying its
     /// best match and a hit count, not one row per matching block. That shape is what
     /// lets a client render the same row component it uses for a listing, and it makes
     /// "one strong match" distinguishable from "thirty weak ones" — which a flat list
@@ -767,7 +767,8 @@ impl HistoryStore {
         // **A user's query is not an FTS5 query**, so it is quoted into a phrase by
         // [`fts5_phrase`] rather than passed through. Binding it as a parameter is not
         // enough on its own: the value still reaches FTS5's *expression* parser, which
-        // reads punctuation as syntax (`docs/storage.md` § `blocks_fts` is standalone).
+        // reads punctuation as syntax (`docs/storage.md` § A user's query is not an
+        // FTS5 query).
         //
         // **`snippet()` cannot appear inside the subquery**, which is what forces this
         // into two statements rather than one. FTS5's auxiliary functions are only
@@ -968,7 +969,7 @@ impl HistoryStore {
     /// This is how a downstream authority's timestamp becomes a sequence number. An
     /// environment reports how far its native store extends as a time, and retention needs
     /// the position in this session's stream that corresponds to it
-    /// (`docs/storage.md` § Deriving a native-source bound).
+    /// (`docs/storage.md` § Deriving a bound from a vendor's store).
     pub async fn max_seq_at_or_before(&self, session_id: &str, at_ms: i64) -> Result<Option<i32>> {
         sqlx::query_scalar::<_, Option<i32>>(
             "SELECT MAX(seq) FROM blocks

@@ -15,8 +15,8 @@ use sylph_protocol::{AgentName, EnvironmentId, Fidelity, NativeId, SessionId};
 ///
 /// The alternative was tempting and wrong: substituting a placeholder id would make
 /// the row readable and make every comparison against it silently false, which is
-/// precisely the failure mode the triple exists to delete (`AGENTS.md` § Two id
-/// spaces). A row that cannot be identified must not be handed out as if it could.
+/// precisely the failure mode the triple exists to delete (`docs/architecture.md`
+/// § Identity). A row that cannot be identified must not be handed out as if it could.
 pub(crate) fn triple_from_row(
     row: &sqlx::sqlite::SqliteRow,
     environment: &str,
@@ -66,7 +66,7 @@ pub struct Session {
     /// The identity triple. Serialized three ways at once, which is deliberate: a
     /// client echoes `id` back as a path segment and reads `environment`, `agent`,
     /// and `nativeId` as fields, **so it never parses the id** to learn which agent
-    /// a session belongs to (`docs/api-design.md` § A session id in a path).
+    /// a session belongs to (`docs/api/README.md` § A session id in a path).
     #[serde(flatten, with = "session_id_fields")]
     pub id: SessionId,
     pub workdir: String,
@@ -82,12 +82,6 @@ pub struct Session {
     /// `flags` here for a release and a client written from it read `undefined`.
     pub flags_json: String,
     pub status: String,
-    /// The delegation parent or fork origin, as an encoded triple.
-    ///
-    /// One column for two relationships, which the row it points at disambiguates
-    /// (`crate::db::labels::lineage`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_session: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -132,7 +126,6 @@ impl FromRow<'_, sqlx::sqlite::SqliteRow> for Session {
             fidelity: fidelity_from_row(row)?,
             flags_json: row.try_get("flags_json")?,
             status: row.try_get("status")?,
-            parent_session: row.try_get("parent_session")?,
             created_at_ms: row.try_get("created_at_ms")?,
             updated_at_ms: row.try_get("updated_at_ms")?,
         })
@@ -147,7 +140,7 @@ impl Session {
 
 /// What a client asks for when starting a session.
 ///
-/// **This starts an agent** (`docs/api-design.md` § `POST /api/v1/sessions`). There is
+/// **This starts an agent** (`docs/api/sessions.md` § `POST /api/v1/sessions`). There is
 /// no id to supply, because a session has no identity until an agent has given it
 /// one — which is why `nativeId` is absent here and present on the adopt request.
 #[derive(Debug, Deserialize)]

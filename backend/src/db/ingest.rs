@@ -1,7 +1,7 @@
 //! Turning an adapter's parse of a native store into journal rows.
 //!
 //! `adopt` and `watch` yield the **same** `SessionMessage` vocabulary a live turn
-//! emits (`docs/session-protocol.md` § All three modes emit the same events), so this
+//! emits (`docs/session-protocol.md` § An adapter is a trait, with three modes), so this
 //! module writes them through the same store, the same sequence allocator, and the same
 //! batching writer the drain path uses. That is the whole point of the shape: the
 //! journal, the history fold, the timeline, replay, and search cannot tell which mode
@@ -501,7 +501,6 @@ mod tests {
                 fidelity: Fidelity::Blocks,
                 flags_json: "{}".to_string(),
                 status: "idle".to_string(),
-                parent_session: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
             })
@@ -580,7 +579,6 @@ mod tests {
                 fidelity: Fidelity::Blocks,
                 flags_json: "{}".to_string(),
                 status: "idle".to_string(),
-                parent_session: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
             })

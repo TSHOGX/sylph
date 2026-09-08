@@ -1,5 +1,5 @@
 [package]
-name = "sylph-web-backend"
+name = "sylph-server"
 version = "0.1.0"
 edition = "2021"
 # 1.88 rather than 1.85 because calamine 0.36 requires it. Left at 1.85 this
@@ -30,9 +30,8 @@ fts5-jieba = { path = "../crates/fts5-jieba" }
 
 # The event vocabulary and the adapter contract as types.
 #
-# A path dependency rather than a module because step 2's adapters and step 4's
-# envagent link against it without linking against the server. See
-# `docs/roadmap.md` § Implementation order.
+# A path dependency rather than a module because the adapters and the envagent link
+# against it without linking against the server.
 sylph-protocol = { path = "../crates/protocol" }
 # The adapter implementations, so `crate::adapters` delegates rather than reading the
 # filesystem. `AGENTS.md` § Compatibility forbids keeping the seam once the real crate
@@ -123,11 +122,11 @@ tempfile = "3.14"
 tower = { version = "0.5", features = ["util"] }
 
 [lib]
-name = "sylph_web_backend"
+name = "sylph_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "sylph-web-backend"
+name = "sylph-server"
 path = "src/main.rs"
 
 [features]

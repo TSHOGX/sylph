@@ -5,12 +5,12 @@
 //! `docs/roadmap.md` recorded route coverage as checked by "a ten-line script diffing
 //! `.route(...)` calls against the spec", run by hand. It was not run, and
 //! `POST /sessions/{id}/queue` shipped implemented, called by the frontend, backed by
-//! `Capability::Queue`, and absent from the schema, `api-design.md`,
+//! `Capability::Queue`, and absent from the schema, `docs/api/`,
 //! `session-protocol.md`, and `architecture.md`. A check nobody runs is not a check.
 //!
 //! # Both sides are derived, neither is listed
 //!
-//! `AGENTS.md` § A hand-maintained list inside a test defeated the test is the reason
+//! `AGENTS.md` § Rules That Keep Costing Time — one fact with two derivations — is the reason
 //! this parses `lib.rs` rather than enumerating expected routes:
 //! `every_emitted_code_is_published_in_the_openapi_enum` read the schema from disk —
 //! correctly — and still missed six codes, because the list of *variants* it compared
@@ -186,7 +186,7 @@ fn no_session_id_parameter_claims_to_be_a_uuid() {
 /// A dangling `$ref` makes a generator fail outright; an orphaned schema is the quieter
 /// half, and it is how a request or response shape outlives the endpoint it described —
 /// which is what `DELETE /sessions/{id}` had done, declared in the schema for an
-/// operation `api-design.md` documents as removed.
+/// operation `docs/api/sessions.md` documents as removed.
 #[test]
 fn every_ref_resolves_and_every_schema_is_referenced() {
     let raw = std::fs::read_to_string(

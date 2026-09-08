@@ -200,7 +200,7 @@ function GeneralSection() {
  * # There is no discovery, so there is nothing to refresh
  *
  * An agent is available when its CLI is on some machine's `PATH` and reports a version,
- * answered by that machine's envagent (`docs/api-design.md` § Agents and environments).
+ * answered by that machine's envagent (`docs/api/environments.md` § Agents and environments).
  * There is no server-side pass to re-run, so this section offers no Refresh button and
  * needs no fingerprint to tell "re-read and something changed" from "re-read and nothing
  * did".

@@ -6,23 +6,20 @@ lies.
 
 ## Three agents
 
-Supported: **`claude`**, **`codex`**, **`pi`**. `gemini` and `opencode` are **not
-supported**, and that is a deliberate narrowing rather than a gap waiting to be filled.
+Supported: **`claude`**, **`codex`**, **`pi`**. Two requirements decided that list, and
+both govern any agent proposed later:
 
-Two requirements decided it, and both are worth stating because they apply to any agent
-proposed later:
+- **A readable per-session native store.** An agent keeping every session in one database
+  with a live WAL has no per-session bytes to watch and no per-session fingerprint, and
+  reading such a store wholesale is unbounded work that starves every other agent's pass.
+- **Known mid-turn write behaviour.** Observation is offerable only where it is known
+  *when* a vendor flushes; unknown is not the same as absent.
 
-- **A readable per-session native store.** An agent that keeps every session in one
-  database with a live WAL cannot be watched by file mtime, has no per-session bytes to
-  point at, and cannot produce a per-session fingerprint; reading such a store wholesale
-  is unbounded work that starves every other agent's pass. Nothing constrains an agent to
-  keep a per-session file, so this has to be checked rather than assumed.
-- **Known mid-turn write behaviour.** Observation is only offerable if it is known *when*
-  a vendor flushes. Unknown is not the same as absent, and neither can be promised to a
-  user as "observable".
+`gemini` and `opencode` meet neither, which is what excludes them.
 
-An agent is available on an environment when its CLI is on that machine's `PATH`. That is
-the whole check — there is no discovery handshake and no adapter directory.
+An agent is available on an environment when its CLI is on that machine's `PATH` **at a
+version the adapter accepts**, discovered by the envagent and re-discovered when the
+machine's inventory changes (`docs/environments.md` § Agent availability).
 
 ## What every agent module must answer
 
@@ -37,9 +34,9 @@ the whole check — there is no discovery handshake and no adapter directory.
 
 ## Capability matrix
 
-*Measured against `claude` 2.1.247 and `pi` 0.84.3 on 2026-08-27, and `codex-cli`
-0.150.1 on 2026-08-28. Every row names a version, because a measurement without one
-goes stale invisibly.*
+Against `claude` 2.1.247 and `pi` 0.84.3 on 2026-08-27, and `codex-cli` 0.150.1 on
+2026-08-28. Versions and dates belong with the table: a capability claim without one goes
+stale invisibly.
 
 | | `claude` | `codex` | `pi` |
 | --- | --- | --- | --- |
@@ -48,24 +45,20 @@ goes stale invisibly.*
 | fork | — | `exec fork <id>`, `thread/fork` | — |
 | native store | JSONL per session | `rollout-*.jsonl` | JSONL per session |
 | mid-turn flush | tool-call and content-block boundaries | item completion | every `message_end` |
-| second-party control | authenticated per-process UDS — **delivers, cannot drive** | app-server: **fully drivable**, incl. interrupt and steer | **none** — stdio only |
+| second-party control | stdio while Sylph holds it; **none** once adopted from a terminal | app-server: **fully drivable**, incl. interrupt and steer | **none** — stdio only |
 | second-party observe | — | explicit `thread/resume`; independent of control | — |
 | forwards delegate interior | only for built-in `Task` | **yes**, with the child's `threadId` | no delegation on the wire at all |
 | slash commands | yes, project-dependent | no command concept | yes |
 | typed config | model, effort, permission mode, output style | model, effort, approval policy, personality, sandbox, cwd | model, thinking level, queue modes |
 
-Three things to read off this table rather than from prose. The control column is why
-`docs/architecture.md` makes control a facet that can report unavailable with a reason:
-`codex` is fully drivable by a second party, `pi` is not drivable at all, and `claude`
-is in between — its socket delivers a message but cannot steer a turn. The flush column
-is why `watch` is offerable at all: all three write mid-turn, so an observer sees
-progress rather than only outcomes.
-
-The third is the observe row, and it is why the two facets are **separate** rather than
-one "reachable" flag. `codex` splits them natively — a second client must call
-`thread/resume` to receive events, and can drive a turn without ever subscribing. So
-observation and control are independently available in a real vendor, not just in
-Sylph's model of one.
+Three columns carry the design. **Control** is why `docs/architecture.md` makes control a
+facet that reports unavailable with a reason: `codex` is drivable by a second party over its
+app-server, `pi` not at all, and `claude` depends on who holds its stdio — drivable when
+Sylph started it, `not_ours_to_drive` once adopted from a terminal. **Flush** is why `watch`
+is offerable: all three write mid-turn, so an observer sees progress rather than outcomes.
+**Observe** is why the facets are separate rather than one "reachable" flag: `codex` splits
+them natively, since a second client must call `thread/resume` to receive events and can
+drive a turn without ever subscribing.
 
 ## `claude`
 
@@ -84,31 +77,25 @@ marks the mode *available* without starting in it, which is what a user selectin
 later actually asked for. And `manual` answers **success while confirming `default`** —
 the vendor normalizes silently, so a picker offering it lands on a different row.
 
-**Model catalogue entries are `{value, displayName, …}`, not `{id, …}`.** Reading `id`
-produced an empty model list on every session ever opened, presenting as a composer
-bug.
+**Model catalogue entries are `{value, displayName, …}`, not `{id, …}`.**
 
 **`system/init` arrives once per turn, not once per process.** A whole-surface
 capability payload answering it erases everything it does not mention; facets exist
 for this.
 
-**Delegation notifications.** The real subtypes are `task_started`, `task_progress`,
-`task_updated`, `task_notification`. `task_completed` and `task_failed` **do not
-exist** — branching on them compiled, never fired, and left every delegate spinning
-forever. A close arrives either as `task_updated` with `patch.status`, or as
-`task_notification` with `status` plus the delegate's summary. `task_updated` carries
-**no `tool_use_id`**, so the host must be remembered from `task_started` or the close
-lands at the root while the trajectory it closes sits inside a container.
+**Delegation notifications.** The subtypes are `task_started`, `task_progress`,
+`task_updated`, `task_notification`; there is no `task_completed` or `task_failed`. A close
+arrives either as `task_updated` with `patch.status`, or as `task_notification` with
+`status` plus the delegate's summary. `task_updated` carries **no `tool_use_id`**, so the
+host is remembered from `task_started`, or the close lands at the root while the trajectory
+it closes sits inside a container.
 
 **`task_type` is the only thing distinguishing a delegation from a backgrounded shell
 job.** `local_agent` is a real subagent; `local_bash` is `run_in_background` on Bash
-reporting through the same channel. Neither `task_updated` nor `task_notification`
-carries the field, so it must be remembered from `task_started`. Classifying by the
-notification alone published a *shell command* as a subagent — a card named `find /
--maxdepth 8 …` whose error flag escalated the Bash call hosting it, so a turn that had
-done nothing wrong read `failed` from its first moment. **Filter narrowly and let an
-unknown type through**: guessing wrong that way costs a missing subtree, while the
-other way mislabels a tool call as an agent.
+reporting through the same channel. Neither `task_updated` nor `task_notification` carries
+the field, so it too is remembered from `task_started`. **Filter narrowly and let an unknown
+type through**: that direction costs a missing subtree, while the other publishes a shell
+command as a subagent and escalates its host tool's status.
 
 **`--forward-subagent-text` forwards only for the built-in `Task`.** `Agent` and
 `Workflow` forward nothing on stdout, so their interior must come from the native bundle;
@@ -148,13 +135,18 @@ conversation-ownership coordination (`auth`, `user`, `peer_message_status`,
 live ~2 MB away in the SDK/WebSocket control table and travel over a websocket.
 Byte-offset proximity in a minified bundle is strong evidence, not proof.
 
-**Inbound `user` frames are gated on the sitting human's approval** — the binary
-carries "held for the recipient user's approval", declined, and expired strings, plus
-`Routed user message to queue (priority=`. So even an approved message is queued rather
-than synchronous. **Whether the gate applies to every inbound frame or only to
-peer-session senders is unresolved, and it is the highest-value unknown here**: if
-every frame is held, remote continuation of a terminal `claude` session is worthless
-precisely when AFK matters, because nobody is there to approve.
+**The inbound approval gate is not a security boundary, and it does not decide the
+facet.** Every sender is hardcoded to `peer`, and the gate compares only a self-declared
+`mode` tag carried in the message body — which the sender supplies, so any local process
+bypasses it. Approved messages are queued rather than delivered synchronously
+(`Routed user message to queue (priority=`).
+
+So the control facet is decided by transport, not by the gate. A terminal-adopted
+`claude` session reports `control: unavailable (not_ours_to_drive)` because interrupt and
+steer have **structurally no channel** — no socket carries them and there is no pipe to
+the process. A session Sylph started runs over stdio and reports `control: available`.
+The discriminant is whether Sylph holds the process's stdio, which is a property of the
+link (`docs/architecture.md` § One link, two typed capability facets).
 
 **Never connect or write to a socket in the user's real `cc-socks` directory.** That
 injects a turn into a live session of theirs. Probe only a throwaway child's own pid.
@@ -163,31 +155,28 @@ injects a turn into a live session of theirs. Probe only a throwaway child's own
 needs the opening-ask fallback.
 
 **In the native store, a tool result's id and its error flag are both on the content
-block — nowhere else.** These are the two shapes a parser for this store must be built
-around, and both are stated as shapes rather than counts on purpose: a developer's session
-store grows while you measure it, so a ratio taken today is not re-derivable, while "this
-key is on that block and on no other" stays true.
+block — nowhere else.** Stated as shapes rather than as counts, since a developer's store
+grows while it is being measured while "this key is on that block and on no other" stays
+true.
 
 `tool_use_id` sits on the `tool_result` block inside `message.content[]`, on every such
-block. It is *not* on `toolUseResult` under either spelling and not at the top level of
-the record — those keys occur nowhere in the store. A parser reading them pairs nothing:
-every tool result gets a null call id, and the pairing `docs/session-protocol.md`
-§ Keying rules depends on silently does not exist.
+block. `toolUseResult` under either spelling, and the top level of the record, hold it
+nowhere — so a parser reading those pairs nothing, and the pairing
+`docs/session-protocol.md` § Keying rules depends on does not exist.
 
-`is_error` is on that same block and **only** on records whose `message.role` is `user`;
-it never appears on an assistant message. A parser reading it from the assistant branch
-therefore classifies **every real tool failure as a success**, because `false` and
-"absent, defaulted to false" are indistinguishable downstream.
+`is_error` is on that same block and **only** on records whose `message.role` is `user`,
+never on an assistant message. Read from the assistant branch it classifies every tool
+failure as a success, since `false` and absent-defaulted-to-`false` are indistinguishable
+downstream.
 
-Note what both failures have in common, since it is the whole risk in reading a vendor
-store: neither raises an error. The parser completes over the entire store and produces
+Neither misread raises an error: the parser completes over the whole store and produces
 plausible records. So assert on *values a parser should have found* — that a failure parses
-as a failure — never on the absence of a crash.
+as a failure — rather than on the absence of a crash.
 
 ## `codex`
 
-*Measured against `codex-cli` 0.150.1. Capture scripts and raw frames for this section
-live in the parser-port measurement set, and each numbered `sNN` probe is re-runnable.*
+Against `codex-cli` 0.150.1. Capture scripts and raw frames live in
+`docs/measurements/codex/`, where each numbered `sNN` probe is re-runnable.
 
 **The strongest second-party surface of the three, and the reason the control facet is
 worth having.** Its app-server exposes a large generated schema of client request
@@ -287,8 +276,8 @@ supplement.
 
 **`forked_from_id` alone does not mean "fork".** On 0.150.1 a subagent carries it too,
 equal to its `parent_thread_id`. The discriminant for a real fork is `parentThreadId:
-null` with `forkedFromId` set. Where both a parent and a fork origin exist, the parent
-wins (`docs/architecture.md` § Provenance is not identity).
+null` with `forkedFromId` set. Where both exist the parent wins
+(`docs/database-schema.md` § Identity in the schema).
 
 **`SubAgentActivity` names a host call id and a child thread id in one record**, which
 makes codex the one agent of the three whose native store carries real delegation
@@ -309,9 +298,9 @@ adapter author would otherwise get wrong:
   trap in its usual form (§ Reading a vendor payload).
 - **`agent_thread_id` is the *other party*, not the child.** In a parent's rollout it names
   the child; in the child's own rollout an `interacted` record names the **parent**
-  (`agent_path: "/root"`). Mapping it to `span` unconditionally inverts the edge for every
-  child-side record, producing a tree that is backwards rather than merely incomplete — and
-  nothing downstream can detect that.
+  (`agent_path: "/root"`). The record's own side therefore decides the edge's direction;
+  mapping it to `span` unconditionally inverts every child-side edge, and nothing
+  downstream can detect that.
 - **`collabAgentToolCall` is not lineage.** It carries empty `receiver_thread_ids` and
   `agents_states` with `tool: "wait"`, and its `status` is the *wait's* rather than any
   delegate's. It marks a barrier.
@@ -322,10 +311,10 @@ when unknown" governs: omit the name, because the journal makes every guess perm
 row written with a placeholder is afterwards indistinguishable from one that carried a real
 name.
 
-**Do not carry `claude`'s conclusion across.** There, a childless trajectory is a real
-terminal state and the card must say so; here it is a loading state, because codex does
-forward a delegate's interior. The two agents need opposite defaults, which is exactly why
-`fidelity` and the capability facets are per-record rather than global.
+**A childless trajectory means the opposite of what it means under `claude`**: there it is
+a terminal state the card must state, here a loading state, since codex does forward the
+interior. The two agents need opposite defaults, which is why `fidelity` and the capability
+facets are per-record rather than global.
 
 **There are three codex event vocabularies for the same concepts, and they are not
 interchangeable.** An adapter reading one while mapping names learned from another gets
@@ -370,38 +359,31 @@ all — the id comes back at `result.thread.id` — so "assigns its own" follows
 of the API rather than from observation. Resume keeps the id and appends to the same
 rollout file; fork mints a new id with `forkedFromId` set.
 
-**`thread_history_*.sqlite` is a projection of the rollouts, not a replacement — read
-the JSONL.** The store also holds `thread_history_*.sqlite` (`thread_items`,
-`thread_turns`) and the CLI offers `migrate-rollouts` to publish legacy sessions into it,
-which together read as a store migrating away from files. It is not:
-`thread_history_projection_state` tracks a per-thread `next_rollout_byte_offset`, and
-`thread_turns` keeps byte offsets pointing back into the file — the table is an
-incrementally-built pagination index *over* the rollouts. It also covers only a small
-fraction of the threads a real install holds, so a parser reading only SQLite silently
-misses most sessions on the machine.
+**`thread_history_*.sqlite` is a pagination index over the rollouts, not a replacement —
+read the JSONL.** `thread_history_projection_state` tracks a per-thread
+`next_rollout_byte_offset` and `thread_turns` keeps byte offsets pointing back into the
+file, so the tables are built incrementally *from* the rollouts and cover only a fraction
+of the threads a real install holds.
 
-Two consequences for an adapter. The JSONL is the authoritative source for `adopt` and
-`watch`, as the row above says. But `enumerate` may legitimately prefer the projection
-where a thread is present, because it is the only place carrying turn-level `status`,
-`duration_ms`, `started_at`, and `completed_at` — facts a rollout scan would have to
-reconstruct — and it must fall back to walking the files for every thread the
-projection does not hold.
+So the JSONL is authoritative for `adopt` and `watch`. `enumerate` may prefer the
+projection where a thread is present, since it is the only carrier of turn-level `status`,
+`duration_ms`, `started_at`, and `completed_at`, and falls back to walking the files for
+every thread it does not hold.
 
 **Model and effort come from `model/list`, and a bad effort value is confirmed rather
 than refused.**
 
-The vendor's refusals are inconsistent, which decides where validation lives.
-`approvalPolicy: "sometimes"` and `personality: "grumpy"` are both refused with their
-valid variants listed — those are enum-typed in the schema, so they map to
-`INVALID_VALUE`. But `effort: "banana"` is **accepted**, echoed back by
-`thread/settings/updated` as the current value, and only fails when a turn runs (`level
-"banana" not supported, valid levels: low, medium, high, xhigh, max`); a nonexistent
-model behaves the same way, and an unknown option name is accepted silently. The schema
-types `ReasoningEffort` as a bare non-empty string, so **validation against
-`model/list`'s `supportedReasoningEfforts` is the adapter's job.** This is the
-"a vendor's `success` is not a promise it did what you asked" rule with a second vendor
-behind it — and note it also means codex offers no `UNSUPPORTED_FIELD` signal at all, so
-an unknown field must be caught adapter-side or it is lost.
+The vendor's refusals are inconsistent, which decides where validation lives. Enum-typed
+fields are refused with their valid variants listed and map to `INVALID_VALUE`:
+`approvalPolicy: "sometimes"`, `personality: "grumpy"`. But the schema types
+`ReasoningEffort` as a bare non-empty string, so `effort: "banana"` is **accepted**, echoed
+back by `thread/settings/updated` as the current value, and fails only when a turn runs
+(`level "banana" not supported, valid levels: low, medium, high, xhigh, max`). A
+nonexistent model behaves the same way, and an unknown option name is accepted silently.
+
+**Validation against `model/list`'s `supportedReasoningEfforts` is therefore the adapter's
+job**, and codex offers no `UNSUPPORTED_FIELD` signal at all, so an unknown field is caught
+adapter-side or lost.
 
 `config/value/write` is worth naming separately: it writes to `config.toml` with **no
 value validation whatsoever**, accepting both `model_reasoning_effort = "banana"` and an
@@ -473,43 +455,34 @@ not turn granularity.
 **It records no title of its own**, so every row needs the opening-ask fallback.
 
 **Its native store has two field-spelling eras, and the rename landed field by field
-rather than atomically.** That is the fact a parser must be built around. The store renamed
-every multi-word key from snake_case to camelCase — `parent_id`→`parentId`,
-`model_id`→`modelId`, `stop_reason`→`stopReason`, `error_message`→`errorMessage` — but
-different fields flipped at different times, so a single file can hold snake `parent_id`
+rather than atomically.** Every multi-word key moved from snake_case to camelCase —
+`parent_id`→`parentId`, `model_id`→`modelId`, `stop_reason`→`stopReason`,
+`error_message`→`errorMessage` — at different times, so one file can hold snake `parent_id`
 beside camel `stopReason`. No file carries both spellings of the *same* field.
 
-So **resolve the spelling per field, never as one era per file.** A per-file era flag is
-unsound rather than merely coarse: for the mixed files no single era exists, and a reader
-choosing one spelling for the whole file gets one field right and another wrong. This is
-worth stating plainly because the per-file shortcut is the obvious design and it passes on
-the large majority of files — long enough to be believed.
+So **resolve the spelling per field, never as one era per file.** For a mixed file no single
+era exists, so a per-file flag gets one field right and another wrong while passing on the
+large majority of files. Two facts bound the detection:
 
-Two traps around the same question:
+- **The vendor's version field cannot discriminate.** Every file in every era carries
+  `"version": 3`, so detection comes from field presence.
+- **`toolCallId`, `isError`, and `toolName` occur only in camelCase**, so a snake_case-era
+  file cannot hold a tool result and the spelling check is not independent of the
+  tool-result path.
 
-- **The vendor's version field cannot discriminate.** Every file in every era carries the
-  same `"version": 3`, so detection comes from field presence, never from the header.
-- **Census keys by walking the parsed structure, never by grepping the serialized line.**
-  These transcripts discuss field names, so a substring test matches words inside message
-  *text* and reports keys a record does not have — inflating exactly the count a port
-  branches on. The defect lands in the *measurement*, which is worse than in the code,
-  because it produces a number and a number reads as evidence.
+Read field presence, and fail loudly on a record whose combination no known era emits. A
+dual-spelling alias is what would make the *next* rename unobservable.
 
-**Do not answer any of it with dual-spelling lookup.** `AGENTS.md` § Compatibility forbids
-the alias, and an alias is what makes the *next* rename unobservable. Read field presence,
-and fail loudly on a record whose combination no known era emits.
+**Take a census by walking the parsed structure, never by grepping the serialized line.**
+These transcripts discuss field names, so a substring test matches words inside message
+*text* and reports keys a record does not have, inflating exactly the count a port branches
+on.
 
-One shape fact falls out: `toolCallId`, `isError`, and `toolName` occur only in camelCase,
-with no snake_case counterpart — so a snake_case-era file cannot hold a tool result, and the
-spelling check is not independent of the tool-result path.
-
-**`message.timestamp` is epoch milliseconds.** Read it as milliseconds; do not sniff a
-value's magnitude to choose a divisor. Dividing as though it were microseconds yields a
-plausible integer that decodes to 1970 — and note what makes that survivable and therefore
-long-lived: session-level start and end come from the entry's own ISO string and stay
-correct, so only the finer-grained per-event times are wrong. A handful of integers in the
-store are the literal `1` written by test sessions, which look like a second unit era and
-are not.
+**`message.timestamp` is epoch milliseconds.** Read it as milliseconds rather than sniffing
+a value's magnitude to choose a divisor: session-level start and end come from the entry's
+own ISO string and stay correct whatever the divisor, so a wrong unit corrupts only the
+per-event times. A handful of integers in the store are the literal `1` written by test
+sessions, which resemble a second unit era and are not.
 
 **There are also two timestamp eras, and a date heuristic cannot separate them.** Some
 outer ISO stamps carry no UTC offset (`2026-04-08T03:20:12.387333`), so an RFC3339 parse
@@ -518,20 +491,16 @@ so those yield *absent* rather than a wrong number. A file is one era or the oth
 both, but the offsetless window sits in the **middle** of the offset-aware range, so
 "before/after this date" gets it backwards.
 
-**Read an offsetless stamp as local wall-clock time, not as UTC.** Comparing such stamps
-against their sibling integers — whose units are known — shows the offsetless era written in
-whatever zone the machine was in, while the offset-bearing era agrees with UTC exactly.
-Reading them locally therefore makes the result depend on where the parser runs, which is
-normally a hazard and is correct here: the stamps *are* local wall-clock time, so every
-fixed zone is wrong by construction, and the offsetless era is a closed historical window
-rather than something new records join.
+**Read an offsetless stamp as local wall-clock time, not as UTC.** Compared against their
+sibling integers, whose units are known, the offsetless era was written in whatever zone the
+machine was in while the offset-bearing era agrees with UTC exactly. Reading them locally
+makes the result depend on where the parser runs, which is correct here: the stamps *are*
+local wall-clock time, so every fixed zone is wrong by construction, and the era is a closed
+historical window rather than one new records join.
 
-This is the vendor-payload family in its subtlest form, and the rule generalizes: **a wrong
-time zone yields a plausible timestamp**, so no presence check and no eyeball test can catch
-it, and the error is invisible on a machine whose own offset is zero. What settles a units
-or zone question is comparing a value against a sibling whose units are already known —
-which means censusing *pairs* rather than stamps. Draw such a pair from the wrong era and it
-disagrees by construction, so the comparison confirms whatever you already believed.
+**A wrong zone yields a plausible timestamp**, so what settles a units or zone question is
+comparing a value against a sibling whose units are known — a census of *pairs* rather than
+of stamps, drawn from one era, since a cross-era pair disagrees by construction.
 
 **A fork pointer is a file path, not a session id.** The session header carries
 `parentSession`/`parent_session` naming another `.jsonl` on disk. Under an identity of

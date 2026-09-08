@@ -124,7 +124,7 @@ real agents. It needs no servers running beforehand, and refuses to run against 
 server left behind by an interrupted one — clear its ports if it complains:
 
 ```sh
-for p in 4318 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done
+for p in 4327 4328 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done
 ```
 
 ### Troubleshooting
@@ -191,8 +191,8 @@ reader wants.
 - [**Frontend Architecture**](docs/frontend-architecture.md) — How the frontend is built
 - [**UI Layout**](docs/ui-layout.md) — What the interface is: panes, surfaces, tokens
 - [**Roadmap**](docs/roadmap.md) — Project status and what is next
-- [**API Design**](docs/api-design.md) — REST endpoints and SSE streaming
-- [**Database Schema**](docs/database-schema.md) — SQLite schema and migrations
+- [**API**](docs/api/README.md) — REST endpoints and SSE streaming, one file per resource
+- [**Database Schema**](docs/database-schema.md) — The journal, and the reasoning behind its shape
 
 See [**AGENTS.md**](AGENTS.md) for the project's development rules and conventions.
 

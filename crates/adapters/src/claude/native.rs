@@ -5,7 +5,7 @@
 //! most likely to get wrong, because the wrong version raises no error and produces
 //! plausible records: `defect_tool_use_id` and `defect_is_error` name the tests that pin
 //! them, each asserting **the value that should have been found** rather than the absence
-//! of a crash (`AGENTS.md` § Reading a vendor payload).
+//! of a crash (`docs/agents.md` § Reading a vendor payload).
 //!
 //! # There is one projection, not two
 //!
@@ -101,8 +101,9 @@ pub fn watch(id: &NativeId) -> Result<EventStream> {
 /// # What the second source may repeat, and how that is decided
 ///
 /// Built-in `Task` output is forwarded on stdout *and* written to a delegate file, so its
-/// file copy would be a duplicate. `Agent` and `Workflow` forward nothing (`docs/agents.md`
-/// § `--forward-subagent-text` forwards only for the built-in `Task`), so for them the file
+/// file copy would be a duplicate. `Agent` and `Workflow` forward nothing
+/// (`docs/agents.md` § `claude`: `--forward-subagent-text` forwards only for the built-in
+/// `Task`), so for them the file
 /// is the **only** source and suppressing it loses the work this reader exists to recover.
 ///
 /// The discriminant is therefore the **host call's tool name**, which is a fact recorded in
@@ -420,6 +421,13 @@ fn summarize(candidate: &SessionCandidate) -> Option<NativeSummary> {
         // say cheaply", and a record count is not an event count anyway — one assistant
         // record can hold several content blocks.
         event_count: None,
+        // Always a fork on this vendor: `forkedFrom.sessionId` above is the only
+        // session-level pointer claude records, and a subagent's transcript carries no
+        // parent id at all (it is reached through its host's tool call). So there is no
+        // input here that could be a delegation, and the relation is a property of the key.
+        parent_relation: parent_native_id
+            .as_ref()
+            .map(|_| sylph_protocol::SessionEdgeRelation::Fork),
         parent_native_id,
         fidelity: NATIVE_FIDELITY,
     })

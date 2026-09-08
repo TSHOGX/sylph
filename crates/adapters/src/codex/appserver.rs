@@ -47,8 +47,9 @@ use sylph_protocol::{AdapterError, RequestedNativeId, RunSpec};
 /// Named constants rather than string literals at each call site, because a misspelled
 /// method here is answered `-32600` at a layer that reports it as a refused control —
 /// and only the *four* below were watched answering on a live session. The other 149 are
-/// deliberately absent: `AGENTS.md` § "A type in a vendor's event union is not a promise
-/// that anything emits it" applies to methods as much as to events.
+/// deliberately absent: `docs/session-protocol.md` § Three rules about reading a vendor's
+/// answer applies to methods as much as to events — a declared type is not a promise that
+/// anything emits it.
 pub mod method {
     /// The handshake. Answers `{userAgent, codexHome, platformFamily, platformOs}`.
     pub const INITIALIZE: &str = "initialize";

@@ -3,7 +3,8 @@
 //! The vendor→Sylph projection: `_stream_event`, `_tool_results`,
 //! `_system`, `_delegate_of`, `_task_notification`, `_task_label` and `flatten`
 //! (roughly :993-1483). `docs/session-protocol.md` §§ Events and Delegated trajectories
-//! govern, and `AGENTS.md` § Pitfalls holds the story behind every quirk below.
+//! govern, and `docs/agents.md` § Reading a vendor payload holds the defect family behind
+//! every quirk below.
 //!
 //! # Why this is a separate, process-free module
 //!

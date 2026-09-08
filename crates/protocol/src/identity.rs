@@ -1,7 +1,7 @@
 //! Session identity, and how much resolution a record has.
 //!
 //! `docs/architecture.md` § Identity is `(environment, agent, native_id)` is
-//! authoritative; `docs/api-design.md` § A session id in a path is the identity
+//! authoritative; `docs/api/README.md` § A session id in a path is the identity
 //! triple owns the encoding.
 
 use std::fmt;

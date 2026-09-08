@@ -2356,7 +2356,6 @@ mod tests {
                 fidelity: sylph_protocol::Fidelity::Stream,
                 flags_json: "{}".into(),
                 status: "idle".into(),
-                parent_session: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
             })
@@ -2682,7 +2681,6 @@ mod tests {
                 fidelity: sylph_protocol::Fidelity::Stream,
                 flags_json: "{}".into(),
                 status: "running".into(),
-                parent_session: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
             })
@@ -2792,7 +2790,6 @@ mod tests {
                 fidelity: sylph_protocol::Fidelity::Stream,
                 flags_json: "{}".into(),
                 status: "running".into(),
-                parent_session: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
             })
@@ -2926,7 +2923,6 @@ mod tests {
                 fidelity: sylph_protocol::Fidelity::Blocks,
                 flags_json: "{}".into(),
                 status: "idle".into(),
-                parent_session: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
             })

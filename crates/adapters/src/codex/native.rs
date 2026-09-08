@@ -2296,6 +2296,14 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
             // count is a number a UI renders as fact. A record count is not an event count
             // here either — one `item_completed` can hold a tool result plus its own timing.
             event_count: None,
+            // The relation this vendor's key already distinguishes, promoted out of the
+            // private `LineageKind` so the server can write a typed edge. It was previously
+            // reachable only as a string inside a child declaration's `data` blob, which
+            // made the same fact have two derivations and one of them untyped.
+            parent_relation: header.lineage_kind.map(|kind| match kind {
+                LineageKind::Delegation => sylph_protocol::SessionEdgeRelation::Delegation,
+                LineageKind::Fork => sylph_protocol::SessionEdgeRelation::Fork,
+            }),
             parent_native_id: header.parent_native_id,
             fidelity: NATIVE_FIDELITY,
         });

@@ -92,7 +92,7 @@ if [ "$DO_ROLLBACK" -eq 1 ]; then
   fi
 
   ln -sf "$PREFIX/start.sh" "$BIN_DIR/sylph-web"
-  ln -sf "$PREFIX/sylph-web-backend" "$BIN_DIR/sylph-web-backend"
+  ln -sf "$PREFIX/sylph-server" "$BIN_DIR/sylph-server"
   if [ -f "$PLIST" ]; then
     launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl load "$PLIST"
     say "Restarted the LaunchAgent"
@@ -107,7 +107,7 @@ if [ "$DO_UNINSTALL" -eq 1 ]; then
   rm -f "$PLIST"
   say "Removing $PREFIX and launchers"
   rm -rf "$PREFIX" "$PREFIX.old" "$PREFIX.new"
-  rm -f "$BIN_DIR/sylph-web" "$BIN_DIR/sylph-web-backend"
+  rm -f "$BIN_DIR/sylph-web" "$BIN_DIR/sylph-server"
   if [ "$DO_PURGE" -eq 1 ]; then
     # The whole root, not just the journal: with one directory, "delete everything
     # this app owns" is finally expressible. It is also why --purge is separate
@@ -162,7 +162,7 @@ rm -rf "$PREFIX.new"
 # not a LaunchAgent is what launched it.
 mkdir -p "$PREFIX.new/frontend" "$PREFIX.new/logs" "$BIN_DIR" "$DATA_DIR"
 
-cp "$REPO/backend/target/release/sylph-web-backend" "$PREFIX.new/sylph-web-backend"
+cp "$REPO/backend/target/release/sylph-server" "$PREFIX.new/sylph-server"
 cp -R "$REPO/frontend/.next/standalone/." "$PREFIX.new/frontend/"
 
 # No adapters are staged, because there is no directory of them to stage. They are
@@ -175,7 +175,7 @@ cp -R "$REPO/frontend/.next/standalone/." "$PREFIX.new/frontend/"
 # agents anywhere else — and zero agents means no session can be created and no
 # slash command offered, while every health probe still reports the server up.
 # There is no equivalent failure to guard now: a missing CLI is reported per agent
-# by `sylph-web doctor` and per environment by `GET /api/v1/environments`, both of
+# by `sylph-server doctor` and per environment by `GET /api/v1/environments`, both of
 # which name the binary to install.
 # Standalone omits these two; without them every asset request 404s.
 mkdir -p "$PREFIX.new/frontend/.next"
@@ -203,7 +203,7 @@ for log in "\$here/logs/stdout.log" "\$here/logs/stderr.log"; do
   fi
 done
 
-"\$here/sylph-web-backend" &
+"\$here/sylph-server" &
 backend=\$!
 trap 'kill \$backend 2>/dev/null || true' EXIT INT TERM
 
@@ -221,7 +221,7 @@ done
 echo "sylph-web: one half exited, shutting down the other" >&2
 exit 1
 EOF
-chmod +x "$PREFIX.new/start.sh" "$PREFIX.new/sylph-web-backend"
+chmod +x "$PREFIX.new/start.sh" "$PREFIX.new/sylph-server"
 
 # Swap in only once the new tree is complete, so a failed build cannot leave a
 # half-installed prefix behind. The previous tree is kept as $PREFIX.old, which
@@ -246,7 +246,7 @@ fi
 mv "$PREFIX.new" "$PREFIX"
 
 ln -sf "$PREFIX/start.sh" "$BIN_DIR/sylph-web"
-ln -sf "$PREFIX/sylph-web-backend" "$BIN_DIR/sylph-web-backend"
+ln -sf "$PREFIX/sylph-server" "$BIN_DIR/sylph-server"
 
 # --- launchagent ----------------------------------------------------------
 
@@ -315,7 +315,7 @@ if [ "$WANT_LAUNCHAGENT" -eq 1 ]; then
 else
   # The backend takes no arguments, so there is no --version to probe; check the
   # artifacts an install must have instead.
-  [ -x "$PREFIX/sylph-web-backend" ] || die "backend binary is missing or not executable"
+  [ -x "$PREFIX/sylph-server" ] || die "backend binary is missing or not executable"
   [ -f "$PREFIX/frontend/server.js" ] || die "frontend bundle is missing server.js"
   [ -d "$PREFIX/frontend/.next/static" ] || die "frontend bundle is missing .next/static"
   say "Installed. Start it with: sylph-web"
