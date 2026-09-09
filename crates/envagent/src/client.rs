@@ -122,14 +122,8 @@ pub async fn run_runtime_stream<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    run_runtime_stream_with_adapters(
-        stream,
-        hello,
-        credential,
-        config,
-        crate::adapters::linked(),
-    )
-    .await
+    run_runtime_stream_with_adapters(stream, hello, credential, config, crate::adapters::linked())
+        .await
 }
 
 /// Run an envagent over an already-connected stream with an explicit adapter source.

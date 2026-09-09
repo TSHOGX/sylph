@@ -481,6 +481,20 @@ impl HistoryStore {
         let mut tx = self.pool.begin().await?;
 
         for (block, (text, data)) in blocks.iter().zip(&payloads) {
+            // A late agent outcome may have reconciled this block while a
+            // previously scheduled consolidation was still writing. Preserve
+            // the reconciled record instead of allowing that stale snapshot to
+            // resurrect the server's provisional `abandoned` close.
+            let already_reconciled: Option<bool> = sqlx::query_scalar(
+                "SELECT json_extract(data_json, '$.reconciled') FROM blocks WHERE session_id = ? AND seq = ?",
+            )
+            .bind(&block.session_id)
+            .bind(block.seq)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if already_reconciled == Some(true) {
+                continue;
+            }
             let (text_inline, text_hash) = match text {
                 Payload::Raw(bytes) | Payload::Zstd(bytes) => (Some(bytes.clone()), None),
                 Payload::External { hash } => (None, Some(hash.clone())),
@@ -597,6 +611,21 @@ impl HistoryStore {
             blocks.push(self.row_to_block(row).await?);
         }
         Ok(blocks)
+    }
+
+    /// Return the next sequence number occupied by this session in history.
+    ///
+    /// The journal and history tiers share one session-wide sequence space, but
+    /// consolidation removes journal rows. Remote ingest therefore needs this
+    /// cursor as well as the journal's max, or a late event can reuse a sequence
+    /// that a consolidated block still owns.
+    pub async fn next_seq(&self, session_id: &str) -> Result<i32> {
+        let max: Option<i32> =
+            sqlx::query_scalar("SELECT MAX(seq) FROM blocks WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(max.unwrap_or(-1).saturating_add(1))
     }
 
     /// One turn's blocks, for a timeline that renders a single exchange.

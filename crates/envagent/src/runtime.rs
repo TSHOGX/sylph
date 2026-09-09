@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use base64::Engine;
 use async_trait::async_trait;
+use base64::Engine;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify, RwLock};
@@ -18,9 +18,9 @@ use sylph_protocol::{
 };
 use sylph_protocol::{EventBatch, ProducerId, ProducerSeq, SourceCursor, WireMessage};
 
-use crate::path::PathPolicy;
 use crate::adapters::AdapterSource;
 use crate::attachments::{attachments_dir, stage as stage_attachments};
+use crate::path::PathPolicy;
 use crate::spool::{Spool, SpoolConfig, SpoolEvent};
 
 /// Keep a prepared adapter's stream draining while the browser is still on
@@ -579,13 +579,8 @@ impl EnvAgent {
             .path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let attachments = stage_attachments(
-            &attachments_dir(root),
-            scope,
-            turn_id,
-            &input.attachments,
-        )
-        .await?;
+        let attachments =
+            stage_attachments(&attachments_dir(root), scope, turn_id, &input.attachments).await?;
         Ok(TurnInput {
             text: input.text,
             attachments,
@@ -668,7 +663,9 @@ impl EnvAgent {
             return Err(anyhow!("working directory is not a directory"));
         }
         spec.workdir = contained.display().to_string();
-        let adapter = self.adapters.for_agent(agent)
+        let adapter = self
+            .adapters
+            .for_agent(agent)
             .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
         let mut session = adapter.run(spec).await?;
         let events = session
@@ -827,7 +824,9 @@ impl EnvAgent {
         let agent_name = AgentName::parse(agent.to_string())
             .map_err(|error| anyhow!("invalid agent name: {error}"))?;
         let workdir = spec.workdir.clone();
-        let adapter = self.adapters.for_agent(agent)
+        let adapter = self
+            .adapters
+            .for_agent(agent)
             .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
         let mut session = adapter.run(spec).await?;
         let events = session
@@ -916,7 +915,9 @@ impl EnvAgent {
     ) -> Result<HostedSource> {
         let agent_name = AgentName::parse(agent.to_string())
             .map_err(|error| anyhow!("invalid agent name: {error}"))?;
-        let adapter = self.adapters.for_agent(agent)
+        let adapter = self
+            .adapters
+            .for_agent(agent)
             .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
         // Native sources are still capable of running adapter code that reads
         // a vendor worktree.  Resolve the recorded directory on this machine
@@ -1033,7 +1034,22 @@ impl EnvAgent {
                 if let Some(draft_id) = draft_id {
                     if let Some(prepared) = self.prepared.write().await.remove(&draft_id) {
                         let initial_input = match initial_input {
-                            Some(input) => match self.local_turn_input(input, &draft_id, initial_turn_id.as_deref().unwrap_or("initial")).await { Ok(v) => Some(v), Err(error) => return sylph_protocol::CommandOutcome::Rejected { code: "ATTACHMENT_INVALID".into(), message: format!("{error:#}") } },
+                            Some(input) => match self
+                                .local_turn_input(
+                                    input,
+                                    &draft_id,
+                                    initial_turn_id.as_deref().unwrap_or("initial"),
+                                )
+                                .await
+                            {
+                                Ok(v) => Some(v),
+                                Err(error) => {
+                                    return sylph_protocol::CommandOutcome::Rejected {
+                                        code: "ATTACHMENT_INVALID".into(),
+                                        message: format!("{error:#}"),
+                                    }
+                                }
+                            },
                             None => None,
                         };
                         let native_id = if let Some(input) = initial_input {
@@ -1135,7 +1151,26 @@ impl EnvAgent {
                     permission_mode,
                 };
                 let initial_input = match initial_input {
-                    Some(input) => match self.local_turn_input(input, session_id.as_ref().map(|s| s.to_string()).as_deref().unwrap_or(&agent), initial_turn_id.as_deref().unwrap_or("initial")).await { Ok(v) => Some(v), Err(error) => return sylph_protocol::CommandOutcome::Rejected { code: "ATTACHMENT_INVALID".into(), message: format!("{error:#}") } },
+                    Some(input) => match self
+                        .local_turn_input(
+                            input,
+                            session_id
+                                .as_ref()
+                                .map(|s| s.to_string())
+                                .as_deref()
+                                .unwrap_or(&agent),
+                            initial_turn_id.as_deref().unwrap_or("initial"),
+                        )
+                        .await
+                    {
+                        Ok(v) => Some(v),
+                        Err(error) => {
+                            return sylph_protocol::CommandOutcome::Rejected {
+                                code: "ATTACHMENT_INVALID".into(),
+                                message: format!("{error:#}"),
+                            }
+                        }
+                    },
                     None => None,
                 };
                 let defer_events = initial_input.is_some();
@@ -1184,7 +1219,18 @@ impl EnvAgent {
                         message: "no live session on this environment".into(),
                     };
                 };
-                let input = match self.local_turn_input(input, &session_id.to_string(), &turn_id).await { Ok(v) => v, Err(error) => return sylph_protocol::CommandOutcome::Rejected { code: "ATTACHMENT_INVALID".into(), message: format!("{error:#}") } };
+                let input = match self
+                    .local_turn_input(input, &session_id.to_string(), &turn_id)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(error) => {
+                        return sylph_protocol::CommandOutcome::Rejected {
+                            code: "ATTACHMENT_INVALID".into(),
+                            message: format!("{error:#}"),
+                        }
+                    }
+                };
                 self.active_turns
                     .write()
                     .await
@@ -1268,9 +1314,9 @@ impl EnvAgent {
                 .start_native_source(&agent, native_id, true, true, turn_id)
                 .await
             {
-                Ok(source) => sylph_protocol::CommandOutcome::accepted_with_result(
-                    source.to_command_result(),
-                ),
+                Ok(source) => {
+                    sylph_protocol::CommandOutcome::accepted_with_result(source.to_command_result())
+                }
                 Err(error) => sylph_protocol::CommandOutcome::Rejected {
                     code: "WATCH_FAILED".into(),
                     message: format!("{error:#}"),
@@ -1285,11 +1331,16 @@ impl EnvAgent {
                 .start_native_source(&agent, native_id, false, true, turn_id)
                 .await
             {
-                Ok(source) => sylph_protocol::CommandOutcome::accepted_with_result(
-                    source.to_command_result(),
-                ),
+                Ok(source) => {
+                    sylph_protocol::CommandOutcome::accepted_with_result(source.to_command_result())
+                }
                 Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                    code: if self.adapters.is_known(&agent) { "NATIVE_SESSION_NOT_FOUND" } else { "AGENT_UNKNOWN" }.into(),
+                    code: if self.adapters.is_known(&agent) {
+                        "NATIVE_SESSION_NOT_FOUND"
+                    } else {
+                        "AGENT_UNKNOWN"
+                    }
+                    .into(),
                     message: format!("{error:#}"),
                 },
             },
@@ -1301,19 +1352,27 @@ impl EnvAgent {
                 )
                 .unwrap_or_default(),
             ),
-            EnvironmentCommand::BrowseRoots => sylph_protocol::CommandOutcome::accepted_with_result(
-                serde_json::json!({"roots": self.config.path_policy.roots()}),
-            ),
+            EnvironmentCommand::BrowseRoots => {
+                sylph_protocol::CommandOutcome::accepted_with_result(
+                    serde_json::json!({"roots": self.config.path_policy.roots()}),
+                )
+            }
             EnvironmentCommand::BrowseTree { path } => {
                 let base = path.unwrap_or_default();
                 match self.config.path_policy.contain(&base) {
                     Ok(dir) => match std::fs::read_dir(dir) {
                         Ok(entries) => sylph_protocol::CommandOutcome::accepted_with_result(
-                            serde_json::json!({"entries": entries.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect::<Vec<_>>()})
+                            serde_json::json!({"entries": entries.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect::<Vec<_>>()}),
                         ),
-                        Err(error) => sylph_protocol::CommandOutcome::Rejected { code: "INTERNAL".into(), message: error.to_string() },
+                        Err(error) => sylph_protocol::CommandOutcome::Rejected {
+                            code: "INTERNAL".into(),
+                            message: error.to_string(),
+                        },
                     },
-                    Err(error) => sylph_protocol::CommandOutcome::Rejected { code: "POLICY_VIOLATION".into(), message: error.to_string() },
+                    Err(error) => sylph_protocol::CommandOutcome::Rejected {
+                        code: "POLICY_VIOLATION".into(),
+                        message: error.to_string(),
+                    },
                 }
             }
             EnvironmentCommand::Capabilities { session_id } => {
@@ -1351,7 +1410,12 @@ impl EnvAgent {
             EnvironmentCommand::Enumerate { agent, workdir } => {
                 let Some(adapter) = self.adapters.for_agent(&agent) else {
                     return sylph_protocol::CommandOutcome::Rejected {
-                        code: if self.adapters.is_known(&agent) { "NATIVE_SESSION_NOT_FOUND" } else { "AGENT_UNKNOWN" }.into(),
+                        code: if self.adapters.is_known(&agent) {
+                            "NATIVE_SESSION_NOT_FOUND"
+                        } else {
+                            "AGENT_UNKNOWN"
+                        }
+                        .into(),
                         message: format!("agent '{agent}' is not installed on this environment"),
                     };
                 };
@@ -1561,15 +1625,22 @@ impl EnvAgent {
                         ));
                     }
                     let size = bytes.len();
-                    let bytes = limit.map(|n| bytes.iter().copied().take(n as usize).collect()).unwrap_or(bytes);
+                    let bytes = limit
+                        .map(|n| bytes.iter().copied().take(n as usize).collect())
+                        .unwrap_or(bytes);
                     Ok(serde_json::json!({
                         "bytes": bytes,
                         "size": size,
                         "truncated": false
                     }))
                 }
-                FileOperation::Write { relative, data, overwrite } => {
-                    let bytes = base64::engine::general_purpose::STANDARD.decode(data.as_bytes())?;
+                FileOperation::Write {
+                    relative,
+                    data,
+                    overwrite,
+                } => {
+                    let bytes =
+                        base64::engine::general_purpose::STANDARD.decode(data.as_bytes())?;
                     let path = contain_session_write_target(policy, root, &relative)?;
                     if path.exists() && !overwrite {
                         return Err(anyhow!("file already exists"));
@@ -2040,7 +2111,9 @@ fn contain_session_path(
             std::path::Component::CurDir => {}
             std::path::Component::Normal(_) => depth += 1,
             std::path::Component::ParentDir if depth > 0 => depth -= 1,
-            std::path::Component::ParentDir => anyhow::bail!("file path escapes the session workdir"),
+            std::path::Component::ParentDir => {
+                anyhow::bail!("file path escapes the session workdir")
+            }
             _ => anyhow::bail!("file path escapes the session workdir"),
         }
     }
@@ -2406,7 +2479,8 @@ mod tests {
             "the server cannot journal an edge whose relation it never received"
         );
         assert_eq!(
-            source.to_command_result()["parentNativeId"], "parent",
+            source.to_command_result()["parentNativeId"],
+            "parent",
             "a relation with no pointer is not an edge either"
         );
 

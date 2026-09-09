@@ -280,9 +280,9 @@ pub async fn create(
     let attachments = req.attachments.unwrap_or_default();
     if !attachments.is_empty() {
         let total: usize = attachments.iter().map(|a| a.data.len()).sum();
-        return Err(Error::AttachmentInvalid(
-            format!("attachments total {total} bytes must be uploaded through the envagent capability"),
-        ));
+        return Err(Error::AttachmentInvalid(format!(
+            "attachments total {total} bytes must be uploaded through the envagent capability"
+        )));
     }
     let text = req.text.unwrap_or_default();
     let now = now_ms();
@@ -342,7 +342,10 @@ pub async fn create(
             ),
         )
         .await?;
-    let _ = state.store.set_session_title_if_empty(&session_id, &text).await;
+    let _ = state
+        .store
+        .set_session_title_if_empty(&session_id, &text)
+        .await;
     let request_id = sylph_protocol::CommandRequestId::parse(
         idempotency_key
             .as_deref()

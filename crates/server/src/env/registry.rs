@@ -138,10 +138,19 @@ impl EnvironmentRegistry {
         }
     }
 
-    pub async fn update_agents(&self, environment_id: &EnvironmentId, epoch: u64, agents: Vec<AgentInventory>) -> bool {
+    pub async fn update_agents(
+        &self,
+        environment_id: &EnvironmentId,
+        epoch: u64,
+        agents: Vec<AgentInventory>,
+    ) -> bool {
         let mut state = self.state.write().await;
-        let Some(installation) = state.installations.get_mut(environment_id) else { return false };
-        if installation.connection_epoch != epoch || !installation.connected { return false; }
+        let Some(installation) = state.installations.get_mut(environment_id) else {
+            return false;
+        };
+        if installation.connection_epoch != epoch || !installation.connected {
+            return false;
+        }
         installation.agents = agents;
         installation.last_seen_at_ms = Some(Self::now_ms());
         true

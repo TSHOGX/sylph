@@ -2763,7 +2763,10 @@ mod tests {
             "walking the cursor across a tie must not drop a session"
         );
         assert_eq!(
-            second.iter().map(|s| s.id.native_id.as_str()).collect::<Vec<_>>(),
+            second
+                .iter()
+                .map(|s| s.id.native_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["d", "c", "b", "a"],
             "the second page repeats the first in the same order it was first served"
         );

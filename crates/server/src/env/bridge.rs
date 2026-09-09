@@ -545,7 +545,9 @@ impl EnvBridge {
                         }))?);
                         let history = self.history.clone();
                         let session_key = session_id.encode();
-                        self.process_message(
+                        let record_source = record.source.clone();
+                        let record_version = record.version;
+                        let result = self.process_message(
                             &environment,
                             epoch,
                             &producer_id,
@@ -557,7 +559,31 @@ impl EnvBridge {
                                 Ok(())
                             },
                         )
-                        .await?;
+                        .await;
+                        if let Err(error) = result {
+                            // A native record is the source of truth for any future
+                            // re-projection.  If retaining it fails, stop the affected
+                            // turn before tearing down the connection so callers observe
+                            // a terminal LINK_LOST outcome instead of a turn that hangs
+                            // until their polling deadline.
+                            if let Some(turn_id) = self.store.running_turn_id(&session_id).await? {
+                                if let Some(closer) = self.turn_closer.read().await.clone() {
+                                    closer
+                                        .close(
+                                            &session_id,
+                                            &turn_id,
+                                            Outcome::LinkLost {
+                                                detail: Some(format!(
+                                                    "could not retain native record {}:{}: {error:#}",
+                                                    record_source, record_version
+                                                )),
+                                            },
+                                        )
+                                        .await;
+                                }
+                            }
+                            return Err(error);
+                        }
                     }
                     DecodedMessage::Known(WireMessage::Request {
                         session_id,
@@ -1613,6 +1639,8 @@ impl EnvBridge {
         let _seq_gate = seq_gate.lock().await;
         let mut terminal_items: Vec<(sylph_protocol::SessionId, String, sylph_protocol::Event)> =
             Vec::new();
+        let mut history_next_seq: std::collections::HashMap<String, i32> =
+            std::collections::HashMap::new();
         let mut accepted_through = self
             .store
             .env_accepted_through(&environment, &batch.producer_id)
@@ -1704,6 +1732,18 @@ impl EnvBridge {
                 )
             };
             row.turn_id = arrival_turn_id.clone();
+            let session_key = item.session_id.encode();
+            let min_next_seq = if let Some(next) = history_next_seq.get(&session_key).copied() {
+                next
+            } else {
+                let next = self
+                    .history
+                    .next_seq(&session_key)
+                    .await
+                    .map_err(|error| anyhow!(error))?;
+                history_next_seq.insert(session_key, next);
+                next
+            };
             let ingest = self
                 .store
                 .ingest_env_event_auto(
@@ -1712,6 +1752,7 @@ impl EnvBridge {
                     item.producer_seq,
                     &mut row,
                     &payload_hash,
+                    min_next_seq,
                 )
                 .await;
             let ingest = match ingest {
@@ -1730,6 +1771,7 @@ impl EnvBridge {
                     // constraint.
                     if let Ok(next_seq) = i32::try_from(ingest.server_seq.get().saturating_add(1)) {
                         self.seq.observe_inner(&item.session_id, next_seq).await;
+                        history_next_seq.insert(item.session_id.encode(), next_seq);
                     }
                     let published = StreamEvent::from_row(&row);
                     if let Some(turn_id) = arrival_turn_id.as_deref() {

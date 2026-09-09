@@ -115,9 +115,17 @@ fn map_remote_file_error(error: anyhow::Error) -> Error {
     let text = format!("{error:#}");
     if text.contains("DRAFT_NOT_FOUND") || text.contains("SESSION_NOT_HOSTED") {
         Error::LinkGone
-    } else if text.contains("outside") || text.contains("escapes") || text.contains("policy violation") || text.contains("POLICY_VIOLATION") || text.contains("must be relative") {
+    } else if text.contains("outside")
+        || text.contains("escapes")
+        || text.contains("policy violation")
+        || text.contains("POLICY_VIOLATION")
+        || text.contains("must be relative")
+    {
         Error::Forbidden("That path is outside the permitted directory.".into())
-    } else if text.contains("No such file") || text.contains("path does not exist") || text.contains("not found") {
+    } else if text.contains("No such file")
+        || text.contains("path does not exist")
+        || text.contains("not found")
+    {
         Error::FileNotFound
     } else if text.contains("file already exists") || text.contains("File exists") {
         Error::InvalidRequest("File already exists; set overwrite to replace it.".into())

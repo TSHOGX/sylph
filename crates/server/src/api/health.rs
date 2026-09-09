@@ -107,7 +107,9 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse
         api_version: "1".to_string(),
         schema_version,
         agents: AgentsHealth {
-            available: environments.iter().any(|environment| environment.connected && !environment.agents.is_empty()),
+            available: environments
+                .iter()
+                .any(|environment| environment.connected && !environment.agents.is_empty()),
         },
         environments,
     }))
@@ -189,7 +191,13 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
             .await
             .unwrap_or_default()
             .into_iter()
-            .flat_map(|environment| environment.agents.into_iter().filter(|agent| agent.available).map(|agent| agent.name))
+            .flat_map(|environment| {
+                environment
+                    .agents
+                    .into_iter()
+                    .filter(|agent| agent.available)
+                    .map(|agent| agent.name)
+            })
             .collect(),
         active_turns: state.turns.active_turn_count().await,
         retention: state.retention.last_pass().await,

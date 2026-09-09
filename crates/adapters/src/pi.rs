@@ -5180,7 +5180,9 @@ done
                 let hour = std::time::Duration::from_secs(3600);
                 for entry in entries.flatten() {
                     let stale = entry.file_name();
-                    let Some(stale) = stale.to_str() else { continue };
+                    let Some(stale) = stale.to_str() else {
+                        continue;
+                    };
                     if !stale.starts_with("sylph-pi-session-") {
                         continue;
                     }

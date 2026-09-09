@@ -286,10 +286,7 @@ async fn wait_for_completed(backend: &TestBackend, turn_id: &str) {
     panic!("remote turn {turn_id} did not settle");
 }
 
-async fn wait_for_connected(
-    bridge: &sylph_server::env::EnvBridge,
-    environment: &EnvironmentId,
-) {
+async fn wait_for_connected(bridge: &sylph_server::env::EnvBridge, environment: &EnvironmentId) {
     for _ in 0..100 {
         if bridge.environment_connected(environment).await {
             return;

@@ -45,7 +45,9 @@ pub async fn stage(
             attachments.len()
         ));
     }
-    let dir = root.join(scope_dir_name(scope)).join(scope_dir_name(turn_id));
+    let dir = root
+        .join(scope_dir_name(scope))
+        .join(scope_dir_name(turn_id));
     tokio::fs::create_dir_all(&dir).await?;
 
     let mut staged = Vec::with_capacity(attachments.len());
@@ -156,7 +158,10 @@ mod tests {
         assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
         assert_eq!(sanitize_filename("a/b\\c.txt"), "c.txt");
         assert_eq!(sanitize_filename("..."), "attachment");
-        assert_eq!(sanitize_filename("报告.pdf"), ".pdf".trim_matches('.').to_string() + "");
+        assert_eq!(
+            sanitize_filename("报告.pdf"),
+            ".pdf".trim_matches('.').to_string() + ""
+        );
     }
 
     #[tokio::test]

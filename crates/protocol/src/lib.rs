@@ -57,12 +57,11 @@ pub use capabilities::{
     FlagSchema, FlagSpec, SessionCapabilities, SubagentSpec,
 };
 pub use env::{
-    AgentInventory,
-    decode_message, negotiate, Ack, CapabilitySnapshot, Command, CommandResultMessage,
-    DecodedMessage, Diagnostic, DiagnosticLevel, EnumeratedSession, EnvironmentCommand,
-    EnvironmentHealth, EventBatch, FileOperation, Heartbeat, Hello, Nack, ProtocolVersion,
-    RejectCode, SourceState, Welcome, WireAttachment, WireError, WireMessage, WireTurnInput,
-    WorkdirPolicy, DEFAULT_MAX_BATCH_EVENTS, MAX_FILE_READ_BYTES, MAX_FRAME_BYTES,
+    decode_message, negotiate, Ack, AgentInventory, CapabilitySnapshot, Command,
+    CommandResultMessage, DecodedMessage, Diagnostic, DiagnosticLevel, EnumeratedSession,
+    EnvironmentCommand, EnvironmentHealth, EventBatch, FileOperation, Heartbeat, Hello, Nack,
+    ProtocolVersion, RejectCode, SourceState, Welcome, WireAttachment, WireError, WireMessage,
+    WireTurnInput, WorkdirPolicy, DEFAULT_MAX_BATCH_EVENTS, MAX_FILE_READ_BYTES, MAX_FRAME_BYTES,
     PROTOCOL as ENV_PROTOCOL, VERSION_MAJOR as ENV_VERSION_MAJOR,
     VERSION_MINOR as ENV_VERSION_MINOR,
 };

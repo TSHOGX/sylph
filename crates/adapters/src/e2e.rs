@@ -40,8 +40,8 @@
 //! [`sylph_protocol::AdapterError`], so the `INVALID_VALUE`-versus-`UNSUPPORTED_FIELD`
 //! distinction is exercised as the real adapters exercise it.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::now_ms;

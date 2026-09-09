@@ -188,5 +188,4 @@ mod tests {
         assert_eq!(envelope_summary("we set summary=\"x\" somewhere"), None);
         assert_eq!(envelope_summary("<teammate-message>"), None);
     }
-
 }

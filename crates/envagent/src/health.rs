@@ -32,7 +32,9 @@ pub struct HealthReporter {
 
 impl HealthReporter {
     pub fn new() -> Self {
-        Self { adapters: crate::adapters::linked() }
+        Self {
+            adapters: crate::adapters::linked(),
+        }
     }
 
     pub fn with_adapters(adapters: Arc<dyn AdapterSource>) -> Self {
@@ -160,9 +162,7 @@ mod tests {
 
     #[tokio::test]
     async fn inventory_lists_every_known_agent_sorted_with_a_reason_when_absent() {
-        let inventory = HealthReporter::new()
-            .inventory()
-            .await;
+        let inventory = HealthReporter::new().inventory().await;
         let names: Vec<_> = inventory.iter().map(|agent| agent.name.as_str()).collect();
         let mut sorted = names.clone();
         sorted.sort();
@@ -181,7 +181,11 @@ mod tests {
                 assert!(agent.info.is_some());
                 assert!(agent.reason.is_none());
             } else {
-                assert!(agent.reason.is_some(), "{} says why it is unavailable", agent.name);
+                assert!(
+                    agent.reason.is_some(),
+                    "{} says why it is unavailable",
+                    agent.name
+                );
                 assert!(agent.info.is_none());
             }
         }

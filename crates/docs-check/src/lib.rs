@@ -256,11 +256,7 @@ fn titles_agree(title: &str, heading: &str) -> bool {
         return true;
     }
     let full = words(heading);
-    let shared = full
-        .iter()
-        .zip(&title)
-        .take_while(|(a, b)| a == b)
-        .count();
+    let shared = full.iter().zip(&title).take_while(|(a, b)| a == b).count();
     if shared == 0 {
         return false;
     }
@@ -345,7 +341,9 @@ fn check_section_pointers(
         // *has* text before it and no `.md` is a same-file pointer — and joining
         // there would adopt whichever document the previous sentence happened to
         // name last, which is a wrong answer rather than a missing one.
-        let leader = line[..at].trim().trim_start_matches(['/', '!', '*', '#', '>']);
+        let leader = line[..at]
+            .trim()
+            .trim_start_matches(['/', '!', '*', '#', '>']);
         if document.is_none() && leader.trim().is_empty() {
             let joined = format!("{previous} {line}");
             document = split_section_pointer(&joined, previous.len() + 1 + at).0;
@@ -503,7 +501,9 @@ fn normalize_relative(path: &Path) -> PathBuf {
 }
 
 fn walk(root: &Path, dir: &Path, found: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();

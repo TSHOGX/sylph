@@ -70,3 +70,58 @@ async fn pairing_exchange_uses_the_standard_error_envelope() {
     // framework response.
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn connected_inventory_updates_after_cli_removal_without_repair_or_restart() {
+    let backend = TestBackend::start().await;
+    let environment = sylph_protocol::EnvironmentId::parse(backend.environment_id().await)
+        .expect("fixture environment id should parse");
+
+    let before = backend
+        .state
+        .env_bridge
+        .list_environments()
+        .await
+        .expect("initial environment listing should succeed")
+        .into_iter()
+        .find(|row| row.id == environment)
+        .expect("paired fixture environment should be listed");
+    assert!(before.connected);
+    assert!(before
+        .agents
+        .iter()
+        .any(|agent| agent.name == "mock" && agent.available));
+
+    // The envagent and server share this test seam, but remain separate processes in
+    // production. The runtime's inventory watcher observes the removal on its next
+    // pass and sends an `agents` frame over the existing connection.
+    backend.agents.uninstall("mock");
+
+    for _ in 0..160 {
+        let current = backend
+            .state
+            .env_bridge
+            .list_environments()
+            .await
+            .expect("updated environment listing should succeed")
+            .into_iter()
+            .find(|row| row.id == environment)
+            .expect("paired fixture environment should remain listed");
+        if current.connected && current.agents.is_empty() {
+            assert_eq!(current.connection_epoch, before.connection_epoch);
+            let api = common::json_body(backend.get_authed("/api/v1/environments").await).await;
+            let row = api["environments"]
+                .as_array()
+                .expect("environment response should contain rows")
+                .iter()
+                .find(|row| row["id"] == environment.as_str())
+                .expect("updated environment should remain in the API listing");
+            assert_eq!(row["connected"], true);
+            assert_eq!(row["agents"].as_array().map(Vec::len), Some(0));
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    panic!("connected environment inventory did not reflect CLI removal");
+}

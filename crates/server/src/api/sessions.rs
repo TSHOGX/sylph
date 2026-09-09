@@ -511,14 +511,23 @@ pub async fn update(
             })
             .and_then(|agent| agent.info);
         let Some(info) = info else {
-            return Err(Error::InvalidRequest(format!("Agent '{}' is unavailable on this environment.", id.agent)));
+            return Err(Error::InvalidRequest(format!(
+                "Agent '{}' is unavailable on this environment.",
+                id.agent
+            )));
         };
         for (key, value) in flags {
             let Some(spec) = info.flags.get(key) else {
-                return Err(Error::InvalidRequest(format!("Agent '{}' does not declare a '{}' flag.", id.agent, key)));
+                return Err(Error::InvalidRequest(format!(
+                    "Agent '{}' does not declare a '{}' flag.",
+                    id.agent, key
+                )));
             };
             if !spec.choices.is_empty() && !spec.choices.contains(value) {
-                return Err(Error::InvalidRequest(format!("'{}' is not a valid {} for '{}'.", value, key, id.agent)));
+                return Err(Error::InvalidRequest(format!(
+                    "'{}' is not a valid {} for '{}'.",
+                    value, key, id.agent
+                )));
             }
         }
         let flags_json = serde_json::to_string(flags)
@@ -986,7 +995,9 @@ pub async fn adopt(
         }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
             return Err(match code.as_str() {
-                "NATIVE_SESSION_NOT_FOUND" | "ADOPT_FAILED" => Error::NativeSessionNotFound(native_id_for_command.to_string()),
+                "NATIVE_SESSION_NOT_FOUND" | "ADOPT_FAILED" => {
+                    Error::NativeSessionNotFound(native_id_for_command.to_string())
+                }
                 "AGENT_UNKNOWN" => Error::InvalidRequest(format!("Unknown agent: {agent}")),
                 _ => Error::InvalidRequest(format!("{code}: {message}")),
             })

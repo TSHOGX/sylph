@@ -178,6 +178,7 @@ impl JournalStore {
         producer_seq: ProducerSeq,
         event: &mut Event,
         payload_hash: &str,
+        min_next_seq: i32,
     ) -> Result<EnvIngestOutcome> {
         if &event.session_id.environment != environment {
             return Err(Error::InvalidRequest(
@@ -240,6 +241,7 @@ impl JournalStore {
         let next = max_event
             .into_iter()
             .chain(max_receipt)
+            .chain(std::iter::once(i64::from(min_next_seq.saturating_sub(1))))
             .max()
             .unwrap_or(-1)
             .saturating_add(1);
