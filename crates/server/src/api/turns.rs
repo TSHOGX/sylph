@@ -171,7 +171,7 @@ pub async fn create_prepared(
                 session_id: session_id.clone(),
                 status: "running".into(),
                 origin: "user".into(),
-                request_text: text,
+                request_text: text.clone(),
                 command_invocation_id: req.command,
                 idempotency_key: req.idempotency_key,
                 error_code: None,
@@ -190,6 +190,33 @@ pub async fn create_prepared(
                         return Err(error);
                     }
                 };
+            // Promotion bypasses the local supervisor, so write the same
+            // server-authored transcript events before releasing the envagent
+            // event pump. Otherwise the user input exists only in
+            // `turns.request_text`, and the live timeline/replay tree has no
+            // user row to render.
+            if !text.is_empty() {
+                state
+                    .turns
+                    .emit_server_event(
+                        &session_id,
+                        &turn_id,
+                        crate::supervisor::turn::server_event("user", text.clone(), None),
+                    )
+                    .await?;
+            }
+            state
+                .turns
+                .emit_server_event(
+                    &session_id,
+                    &turn_id,
+                    crate::supervisor::turn::server_event(
+                        "status",
+                        String::new(),
+                        Some(serde_json::json!({"state": "starting"})),
+                    ),
+                )
+                .await?;
             if let Err(error) = state.env_bridge.activate_remote(&session_id).await {
                 let _ = state.env_bridge.close_remote_session(&session_id).await;
                 state.env_bridge.discard_remote_draft(&draft_id).await;
