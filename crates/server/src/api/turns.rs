@@ -617,13 +617,8 @@ pub async fn stop(
         .lock_owned()
         .await;
     let settled = state
-        .turns
-        .closer()
-        .close(
-            &turn.session_id,
-            &turn.id,
-            crate::supervisor::Outcome::Interrupted,
-        )
+        .env_bridge
+        .interrupt_turn(&turn.session_id, &turn.id)
         .await;
     if !settled {
         return Err(Error::StopAlreadyCompleted);

@@ -185,6 +185,19 @@ impl EnvBridge {
         *self.turn_closer.write().await = Some(closer);
     }
 
+    pub async fn interrupt_turn(
+        &self,
+        session_id: &sylph_protocol::SessionId,
+        turn_id: &str,
+    ) -> bool {
+        let Some(closer) = self.turn_closer.read().await.clone() else {
+            return false;
+        };
+        closer
+            .close(session_id, turn_id, Outcome::Interrupted)
+            .await
+    }
+
     /// Journal and publish a server-authored event for a remote turn. This is
     /// the bridge-owned counterpart of the deleted in-process supervisor path.
     pub async fn emit_server_event(
