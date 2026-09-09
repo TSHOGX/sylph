@@ -129,7 +129,7 @@ impl JournalStore {
     /// **The caller must have started the agent first.** A row exists only once a
     /// session has an identity (`docs/architecture.md` § Identity), so this is the
     /// second half of a prepared-session promotion rather than the whole of it — see
-    /// [`crate::links::LinkManager::promote_prepared_turn`], which owns that ordering.
+    /// The bridge promotion path owns that ordering.
     /// Nothing here can enforce it, and that is what the type is for: a [`Session`]
     /// cannot be constructed without a [`SessionId`], which only an agent's answer
     /// produces.

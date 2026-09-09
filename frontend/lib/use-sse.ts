@@ -51,7 +51,7 @@ interface Buffer {
 /**
  * The turn statuses that mean it will produce nothing further.
  *
- * Kept in step with `Outcome::as_status` in `crates/server/src/supervisor/turn.rs`, which emits
+ * Kept in step with the shared server outcome vocabulary, which emits
  * only `completed`, `failed`, and `cancelled` — a narrower set than `TurnStatus`, since
  * the rest describe a turn still in flight.
  */

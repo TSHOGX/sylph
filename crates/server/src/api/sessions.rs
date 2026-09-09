@@ -448,7 +448,7 @@ pub async fn prepared_get(
         }));
     }
     // Draft handles are owned by the envagent that created them. A local
-    // LinkManager handle must never be accepted as a second execution path.
+    // A stale remote draft must never be accepted as a second execution path.
     Err(Error::SessionNotFound)
 }
 

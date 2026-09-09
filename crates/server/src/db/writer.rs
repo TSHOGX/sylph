@@ -8,7 +8,7 @@
 //! ## Only ephemeral events are batched, and that is not a compromise
 //!
 //! The split is forced by an invariant already in the code, not chosen for
-//! caution. [`crate::supervisor::turn`] journals a stable event *before* publishing
+//! caution. The shared bridge/closer journals a stable event *before* publishing
 //! it, so that "a client reconnecting immediately after seeing an event always
 //! finds it in replay". Meanwhile [`crate::events::EventHub`] keeps a bounded ring
 //! of **only ephemeral** events, which is what a mid-stream reconnect replays from.

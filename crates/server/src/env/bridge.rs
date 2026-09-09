@@ -1871,7 +1871,7 @@ impl EnvBridge {
                     self.hub
                         .publish_trace(&row.session_id.encode(), published)
                         .await;
-                    // A remote envagent's drain is outside `LinkManager`, so
+                    // Remote envagent ingest owns its own drain, so
                     // mirror the live path's late trajectory reconciliation here.
                     // The event is still retained on the arriving turn; the
                     // reconciler amends the earlier provisional record in place.

@@ -435,7 +435,7 @@ impl CapabilityFacets {
     ///
     /// This is the only implementation, and every caller is the server: `Link::apply`
     /// for an adapter-pushed update and `Link::set_config` for an accepted setting, both
-    /// under the one mutex guarding the merged surface (`crates/server/src/links/mod.rs`). An
+    /// under the one mutex guarding the merged surface in the server bridge. An
     /// adapter returns facets and never a surface, so it has nothing to merge with.
     pub fn apply_to(self, surface: &mut SessionCapabilities) {
         if let Some(commands) = self.commands {

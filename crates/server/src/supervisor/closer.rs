@@ -13,8 +13,8 @@
 //! and a completion cannot both be reported.
 //!
 //! Holds no reference to either manager, which is what lets both hold one of these:
-//! `LinkedSupervisor` owns a `LinkManager`, so a direct call back the other way would
-//! be a cycle.
+//! The closer is shared by bridge ingest and retention settlement, so it has no
+//! dependency on an execution pool.
 
 use tracing::{debug, error};
 

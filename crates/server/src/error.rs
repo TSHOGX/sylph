@@ -542,7 +542,7 @@ mod tests {
         // `Error` is not the only producer of a published code. A turn that ends
         // badly records one on its journal row, and those never pass through
         // this type at all — so the loop above cannot see them, and `LINK_LOST`
-        // was emitted by `supervisor::turn` while absent from the enum for as
+        // was emitted by the old turn runner while absent from the enum for as
         // long as the outcome existed. Its two siblings were published, which is
         // what makes the omission a slip rather than a policy.
         //

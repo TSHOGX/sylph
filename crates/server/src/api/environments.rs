@@ -164,7 +164,7 @@ pub async fn unpair(State(state): State<AppState>, Path(id): Path<String>) -> Re
 /// two products), so "the machine the server runs on" is not a privileged
 /// environment with its own code path. Until pairing lands (step 4), the only
 /// environment this can describe is the local one, and what it reports about that
-/// one is honest about the seam: an [`crate::adapters::AdapterSource`] that lists nothing
+/// one is honest about the environment inventory: an envagent that lists no agents
 /// yields an environment with no agents, which is exactly the state a client must be able
 /// to explain rather than render as empty chrome.
 pub async fn list(State(state): State<AppState>) -> Result<Json<EnvironmentsResponse>> {

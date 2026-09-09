@@ -50,7 +50,7 @@
 //! | `turn`/`completed` | closes it, recording the vendor's own stop reason | opens one and closes it immediately, so the outcome is not orphaned |
 //! | anything else | goes into it | opens one |
 //!
-//! The first row is the same call `links::LinkManager::open_agent_turn` makes for a live
+//! The first row is the same call the bridge makes for a live
 //! session, and for the same measured reason: a vendor's `turn`/`started` can arrive
 //! *after* the payload it brackets, so treating it as the opener drops whatever preceded
 //! it.
@@ -99,7 +99,7 @@ pub struct IngestReport {
     /// Capability partials seen, which this path deliberately drops.
     ///
     /// A capability surface is **current state, not something that happened**
-    /// (`links::LinkManager` publishes it rather than journaling it), and an adopted
+    /// (the bridge publishes it rather than journaling it), and an adopted
     /// session has no live link for the surface to describe. Recording a months-old
     /// permission mode as the session's current one would report a policy the session
     /// is not running under — which `AGENTS.md` records as its own class of defect,
@@ -718,7 +718,7 @@ mod tests {
     /// A vendor's `turn`/`started` arriving **after** content lands inside the container
     /// that content already opened, rather than opening a second one.
     ///
-    /// The same rule `links::LinkManager::open_agent_turn` follows for a live session, and
+    /// The same rule the bridge follows for a live session, and
     /// for the same measured reason: a vendor's bracket can arrive after the payload it
     /// brackets, so treating it as the opener drops whatever preceded it. Here the cost
     /// would be an empty first turn beside a bracketed second one.

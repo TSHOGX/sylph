@@ -244,7 +244,7 @@ pub async fn create_prepared(
         | crate::env::bridge::RemoteDraftClaim::Busy => return Err(Error::SessionAlreadyRunning),
         crate::env::bridge::RemoteDraftClaim::Missing => {
             // A remote handle must never fall through to the local
-            // LinkManager. A stale remote draft is a missing resource, not a
+            // local execution path. A stale remote draft is a missing resource, not a
             // local draft with a coincidentally similar spelling.
             if draft_id.starts_with("remote-draft-") {
                 return Err(Error::SessionNotFound);

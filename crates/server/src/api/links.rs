@@ -121,7 +121,7 @@ pub async fn prepared_set_config(
         return Ok(Json(remote_link_state(draft.agent, refreshed)?));
     }
     // Draft handles are issued by an envagent. A handle unknown to the bridge
-    // is gone; it must never fall through to an in-process LinkManager.
+    // is gone; it must never fall through to an in-process execution path.
     Err(Error::SessionNotFound)
 }
 
