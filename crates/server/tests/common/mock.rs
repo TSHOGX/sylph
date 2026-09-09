@@ -23,7 +23,7 @@
 //! `AppState::build_with_adapters`. That is also what makes "the agent was uninstalled"
 //! expressible ([`MockAgents::uninstall`]) now that there is no directory to delete.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
@@ -193,6 +193,10 @@ impl MockRunner {
 #[derive(Clone, Default)]
 pub struct MockAgents {
     agents: Arc<RwLock<HashMap<String, Behavior>>>,
+    /// Names compiled into this fixture, including agents currently unavailable.
+    /// Keeping this separate from `agents` preserves the protocol distinction between
+    /// `AGENT_UNKNOWN` and a known vendor whose CLI was removed after pairing.
+    known: Arc<RwLock<HashSet<String>>>,
     /// The workdir every stored session reports.
     ///
     /// Set by the harness to a directory inside its own tree, because adopting runs the
@@ -211,6 +215,9 @@ impl MockAgents {
             .collect();
         Self {
             agents: Arc::new(RwLock::new(agents)),
+            known: Arc::new(RwLock::new(
+                runners.iter().map(|runner| runner.name.clone()).collect(),
+            )),
             store_workdir: Arc::new(RwLock::new(None)),
         }
     }
@@ -319,7 +326,15 @@ impl sylph_envagent::adapters::AdapterSource for MockAgents {
     /// distinction is what lets a message name a fix. Here every agent this source knows is
     /// one it can run, so collapsing them is honest rather than lossy.
     fn known_agents(&self) -> Vec<String> {
-        self.available()
+        let mut names: Vec<String> = self
+            .known
+            .read()
+            .expect("the mock known-agent map is not poisoned")
+            .iter()
+            .cloned()
+            .collect();
+        names.sort();
+        names
     }
 }
 

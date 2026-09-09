@@ -733,6 +733,22 @@ impl EnvAgent {
                 result: Some(serde_json::json!({"draftId": draft_id})),
             };
         }
+        // Classify inventory failures before probing. The bridge must preserve the
+        // typed distinction between an unknown vendor and a known vendor whose CLI is
+        // currently unavailable; collapsing both into PREPARE_FAILED makes a plausible
+        // 503 out of a durable `no_agent` facet.
+        if !self.adapters.is_known(&agent) {
+            return sylph_protocol::CommandOutcome::Rejected {
+                code: "AGENT_UNKNOWN".into(),
+                message: format!("agent '{agent}' is not known on this environment"),
+            };
+        }
+        if self.adapters.for_agent(&agent).is_none() {
+            return sylph_protocol::CommandOutcome::Rejected {
+                code: "NO_AGENT".into(),
+                message: format!("agent '{agent}' is not installed on this environment"),
+            };
+        }
         let spec = RunSpec {
             workdir,
             native_id: sylph_protocol::RequestedNativeId::New,
