@@ -1112,7 +1112,14 @@ pub async fn upload(
                 },
             )
             .await
-            .map_err(map_remote_file_error)?;
+            .map_err(|error| match map_remote_file_error(error) {
+                Error::InvalidRequest(message) if message.starts_with("File already exists") => {
+                    Error::InvalidRequest(format!(
+                        "{filename} already exists. Send overwrite to replace it."
+                    ))
+                }
+                other => other,
+            })?;
         let size = value
             .get("written")
             .and_then(|value| value.as_u64())
