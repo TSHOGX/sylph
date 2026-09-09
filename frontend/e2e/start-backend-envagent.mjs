@@ -191,7 +191,7 @@ async function waitForConnectedEnvironment() {
 }
 
 try {
-  launch("cargo", ["run", "--quiet", "-p", "sylph-server", "--features", "e2e", "--bin", "sylph-server"], {
+  launch("cargo", ["run", "--quiet", "-p", "sylph-server", "--bin", "sylph-server"], {
     SYLPH_ENV_LISTEN: `127.0.0.1:${envPort}`,
     SYLPH_BROWSE_ROOTS: browseRoots,
   });

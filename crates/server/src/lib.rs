@@ -16,8 +16,6 @@ use axum::{
 };
 use tower_http::trace::TraceLayer;
 
-/// Which agents this machine can run, and where the server gets an adapter from.
-pub mod adapters;
 pub mod api;
 pub mod attachments;
 pub mod config;
@@ -25,15 +23,10 @@ pub mod db;
 /// Parsing spreadsheets, documents, and presentations. A library with no HTTP
 /// knowledge, so it sits beside `attachments` rather than inside `api`.
 pub mod documents;
-/// Where a session's work happens: local today, a Khora sandbox or SSH next.
-/// The seam local fork/exec used to occupy implicitly.
 pub mod env;
 pub mod error;
 pub mod events;
 pub mod link_state;
-/// The pool of live agent sessions, and the one place a link's output becomes
-/// durable state.
-pub mod links;
 pub mod middleware;
 pub mod models;
 pub mod paths;
