@@ -98,21 +98,10 @@ impl AppState {
     /// readable and every other surface works, which is why the report has to be
     /// loud rather than the startup being aborted.
     pub async fn build(config: Config) -> anyhow::Result<Self> {
-        Self::build_with_adapters(config, crate::adapters::linked()).await
+        Self::build_inner(config).await
     }
 
-    /// Assemble state against a given adapter source.
-    ///
-    /// Separate from [`Self::build`] because the integration suite needs an agent that is
-    /// deterministic, has no vendor CLI, and can be told to fail — and a *different* one
-    /// per test, since tests run concurrently in one process. A name-keyed global registry
-    /// cannot provide that, so the source is injected rather than discovered. It is the
-    /// same reason `environment` is a field: step 4 replaces the local source with a
-    /// per-environment one and this signature already accepts it.
-    async fn build_with_adapters(
-        config: Config,
-        adapters: Arc<dyn crate::adapters::AdapterSource>,
-    ) -> anyhow::Result<Self> {
+    async fn build_inner(config: Config) -> anyhow::Result<Self> {
         let store = JournalStore::new(&config.journal_path).await?;
         tracing::info!("Journal initialized at {}", config.journal_path);
 
@@ -127,22 +116,6 @@ impl AppState {
         // *which* machine. This line is the server-side half, and it stays at `error`
         // for the same reason it was raised to `error` before: it names a total
         // failure whose symptom appears three layers away.
-        let runnable = adapters.available();
-        if runnable.is_empty() {
-            tracing::error!(
-                "No agent CLI is on this machine's PATH, so this build can run nothing. \
-                 Sessions cannot be created and no slash commands will be offered. \
-                 Install one of {:?} and restart; see `GET /api/v1/environments` for what \
-                 each environment reports.",
-                // From the source, not from `sylph_adapters`: the two can disagree, and a
-                // line telling an operator to install one of three agents when this build
-                // knows a different set is worse than saying nothing.
-                adapters.known_agents()
-            );
-        } else {
-            tracing::info!("Agents this build can run: {}", runnable.join(", "));
-        }
-
         // Child processes do not survive a restart, so anything the journal
         // still lists as live is unrecoverable.
         let interrupted = store.interrupt_stale_turns().await?;
@@ -242,7 +215,7 @@ impl AppState {
             data_dir: config.data_dir.clone(),
             writer: writer.clone(),
             hub: hub.clone(),
-            adapters: adapters.clone(),
+            adapters: crate::adapters::linked(),
             soul_path,
             seq: seq.clone(),
         });
