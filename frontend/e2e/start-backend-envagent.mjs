@@ -20,7 +20,7 @@ const envPort = Number(process.env.SYLPH_ENV_PORT ?? backendPort + 1);
 const backend = `http://127.0.0.1:${backendPort}`;
 const envHome = path.join(here, "..", ".e2e-env-home");
 const agentHome = path.join(envHome, "home");
-const browseRoots = process.env.SYLPH_BROWSE_ROOTS || ["/tmp", os.tmpdir()].join(":");
+const browseRoots = ["/tmp", os.tmpdir(), os.tmpdir().startsWith("/var/") ? `/private${os.tmpdir()}` : ""].filter(Boolean).join(":");
 // Keep Cargo usable after giving the envagent an isolated HOME. Rustup resolves
 // its toolchain from HOME when these variables are absent.
 const toolchainEnv = {
