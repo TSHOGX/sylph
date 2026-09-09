@@ -109,7 +109,7 @@ impl AppState {
     /// cannot provide that, so the source is injected rather than discovered. It is the
     /// same reason `environment` is a field: step 4 replaces the local source with a
     /// per-environment one and this signature already accepts it.
-    pub async fn build_with_adapters(
+    async fn build_with_adapters(
         config: Config,
         adapters: Arc<dyn crate::adapters::AdapterSource>,
     ) -> anyhow::Result<Self> {

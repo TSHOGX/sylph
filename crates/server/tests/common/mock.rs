@@ -20,7 +20,7 @@
 //! or `agent` with *different* behaviour. A name-keyed global registry cannot answer that —
 //! `sylph_adapters::for_agent` has no way to know which test is asking — so each
 //! [`super::TestBackend`] owns its own [`MockAgents`] and hands it to
-//! `AppState::build_with_adapters`. That is also what makes "the agent was uninstalled"
+//! The fixture envagent owns the adapter source. That is also what makes "the agent was uninstalled"
 //! expressible ([`MockAgents::uninstall`]) now that there is no directory to delete.
 
 use std::collections::{HashMap, HashSet};
