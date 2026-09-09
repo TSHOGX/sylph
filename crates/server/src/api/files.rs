@@ -73,18 +73,15 @@ async fn remote_target(state: &AppState, id: &str) -> Result<Option<RemoteTarget
         }));
     }
     if id.starts_with("draft-") {
-        return Ok(None);
+        return Err(Error::SessionNotFound);
     }
-    // Local draft handles are resolved by the legacy LinkManager below. A
-    // remote handle always carries the explicit remote prefix; never try to
-    // resolve a remote path on the server.
+    // Every durable session is owned by an envagent, including one whose
+    // environment happens to share the server host. The server never resolves
+    // or reads a session workdir locally.
     let session_id = crate::api::sessions::decode_id(id)?;
     let Some(session) = state.store.get_session(&session_id).await? else {
         return Err(Error::SessionNotFound);
     };
-    if session_id.environment.as_str() == state.environment.descriptor().id {
-        return Ok(None);
-    }
     Ok(Some(RemoteTarget::Session {
         environment: session_id.environment.clone(),
         session_id,
@@ -139,7 +136,10 @@ async fn remote_read_bytes(
             environment,
             draft_id,
             session_id,
-            sylph_protocol::FileOperation::Read { relative, limit: None },
+            sylph_protocol::FileOperation::Read {
+                relative,
+                limit: None,
+            },
         )
         .await
         .map_err(map_remote_file_error)?;
@@ -478,93 +478,7 @@ pub async fn content(
             })),
         }
     } else {
-        let (_root, target) = resolve(&state, &id, &query.path).await?;
-
-        let metadata = std::fs::metadata(&target)
-            .map_err(|e| paths::describe_io_error(&e, "read that file"))?;
-        if metadata.is_dir() {
-            return Err(Error::InvalidRequest(
-                "That path is a directory, not a file.".to_string(),
-            ));
-        }
-
-        let size = metadata.len();
-        let mime_type = guess_mime(&target);
-        let is_image = mime_type.starts_with("image/");
-
-        // Images are all-or-nothing: a truncated image decodes to nothing useful,
-        // so an oversized one reports its size and offers no preview.
-        if is_image {
-            if size > MAX_PREVIEW_BYTES {
-                return Ok(Json(ContentResponse {
-                    path: paths::normalize_relative(&query.path),
-                    absolute_path: target.display().to_string(),
-                    size,
-                    encoding: "binary".to_string(),
-                    mime_type,
-                    content: None,
-                    truncated: true,
-                    modified_at_ms: paths::modified_ms(&metadata),
-                }));
-            }
-            let bytes = std::fs::read(&target)
-                .map_err(|e| paths::describe_io_error(&e, "read that file"))?;
-            return Ok(Json(ContentResponse {
-                path: paths::normalize_relative(&query.path),
-                absolute_path: target.display().to_string(),
-                size,
-                encoding: "image".to_string(),
-                mime_type,
-                content: Some(base64_encode(&bytes)),
-                truncated: false,
-                modified_at_ms: paths::modified_ms(&metadata),
-            }));
-        }
-
-        let read_limit = size.min(MAX_PREVIEW_BYTES) as usize;
-        let bytes = read_prefix(&target, read_limit)?;
-
-        // UTF-8 validity, not the extension, decides whether this is text. An
-        // extension-based guess mislabels a `.log` holding binary output, and
-        // refuses a perfectly readable file with no extension at all.
-        match String::from_utf8(bytes) {
-            Ok(text) => {
-                let truncated = size > read_limit as u64;
-                let content = if truncated && text.len() > TRUNCATE_TO_BYTES {
-                    // Cut on a character boundary; slicing by byte index would panic
-                    // in the middle of a multi-byte codepoint.
-                    let end = text
-                        .char_indices()
-                        .map(|(i, _)| i)
-                        .take_while(|i| *i <= TRUNCATE_TO_BYTES)
-                        .last()
-                        .unwrap_or(0);
-                    text[..end].to_string()
-                } else {
-                    text
-                };
-                Ok(Json(ContentResponse {
-                    path: paths::normalize_relative(&query.path),
-                    absolute_path: target.display().to_string(),
-                    size,
-                    encoding: "text".to_string(),
-                    mime_type,
-                    content: Some(content),
-                    truncated,
-                    modified_at_ms: paths::modified_ms(&metadata),
-                }))
-            }
-            Err(_) => Ok(Json(ContentResponse {
-                path: paths::normalize_relative(&query.path),
-                absolute_path: target.display().to_string(),
-                size,
-                encoding: "binary".to_string(),
-                mime_type,
-                content: None,
-                truncated: false,
-                modified_at_ms: paths::modified_ms(&metadata),
-            })),
-        }
+        return Err(Error::SessionNotFound);
     }
 }
 
