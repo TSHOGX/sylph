@@ -1,9 +1,8 @@
 //! Recording a turn's terminal state, for turns nobody is waiting on.
 //!
-//! A user's turn settles through [`crate::supervisor::LinkedSupervisor`]: a POST parks on a waiter, the
-//! agent's `turn`/`completed` arrives, and the waiter is woken with the outcome. An
-//! *agent-initiated* turn has no waiter, because nobody asked for it — so the same
-//! work has to be reachable from the link manager, which is where its events land.
+//! A user's turn settles through the envagent bridge: a POST records the turn, the
+//! agent's `turn`/`completed` arrives, and the closer records the outcome. An
+//! agent-initiated turn follows the same durable path.
 //!
 //! Extracted rather than duplicated. This is the code that closes open trajectories,
 //! marks the session idle, and hands the turn to consolidation; a second copy would
