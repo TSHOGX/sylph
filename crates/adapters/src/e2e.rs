@@ -41,6 +41,7 @@
 //! distinction is exercised as the real adapters exercise it.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::now_ms;
@@ -68,6 +69,7 @@ pub const AGENT_NAME: &str = "e2e";
 /// Stable rather than minted, so a resumed session in a spec is recognisably the same
 /// conversation rather than a new one that happens to look alike.
 const DEFAULT_NATIVE_ID: &str = "e2e-native-session";
+static NEXT_NATIVE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The context window this agent declares, in tokens.
 const CONTEXT_WINDOW: i64 = 200_000;
@@ -322,7 +324,10 @@ impl Adapter for E2eAdapter {
             // Honoured rather than refused: `dictates_native_id` is true so the server
             // always names one, but a fixture that panics on a protocol value is a
             // fixture that fails the suite for a reason no spec is about.
-            RequestedNativeId::New => NativeId::new(DEFAULT_NATIVE_ID),
+            RequestedNativeId::New => NativeId::new(format!(
+                "{DEFAULT_NATIVE_ID}-{}",
+                NEXT_NATIVE_ID.fetch_add(1, Ordering::Relaxed)
+            )),
         };
         Ok(Box::new(E2eSession::new(native_id)))
     }
