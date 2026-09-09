@@ -456,10 +456,18 @@ async fn interrupt_and_steer_report_a_missing_agent_once_its_link_is_gone() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
     let typed = common::TestBackend::session_id(&session_id);
+    let epoch = server
+        .state
+        .env_bridge
+        .registry
+        .get(&typed.environment)
+        .await
+        .expect("fixture environment exists")
+        .connection_epoch;
     server
         .state
         .env_bridge
-        .disconnect(&typed.environment, u64::MAX)
+        .disconnect(&typed.environment, epoch)
         .await
         .expect("disconnecting the envagent fixture");
 

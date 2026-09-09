@@ -1555,11 +1555,6 @@ impl EnvBridge {
         let actual_epoch = {
             let mut leases = self.leases.write().await;
             match leases.get(environment) {
-                Some(lease) if epoch == u64::MAX => {
-                    let actual = lease.epoch;
-                    leases.remove(environment);
-                    Some(actual)
-                }
                 Some(lease) if lease.epoch == epoch => {
                     leases.remove(environment);
                     Some(epoch)
