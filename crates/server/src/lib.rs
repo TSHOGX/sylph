@@ -54,13 +54,7 @@ pub struct AppState {
     pub store: JournalStore,
     pub config: Config,
     pub hub: EventHub,
-    /// Where a session's work runs.
-    ///
-    /// One environment today, and it is held here rather than constructed per
-    /// caller so that pairing (`docs/roadmap.md` § Milestone 1)
-    /// replaces one field instead of reaching into every consumer. This is also what
-    /// `GET /environments` reports availability from — the surface that replaced
-    /// discovery's `agents.available` and `broken_adapters`.
+    /// Paired environment reachability used by retention and diagnostics.
     pub environment: Arc<dyn crate::env::Environment>,
     /// Runs turns on live links.
     pub turns: crate::supervisor::turn::LinkedSupervisor,

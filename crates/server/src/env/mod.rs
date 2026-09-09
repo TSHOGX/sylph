@@ -5,9 +5,8 @@
 //! `docs/environments.md` § The envagent is the whole abstraction is explicit that there
 //! is **no** `Environment` trait with one implementation per substrate: local, SSH, and
 //! sandbox differ only in how an envagent came to exist, and after it exists they are the
-//! same case. So this is scaffolding for step 4 rather than the design — it holds the two
-//! questions the server asks about a machine before it can talk to one, and
-//! [`LocalEnvironment`](crate::env::LocalEnvironment) answers them for the host the server runs on.
+//! same case. The server asks only about paired envagent state; it does not model
+//! the server host as a privileged execution substrate.
 //!
 //! What it is *not* is a process abstraction. A vendor CLI's process belongs to the
 //! adapter that knows how to talk to it (`crates/adapters/src/process.rs`), so nothing
