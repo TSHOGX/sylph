@@ -1544,6 +1544,9 @@ impl EnvAgent {
                 }
                 FileOperation::Read { relative, limit } => {
                     let path = contain_session_path(policy, root, &relative)?;
+                    if path.is_dir() {
+                        anyhow::bail!("path is a directory");
+                    }
                     let bytes = std::fs::read(path)?;
                     const MAX_REMOTE_READ_BYTES: usize = 32 * 1024 * 1024;
                     if bytes.len() > MAX_REMOTE_READ_BYTES {

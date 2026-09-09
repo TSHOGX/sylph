@@ -115,12 +115,16 @@ fn map_remote_file_error(error: anyhow::Error) -> Error {
     let text = format!("{error:#}");
     if text.contains("DRAFT_NOT_FOUND") || text.contains("SESSION_NOT_HOSTED") {
         Error::LinkGone
-    } else if text.contains("outside") || text.contains("escapes") || text.contains("policy violation") || text.contains("POLICY_VIOLATION") {
+    } else if text.contains("outside") || text.contains("escapes") || text.contains("policy violation") || text.contains("POLICY_VIOLATION") || text.contains("must be relative") {
         Error::Forbidden("That path is outside the permitted directory.".into())
-    } else if text.contains("FILES_FAILED: path does not exist") && text.contains("/etc/") {
-        Error::Forbidden("That path is outside the permitted directory.".into())
-    } else if text.contains("No such file") || text.contains("not found") {
+    } else if text.contains("No such file") || text.contains("path does not exist") || text.contains("not found") {
         Error::FileNotFound
+    } else if text.contains("file already exists") {
+        Error::InvalidRequest("File already exists; set overwrite to replace it.".into())
+    } else if text.contains("Directory not empty") || text.contains("directory not empty") {
+        Error::InvalidRequest("Directory is not empty; set recursive to remove it.".into())
+    } else if text.contains("path is a directory") {
+        Error::InvalidRequest("That path is a directory, not a file.".into())
     } else {
         Error::LinkFailed(text)
     }
