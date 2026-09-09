@@ -1649,6 +1649,47 @@ impl EnvBridge {
                 }
             }
         }
+        // Requests are server resources; announce every row whose agent died so
+        // attached clients retire stale approval panels immediately.
+        let sessions = self
+            .store
+            .list_sessions(&crate::db::store::SessionFilter {
+                environment: Some(environment.to_string()),
+                limit: 10000,
+                ..Default::default()
+            })
+            .await
+            .unwrap_or_default();
+        for session in sessions {
+            if let Ok(rows) = self.store.abandon_open_requests(&session.id).await {
+                for row in rows {
+                    self.hub
+                        .publish_session(
+                            &session.id.encode(),
+                            crate::events::StreamEvent {
+                                seq: 0,
+                                arrival_turn_id: None,
+                                kind: "request".into(),
+                                phase: None,
+                                stream_id: None,
+                                span: None,
+                                interior_state: None,
+                                name: None,
+                                text: String::new(),
+                                data: Some(serde_json::to_value(row).unwrap_or_default()),
+                                is_error: false,
+                                stability: "stable".into(),
+                                source: "server".into(),
+                                arrival_at_ms: now_ms(),
+                                recorded_at_ms: None,
+                                created_at_ms: now_ms(),
+                                started_at_ms: None,
+                            },
+                        )
+                        .await;
+                }
+            }
+        }
         let _ = self.registry.disconnect(environment, epoch).await;
         Ok(())
     }

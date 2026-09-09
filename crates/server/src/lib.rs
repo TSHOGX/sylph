@@ -56,10 +56,6 @@ pub struct AppState {
     pub hub: EventHub,
     /// Paired environment reachability used by retention and diagnostics.
     pub environment: Arc<dyn crate::env::Environment>,
-    /// Legacy in-process fixture supervisor; product routes use EnvBridge.
-    pub turns: crate::supervisor::turn::LinkedSupervisor,
-    /// Legacy in-process fixture link pool; product routes use EnvBridge.
-    pub links: crate::links::LinkManager,
     /// The warm tier. Reads come here once a turn has been consolidated.
     pub history: crate::storage::HistoryStore,
     /// Moves settled turns into history. Exposed so a test can trigger the same
@@ -318,8 +314,6 @@ impl AppState {
             config,
             environment,
             hub,
-            turns,
-            links,
             history,
             consolidator,
             retention,

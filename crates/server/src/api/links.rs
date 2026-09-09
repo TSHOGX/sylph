@@ -253,7 +253,36 @@ pub async fn attach(
         .await
         .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
     match outcome {
-        sylph_protocol::CommandOutcome::Accepted { .. } => Ok(Json(LinkState::detached_remote())),
+        sylph_protocol::CommandOutcome::Accepted { .. } => {
+            for request in state.store.abandon_open_requests(&session_id).await? {
+                state
+                    .hub
+                    .publish_session(
+                        &session_id.encode(),
+                        crate::events::StreamEvent {
+                            seq: 0,
+                            arrival_turn_id: None,
+                            kind: "request".into(),
+                            phase: None,
+                            stream_id: None,
+                            span: None,
+                            interior_state: None,
+                            name: None,
+                            text: String::new(),
+                            data: Some(serde_json::to_value(request).unwrap_or_default()),
+                            is_error: false,
+                            stability: "stable".into(),
+                            source: "server".into(),
+                            arrival_at_ms: crate::models::now_ms(),
+                            recorded_at_ms: None,
+                            created_at_ms: crate::models::now_ms(),
+                            started_at_ms: None,
+                        },
+                    )
+                    .await;
+            }
+            Ok(Json(LinkState::detached_remote()))
+        }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
             Err(remote_config_refusal(&code, message))
         }
@@ -270,6 +299,34 @@ pub async fn detach(
     Path(session_id): Path<String>,
 ) -> Result<Json<LinkState>> {
     let session_id = require_session(&state, &session_id).await?;
+    let abandoned = state.store.abandon_open_requests(&session_id).await?;
+    for request in abandoned {
+        state
+            .hub
+            .publish_session(
+                &session_id.encode(),
+                crate::events::StreamEvent {
+                    seq: 0,
+                    arrival_turn_id: None,
+                    kind: "request".into(),
+                    phase: None,
+                    stream_id: None,
+                    span: None,
+                    interior_state: None,
+                    name: None,
+                    text: String::new(),
+                    data: Some(serde_json::to_value(request).unwrap_or_default()),
+                    is_error: false,
+                    stability: "stable".into(),
+                    source: "server".into(),
+                    arrival_at_ms: crate::models::now_ms(),
+                    recorded_at_ms: None,
+                    created_at_ms: crate::models::now_ms(),
+                    started_at_ms: None,
+                },
+            )
+            .await;
+    }
     let outcome = state
         .env_bridge
         .remote_session_command(

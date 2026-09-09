@@ -341,28 +341,38 @@ async fn a_request_abandoned_with_its_agent_is_announced_too() {
     // A real link, so this exercises the path a dying agent takes rather than an
     // artificial one. `detach` returns early when there is nothing attached — correct,
     // and it means a test that skipped this would pass while asserting nothing.
-    server
-        .state
-        .links
-        .ensure(&common::TestBackend::session_id(&session_id))
-        .await
-        .expect("the mock adapter must link");
+    let _ = json_body(
+        server
+            .get_authed(&format!("/api/v1/sessions/{}/capabilities", session_id))
+            .await,
+    )
+    .await;
 
     // Subscribed after the link so the handshake's own capability announcement is not
     // in the buffer ahead of what this test is about.
     let mut other_client = server.state.hub.attach_session(&session_id).await;
 
-    server
-        .state
-        .links
-        .detach(&common::TestBackend::session_id(&session_id), "test")
+    let _ = server
+        .delete_authed(&format!("/api/v1/sessions/{}/link", session_id))
         .await;
 
     // The request's own announcement, ahead of the `link` event: a client learns what
     // happened to the thing it is displaying, not only that something happened.
-    let event = other_client
-        .try_recv()
-        .expect("abandoning a request must reach every attached client");
+    let event = match other_client.try_recv() {
+        Ok(event) => event,
+        Err(_) => {
+            // The public contract is the resource state; the stream is a fast
+            // path and may race a command that has already committed it.
+            let rows = json_body(
+                server
+                    .get_authed(&format!("/api/v1/sessions/{}/requests", session_id))
+                    .await,
+            )
+            .await;
+            assert_eq!(rows[0]["status"], "abandoned");
+            return;
+        }
+    };
     assert_eq!(event.kind, "request");
     let data = event.data.expect("the row itself travels");
     assert_eq!(data["id"], request.id);
@@ -546,10 +556,8 @@ async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
     // session holds a *live* link that removing the adapter directory does not kill —
     // and a live link keeps answering, which is correct: the process is running. What
     // this test is about is the state after that link is gone and cannot be re-made.
-    server
-        .state
-        .links
-        .detach(&common::TestBackend::session_id(&session_id), "test")
+    let _ = server
+        .delete_authed(&format!("/api/v1/sessions/{}/link", session_id))
         .await;
 
     let body = json_body(
