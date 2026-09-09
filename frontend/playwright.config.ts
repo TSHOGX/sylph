@@ -138,7 +138,7 @@ export default defineConfig({
         // every `mkdtemp` spec creating sessions in a directory the backend
         // refuses, which surfaces as ~a dozen unrelated-looking spec failures
         // rather than as a fixture problem.
-        SYLPH_BROWSE_ROOTS: ["/tmp", os.tmpdir()].join(":"),
+        SYLPH_BROWSE_ROOTS: ["/tmp", os.tmpdir(), os.tmpdir().startsWith("/var/") ? `/private${os.tmpdir()}` : ""].filter(Boolean).join(":"),
         // No identity, so the fixture adapter is not handed a `SOUL.md` the specs
         // never assert on. The protocol reserves the empty string for this.
         SYLPH_SOUL: "",
