@@ -139,7 +139,7 @@ async fn remote_read_bytes(
             environment,
             draft_id,
             session_id,
-            sylph_protocol::FileOperation::Read { relative },
+            sylph_protocol::FileOperation::Read { relative, limit: None },
         )
         .await
         .map_err(map_remote_file_error)?;
@@ -1184,7 +1184,7 @@ pub async fn upload(
                 session_id,
                 sylph_protocol::FileOperation::Write {
                     relative: relative.clone(),
-                    bytes,
+                    data: base64::engine::general_purpose::STANDARD.encode(&bytes),
                     overwrite: req.overwrite,
                 },
             )

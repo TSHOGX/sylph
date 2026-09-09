@@ -126,11 +126,7 @@ async fn run(_args: &[String]) -> Result<()> {
     let health = HealthReporter::new()
         .snapshot(credential.environment_id.clone())
         .await;
-    let agents = health
-        .agents
-        .iter()
-        .filter_map(|agent| agent.info.clone())
-        .collect();
+    let agents = health.agents.clone();
     let hello = Hello {
         protocol: sylph_protocol::ENV_PROTOCOL.into(),
         versions: vec![sylph_protocol::ProtocolVersion::CURRENT],
@@ -154,11 +150,7 @@ async fn run(_args: &[String]) -> Result<()> {
         agents,
         health: Some(EnvironmentHealth {
             connected: true,
-            agents: health
-                .agents
-                .iter()
-                .filter_map(|agent| agent.info.clone())
-                .collect(),
+            agents: health.agents.clone(),
             facts: Default::default(),
         }),
     };

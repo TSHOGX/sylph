@@ -382,6 +382,14 @@ impl EnvBridge {
                         }
                         let _ = self.registry.touch(&environment, epoch).await;
                     }
+                    DecodedMessage::Known(WireMessage::Agents { connection_epoch, agents }) => {
+                        if connection_epoch != epoch { return Err(BridgeError::StaleEpoch.into()); }
+                        let agents_json = serde_json::to_string(&agents)?;
+                        if let Some(row) = self.store.environment_row(&environment).await? {
+                            let _ = self.store.set_environment_connection(&environment, &row.token_hash, epoch, true, row.reachable_via.as_deref(), &agents_json).await?;
+                        }
+                        let _ = self.registry.update_agents(&environment, epoch, agents).await;
+                    }
                     DecodedMessage::Known(WireMessage::TurnInput {
                         session_id,
                         turn_id,
@@ -844,8 +852,9 @@ impl EnvBridge {
             .await?;
         // Keep the in-memory registry in sync for immediate API reads.  The
         // database remains authoritative across a server restart.
+        let inventory = agents.iter().cloned().map(sylph_protocol::AgentInventory::available).collect();
         self.registry
-            .register_existing(environment_id.clone(), name, origin, token.clone(), agents)
+            .register_existing(environment_id.clone(), name, origin, token.clone(), inventory)
             .await;
         Ok(PairingGrant {
             environment_id,
@@ -2184,6 +2193,8 @@ fn command_name(command: &sylph_protocol::EnvironmentCommand) -> &'static str {
         EnvironmentCommand::Enumerate { .. } => "enumerate",
         EnvironmentCommand::Activate { .. } => "activate",
         EnvironmentCommand::Close { .. } => "close",
+        EnvironmentCommand::BrowseRoots => "browse-roots",
+        EnvironmentCommand::BrowseTree { .. } => "browse-tree",
     }
 }
 

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use sylph_protocol::{AgentInfo, EnvironmentId};
+use sylph_protocol::{AgentInventory, EnvironmentId};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -42,7 +42,7 @@ pub struct EnvironmentSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachable_via: Option<String>,
     pub connection_epoch: u64,
-    pub agents: Vec<AgentInfo>,
+    pub agents: Vec<AgentInventory>,
     pub last_seen_at_ms: Option<i64>,
 }
 
@@ -59,7 +59,7 @@ struct Installation {
     reachable_via: Option<String>,
     token: String,
     connection_epoch: u64,
-    agents: Vec<AgentInfo>,
+    agents: Vec<AgentInventory>,
     connected: bool,
     last_seen_at_ms: Option<i64>,
 }
@@ -98,7 +98,7 @@ impl EnvironmentRegistry {
         name: impl Into<String>,
         origin: impl Into<String>,
         token: String,
-        agents: Vec<AgentInfo>,
+        agents: Vec<AgentInventory>,
     ) {
         self.state.write().await.installations.insert(
             id.clone(),
@@ -122,7 +122,7 @@ impl EnvironmentRegistry {
         &self,
         environment_id: &EnvironmentId,
         epoch: u64,
-        agents: Vec<AgentInfo>,
+        agents: Vec<AgentInventory>,
     ) {
         if let Some(installation) = self
             .state
@@ -136,6 +136,15 @@ impl EnvironmentRegistry {
             installation.last_seen_at_ms = Some(Self::now_ms());
             installation.agents = agents;
         }
+    }
+
+    pub async fn update_agents(&self, environment_id: &EnvironmentId, epoch: u64, agents: Vec<AgentInventory>) -> bool {
+        let mut state = self.state.write().await;
+        let Some(installation) = state.installations.get_mut(environment_id) else { return false };
+        if installation.connection_epoch != epoch || !installation.connected { return false; }
+        installation.agents = agents;
+        installation.last_seen_at_ms = Some(Self::now_ms());
+        true
     }
 
     pub fn now_ms() -> i64 {
@@ -172,7 +181,7 @@ impl EnvironmentRegistry {
         code: &str,
         name: impl Into<String>,
         origin: impl Into<String>,
-        agents: Vec<AgentInfo>,
+        agents: Vec<AgentInventory>,
     ) -> Result<PairingGrant, RegistryError> {
         let now = Self::now_ms();
         let mut state = self.state.write().await;
@@ -212,7 +221,7 @@ impl EnvironmentRegistry {
         &self,
         environment_id: &EnvironmentId,
         token: &str,
-        agents: Vec<AgentInfo>,
+        agents: Vec<AgentInventory>,
         name: Option<String>,
         origin: Option<String>,
         reachable_via: Option<String>,

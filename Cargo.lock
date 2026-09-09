@@ -2111,6 +2111,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "futures",
  "hex",
  "serde",
@@ -2122,7 +2123,9 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
+ "toml",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

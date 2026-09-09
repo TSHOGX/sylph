@@ -254,3 +254,16 @@ impl From<AgentInfo> for AgentAvailability {
         }
     }
 }
+
+impl From<sylph_protocol::AgentInventory> for AgentAvailability {
+    fn from(inventory: sylph_protocol::AgentInventory) -> Self {
+        let info = inventory.info;
+        Self {
+            name: inventory.name,
+            version: inventory.version.or_else(|| info.as_ref().and_then(|i| i.version.clone())),
+            flags: info.as_ref().map(|i| i.flags.clone()).unwrap_or_default(),
+            supports: info.as_ref().map(|i| i.supports.clone()).unwrap_or_default(),
+            available: inventory.available,
+        }
+    }
+}

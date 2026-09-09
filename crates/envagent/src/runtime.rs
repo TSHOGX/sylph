@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use base64::Engine;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,7 @@ use sylph_protocol::{
 use sylph_protocol::{EventBatch, ProducerId, ProducerSeq, SourceCursor, WireMessage};
 
 use crate::path::PathPolicy;
+use crate::attachments::{attachments_dir, stage as stage_attachments};
 use crate::spool::{Spool, SpoolConfig, SpoolEvent};
 
 /// Keep a prepared adapter's stream draining while the browser is still on
@@ -563,6 +565,36 @@ pub struct EnvAgent {
 }
 
 impl EnvAgent {
+    async fn local_turn_input(
+        &self,
+        input: sylph_protocol::WireTurnInput,
+        scope: &str,
+        turn_id: &str,
+    ) -> Result<TurnInput> {
+        let root = self
+            .config
+            .spool
+            .path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let attachments = stage_attachments(
+            &attachments_dir(root),
+            scope,
+            turn_id,
+            &input.attachments,
+        )
+        .await?;
+        Ok(TurnInput {
+            text: input.text,
+            attachments,
+            command: input.command,
+            args: input.args,
+            config: input.config,
+        })
+    }
+}
+
+impl EnvAgent {
     pub async fn open(config: EnvAgentConfig, sink: Arc<dyn EventSink>) -> Result<Self> {
         let environment = EnvironmentId::parse(config.environment_id.clone())
             .map_err(|error| anyhow!("invalid environment id: {error}"))?;
@@ -972,13 +1004,10 @@ impl EnvAgent {
                 // in place so retries cannot spawn a second vendor session.
                 if let Some(draft_id) = draft_id {
                     if let Some(prepared) = self.prepared.write().await.remove(&draft_id) {
-                        let initial_input = initial_input.map(|input| TurnInput {
-                            text: input.text,
-                            attachments: input.attachments,
-                            command: input.command,
-                            args: input.args,
-                            config: input.config,
-                        });
+                        let initial_input = match initial_input {
+                            Some(input) => match self.local_turn_input(input, &draft_id, initial_turn_id.as_deref().unwrap_or("initial")).await { Ok(v) => Some(v), Err(error) => return sylph_protocol::CommandOutcome::Rejected { code: "ATTACHMENT_INVALID".into(), message: format!("{error:#}") } },
+                            None => None,
+                        };
                         let native_id = if let Some(input) = initial_input {
                             if prepared.session.native_id().is_some() {
                                 if let Err(error) = prepared.session.send(input).await {
@@ -1077,13 +1106,10 @@ impl EnvAgent {
                     flags,
                     permission_mode,
                 };
-                let initial_input = initial_input.map(|input| TurnInput {
-                    text: input.text,
-                    attachments: input.attachments,
-                    command: input.command,
-                    args: input.args,
-                    config: input.config,
-                });
+                let initial_input = match initial_input {
+                    Some(input) => match self.local_turn_input(input, session_id.as_ref().map(|s| s.to_string()).as_deref().unwrap_or(&agent), initial_turn_id.as_deref().unwrap_or("initial")).await { Ok(v) => Some(v), Err(error) => return sylph_protocol::CommandOutcome::Rejected { code: "ATTACHMENT_INVALID".into(), message: format!("{error:#}") } },
+                    None => None,
+                };
                 let defer_events = initial_input.is_some();
                 match self
                     .run_with_event_gate(&agent, spec, defer_events, initial_input, initial_turn_id)
@@ -1130,13 +1156,7 @@ impl EnvAgent {
                         message: "no live session on this environment".into(),
                     };
                 };
-                let input = TurnInput {
-                    text: input.text,
-                    attachments: input.attachments,
-                    command: input.command,
-                    args: input.args,
-                    config: input.config,
-                };
+                let input = match self.local_turn_input(input, &session_id.to_string(), &turn_id).await { Ok(v) => v, Err(error) => return sylph_protocol::CommandOutcome::Rejected { code: "ATTACHMENT_INVALID".into(), message: format!("{error:#}") } };
                 self.active_turns
                     .write()
                     .await
@@ -1253,6 +1273,21 @@ impl EnvAgent {
                 )
                 .unwrap_or_default(),
             ),
+            EnvironmentCommand::BrowseRoots => sylph_protocol::CommandOutcome::accepted_with_result(
+                serde_json::json!({"roots": self.config.path_policy.roots()}),
+            ),
+            EnvironmentCommand::BrowseTree { path } => {
+                let base = path.unwrap_or_default();
+                match self.config.path_policy.contain(&base) {
+                    Ok(dir) => match std::fs::read_dir(dir) {
+                        Ok(entries) => sylph_protocol::CommandOutcome::accepted_with_result(
+                            serde_json::json!({"entries": entries.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect::<Vec<_>>()})
+                        ),
+                        Err(error) => sylph_protocol::CommandOutcome::Rejected { code: "INTERNAL".into(), message: error.to_string() },
+                    },
+                    Err(error) => sylph_protocol::CommandOutcome::Rejected { code: "POLICY_VIOLATION".into(), message: error.to_string() },
+                }
+            }
             EnvironmentCommand::Capabilities { session_id } => {
                 if self.native_sources.read().await.contains(&session_id) {
                     // The vendor answers this, not a literal here. Hardcoding it meant
@@ -1485,7 +1520,7 @@ impl EnvAgent {
                     }
                     Ok(serde_json::json!(entries))
                 }
-                FileOperation::Read { relative } => {
+                FileOperation::Read { relative, limit } => {
                     let path = contain_session_path(policy, root, &relative)?;
                     let bytes = std::fs::read(path)?;
                     const MAX_REMOTE_READ_BYTES: usize = 32 * 1024 * 1024;
@@ -1496,17 +1531,15 @@ impl EnvAgent {
                         ));
                     }
                     let size = bytes.len();
+                    let bytes = limit.map(|n| bytes.iter().copied().take(n as usize).collect()).unwrap_or(bytes);
                     Ok(serde_json::json!({
                         "bytes": bytes,
                         "size": size,
                         "truncated": false
                     }))
                 }
-                FileOperation::Write {
-                    relative,
-                    bytes,
-                    overwrite,
-                } => {
+                FileOperation::Write { relative, data, overwrite } => {
+                    let bytes = base64::engine::general_purpose::STANDARD.decode(data.as_bytes())?;
                     let path = contain_session_write_target(policy, root, &relative)?;
                     if path.exists() && !overwrite {
                         return Err(anyhow!("file already exists"));
@@ -2183,7 +2216,7 @@ mod tests {
                 session_id: session.clone(),
                 operation: sylph_protocol::FileOperation::Write {
                     relative: "a.txt".into(),
-                    bytes: b"one".to_vec(),
+                    data: base64::engine::general_purpose::STANDARD.encode(b"one"),
                     overwrite: false,
                 },
             })
@@ -2197,7 +2230,7 @@ mod tests {
                 session_id: session.clone(),
                 operation: sylph_protocol::FileOperation::Write {
                     relative: "a.txt".into(),
-                    bytes: b"two".to_vec(),
+                    data: base64::engine::general_purpose::STANDARD.encode(b"two"),
                     overwrite: false,
                 },
             })
@@ -2212,6 +2245,7 @@ mod tests {
                 session_id: session.clone(),
                 operation: sylph_protocol::FileOperation::Read {
                     relative: "../outside.txt".into(),
+                    limit: None,
                 },
             })
             .await;
@@ -2225,6 +2259,7 @@ mod tests {
                 session_id: session,
                 operation: sylph_protocol::FileOperation::Read {
                     relative: "/etc/passwd".into(),
+                    limit: None,
                 },
             })
             .await;

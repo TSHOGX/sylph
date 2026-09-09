@@ -7,6 +7,8 @@
 //! vendor CLI or a network.
 
 pub mod client;
+pub mod adapters;
+pub mod attachments;
 pub mod credentials;
 pub mod fixture;
 pub mod health;

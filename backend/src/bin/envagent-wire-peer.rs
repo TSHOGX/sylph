@@ -346,6 +346,8 @@ fn command_name(command: &EnvironmentCommand) -> &'static str {
         EnvironmentCommand::Enumerate { .. } => "enumerate",
         EnvironmentCommand::Activate { .. } => "activate",
         EnvironmentCommand::Close { .. } => "close",
+        EnvironmentCommand::BrowseRoots => "browse_roots",
+        EnvironmentCommand::BrowseTree { .. } => "browse_tree",
     }
 }
 

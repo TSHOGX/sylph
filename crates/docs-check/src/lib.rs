@@ -47,11 +47,12 @@ impl std::fmt::Display for Finding {
 
 /// The workspace root, derived from this crate's own location.
 pub fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("crates/docs-check sits two levels below the workspace root")
-        .to_path_buf()
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while !path.join("docs/README.md").is_file() {
+        let Some(parent) = path.parent() else { break };
+        path = parent.to_path_buf();
+    }
+    path
 }
 
 /// Directories holding nothing this lint governs.

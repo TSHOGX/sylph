@@ -1,120 +1,90 @@
-//! Machine-local health and agent inventory.
+//! Machine-local agent inventory.
+//!
+//! Which agents this machine can run is discovered, not configured, and it is a fact
+//! about this one machine (`docs/environments.md` § Agent availability). Every agent
+//! the build knows is reported, available or not, because "known and unavailable" is
+//! the state that names a fix.
 
-use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
 use futures::future::join_all;
-use serde::{Deserialize, Serialize};
-use sylph_protocol::{Adapter, AgentInfo};
+use sylph_protocol::{Adapter, AgentInventory};
 use tokio::time::timeout;
 
-/// One installed (or absent) vendor CLI.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentHealth {
-    pub name: String,
-    pub available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    #[serde(default)]
-    pub info: Option<AgentInfo>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
+use crate::adapters::AdapterSource;
+pub type AgentHealth = AgentInventory;
+pub type EnvironmentHealth = sylph_protocol::EnvironmentHealth;
 
-/// Snapshot sent in hello and health replies.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct EnvironmentHealth {
-    pub environment_id: String,
-    pub connected: bool,
-    pub agents: Vec<AgentHealth>,
-    #[serde(default)]
-    pub facts: BTreeMap<String, String>,
-}
+/// How long a vendor CLI gets to say what it is before it is called unusable.
+///
+/// A CLI that cannot answer `--version` in ten seconds is not going to run a turn. A
+/// generous bound rather than a tight one because a cold vendor binary on a slow disk
+/// is a real case, and the cost of being wrong is refusing a session that would have
+/// worked.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-impl EnvironmentHealth {
-    pub fn unavailable(environment_id: impl Into<String>, reason: impl Into<String>) -> Self {
-        let mut facts = BTreeMap::new();
-        facts.insert("reason".into(), reason.into());
-        Self {
-            environment_id: environment_id.into(),
-            connected: false,
-            agents: Vec::new(),
-            facts,
-        }
-    }
+/// Probes every agent an adapter source knows, once per pass.
+#[derive(Clone)]
+pub struct HealthReporter {
+    adapters: Arc<dyn AdapterSource>,
 }
-
-/// Probes all compiled-in adapters once per health pass.
-#[derive(Debug, Clone, Default)]
-pub struct HealthReporter;
 
 impl HealthReporter {
     pub fn new() -> Self {
-        Self
+        Self { adapters: crate::adapters::linked() }
     }
 
-    pub async fn snapshot(&self, environment_id: impl Into<String>) -> EnvironmentHealth {
-        let probes = sylph_adapters::known_agents().iter().map(|name| {
-            let name = (*name).to_string();
+    pub fn with_adapters(adapters: Arc<dyn AdapterSource>) -> Self {
+        Self { adapters }
+    }
+
+    /// One entry per known agent, sorted by name.
+    pub async fn inventory(&self) -> Vec<AgentInventory> {
+        let probes = self.adapters.known_agents().into_iter().map(|name| {
+            let adapters = self.adapters.clone();
             async move {
-                let Some(adapter) = sylph_adapters::for_agent(&name) else {
-                    return AgentHealth {
-                        name,
-                        available: false,
-                        version: None,
-                        info: None,
-                        reason: Some("agent CLI is not on PATH".into()),
-                    };
+                let Some(adapter) = adapters.for_agent(&name) else {
+                    return AgentInventory::unavailable(
+                        name.clone(),
+                        None,
+                        format!("the `{name}` CLI is not on this machine's PATH"),
+                    );
                 };
-                match timeout(Duration::from_secs(10), probe_one(name.clone(), adapter)).await {
-                    Ok(result) => result,
-                    Err(_) => AgentHealth {
-                        name,
-                        available: false,
-                        version: None,
-                        info: None,
-                        reason: Some("agent probe timed out".into()),
-                    },
-                }
+                probe_one(name, adapter).await
             }
         });
         let mut agents = join_all(probes).await;
         agents.sort_by(|left, right| left.name.cmp(&right.name));
+        agents
+    }
+
+    pub async fn snapshot(&self, _environment_id: impl Into<String>) -> EnvironmentHealth {
         EnvironmentHealth {
-            environment_id: environment_id.into(),
             connected: true,
-            agents,
-            facts: BTreeMap::new(),
+            agents: self.inventory().await,
+            facts: Default::default(),
         }
     }
 }
 
-async fn probe_one(name: String, adapter: Box<dyn Adapter>) -> AgentHealth {
-    match adapter.probe().await {
-        Ok(info) => AgentHealth {
-            name,
-            available: true,
-            version: info.version.clone(),
-            info: Some(info),
-            reason: None,
-        },
-        Err(error) => AgentHealth {
-            name,
-            available: false,
-            version: None,
-            info: None,
-            reason: Some(format!("{error:#}")),
-        },
+impl Default for HealthReporter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-/// A small helper used by fixture tests to validate an adapter without exposing
-/// the concrete vendor type.
-pub async fn probe_adapter(adapter: &dyn Adapter) -> Result<AgentInfo> {
-    adapter.probe().await
+/// Probe one adapter, bounding how long it may take.
+pub async fn probe_one(name: String, adapter: Box<dyn Adapter>) -> AgentInventory {
+    match timeout(PROBE_TIMEOUT, adapter.probe()).await {
+        Ok(Ok(info)) => AgentInventory::available(info),
+        Ok(Err(error)) => AgentInventory::unavailable(name, None, format!("{error:#}")),
+        Err(_) => AgentInventory::unavailable(
+            name,
+            None,
+            format!("the CLI did not answer a version probe within {PROBE_TIMEOUT:?}"),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -122,16 +92,31 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn inventory_is_sorted_and_reports_missing_clis_explicitly() {
-        let snapshot = HealthReporter::new().snapshot("env7fk2").await;
-        let names: Vec<_> = snapshot
-            .agents
-            .iter()
-            .map(|agent| agent.name.as_str())
-            .collect();
+    async fn inventory_lists_every_known_agent_sorted_with_a_reason_when_absent() {
+        let inventory = HealthReporter::new()
+            .inventory()
+            .await;
+        let names: Vec<_> = inventory.iter().map(|agent| agent.name.as_str()).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
-        assert!(snapshot.connected);
+        assert_eq!(
+            names,
+            crate::adapters::linked()
+                .known_agents()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "an absent CLI is still listed, so a client can name the fix"
+        );
+        for agent in &inventory {
+            if agent.available {
+                assert!(agent.info.is_some());
+                assert!(agent.reason.is_none());
+            } else {
+                assert!(agent.reason.is_some(), "{} says why it is unavailable", agent.name);
+                assert!(agent.info.is_none());
+            }
+        }
     }
 }

@@ -297,6 +297,26 @@ impl CommandOutcome {
             result: Some(result),
         }
     }
+
+    /// A refusal naming one of the codes the server branches on.
+    ///
+    /// The only constructor an envagent should use for a rejection: a code spelled by
+    /// hand at the call site is a code the server may not know, and an unknown code is
+    /// reported as a link failure rather than as the refusal it was.
+    pub fn rejected(code: crate::env::RejectCode, message: impl Into<String>) -> Self {
+        Self::Rejected {
+            code: code.as_str().to_string(),
+            message: message.into(),
+        }
+    }
+
+    /// The typed code behind a rejection, when this build knows it.
+    pub fn reject_code(&self) -> Option<crate::env::RejectCode> {
+        match self {
+            Self::Rejected { code, .. } => crate::env::RejectCode::parse(code),
+            _ => None,
+        }
+    }
     pub const fn is_terminal(&self) -> bool {
         !matches!(self, Self::Unknown { .. })
     }

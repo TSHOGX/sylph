@@ -20,6 +20,24 @@ pub const VERSION_MAJOR: u16 = 1;
 pub const VERSION_MINOR: u16 = 0;
 pub const DEFAULT_MAX_BATCH_EVENTS: usize = 128;
 
+/// Hard upper bound for one framed message, on both ends of the wire.
+///
+/// One constant rather than one per side, because the two sides used to each hold an
+/// 8 MiB ceiling and nothing checked that they agreed. It is sized by the largest
+/// payload a frame legitimately carries: a turn's attachments, which `docs/api/files.md`
+/// caps at 10 MiB per turn and which travel base64-encoded (a third larger), and a
+/// session file read, which the envagent caps at [`MAX_FILE_READ_BYTES`] before
+/// encoding. Both fit with room; anything larger is a defect in a producer rather than
+/// a frame that should have been allowed.
+pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
+/// The most bytes one `read` file operation returns before encoding.
+///
+/// The envagent refuses larger reads rather than truncating silently: a caller that
+/// wants a prefix asks for one with `limit`, and a caller that asked for the whole file
+/// must be told it did not get it.
+pub const MAX_FILE_READ_BYTES: u64 = 32 * 1024 * 1024;
+
 /// A protocol version offered by one side of a connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +54,59 @@ impl ProtocolVersion {
 
     pub const fn compatible_with(self, other: Self) -> bool {
         self.major == other.major
+    }
+}
+
+/// One agent this build of the envagent knows, and whether that machine can run it.
+///
+/// **Known and unavailable is a state, and it is the state that names a fix.** An
+/// inventory carrying only the installed agents cannot say whether `codex` is missing
+/// because the CLI is not on `PATH` (install it) or because this envagent was never
+/// built with it (upgrade the envagent), and a picker can only render "not here". So
+/// every agent the envagent knows appears, with `available` and, when it is not, a
+/// `reason` in words and the `version` it found if a CLI was present but refused.
+///
+/// `info` is the adapter's own [`AgentInfo`] — flags, controls, identity rules — and
+/// is present exactly when `available` is true, since it comes from probing a CLI
+/// that answered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInventory {
+    pub name: String,
+    pub available: bool,
+    /// The CLI's own version, when a probe reported one. Never synthesized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Why `available` is false, for a person. Absent when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<AgentInfo>,
+}
+
+impl AgentInventory {
+    pub fn available(info: AgentInfo) -> Self {
+        Self {
+            name: info.name.clone(),
+            available: true,
+            version: info.version.clone(),
+            reason: None,
+            info: Some(info),
+        }
+    }
+
+    pub fn unavailable(
+        name: impl Into<String>,
+        version: Option<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            available: false,
+            version,
+            reason: Some(reason.into()),
+            info: None,
+        }
     }
 }
 
@@ -56,8 +127,10 @@ pub struct Hello {
     /// producer.  The map is keyed by the producer id's wire spelling.
     #[serde(default)]
     pub spool_cursors: BTreeMap<String, ProducerSeq>,
+    /// Every agent this envagent knows, available or not
+    /// (`docs/environments.md` § Agent availability).
     #[serde(default)]
-    pub agents: Vec<AgentInfo>,
+    pub agents: Vec<AgentInventory>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<EnvironmentHealth>,
 }
@@ -248,6 +321,171 @@ pub enum EnvironmentCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<SessionId>,
     },
+    /// The directories a client may start browsing from on this machine, for naming
+    /// a session's `workdir`.
+    ///
+    /// Answered by the envagent because the roots are its own `browse_roots`
+    /// (`docs/configuration.md` § `browse_roots` bounds where agents run): only the
+    /// machine holding a path can canonicalize it, so the server never resolves one.
+    BrowseRoots,
+    /// One directory level of subdirectories under a browsable root.
+    ///
+    /// `path` absent means the first root, so a client's first request needs no prior
+    /// knowledge of them.
+    BrowseTree {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+}
+
+/// One attachment a client posted with a turn, as it crosses the wire.
+///
+/// **Bytes, not a path.** The server used to stage attachments on its own disk and
+/// hand the adapter an absolute path, which worked exactly while the adapter ran in
+/// the server's process. An adapter runs in the envagent now, on whatever machine the
+/// session lives on, so a server-side path names a file it cannot open. The envagent
+/// stages the bytes under its own root and hands the adapter a local path.
+///
+/// `data` is base64 with no `data:` prefix — the same encoding a browser posted it
+/// with, so nothing decodes and re-encodes it on the way through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireAttachment {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub mime_type: String,
+    pub data: String,
+}
+
+/// One native session in an environment's store, as `enumerate` answers it.
+///
+/// A [`crate::NativeSummary`] plus the one fact only the machine holding the store can add:
+/// whether its recorded directory is one this environment permits an agent to run in.
+/// The server used to classify that itself against its own roots, which was a check
+/// against a filesystem it could not see the moment the store lived elsewhere.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnumeratedSession {
+    #[serde(flatten)]
+    pub summary: crate::NativeSummary,
+    pub workdir_policy: WorkdirPolicy,
+}
+
+/// What the envagent found when it checked a recorded working directory.
+///
+/// Each value is one of the adopt refusals, decided before the request rather than
+/// after — the same classification, so a picker cannot disagree with the endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkdirPolicy {
+    /// Exists, and resolves inside a browse root. Adopting will be accepted.
+    Contained,
+    /// Exists, and resolves outside every root. Adopting is refused; widening
+    /// `browse_roots` on that machine is the fix.
+    Outside,
+    /// The recorded directory is gone. No configuration brings it back.
+    Missing,
+    /// The store recorded no directory at all. Nothing can make it adoptable, because
+    /// guessing one would decide where arbitrary code runs.
+    Unrecorded,
+}
+
+/// Why an envagent refused a command.
+///
+/// **A code the server branches on, never a message it matches.** The server used to
+/// classify a refusal by searching its text for `"outside"` or `"No such file"`, which
+/// is the shape `AGENTS.md` names as the expensive defect: a reworded message turned a
+/// `403` into a `503` with nothing failing. Every rejection an envagent produces names
+/// one of these, and the server maps each to exactly one HTTP error.
+///
+/// Carried as a string on the wire so an older server can still read a code a newer
+/// envagent adds; [`RejectCode::parse`] answers `None` for one it does not know, and
+/// the server reports that as a link failure carrying the original text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RejectCode {
+    /// This environment does not know an agent by that name at all.
+    AgentUnknown,
+    /// The agent is known and its CLI is not on this machine's `PATH`. An install, not a
+    /// retry.
+    AgentUnavailable,
+    /// The CLI is present and would not say what it is, or would not start.
+    AgentStartFailed,
+    /// The requested working directory does not exist.
+    WorkdirMissing,
+    /// The requested working directory exists and is not a directory.
+    WorkdirNotADirectory,
+    /// The requested working directory resolves outside every browse root.
+    WorkdirOutsideRoots,
+    /// No live session is hosted here under that id. Resuming is the remedy.
+    SessionNotHosted,
+    /// No prepared draft is held here under that handle.
+    DraftNotFound,
+    /// The named turn is no longer the active one, so a guarded interrupt did nothing.
+    TurnMoved,
+    /// The agent's own store holds no session by that id.
+    NativeSessionNotFound,
+    /// The store holds the session and recorded no working directory for it.
+    NativeSessionNotResumable,
+    /// The option is not one this session's surface offers.
+    ConfigOptionUnknown,
+    /// The option exists and the value is not one it enumerated.
+    ConfigValueNotOffered,
+    /// The adapter refused the option as one the agent does not have.
+    UnsupportedField,
+    /// The adapter refused this value, and the control stays usable.
+    InvalidValue,
+    /// A file path was malformed: absolute, or naming no final component.
+    InvalidPath,
+    /// A file path resolves outside the directory it must stay within.
+    PolicyViolation,
+    FileNotFound,
+    FileExists,
+    NotADirectory,
+    IsADirectory,
+    DirectoryNotEmpty,
+    /// A file read was refused because the file exceeds [`MAX_FILE_READ_BYTES`].
+    FileTooLarge,
+    /// The adapter or the machine failed in a way none of the above describes; the
+    /// message is the diagnosis.
+    Internal,
+}
+
+impl RejectCode {
+    /// The wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentUnknown => "AGENT_UNKNOWN",
+            Self::AgentUnavailable => "AGENT_UNAVAILABLE",
+            Self::AgentStartFailed => "AGENT_START_FAILED",
+            Self::WorkdirMissing => "WORKDIR_MISSING",
+            Self::WorkdirNotADirectory => "WORKDIR_NOT_A_DIRECTORY",
+            Self::WorkdirOutsideRoots => "WORKDIR_OUTSIDE_ROOTS",
+            Self::SessionNotHosted => "SESSION_NOT_HOSTED",
+            Self::DraftNotFound => "DRAFT_NOT_FOUND",
+            Self::TurnMoved => "TURN_MOVED",
+            Self::NativeSessionNotFound => "NATIVE_SESSION_NOT_FOUND",
+            Self::NativeSessionNotResumable => "NATIVE_SESSION_NOT_RESUMABLE",
+            Self::ConfigOptionUnknown => "CONFIG_OPTION_UNKNOWN",
+            Self::ConfigValueNotOffered => "CONFIG_VALUE_NOT_OFFERED",
+            Self::UnsupportedField => "UNSUPPORTED_FIELD",
+            Self::InvalidValue => "INVALID_VALUE",
+            Self::InvalidPath => "INVALID_PATH",
+            Self::PolicyViolation => "POLICY_VIOLATION",
+            Self::FileNotFound => "FILE_NOT_FOUND",
+            Self::FileExists => "FILE_EXISTS",
+            Self::NotADirectory => "NOT_A_DIRECTORY",
+            Self::IsADirectory => "IS_A_DIRECTORY",
+            Self::DirectoryNotEmpty => "DIRECTORY_NOT_EMPTY",
+            Self::FileTooLarge => "FILE_TOO_LARGE",
+            Self::Internal => "INTERNAL",
+        }
+    }
+
+    /// The code a wire string names, or `None` for one this build does not know.
+    pub fn parse(code: &str) -> Option<Self> {
+        serde_json::from_value(serde_json::Value::String(code.to_string())).ok()
+    }
 }
 
 /// A command envelope.  The request id and retry policy are mandatory even
@@ -430,7 +668,7 @@ pub struct SourceState {
 pub struct EnvironmentHealth {
     pub connected: bool,
     #[serde(default)]
-    pub agents: Vec<AgentInfo>,
+    pub agents: Vec<AgentInventory>,
     #[serde(default)]
     pub facts: BTreeMap<String, String>,
 }
@@ -465,8 +703,10 @@ pub enum DiagnosticLevel {
 pub struct WireTurnInput {
     #[serde(default)]
     pub text: String,
+    /// The bytes a client posted, for the envagent to stage where its adapter can read
+    /// them. See [`WireAttachment`] for why these are not paths.
     #[serde(default)]
-    pub attachments: Vec<String>,
+    pub attachments: Vec<WireAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(default)]
@@ -477,6 +717,11 @@ pub struct WireTurnInput {
 
 /// File operations are path names relative to the session workdir.  The
 /// envagent resolves and contains them before touching its filesystem.
+///
+/// File bytes travel **base64-encoded in a string**, in both directions. A `Vec<u8>`
+/// serializes to a JSON array of integers, up to four bytes of text per byte of file,
+/// and a one-megabyte preview became a four-megabyte frame — half the frame ceiling
+/// for a file the pane shows the top of.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -487,12 +732,20 @@ pub enum FileOperation {
     List {
         relative: String,
     },
+    /// Read a file, or its first `limit` bytes.
+    ///
+    /// The answer carries the file's whole size beside the bytes it returned, so a
+    /// caller that asked for a prefix knows it got one. With no `limit` the whole file
+    /// is returned, up to [`MAX_FILE_READ_BYTES`].
     Read {
         relative: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
     },
     Write {
         relative: String,
-        bytes: Vec<u8>,
+        /// Base64, no `data:` prefix.
+        data: String,
         #[serde(default)]
         overwrite: bool,
     },
@@ -531,7 +784,7 @@ pub enum WireMessage {
         #[serde(default)]
         spool_cursors: BTreeMap<String, ProducerSeq>,
         #[serde(default)]
-        agents: Vec<AgentInfo>,
+        agents: Vec<AgentInventory>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         health: Option<EnvironmentHealth>,
     },
@@ -578,6 +831,18 @@ pub enum WireMessage {
     Heartbeat {
         connection_epoch: u64,
         sent_at_ms: i64,
+    },
+    /// The envagent's agent inventory changed while connected.
+    ///
+    /// `docs/environments.md` § Agent availability: which agents a machine can run is
+    /// discovered in `hello` and **re-discovered over the life of the connection**, so
+    /// upgrading a vendor CLI or installing a new one takes effect without a re-pair or
+    /// a server restart. Not sequenced through the spool, like a heartbeat: it is current
+    /// state about the machine rather than a fact about a session's history, and a
+    /// reconnect re-reports it in `hello` anyway.
+    Agents {
+        connection_epoch: u64,
+        agents: Vec<AgentInventory>,
     },
     CapabilitySnapshot {
         session_id: SessionId,
@@ -654,6 +919,7 @@ impl WireMessage {
             Self::Ack { .. } => "ack",
             Self::Nack { .. } => "nack",
             Self::Heartbeat { .. } => "heartbeat",
+            Self::Agents { .. } => "agents",
             Self::CapabilitySnapshot { .. } => "capability_snapshot",
             Self::SourceState { .. } => "source_state",
             Self::TurnInput { .. } => "turn_input",
@@ -778,6 +1044,7 @@ fn known_kind(kind: &str) -> bool {
             | "ack"
             | "nack"
             | "heartbeat"
+            | "agents"
             | "capability_snapshot"
             | "source_state"
             | "turn_input"
@@ -949,6 +1216,7 @@ mod tests {
             "ack",
             "nack",
             "heartbeat",
+            "agents",
             "capabilitySnapshot",
             "sourceState",
             "turnInput",
@@ -977,5 +1245,77 @@ mod tests {
             "turn guard must be present in the protocol artifact"
         );
         assert!(schema["$defs"]["fileOperation"]["oneOf"].is_array());
+        for browse in ["#/$defs/commandBrowseRoots", "#/$defs/commandBrowseTree"] {
+            assert!(
+                command_refs.contains(browse),
+                "{browse} must be described by the checked-in command schema"
+            );
+        }
+        // Attachments are bytes on the wire, not server-side paths, and the schema is
+        // where a reader learns that.
+        assert_eq!(
+            schema["$defs"]["wireTurnInput"]["properties"]["attachments"]["items"]["$ref"],
+            "#/$defs/wireAttachment"
+        );
+        assert!(
+            schema["$defs"]["wireAttachment"]["properties"]["data"].is_object(),
+            "an attachment carries its bytes, not a server-side path"
+        );
+    }
+
+    /// The code is the contract; the message is for a person.
+    ///
+    /// Round-tripped through the wire spelling because that is what the server parses:
+    /// a variant whose `as_str` and serde spelling disagreed would be emitted by the
+    /// envagent under one name and looked up by the server under another, and the
+    /// lookup would answer `None` — the "unknown code" branch, which reads as a link
+    /// failure rather than the refusal it was.
+    #[test]
+    fn every_reject_code_parses_from_its_own_wire_spelling() {
+        let codes = [
+            RejectCode::AgentUnknown,
+            RejectCode::AgentUnavailable,
+            RejectCode::AgentStartFailed,
+            RejectCode::WorkdirMissing,
+            RejectCode::WorkdirNotADirectory,
+            RejectCode::WorkdirOutsideRoots,
+            RejectCode::SessionNotHosted,
+            RejectCode::DraftNotFound,
+            RejectCode::TurnMoved,
+            RejectCode::NativeSessionNotFound,
+            RejectCode::NativeSessionNotResumable,
+            RejectCode::ConfigOptionUnknown,
+            RejectCode::ConfigValueNotOffered,
+            RejectCode::UnsupportedField,
+            RejectCode::InvalidValue,
+            RejectCode::InvalidPath,
+            RejectCode::PolicyViolation,
+            RejectCode::FileNotFound,
+            RejectCode::FileExists,
+            RejectCode::NotADirectory,
+            RejectCode::IsADirectory,
+            RejectCode::DirectoryNotEmpty,
+            RejectCode::FileTooLarge,
+            RejectCode::Internal,
+        ];
+        for code in codes {
+            assert_eq!(RejectCode::parse(code.as_str()), Some(code), "{code:?}");
+            assert_eq!(
+                serde_json::to_value(code).unwrap(),
+                serde_json::Value::String(code.as_str().to_string()),
+                "{code:?}"
+            );
+        }
+        assert_eq!(RejectCode::parse("NOT_A_CODE"), None);
+        // The adapter's own refusal codes share a spelling with these two, so a
+        // refusal crosses the wire without translation.
+        assert_eq!(
+            serde_json::to_value(crate::RefusalCode::UnsupportedField).unwrap(),
+            serde_json::Value::String(RejectCode::UnsupportedField.as_str().into())
+        );
+        assert_eq!(
+            serde_json::to_value(crate::RefusalCode::InvalidValue).unwrap(),
+            serde_json::Value::String(RejectCode::InvalidValue.as_str().into())
+        );
     }
 }

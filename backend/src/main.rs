@@ -321,13 +321,12 @@ async fn serve() -> anyhow::Result<()> {
     let env_bridge = state.env_bridge.clone();
     let app = router(state);
 
-    // The wire listener is opt-in so existing single-process installs do not
-    // expose an extra socket. Development and integration deployments set
-    // SYLPH_ENV_LISTEN (for example 127.0.0.1:4318) to exercise the real
-    // server-to-envagent path.
-    if let Some(raw) = std::env::var_os("SYLPH_ENV_LISTEN") {
-        let raw = raw.to_string_lossy();
-        let listener = tokio::net::TcpListener::bind(raw.as_ref()).await?;
+    // The envagent ingress is always bound. A single-machine install therefore
+    // has two processes, and an unpaired server has no execution path.
+    {
+        let default = format!("127.0.0.1:{}", port + 1);
+        let raw = std::env::var("SYLPH_ENV_LISTEN").unwrap_or(default);
+        let listener = tokio::net::TcpListener::bind(&raw).await?;
         let local_addr = listener.local_addr()?;
         if !local_addr.ip().is_loopback() {
             anyhow::bail!(
