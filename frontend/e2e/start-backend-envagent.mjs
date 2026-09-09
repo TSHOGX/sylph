@@ -38,6 +38,10 @@ if (process.env.SYLPH_E2E_KEEP_HOME !== "1") {
 fs.mkdirSync(agentHome, { recursive: true });
 
 const children = new Set();
+const restartMarker = path.join(envHome, "restart-agent");
+const restartReceipt = path.join(envHome, "restart-complete");
+let agentProcess;
+let restarting = false;
 let stopping = false;
 
 function launch(command, args, extraEnv = {}) {
@@ -49,7 +53,7 @@ function launch(command, args, extraEnv = {}) {
   children.add(child);
   child.once("exit", (code, signal) => {
     children.delete(child);
-    if (!stopping && code !== 0) {
+    if (!stopping && !restarting && code !== 0) {
       console.error(`[e2e] child ${command} exited (${code ?? signal})`);
       shutdown(code ?? 1);
     }
@@ -140,6 +144,23 @@ async function pair() {
   if (result !== 0) throw new Error(`envagent pair exited with ${result}`);
 }
 
+function agentEnvironment() {
+  return {
+    ...toolchainEnv,
+    SYLPH_ENV_HOME: envHome,
+    SYLPH_ENV_SERVER: `127.0.0.1:${envPort}`,
+    SYLPH_BROWSE_ROOTS: process.env.SYLPH_BROWSE_ROOTS ?? "",
+  };
+}
+
+function startAgent() {
+  return launch(
+    "cargo",
+    ["run", "--quiet", "-p", "sylph-envagent", "--features", "e2e", "--", "run"],
+    agentEnvironment(),
+  );
+}
+
 async function waitForConnectedEnvironment() {
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const response = await request("GET", "/api/v1/auth/token");
@@ -158,14 +179,31 @@ try {
   });
   await waitForHealth();
   await pair();
-  launch("cargo", ["run", "--quiet", "-p", "sylph-envagent", "--features", "e2e", "--", "run"], {
-    ...toolchainEnv,
-    SYLPH_ENV_HOME: envHome,
-    SYLPH_ENV_SERVER: `127.0.0.1:${envPort}`,
-    SYLPH_BROWSE_ROOTS: process.env.SYLPH_BROWSE_ROOTS ?? "",
-  });
+  agentProcess = startAgent();
   await waitForConnectedEnvironment();
   console.log("[e2e] paired envagent is connected and reports the e2e adapter");
+  // A browser fault-injection spec can request a real process restart by creating
+  // this marker. Polling keeps the control local and avoids adding a product API.
+  setInterval(async () => {
+    if (stopping || restarting || !fs.existsSync(restartMarker)) return;
+    fs.rmSync(restartMarker, { force: true });
+    restarting = true;
+    const old = agentProcess;
+    if (old) {
+      old.kill("SIGTERM");
+      await new Promise((resolve) => old.once("exit", resolve));
+    }
+    agentProcess = startAgent();
+    restarting = false;
+    try {
+      await waitForConnectedEnvironment();
+      fs.writeFileSync(restartReceipt, `${Date.now()}\n`);
+      console.log("[e2e] envagent reconnected after requested restart");
+    } catch (error) {
+      console.error(`[e2e] envagent restart failed: ${error instanceof Error ? error.message : error}`);
+      shutdown(1);
+    }
+  }, 100);
   await new Promise(() => {});
 } catch (error) {
   console.error(`[e2e] stack startup failed: ${error instanceof Error ? error.message : error}`);
