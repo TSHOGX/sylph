@@ -121,16 +121,6 @@ export default function SessionPage() {
   // finishes. Its terminal trace event is authoritative for the session's
   // composer state; without refreshing here the page keeps the setup session's
   // transient `running` status and hides Send for the next user turn.
-  const traceHasTerminalTurn = useMemo(
-    () => traceEvents.some((event) => event.kind === "turn" && event.phase === "completed"),
-    [traceEvents],
-  );
-
-  useEffect(() => {
-    if (!traceHasTerminalTurn) return;
-    void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-  }, [queryClient, sessionId, traceHasTerminalTurn]);
-
   // There is deliberately no empty-session cleanup here any more. `POST /sessions`
   // starts an agent rather than reserving a row, so a session has no identity until an
   // agent has assigned one — the empty-draft state this discarded cannot exist, and
@@ -170,6 +160,20 @@ export default function SessionPage() {
     [sentTurnId, history],
   );
   const watchedTurnId = (sentIsSettled ? null : sentTurnId) ?? adoptedTurnId;
+
+  const traceHasTerminalTurn = useMemo(
+    () => traceEvents.some((event) =>
+      event.arrivalTurnId === watchedTurnId &&
+      event.kind === "turn" &&
+      event.phase === "completed",
+    ),
+    [traceEvents, watchedTurnId],
+  );
+
+  useEffect(() => {
+    if (!traceHasTerminalTurn) return;
+    void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+  }, [queryClient, sessionId, traceHasTerminalTurn]);
 
   const watchedTurn = useQuery({
     queryKey: ["turn", watchedTurnId],
