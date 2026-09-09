@@ -56,8 +56,9 @@ pub struct AppState {
     pub hub: EventHub,
     /// Paired environment reachability used by retention and diagnostics.
     pub environment: Arc<dyn crate::env::Environment>,
-    /// Runs turns on live links.
+    /// Legacy in-process fixture supervisor; product routes use EnvBridge.
     pub turns: crate::supervisor::turn::LinkedSupervisor,
+    /// Legacy in-process fixture link pool; product routes use EnvBridge.
     pub links: crate::links::LinkManager,
     /// The warm tier. Reads come here once a turn has been consolidated.
     pub history: crate::storage::HistoryStore,

@@ -33,9 +33,9 @@ fts5-jieba = { path = "../fts5-jieba" }
 # A path dependency rather than a module because the adapters and the envagent link
 # against it without linking against the server.
 sylph-protocol = { path = "../protocol" }
-# The adapter implementations, so `crate::adapters` delegates rather than reading the
-# filesystem. `AGENTS.md` § Compatibility forbids keeping the seam once the real crate
-# answers.
+# Kept only for the legacy in-process integration fixture seam. Product execution
+# routes through `sylph-envagent`; this dependency is scheduled for removal once the
+# remaining server fixture harness is wire-backed.
 #
 # The `e2e` feature is **not** enabled here: it must be asked for explicitly
 # (`cargo run --features e2e`), because a fixture agent reachable from a default build
