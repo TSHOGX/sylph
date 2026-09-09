@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -19,6 +20,7 @@ const envPort = Number(process.env.SYLPH_ENV_PORT ?? backendPort + 1);
 const backend = `http://127.0.0.1:${backendPort}`;
 const envHome = path.join(here, "..", ".e2e-env-home");
 const agentHome = path.join(envHome, "home");
+const browseRoots = process.env.SYLPH_BROWSE_ROOTS ?? ["/tmp", os.tmpdir()].join(":");
 // Keep Cargo usable after giving the envagent an isolated HOME. Rustup resolves
 // its toolchain from HOME when these variables are absent.
 const toolchainEnv = {
@@ -49,6 +51,7 @@ function launch(command, args, extraEnv = {}) {
     cwd: repo,
     env: { ...process.env, ...extraEnv },
     stdio: "inherit",
+    detached: true,
   });
   children.add(child);
   child.once("exit", (code, signal) => {
@@ -64,9 +67,21 @@ function launch(command, args, extraEnv = {}) {
 function shutdown(code = 0) {
   if (stopping) return;
   stopping = true;
-  for (const child of children) child.kill("SIGTERM");
+  for (const child of children) {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+    } catch {
+      child.kill("SIGTERM");
+    }
+  }
   setTimeout(() => {
-    for (const child of children) child.kill("SIGKILL");
+    for (const child of children) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+    }
     process.exit(code);
   }, 2_000).unref();
 }
@@ -137,7 +152,7 @@ async function pair() {
       ...toolchainEnv,
       SYLPH_ENV_HOME: envHome,
       SYLPH_ENV_SERVER: `127.0.0.1:${envPort}`,
-      SYLPH_BROWSE_ROOTS: process.env.SYLPH_BROWSE_ROOTS ?? "",
+      SYLPH_BROWSE_ROOTS: browseRoots,
     },
   );
   const result = await new Promise((resolve) => pairChild.once("exit", (code) => resolve(code ?? 1)));
@@ -149,7 +164,7 @@ function agentEnvironment() {
     ...toolchainEnv,
     SYLPH_ENV_HOME: envHome,
     SYLPH_ENV_SERVER: `127.0.0.1:${envPort}`,
-    SYLPH_BROWSE_ROOTS: process.env.SYLPH_BROWSE_ROOTS ?? "",
+    SYLPH_BROWSE_ROOTS: browseRoots,
   };
 }
 
@@ -176,6 +191,7 @@ async function waitForConnectedEnvironment() {
 try {
   launch("cargo", ["run", "--quiet", "-p", "sylph-server", "--features", "e2e", "--bin", "sylph-server"], {
     SYLPH_ENV_LISTEN: `127.0.0.1:${envPort}`,
+    SYLPH_BROWSE_ROOTS: browseRoots,
   });
   await waitForHealth();
   await pair();
@@ -190,7 +206,11 @@ try {
     restarting = true;
     const old = agentProcess;
     if (old) {
-      old.kill("SIGTERM");
+      try {
+        process.kill(-old.pid, "SIGTERM");
+      } catch {
+        old.kill("SIGTERM");
+      }
       await new Promise((resolve) => old.once("exit", resolve));
     }
     agentProcess = startAgent();
