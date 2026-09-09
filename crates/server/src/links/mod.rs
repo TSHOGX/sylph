@@ -633,7 +633,7 @@ impl LinkManager {
         &self,
         session_id: &SessionId,
         turn_id: &str,
-        outcome: crate::supervisor::turn::Outcome,
+        outcome: crate::supervisor::Outcome,
     ) {
         // Cloned out from under the read guard, so the guard is not held across
         // the `lock().await` below — holding both would order two locks and
@@ -1558,7 +1558,7 @@ impl LinkManager {
         self.hub.publish_trace(&session_id.encode(), event).await;
 
         if settles {
-            use crate::supervisor::turn::Outcome;
+            use crate::supervisor::Outcome;
             // The agent's own error flag decides this, not the transport: a turn
             // that ran and reported failure is a completed exchange the user
             // needs to see, not a broken link.
@@ -1769,7 +1769,7 @@ impl LinkManager {
             self.settle_turn(
                 session_id,
                 &turn_id,
-                crate::supervisor::turn::Outcome::LinkLost {
+                crate::supervisor::Outcome::LinkLost {
                     detail: detail.clone(),
                 },
             )

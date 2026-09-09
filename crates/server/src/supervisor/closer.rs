@@ -21,7 +21,7 @@ use tracing::{debug, error};
 use crate::db::JournalStore;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::storage::Consolidator;
-use crate::supervisor::turn::{server_event, Outcome};
+use crate::supervisor::{server_event, Outcome};
 
 #[derive(Clone)]
 pub struct TurnCloser {

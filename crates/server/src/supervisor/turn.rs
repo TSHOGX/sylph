@@ -12,14 +12,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
-use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
-
-use crate::db::JournalStore;
-use crate::events::{EventHub, SeqAllocator, StreamEvent};
-use crate::links::LinkManager;
-use crate::models::now_ms;
+// Legacy runner imports are intentionally absent: product execution is bridge-owned.
 
 /// Everything needed to run one turn.
 pub struct TurnRequest {
@@ -42,7 +35,7 @@ pub struct PreparedTurnRequest {
     pub turn: crate::links::PreparedTurn,
 }
 
-/// How a turn ended, as reported by the link.
+/* legacy runner-only types retained until links is deleted
 #[derive(Debug, Clone)]
 pub enum Outcome {
     Completed {
@@ -573,3 +566,9 @@ pub(crate) fn server_event(
         started_at_ms: None,
     }
 }
+*/
+
+pub use crate::supervisor::outcome::{server_event, Outcome};
+pub type TurnWaiters = std::sync::Arc<
+    tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<Outcome>>>,
+>;
