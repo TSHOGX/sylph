@@ -93,17 +93,9 @@ pub async fn prepared_set_config(
             .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
         return Ok(Json(remote_link_state(draft.agent, refreshed)?));
     }
-    state
-        .links
-        .prepared_set_config(&draft_id, &body.id, body.value)
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    let link = state
-        .links
-        .prepared_state(&draft_id)
-        .await
-        .ok_or(Error::SessionNotFound)?;
-    Ok(Json(link))
+    // Draft handles are issued by an envagent. A handle unknown to the bridge
+    // is gone; it must never fall through to an in-process LinkManager.
+    Err(Error::SessionNotFound)
 }
 
 /// DELETE /api/v1/sessions/draft/{id}
@@ -111,11 +103,7 @@ pub async fn discard_prepared(
     State(state): State<AppState>,
     Path(draft_id): Path<String>,
 ) -> Result<StatusCode> {
-    if draft_id.starts_with("remote-draft-") {
-        state.env_bridge.discard_remote_draft(&draft_id).await;
-        return Ok(StatusCode::NO_CONTENT);
-    }
-    state.links.discard_prepared(&draft_id).await;
+    state.env_bridge.discard_remote_draft(&draft_id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -135,12 +123,7 @@ pub async fn prepared_capabilities(
             .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
         return Ok(Json(remote_link_state(draft.agent, value)?));
     }
-    let link = state
-        .links
-        .prepared_state(&id)
-        .await
-        .ok_or(Error::SessionNotFound)?;
-    Ok(Json(link))
+    Err(Error::SessionNotFound)
 }
 
 /// What this session's agent can do right now.
@@ -155,59 +138,44 @@ pub async fn capabilities(
 ) -> Result<Json<LinkState>> {
     let session_id = require_session(&state, &session_id).await?;
 
-    if session_id.environment.as_str() != state.environment.descriptor().id {
-        let outcome = state
-            .env_bridge
-            .remote_session_command(
-                &session_id,
-                sylph_protocol::EnvironmentCommand::Capabilities {
-                    session_id: session_id.clone(),
-                },
-                sylph_protocol::IdempotencyPolicy::Replayable,
-            )
-            .await;
-        return match outcome {
-            Ok(sylph_protocol::CommandOutcome::Accepted {
-                result: Some(value),
-            }) => Ok(Json(remote_link_state(
-                session_id.agent.to_string(),
-                value,
-            )?)),
-            Ok(sylph_protocol::CommandOutcome::Accepted { result: None }) => {
-                Ok(Json(LinkState::detached_remote()))
-            }
-            Ok(sylph_protocol::CommandOutcome::Rejected { code, message }) => {
-                Err(Error::LinkFailed(format!("{code}: {message}")))
-            }
-            Ok(sylph_protocol::CommandOutcome::Unknown { message }) => {
-                Err(Error::LinkFailed(format!(
-                    "remote capabilities outcome is unknown: {}",
-                    message.unwrap_or_default()
-                )))
-            }
-            Err(_error) => Ok(Json(LinkState::failed(
-                sylph_protocol::UnavailableReason::HandshakeFailed,
-            ))),
-        };
+    if !state
+        .env_bridge
+        .environment_connected(&session_id.environment)
+        .await
+    {
+        return Ok(Json(LinkState::failed(
+            sylph_protocol::UnavailableReason::EnvironmentUnreachable,
+        )));
     }
-
-    if let Err(error) = state.links.ensure(&session_id).await {
-        // A missing adapter or a refusing agent is a real failure, but it is the
-        // agent's failure rather than the request's: the session is still valid
-        // and its history still readable, so this reports detached with a reason
-        // rather than a 500 that would make the whole session look broken.
-        //
-        // The reason travels in the body. Logging it and returning a bare
-        // `attached: false` was the defect: a client could not tell a failure from
-        // an agent that simply declares no commands, so the only honest thing it
-        // could render was nothing at all.
-        tracing::warn!("Could not establish a link for {}: {:#}", session_id, error);
-        return Ok(Json(
-            state.links.state_after_failure(&session_id, &error).await,
-        ));
+    let outcome = state
+        .env_bridge
+        .remote_session_command(
+            &session_id,
+            sylph_protocol::EnvironmentCommand::Capabilities {
+                session_id: session_id.clone(),
+            },
+            sylph_protocol::IdempotencyPolicy::Replayable,
+        )
+        .await
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    match outcome {
+        sylph_protocol::CommandOutcome::Accepted {
+            result: Some(value),
+        } => Ok(Json(remote_link_state(
+            session_id.agent.to_string(),
+            value,
+        )?)),
+        sylph_protocol::CommandOutcome::Accepted { result: None } => {
+            Ok(Json(LinkState::detached_remote()))
+        }
+        sylph_protocol::CommandOutcome::Rejected { code, message } => {
+            Err(Error::LinkFailed(format!("{code}: {message}")))
+        }
+        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
+            "remote capabilities outcome is unknown: {}",
+            message.unwrap_or_default()
+        ))),
     }
-
-    Ok(Json(state.links.state(&session_id).await))
 }
 
 /// Establish a link eagerly.
@@ -221,39 +189,27 @@ pub async fn attach(
 ) -> Result<Json<LinkState>> {
     let session_id = require_session(&state, &session_id).await?;
 
-    if session_id.environment.as_str() != state.environment.descriptor().id {
-        let outcome = state
-            .env_bridge
-            .remote_attach(
-                &state
-                    .store
-                    .get_session(&session_id)
-                    .await?
-                    .ok_or(Error::SessionNotFound)?,
-            )
-            .await
-            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-        return match outcome {
-            sylph_protocol::CommandOutcome::Accepted { .. } => {
-                Ok(Json(LinkState::detached_remote()))
-            }
-            sylph_protocol::CommandOutcome::Rejected { code, message } => {
-                Err(Error::LinkFailed(format!("{code}: {message}")))
-            }
-            sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-                "remote attach outcome is unknown: {}",
-                message.unwrap_or_default()
-            ))),
-        };
-    }
-
-    state
-        .links
-        .ensure(&session_id)
+    let outcome = state
+        .env_bridge
+        .remote_attach(
+            &state
+                .store
+                .get_session(&session_id)
+                .await?
+                .ok_or(Error::SessionNotFound)?,
+        )
         .await
-        .map_err(|error| Error::LinkFailed(format!("{:#}", error)))?;
-
-    Ok(Json(state.links.state(&session_id).await))
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    match outcome {
+        sylph_protocol::CommandOutcome::Accepted { .. } => Ok(Json(LinkState::detached_remote())),
+        sylph_protocol::CommandOutcome::Rejected { code, message } => {
+            Err(Error::LinkFailed(format!("{code}: {message}")))
+        }
+        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
+            "remote attach outcome is unknown: {}",
+            message.unwrap_or_default()
+        ))),
+    }
 }
 
 /// Tear a link down without ending the session.
@@ -262,33 +218,27 @@ pub async fn detach(
     Path(session_id): Path<String>,
 ) -> Result<Json<LinkState>> {
     let session_id = require_session(&state, &session_id).await?;
-    if session_id.environment.as_str() != state.environment.descriptor().id {
-        let outcome = state
-            .env_bridge
-            .remote_session_command(
-                &session_id,
-                sylph_protocol::EnvironmentCommand::Close {
-                    session_id: Some(session_id.clone()),
-                },
-                sylph_protocol::IdempotencyPolicy::Replayable,
-            )
-            .await
-            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-        return match outcome {
-            sylph_protocol::CommandOutcome::Accepted { .. } => {
-                Ok(Json(LinkState::detached_remote()))
-            }
-            sylph_protocol::CommandOutcome::Rejected { code, message } => {
-                Err(Error::LinkFailed(format!("{code}: {message}")))
-            }
-            sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-                "remote detach outcome is unknown: {}",
-                message.unwrap_or_default()
-            ))),
-        };
+    let outcome = state
+        .env_bridge
+        .remote_session_command(
+            &session_id,
+            sylph_protocol::EnvironmentCommand::Close {
+                session_id: Some(session_id.clone()),
+            },
+            sylph_protocol::IdempotencyPolicy::Replayable,
+        )
+        .await
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    match outcome {
+        sylph_protocol::CommandOutcome::Accepted { .. } => Ok(Json(LinkState::detached_remote())),
+        sylph_protocol::CommandOutcome::Rejected { code, message } => {
+            Err(Error::LinkFailed(format!("{code}: {message}")))
+        }
+        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
+            "remote detach outcome is unknown: {}",
+            message.unwrap_or_default()
+        ))),
     }
-    state.links.detach(&session_id, "client").await;
-    Ok(Json(state.links.state(&session_id).await))
 }
 
 /// What this session is waiting on.
@@ -382,70 +332,34 @@ pub async fn resolve(
     // only ever grow; it shrank on a 20-second poll that a backgrounded tab does not
     // run, which is why answering on one device left the dialog standing on another
     // until a manual reload.
-    state
-        .links
-        .announce_request(&request.session_id, &resolved)
-        .await;
-
-    // A paired environment has no in-process LinkManager entry. Forward the
-    // typed resolution to the envagent that owns the vendor process, while the
-    // durable claim above remains the server's single-winner authority.
-    if request.session_id.environment.as_str() != state.environment.descriptor().id {
-        let outcome = state
-            .env_bridge
-            .remote_session_command(
-                &request.session_id,
-                sylph_protocol::EnvironmentCommand::Resolve {
-                    session_id: request.session_id.clone(),
-                    resolution: serde_json::json!({
-                        "requestId": request.adapter_request_id.clone(),
-                        "option": body.option.clone(),
-                        "input": body.input.clone(),
-                    }),
-                },
-                sylph_protocol::IdempotencyPolicy::AtMostOnce,
-            )
-            .await
-            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-        return match outcome {
-            sylph_protocol::CommandOutcome::Accepted { .. } => Ok(Json(resolved)),
-            sylph_protocol::CommandOutcome::Rejected { code, message } => {
-                Err(Error::LinkFailed(format!("{code}: {message}")))
-            }
-            sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-                "remote resolution outcome is unknown: {}",
-                message.unwrap_or_default()
-            ))),
-        };
-    }
-
-    // Forwarded only after the claim succeeds. Sending first would let the loser
-    // of a race also reach the adapter, and for an approval the second answer
-    // would overwrite the first's decision.
-    match state.links.get(&request.session_id).await {
-        Some(link) => {
-            link.resolve(sylph_protocol::Resolution {
-                // The agent's own id, not the journal row's. A client addresses the row
-                // and the adapter only knows what it raised, so this is the one hop where
-                // the two id spaces meet — and it is a field read off the row rather than
-                // anything a client supplies, which is what stops an answer to a request
-                // that was never raised.
-                request_id: request.adapter_request_id.clone(),
-                option: body.option.clone(),
-                input: body.input,
-            })
-            .await
-            .map_err(|error| Error::LinkFailed(format!("{:#}", error)))?;
+    // Forward the typed resolution to the envagent that owns the vendor process,
+    // while the durable claim above remains the server's single-winner authority.
+    let outcome = state
+        .env_bridge
+        .remote_session_command(
+            &request.session_id,
+            sylph_protocol::EnvironmentCommand::Resolve {
+                session_id: request.session_id.clone(),
+                resolution: serde_json::json!({
+                    "requestId": request.adapter_request_id.clone(),
+                    "option": body.option.clone(),
+                    "input": body.input.clone(),
+                }),
+            },
+            sylph_protocol::IdempotencyPolicy::AtMostOnce,
+        )
+        .await
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    match outcome {
+        sylph_protocol::CommandOutcome::Accepted { .. } => Ok(Json(resolved)),
+        sylph_protocol::CommandOutcome::Rejected { code, message } => {
+            Err(Error::LinkFailed(format!("{code}: {message}")))
         }
-        None => {
-            // The row is already marked resolved, which is correct: the user did
-            // answer. But nothing is waiting for it, and saying so is better than
-            // a success that silently went nowhere.
-            return Err(Error::LinkGone);
-        }
+        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
+            "remote resolution outcome is unknown: {}",
+            message.unwrap_or_default()
+        ))),
     }
-
-    Ok(Json(resolved))
 }
 
 /// Interrupt the running turn, keeping the session alive.
@@ -461,46 +375,31 @@ pub async fn interrupt(
 ) -> Result<Json<serde_json::Value>> {
     let session_id = require_session(&state, &session_id).await?;
 
-    if session_id.environment.as_str() != state.environment.descriptor().id {
-        let outcome = state
-            .env_bridge
-            .remote_session_command(
-                &session_id,
-                sylph_protocol::EnvironmentCommand::Interrupt {
-                    session_id: session_id.clone(),
-                    expected_turn_id: None,
-                },
-                sylph_protocol::IdempotencyPolicy::AtMostOnce,
-            )
-            .await
-            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-        return match outcome {
-            sylph_protocol::CommandOutcome::Accepted { .. } => {
-                Ok(Json(serde_json::json!({"interrupted": true})))
-            }
-            sylph_protocol::CommandOutcome::Rejected { code, message } => Err(refusal_or(
-                anyhow::anyhow!("{code}: {message}"),
-                Error::Unsupported,
-            )),
-            sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-                "remote interrupt outcome is unknown: {}",
-                message.unwrap_or_default()
-            ))),
-        };
-    }
-
-    let link = state.links.get(&session_id).await.ok_or(Error::LinkGone)?;
-
-    link.interrupt()
+    let outcome = state
+        .env_bridge
+        .remote_session_command(
+            &session_id,
+            sylph_protocol::EnvironmentCommand::Interrupt {
+                session_id: session_id.clone(),
+                expected_turn_id: None,
+            },
+            sylph_protocol::IdempotencyPolicy::AtMostOnce,
+        )
         .await
-        // The **adapter** refuses when it never declared interrupt, so this is a capability
-        // answer rather than a transport failure. It used to be refused by the server from
-        // its own copy of `supports`, and moving it is not a simplification: the adapter is
-        // the only thing that knows whether the vendor accepted, and two derivations of one
-        // fact diverge the moment either grows a case.
-        .map_err(|error| refusal_or(error, Error::Unsupported))?;
-
-    Ok(Json(serde_json::json!({"interrupted": true})))
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    match outcome {
+        sylph_protocol::CommandOutcome::Accepted { .. } => {
+            Ok(Json(serde_json::json!({"interrupted": true})))
+        }
+        sylph_protocol::CommandOutcome::Rejected { code, message } => Err(refusal_or(
+            anyhow::anyhow!("{code}: {message}"),
+            Error::Unsupported,
+        )),
+        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
+            "remote interrupt outcome is unknown: {}",
+            message.unwrap_or_default()
+        ))),
+    }
 }
 
 /// Add text to a turn already in flight.
@@ -534,41 +433,31 @@ pub async fn steer(
         }
     }
 
-    if session_id.environment.as_str() != state.environment.descriptor().id {
-        let outcome = state
-            .env_bridge
-            .remote_session_command(
-                &session_id,
-                sylph_protocol::EnvironmentCommand::Steer {
-                    session_id: session_id.clone(),
-                    text: body.text,
-                    expected_turn_id: body.turn_id,
-                },
-                sylph_protocol::IdempotencyPolicy::AtMostOnce,
-            )
-            .await
-            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-        return match outcome {
-            sylph_protocol::CommandOutcome::Accepted { .. } => {
-                Ok(Json(serde_json::json!({"steered": true})))
-            }
-            sylph_protocol::CommandOutcome::Rejected { code, message } => {
-                Err(Error::LinkFailed(format!("{code}: {message}")))
-            }
-            sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-                "remote steer outcome is unknown: {}",
-                message.unwrap_or_default()
-            ))),
-        };
-    }
-
-    let link = state.links.get(&session_id).await.ok_or(Error::LinkGone)?;
-
-    link.steer(&body.text, running.as_deref())
+    let outcome = state
+        .env_bridge
+        .remote_session_command(
+            &session_id,
+            sylph_protocol::EnvironmentCommand::Steer {
+                session_id: session_id.clone(),
+                text: body.text,
+                expected_turn_id: body.turn_id,
+            },
+            sylph_protocol::IdempotencyPolicy::AtMostOnce,
+        )
         .await
-        .map_err(|error| refusal_or(error, Error::Unsupported))?;
-
-    Ok(Json(serde_json::json!({"steered": true})))
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    match outcome {
+        sylph_protocol::CommandOutcome::Accepted { .. } => {
+            Ok(Json(serde_json::json!({"steered": true})))
+        }
+        sylph_protocol::CommandOutcome::Rejected { code, message } => {
+            Err(Error::LinkFailed(format!("{code}: {message}")))
+        }
+        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
+            "remote steer outcome is unknown: {}",
+            message.unwrap_or_default()
+        ))),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -613,40 +502,30 @@ pub async fn queue(
         return Err(Error::InvalidRequest("Queued text cannot be empty".into()));
     }
 
-    if session_id.environment.as_str() != state.environment.descriptor().id {
-        let outcome = state
-            .env_bridge
-            .remote_session_command(
-                &session_id,
-                sylph_protocol::EnvironmentCommand::Queue {
-                    session_id: session_id.clone(),
-                    text: body.text,
-                },
-                sylph_protocol::IdempotencyPolicy::AtMostOnce,
-            )
-            .await
-            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-        return match outcome {
-            sylph_protocol::CommandOutcome::Accepted { .. } => {
-                Ok(Json(serde_json::json!({"queued": true})))
-            }
-            sylph_protocol::CommandOutcome::Rejected { code, message } => {
-                Err(Error::LinkFailed(format!("{code}: {message}")))
-            }
-            sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-                "remote queue outcome is unknown: {}",
-                message.unwrap_or_default()
-            ))),
-        };
-    }
-
-    let link = state.links.get(&session_id).await.ok_or(Error::LinkGone)?;
-
-    link.queue(&body.text)
+    let outcome = state
+        .env_bridge
+        .remote_session_command(
+            &session_id,
+            sylph_protocol::EnvironmentCommand::Queue {
+                session_id: session_id.clone(),
+                text: body.text,
+            },
+            sylph_protocol::IdempotencyPolicy::AtMostOnce,
+        )
         .await
-        .map_err(|error| refusal_or(error, Error::Unsupported))?;
-
-    Ok(Json(serde_json::json!({"queued": true})))
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    match outcome {
+        sylph_protocol::CommandOutcome::Accepted { .. } => {
+            Ok(Json(serde_json::json!({"queued": true})))
+        }
+        sylph_protocol::CommandOutcome::Rejected { code, message } => {
+            Err(Error::LinkFailed(format!("{code}: {message}")))
+        }
+        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
+            "remote queue outcome is unknown: {}",
+            message.unwrap_or_default()
+        ))),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -672,90 +551,37 @@ pub async fn set_config(
         return Err(Error::InvalidRequest("A config id is required".into()));
     }
 
-    if session_id.environment.as_str() != state.environment.descriptor().id {
-        let outcome = state
-            .env_bridge
-            .remote_session_command(
-                &session_id,
-                sylph_protocol::EnvironmentCommand::SetConfig {
-                    session_id: session_id.clone(),
-                    id: body.config_id,
-                    value: body.value,
-                },
-                sylph_protocol::IdempotencyPolicy::AtMostOnce,
-            )
-            .await
-            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-        return match outcome {
-            sylph_protocol::CommandOutcome::Accepted {
-                result: Some(value),
-            } => Ok(Json(remote_link_state(
-                session_id.agent.to_string(),
-                value,
-            )?)),
-            sylph_protocol::CommandOutcome::Accepted { result: None } => {
-                Ok(Json(LinkState::detached_remote()))
-            }
-            sylph_protocol::CommandOutcome::Rejected { code, message } => {
-                Err(Error::LinkFailed(format!("{code}: {message}")))
-            }
-            sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-                "remote config outcome is unknown: {}",
-                message.unwrap_or_default()
-            ))),
-        };
-    }
-
-    let link = state
-        .links
-        .ensure(&session_id)
+    let outcome = state
+        .env_bridge
+        .remote_session_command(
+            &session_id,
+            sylph_protocol::EnvironmentCommand::SetConfig {
+                session_id: session_id.clone(),
+                id: body.config_id,
+                value: body.value,
+            },
+            sylph_protocol::IdempotencyPolicy::AtMostOnce,
+        )
         .await
-        .map_err(|error| Error::LinkFailed(format!("{:#}", error)))?;
-
-    // The option has to be one the agent offered, for the same reason a request
-    // option is validated: an id the adapter does not recognize reaches the vendor
-    // CLI as an unknown setting, and what that does is undefined.
-    let surface = link.capabilities().await;
-    let Some(option) = surface
-        .config
-        .iter()
-        .find(|option| option.id == body.config_id)
-    else {
-        return Err(Error::InvalidRequest(format!(
-            "'{}' is not a config option this session offers",
-            body.config_id
-        )));
-    };
-
-    // And the *value* has to be one it enumerated. Validating only the id was the
-    // asymmetry worth closing: the approval path has always checked its option
-    // against what was offered, while a config value went through untouched. A
-    // mistyped one then reached the vendor CLI, which is exactly how `pi` came to
-    // answer `Model not found: undefined/undefined` — an error whose wording named
-    // fields no user had ever seen, three layers from where it could be read.
-    if !option.accepts(&body.value) {
-        return Err(Error::InvalidRequest(format!(
-            "that is not a value '{}' offers",
-            body.config_id
-        )));
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    match outcome {
+        sylph_protocol::CommandOutcome::Accepted {
+            result: Some(value),
+        } => Ok(Json(remote_link_state(
+            session_id.agent.to_string(),
+            value,
+        )?)),
+        sylph_protocol::CommandOutcome::Accepted { result: None } => {
+            Ok(Json(LinkState::detached_remote()))
+        }
+        sylph_protocol::CommandOutcome::Rejected { code, message } => {
+            Err(Error::LinkFailed(format!("{code}: {message}")))
+        }
+        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
+            "remote config outcome is unknown: {}",
+            message.unwrap_or_default()
+        ))),
     }
-
-    // A refusal is classified by the adapter's own code rather than flattened to one
-    // status. The distinction is the difference between "this agent cannot do that"
-    // and "that value is not allowed right now": the first justifies disabling the
-    // control, the second must leave it usable, since the other five values may well
-    // be fine. `claude` reports exactly this shape when a permission mode is refused
-    // for a reason the session cannot change, and reporting it as unsupported sent the
-    // last investigation to the picker.
-    link.set_config_and_persist(&state.store, &session_id, &body.config_id, body.value)
-        .await
-        .map_err(config_error)?;
-
-    // Published so every other attached client sees the change rather than only the
-    // one that made it — the same reason a capability update is pushed at all.
-    state.links.announce_capabilities(&session_id).await;
-
-    Ok(Json(state.links.state(&session_id).await))
 }
 
 #[derive(serde::Deserialize)]
@@ -793,21 +619,6 @@ fn refusal_or(error: anyhow::Error, otherwise: fn(String) -> Error) -> Error {
         }
         Some(refusal) => otherwise(refusal.message.clone()),
         None => otherwise(format!("{error:#}")),
-    }
-}
-
-/// Classify a config operation without mistaking a persistence failure for an
-/// adapter refusal. The latter is actionable by the picker; the former means the
-/// live change succeeded but the durable preference could not be recorded.
-fn config_error(error: anyhow::Error) -> Error {
-    match error.downcast_ref::<sylph_protocol::AdapterError>() {
-        Some(refusal) if refusal.code == sylph_protocol::RefusalCode::InvalidValue => {
-            Error::InvalidRequest(refusal.message.clone())
-        }
-        Some(refusal) => Error::Unsupported(refusal.message.clone()),
-        None => Error::Internal(format!(
-            "Could not persist session configuration: {error:#}"
-        )),
     }
 }
 
