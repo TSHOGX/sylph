@@ -528,6 +528,21 @@ impl LinkedSupervisor {
         self.hub.publish_trace(&session_id.encode(), event).await;
         Ok(())
     }
+
+    /// Journal a server-authored event for a remote turn before dispatching work.
+    ///
+    /// Remote turns do not pass through [`Self::run`], but they still need the
+    /// same durable user transcript and starting marker as local turns. Keeping
+    /// this behind the supervisor preserves the single sequence allocator and
+    /// journal-before-publish ordering.
+    pub async fn emit_server_event(
+        &self,
+        session_id: &sylph_protocol::SessionId,
+        turn_id: &str,
+        event: StreamEvent,
+    ) -> crate::error::Result<()> {
+        self.emit(session_id, turn_id, event).await
+    }
 }
 
 /// A server-authored event. These have no phase and are always stable.

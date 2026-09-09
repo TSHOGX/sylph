@@ -339,6 +339,29 @@ pub async fn create(
             return Err(Error::SessionAlreadyRunning);
         }
     };
+    if !text.is_empty() {
+        state
+            .turns
+            .emit_server_event(
+                &session_id,
+                &created.id,
+                crate::supervisor::turn::server_event("user", text.clone(), None),
+            )
+            .await?;
+    }
+    state
+        .turns
+        .emit_server_event(
+            &session_id,
+            &created.id,
+            crate::supervisor::turn::server_event(
+                "status",
+                String::new(),
+                Some(serde_json::json!({"state": "starting"})),
+            ),
+        )
+        .await?;
+    let _ = state.store.set_session_title_if_empty(&session_id, &text).await;
     let request_id = sylph_protocol::CommandRequestId::parse(
         idempotency_key
             .as_deref()
