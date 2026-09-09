@@ -242,6 +242,34 @@ impl MockAgents {
             .expect("the mock agent map is not poisoned")
             .remove(name);
     }
+
+    /// Snapshot this fixture's adapter inventory in the shape an envagent hello carries.
+    pub async fn inventory(&self) -> Vec<sylph_protocol::AgentInventory> {
+        let mut names = self.available();
+        names.sort();
+        let mut inventory = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(adapter) = <Self as AdapterSource>::for_agent(self, &name) {
+                match adapter.probe().await {
+                    Ok(info) => inventory.push(sylph_protocol::AgentInventory::available(info)),
+                    Err(error) => inventory.push(sylph_protocol::AgentInventory::unavailable(
+                        name,
+                        None,
+                        error.to_string(),
+                    )),
+                }
+            }
+        }
+        inventory
+    }
+
+    pub async fn infos(&self) -> Vec<AgentInfo> {
+        self.inventory()
+            .await
+            .into_iter()
+            .filter_map(|entry| entry.info)
+            .collect()
+    }
 }
 
 impl AdapterSource for MockAgents {
@@ -288,6 +316,19 @@ impl AdapterSource for MockAgents {
     /// one it can run, so collapsing them is honest rather than lossy.
     fn known_agents(&self) -> Vec<String> {
         self.available()
+    }
+}
+
+/// The same deterministic source is installed inside the fixture envagent. Keeping this
+/// implementation beside the server source ensures both sides use the identical adapter
+/// behaviour while the server can only reach it over `sylph.env.v1`.
+impl sylph_envagent::adapters::AdapterSource for MockAgents {
+    fn for_agent(&self, name: &str) -> Option<Box<dyn Adapter>> {
+        <Self as AdapterSource>::for_agent(self, name)
+    }
+
+    fn known_agents(&self) -> Vec<String> {
+        <Self as AdapterSource>::known_agents(self)
     }
 }
 

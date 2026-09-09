@@ -19,7 +19,7 @@ pub mod transport;
 
 pub use client::{
     connect as connect_to_server, run_runtime, run_runtime_reconnecting, run_runtime_stream,
-    ClientConnection,
+    run_runtime_stream_with_adapters, ClientConnection,
 };
 pub use credentials::{Credential, CredentialStore};
 pub use fixture::{FaultPlan, FaultPoint, FixtureSink};

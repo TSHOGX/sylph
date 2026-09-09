@@ -2163,6 +2163,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "sylph-adapters",
+ "sylph-envagent",
  "sylph-protocol",
  "tempfile",
  "thiserror",

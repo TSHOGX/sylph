@@ -115,9 +115,33 @@ pub async fn run_runtime(
 /// semantic path after framing is identical.
 pub async fn run_runtime_stream<S>(
     stream: S,
+    hello: sylph_protocol::Hello,
+    credential: impl Into<String>,
+    config: crate::runtime::EnvAgentConfig,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    run_runtime_stream_with_adapters(
+        stream,
+        hello,
+        credential,
+        config,
+        crate::adapters::linked(),
+    )
+    .await
+}
+
+/// Run an envagent over an already-connected stream with an explicit adapter source.
+///
+/// This is the integration-test seam: the fixture adapter remains inside the envagent
+/// process boundary, while production callers continue to use [`run_runtime_stream`].
+pub async fn run_runtime_stream_with_adapters<S>(
+    stream: S,
     mut hello: sylph_protocol::Hello,
     credential: impl Into<String>,
     config: crate::runtime::EnvAgentConfig,
+    adapters: Arc<dyn crate::adapters::AdapterSource>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -191,7 +215,7 @@ where
         sender: out_tx,
         heartbeat_stop,
     };
-    let runtime = crate::runtime::EnvAgent::open(config, sink).await?;
+    let runtime = crate::runtime::EnvAgent::open_with_adapters(config, sink, adapters).await?;
     run_connection(&runtime, connection).await
 }
 

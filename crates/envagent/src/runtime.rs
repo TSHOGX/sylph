@@ -19,6 +19,7 @@ use sylph_protocol::{
 use sylph_protocol::{EventBatch, ProducerId, ProducerSeq, SourceCursor, WireMessage};
 
 use crate::path::PathPolicy;
+use crate::adapters::AdapterSource;
 use crate::attachments::{attachments_dir, stage as stage_attachments};
 use crate::spool::{Spool, SpoolConfig, SpoolEvent};
 
@@ -562,6 +563,7 @@ pub struct EnvAgent {
     deferred_events: Arc<Mutex<std::collections::HashMap<SessionId, Arc<Notify>>>>,
     prepared: Arc<RwLock<std::collections::HashMap<String, PreparedHosted>>>,
     promoted_drafts: Arc<RwLock<std::collections::HashMap<String, SessionId>>>,
+    adapters: Arc<dyn AdapterSource>,
 }
 
 impl EnvAgent {
@@ -596,6 +598,19 @@ impl EnvAgent {
 
 impl EnvAgent {
     pub async fn open(config: EnvAgentConfig, sink: Arc<dyn EventSink>) -> Result<Self> {
+        Self::open_with_adapters(config, sink, crate::adapters::linked()).await
+    }
+
+    /// Open an envagent against an explicit adapter source.
+    ///
+    /// Production always uses the linked source. The override exists so integration tests
+    /// can put their deterministic adapter behind the same envagent wire boundary as a real
+    /// installation, without restoring a server-side execution path.
+    pub async fn open_with_adapters(
+        config: EnvAgentConfig,
+        sink: Arc<dyn EventSink>,
+        adapters: Arc<dyn AdapterSource>,
+    ) -> Result<Self> {
         let environment = EnvironmentId::parse(config.environment_id.clone())
             .map_err(|error| anyhow!("invalid environment id: {error}"))?;
         let _ = sylph_protocol::ProducerId::parse(config.producer_id.clone())
@@ -617,6 +632,7 @@ impl EnvAgent {
             deferred_events: Arc::new(Mutex::new(std::collections::HashMap::new())),
             prepared: Arc::new(RwLock::new(std::collections::HashMap::new())),
             promoted_drafts: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            adapters,
         })
     }
 
@@ -643,7 +659,7 @@ impl EnvAgent {
             .contain(&spec.workdir)
             .map_err(|error| anyhow!(error))?;
         spec.workdir = contained.display().to_string();
-        let adapter = sylph_adapters::for_agent(agent)
+        let adapter = self.adapters.for_agent(agent)
             .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
         let mut session = adapter.run(spec).await?;
         let events = session
@@ -799,7 +815,7 @@ impl EnvAgent {
         let agent_name = AgentName::parse(agent.to_string())
             .map_err(|error| anyhow!("invalid agent name: {error}"))?;
         let workdir = spec.workdir.clone();
-        let adapter = sylph_adapters::for_agent(agent)
+        let adapter = self.adapters.for_agent(agent)
             .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
         let mut session = adapter.run(spec).await?;
         let events = session
@@ -888,7 +904,7 @@ impl EnvAgent {
     ) -> Result<HostedSource> {
         let agent_name = AgentName::parse(agent.to_string())
             .map_err(|error| anyhow!("invalid agent name: {error}"))?;
-        let adapter = sylph_adapters::for_agent(agent)
+        let adapter = self.adapters.for_agent(agent)
             .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
         // Native sources are still capable of running adapter code that reads
         // a vendor worktree.  Resolve the recorded directory on this machine
@@ -1321,7 +1337,7 @@ impl EnvAgent {
                 }
             }
             EnvironmentCommand::Enumerate { agent, workdir } => {
-                let Some(adapter) = sylph_adapters::for_agent(&agent) else {
+                let Some(adapter) = self.adapters.for_agent(&agent) else {
                     return sylph_protocol::CommandOutcome::Rejected {
                         code: "AGENT_UNAVAILABLE".into(),
                         message: format!("agent '{agent}' is not installed on this environment"),
@@ -1604,7 +1620,7 @@ impl EnvAgent {
         session: &HostedSession,
     ) -> Result<serde_json::Value> {
         let capabilities = session.capabilities().await?;
-        let supports = match sylph_adapters::for_agent(agent) {
+        let supports = match self.adapters.for_agent(agent) {
             Some(adapter) => adapter
                 .probe()
                 .await

@@ -117,6 +117,7 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3.14"
+sylph-envagent = { path = "../envagent" }
 # Drives the router in-process via ServiceExt::oneshot, so integration tests
 # need no bound port and no spawned server.
 tower = { version = "0.5", features = ["util"] }

@@ -53,6 +53,9 @@ pub struct TestBackend {
     /// directory any more — an adapter is linked in — so availability is a fact the source
     /// holds rather than one the filesystem does.
     pub agents: MockAgents,
+    environment: EnvironmentId,
+    bridge_task: tokio::task::JoinHandle<()>,
+    envagent_task: tokio::task::JoinHandle<()>,
 }
 
 impl TestBackend {
@@ -158,6 +161,69 @@ impl TestBackend {
         // spelling the server journals and compares against.
         agents.set_store_workdir(Some(workdir.display().to_string()));
 
+        let offer = state
+            .env_bridge
+            .create_pairing()
+            .await
+            .expect("fixture pairing offer should be created");
+        let grant = state
+            .env_bridge
+            .claim_pairing(
+                &offer.code,
+                "test fixture",
+                "development",
+                agents.infos().await,
+            )
+            .await
+            .expect("fixture pairing should be accepted");
+        let environment = grant.environment_id.clone();
+        let producer_id = sylph_protocol::ProducerId::parse("fixture-producer").unwrap();
+        let hello = sylph_protocol::Hello::current(
+            grant.installation_id.clone(),
+            producer_id.clone(),
+            Some(environment.clone()),
+            0,
+        );
+        let (server_stream, agent_stream) = tokio::io::duplex(8 * 1024 * 1024);
+        let bridge = state.env_bridge.clone();
+        let bridge_task = tokio::spawn(async move {
+            let (reader, writer) = tokio::io::split(server_stream);
+            let _ = bridge.serve_io(reader, writer).await;
+        });
+        let env_config = sylph_envagent::EnvAgentConfig {
+            environment_id: environment.to_string(),
+            producer_id: producer_id.to_string(),
+            spool: sylph_envagent::SpoolConfig::new(
+                root.join("envagent-spool.db"),
+                64 * 1024 * 1024,
+            ),
+            path_policy: sylph_envagent::PathPolicy::from_roots([root.to_path_buf()])
+                .expect("fixture envagent path policy should build"),
+        };
+        let source: Arc<dyn sylph_envagent::adapters::AdapterSource> =
+            Arc::new(agents.clone());
+        let token = grant.credential;
+        let envagent_task = tokio::spawn(async move {
+            let _ = sylph_envagent::run_runtime_stream_with_adapters(
+                agent_stream,
+                hello,
+                token,
+                env_config,
+                source,
+            )
+            .await;
+        });
+        for _ in 0..100 {
+            if state.env_bridge.environment_connected(&environment).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            state.env_bridge.environment_connected(&environment).await,
+            "fixture envagent failed to connect"
+        );
+
         Self {
             router: router(state.clone()),
             temp,
@@ -167,6 +233,9 @@ impl TestBackend {
             config,
             state,
             agents,
+            environment,
+            bridge_task,
+            envagent_task,
         }
     }
 
@@ -506,11 +575,20 @@ impl TestBackend {
             })
             .await
             .expect("fixture session insert failed");
-        self.state
-            .links
-            .ensure(&session_id)
+        let session = self
+            .state
+            .store
+            .get_session(&session_id)
             .await
-            .expect("fixture link establishment failed");
+            .expect("fixture session lookup failed")
+            .expect("fixture session must be present");
+        let outcome = self
+            .state
+            .env_bridge
+            .remote_attach(&session)
+            .await
+            .expect("fixture remote link establishment failed");
+        assert!(matches!(outcome, sylph_protocol::CommandOutcome::Accepted { .. }));
         session_id.encode()
     }
 
@@ -520,11 +598,7 @@ impl TestBackend {
     /// what the code hardcodes proves only that the two agree, which `AGENTS.md` records
     /// as having twice let a test and the endpoint be wrong about the product together.
     pub async fn environment_id(&self) -> String {
-        let body = json_body(self.get_authed("/api/v1/environments").await).await;
-        body["environments"][0]["id"]
-            .as_str()
-            .expect("the server reports at least its own environment")
-            .to_string()
+        self.environment.to_string()
     }
 
     /// The typed form of a session id, for the store-level APIs.
