@@ -143,7 +143,7 @@ say "Installing into $PREFIX (backend port $BACKEND_PORT, frontend $FRONTEND_POR
 # --- build ----------------------------------------------------------------
 
 say "Building backend (release)"
-cargo build --release --manifest-path "$REPO/backend/Cargo.toml"
+cargo build --release --manifest-path "$REPO/crates/server/Cargo.toml"
 
 say "Building frontend (standalone)"
 (
@@ -162,7 +162,7 @@ rm -rf "$PREFIX.new"
 # not a LaunchAgent is what launched it.
 mkdir -p "$PREFIX.new/frontend" "$PREFIX.new/logs" "$BIN_DIR" "$DATA_DIR"
 
-cp "$REPO/backend/target/release/sylph-server" "$PREFIX.new/sylph-server"
+cp "$REPO/target/release/sylph-server" "$PREFIX.new/sylph-server"
 cp -R "$REPO/frontend/.next/standalone/." "$PREFIX.new/frontend/"
 
 # No adapters are staged, because there is no directory of them to stage. They are

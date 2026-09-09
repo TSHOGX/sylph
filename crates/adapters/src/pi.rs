@@ -5157,7 +5157,7 @@ done
         /// makes it idempotent *within* a run. Neither removes it afterwards, so every
         /// `cargo test` used to leave its set behind: 392 of them had accumulated in
         /// `temp_dir()` here, which is also an E2E browse root, where a listing is
-        /// silently truncated past `MAX_ENTRIES` (`backend/src/api/fs.rs`).
+        /// silently truncated past `MAX_ENTRIES` (`crates/server/src/api/fs.rs`).
         ///
         /// So sweeping is part of creating one. Age-gated rather than pid-gated on
         /// purpose: a second `cargo test` running concurrently is a different pid, and

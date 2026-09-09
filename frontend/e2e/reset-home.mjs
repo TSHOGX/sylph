@@ -85,7 +85,7 @@ if (fs.existsSync(home)) {
 // nothing removed them. They accumulated at roughly seven per run and reached 164
 // here before anyone looked.
 //
-// That is a cliff rather than a slope: `MAX_ENTRIES` in `backend/src/api/fs.rs`
+// That is a cliff rather than a slope: `MAX_ENTRIES` in `crates/server/src/api/fs.rs`
 // caps a listing at 2000, and past the cap a directory tree is *silently
 // truncated*. A spec looking for its own workdir would stop finding it, and which
 // entries survive depends on readdir order — so it would present as the same

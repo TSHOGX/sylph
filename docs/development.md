@@ -22,7 +22,7 @@ here depends on it.
 
 1. **Project dependencies:**
    ```sh
-   cd $REPO/backend && cargo build
+   cd $REPO/crates/server && cargo build
    cd $REPO/frontend && npm install
    ```
 2. **At least one agent CLI on your `PATH`** — `claude`, `codex`, or `pi`. That is the
@@ -32,7 +32,7 @@ here depends on it.
 
 **Backend**
 ```sh
-cd $REPO/backend
+cd $REPO/crates/server
 cargo run
 ```
 
@@ -151,7 +151,7 @@ Look for these lines in the frontend tab output:
 
 Tunnelling straight to `localhost:3000` is not enough: the backend rejects
 non-loopback `Host`/`Origin` headers (DNS-rebinding defense, see
-`backend/src/middleware/auth.rs`), and Next's rewrite forwards the browser's
+`crates/server/src/middleware/auth.rs`), and Next's rewrite forwards the browser's
 `Origin`, so every mutation (create/import/resume) 403s from a tunnel or LAN
 origin. Route through the loopback reverse proxy instead, which rewrites
 `Host`/`Origin` to loopback and sends `/api/*` straight to the backend:

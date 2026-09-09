@@ -81,7 +81,7 @@ export interface Session {
  * That is a server guarantee rather than a convention, and a recent one: `status` used to
  * go terminal *before* the settle sweep ran, so a client acting on it unmounted the stream
  * before the sweep's events arrived and refetched a journal the sweep had not written.
- * `backend/src/supervisor/closer.rs` holds the measurement.
+ * `crates/server/src/supervisor/closer.rs` holds the measurement.
  *
  * `settling` is transient and usually a few milliseconds, but it is a real state a poll can
  * land on, so it renders as in-flight rather than being folded into `running`.
@@ -109,7 +109,7 @@ export interface Turn {
    * from a user who sent nothing — and without the distinction it reads as a reply to
    * a message the user never wrote.
    *
-   * Required: `backend/src/models/turn.rs:20` has this as a non-`Option` `String`
+   * Required: `crates/server/src/models/turn.rs:20` has this as a non-`Option` `String`
    * with no `skip_serializing_if`, so it is on every row the backend serializes.
    */
   origin: "user" | "agent";

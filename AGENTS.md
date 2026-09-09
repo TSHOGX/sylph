@@ -56,8 +56,7 @@ owns progress and status; `docs/` owns design.
 - `crates/fts5-jieba/` — the SQLite FTS5 tokenizer, linked into the server so Chinese is
   searchable. Vendored rather than depended on by path, which is only ever right on one
   machine.
-- `backend/` — Rust, Axum, SQLx. Holds the store, the supervisor, and the API; becomes
-  `crates/server` when the envagent splits out.
+- `crates/server/` — Rust, Axum, SQLx. Holds the store, the supervisor, and the API.
 - `frontend/` — Next.js App Router, React, TanStack Query, Tailwind.
 - `docs/` — the governing specs. Read the relevant section before implementing.
 - `scripts/` — install and deployment tooling.

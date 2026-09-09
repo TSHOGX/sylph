@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// # Why three variants and not eight
 ///
 /// `sylph.agent.v3` declared eight: `Interrupt`, `Steer`, `Approval`, `Subagent`,
-/// `Slash`, `SetConfig`, `Context`, `Fork`. *Measured against `backend/src` before
+/// `Slash`, `SetConfig`, `Context`, `Fork`. *Measured against `crates/server/src` before
 /// this crate existed:* grepping for `Capability::Context|Fork|Approval|Subagent|Slash`
 /// outside the declaring module returned **nothing**. Only `Interrupt`, `Steer`, and
 /// `SetConfig` were ever read, and each gates exactly one method on [`crate::Session`].
@@ -435,7 +435,7 @@ impl CapabilityFacets {
     ///
     /// This is the only implementation, and every caller is the server: `Link::apply`
     /// for an adapter-pushed update and `Link::set_config` for an accepted setting, both
-    /// under the one mutex guarding the merged surface (`backend/src/links/mod.rs`). An
+    /// under the one mutex guarding the merged surface (`crates/server/src/links/mod.rs`). An
     /// adapter returns facets and never a surface, so it has nothing to merge with.
     pub fn apply_to(self, surface: &mut SessionCapabilities) {
         if let Some(commands) = self.commands {

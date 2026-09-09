@@ -3864,7 +3864,7 @@
       },
       "Turn": {
         "type": "object",
-        "description": "A turn as the API serializes it. Mirrors `backend/src/models/turn.rs`. `origin` is turn-level provenance: an `agent` turn is one nobody asked for, opened when an agent speaks after its previous turn settled, and its `requestText` is empty by construction.",
+        "description": "A turn as the API serializes it. Mirrors `crates/server/src/models/turn.rs`. `origin` is turn-level provenance: an `agent` turn is one nobody asked for, opened when an agent speaks after its previous turn settled, and its `requestText` is empty by construction.",
         "required": [
           "id",
           "sessionId",

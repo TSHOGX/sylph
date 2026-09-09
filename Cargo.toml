@@ -1,8 +1,7 @@
 # The Rust side of Sylph, as one workspace.
 #
 # `AGENTS.md` § Orientation names the crates this grows into: `protocol`, `adapters`,
-# `server`, `envagent`. `protocol` and `adapters` exist; `backend` is the standing
-# server until `docs/roadmap.md` § Milestone 1 moves it.
+# `server`, `envagent`. Their manifests live together under `crates/`.
 #
 # One workspace rather than four independent crates because they share one
 # vocabulary and one dependency set. A shared `Cargo.lock` is the part that
@@ -11,7 +10,7 @@
 [workspace]
 resolver = "2"
 members = [
-  "backend",
+  "crates/server",
   "crates/protocol",
   "crates/adapters",
   "crates/fts5-jieba",
@@ -25,7 +24,7 @@ members = [
 # lives in exactly one manifest is noise here, and moving it up would invite the
 # next reader to assume it is shared.
 #
-# Versions are copied verbatim from `backend/Cargo.toml` as it stood before the
+# Versions are copied verbatim from `crates/server/Cargo.toml` as it stood before the
 # workspace existed. Nothing is bumped: a version change is a separate act with
 # its own verification, and folding one into a restructuring hides it.
 [workspace.dependencies]

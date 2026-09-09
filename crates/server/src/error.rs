@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn every_emitted_code_is_published_in_the_openapi_enum() {
         let schema = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/api-v1.openapi.json"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api-v1.openapi.json"),
         )
         .expect("the OpenAPI schema is part of the repo");
         let schema: serde_json::Value =

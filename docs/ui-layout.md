@@ -20,14 +20,14 @@ a pane's collapse breakpoint is layout even though it is implemented in a hook.
 │ (240px)      │ (flex, only this scrolls)          │ (320–384px)      │
 │              │                                    │                  │
 │ ⚡Quick Sess. │ › Add logging to the auth module   │ Files            │
-│   scratch    │                                    │ ▾ backend/       │
+│   scratch    │                                    │ ▾ crates/server/       │
 │              │ ▸ ✻ Thinking  84 words             │   ▾ src/         │
 │ Workspaces   │                                    │     ▫ lib.rs     │
-│ ▾ sylph-web8+│ ▤ Read  backend/src/auth.rs    ✓   │     ▫ auth.rs    │
+│ ▾ sylph-web8+│ ▤ Read  crates/server/src/auth.rs    ✓   │     ▫ auth.rs    │
 │   ● session A│                                    │ ▫ Cargo.toml     │
 │   ◆ session B│ I'll add logging at three points.  │                  │
 │   ⌗ past work│                                    │ ─────────────────│
-│   ⌗ older  ⑂2│ ✎ Edit  backend/src/auth.rs    ✓   │ auth.rs          │
+│   ⌗ older  ⑂2│ ✎ Edit  crates/server/src/auth.rs    ✓   │ auth.rs          │
 │   Browse all→│                                    │                  │
 │ ▾ trace-db 3+│                                    │                  │
 │   ● session C│                                    │                  │
@@ -78,7 +78,7 @@ The three-pane layout cannot lay out in flow on a phone. A 240px sidebar on a
 │  conversation (visible) │
 ├═════════════════════════┤  ← grab handle; the sheet does not reach the top,
 │ ▬ Files            ✕    │    because files are inspection *of* what is above
-│ ▾ backend/              │
+│ ▾ crates/server/              │
 │   ▫ auth.rs             │
 └─────────────────────────┘
 ```
@@ -170,7 +170,7 @@ browsing                            viewing
 ┌─ Artifacts ─────────┐             ┌─ Artifacts ─────────┐
 │ Files      Reload   │             │ ‹ Files  auth.rs ⛶ ✕│
 │ /Users/you/proj     │             ├─────────────────────┤
-│ ▾ backend/          │  select     │                     │
+│ ▾ crates/server/          │  select     │                     │
 │   ▾ src/            │  ────────▶  │   full-height       │
 │     ▫ lib.rs        │             │   viewer            │
 │     ▫ auth.rs       │             │                     │

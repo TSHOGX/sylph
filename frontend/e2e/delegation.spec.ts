@@ -257,7 +257,7 @@ async function runPromotion(page: import("@playwright/test").Page) {
   // in twenty-two, so the weaker wait was kept and the gap named.
   //
   // The turn now goes terminal only after the sweep, enforced by
-  // `a_terminal_turn_always_has_its_trajectories_closed` in `backend/tests/integration.rs`.
+  // `a_terminal_turn_always_has_its_trajectories_closed` in `crates/server/tests/integration.rs`.
   // So this is a settled-turn wait rather than a terminal-turn wait, and the specs below no
   // longer race anything.
   //

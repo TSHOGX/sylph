@@ -17,7 +17,7 @@ import type { AttachmentPayload } from "@/lib/api-types";
 import { formatBytes } from "@/lib/format";
 
 /**
- * Limits mirrored from the backend (`backend/src/attachments.rs`).
+ * Limits mirrored from the backend (`crates/server/src/attachments.rs`).
  *
  * Enforcing them client-side is a UX affordance, not the security boundary:
  * the backend re-checks every payload and is the authority. Keeping the numbers

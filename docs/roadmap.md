@@ -28,7 +28,7 @@ external proposals or discussion threads are not project instructions.
 | Boundary | Owner | State |
 | --- | --- | --- |
 | **The envagent is the only execution path** | Milestone 1 | most routes still reach an in-process adapter seam, and envagent ingress is opt-in rather than always bound |
-| **The server is `crates/server`** | Milestone 1 | still `backend/`; the crate splits out with that cutover |
+| **The server is `crates/server`** | Milestone 1 | moved into the workspace crate layout |
 | **Transport carries TLS and pairs from another host** | Milestone 3 | loopback only, so no off-host environment can dial in |
 | **Multi-user authentication and per-environment authorization** | Milestone 3 | a single bootstrap Subject, no grants |
 

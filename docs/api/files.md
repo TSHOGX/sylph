@@ -28,7 +28,7 @@ string. The root is the session's `workdir` as recorded in the journal, so no
 request can choose its own root; the joined path is canonicalized, which resolves
 `..` and every symlink component, and is then required to still be inside the
 canonical root. A symlink pointing outside the workspace is refused and is also
-omitted from listings. See `backend/src/api/files.rs` for the threat model.
+omitted from listings. See `crates/server/src/api/files.rs` for the threat model.
 
 ### `GET /api/v1/sessions/{id}/files?path=`
 
@@ -39,10 +39,10 @@ root. Lazy expansion is what keeps a repository with 100k files usable.
 ```json
 {
   "root": "/Users/you/Workspace/sylph-web",
-  "path": "backend/src",
+  "path": "crates/server/src",
   "entries": [
-    { "path": "backend/src/api", "name": "api", "isDir": true, "modifiedAtMs": 1755600000000 },
-    { "path": "backend/src/lib.rs", "name": "lib.rs", "isDir": false, "size": 5120, "modifiedAtMs": 1755600000000 }
+    { "path": "crates/server/src/api", "name": "api", "isDir": true, "modifiedAtMs": 1755600000000 },
+    { "path": "crates/server/src/lib.rs", "name": "lib.rs", "isDir": false, "size": 5120, "modifiedAtMs": 1755600000000 }
   ],
   "truncated": false
 }
@@ -376,7 +376,7 @@ Errors: `FILE_NOT_FOUND` (404), `POLICY_VIOLATION` (403) for the root or an esca
 `INVALID_REQUEST` (400) for a non-empty directory without `recursive`. Note the code is
 `POLICY_VIOLATION`, not `FORBIDDEN` — that is the HTTP status name, and a client
 branching on it never matches (`Error::Forbidden` → `POLICY_VIOLATION`,
-`backend/src/error.rs:229`).
+`crates/server/src/error.rs:229`).
 
 ## Machine-level browsing
 
@@ -396,7 +396,7 @@ the path, since no other process can resolve a symlink it cannot see
 check). A listing is therefore a bridge round trip, not a local `readdir`.
 
 Today it is still a local `readdir` in the server, against the server's own configuration
-(`backend/src/api/fs.rs`). That is the same in-process seam Milestone 1 removes, and
+(`crates/server/src/api/fs.rs`). That is the same in-process seam Milestone 1 removes, and
 `docs/roadmap.md` § Milestone 2 carries the exit gate that closes it: *no remote path
 check happens in the server.* Until then this endpoint answers correctly only for an
 environment on the server's own machine, which is the only kind that can be paired.

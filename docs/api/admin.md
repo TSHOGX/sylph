@@ -165,7 +165,7 @@ The generated machine-readable snapshot is `docs/api-v1.openapi.json`; this docu
 the evolving source for endpoint semantics.
 
 **Verify coverage by diffing, never by trusting a count.** A route added to
-`backend/src/lib.rs` without a matching path here is the recurring failure, and the check
+`crates/server/src/lib.rs` without a matching path here is the recurring failure, and the check
 is mechanical: normalize path parameters and diff the spec against the `.route(...)` calls,
 in both directions. Counts stated in prose have been wrong here in both directions at once
 — claiming full coverage while a whole control plane was undocumented, and naming

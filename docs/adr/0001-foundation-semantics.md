@@ -94,7 +94,7 @@ test named after the property it holds: `producer_and_server_sequences_are_disti
 `command_policy_and_unknown_outcome_are_explicit`.
 
 The edge store has a producer: adopting a session journals the edge its vendor recorded
-(`record_adopted_lineage` in `backend/src/api/sessions.rs`). Before that it had a table, a
+(`record_adopted_lineage` in `crates/server/src/api/sessions.rs`). Before that it had a table, a
 route, and a wire message but nothing that wrote a row, so the decision was pinned by types
 and unreached by data — and the superseded column was still being written from all three
 adapters while this document claimed it held `None`. A write-only field is

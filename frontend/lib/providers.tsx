@@ -120,7 +120,7 @@ function AuthGate({ children }: { children: ReactNode }) {
             <code className="rounded bg-hover px-1">localhost:4317</code>.
           </p>
           <pre className="mt-3 overflow-x-auto rounded-lg bg-sunken p-3 text-left text-xs text-ink-soft">
-            cd backend &amp;&amp; cargo run
+            cd crates/server &amp;&amp; cargo run
           </pre>
           <Button
             variant="primary"

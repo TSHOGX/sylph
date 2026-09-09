@@ -2352,7 +2352,7 @@ mod tests {
             parent_relation: Some(sylph_protocol::SessionEdgeRelation::Delegation),
         };
 
-        // Verbatim from `backend/src/api/sessions.rs`'s remote adopt path.
+        // Verbatim from `crates/server/src/api/sessions.rs`'s remote adopt path.
         let read = |result: &serde_json::Value| -> Option<sylph_protocol::SessionEdgeRelation> {
             result
                 .get("parentRelation")

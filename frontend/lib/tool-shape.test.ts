@@ -29,13 +29,13 @@ describe("describeTool", () => {
     const shape = describeTool(
       event({
         name: "Read",
-        text: '{"file_path":"backend/src/auth.rs"}',
-        data: { input: { file_path: "backend/src/auth.rs" } },
+        text: '{"file_path":"crates/server/src/auth.rs"}',
+        data: { input: { file_path: "crates/server/src/auth.rs" } },
       }),
     );
     expect(shape.kind).toBe("read");
-    expect(shape.path).toBe("backend/src/auth.rs");
-    expect(shape.summary).toBe("backend/src/auth.rs");
+    expect(shape.path).toBe("crates/server/src/auth.rs");
+    expect(shape.summary).toBe("crates/server/src/auth.rs");
   });
 
   it("falls back to parsing text when data is absent", () => {

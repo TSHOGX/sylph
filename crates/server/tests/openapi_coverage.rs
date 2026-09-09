@@ -85,7 +85,7 @@ fn implemented() -> BTreeSet<String> {
 /// Every `<METHOD> <path>` pair the schema declares.
 fn documented() -> BTreeSet<String> {
     let raw = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/api-v1.openapi.json"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api-v1.openapi.json"),
     )
     .expect("the OpenAPI schema is part of the repo");
     let schema: serde_json::Value =
@@ -149,7 +149,7 @@ fn every_registered_route_is_documented_and_every_documented_route_exists() {
 #[test]
 fn no_session_id_parameter_claims_to_be_a_uuid() {
     let raw = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/api-v1.openapi.json"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api-v1.openapi.json"),
     )
     .expect("the OpenAPI schema is part of the repo");
     let schema: serde_json::Value =
@@ -190,7 +190,7 @@ fn no_session_id_parameter_claims_to_be_a_uuid() {
 #[test]
 fn every_ref_resolves_and_every_schema_is_referenced() {
     let raw = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/api-v1.openapi.json"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api-v1.openapi.json"),
     )
     .expect("the OpenAPI schema is part of the repo");
     let schema: serde_json::Value =
@@ -303,7 +303,7 @@ fn every_turn_status_the_schema_declares_is_one_the_journal_allows() {
     );
 
     let raw = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/api-v1.openapi.json"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api-v1.openapi.json"),
     )
     .expect("the OpenAPI schema is part of the repo");
     let schema: serde_json::Value =

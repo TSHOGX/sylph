@@ -11,7 +11,7 @@
 //! - **A section pointer** — a document, `§`, and a heading. Rots on a rename, and
 //!   the specs rewrite renamed four sections out from under live pointers.
 //! - **A backticked repo path.** Rots when a file moves or is deleted. The deleted
-//!   `adapter/link.rs` under `backend/src/` was still named by three crate
+//!   `adapter/link.rs` under `crates/server/src/` was still named by three crate
 //!   comments, one of which described its behaviour in the present tense.
 //! - **A markdown link,** with its `#anchor`.
 //!
@@ -135,7 +135,7 @@ pub fn check(root: &Path) -> Vec<Finding> {
 /// A citation is written from wherever the reader is standing, and this repo uses
 /// three spellings on purpose: repo-relative from a doc (`docs/api/files.md`),
 /// relative to the citing file's own directory (a README naming a sibling
-/// directory), and relative to an ancestor of it (a module under `backend/src/`
+/// directory), and relative to an ancestor of it (a module under `crates/server/src/`
 /// naming a migration by bare filename). Trying the root first and
 /// then walking up from the citing file resolves all three without the lint having
 /// to know which convention a file follows.
@@ -406,7 +406,7 @@ fn check_section_pointers(
 /// turns off.
 fn is_ours(candidate: &str) -> bool {
     const OWNED: &[&str] = &[
-        "backend/",
+        "crates/server/",
         "crates/",
         "frontend/",
         "docs/",

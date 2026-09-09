@@ -2,7 +2,7 @@
 
 **This file covers `journal.db`** — the hot tier, holding sessions, turns, and the events
 of turns still in flight. It states the shape and the reasoning; the DDL itself lives in
-`backend/migrations/`, applied by `sqlx::migrate!` at startup.
+`crates/server/migrations/`, applied by `sqlx::migrate!` at startup.
 
 One authoritative record is split across three stores for SQLite's sake rather than as a
 data-model choice (`docs/storage.md` § Three tiers): `journal.db` here, `history.db` for
@@ -273,7 +273,7 @@ examined, not pages.**
 ## Schema evolution
 
 Numbered SQL files, one set per database, applied by `sqlx::migrate!` at startup:
-`backend/migrations/` for the journal and `backend/migrations/history/` for history.
+`crates/server/migrations/` for the journal and `crates/server/migrations/history/` for history.
 
 **Schemas change in place.** The store is disposable: a build that cannot read one refuses
 to start and names it, and the answer is to discard `data/` and re-adopt from the vendors'

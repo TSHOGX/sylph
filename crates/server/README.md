@@ -70,7 +70,7 @@ from the root. The full table is in `docs/configuration.md`; the ones used most:
 
 ## API Endpoints
 
-The complete, machine-checked contract is [`docs/api-v1.openapi.json`](../docs/api-v1.openapi.json).
+The complete, machine-checked contract is [`docs/api-v1.openapi.json`](../../docs/api-v1.openapi.json).
 The most important surfaces are:
 
 - `GET /api/v1/health`, `/diagnostics`, `/config`, `/environments`, and `/soul`
@@ -105,7 +105,7 @@ Migrations are in `migrations/` and run automatically on startup.
 ## Project Structure
 
 ```
-backend/
+crates/server/
 ├── Cargo.toml              # Dependencies
 ├── migrations/             # SQL migrations, plus migrations/history for history.db
 ├── src/
@@ -147,7 +147,7 @@ cargo test -- --nocapture
 ```
 
 The implementation roadmap and remaining work are maintained in
-[`docs/roadmap.md`](../docs/roadmap.md), rather than duplicated here.
+[`docs/roadmap.md`](../../docs/roadmap.md), rather than duplicated here.
 
 ## License
 

@@ -2,7 +2,7 @@
 
 How the record is kept so that it is lossless, replayable from any frontend, and pruned
 only when a downstream authority has confirmed the data. The implementation is
-`backend/src/storage/`, and the tables are in `backend/migrations/history/`.
+`crates/server/src/storage/`, and the tables are in `crates/server/migrations/history/`.
 
 **This file owns `history.db` and `blobs/`.** `docs/database-schema.md` owns `journal.db`.
 
@@ -281,7 +281,7 @@ immutable once built and tokenizing takes `&self`.
 
 The index is tokenizer-specific, so changing the tokenizer requires reinserting the FTS
 rows. A test for CJK search must fail against `unicode61` to be evidence about the index;
-`chinese_text_is_searchable_by_word` in `backend/tests/storage.rs` is written that way and
+`chinese_text_is_searchable_by_word` in `crates/server/tests/storage.rs` is written that way and
 was verified by reverting the tokenizer.
 
 ### A user's query is not an FTS5 query

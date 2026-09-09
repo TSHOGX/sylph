@@ -84,7 +84,7 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(
       0,
       "backend_unreachable",
-      "Cannot reach the Sylph Web backend on port 4317. Start it with `cd backend && cargo run`.",
+      "Cannot reach the Sylph Web backend on port 4317. Start it with `cd crates/server && cargo run`.",
     );
   }
 
@@ -130,7 +130,7 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
  */
 function describeEnvelopeless(status: number, path: string): string {
   if (status === 404) {
-    return `The backend has no ${path} endpoint. It is probably an older build than this UI — restart it with \`cd backend && cargo run\`.`;
+    return `The backend has no ${path} endpoint. It is probably an older build than this UI — restart it with \`cd crates/server && cargo run\`.`;
   }
   if (status === 502 || status === 503 || status === 504) {
     return "The backend did not answer. Check that it is running on the port the frontend proxies to.";

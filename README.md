@@ -48,7 +48,7 @@ Two terminals, start to finish. Every command below has been run as written.
 **Terminal 1 — backend:**
 
 ```sh
-cd backend
+cd crates/server
 cargo run
 ```
 
@@ -108,7 +108,7 @@ not create.
 ### Verifying a Checkout
 
 ```sh
-cd backend && cargo test && cargo clippy --all-targets
+cd crates/server && cargo test && cargo clippy --all-targets
 cd frontend && npm test && npm run build && npx eslint .
 cd frontend && npm run e2e
 ```
@@ -163,7 +163,7 @@ faster than the shipped adapter, the fix is upgrading Sylph on that machine.
 To see what actually resolved, and who supplied each value:
 
 ```sh
-cd backend && cargo run -- doctor
+cd crates/server && cargo run -- doctor
 ```
 
 Settings → Configuration in the app shows the same report.

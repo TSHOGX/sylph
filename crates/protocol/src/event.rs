@@ -6,7 +6,7 @@
 //! # What lives here and what stays on the server
 //!
 //! This is the event **an adapter emits**. The server's own wire projection
-//! (`backend/src/events/mod.rs`) is this plus two fields that are not an adapter's to
+//! (`crates/server/src/events/mod.rs`) is this plus two fields that are not an adapter's to
 //! set, and it is left there until `docs/roadmap.md` § Milestone 1 moves the server:
 //!
 //! - `seq`, because ordering is the server's to decide. An adapter numbering its own

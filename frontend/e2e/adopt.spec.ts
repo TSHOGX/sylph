@@ -25,7 +25,7 @@ import { gotoReady } from "./fixtures/session";
  * shape the backend's own tests pin. The success path was verified by hand against the
  * real stores — 1000 `claude`, 1258 `codex`, 531 `pi` sessions readable, one `claude`
  * session adopted at 13623 events and one `codex` rollout at 3 bracketed turns — and those
- * measurements are recorded in `backend/src/db/ingest.rs`.
+ * measurements are recorded in `crates/server/src/db/ingest.rs`.
  */
 
 /** One row, with only what a picker renders. */

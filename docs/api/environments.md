@@ -149,7 +149,7 @@ Four decisions this shape encodes:
 Authenticated, like every route but `/health`: it returns an absolute filesystem
 path and the full text of a personal file.
 
-Resolution lives in `Config` (`backend/src/config/`), which resolves `paths.soul`
+Resolution lives in `Config` (`crates/server/src/config/`), which resolves `paths.soul`
 once — `~/.sylph/SOUL.md` by default, overridden by `SYLPH_SOUL`. An explicit empty
 `SYLPH_SOUL` yields no identity, matching the adapter protocol's spelling, and a
 configured path that does not exist resolves to none for the same reason. Resolving

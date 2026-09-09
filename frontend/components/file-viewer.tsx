@@ -458,7 +458,7 @@ function BodyError({ error, t }: { error: unknown; t: Translate }) {
 }
 
 /**
- * Limits mirrored from `backend/src/api/files.rs`.
+ * Limits mirrored from `crates/server/src/api/files.rs`.
  *
  * Duplicated deliberately, and only for *phrasing*: the backend is the authority
  * and reports `truncated` itself, so a drift here shows up as a slightly wrong
