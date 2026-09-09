@@ -50,13 +50,14 @@ let agentProcess;
 let restarting = false;
 let stopping = false;
 
-function launch(command, args, extraEnv = {}) {
+function launch(command, args, extraEnv = {}, processGroup = false) {
   const child = spawn(command, args, {
     cwd: repo,
     env: { ...process.env, ...extraEnv },
     stdio: "inherit",
-    detached: true,
+    detached: processGroup,
   });
+  child.detached = processGroup;
   children.add(child);
   child.once("exit", (code, signal) => {
     children.delete(child);
@@ -72,19 +73,15 @@ function shutdown(code = 0) {
   if (stopping) return;
   stopping = true;
   for (const child of children) {
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch {
-      child.kill("SIGTERM");
-    }
+    if (child.spawnargs && child.detached) {
+      try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+    } else child.kill("SIGTERM");
   }
   setTimeout(() => {
     for (const child of children) {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
+      if (child.spawnargs && child.detached) {
+        try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+      } else child.kill("SIGKILL");
     }
     process.exit(code);
   }, 2_000).unref();
@@ -177,6 +174,7 @@ function startAgent() {
     "cargo",
     ["run", "--quiet", "-p", "sylph-envagent", "--features", "e2e", "--", "run"],
     agentEnvironment(),
+    true,
   );
 }
 
