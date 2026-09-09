@@ -76,8 +76,32 @@ impl Default for HealthReporter {
 
 /// Probe one adapter, bounding how long it may take.
 pub async fn probe_one(name: String, adapter: Box<dyn Adapter>) -> AgentInventory {
+    let floor = adapter.version_floor();
     match timeout(PROBE_TIMEOUT, adapter.probe()).await {
-        Ok(Ok(info)) => AgentInventory::available(info),
+        Ok(Ok(info)) => match floor {
+            Some(floor) => match info.version.as_deref() {
+                Some(version) if version_meets_floor(version, floor) => {
+                    AgentInventory::available(info)
+                }
+                Some(version) => AgentInventory::unavailable(
+                    name,
+                    Some(version.to_string()),
+                    format!(
+                        "the `{}` CLI reports version {version}, but this adapter requires at least {floor}",
+                        info.name
+                    ),
+                ),
+                None => AgentInventory::unavailable(
+                    name,
+                    None,
+                    format!(
+                        "the `{}` CLI did not report a version; this adapter requires at least {floor}",
+                        info.name
+                    ),
+                ),
+            },
+            None => AgentInventory::available(info),
+        },
         Ok(Err(error)) => AgentInventory::unavailable(name, None, format!("{error:#}")),
         Err(_) => AgentInventory::unavailable(
             name,
@@ -85,6 +109,49 @@ pub async fn probe_one(name: String, adapter: Box<dyn Adapter>) -> AgentInventor
             format!("the CLI did not answer a version probe within {PROBE_TIMEOUT:?}"),
         ),
     }
+}
+
+/// Compare dotted numeric vendor versions without treating a malformed value as valid.
+///
+/// Vendor probes currently return numeric versions (`2.1.250`, `0.150.1`, and `0.84.3`).
+/// Keeping this parser here avoids a semver policy in the protocol crate, while rejecting
+/// a future non-numeric report instead of silently making an availability decision from a
+/// partial string. Missing components compare as zero, so `1.2` is below `1.2.1`.
+pub fn version_meets_floor(version: &str, floor: &str) -> bool {
+    let Some(version) = parse_version(version) else {
+        return false;
+    };
+    let Some(floor) = parse_version(floor) else {
+        return false;
+    };
+    version >= floor
+}
+
+fn parse_version(version: &str) -> Option<Vec<u64>> {
+    let trimmed = version.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut components = Vec::new();
+    for component in trimmed.split('.') {
+        if component.is_empty() {
+            return None;
+        }
+        let digits = component.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return None;
+        }
+        components.push(component[..digits].parse().ok()?);
+        if digits != component.len() {
+            // A prerelease suffix is not a version this adapter has measured. Refuse it
+            // rather than accidentally treating `2.1.247-beta` as the released floor.
+            return None;
+        }
+    }
+    while components.len() < 3 {
+        components.push(0);
+    }
+    Some(components)
 }
 
 #[cfg(test)]
@@ -118,5 +185,20 @@ mod tests {
                 assert!(agent.info.is_none());
             }
         }
+    }
+
+    #[test]
+    fn version_floor_accepts_equal_and_newer_numeric_versions() {
+        assert!(version_meets_floor("2.1.247", "2.1.247"));
+        assert!(version_meets_floor("2.1.248", "2.1.247"));
+        assert!(version_meets_floor("2.2", "2.1.247"));
+    }
+
+    #[test]
+    fn version_floor_rejects_older_missing_and_non_numeric_versions() {
+        assert!(!version_meets_floor("2.1.246", "2.1.247"));
+        assert!(!version_meets_floor("2.1", "2.1.247"));
+        assert!(!version_meets_floor("2.1.247-beta", "2.1.247"));
+        assert!(!version_meets_floor("", "2.1.247"));
     }
 }
