@@ -152,7 +152,6 @@ impl AppState {
         // Resolved once, in `Config`, so the supervisor injects the same file
         // `GET /soul` displays. Deriving it here as well is how the two would
         // drift into disagreeing about whether identity is active.
-        let soul_path = config.soul_path.clone();
 
         // The warm tier, opened before anything can settle a turn into it.
         let history = crate::storage::HistoryStore::open(
@@ -209,23 +208,6 @@ impl AppState {
         // so separate writers would leave the fold reading a buffer nobody flushed.
         let writer = crate::db::JournalWriter::new(store.clone());
 
-        let links = crate::links::LinkManager::new(crate::links::LinkManagerConfig {
-            store: store.clone(),
-            history: history.clone(),
-            data_dir: config.data_dir.clone(),
-            writer: writer.clone(),
-            hub: hub.clone(),
-            adapters: crate::adapters::linked(),
-            soul_path,
-            seq: seq.clone(),
-        });
-
-        // Turns on a live link. The two reference each other — the supervisor
-        // asks for a link, the manager settles the supervisor's turns — so the
-        // waiter registry is handed over after both exist.
-        // Adopting a native session writes through the same three collaborators the live
-        // drain path uses, which is what makes an adopted row indistinguishable from a
-        // live one downstream (`docs/architecture.md` § One authority).
         let ingest = crate::db::NativeIngest::new(
             store.clone(),
             writer.clone(),
@@ -234,38 +216,16 @@ impl AppState {
         )
         .with_hub(hub.clone());
 
-        let turns = crate::supervisor::turn::LinkedSupervisor::new(
+        let closer = crate::supervisor::TurnCloser::new(
             store.clone(),
-            writer.clone(),
             hub.clone(),
-            links.clone(),
             seq,
             consolidator.clone(),
+            writer.clone(),
         );
-        links.set_waiters(turns.waiters()).await;
-        // The other half of settling: a turn the *agent* started has no waiter, so
-        // resolving a channel cannot end it. Without this the first unprompted turn
-        // would sit `running` forever and wedge its session, because the composer
-        // refuses a message while a turn is live.
-        links.set_closer(turns.closer()).await;
-        // Remote envagent event batches use the same terminal settlement path as
-        // in-process links. Install it only after the supervisor owns its
-        // consolidator so the bridge never grows a second definition of a
-        // finished turn.
-        env_bridge.set_turn_closer(turns.closer()).await;
+        env_bridge.set_turn_closer(closer).await;
         env_bridge
             .set_trajectory_reconciler(crate::supervisor::TrajectoryReconciler::new(
-                store.clone(),
-                history.clone(),
-            ))
-            .await;
-        // And the half that reaches *backwards*: a delegation that outlived its turn
-        // reports its outcome on a later one, and the record it corrects belongs to the
-        // turn that opened it (`crate::supervisor::reconcile`). Both stores, because
-        // consolidation decides which tier holds that record and no caller can observe
-        // when it runs.
-        links
-            .set_reconciler(crate::supervisor::TrajectoryReconciler::new(
                 store.clone(),
                 history.clone(),
             ))
