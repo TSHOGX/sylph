@@ -15,7 +15,6 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
 use crate::{
-    attachments,
     error::{Error, Result},
     events::{Attachment, StreamEvent},
     models::{CreateTurnRequest, Turn},
@@ -219,32 +218,7 @@ pub async fn create_prepared(
             }
         }
     }
-    let turn_id = uuid::Uuid::new_v4().to_string();
-    let staged_attachments =
-        attachments::stage_draft(&state.config.data_dir, &draft_id, &turn_id, &attachments).await?;
-    let (session, _turn) = state
-        .turns
-        .promote_prepared(crate::supervisor::turn::PreparedTurnRequest {
-            draft_id,
-            turn: crate::links::PreparedTurn {
-                id: turn_id,
-                text,
-                attachments: staged_attachments
-                    .iter()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .collect(),
-                command: req.command,
-                args: req.args.unwrap_or_default().into_iter().collect(),
-                idempotency_key: req.idempotency_key,
-                created_at_ms: now_ms(),
-            },
-        })
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    Ok((
-        StatusCode::CREATED,
-        Json(crate::api::sessions::SessionResponse { session }),
-    ))
+    Err(Error::SessionNotFound)
 }
 
 /// POST /api/v1/sessions/{id}/turns
