@@ -90,7 +90,11 @@ impl JournalStore {
             .busy_timeout(std::time::Duration::from_secs(30));
 
         let pool = SqlitePoolOptions::new()
-            .max_connections(3)
+            // One writer connection makes read-then-write CAS transactions
+            // deterministic. WAL still lets the separate history database and
+            // external readers proceed, while multiple journal connections can
+            // otherwise hit SQLITE_BUSY_SNAPSHOT when a transaction upgrades.
+            .max_connections(1)
             .connect_with(options)
             .await?;
 
