@@ -40,7 +40,6 @@
 //! [`sylph_protocol::AdapterError`], so the `INVALID_VALUE`-versus-`UNSUPPORTED_FIELD`
 //! distinction is exercised as the real adapters exercise it.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,10 +65,11 @@ pub const AGENT_NAME: &str = "e2e";
 
 /// The native session id this agent reports when the server does not dictate one.
 ///
-/// Stable rather than minted, so a resumed session in a spec is recognisably the same
-/// conversation rather than a new one that happens to look alike.
+/// Resumed sessions retain the id supplied in `RequestedNativeId::Resume`; new sessions
+/// receive a fresh id below.  The fixture runs in a separately restarted envagent during
+/// E2E, so a process-local counter would repeat ids after reconnect and collide with the
+/// server's `(environment, agent, native_id)` key.
 const DEFAULT_NATIVE_ID: &str = "e2e-native-session";
-static NEXT_NATIVE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The context window this agent declares, in tokens.
 const CONTEXT_WINDOW: i64 = 200_000;
@@ -326,7 +326,7 @@ impl Adapter for E2eAdapter {
             // fixture that fails the suite for a reason no spec is about.
             RequestedNativeId::New => NativeId::new(format!(
                 "{DEFAULT_NATIVE_ID}-{}",
-                NEXT_NATIVE_ID.fetch_add(1, Ordering::Relaxed)
+                uuid::Uuid::new_v4().simple()
             )),
         };
         Ok(Box::new(E2eSession::new(native_id)))

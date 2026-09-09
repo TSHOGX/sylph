@@ -243,6 +243,14 @@ impl MockAgents {
             .remove(name);
     }
 
+    /// Make an agent available again, as installing or upgrading its CLI would.
+    pub fn install(&self, name: &str) {
+        self.agents
+            .write()
+            .expect("the mock agent map is not poisoned")
+            .insert(name.to_string(), Behavior::Success);
+    }
+
     /// Snapshot this fixture's adapter inventory in the shape an envagent hello carries.
     pub async fn inventory(&self) -> Vec<sylph_protocol::AgentInventory> {
         let mut names = self.available();

@@ -118,7 +118,32 @@ async fn connected_inventory_updates_after_cli_removal_without_repair_or_restart
                 .expect("updated environment should remain in the API listing");
             assert_eq!(row["connected"], true);
             assert_eq!(row["agents"].as_array().map(Vec::len), Some(0));
-            return;
+
+            // Installing or upgrading the CLI is the inverse transition. It must
+            // be visible on this same lease as well, without a new pairing epoch.
+            backend.agents.install("mock");
+            for _ in 0..160 {
+                let restored = backend
+                    .state
+                    .env_bridge
+                    .list_environments()
+                    .await
+                    .expect("restored environment listing should succeed")
+                    .into_iter()
+                    .find(|row| row.id == environment)
+                    .expect("paired fixture environment should remain listed");
+                if restored.connected
+                    && restored
+                        .agents
+                        .iter()
+                        .any(|agent| agent.name == "mock" && agent.available)
+                {
+                    assert_eq!(restored.connection_epoch, before.connection_epoch);
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("connected environment inventory did not reflect CLI installation");
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }

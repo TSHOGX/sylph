@@ -104,9 +104,8 @@ unavailable *with its version*, which is a different fix from installing it.
 and sends an `agents` message when its inventory moves, so upgrading a vendor CLI or
 installing a new one takes effect without re-pairing or restarting the server. A machine
 that starts with only `claude` usable, then upgrades `codex` past the floor and installs
-`pi`, reports all three from that moment. Only the `hello` half of this is built; the
-watcher and the `agents` message are the Milestone 1 exit gate in `docs/roadmap.md`
-§ Milestone 1 — until they land, an inventory change is observed at the next connection.
+`pi`, reports all three from that moment. The watcher and the `agents` message complete
+the live half of the Milestone 1 exit gate in `docs/roadmap.md` § Milestone 1.
 
 So availability is per environment and time-varying, and `GET /api/v1/environments` is
 where it is read. A picker offering an agent must name the environment it will run in,
