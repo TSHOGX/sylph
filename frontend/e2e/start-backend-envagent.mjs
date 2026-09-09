@@ -20,7 +20,11 @@ const envPort = Number(process.env.SYLPH_ENV_PORT ?? backendPort + 1);
 const backend = `http://127.0.0.1:${backendPort}`;
 const envHome = path.join(here, "..", ".e2e-env-home");
 const agentHome = path.join(envHome, "home");
-const browseRoots = ["/tmp", os.tmpdir(), os.tmpdir().startsWith("/var/") ? `/private${os.tmpdir()}` : ""].filter(Boolean).join(":");
+// The server's isolated HOME is still the developer home in this process, while
+// the fixture envagent uses its own HOME for credentials.  Browse roots describe
+// the machine's usable paths, so include both homes explicitly along with the
+// temporary roots used by the specs.
+const browseRoots = [process.env.HOME ?? "/Users/hsw", "/tmp", os.tmpdir(), os.tmpdir().startsWith("/var/") ? `/private${os.tmpdir()}` : ""].filter(Boolean).join(":");
 // Keep Cargo usable after giving the envagent an isolated HOME. Rustup resolves
 // its toolchain from HOME when these variables are absent.
 const toolchainEnv = {
