@@ -62,14 +62,6 @@ pub struct AppState {
     /// `GET /environments` reports availability from — the surface that replaced
     /// discovery's `agents.available` and `broken_adapters`.
     pub environment: Arc<dyn crate::env::Environment>,
-    /// Where an adapter comes from, and what may be reported about them.
-    ///
-    /// Held beside `environment` and for the same reason: one implementation today, and
-    /// step 4 replaces it with a per-environment answer dialled in from an envagent, so
-    /// pairing replaces one field rather than reaching into `/health`, `/diagnostics`,
-    /// `GET /environments`, and the gate on `POST /sessions` — all of which read this one
-    /// object and therefore cannot disagree about which agents exist.
-    pub adapters: Arc<dyn crate::adapters::AdapterSource>,
     /// Runs turns on live links.
     pub turns: crate::supervisor::turn::LinkedSupervisor,
     pub links: crate::links::LinkManager,
@@ -258,7 +250,6 @@ impl AppState {
             data_dir: config.data_dir.clone(),
             writer: writer.clone(),
             hub: hub.clone(),
-            environment: environment.clone(),
             adapters: adapters.clone(),
             soul_path,
             seq: seq.clone(),
@@ -297,6 +288,12 @@ impl AppState {
         // consolidator so the bridge never grows a second definition of a
         // finished turn.
         env_bridge.set_turn_closer(turns.closer()).await;
+        env_bridge
+            .set_trajectory_reconciler(crate::supervisor::TrajectoryReconciler::new(
+                store.clone(),
+                history.clone(),
+            ))
+            .await;
         // And the half that reaches *backwards*: a delegation that outlived its turn
         // reports its outcome on a later one, and the record it corrects belongs to the
         // turn that opened it (`crate::supervisor::reconcile`). Both stores, because
@@ -324,7 +321,6 @@ impl AppState {
             store,
             config,
             environment,
-            adapters,
             hub,
             turns,
             links,

@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use crate::db::{EnvIngestResult, JournalStore};
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::models::now_ms;
-use crate::supervisor::{Outcome, TurnCloser};
+use crate::supervisor::{Outcome, TrajectoryOutcome, TrajectoryReconciler, TurnCloser};
 
 use super::registry::{EnvironmentRegistry, EnvironmentSnapshot, PairingGrant, PairingOffer};
 
@@ -143,6 +143,10 @@ pub struct EnvBridge {
     /// supervisor (which owns the consolidator), so this is installed by
     /// `AppState::build` once both sides exist.
     turn_closer: Arc<RwLock<Option<TurnCloser>>>,
+    /// Applies late delegated outcomes to the turn that opened the trajectory.
+    /// Remote event batches bypass the live link drain, so they need the same
+    /// reconciler wired explicitly at startup.
+    trajectory_reconciler: Arc<RwLock<Option<TrajectoryReconciler>>>,
     server_epoch: u64,
 }
 
@@ -171,6 +175,7 @@ impl EnvBridge {
             session_command_locks: Arc::new(Mutex::new(HashMap::new())),
             remote_source_turns: Arc::new(Mutex::new(HashMap::new())),
             turn_closer: Arc::new(RwLock::new(None)),
+            trajectory_reconciler: Arc::new(RwLock::new(None)),
             server_epoch: now_ms() as u64,
         }
     }
@@ -178,6 +183,11 @@ impl EnvBridge {
     /// Install the canonical turn settlement path after supervisor construction.
     pub async fn set_turn_closer(&self, closer: TurnCloser) {
         *self.turn_closer.write().await = Some(closer);
+    }
+
+    /// Install the shared trajectory reconciliation path used by remote ingest.
+    pub async fn set_trajectory_reconciler(&self, reconciler: TrajectoryReconciler) {
+        *self.trajectory_reconciler.write().await = Some(reconciler);
     }
 
     pub fn spawn_health_reaper(&self) {
@@ -1728,6 +1738,35 @@ impl EnvBridge {
                     self.hub
                         .publish_trace(&row.session_id.encode(), published)
                         .await;
+                    // A remote envagent's drain is outside `LinkManager`, so
+                    // mirror the live path's late trajectory reconciliation here.
+                    // The event is still retained on the arriving turn; the
+                    // reconciler amends the earlier provisional record in place.
+                    if item.event.kind == sylph_protocol::EventKind::Subagent
+                        && item.event.phase == Some(sylph_protocol::Phase::Completed)
+                    {
+                        if let Some(stream_id) = item.event.stream_id.as_deref() {
+                            if let Some(reconciler) =
+                                self.trajectory_reconciler.read().await.clone()
+                            {
+                                let outcome = TrajectoryOutcome {
+                                    text: &item.event.text,
+                                    is_error: item.event.is_error,
+                                    reported_on_turn_id: arrival_turn_id
+                                        .as_deref()
+                                        .unwrap_or_default(),
+                                };
+                                let _ = reconciler
+                                    .record(
+                                        &item.session_id,
+                                        stream_id,
+                                        arrival_turn_id.as_deref().unwrap_or_default(),
+                                        &outcome,
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
                     if let Some(turn_id) = arrival_turn_id.as_deref() {
                         if item.event.kind == sylph_protocol::EventKind::Turn
                             && item.event.phase == Some(sylph_protocol::Phase::Completed)
@@ -1811,7 +1850,10 @@ impl EnvBridge {
             id: format!("remote-source-turn-{}", uuid::Uuid::new_v4().simple()),
             session_id: session_id.clone(),
             status: "running".into(),
-            origin: "user".into(),
+            // No HTTP request opened this turn: it is the remote agent speaking
+            // after the prior turn settled, so preserve that provenance in the
+            // durable turn row just as the live link path does.
+            origin: "agent".into(),
             request_text: String::new(),
             command_invocation_id: None,
             idempotency_key: None,

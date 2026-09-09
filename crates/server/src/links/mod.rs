@@ -46,7 +46,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::adapters::AdapterSource;
 use crate::db::JournalStore;
-use crate::env::Environment;
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
 use crate::models::now_ms;
 use crate::models::PendingRequest;
@@ -511,11 +510,6 @@ pub struct LinkManager {
     /// request) that has nothing to batch.
     writer: crate::db::JournalWriter,
     hub: EventHub,
-    /// Held for `descriptor` and `probe`, which is what the session's environment id and
-    /// per-environment health are read from. It no longer spawns anything: an adapter owns
-    /// whatever process its vendor CLI needs (`crates/adapters/src/process.rs`).
-    #[allow(dead_code)]
-    environment: Arc<dyn Environment>,
     /// Where an adapter comes from.
     ///
     /// A trait object rather than a search path: availability is "is the vendor CLI on this
@@ -579,7 +573,6 @@ pub struct LinkManagerConfig {
     pub data_dir: PathBuf,
     pub writer: crate::db::JournalWriter,
     pub hub: EventHub,
-    pub environment: Arc<dyn Environment>,
     pub adapters: Arc<dyn AdapterSource>,
     pub soul_path: Option<PathBuf>,
     pub seq: SeqAllocator,
@@ -593,7 +586,6 @@ impl LinkManager {
             data_dir: config.data_dir,
             writer: config.writer,
             hub: config.hub,
-            environment: config.environment,
             adapters: config.adapters,
             soul_path: config.soul_path,
             seq: config.seq,
