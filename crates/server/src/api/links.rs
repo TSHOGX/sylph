@@ -37,20 +37,44 @@ fn remote_link_state(agent: String, value: serde_json::Value) -> Result<LinkStat
                 .collect()
         })
         .unwrap_or_default();
-    let capabilities = serde_json::from_value(capabilities_value)
-        .map_err(|error| Error::Internal(format!("remote capabilities were malformed: {error}")))?;
-    let link = match value.get("link") {
+    let link: Option<sylph_protocol::LinkFacets> = match value.get("link") {
         Some(value) => Some(serde_json::from_value(value.clone()).map_err(|error| {
             Error::Internal(format!("remote link facets were malformed: {error}"))
         })?),
         None => None,
     };
+    if link.as_ref().is_some_and(|link| !link.control.available) {
+        return Ok(LinkState {
+            link: link.unwrap(),
+            agent: Some(agent),
+            supports: Vec::new(),
+            capabilities: None,
+        });
+    }
+    let capabilities = serde_json::from_value(capabilities_value)
+        .map_err(|error| Error::Internal(format!("remote capabilities were malformed: {error}")))?;
     Ok(LinkState::from_remote_capabilities_with_link(
         agent,
         capabilities,
         supports,
         link,
     ))
+}
+
+fn remote_refusal(code: &str, message: String) -> Error {
+    match code {
+        "INVALID_VALUE" => Error::InvalidRequest(message),
+        "UNSUPPORTED_FIELD" => Error::Unsupported(message),
+        "SESSION_NOT_HOSTED" | "NO_AGENT" => Error::LinkFailed(message),
+        _ => Error::LinkFailed(format!("{code}: {message}")),
+    }
+}
+
+fn remote_config_refusal(code: &str, message: String) -> Error {
+    match code {
+        "INVALID_VALUE" | "UNSUPPORTED_FIELD" => Error::InvalidRequest(message),
+        _ => remote_refusal(code, message),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -77,14 +101,17 @@ pub async fn prepared_set_config(
     Json(body): Json<PreparedConfigRequest>,
 ) -> Result<Json<crate::links::LinkState>> {
     if let Some(draft) = state.env_bridge.remote_draft(&draft_id).await {
-        let value = state
+        state
             .env_bridge
             .remote_draft_set_config(&draft, body.id, body.value)
             .await
-            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-        let _: Vec<sylph_protocol::ConfigOption> =
-            serde_json::from_value(value).map_err(|error| {
-                Error::Internal(format!("remote draft returned malformed options: {error}"))
+            .map_err(|error| {
+                let text = format!("{error:#}");
+                if let Some((code, message)) = text.split_once(": ") {
+                    remote_config_refusal(code, message.to_string())
+                } else {
+                    Error::LinkFailed(text)
+                }
             })?;
         let refreshed = state
             .env_bridge
@@ -169,7 +196,7 @@ pub async fn capabilities(
             Ok(Json(LinkState::detached_remote()))
         }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(Error::LinkFailed(format!("{code}: {message}")))
+            Err(remote_config_refusal(&code, message))
         }
         sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
             "remote capabilities outcome is unknown: {}",
@@ -203,7 +230,7 @@ pub async fn attach(
     match outcome {
         sylph_protocol::CommandOutcome::Accepted { .. } => Ok(Json(LinkState::detached_remote())),
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(Error::LinkFailed(format!("{code}: {message}")))
+            Err(remote_config_refusal(&code, message))
         }
         sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
             "remote attach outcome is unknown: {}",
@@ -317,6 +344,32 @@ pub async fn resolve(
         .resolve_request(&request_id, &body.option, input_json.as_deref(), None)
         .await?
         .ok_or(Error::RequestAlreadyResolved)?;
+
+    state
+        .hub
+        .publish_session(
+            &request.session_id.encode(),
+            crate::events::StreamEvent {
+                seq: 0,
+                arrival_turn_id: None,
+                kind: "request".into(),
+                phase: None,
+                stream_id: None,
+                span: None,
+                interior_state: None,
+                name: None,
+                text: String::new(),
+                data: Some(serde_json::to_value(&resolved).unwrap_or_default()),
+                is_error: false,
+                stability: "stable".into(),
+                source: "server".into(),
+                arrival_at_ms: crate::models::now_ms(),
+                recorded_at_ms: None,
+                created_at_ms: crate::models::now_ms(),
+                started_at_ms: None,
+            },
+        )
+        .await;
 
     // Announced before the forward, and deliberately so. The claim above is what makes
     // this request answered — the row is committed and no second answer can win — so
@@ -567,15 +620,28 @@ pub async fn set_config(
     match outcome {
         sylph_protocol::CommandOutcome::Accepted {
             result: Some(value),
-        } => Ok(Json(remote_link_state(
-            session_id.agent.to_string(),
-            value,
-        )?)),
+        } => {
+            if let Some(flag) = value.get("persistedFlag") {
+                if let (Some(key), Some(value)) = (
+                    flag.get("key").and_then(|v| v.as_str()),
+                    flag.get("value").and_then(|v| v.as_str()),
+                ) {
+                    state
+                        .store
+                        .set_session_flag(&session_id, key, value)
+                        .await?;
+                }
+            }
+            Ok(Json(remote_link_state(
+                session_id.agent.to_string(),
+                value,
+            )?))
+        }
         sylph_protocol::CommandOutcome::Accepted { result: None } => {
             Ok(Json(LinkState::detached_remote()))
         }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(Error::LinkFailed(format!("{code}: {message}")))
+            Err(remote_config_refusal(&code, message))
         }
         sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
             "remote config outcome is unknown: {}",

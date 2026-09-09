@@ -2485,6 +2485,7 @@
                   "REQUEST_ALREADY_RESOLVED",
                   "LINK_GONE",
                   "LINK_FAILED",
+                  "HANDSHAKE_FAILED",
                   "TURN_MOVED",
                   "AGENT_UNSUPPORTED",
                   "AGENT_START_FAILED",

@@ -142,6 +142,9 @@ pub enum Error {
     #[error("Could not start the agent: {0}")]
     LinkFailed(String),
 
+    #[error("Agent handshake failed: {0}")]
+    HandshakeFailed(String),
+
     /// The agent does not support what was asked — interrupt on an adapter that
     /// never declared it, for instance. A capability failure rather than a bad
     /// request, so a UI can disable the control instead of retrying.
@@ -242,6 +245,9 @@ impl Error {
             // this server starts, and the useful signal is "try again once it
             // can start" rather than "your request was malformed".
             Error::LinkFailed(msg) => (StatusCode::SERVICE_UNAVAILABLE, "LINK_FAILED", msg.clone()),
+            Error::HandshakeFailed(msg) => {
+                (StatusCode::BAD_GATEWAY, "HANDSHAKE_FAILED", msg.clone())
+            }
             Error::Unsupported(msg) => (StatusCode::CONFLICT, "AGENT_UNSUPPORTED", msg.clone()),
             Error::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
@@ -486,6 +492,7 @@ mod tests {
                 running: None,
             },
             Error::LinkFailed("x".into()),
+            Error::HandshakeFailed("x".into()),
             Error::Unsupported("x".into()),
             Error::Internal("x".into()),
         ];
@@ -517,6 +524,7 @@ mod tests {
                 | Error::LinkGone
                 | Error::TurnMoved { .. }
                 | Error::LinkFailed(_)
+                | Error::HandshakeFailed(_)
                 | Error::Unsupported(_)
                 | Error::Internal(_) => {}
             }

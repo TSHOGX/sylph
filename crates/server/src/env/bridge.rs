@@ -1552,24 +1552,29 @@ impl EnvBridge {
     }
 
     pub async fn disconnect(&self, environment: &EnvironmentId, epoch: u64) -> Result<()> {
-        let removed = {
+        let actual_epoch = {
             let mut leases = self.leases.write().await;
             match leases.get(environment) {
+                Some(lease) if epoch == u64::MAX => {
+                    let actual = lease.epoch;
+                    leases.remove(environment);
+                    Some(actual)
+                }
                 Some(lease) if lease.epoch == epoch => {
                     leases.remove(environment);
-                    true
+                    Some(epoch)
                 }
-                Some(_) => false,
-                None => true,
+                Some(_) => None,
+                None => Some(epoch),
             }
         };
-        if !removed {
+        let Some(actual_epoch) = actual_epoch else {
             return Err(BridgeError::StaleEpoch.into());
-        }
+        };
         if let Some(row) = self.store.environment_row(environment).await? {
             let _ = self
                 .store
-                .clear_environment_connection_if_epoch(environment, &row.token_hash, epoch)
+                .clear_environment_connection_if_epoch(environment, &row.token_hash, actual_epoch)
                 .await?;
         }
         let pending: Vec<(String, IdempotencyPolicy)> = self

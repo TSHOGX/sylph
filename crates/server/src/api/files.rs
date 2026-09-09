@@ -166,17 +166,6 @@ async fn remote_read_bytes(
     .map_err(|error| Error::Internal(format!("remote read returned malformed bytes: {error}")))
 }
 
-/// Largest file served inline.
-///
-/// The Artifacts pane previews source files and images, and a browser cannot
-/// usefully render megabytes of text in a side panel anyway. Beyond this the
-/// response reports the size and sets `truncated`, so the UI can say why it is
-/// showing a prefix instead of failing.
-const MAX_PREVIEW_BYTES: u64 = 1024 * 1024;
-
-/// How much of an oversized text file to return.
-const TRUNCATE_TO_BYTES: usize = 256 * 1024;
-
 /// Entries per directory listing.
 ///
 /// A `node_modules` directory can hold tens of thousands of entries; sending
@@ -498,7 +487,7 @@ pub async fn content(
             })),
         }
     } else {
-        return Err(Error::SessionNotFound);
+        Err(Error::SessionNotFound)
     }
 }
 

@@ -527,6 +527,14 @@ impl HostedSession {
         self.session.lock().await.set_config(id, value).await
     }
 
+    pub async fn launch_flag_for_config(
+        &self,
+        id: &str,
+        value: &serde_json::Value,
+    ) -> Option<(String, String)> {
+        self.session.lock().await.launch_flag_for_config(id, value)
+    }
+
     pub async fn resolve(&self, resolution: sylph_protocol::Resolution) -> Result<()> {
         self.session.lock().await.resolve(resolution).await
     }
@@ -667,6 +675,16 @@ impl EnvAgent {
             .adapters
             .for_agent(agent)
             .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
+        let info = adapter
+            .probe()
+            .await
+            .with_context(|| format!("agent '{agent}' would not report what it is"))?;
+        if info.name != agent {
+            return Err(anyhow!(
+                "agent '{agent}' reported itself as '{}', which is a handshake failure",
+                info.name
+            ));
+        }
         let mut session = adapter.run(spec).await?;
         let events = session
             .events()
@@ -1284,22 +1302,52 @@ impl EnvAgent {
                 id,
                 value,
             } => match self.sessions.read().await.get(&session_id).cloned() {
-                Some(session) => match session.set_config(&id, value).await {
-                    Ok(_options) => match self
-                        .capability_result(&session_id.agent.to_string(), &session)
+                Some(session) => {
+                    let persisted = session
+                        .launch_flag_for_config(&id, &value)
                         .await
-                    {
-                        Ok(value) => sylph_protocol::CommandOutcome::accepted_with_result(value),
-                        Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                            code: "CAPABILITIES_FAILED".into(),
-                            message: format!("{error:#}"),
+                        .map(|(key, value)| serde_json::json!({"key": key, "value": value}));
+                    match session.set_config(&id, value).await {
+                        Ok(_options) => match self
+                            .capability_result(&session_id.agent.to_string(), &session)
+                            .await
+                        {
+                            Ok(mut value) => {
+                                if let Some(flag) = persisted {
+                                    value["persistedFlag"] = flag;
+                                }
+                                sylph_protocol::CommandOutcome::accepted_with_result(value)
+                            }
+                            Err(error) => sylph_protocol::CommandOutcome::Rejected {
+                                code: "CAPABILITIES_FAILED".into(),
+                                message: format!("{error:#}"),
+                            },
                         },
-                    },
-                    Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                        code: "SET_CONFIG_FAILED".into(),
-                        message: format!("{error:#}"),
-                    },
-                },
+                        Err(error) => {
+                            if let Some(refusal) =
+                                error.downcast_ref::<sylph_protocol::AdapterError>()
+                            {
+                                sylph_protocol::CommandOutcome::Rejected {
+                                    code: match refusal.code {
+                                        sylph_protocol::RefusalCode::UnsupportedField => {
+                                            "UNSUPPORTED_FIELD"
+                                        }
+                                        sylph_protocol::RefusalCode::InvalidValue => {
+                                            "INVALID_VALUE"
+                                        }
+                                    }
+                                    .into(),
+                                    message: refusal.message.clone(),
+                                }
+                            } else {
+                                sylph_protocol::CommandOutcome::Rejected {
+                                    code: "SET_CONFIG_FAILED".into(),
+                                    message: format!("{error:#}"),
+                                }
+                            }
+                        }
+                    }
+                }
                 None => sylph_protocol::CommandOutcome::Rejected {
                     code: "SESSION_NOT_HOSTED".into(),
                     message: "no live session on this environment".into(),
@@ -1705,17 +1753,26 @@ impl EnvAgent {
         session: &HostedSession,
     ) -> Result<serde_json::Value> {
         let capabilities = session.capabilities().await?;
-        let supports = match self.adapters.for_agent(agent) {
-            Some(adapter) => adapter
-                .probe()
-                .await
-                .map(|info| info.supports)
-                .unwrap_or_default(),
-            None => Vec::new(),
+        let (supports, link) = match self.adapters.for_agent(agent) {
+            Some(adapter) => match adapter.probe().await {
+                Ok(info) => (
+                    info.supports,
+                    serde_json::json!({"observe": {"available": true}, "control": {"available": true}}),
+                ),
+                Err(_) => (
+                    Vec::new(),
+                    serde_json::json!({"observe": {"available": true}, "control": {"available": false, "reason": "handshake_failed"}}),
+                ),
+            },
+            None => (
+                Vec::new(),
+                serde_json::json!({"observe": {"available": true}, "control": {"available": false, "reason": "no_agent"}}),
+            ),
         };
         Ok(serde_json::json!({
             "capabilities": capabilities,
             "supports": supports,
+            "link": link,
         }))
     }
 
@@ -1732,10 +1789,25 @@ impl EnvAgent {
         match session {
             Some(session) => match operation(session).await {
                 Ok(()) => sylph_protocol::CommandOutcome::accepted(),
-                Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                    code: "CONTROL_FAILED".into(),
-                    message: format!("{error:#}"),
-                },
+                Err(error) => {
+                    if let Some(refusal) = error.downcast_ref::<sylph_protocol::AdapterError>() {
+                        sylph_protocol::CommandOutcome::Rejected {
+                            code: match refusal.code {
+                                sylph_protocol::RefusalCode::UnsupportedField => {
+                                    "UNSUPPORTED_FIELD"
+                                }
+                                sylph_protocol::RefusalCode::InvalidValue => "INVALID_VALUE",
+                            }
+                            .into(),
+                            message: refusal.message.clone(),
+                        }
+                    } else {
+                        sylph_protocol::CommandOutcome::Rejected {
+                            code: "CONTROL_FAILED".into(),
+                            message: format!("{error:#}"),
+                        }
+                    }
+                }
             },
             None => sylph_protocol::CommandOutcome::Rejected {
                 code: "SESSION_NOT_HOSTED".into(),

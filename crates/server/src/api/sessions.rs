@@ -410,6 +410,8 @@ async fn create_prepared(
                 Error::InvalidRequest("Working directory is not a directory".into())
             } else if text.contains("AGENT_UNKNOWN") {
                 Error::InvalidRequest(format!("Unknown agent: {}", req.agent))
+            } else if text.contains("handshake failure") || text.contains("would not report") {
+                Error::HandshakeFailed(text)
             } else {
                 Error::AgentStartFailed(anyhow::anyhow!(text))
             }
@@ -1078,8 +1080,8 @@ pub async fn adopt(
         let _ = state.env_bridge.close_remote_session(&session_id).await;
         return Err(Error::LinkFailed(format!("{error:#}")));
     }
-    return Ok((
+    Ok((
         StatusCode::CREATED,
         Json(SessionResponse { session: stored }),
-    ));
+    ))
 }

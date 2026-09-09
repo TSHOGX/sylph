@@ -455,14 +455,13 @@ async fn interrupt_and_steer_reach_a_live_agent() {
 async fn interrupt_and_steer_report_a_missing_agent_once_its_link_is_gone() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
+    let typed = common::TestBackend::session_id(&session_id);
     server
         .state
-        .links
-        .detach(&common::TestBackend::session_id(&session_id), "test")
-        .await;
-    // Made absent so `ensure` cannot transparently establish a fresh link, which is what
-    // every one of these routes does on demand.
-    server.agents.uninstall("mock");
+        .env_bridge
+        .disconnect(&typed.environment, u64::MAX)
+        .await
+        .expect("disconnecting the envagent fixture");
 
     let steered = server
         .post_authed(
@@ -470,7 +469,7 @@ async fn interrupt_and_steer_report_a_missing_agent_once_its_link_is_gone() {
             json!({"text": "also check the tests"}),
         )
         .await;
-    assert_eq!(steered.status(), StatusCode::CONFLICT);
+    assert_eq!(steered.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
