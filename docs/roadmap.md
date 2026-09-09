@@ -27,7 +27,7 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| **The envagent is the only execution path** | Milestone 1 | most routes still reach an in-process adapter seam, and envagent ingress is opt-in rather than always bound |
+| **The envagent is the only execution path** | Milestone 1 | session routes and the default ingress now use the bridge; control, files, health, and environment listing still reach in-process seams |
 | **The server is `crates/server`** | Milestone 1 | moved into the workspace crate layout |
 | **Transport carries TLS and pairs from another host** | Milestone 3 | loopback only, so no off-host environment can dial in |
 | **Multi-user authentication and per-environment authorization** | Milestone 3 | a single bootstrap Subject, no grants |
