@@ -97,7 +97,10 @@ async fn connected_inventory_updates_after_cli_removal_without_repair_or_restart
     // pass and sends an `agents` frame over the existing connection.
     backend.agents.uninstall("mock");
 
-    for _ in 0..160 {
+    // Inventory probes run on a five-second cadence. Allow several complete
+    // passes so a busy shared test runtime cannot make this timing assertion
+    // flaky when the environments suite runs in parallel.
+    for _ in 0..600 {
         let current = backend
             .state
             .env_bridge
@@ -122,7 +125,7 @@ async fn connected_inventory_updates_after_cli_removal_without_repair_or_restart
             // Installing or upgrading the CLI is the inverse transition. It must
             // be visible on this same lease as well, without a new pairing epoch.
             backend.agents.install("mock");
-            for _ in 0..160 {
+            for _ in 0..600 {
                 let restored = backend
                     .state
                     .env_bridge
