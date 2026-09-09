@@ -290,6 +290,12 @@ pub async fn tree(
                     .flatten(),
             });
         }
+        entries.retain(|entry| !(entry.is_dir && SKIPPED_DIRS.contains(&entry.name.as_str())));
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
         return Ok(Json(TreeResponse {
             root: workdir.to_string(),
             path: paths::normalize_relative(&query.path),

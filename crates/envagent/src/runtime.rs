@@ -1519,11 +1519,10 @@ impl EnvAgent {
                         let entry = entry?;
                         let file_type = entry.file_type()?;
                         let resolved = if file_type.is_symlink() {
-                            let resolved = entry.path().canonicalize()?;
-                            if !resolved.starts_with(root) {
-                                continue;
+                            match entry.path().canonicalize() {
+                                Ok(resolved) if resolved.starts_with(root) => resolved,
+                                _ => continue,
                             }
-                            resolved
                         } else {
                             entry.path()
                         };
