@@ -1003,21 +1003,12 @@ async fn resolve(state: &AppState, session_id: &str, relative: &str) -> Result<(
     // shape; every other value still goes through the strict identity decoder below.
     // This keeps the file API useful while composing without pretending a draft handle
     // is a session id (the original bug sent `draft-...` through `SessionId::decode`).
-    let workdir = if session_id.starts_with("draft-") {
-        state
-            .links
-            .prepared_spec(session_id)
-            .await
-            .ok_or(Error::SessionNotFound)?
-            .workdir
-    } else {
-        state
-            .store
-            .get_session(&crate::api::sessions::decode_id(session_id)?)
-            .await?
-            .ok_or(Error::SessionNotFound)?
-            .workdir
-    };
+    let workdir = state
+        .store
+        .get_session(&crate::api::sessions::decode_id(session_id)?)
+        .await?
+        .ok_or(Error::SessionNotFound)?
+        .workdir;
 
     // Canonicalizing the root too matters on macOS, where `/tmp` is a symlink to
     // `/private/tmp`: comparing a canonical target against a non-canonical root
