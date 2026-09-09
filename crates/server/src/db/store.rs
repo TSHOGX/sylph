@@ -434,14 +434,13 @@ impl JournalStore {
             r#"INSERT INTO turns (
                 id, session_env, session_agent, session_native, status, origin,
                 request_text, command_invocation_id, idempotency_key, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)
             RETURNING *"#,
         )
         .bind(&turn.id)
         .bind(turn.session_id.environment.as_str())
         .bind(turn.session_id.agent.as_str())
         .bind(turn.session_id.native_id.as_str())
-        .bind(&turn.status)
         .bind(&turn.origin)
         .bind(&turn.request_text)
         .bind(&turn.command_invocation_id)
