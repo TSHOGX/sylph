@@ -1063,6 +1063,18 @@ impl EnvAgent {
                 initial_input,
                 initial_turn_id,
             } => {
+                if !self.adapters.is_known(&agent) {
+                    return sylph_protocol::CommandOutcome::Rejected {
+                        code: "AGENT_UNKNOWN".into(),
+                        message: format!("agent '{agent}' is not known on this environment"),
+                    };
+                }
+                if self.adapters.for_agent(&agent).is_none() {
+                    return sylph_protocol::CommandOutcome::Rejected {
+                        code: "NO_AGENT".into(),
+                        message: format!("agent '{agent}' is not installed on this environment"),
+                    };
+                }
                 // A prepared draft already owns the adapter process. Promote it
                 // in place so retries cannot spawn a second vendor session.
                 if let Some(draft_id) = draft_id {

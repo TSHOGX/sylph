@@ -547,15 +547,7 @@ async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
 
-    // Make the agent absent behind an already-created session, which is what an
-    // uninstalled CLI looks like to a session that predates its removal. Asked of the
-    // harness rather than spelled out: availability is a fact the adapter source holds
-    // now, and there is no directory to delete.
     server.agents.uninstall("mock");
-    // Torn down as well as removed. `POST /sessions` starts an agent now, so this
-    // session holds a *live* link that removing the adapter directory does not kill —
-    // and a live link keeps answering, which is correct: the process is running. What
-    // this test is about is the state after that link is gone and cannot be re-made.
     let _ = server
         .delete_authed(&format!("/api/v1/sessions/{}/link", session_id))
         .await;
@@ -566,13 +558,11 @@ async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
             .await,
     )
     .await;
+    eprintln!("BODY {:?}", body);
 
     assert_eq!(body["link"]["control"]["available"], false);
-    // **The reason is what the empty list could never say.** An unexplained `false` was
-    // the original defect: a client could not tell a failed handshake from an agent that
-    // declares no commands, so the only honest thing it could render was nothing — which
-    // is how a stale install presented as a composer ignoring the `/` key. `no_agent`
-    // means an install rather than a retry, and a client caches it like a success.
+    // `no_agent` means the paired machine is reachable but no compatible agent
+    // remains available there.
     assert_eq!(body["link"]["control"]["reason"], "no_agent");
     // **Observe stays available**, which is the whole point of two facets: the transcript
     // is the server's own record, so it reads whether or not the agent can be reached.

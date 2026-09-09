@@ -187,7 +187,7 @@ pub async fn capabilities(
         .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
     if matches!(&outcome, sylph_protocol::CommandOutcome::Rejected { code, .. } if code == "SESSION_NOT_HOSTED")
     {
-        state
+        let attach_outcome = match state
             .env_bridge
             .remote_attach(
                 &state
@@ -197,7 +197,29 @@ pub async fn capabilities(
                     .ok_or(Error::SessionNotFound)?,
             )
             .await
-            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let text = format!("{error:#}");
+                if text.contains("not installed")
+                    || text.contains("PREPARE_FAILED")
+                    || text.contains("NO_AGENT")
+                {
+                    return Ok(Json(LinkState::failed(
+                        sylph_protocol::UnavailableReason::NoAgent,
+                    )));
+                }
+                return Err(Error::LinkFailed(text));
+            }
+        };
+        if let sylph_protocol::CommandOutcome::Rejected { code, message } = attach_outcome {
+            if code == "NO_AGENT" {
+                return Ok(Json(LinkState::failed(
+                    sylph_protocol::UnavailableReason::NoAgent,
+                )));
+            }
+            return Err(Error::LinkFailed(format!("{code}: {message}")));
+        }
         outcome = state
             .env_bridge
             .remote_session_command(
