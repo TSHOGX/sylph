@@ -48,6 +48,9 @@ use crate::{
     AppState,
 };
 
+const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
+const TRUNCATE_TO_BYTES: usize = 256 * 1024;
+
 enum RemoteTarget {
     Draft {
         environment: sylph_protocol::EnvironmentId,
@@ -464,6 +467,12 @@ pub async fn content(
                 modified_at_ms: 0,
             }));
         }
+        let truncated = bytes.len() > MAX_PREVIEW_BYTES;
+        let bytes = if truncated {
+            bytes[..TRUNCATE_TO_BYTES].to_vec()
+        } else {
+            bytes
+        };
         match String::from_utf8(bytes) {
             Ok(text) => Ok(Json(ContentResponse {
                 path,
@@ -472,7 +481,7 @@ pub async fn content(
                 encoding: "text".into(),
                 mime_type,
                 content: Some(text),
-                truncated: false,
+                truncated,
                 modified_at_ms: 0,
             })),
             Err(_) => Ok(Json(ContentResponse {
@@ -482,7 +491,7 @@ pub async fn content(
                 encoding: "binary".into(),
                 mime_type,
                 content: None,
-                truncated: false,
+                truncated,
                 modified_at_ms: 0,
             })),
         }
