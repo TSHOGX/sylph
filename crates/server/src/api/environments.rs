@@ -23,11 +23,8 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use sylph_protocol::{AgentInfo, Capability, EnvironmentId, FlagSchema};
-use tokio::time::timeout;
 
 use crate::{error::Result, AppState};
 
@@ -171,53 +168,7 @@ pub async fn unpair(State(state): State<AppState>, Path(id): Path<String>) -> Re
 /// yields an environment with no agents, which is exactly the state a client must be able
 /// to explain rather than render as empty chrome.
 pub async fn list(State(state): State<AppState>) -> Result<Json<EnvironmentsResponse>> {
-    let descriptor = state.environment.descriptor();
-    let health = state.environment.probe().await;
-
-    // Probe each installed adapter once, concurrently.  The environment list is the
-    // only machine-level catalogue, so it must carry the same spawn-time metadata the
-    // draft UI uses for defaults.  A probe failure does not hide a PATH-present agent:
-    // opening a session will report the classified handshake failure, while this list
-    // still tells the user which CLI was found.  The timeout prevents a wedged vendor
-    // binary from hanging the environments picker indefinitely.
-    let probes = state.adapters.available().into_iter().map(|name| {
-        let adapters = state.adapters.clone();
-        async move {
-            let fallback = || AgentAvailability {
-                name: name.clone(),
-                version: None,
-                flags: FlagSchema::new(),
-                supports: Vec::new(),
-                available: true,
-            };
-            let Some(adapter) = adapters.for_agent(&name) else {
-                return fallback();
-            };
-            match timeout(Duration::from_secs(10), adapter.probe()).await {
-                Ok(Ok(info)) => AgentAvailability::from(info),
-                Ok(Err(error)) => {
-                    tracing::debug!(agent = %name, "Agent probe failed while listing environments: {error:#}");
-                    fallback()
-                }
-                Err(_) => {
-                    tracing::debug!(agent = %name, "Agent probe timed out while listing environments");
-                    fallback()
-                }
-            }
-        }
-    });
-    let agents = join_all(probes).await;
-
-    let mut environments = vec![Environment {
-        id: descriptor.id.clone(),
-        name: descriptor.label.clone(),
-        connected: health.available,
-        reason: health.reason,
-        origin: "development".to_string(),
-        // Directly connected: nothing relays for it.
-        reachable_via: None,
-        agents,
-    }];
+    let mut environments = Vec::new();
 
     for snapshot in state
         .env_bridge

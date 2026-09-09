@@ -81,21 +81,6 @@ struct AgentHealthLine {
 pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>> {
     let schema_version = state.store.schema_version().await.unwrap_or(0);
     let mut environments = Vec::new();
-    let local = state.environment.descriptor();
-    environments.push(EnvironmentHealthLine {
-        id: local.id,
-        name: local.label,
-        connected: state.environment.probe().await.available,
-        agents: state
-            .adapters
-            .available()
-            .into_iter()
-            .map(|name| AgentHealthLine {
-                name,
-                version: None,
-            })
-            .collect(),
-    });
     for environment in state
         .env_bridge
         .list_environments()
@@ -122,7 +107,7 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse
         api_version: "1".to_string(),
         schema_version,
         agents: AgentsHealth {
-            available: !state.adapters.available().is_empty(),
+            available: environments.iter().any(|environment| environment.connected && !environment.agents.is_empty()),
         },
         environments,
     }))
@@ -198,7 +183,14 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
         uptime_seconds: uptime_seconds(),
         sessions,
         turns,
-        agents: state.adapters.available(),
+        agents: state
+            .env_bridge
+            .list_environments()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|environment| environment.agents.into_iter().filter(|agent| agent.available).map(|agent| agent.name))
+            .collect(),
         active_turns: state.turns.active_turn_count().await,
         retention: state.retention.last_pass().await,
         native_record_failures: state.history.native_record_failures(),
