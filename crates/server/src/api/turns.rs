@@ -140,13 +140,19 @@ pub async fn create_prepared(
             };
 
             let now = now_ms();
+            let opening_title = if text.trim().is_empty() {
+                req.command.as_ref().map(|command| format!("/{command}"))
+            } else {
+                Some(crate::db::labels::summarize_line(&text))
+            };
             let session = crate::models::Session {
                 id: session_id.clone(),
                 workdir: resolved_workdir,
                 title: draft
                     .title
                     .clone()
-                    .or_else(|| crate::db::labels::summarize_line(&text).into()),
+                    .filter(|title| !title.trim().is_empty())
+                    .or(opening_title),
                 inject_identity: draft.inject_identity,
                 fidelity: sylph_protocol::Fidelity::Stream,
                 flags_json: match serde_json::to_string(&draft.flags) {

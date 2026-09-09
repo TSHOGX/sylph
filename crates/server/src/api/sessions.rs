@@ -495,32 +495,30 @@ pub async fn update(
     // and remains available while an envagent is temporarily offline; the next
     // turn carries the stored set through the bridge.
     if let Some(flags) = &req.flags {
-        let outcome = state
+        let environments = state
             .env_bridge
-            .remote_session_command(
-                &id,
-                sylph_protocol::EnvironmentCommand::Capabilities {
-                    session_id: id.clone(),
-                },
-                sylph_protocol::IdempotencyPolicy::Replayable,
-            )
+            .list_environments()
             .await
             .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-        if let sylph_protocol::CommandOutcome::Accepted {
-            result: Some(value),
-        } = outcome
-        {
-            if let Some(config) = value.get("capabilities").and_then(|v| v.get("config")) {
-                let options: Vec<sylph_protocol::ConfigOption> = serde_json::from_value(config.clone())
-                    .map_err(|error| Error::Internal(format!("remote capabilities were malformed: {error}")))?;
-                for (key, value) in flags {
-                    let Some(option) = options.iter().find(|option| option.id == *key) else {
-                        return Err(Error::InvalidRequest(format!("Agent '{}' does not declare a '{}' flag.", id.agent, key)));
-                    };
-                    if !option.options.is_empty() && !option.options.iter().any(|choice| choice.value == *value) {
-                        return Err(Error::InvalidRequest(format!("'{}' is not a valid {} for '{}'.", value, key, id.agent)));
-                    }
-                }
+        let info = environments
+            .into_iter()
+            .find(|environment| environment.id == id.environment)
+            .and_then(|environment| {
+                environment
+                    .agents
+                    .into_iter()
+                    .find(|agent| agent.name == id.agent.as_str())
+            })
+            .and_then(|agent| agent.info);
+        let Some(info) = info else {
+            return Err(Error::InvalidRequest(format!("Agent '{}' is unavailable on this environment.", id.agent)));
+        };
+        for (key, value) in flags {
+            let Some(spec) = info.flags.get(key) else {
+                return Err(Error::InvalidRequest(format!("Agent '{}' does not declare a '{}' flag.", id.agent, key)));
+            };
+            if !spec.choices.is_empty() && !spec.choices.contains(value) {
+                return Err(Error::InvalidRequest(format!("'{}' is not a valid {} for '{}'.", value, key, id.agent)));
             }
         }
         let flags_json = serde_json::to_string(flags)
