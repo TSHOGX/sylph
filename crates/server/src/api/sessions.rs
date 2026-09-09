@@ -398,7 +398,22 @@ async fn create_prepared(
             None,
         )
         .await
-        .map_err(|error| Error::AgentStartFailed(anyhow::anyhow!("{error:#}")))?;
+        .map_err(|error| {
+            let text = format!("{error:#}");
+            if text.contains("PREPARE_FAILED") && text.contains("not installed") {
+                Error::InvalidRequest(format!("Unknown agent: {}", req.agent))
+            } else if text.contains("POLICY_VIOLATION") || text.contains("outside") || text.contains("escapes") {
+                Error::Forbidden(format!("The requested working directory is outside the configured sessions may run in roots: {}", state.config.browse_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")))
+            } else if text.contains("WORKDIR_MISSING") || text.contains("does not exist") {
+                Error::InvalidRequest("Working directory does not exist".into())
+            } else if text.contains("not a directory") {
+                Error::InvalidRequest("Working directory is not a directory".into())
+            } else if text.contains("AGENT_UNKNOWN") {
+                Error::InvalidRequest(format!("Unknown agent: {}", req.agent))
+            } else {
+                Error::AgentStartFailed(anyhow::anyhow!(text))
+            }
+        })?;
     Ok((
         StatusCode::CREATED,
         Json(PreparedSessionResponse {

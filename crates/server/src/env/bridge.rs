@@ -382,13 +382,31 @@ impl EnvBridge {
                         }
                         let _ = self.registry.touch(&environment, epoch).await;
                     }
-                    DecodedMessage::Known(WireMessage::Agents { connection_epoch, agents }) => {
-                        if connection_epoch != epoch { return Err(BridgeError::StaleEpoch.into()); }
+                    DecodedMessage::Known(WireMessage::Agents {
+                        connection_epoch,
+                        agents,
+                    }) => {
+                        if connection_epoch != epoch {
+                            return Err(BridgeError::StaleEpoch.into());
+                        }
                         let agents_json = serde_json::to_string(&agents)?;
                         if let Some(row) = self.store.environment_row(&environment).await? {
-                            let _ = self.store.set_environment_connection(&environment, &row.token_hash, epoch, true, row.reachable_via.as_deref(), &agents_json).await?;
+                            let _ = self
+                                .store
+                                .set_environment_connection(
+                                    &environment,
+                                    &row.token_hash,
+                                    epoch,
+                                    true,
+                                    row.reachable_via.as_deref(),
+                                    &agents_json,
+                                )
+                                .await?;
                         }
-                        let _ = self.registry.update_agents(&environment, epoch, agents).await;
+                        let _ = self
+                            .registry
+                            .update_agents(&environment, epoch, agents)
+                            .await;
                     }
                     DecodedMessage::Known(WireMessage::TurnInput {
                         session_id,
@@ -852,9 +870,19 @@ impl EnvBridge {
             .await?;
         // Keep the in-memory registry in sync for immediate API reads.  The
         // database remains authoritative across a server restart.
-        let inventory = agents.iter().cloned().map(sylph_protocol::AgentInventory::available).collect();
+        let inventory = agents
+            .iter()
+            .cloned()
+            .map(sylph_protocol::AgentInventory::available)
+            .collect();
         self.registry
-            .register_existing(environment_id.clone(), name, origin, token.clone(), inventory)
+            .register_existing(
+                environment_id.clone(),
+                name,
+                origin,
+                token.clone(),
+                inventory,
+            )
             .await;
         Ok(PairingGrant {
             environment_id,
@@ -1568,6 +1596,11 @@ impl EnvBridge {
             return Err(BridgeError::ProducerMismatch.into());
         }
         let _gate = self.ingest_gate.lock().await;
+        // Remote events derive their canonical sequence from SQLite. Hold the
+        // allocator gate through that transaction and cursor update so a
+        // concurrent server-authored frame cannot reserve the same number.
+        let seq_gate = self.seq.gate();
+        let _seq_gate = seq_gate.lock().await;
         let mut terminal_items: Vec<(sylph_protocol::SessionId, String, sylph_protocol::Event)> =
             Vec::new();
         let mut accepted_through = self
@@ -1686,7 +1719,7 @@ impl EnvBridge {
                     // frame can reuse the sequence and hit the journal's uniqueness
                     // constraint.
                     if let Ok(next_seq) = i32::try_from(ingest.server_seq.get().saturating_add(1)) {
-                        self.seq.observe(&item.session_id, next_seq).await;
+                        self.seq.observe_inner(&item.session_id, next_seq).await;
                     }
                     let published = StreamEvent::from_row(&row);
                     if let Some(turn_id) = arrival_turn_id.as_deref() {
@@ -1719,6 +1752,7 @@ impl EnvBridge {
             accepted_through = seq;
         }
         drop(_gate);
+        drop(_seq_gate);
         if let Some(closer) = self.turn_closer.read().await.clone() {
             for (session_id, turn_id, event) in terminal_items {
                 let stop_reason = event

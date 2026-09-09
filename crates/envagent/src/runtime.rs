@@ -658,6 +658,9 @@ impl EnvAgent {
             .path_policy
             .contain(&spec.workdir)
             .map_err(|error| anyhow!(error))?;
+        if !contained.is_dir() {
+            return Err(anyhow!("working directory is not a directory"));
+        }
         spec.workdir = contained.display().to_string();
         let adapter = self.adapters.for_agent(agent)
             .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
@@ -811,6 +814,9 @@ impl EnvAgent {
             .path_policy
             .contain(&spec.workdir)
             .map_err(|error| anyhow!(error))?;
+        if !contained.is_dir() {
+            return Err(anyhow!("working directory is not a directory"));
+        }
         spec.workdir = contained.display().to_string();
         let agent_name = AgentName::parse(agent.to_string())
             .map_err(|error| anyhow!("invalid agent name: {error}"))?;
@@ -2019,6 +2025,16 @@ fn contain_session_path(
     let relative_path = std::path::Path::new(relative);
     if relative_path.is_absolute() {
         anyhow::bail!("file path must be relative to the session workdir");
+    }
+    let mut depth = 0usize;
+    for component in relative_path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(_) => depth += 1,
+            std::path::Component::ParentDir if depth > 0 => depth -= 1,
+            std::path::Component::ParentDir => anyhow::bail!("file path escapes the session workdir"),
+            _ => anyhow::bail!("file path escapes the session workdir"),
+        }
     }
     let path = policy.contain(root.join(relative_path))?;
     if !path.starts_with(root) {

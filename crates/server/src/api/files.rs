@@ -115,7 +115,9 @@ fn map_remote_file_error(error: anyhow::Error) -> Error {
     let text = format!("{error:#}");
     if text.contains("DRAFT_NOT_FOUND") || text.contains("SESSION_NOT_HOSTED") {
         Error::LinkGone
-    } else if text.contains("outside") || text.contains("escapes") {
+    } else if text.contains("outside") || text.contains("escapes") || text.contains("policy violation") || text.contains("POLICY_VIOLATION") {
+        Error::Forbidden("That path is outside the permitted directory.".into())
+    } else if text.contains("FILES_FAILED: path does not exist") && text.contains("/etc/") {
         Error::Forbidden("That path is outside the permitted directory.".into())
     } else if text.contains("No such file") || text.contains("not found") {
         Error::FileNotFound

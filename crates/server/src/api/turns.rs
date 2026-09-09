@@ -299,8 +299,9 @@ pub async fn create(
     }
     let attachments = req.attachments.unwrap_or_default();
     if !attachments.is_empty() {
+        let total: usize = attachments.iter().map(|a| a.data.len()).sum();
         return Err(Error::AttachmentInvalid(
-            "remote turns require files to be uploaded through the envagent capability".into(),
+            format!("attachments total {total} bytes must be uploaded through the envagent capability"),
         ));
     }
     let text = req.text.unwrap_or_default();
@@ -409,7 +410,9 @@ pub async fn create(
         }
     };
     match outcome {
-        sylph_protocol::CommandOutcome::Accepted { .. } => {}
+        sylph_protocol::CommandOutcome::Accepted { .. } => {
+            let _ = state.store.mark_turn_running(&created.id).await?;
+        }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
             let _ = state
                 .store
@@ -436,8 +439,7 @@ pub async fn create(
             )));
         }
     }
-    let updated = state.store.get_turn(&created.id).await?.unwrap_or(created);
-    Ok((StatusCode::ACCEPTED, Json(TurnResponse { turn: updated })))
+    Ok((StatusCode::ACCEPTED, Json(TurnResponse { turn: created })))
 }
 
 /// GET /api/v1/turns/{id}

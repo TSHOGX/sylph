@@ -54,8 +54,11 @@ pub struct TestBackend {
     /// holds rather than one the filesystem does.
     pub agents: MockAgents,
     environment: EnvironmentId,
+    installation_id: String,
+    token: String,
     bridge_task: tokio::task::JoinHandle<()>,
     envagent_task: tokio::task::JoinHandle<()>,
+    session_ids: Arc<tokio::sync::Mutex<Vec<SessionId>>>,
 }
 
 impl TestBackend {
@@ -191,6 +194,12 @@ impl TestBackend {
             let (reader, writer) = tokio::io::split(server_stream);
             let _ = bridge.serve_io(reader, writer).await;
         });
+        let mut env_roots = std::iter::once(root.to_path_buf())
+            .chain(extra_roots.iter().map(|path| path.to_path_buf()))
+            .collect::<Vec<_>>();
+        if config.quick_start_dir.exists() {
+            env_roots.push(config.quick_start_dir.clone());
+        }
         let env_config = sylph_envagent::EnvAgentConfig {
             environment_id: environment.to_string(),
             producer_id: producer_id.to_string(),
@@ -198,12 +207,11 @@ impl TestBackend {
                 root.join("envagent-spool.db"),
                 64 * 1024 * 1024,
             ),
-            path_policy: sylph_envagent::PathPolicy::from_roots([root.to_path_buf()])
+            path_policy: sylph_envagent::PathPolicy::from_roots(env_roots)
                 .expect("fixture envagent path policy should build"),
         };
-        let source: Arc<dyn sylph_envagent::adapters::AdapterSource> =
-            Arc::new(agents.clone());
-        let token = grant.credential;
+        let source: Arc<dyn sylph_envagent::adapters::AdapterSource> = Arc::new(agents.clone());
+        let token = grant.credential.clone();
         let envagent_task = tokio::spawn(async move {
             let _ = sylph_envagent::run_runtime_stream_with_adapters(
                 agent_stream,
@@ -235,8 +243,11 @@ impl TestBackend {
             state,
             agents,
             environment,
+            installation_id: grant.installation_id,
+            token: grant.credential,
             bridge_task,
             envagent_task,
+            session_ids: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -285,10 +296,88 @@ impl TestBackend {
             AppState::build_with_adapters(self.config.clone(), Arc::new(self.agents.clone()))
                 .await
                 .expect("failed to rebuild state");
+        self.bridge_task.abort();
+        self.envagent_task.abort();
         self.router = router(state.clone());
         // Replaced too, or a test would keep querying the pre-restart store and
         // miss exactly the recovery it is asserting on.
         self.state = state;
+
+        let producer_id = sylph_protocol::ProducerId::parse("fixture-producer").unwrap();
+        let mut hello = sylph_protocol::Hello::current(
+            self.installation_id.clone(),
+            producer_id.clone(),
+            Some(self.environment.clone()),
+            0,
+        );
+        hello.agents = self.agents.inventory().await;
+        let (server_stream, agent_stream) = tokio::io::duplex(8 * 1024 * 1024);
+        let bridge = self.state.env_bridge.clone();
+        self.bridge_task = tokio::spawn(async move {
+            let (reader, writer) = tokio::io::split(server_stream);
+            let _ = bridge.serve_io(reader, writer).await;
+        });
+        let mut env_roots = self.config.browse_roots.clone();
+        if self.config.quick_start_dir.exists() {
+            env_roots.push(self.config.quick_start_dir.clone());
+        }
+        let env_config = sylph_envagent::EnvAgentConfig {
+            environment_id: self.environment.to_string(),
+            producer_id: producer_id.to_string(),
+            spool: sylph_envagent::SpoolConfig::new(
+                self.temp.path().join("envagent-spool.db"),
+                64 * 1024 * 1024,
+            ),
+            path_policy: sylph_envagent::PathPolicy::from_roots(env_roots)
+                .expect("fixture envagent path policy should build"),
+        };
+        let source: Arc<dyn sylph_envagent::adapters::AdapterSource> =
+            Arc::new(self.agents.clone());
+        let token = self.token.clone();
+        self.envagent_task = tokio::spawn(async move {
+            let _ = sylph_envagent::run_runtime_stream_with_adapters(
+                agent_stream,
+                hello,
+                token,
+                env_config,
+                source,
+            )
+            .await;
+        });
+        for _ in 0..100 {
+            if self
+                .state
+                .env_bridge
+                .environment_connected(&self.environment)
+                .await
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            self.state
+                .env_bridge
+                .environment_connected(&self.environment)
+                .await,
+            "fixture envagent failed to reconnect after restart"
+        );
+        // The test envagent task is recreated on restart, so restore the hosted
+        // handles a real reconnecting envagent would retain. This keeps subsequent
+        // commands on durable sessions on the bridge path rather than manufacturing
+        // a SESSION_NOT_HOSTED failure from the harness lifecycle itself.
+        let session_ids = self.session_ids.lock().await.clone();
+        for session_id in session_ids {
+            if let Some(session) = self
+                .state
+                .store
+                .get_session(&session_id)
+                .await
+                .expect("fixture session lookup after restart failed")
+            {
+                let _ = self.state.env_bridge.remote_attach(&session).await;
+            }
+        }
     }
 
     /// Restart with the Quick Start directory *outside* every browse root.
@@ -589,7 +678,11 @@ impl TestBackend {
             .remote_attach(&session)
             .await
             .expect("fixture remote link establishment failed");
-        assert!(matches!(outcome, sylph_protocol::CommandOutcome::Accepted { .. }));
+        assert!(matches!(
+            outcome,
+            sylph_protocol::CommandOutcome::Accepted { .. }
+        ));
+        self.session_ids.lock().await.push(session_id.clone());
         session_id.encode()
     }
 

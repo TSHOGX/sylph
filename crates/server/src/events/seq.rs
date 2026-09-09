@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::db::JournalStore;
 use crate::error::Result;
@@ -26,6 +26,9 @@ use sylph_protocol::SessionId;
 pub struct SeqAllocator {
     store: JournalStore,
     counters: Arc<RwLock<HashMap<String, Arc<AtomicI32>>>>,
+    /// Serializes in-memory reservations with bridge transactions that derive
+    /// canonical sequence values from SQLite.
+    gate: Arc<Mutex<()>>,
 }
 
 impl SeqAllocator {
@@ -33,7 +36,14 @@ impl SeqAllocator {
         Self {
             store,
             counters: Arc::new(RwLock::new(HashMap::new())),
+            gate: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Shared reservation gate. A bridge ingest holds this through its SQLite
+    /// transaction and cursor update; server producers acquire it in `next`.
+    pub(crate) fn gate(&self) -> Arc<Mutex<()>> {
+        self.gate.clone()
     }
 
     /// The next sequence number for a session.
@@ -41,6 +51,11 @@ impl SeqAllocator {
     /// Seeded from `MAX(seq)` on first use so numbering keeps climbing across a
     /// restart rather than restarting at zero and colliding with journaled rows.
     pub async fn next(&self, session_id: &SessionId) -> Result<i32> {
+        let _gate = self.gate.lock().await;
+        self.next_inner(session_id).await
+    }
+
+    async fn next_inner(&self, session_id: &SessionId) -> Result<i32> {
         // Keyed on the encoded triple rather than on `SessionId` itself: the map is
         // hot — one lookup per event — and the encoding has a single producer, so the
         // two spellings cannot diverge.
@@ -76,6 +91,12 @@ impl SeqAllocator {
     /// make the next status or error reuse a number the bridge has just journaled.
     /// Raise the counter monotonically and never rewind a value already handed out.
     pub async fn observe(&self, session_id: &SessionId, next_seq: i32) {
+        let _gate = self.gate.lock().await;
+        self.observe_inner(session_id, next_seq).await;
+    }
+
+    /// Advance the cursor while the caller already holds [`Self::gate`].
+    pub(crate) async fn observe_inner(&self, session_id: &SessionId, next_seq: i32) {
         let key = session_id.encode();
         let counter = {
             let counters = self.counters.read().await;
@@ -220,5 +241,28 @@ mod tests {
         // A late remote event must never rewind a value already handed out.
         allocator.observe(&session, 3).await;
         assert_eq!(allocator.next(&session).await.unwrap(), 9);
+    }
+
+    #[tokio::test]
+    async fn reservation_gate_blocks_server_sequence_until_remote_commit() {
+        let (store, _dir) = store().await;
+        let allocator = SeqAllocator::new(store);
+        let session = crate::fixtures::test_session_id("remote-gate");
+        let gate = allocator.gate();
+        let guard = gate.lock().await;
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let pending = {
+            let allocator = allocator.clone();
+            let session = session.clone();
+            tokio::spawn(async move {
+                let value = allocator.next(&session).await.unwrap();
+                let _ = tx.send(value);
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err());
+        drop(guard);
+        assert_eq!(rx.await.unwrap(), 0);
+        pending.await.unwrap();
     }
 }
