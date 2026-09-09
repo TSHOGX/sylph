@@ -223,13 +223,14 @@ impl AppState {
         // The host is the only environment today. It is constructed here rather
         // than inside the supervisor so a session-chosen environment later
         // replaces one argument instead of reaching into the supervisor.
-        let environment: Arc<dyn crate::env::Environment> =
-            Arc::new(crate::env::LocalEnvironment::new());
+        let environment_registry = crate::env::EnvironmentRegistry::new();
+        let environment: Arc<dyn crate::env::Environment> = Arc::new(
+            crate::env::RegistryEnvironment::new(environment_registry.clone()),
+        );
         // One allocator, shared. Both the supervisor and each link's drain task
         // emit events for the same session, and separate counters would hand out
         // the same sequence number.
         let seq = crate::events::SeqAllocator::new(store.clone());
-        let environment_registry = crate::env::EnvironmentRegistry::new();
         let env_bridge = Arc::new(crate::env::EnvBridge::new(
             store.clone(),
             history.clone(),
