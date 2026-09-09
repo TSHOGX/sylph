@@ -35,7 +35,6 @@ use sylph_protocol::{
     FlagSpec, NativeId, NativeRecord, NativeSummary, Phase, RequestedNativeId, Resolution, RunSpec,
     Session, SessionCapabilities, SessionMessage, StoreFilter, SubagentSpec, TurnInput,
 };
-use sylph_server::adapters::AdapterSource;
 use tokio::sync::{mpsc, Mutex};
 
 /// The value `set_config` refuses, so the classification path is reachable.
@@ -257,7 +256,7 @@ impl MockAgents {
         names.sort();
         let mut inventory = Vec::with_capacity(names.len());
         for name in names {
-            if let Some(adapter) = <Self as AdapterSource>::for_agent(self, &name) {
+            if let Some(adapter) = self.adapter_for(&name) {
                 match adapter.probe().await {
                     Ok(info) => inventory.push(sylph_protocol::AgentInventory::available(info)),
                     Err(error) => inventory.push(sylph_protocol::AgentInventory::unavailable(
@@ -271,17 +270,19 @@ impl MockAgents {
         inventory
     }
 
-    pub async fn infos(&self) -> Vec<AgentInfo> {
-        self.inventory()
-            .await
-            .into_iter()
-            .filter_map(|entry| entry.info)
-            .collect()
+    fn available(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .agents
+            .read()
+            .expect("the mock agent map is not poisoned")
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        names
     }
-}
 
-impl AdapterSource for MockAgents {
-    fn for_agent(&self, name: &str) -> Option<Box<dyn Adapter>> {
+    fn adapter_for(&self, name: &str) -> Option<Box<dyn Adapter>> {
         let behavior = *self
             .agents
             .read()
@@ -298,23 +299,18 @@ impl AdapterSource for MockAgents {
         }))
     }
 
-    fn available(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .agents
-            .read()
-            .expect("the mock agent map is not poisoned")
-            .keys()
-            .cloned()
-            .collect();
-        names.sort();
-        names
+    pub async fn infos(&self) -> Vec<AgentInfo> {
+        self.inventory()
+            .await
+            .into_iter()
+            .filter_map(|entry| entry.info)
+            .collect()
     }
+}
 
-    fn is_known(&self, name: &str) -> bool {
-        self.agents
-            .read()
-            .expect("the mock agent map is not poisoned")
-            .contains_key(name)
+impl sylph_envagent::adapters::AdapterSource for MockAgents {
+    fn for_agent(&self, name: &str) -> Option<Box<dyn Adapter>> {
+        self.adapter_for(name)
     }
 
     /// The same set as [`Self::available`], because a mock agent has no CLI to be missing.
@@ -324,19 +320,6 @@ impl AdapterSource for MockAgents {
     /// one it can run, so collapsing them is honest rather than lossy.
     fn known_agents(&self) -> Vec<String> {
         self.available()
-    }
-}
-
-/// The same deterministic source is installed inside the fixture envagent. Keeping this
-/// implementation beside the server source ensures both sides use the identical adapter
-/// behaviour while the server can only reach it over `sylph.env.v1`.
-impl sylph_envagent::adapters::AdapterSource for MockAgents {
-    fn for_agent(&self, name: &str) -> Option<Box<dyn Adapter>> {
-        <Self as AdapterSource>::for_agent(self, name)
-    }
-
-    fn known_agents(&self) -> Vec<String> {
-        <Self as AdapterSource>::known_agents(self)
     }
 }
 

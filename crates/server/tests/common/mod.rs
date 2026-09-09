@@ -142,9 +142,10 @@ impl TestBackend {
         config.port = 0;
         config.cookie_secret = "test-secret-token".to_string();
 
-        // Injected rather than discovered, which is what lets tests run concurrently while
-        // several of them offer an agent of the same name with different behaviour.
-        let state = AppState::build_with_adapters(config.clone(), Arc::new(agents.clone()))
+        // The server never receives an adapter source. The deterministic adapter lives in
+        // the fixture envagent below, so this build exercises the same production wiring
+        // and reaches execution only across the bridge.
+        let state = AppState::build(config.clone())
             .await
             .expect("failed to build state");
         let cookie = format!("sylph_session={}", state.config.cookie_secret);
@@ -290,12 +291,11 @@ impl TestBackend {
     /// process left mid-flight is gone. This is the only way to exercise the
     /// startup recovery that reconciles those rows.
     pub async fn restart(&mut self) {
-        // The same source, so a restart keeps whatever a test uninstalled — which is what
-        // a restart does to a machine whose CLI is gone.
-        let state =
-            AppState::build_with_adapters(self.config.clone(), Arc::new(self.agents.clone()))
-                .await
-                .expect("failed to rebuild state");
+        // A restart rebuilds only server state. The deterministic adapter remains inside
+        // the fixture envagent, exactly as it does in production.
+        let state = AppState::build(self.config.clone())
+            .await
+            .expect("failed to rebuild state");
         self.bridge_task.abort();
         self.envagent_task.abort();
         self.router = router(state.clone());
