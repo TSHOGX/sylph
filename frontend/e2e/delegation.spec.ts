@@ -240,7 +240,7 @@ test("delegation structure survives a reload", async ({ page }) => {
  * observe the collapse this exists to catch.
  */
 async function runPromotion(page: import("@playwright/test").Page) {
-  await createSession(page);
+  const sessionId = await createSession(page);
   await page.getByLabel("Message").fill("promote this workflow");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
@@ -261,15 +261,31 @@ async function runPromotion(page: import("@playwright/test").Page) {
   // So this is a settled-turn wait rather than a terminal-turn wait, and the specs below no
   // longer race anything.
   //
-  // Deliberately *not* `workflowHosting(...)` as the wait, even though the comment this
-  // replaces prescribed it. That helper snapshots the host count and expands each one at call
-  // time, and a collapsed card mounts none of its subtree — so a host still to be rendered
-  // stays collapsed and its delegate never appears. It is correct after a settle and wrong as
-  // the thing that waits for one.
-  await expect(page.getByText("Running a workflow.")).toBeVisible({ timeout: 15000 });
-  await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0, {
-    timeout: 20000,
-  });
+  // Wait on the durable close produced by the sweep. The browser may have an older
+  // turn-stream render while the session trace catches up, but this API read is the
+  // same record the assertions below inspect and cannot report success before the
+  // server has written the stranded trajectory close.
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const response = await page.request.get(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/turns`,
+    );
+    if (response.ok()) {
+      const body = (await response.json()) as {
+        turns?: { events?: { streamId?: string; data?: { closedBy?: string } }[] }[];
+      };
+      if (
+        body.turns?.some((turn) =>
+          turn.events?.some(
+            (event) => event.streamId === "pr-host-c" && event.data?.closedBy === "server",
+          ),
+        )
+      ) {
+        return;
+      }
+    }
+    await page.waitForTimeout(100);
+  }
+  throw new Error("promotion turn did not reach the server settle sweep");
 }
 
 /**

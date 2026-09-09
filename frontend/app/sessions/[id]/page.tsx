@@ -100,6 +100,23 @@ export default function SessionPage() {
   const history = useMemo(() => historyQuery.data?.turns ?? [], [historyQuery.data]);
   const { events: traceEvents } = useSessionTrace(sessionId || undefined, Boolean(sessionId));
 
+  // A late agent report can open a new turn after the history request that loaded the
+  // page has already completed. The session trace carries its arrival turn id immediately,
+  // so refresh history when that id is not represented by a turn row yet. Without this
+  // bridge, the event is durable and visible to the trace subscriber but has no turn
+  // container for the timeline to render it in until a manual reload.
+  const traceHasUnknownTurn = useMemo(() => {
+    const known = new Set(history.map((entry) => entry.turn.id));
+    return traceEvents.some(
+      (event) => Boolean(event.arrivalTurnId) && !known.has(event.arrivalTurnId!),
+    );
+  }, [history, traceEvents]);
+
+  useEffect(() => {
+    if (!traceHasUnknownTurn) return;
+    void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "history"] });
+  }, [queryClient, sessionId, traceHasUnknownTurn]);
+
   // There is deliberately no empty-session cleanup here any more. `POST /sessions`
   // starts an agent rather than reserving a row, so a session has no identity until an
   // agent has assigned one — the empty-draft state this discarded cannot exist, and

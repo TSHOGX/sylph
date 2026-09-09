@@ -464,9 +464,24 @@ pub async fn events(
 
     let after_seq = query.after_seq;
 
-    // Replay stable events, from whichever tier holds them. A finished turn that
-    // has already been consolidated is gone from the journal, so a client
-    // reconnecting to it would otherwise get an empty stream.
+    // One attach() call: it snapshots the ephemeral projection and subscribes
+    // under a single lock. Calling it twice (once for `live`, once for `replay`)
+    // reintroduces the gap it exists to close — an event published between the
+    // two calls is both replayed and broadcast, so the client sees it twice.
+    let Attachment {
+        replay: projection,
+        live,
+        ..
+    } = state.hub.attach(&turn_id, after_seq).await;
+
+    // Read durable events *after* attaching. If the turn settles between a storage
+    // read and `attach`, the terminal status is already in the journal while the
+    // finished channel has no live receiver; reading first would therefore omit the
+    // status frame and leave a browser waiting on a turn that is already complete.
+    // Attaching first closes that interval: events published after the snapshot arrive
+    // through `live`, while everything committed before the read is replayed below.
+    // A finished turn that has already been consolidated is gone from the journal, so
+    // the history tier remains the fallback for that case.
     let journalled = state.store.turn_events_after(&turn_id, after_seq).await?;
     let journal_events: Vec<StreamEvent> = if journalled.is_empty() {
         state
@@ -487,21 +502,20 @@ pub async fn events(
             .map(|row| StreamEvent::from_row(&row))
             .collect()
     };
-
-    // One attach() call: it snapshots the ephemeral projection and subscribes
-    // under a single lock. Calling it twice (once for `live`, once for `replay`)
-    // reintroduces the gap it exists to close — an event published between the
-    // two calls is both replayed and broadcast, so the client sees it twice.
-    let Attachment {
-        replay: projection,
-        live,
-        ..
-    } = state.hub.attach(&turn_id, after_seq).await;
+    // A stable event can be published after the attach snapshot but before the
+    // durable read. It then appears in both `journal_events` and the live receiver;
+    // suppress only those exact sequence numbers. A high-water filter is wrong here:
+    // ephemeral deltas intentionally leave gaps before a later stable event.
+    let durable_seqs = journal_events
+        .iter()
+        .map(|event| event.seq)
+        .collect::<std::collections::HashSet<_>>();
 
     let stream = if let Some(attachment) = live {
         // BroadcastStream wraps errors; unwrap them because this adapter is
         // infallible — a lagged receiver is disconnected, not surfaced.
-        let live = BroadcastStream::new(attachment).filter_map(|r| r.ok());
+        let live = BroadcastStream::new(attachment)
+            .filter_map(move |r| r.ok().filter(|event| !durable_seqs.contains(&event.seq)));
 
         boxed_local(
             stream::iter(journal_events)
