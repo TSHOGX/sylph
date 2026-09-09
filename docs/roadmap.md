@@ -27,7 +27,7 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| **The envagent is the only execution path** | Milestone 1 | product routes and default ingress use the bridge; legacy local collaborators remain in server state and need removal after fixture migration |
+| **The envagent is the only execution path** | Milestone 1 | product routes and default ingress use the bridge; legacy local collaborators remain only in server state while remote lifecycle and full E2E coverage are completed |
 | **The server is `crates/server`** | Milestone 1 | moved into the workspace crate layout |
 | **Transport carries TLS and pairs from another host** | Milestone 3 | loopback only, so no off-host environment can dial in |
 | **Multi-user authentication and per-environment authorization** | Milestone 3 | a single bootstrap Subject, no grants |
