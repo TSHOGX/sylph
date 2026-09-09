@@ -185,6 +185,43 @@ impl EnvBridge {
         *self.turn_closer.write().await = Some(closer);
     }
 
+    /// Journal and publish a server-authored event for a remote turn. This is
+    /// the bridge-owned counterpart of the deleted in-process supervisor path.
+    pub async fn emit_server_event(
+        &self,
+        session_id: &sylph_protocol::SessionId,
+        turn_id: &str,
+        kind: &str,
+        text: String,
+        data: Option<serde_json::Value>,
+    ) -> Result<()> {
+        let event = crate::events::StreamEvent {
+            seq: self.seq.next(session_id).await?,
+            arrival_turn_id: Some(turn_id.to_string()),
+            kind: kind.to_string(),
+            phase: None,
+            stream_id: None,
+            span: None,
+            interior_state: None,
+            name: None,
+            text,
+            data,
+            is_error: false,
+            stability: "stable".into(),
+            source: "server".into(),
+            arrival_at_ms: now_ms(),
+            recorded_at_ms: None,
+            created_at_ms: now_ms(),
+            started_at_ms: None,
+        };
+        self.store
+            .append_event(&event.to_row(session_id, turn_id))
+            .await?;
+        self.hub.publish(turn_id, event.clone()).await;
+        self.hub.publish_trace(&session_id.encode(), event).await;
+        Ok(())
+    }
+
     /// Install the shared trajectory reconciliation path used by remote ingest.
     pub async fn set_trajectory_reconciler(&self, reconciler: TrajectoryReconciler) {
         *self.trajectory_reconciler.write().await = Some(reconciler);

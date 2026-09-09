@@ -197,26 +197,26 @@ pub async fn create_prepared(
             // user row to render.
             if !text.is_empty() {
                 state
-                    .turns
-                    .emit_server_event(
-                        &session_id,
-                        &turn_id,
-                        crate::supervisor::turn::server_event("user", text.clone(), None),
-                    )
-                    .await?;
+                    .env_bridge
+                    .emit_server_event(&session_id, &turn_id, "user", text.clone(), None)
+                    .await
+                    .map_err(|error| {
+                        Error::Internal(format!("could not journal user event: {error:#}"))
+                    })?;
             }
             state
-                .turns
+                .env_bridge
                 .emit_server_event(
                     &session_id,
                     &turn_id,
-                    crate::supervisor::turn::server_event(
-                        "status",
-                        String::new(),
-                        Some(serde_json::json!({"state": "starting"})),
-                    ),
+                    "status",
+                    String::new(),
+                    Some(serde_json::json!({"state": "starting"})),
                 )
-                .await?;
+                .await
+                .map_err(|error| {
+                    Error::Internal(format!("could not journal status event: {error:#}"))
+                })?;
             if let Err(error) = state.env_bridge.activate_remote(&session_id).await {
                 let _ = state.env_bridge.close_remote_session(&session_id).await;
                 state.env_bridge.discard_remote_draft(&draft_id).await;
@@ -349,26 +349,22 @@ pub async fn create(
     };
     if !text.is_empty() {
         state
-            .turns
-            .emit_server_event(
-                &session_id,
-                &created.id,
-                crate::supervisor::turn::server_event("user", text.clone(), None),
-            )
-            .await?;
+            .env_bridge
+            .emit_server_event(&session_id, &created.id, "user", text.clone(), None)
+            .await
+            .map_err(|error| Error::Internal(format!("could not journal user event: {error:#}")))?;
     }
     state
-        .turns
+        .env_bridge
         .emit_server_event(
             &session_id,
             &created.id,
-            crate::supervisor::turn::server_event(
-                "status",
-                String::new(),
-                Some(serde_json::json!({"state": "starting"})),
-            ),
+            "status",
+            String::new(),
+            Some(serde_json::json!({"state": "starting"})),
         )
-        .await?;
+        .await
+        .map_err(|error| Error::Internal(format!("could not journal status event: {error:#}")))?;
     let _ = state
         .store
         .set_session_title_if_empty(&session_id, &text)

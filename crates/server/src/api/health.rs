@@ -199,7 +199,7 @@ pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<Diagnosti
                     .map(|agent| agent.name)
             })
             .collect(),
-        active_turns: state.turns.active_turn_count().await,
+        active_turns: state.store.active_turn_count().await?,
         retention: state.retention.last_pass().await,
         native_record_failures: state.history.native_record_failures(),
     }))

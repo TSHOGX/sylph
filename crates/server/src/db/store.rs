@@ -1740,6 +1740,15 @@ impl JournalStore {
         .map_err(Error::Database)
     }
 
+    pub async fn active_turn_count(&self) -> Result<usize> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM turns WHERE status IN ('queued','starting','running','stopping','settling')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count as usize)
+    }
+
     /// A session's journal rows after `after_seq`, across every turn.
     ///
     /// Distinct from `turn_events_after`: a replay is session-scoped, and the
