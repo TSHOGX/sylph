@@ -178,12 +178,13 @@ impl TestBackend {
             .expect("fixture pairing should be accepted");
         let environment = grant.environment_id.clone();
         let producer_id = sylph_protocol::ProducerId::parse("fixture-producer").unwrap();
-        let hello = sylph_protocol::Hello::current(
+        let mut hello = sylph_protocol::Hello::current(
             grant.installation_id.clone(),
             producer_id.clone(),
             Some(environment.clone()),
             0,
         );
+        hello.agents = agents.inventory().await;
         let (server_stream, agent_stream) = tokio::io::duplex(8 * 1024 * 1024);
         let bridge = state.env_bridge.clone();
         let bridge_task = tokio::spawn(async move {
