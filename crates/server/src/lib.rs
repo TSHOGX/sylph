@@ -30,6 +30,7 @@ pub mod documents;
 pub mod env;
 pub mod error;
 pub mod events;
+pub mod link_state;
 /// The pool of live agent sessions, and the one place a link's output becomes
 /// durable state.
 pub mod links;

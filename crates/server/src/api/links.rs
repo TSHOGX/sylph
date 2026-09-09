@@ -18,7 +18,7 @@ use tokio_stream::{self as stream, wrappers::BroadcastStream};
 use sylph_protocol::SessionId;
 
 use crate::error::{Error, Result};
-use crate::links::LinkState;
+use crate::link_state::LinkState;
 use crate::models::{PendingRequest, ResolveRequest};
 use crate::AppState;
 
@@ -99,7 +99,7 @@ pub async fn prepared_set_config(
     State(state): State<AppState>,
     Path(draft_id): Path<String>,
     Json(body): Json<PreparedConfigRequest>,
-) -> Result<Json<crate::links::LinkState>> {
+) -> Result<Json<LinkState>> {
     if let Some(draft) = state.env_bridge.remote_draft(&draft_id).await {
         state
             .env_bridge
@@ -138,7 +138,7 @@ pub async fn discard_prepared(
 pub async fn prepared_capabilities(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<crate::links::LinkState>> {
+) -> Result<Json<LinkState>> {
     if state.env_bridge.remote_draft_promoting(&id).await {
         return Err(Error::SessionAlreadyRunning);
     }
