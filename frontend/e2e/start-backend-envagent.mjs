@@ -32,7 +32,9 @@ const toolchainEnv = {
 if (path.basename(envHome) !== ".e2e-env-home") {
   throw new Error(`refusing to wipe unexpected envagent root: ${envHome}`);
 }
-fs.rmSync(envHome, { recursive: true, force: true });
+if (process.env.SYLPH_E2E_KEEP_HOME !== "1") {
+  fs.rmSync(envHome, { recursive: true, force: true });
+}
 fs.mkdirSync(agentHome, { recursive: true });
 
 const children = new Set();
