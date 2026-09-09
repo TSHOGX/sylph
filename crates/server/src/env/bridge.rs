@@ -2353,6 +2353,20 @@ fn remote_request_id(
     // request ids bounded even for large file writes, while making retries of
     // the same operation address the original durable result and changing a
     // config value or file payload address a new operation.
+    // Read operations are replay-safe but must not reuse one cached result
+    // forever: a directory listing after mkdir must observe the new entry.
+    // Their retry safety comes from the operation itself, so give each read a
+    // fresh request id. Mutating commands retain payload-derived ids for
+    // at-most-once semantics.
+    if command_is_replay_safe(command) {
+        return sylph_protocol::CommandRequestId::parse(format!(
+            "remote-{}-{}-{}",
+            environment,
+            command_name(command),
+            uuid::Uuid::new_v4().simple()
+        ))
+        .map_err(|error| anyhow!(error));
+    }
     let payload = serde_json::to_vec(command).map_err(|error| anyhow!(error))?;
     let suffix = hash_bytes(&payload);
     sylph_protocol::CommandRequestId::parse(format!(
