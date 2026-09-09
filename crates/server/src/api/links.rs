@@ -174,7 +174,7 @@ pub async fn capabilities(
             sylph_protocol::UnavailableReason::EnvironmentUnreachable,
         )));
     }
-    let outcome = state
+    let mut outcome = state
         .env_bridge
         .remote_session_command(
             &session_id,
@@ -185,6 +185,31 @@ pub async fn capabilities(
         )
         .await
         .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    if matches!(&outcome, sylph_protocol::CommandOutcome::Rejected { code, .. } if code == "SESSION_NOT_HOSTED")
+    {
+        state
+            .env_bridge
+            .remote_attach(
+                &state
+                    .store
+                    .get_session(&session_id)
+                    .await?
+                    .ok_or(Error::SessionNotFound)?,
+            )
+            .await
+            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+        outcome = state
+            .env_bridge
+            .remote_session_command(
+                &session_id,
+                sylph_protocol::EnvironmentCommand::Capabilities {
+                    session_id: session_id.clone(),
+                },
+                sylph_protocol::IdempotencyPolicy::Replayable,
+            )
+            .await
+            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    }
     match outcome {
         sylph_protocol::CommandOutcome::Accepted {
             result: Some(value),
