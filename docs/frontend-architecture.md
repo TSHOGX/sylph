@@ -1018,6 +1018,17 @@ document has nothing to scroll, `window.scrollY` stays 0 after a 4000px wheel.
 element whose box extends past the right edge, which is the defect itself and stays
 actionable across padding changes.
 
+
+**The E2E web server is a two-process stack.** `e2e/start-backend-envagent.mjs` starts
+`sylph-server` and a separately compiled `sylph-envagent`, obtains a short-lived pairing
+code through the authenticated API, exchanges it with `sylph-envagent pair`, and then runs
+the envagent against the adjacent loopback ingress. Browser fixtures select the connected
+environment whose inventory reports the `e2e` adapter. This crosses the same
+`Client → Server → EnvBridge → Envagent → Adapter` boundary as a single-machine install;
+starting only the backend would exercise an in-process seam and could not prove Milestone 1.
+Both children inherit the suite's throwaway roots, and the wrapper terminates them together
+when Playwright stops the web server.
+
 #### Fixture state
 
 **`npm run e2e` wipes `.e2e-home/` before the run, and the npm script is the only place
@@ -1167,7 +1178,7 @@ Hand-writing means a wire change surfaces as a type error where the shape is con
 cd frontend && npm run build        # also the TypeScript gate; no separate tsc step
 npx eslint .                        # not `next lint`, removed in Next 16
 npm test                            # Vitest
-npm run e2e                         # Playwright, starts its own servers
+npm run e2e                         # Playwright, starts and pairs its own two-process stack
 ```
 
 `npm run build` emits `output: "standalone"`. That bundle omits `.next/static` and

@@ -476,43 +476,10 @@ pub async fn update(
         .await?
         .ok_or(Error::SessionNotFound)?;
 
-    // Flag mutation is an envagent command. The server may persist the
-    // resulting metadata, but it never establishes a local adapter link.
+    // Flags are session metadata. Persisting them does not execute an adapter
+    // and remains available while an envagent is temporarily offline; the next
+    // turn carries the stored set through the bridge.
     if let Some(flags) = &req.flags {
-        if !state
-            .env_bridge
-            .environment_connected(&id.environment)
-            .await
-        {
-            return Err(Error::EnvironmentUnreachable(id.environment.to_string()));
-        }
-        for (config_id, value) in flags {
-            let outcome = state
-                .env_bridge
-                .remote_session_command(
-                    &id,
-                    sylph_protocol::EnvironmentCommand::SetConfig {
-                        session_id: id.clone(),
-                        id: config_id.clone(),
-                        value: serde_json::Value::String(value.clone()),
-                    },
-                    sylph_protocol::IdempotencyPolicy::AtMostOnce,
-                )
-                .await
-                .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-            match outcome {
-                sylph_protocol::CommandOutcome::Accepted { .. } => {}
-                sylph_protocol::CommandOutcome::Rejected { code, message } => {
-                    return Err(Error::InvalidRequest(format!("{code}: {message}")))
-                }
-                sylph_protocol::CommandOutcome::Unknown { message } => {
-                    return Err(Error::LinkFailed(format!(
-                        "remote config outcome is unknown: {}",
-                        message.unwrap_or_default()
-                    )))
-                }
-            }
-        }
         let flags_json = serde_json::to_string(flags)
             .map_err(|e| Error::Internal(format!("Failed to encode flags: {e}")))?;
         state.store.set_session_flags(&id, &flags_json).await?;

@@ -29,36 +29,43 @@ const AGENT = "e2e";
  * So it is read from `GET /api/v1/environments` rather than written here. A hardcoded id
  * would pass on this checkout and fail on any other install, which is the same class of
  * defect as a default pointing at one machine's absolute path (`AGENTS.md` records one
- * that shipped). Until pairing lands there is exactly one environment, so the first row is
- * the local one.
+ * that shipped). The E2E stack pairs a separate envagent, so select the connected row that
+ * advertises the fixture adapter instead of relying on response ordering or a development
+ * placeholder.
  *
  * Cached because every spec calls `createSession` and the answer cannot change within a
- * run: one worker, one backend, one machine.
+ * run: one worker, one backend, one paired envagent.
  */
 let cachedEnvironment: string | undefined;
 
 async function environmentId(page: Page): Promise<string> {
   if (cachedEnvironment) return cachedEnvironment;
 
-  const response = await page.request.get("/api/v1/environments");
-  expect(
-    response.ok(),
-    `environments lookup failed: ${response.status()} ${await response.text()}`,
-  ).toBe(true);
+  // Pairing and the envagent's first hello are asynchronous. Poll the observable
+  // inventory rather than sleeping or accepting the server's local placeholder.
+  for (let attempt = 0; attempt < 150; attempt += 1) {
+    const response = await page.request.get("/api/v1/environments");
+    expect(
+      response.ok(),
+      `environments lookup failed: ${response.status()} ${await response.text()}`,
+    ).toBe(true);
 
-  const { environments } = (await response.json()) as {
-    environments: { id: string }[];
-  };
-  // Asserted rather than optional-chained: with no environment there is nothing to key a
-  // session to, and every spec would otherwise fail on a 422 about a missing field —
-  // which reads as a broken request rather than as a backend reporting no machine.
-  expect(
-    environments.length,
-    "the backend reported no environments, so no session can be created",
-  ).toBeGreaterThan(0);
+    const { environments } = (await response.json()) as {
+      environments: { id: string; connected: boolean; agents?: { name: string; available: boolean }[] }[];
+    };
+    const paired = environments.find(
+      (environment) =>
+        environment.connected &&
+        environment.agents?.some((agent) => agent.name === AGENT && agent.available),
+    );
+    if (paired) {
+      cachedEnvironment = paired.id;
+      return paired.id;
+    }
+    await page.waitForTimeout(200);
+  }
 
-  cachedEnvironment = environments[0].id;
-  return cachedEnvironment;
+  throw new Error("the paired envagent did not report the e2e agent within 30 seconds");
 }
 
 /**

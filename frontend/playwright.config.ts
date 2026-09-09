@@ -5,9 +5,11 @@ import path from "node:path";
 /**
  * End-to-end configuration.
  *
- * Both servers are started by Playwright so a run needs no manual setup. The
- * backend gets its own data directory and a deterministic mock runner, so E2E
- * never touches the developer's real journal, real archive, or real agents.
+ * The server and a separately compiled envagent are started by Playwright so a run needs
+ * no manual setup. The envagent is paired over the loopback wire before tests begin; this
+ * keeps E2E on the Milestone 1 product path rather than reaching a linked adapter in the
+ * server process. Both processes use throwaway roots, so E2E never touches the developer's
+ * real journal, real archive, or real agents.
  *
  * Ports come from the allocation in `docs/configuration.md` § Ports: a server
  * instance owns an HTTP port and the port above it, which is where its envagent
@@ -94,12 +96,12 @@ export default defineConfig({
   ],
   webServer: [
     {
-      // `--features e2e` compiles in the deterministic E2E agent
-      // (`crates/adapters/src/e2e.rs`). It is a feature rather than an environment
-      // variable so a production binary has no code path that reaches the fixture at
-      // all: "which agents exist" must not depend on a variable a running server reads.
-      command: "cargo run --quiet --features e2e --bin sylph-server",
-      cwd: path.join(__dirname, "..", "backend"),
+      // The wrapper starts the backend, obtains a one-shot pairing code, runs the
+      // separately compiled fixture envagent, and leaves both children attached to this
+      // webServer process. The `e2e` feature is a build-time choice in each binary, so a
+      // production process has no path to the fixture.
+      command: "node frontend/e2e/start-backend-envagent.mjs",
+      cwd: path.join(__dirname, ".."),
       url: `http://127.0.0.1:${BACKEND_PORT}/api/v1/health`,
       reuseExistingServer: false,
       // A cold `cargo run` compiles the whole backend first.
@@ -109,6 +111,8 @@ export default defineConfig({
       env: {
         SYLPH_HOME: sylphHome,
         SYLPH_PORT: String(BACKEND_PORT),
+        SYLPH_ENV_PORT: String(BACKEND_PORT + 1),
+        SYLPH_ENV_LISTEN: `127.0.0.1:${BACKEND_PORT + 1}`,
         // No agent-directory pins, because there are no agent directories. Adapters are
         // compiled in, so `--features e2e` above is the whole mechanism — and under that
         // feature the fixture is the *only* agent this build knows
