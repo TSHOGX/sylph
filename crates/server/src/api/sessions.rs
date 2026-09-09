@@ -944,7 +944,11 @@ pub async fn adopt(
             return Err(Error::LinkFailed("remote adopt returned no session".into()))
         }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            return Err(Error::InvalidRequest(format!("{code}: {message}")))
+            return Err(match code.as_str() {
+                "NATIVE_SESSION_NOT_FOUND" | "ADOPT_FAILED" => Error::NativeSessionNotFound(native_id_for_command.to_string()),
+                "AGENT_UNKNOWN" => Error::InvalidRequest(format!("Unknown agent: {agent}")),
+                _ => Error::InvalidRequest(format!("{code}: {message}")),
+            })
         }
         sylph_protocol::CommandOutcome::Unknown { message } => {
             return Err(Error::LinkFailed(format!(

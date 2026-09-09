@@ -1277,7 +1277,7 @@ impl EnvAgent {
                     source.to_command_result(),
                 ),
                 Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                    code: "ADOPT_FAILED".into(),
+                    code: if self.adapters.is_known(&agent) { "NATIVE_SESSION_NOT_FOUND" } else { "AGENT_UNKNOWN" }.into(),
                     message: format!("{error:#}"),
                 },
             },
@@ -1339,7 +1339,7 @@ impl EnvAgent {
             EnvironmentCommand::Enumerate { agent, workdir } => {
                 let Some(adapter) = self.adapters.for_agent(&agent) else {
                     return sylph_protocol::CommandOutcome::Rejected {
-                        code: "AGENT_UNAVAILABLE".into(),
+                        code: if self.adapters.is_known(&agent) { "NATIVE_SESSION_NOT_FOUND" } else { "AGENT_UNKNOWN" }.into(),
                         message: format!("agent '{agent}' is not installed on this environment"),
                     };
                 };
