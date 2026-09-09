@@ -526,7 +526,7 @@ pub struct LinkManager {
     /// records terminal state. Rather than call back into it — which would be a
     /// cycle, since it calls `ensure` — the drain task resolves the channel the
     /// supervisor is parked on. Set once at startup.
-    waiters: Arc<RwLock<Option<crate::supervisor::turn::TurnWaiters>>>,
+    waiters: Arc<RwLock<Option<crate::supervisor::TurnWaiters>>>,
     /// Records terminal state for a turn no waiter exists for.
     ///
     /// An agent-initiated turn has no waiter by definition — nobody asked for it, so
@@ -607,7 +607,7 @@ impl LinkManager {
     /// supervisor's turns. One of the two edges has to be late, and this is the
     /// cheaper one — a manager with no waiters yet simply cannot settle a turn,
     /// and no turn exists before the supervisor does.
-    pub async fn set_waiters(&self, waiters: crate::supervisor::turn::TurnWaiters) {
+    pub async fn set_waiters(&self, waiters: crate::supervisor::TurnWaiters) {
         *self.waiters.write().await = Some(waiters);
     }
 

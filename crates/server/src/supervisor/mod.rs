@@ -14,8 +14,7 @@
 pub mod closer;
 pub mod outcome;
 pub mod reconcile;
-pub mod turn;
 
 pub use closer::TurnCloser;
-pub use outcome::{server_event, Outcome};
+pub use outcome::{server_event, Outcome, TurnWaiters};
 pub use reconcile::{TrajectoryOutcome, TrajectoryReconciler};

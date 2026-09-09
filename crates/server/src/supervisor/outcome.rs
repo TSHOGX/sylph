@@ -1,5 +1,8 @@
 use crate::events::StreamEvent;
 use crate::models::now_ms;
+pub type TurnWaiters = std::sync::Arc<
+    tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<Outcome>>>,
+>;
 
 #[derive(Debug, Clone)]
 pub enum Outcome {
