@@ -108,7 +108,7 @@ test("starting another session while a draft is open leaves the new draft alive"
   await group.click({ button: "right" });
   const menu = page.getByRole("menu");
   await menu.getByRole("menuitem", { name: "New session here", exact: true }).click();
-  await expect(page).toHaveURL(/\/sessions\/draft\/draft-/);
+  await expect(page).toHaveURL(/\/sessions\/draft\/(?:draft-|remote-draft-)/);
   await expect(page.getByLabel("Message")).toBeVisible();
   const secondDraft = decodeURIComponent(page.url().split("/").pop()!);
   const metadata = await page.request.get(`/api/v1/sessions/draft/${encodeURIComponent(secondDraft)}`);
