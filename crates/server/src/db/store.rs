@@ -82,10 +82,15 @@ impl JournalStore {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
-            .busy_timeout(std::time::Duration::from_secs(5));
+            // SQLite has one writer even in WAL mode. The bridge, event pump,
+            // consolidator, and request handlers may all arrive together; a
+            // five-second timeout turned ordinary startup bursts into 503s.
+            // Wait long enough for the writer transaction to finish rather
+            // than exposing a transient lock as an unavailable environment.
+            .busy_timeout(std::time::Duration::from_secs(30));
 
         let pool = SqlitePoolOptions::new()
-            .max_connections(5)
+            .max_connections(3)
             .connect_with(options)
             .await?;
 

@@ -167,10 +167,11 @@ impl HistoryStore {
             // FULL, unlike the journal's NORMAL: this is the record, and it is
             // written once per turn rather than once per token, so the fsync is
             // affordable exactly where the journal's would not be.
-            .synchronous(SqliteSynchronous::Full);
+            .synchronous(SqliteSynchronous::Full)
+            .busy_timeout(std::time::Duration::from_secs(30));
 
         let pool = SqlitePoolOptions::new()
-            .max_connections(4)
+            .max_connections(3)
             // **The `jieba` tokenizer is registered per connection, and a failure here is
             // fatal rather than a fallback.**
             //
