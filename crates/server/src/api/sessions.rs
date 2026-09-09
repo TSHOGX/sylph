@@ -497,7 +497,7 @@ pub async fn update(
     Ok(Json(SessionResponse { session: updated }))
 }
 
-/// Resolve an environment id to the adapter set that answers for it, or refuse.
+/// Resolve an environment id to a connected envagent, or refuse.
 ///
 /// # Why this is a `503` and not a `400`
 ///
@@ -857,9 +857,8 @@ pub async fn enumerate(
 ///
 /// `watch: false` is drained **before** the `201`, so a client that reads the transcript
 /// the moment it gets a response finds it there. `watch: true` follows the store as it
-/// grows and has no end to wait for, so it is spawned onto a task that outlives the
-/// request — the same shape `links::LinkManager::spawn_drain` gives a live link, for the
-/// same reason.
+/// grows and has no end to wait for; the envagent owns that long-lived source and emits
+/// its events over the bridge.
 pub async fn adopt(
     State(state): State<AppState>,
     Json(req): Json<AdoptSessionRequest>,
