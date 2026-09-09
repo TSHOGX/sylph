@@ -64,6 +64,12 @@ pub use translate::{Correlation, Emission};
 /// path is not derivable from either and is stated separately in [`native`].
 pub const AGENT_NAME: &str = "pi";
 
+/// Minimum pi version covered by the adapter's measurements.
+///
+/// The capability matrix in `docs/agents.md` was measured against 0.84.3 and this is
+/// therefore the minimum version the adapter can currently verify.
+pub const VERSION_FLOOR: &str = "0.84.3";
+
 /// The thinking levels the CLI accepts at launch, from `pi --help` on 0.84.3.
 ///
 /// **Deliberately not the set a live session offers.** `get_available_thinking_levels`
@@ -231,6 +237,10 @@ pub const IDENTITY_PREAMBLE_PLACEHOLDER: &str = "<sylph-identity-preamble>";
 
 #[async_trait]
 impl Adapter for PiAdapter {
+    fn version_floor(&self) -> Option<&'static str> {
+        Some(VERSION_FLOOR)
+    }
+
     async fn probe(&self) -> Result<AgentInfo> {
         if !Self::is_installed() {
             // Names the CLI, because that is the whole fix. The mechanism this replaced

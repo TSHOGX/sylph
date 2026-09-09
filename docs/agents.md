@@ -35,8 +35,9 @@ machine's inventory changes (`docs/environments.md` § Agent availability).
 ## Capability matrix
 
 Against `claude` 2.1.247 and `pi` 0.84.3 on 2026-08-27, and `codex-cli` 0.150.1 on
-2026-08-28. Versions and dates belong with the table: a capability claim without one goes
-stale invisibly.
+2026-08-28. These are the minimum versions currently verified by the adapters; a CLI below
+its adapter's floor is reported unavailable with the version it reported. Versions and dates
+belong with the table: a capability claim without one goes stale invisibly.
 
 | | `claude` | `codex` | `pi` |
 | --- | --- | --- | --- |

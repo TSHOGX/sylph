@@ -594,6 +594,18 @@ pub struct TurnInput {
 /// against an agent that did not exist.
 #[async_trait]
 pub trait Adapter: Send + Sync {
+    /// The minimum vendor CLI version this adapter has been verified against.
+    ///
+    /// `None` means the adapter has no versioned CLI (the deterministic E2E fixture is
+    /// one example). The envagent compares the version returned by [`Self::probe`] with
+    /// this floor before publishing inventory, so a present but unsupported binary is
+    /// reported as unavailable with the version it reported rather than as runnable.
+    /// This is adapter metadata rather than server policy: only the process that knows
+    /// the vendor's wire and store shapes can state which versions it accepts.
+    fn version_floor(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Which agent this speaks for, and what the local CLI reports about itself.
     ///
     /// Fails when the CLI is absent or unrunnable. **The absence is one fact about the

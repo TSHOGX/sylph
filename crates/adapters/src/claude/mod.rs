@@ -42,6 +42,12 @@ pub use translate::{Correlation, Emission};
 /// path is not derivable from either, which is why that module states all three.
 pub const AGENT_NAME: &str = "claude";
 
+/// Minimum Claude Code version covered by the adapter's measurements.
+///
+/// The capability matrix in `docs/agents.md` was measured against 2.1.247 and this is
+/// therefore a **minimum verified** version, not a claim that older releases cannot run.
+pub const VERSION_FLOOR: &str = "2.1.247";
+
 /// What `--permission-mode` actually accepts at launch.
 ///
 /// **Enumerated by trying every candidate against claude 2.1.245, not read off the CLI's
@@ -390,6 +396,10 @@ pub const IDENTITY_PREAMBLE_PLACEHOLDER: &str = "<sylph-identity-preamble>";
 
 #[async_trait]
 impl Adapter for ClaudeAdapter {
+    fn version_floor(&self) -> Option<&'static str> {
+        Some(VERSION_FLOOR)
+    }
+
     async fn probe(&self) -> Result<AgentInfo> {
         if !Self::is_installed() {
             // Names the CLI, because that is the whole fix. The mechanism this replaced

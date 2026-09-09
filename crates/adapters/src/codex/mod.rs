@@ -60,6 +60,12 @@ use sylph_protocol::{
 /// The name this adapter answers to, and the `PATH` binary that decides availability.
 pub const AGENT_NAME: &str = "codex";
 
+/// Minimum Codex CLI version covered by the adapter's measurements.
+///
+/// The capability and native-store measurements in `docs/agents.md` use codex-cli
+/// 0.150.1, so this is the minimum version the adapter can currently verify.
+pub const VERSION_FLOOR: &str = "0.150.1";
+
 /// Where this vendor keeps its rollouts, `$HOME`-relative — **the third fact, and not
 /// derivable from either of the two above.**
 ///
@@ -344,6 +350,10 @@ pub const LISTEN_PATH_PLACEHOLDER: &str = "unix://<sylph-codex-socket>";
 
 #[async_trait]
 impl Adapter for CodexAdapter {
+    fn version_floor(&self) -> Option<&'static str> {
+        Some(VERSION_FLOOR)
+    }
+
     async fn probe(&self) -> Result<AgentInfo> {
         if !Self::is_installed() {
             // Names the CLI, because that is the whole fix.
