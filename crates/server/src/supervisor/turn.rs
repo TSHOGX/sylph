@@ -531,7 +531,7 @@ impl LinkedSupervisor {
 
     /// Journal a server-authored event for a remote turn before dispatching work.
     ///
-    /// Remote turns do not pass through [`Self::run`], but they still need the
+    /// Remote turns do not pass through the supervisor's internal run loop, but they still need the
     /// same durable user transcript and starting marker as local turns. Keeping
     /// this behind the supervisor preserves the single sequence allocator and
     /// journal-before-publish ordering.
