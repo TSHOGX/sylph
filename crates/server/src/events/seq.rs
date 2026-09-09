@@ -68,6 +68,40 @@ impl SeqAllocator {
         Ok(counter.fetch_add(1, Ordering::SeqCst))
     }
 
+    /// Advance the next value after a sequence allocated by another producer.
+    ///
+    /// Envagent events receive their canonical sequence inside the ingest
+    /// transaction, so they do not call [`Self::next`].  The allocator is shared
+    /// with server-authored events, however; leaving its counter unchanged would
+    /// make the next status or error reuse a number the bridge has just journaled.
+    /// Raise the counter monotonically and never rewind a value already handed out.
+    pub async fn observe(&self, session_id: &SessionId, next_seq: i32) {
+        let key = session_id.encode();
+        let counter = {
+            let counters = self.counters.read().await;
+            counters.get(&key).cloned()
+        };
+        let counter = match counter {
+            Some(counter) => counter,
+            None => {
+                let max = self.store.max_event_seq(session_id).await.unwrap_or(-1);
+                let mut counters = self.counters.write().await;
+                counters
+                    .entry(key)
+                    .or_insert_with(|| Arc::new(AtomicI32::new(max + 1)))
+                    .clone()
+            }
+        };
+
+        let mut current = counter.load(Ordering::SeqCst);
+        while current < next_seq {
+            match counter.compare_exchange(current, next_seq, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(updated) => current = updated,
+            }
+        }
+    }
+
     /// Forget an optimistic in-memory counter after a transaction fails.
     ///
     /// The next allocation is reseeded from the durable journal, so a failed
@@ -171,5 +205,20 @@ mod tests {
         sorted.sort();
         assert_eq!(sorted.first(), Some(&0));
         assert_eq!(sorted.last(), Some(&(all.len() as i32 - 1)));
+    }
+
+    #[tokio::test]
+    async fn observing_remote_sequence_advances_server_producer() {
+        let (store, _dir) = store().await;
+        let allocator = SeqAllocator::new(store);
+        let session = crate::fixtures::test_session_id("remote");
+
+        assert_eq!(allocator.next(&session).await.unwrap(), 0);
+        allocator.observe(&session, 8).await;
+        assert_eq!(allocator.next(&session).await.unwrap(), 8);
+
+        // A late remote event must never rewind a value already handed out.
+        allocator.observe(&session, 3).await;
+        assert_eq!(allocator.next(&session).await.unwrap(), 9);
     }
 }

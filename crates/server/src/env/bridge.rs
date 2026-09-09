@@ -1680,6 +1680,14 @@ impl EnvBridge {
             };
             match ingest.result {
                 EnvIngestResult::Inserted => {
+                    // Remote ingest allocates the canonical sequence in the same
+                    // transaction as the event row. Keep server-authored producers'
+                    // in-memory allocator above that value, or the next status/error
+                    // frame can reuse the sequence and hit the journal's uniqueness
+                    // constraint.
+                    if let Ok(next_seq) = i32::try_from(ingest.server_seq.get().saturating_add(1)) {
+                        self.seq.observe(&item.session_id, next_seq).await;
+                    }
                     let published = StreamEvent::from_row(&row);
                     if let Some(turn_id) = arrival_turn_id.as_deref() {
                         self.hub.publish(turn_id, published.clone()).await;
