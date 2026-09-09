@@ -231,8 +231,14 @@ async fn run_connection(
     runtime.flush_pending(128).await?;
     let sender = connection.sender.clone();
     let mut incoming = connection.incoming;
-    while let Some(message) = incoming.recv().await {
-        match message {
+    let mut inventory_tick = tokio::time::interval(Duration::from_secs(5));
+    inventory_tick.tick().await;
+    let mut inventory = runtime.inventory().await;
+    loop {
+        tokio::select! {
+            maybe = incoming.recv() => {
+                let Some(message) = maybe else { break; };
+                match message {
             sylph_protocol::DecodedMessage::Known(sylph_protocol::WireMessage::Command {
                 request_id,
                 idempotency,
@@ -263,6 +269,18 @@ async fn run_connection(
             }
             sylph_protocol::DecodedMessage::Known(other) => {
                 tracing::debug!("ignoring server frame {}", other.kind());
+            }
+                }
+            }
+            _ = inventory_tick.tick() => {
+                let current = runtime.inventory().await;
+                if current != inventory {
+                    sender.send(sylph_protocol::WireMessage::Agents {
+                        connection_epoch: connection.welcome.connection_epoch,
+                        agents: current.clone(),
+                    }).await?;
+                    inventory = current;
+                }
             }
         }
     }

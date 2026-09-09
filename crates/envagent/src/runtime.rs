@@ -648,6 +648,12 @@ impl EnvAgent {
         &self.environment
     }
 
+    pub async fn inventory(&self) -> Vec<sylph_protocol::AgentInventory> {
+        crate::health::HealthReporter::with_adapters(self.adapters.clone())
+            .inventory()
+            .await
+    }
+
     pub async fn set_sink(&self, sink: Arc<dyn EventSink>) {
         *self.sink.write().await = sink;
     }
