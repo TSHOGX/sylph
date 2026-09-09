@@ -399,7 +399,7 @@ test("Quick Sessions creates a session from its menu with no dialog", async ({ p
   await expect(page.getByLabel("Message")).toBeVisible();
   // Creation is two-phase: this route carries an opaque draft handle until the first
   // real message. It is intentionally absent from the sidebar and history while empty.
-  await expect(page).toHaveURL(/\/sessions\/draft\/draft-/);
+  await expect(page).toHaveURL(/\/sessions\/draft\/(?:draft-|remote-draft-)/);
   await expect(page.getByLabel("Working directory")).toHaveCount(0);
 
   await page.getByLabel("Message").fill("persist this draft");
