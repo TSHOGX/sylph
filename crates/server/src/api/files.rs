@@ -119,7 +119,7 @@ fn map_remote_file_error(error: anyhow::Error) -> Error {
         Error::Forbidden("That path is outside the permitted directory.".into())
     } else if text.contains("No such file") || text.contains("path does not exist") || text.contains("not found") {
         Error::FileNotFound
-    } else if text.contains("file already exists") {
+    } else if text.contains("file already exists") || text.contains("File exists") {
         Error::InvalidRequest("File already exists; set overwrite to replace it.".into())
     } else if text.contains("Directory not empty") || text.contains("directory not empty") {
         Error::InvalidRequest("Directory is not empty; set recursive to remove it.".into())
@@ -1263,6 +1263,9 @@ pub async fn mkdir(
 ) -> Result<(StatusCode, Json<MkdirResponse>)> {
     if let Some(remote) = remote_target(&state, &id).await? {
         let name = sanitize_component(&req.name)?;
+        // Reject the user-facing name before crossing the bridge. The envagent receives
+        // only a normalized relative path, so it cannot distinguish a separator typo
+        // from an intentional nested path after `join_relative` has rewritten it.
         let relative = paths::join_relative(&req.path, &name);
         let (environment, draft_id, session_id, workdir) = remote_parts(&remote);
         state

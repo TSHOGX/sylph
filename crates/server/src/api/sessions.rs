@@ -495,6 +495,34 @@ pub async fn update(
     // and remains available while an envagent is temporarily offline; the next
     // turn carries the stored set through the bridge.
     if let Some(flags) = &req.flags {
+        let outcome = state
+            .env_bridge
+            .remote_session_command(
+                &id,
+                sylph_protocol::EnvironmentCommand::Capabilities {
+                    session_id: id.clone(),
+                },
+                sylph_protocol::IdempotencyPolicy::Replayable,
+            )
+            .await
+            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+        if let sylph_protocol::CommandOutcome::Accepted {
+            result: Some(value),
+        } = outcome
+        {
+            if let Some(config) = value.get("capabilities").and_then(|v| v.get("config")) {
+                let options: Vec<sylph_protocol::ConfigOption> = serde_json::from_value(config.clone())
+                    .map_err(|error| Error::Internal(format!("remote capabilities were malformed: {error}")))?;
+                for (key, value) in flags {
+                    let Some(option) = options.iter().find(|option| option.id == *key) else {
+                        return Err(Error::InvalidRequest(format!("Agent '{}' does not declare a '{}' flag.", id.agent, key)));
+                    };
+                    if !option.options.is_empty() && !option.options.iter().any(|choice| choice.value == *value) {
+                        return Err(Error::InvalidRequest(format!("'{}' is not a valid {} for '{}'.", value, key, id.agent)));
+                    }
+                }
+            }
+        }
         let flags_json = serde_json::to_string(flags)
             .map_err(|e| Error::Internal(format!("Failed to encode flags: {e}")))?;
         state.store.set_session_flags(&id, &flags_json).await?;
