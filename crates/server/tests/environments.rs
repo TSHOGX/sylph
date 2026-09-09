@@ -92,6 +92,13 @@ async fn connected_inventory_updates_after_cli_removal_without_repair_or_restart
         .iter()
         .any(|agent| agent.name == "mock" && agent.available));
 
+    // `run_connection` establishes its comparison snapshot immediately, then
+    // polls on a five-second cadence. Wait for one complete cadence after the
+    // pairing handshake so this test changes the source after that snapshot,
+    // rather than racing startup and making the removal indistinguishable from
+    // the initial hello inventory.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+
     // The envagent and server share this test seam, but remain separate processes in
     // production. The runtime's inventory watcher observes the removal on its next
     // pass and sends an `agents` frame over the existing connection.
