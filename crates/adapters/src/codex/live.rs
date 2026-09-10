@@ -1001,6 +1001,7 @@ fn scripted_peer(script: &str) -> process::Spawn {
         args: vec!["-c".to_string(), script.to_string()],
         cwd: "/tmp".to_string(),
         env: HashMap::new(),
+        env_remove: Vec::new(),
         // The same predicate the real spawn uses, so these tests exercise the correlation
         // the session actually runs with rather than a simplified stand-in.
         reply_id: Some(Box::new(process::json_rpc_reply_id)),
@@ -1030,6 +1031,7 @@ pub async fn run(spec: RunSpec) -> Result<Box<dyn Session>> {
         args: vec!["app-server".to_string()],
         cwd: spec.workdir.clone(),
         env: HashMap::new(),
+        env_remove: Vec::new(),
         // **The predicate, not a field name.** codex numbers its *server* requests in the
         // same space `next_request_id` mints from — measured at 0,1,2 against our 1.. — so a
         // reader keyed on the presence of an `id` would route an approval into whichever
