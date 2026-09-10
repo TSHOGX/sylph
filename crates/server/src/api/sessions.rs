@@ -11,6 +11,7 @@ use sylph_protocol::{AgentName, EnvironmentId, NativeId, SessionId};
 
 use crate::{
     db::store::SessionFilter,
+    env::bridge::RemoteCommandError,
     error::{Error, Result},
     events::StreamEvent,
     models::{AdoptSessionRequest, CreateSessionRequest, Session, Turn},
@@ -399,22 +400,37 @@ async fn create_prepared(
         )
         .await
         .map_err(|error| {
-            let text = format!("{error:#}");
-            if text.contains("PREPARE_FAILED") && text.contains("not installed") {
-                Error::InvalidRequest(format!("Unknown agent: {}", req.agent))
-            } else if text.contains("POLICY_VIOLATION") || text.contains("outside") || text.contains("escapes") {
-                Error::Forbidden(format!("The requested working directory is outside the configured sessions may run in roots: {}", state.config.browse_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")))
-            } else if text.contains("WORKDIR_MISSING") || text.contains("does not exist") {
-                Error::InvalidRequest("Working directory does not exist".into())
-            } else if text.contains("not a directory") {
-                Error::InvalidRequest("Working directory is not a directory".into())
-            } else if text.contains("AGENT_UNKNOWN") {
-                Error::InvalidRequest(format!("Unknown agent: {}", req.agent))
-            } else if text.contains("handshake failure") || text.contains("would not report") {
-                Error::HandshakeFailed(text)
-            } else {
-                Error::AgentStartFailed(anyhow::anyhow!(text))
+            if let Some(remote) = error.downcast_ref::<RemoteCommandError>() {
+                if let Some(code) = remote.code() {
+                    return match sylph_protocol::RejectCode::parse(code) {
+                        Some(sylph_protocol::RejectCode::AgentUnknown) => {
+                            Error::InvalidRequest(format!("Unknown agent: {}", req.agent))
+                        }
+                        Some(sylph_protocol::RejectCode::AgentUnavailable) => {
+                            Error::InvalidRequest(format!("Agent is not installed: {}", req.agent))
+                        }
+                        Some(
+                            sylph_protocol::RejectCode::WorkdirOutsideRoots
+                            | sylph_protocol::RejectCode::PolicyViolation,
+                        ) => Error::Forbidden(
+                            "The requested working directory is outside the configured roots"
+                                .into(),
+                        ),
+                        Some(sylph_protocol::RejectCode::WorkdirMissing) => {
+                            Error::InvalidRequest("Working directory does not exist".into())
+                        }
+                        Some(sylph_protocol::RejectCode::WorkdirNotADirectory) => {
+                            Error::InvalidRequest("Working directory is not a directory".into())
+                        }
+                        Some(sylph_protocol::RejectCode::AgentStartFailed) => {
+                            Error::HandshakeFailed(remote.message().to_string())
+                        }
+                        _ => Error::AgentStartFailed(anyhow::anyhow!(remote.message().to_string())),
+                    };
+                }
+                return Error::AgentStartFailed(anyhow::anyhow!(remote.message().to_string()));
             }
+            Error::AgentStartFailed(error)
         })?;
     Ok((
         StatusCode::CREATED,

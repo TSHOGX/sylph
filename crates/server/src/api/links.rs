@@ -62,19 +62,24 @@ fn remote_link_state(agent: String, value: serde_json::Value) -> Result<LinkStat
 }
 
 fn remote_refusal(code: &str, message: String) -> Error {
-    match code {
-        "INVALID_VALUE" => Error::InvalidRequest(message),
-        "UNSUPPORTED_FIELD" => Error::Unsupported(message),
-        "SESSION_NOT_HOSTED" | "NO_AGENT" => Error::LinkFailed(message),
+    match sylph_protocol::RejectCode::parse(code) {
+        Some(
+            sylph_protocol::RejectCode::InvalidValue
+            | sylph_protocol::RejectCode::ConfigValueNotOffered
+            | sylph_protocol::RejectCode::ConfigOptionUnknown,
+        ) => Error::InvalidRequest(message),
+        Some(sylph_protocol::RejectCode::UnsupportedField) => Error::Unsupported(message),
+        Some(
+            sylph_protocol::RejectCode::SessionNotHosted
+            | sylph_protocol::RejectCode::AgentUnavailable
+            | sylph_protocol::RejectCode::AgentStartFailed,
+        ) => Error::LinkFailed(message),
         _ => Error::LinkFailed(format!("{code}: {message}")),
     }
 }
 
 fn remote_config_refusal(code: &str, message: String) -> Error {
-    match code {
-        "INVALID_VALUE" | "UNSUPPORTED_FIELD" => Error::InvalidRequest(message),
-        _ => remote_refusal(code, message),
-    }
+    remote_refusal(code, message)
 }
 
 #[derive(serde::Deserialize)]
@@ -101,18 +106,23 @@ pub async fn prepared_set_config(
     Json(body): Json<PreparedConfigRequest>,
 ) -> Result<Json<LinkState>> {
     if let Some(draft) = state.env_bridge.remote_draft(&draft_id).await {
-        state
+        let outcome = state
             .env_bridge
             .remote_draft_set_config(&draft, body.id, body.value)
             .await
-            .map_err(|error| {
-                let text = format!("{error:#}");
-                if let Some((code, message)) = text.split_once(": ") {
-                    remote_config_refusal(code, message.to_string())
-                } else {
-                    Error::LinkFailed(text)
-                }
-            })?;
+            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+        match outcome {
+            sylph_protocol::CommandOutcome::Accepted { .. } => {}
+            sylph_protocol::CommandOutcome::Rejected { code, message } => {
+                return Err(remote_config_refusal(&code, message));
+            }
+            sylph_protocol::CommandOutcome::Unknown { message } => {
+                return Err(Error::LinkFailed(format!(
+                    "remote draft config outcome is unknown: {}",
+                    message.unwrap_or_default()
+                )));
+            }
+        }
         let refreshed = state
             .env_bridge
             .remote_draft_capabilities(&draft)
@@ -199,26 +209,18 @@ pub async fn capabilities(
             .await
         {
             Ok(outcome) => outcome,
-            Err(error) => {
-                let text = format!("{error:#}");
-                if text.contains("not installed")
-                    || text.contains("PREPARE_FAILED")
-                    || text.contains("NO_AGENT")
-                {
-                    return Ok(Json(LinkState::failed(
-                        sylph_protocol::UnavailableReason::NoAgent,
-                    )));
-                }
-                return Err(Error::LinkFailed(text));
-            }
+            Err(error) => return Err(Error::LinkFailed(format!("{error:#}"))),
         };
         if let sylph_protocol::CommandOutcome::Rejected { code, message } = attach_outcome {
-            if code == "NO_AGENT" {
+            if matches!(
+                sylph_protocol::RejectCode::parse(&code),
+                Some(sylph_protocol::RejectCode::AgentUnavailable)
+            ) {
                 return Ok(Json(LinkState::failed(
                     sylph_protocol::UnavailableReason::NoAgent,
                 )));
             }
-            return Err(Error::LinkFailed(format!("{code}: {message}")));
+            return Err(remote_refusal(&code, message));
         }
         outcome = state
             .env_bridge
@@ -608,7 +610,7 @@ pub async fn steer(
             Ok(Json(serde_json::json!({"steered": true})))
         }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(Error::LinkFailed(format!("{code}: {message}")))
+            Err(remote_refusal(&code, message))
         }
         sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
             "remote steer outcome is unknown: {}",
@@ -676,7 +678,7 @@ pub async fn queue(
             Ok(Json(serde_json::json!({"queued": true})))
         }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(Error::LinkFailed(format!("{code}: {message}")))
+            Err(remote_refusal(&code, message))
         }
         sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
             "remote queue outcome is unknown: {}",
@@ -725,7 +727,7 @@ pub async fn set_config(
         sylph_protocol::CommandOutcome::Accepted {
             result: Some(value),
         } => {
-            if let Some(flag) = value.get("persistedFlag") {
+            if let Some(flag) = value.get("persistedLaunchFlag") {
                 if let (Some(key), Some(value)) = (
                     flag.get("key").and_then(|v| v.as_str()),
                     flag.get("value").and_then(|v| v.as_str()),

@@ -188,6 +188,7 @@ impl AppState {
         // emit events for the same session, and separate counters would hand out
         // the same sequence number.
         let seq = crate::events::SeqAllocator::new(store.clone());
+        let retention_registry = environment_registry.clone();
         let env_bridge = Arc::new(crate::env::EnvBridge::new(
             store.clone(),
             history.clone(),
@@ -232,7 +233,7 @@ impl AppState {
         let retention = crate::storage::RetentionScheduler::new(
             store.clone(),
             history.clone(),
-            environment.clone(),
+            retention_registry,
         );
         retention.spawn();
 

@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentInfo, CapabilityFacets, CommandOutcome, CommandRequest, CommandRequestId, EnvironmentId,
-    IdempotencyPolicy, LinkFacets, NativeId, NativeRecord, ProducerId, ProducerSeq, Request,
-    SequencedEvent, ServerSeq, SessionCapabilities, SessionEdge, SessionId, SourceCursor,
+    AgentInfo, Capability, CapabilityFacets, CommandOutcome, CommandRequest, CommandRequestId,
+    EnvironmentId, IdempotencyPolicy, LinkFacets, NativeId, NativeRecord, ProducerId, ProducerSeq,
+    Request, SequencedEvent, ServerSeq, SessionCapabilities, SessionEdge, SessionId, SourceCursor,
     TurnInputFact,
 };
 
@@ -427,6 +427,26 @@ pub enum RejectCode {
     NativeSessionNotFound,
     /// The store holds the session and recorded no working directory for it.
     NativeSessionNotResumable,
+    /// The draft handle is malformed.
+    InvalidDraftId,
+    /// A draft could not be prepared.
+    PrepareFailed,
+    /// A run could not be started or resumed.
+    RunFailed,
+    /// An attachment or turn input could not be accepted.
+    AttachmentInvalid,
+    /// A turn input could not be sent.
+    SendFailed,
+    /// A capability snapshot could not be produced.
+    CapabilitiesFailed,
+    /// A config change could not be applied.
+    SetConfigFailed,
+    /// A native source could not be watched.
+    WatchFailed,
+    /// A native session enumeration failed.
+    EnumerateFailed,
+    /// A file command failed.
+    FilesFailed,
     /// The option is not one this session's surface offers.
     ConfigOptionUnknown,
     /// The option exists and the value is not one it enumerated.
@@ -466,6 +486,16 @@ impl RejectCode {
             Self::TurnMoved => "TURN_MOVED",
             Self::NativeSessionNotFound => "NATIVE_SESSION_NOT_FOUND",
             Self::NativeSessionNotResumable => "NATIVE_SESSION_NOT_RESUMABLE",
+            Self::InvalidDraftId => "INVALID_DRAFT_ID",
+            Self::PrepareFailed => "PREPARE_FAILED",
+            Self::RunFailed => "RUN_FAILED",
+            Self::AttachmentInvalid => "ATTACHMENT_INVALID",
+            Self::SendFailed => "SEND_FAILED",
+            Self::CapabilitiesFailed => "CAPABILITIES_FAILED",
+            Self::SetConfigFailed => "SET_CONFIG_FAILED",
+            Self::WatchFailed => "WATCH_FAILED",
+            Self::EnumerateFailed => "ENUMERATE_FAILED",
+            Self::FilesFailed => "FILES_FAILED",
             Self::ConfigOptionUnknown => "CONFIG_OPTION_UNKNOWN",
             Self::ConfigValueNotOffered => "CONFIG_VALUE_NOT_OFFERED",
             Self::UnsupportedField => "UNSUPPORTED_FIELD",
@@ -652,6 +682,23 @@ pub struct CapabilitySnapshot {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LaunchFlag {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityResult {
+    pub capabilities: SessionCapabilities,
+    pub supports: Vec<Capability>,
+    pub link: LinkFacets,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_launch_flag: Option<LaunchFlag>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SourceState {
     pub session_id: SessionId,
     pub cursor: SourceCursor,
@@ -734,9 +781,9 @@ pub enum FileOperation {
     },
     /// Read a file, or its first `limit` bytes.
     ///
-    /// The answer carries the file's whole size beside the bytes it returned, so a
-    /// caller that asked for a prefix knows it got one. With no `limit` the whole file
-    /// is returned, up to [`MAX_FILE_READ_BYTES`].
+    /// The answer carries the file's whole size beside the base64 bytes it returned,
+    /// so a caller that asked for a prefix knows it got one. With no `limit` the
+    /// whole file is returned, up to [`MAX_FILE_READ_BYTES`].
     Read {
         relative: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1284,6 +1331,16 @@ mod tests {
             RejectCode::TurnMoved,
             RejectCode::NativeSessionNotFound,
             RejectCode::NativeSessionNotResumable,
+            RejectCode::InvalidDraftId,
+            RejectCode::PrepareFailed,
+            RejectCode::RunFailed,
+            RejectCode::AttachmentInvalid,
+            RejectCode::SendFailed,
+            RejectCode::CapabilitiesFailed,
+            RejectCode::SetConfigFailed,
+            RejectCode::WatchFailed,
+            RejectCode::EnumerateFailed,
+            RejectCode::FilesFailed,
             RejectCode::ConfigOptionUnknown,
             RejectCode::ConfigValueNotOffered,
             RejectCode::UnsupportedField,

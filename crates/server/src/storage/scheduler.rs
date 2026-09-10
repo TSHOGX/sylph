@@ -30,7 +30,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use crate::db::JournalStore;
-use crate::env::Environment;
+use crate::env::{EnvironmentRegistry, EnvironmentSnapshot};
 use crate::models::now_ms;
 use crate::storage::history::HistoryStore;
 use crate::storage::retention::{self, Resolved};
@@ -157,14 +157,11 @@ fn human_bytes(bytes: i64) -> String {
 pub struct RetentionScheduler {
     journal: JournalStore,
     history: HistoryStore,
-    /// The environment sessions run in.
-    ///
-    /// One today. Held as the trait object rather than a kind string because the
-    /// authority now asks it a *question* — is this session's native source still
-    /// there — rather than branching on what kind of environment it is. That branch
-    /// (`matches!(kind, "local")`) was the "who started it" reading `docs/storage.md`
-    /// forbids.
-    environment: Arc<dyn Environment>,
+    /// Paired envagents indexed by their opaque environment id. Retention must
+    /// resolve the session's own environment; a synthetic global "paired"
+    /// descriptor cannot answer that question without turning every session into
+    /// terminal data.
+    registry: EnvironmentRegistry,
     /// One pass at a time, for the same reason the consolidator serializes: this is
     /// I/O-heavy background work and competing with the token path for the same
     /// disk is what the tiering exists to avoid.
@@ -176,12 +173,12 @@ impl RetentionScheduler {
     pub fn new(
         journal: JournalStore,
         history: HistoryStore,
-        environment: Arc<dyn Environment>,
+        registry: EnvironmentRegistry,
     ) -> Self {
         Self {
             journal,
             history,
-            environment,
+            registry,
             gate: Arc::new(Semaphore::new(1)),
             last: Arc::new(Mutex::new(None)),
         }
@@ -205,14 +202,19 @@ impl RetentionScheduler {
             ..PassReport::default()
         };
 
-        // Once, before any session. A backed session cannot be confirmed without its
-        // environment, and asking per session turns one configuration fact into a
-        // per-session failure.
-        let descriptor = self.environment.descriptor();
-        let reachable = self.environment.probe().await.available;
-        report
-            .environments_reachable
-            .insert(descriptor.id.clone(), reachable);
+        // Snapshot all paired installations once. A session is bound to its own
+        // opaque environment id for life; probing one synthetic "paired" environment
+        // would make the reachability result unusable for every real session.
+        let snapshots = self.registry.list().await;
+        for snapshot in &snapshots {
+            report
+                .environments_reachable
+                .insert(snapshot.id.to_string(), snapshot.connected);
+        }
+        let snapshots: std::collections::BTreeMap<String, EnvironmentSnapshot> = snapshots
+            .into_iter()
+            .map(|snapshot| (snapshot.id.to_string(), snapshot))
+            .collect();
 
         let sessions = match self.history.sessions_awaiting_retention(PASS_BATCH).await {
             Ok(sessions) => sessions,
@@ -224,7 +226,7 @@ impl RetentionScheduler {
 
         for session_id in sessions {
             report.examined += 1;
-            match self.run_one(&session_id, &mut report).await {
+            match self.run_one(&session_id, &snapshots, &mut report).await {
                 Ok(()) => {}
                 // One session's failure must not stop the pass, or a single
                 // unreachable archive row would block every session behind it.
@@ -341,7 +343,12 @@ impl RetentionScheduler {
     }
 
     /// One session: resolve its authority, skip it if unchanged, otherwise prune.
-    async fn run_one(&self, encoded: &str, report: &mut PassReport) -> anyhow::Result<()> {
+    async fn run_one(
+        &self,
+        encoded: &str,
+        snapshots: &std::collections::BTreeMap<String, EnvironmentSnapshot>,
+        report: &mut PassReport,
+    ) -> anyhow::Result<()> {
         // `history.db` keys on the encoded triple, so a batch arrives as strings and
         // this is where the decode happens. A key that will not decode cannot name a
         // session, so nothing can be asked about it and its history is kept — the safe
@@ -366,13 +373,13 @@ impl RetentionScheduler {
             return Ok(());
         }
 
-        let resolved = retention::resolve_authority(&self.environment, &session_id);
+        let resolved = retention::resolve_authority(snapshots, &session_id);
 
         if matches!(resolved, Resolved::Terminal(_)) {
             report.terminal += 1;
         }
 
-        // A backed session whose environment did not answer is left **entirely alone**:
+        // An unresolved environment is left **entirely alone**:
         // not pruned, and *not* recorded as checked. Writing a watermark would assert a
         // confirmation that was never obtained, and "cannot ask" must not be stored as
         // "asked, and nothing is safe yet" — a later pass would believe a bound had been
@@ -388,7 +395,9 @@ impl RetentionScheduler {
             .get(session_id.environment.as_str())
             .copied()
             .unwrap_or(false);
-        if matches!(resolved, Resolved::Backed(_)) && !reachable {
+        if matches!(resolved, Resolved::Unreachable)
+            || (matches!(resolved, Resolved::Backed(_)) && !reachable)
+        {
             self.record_withheld(report, retention::WithheldReason::EnvironmentUnreachable);
             debug!(
                 "Environment {} is unreachable; leaving {}'s history and watermark untouched",

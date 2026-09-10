@@ -18,13 +18,11 @@
 //!   terminal session and a symptom for a backed one, and both look identical to never
 //!   having run at all.
 
-use std::sync::Arc;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use tracing::{debug, info};
 
-use crate::env::Environment;
+use crate::env::EnvironmentSnapshot;
 use crate::storage::HistoryStore;
 use sylph_protocol::SessionId;
 
@@ -184,11 +182,13 @@ impl RetentionAuthority for TerminalAuthority {
 /// unavailable until something durably records which event a native record produced;
 /// until then growth is the deliberate direction, per this module's header.
 pub struct EnvagentAuthority {
-    environment: Arc<dyn Environment>,
+    /// The environment id is retained for auditability even though the current
+    /// adapter protocol cannot derive a native-to-sequence bound yet.
+    environment: sylph_protocol::EnvironmentId,
 }
 
 impl EnvagentAuthority {
-    pub fn new(environment: Arc<dyn Environment>) -> Self {
+    pub fn new(environment: sylph_protocol::EnvironmentId) -> Self {
         Self { environment }
     }
 }
@@ -200,22 +200,10 @@ impl RetentionAuthority for EnvagentAuthority {
     }
 
     async fn confirm(&self, session: &SessionId) -> Result<Confirmation> {
-        // The scheduler probes reachability **once per pass** and does not reach here
-        // for a session whose environment it found unreachable — that is the layer that
-        // owns the discipline, because an unreachable environment is one fact about the
-        // pass rather than N session failures. This is the second line of defence for a
-        // connection that dropped mid-pass.
-        let health = self.environment.probe().await;
-        if !health.available {
-            return Ok(Confirmation::nothing(
-                Some(NativeSourceState::Unreachable),
-                WithheldReason::EnvironmentUnreachable,
-            ));
-        }
-
         debug!(
-            "No native-to-sequence correspondence exists for {}, so no bound is derivable; keeping every block",
-            session.encode()
+            "No native-to-sequence correspondence exists for {} on environment {}, so no bound is derivable; keeping every block",
+            session.encode(),
+            self.environment
         );
         Ok(Confirmation::nothing(
             Some(NativeSourceState::Present),
@@ -231,9 +219,13 @@ impl RetentionAuthority for EnvagentAuthority {
 /// terminal session and a symptom for a backed one, and without the class those two are
 /// indistinguishable in a log.
 pub enum Resolved {
-    /// A reachable environment holds this session's native source.
+    /// A connected environment holds this session's native source.
     Backed(EnvagentAuthority),
-    /// No reachable native source. Compact forever, prune never.
+    /// The environment cannot be asked during this pass. No watermark may be
+    /// written: doing so would claim an observation that never happened.
+    Unreachable,
+    /// The session has no native source at all. This is a terminal fact and may
+    /// record a terminal watermark while retaining every block forever.
     Terminal(TerminalAuthority),
 }
 
@@ -242,6 +234,7 @@ impl Resolved {
         match self {
             Self::Backed(authority) => authority,
             Self::Terminal(authority) => authority,
+            Self::Unreachable => unreachable!("unreachable sessions are never asked"),
         }
     }
 }
@@ -262,12 +255,18 @@ impl Resolved {
 /// (`docs/architecture.md` § Sessions do not migrate). So the only question is whether
 /// *that* environment is one this server can currently reach — and because sessions do
 /// not migrate, no other environment could answer for it even if it were connected.
-pub fn resolve_authority(environment: &Arc<dyn Environment>, session: &SessionId) -> Resolved {
-    let descriptor = environment.descriptor();
-    if descriptor.id == session.environment.as_str() {
-        Resolved::Backed(EnvagentAuthority::new(environment.clone()))
-    } else {
-        Resolved::Terminal(TerminalAuthority)
+pub fn resolve_authority(
+    environments: &std::collections::BTreeMap<String, EnvironmentSnapshot>,
+    session: &SessionId,
+) -> Resolved {
+    match environments.get(session.environment.as_str()) {
+        Some(snapshot) if snapshot.connected => {
+            Resolved::Backed(EnvagentAuthority::new(session.environment.clone()))
+        }
+        // A disconnected or unpaired environment cannot answer this pass. Keep
+        // the prior watermark untouched so a transient outage can never become a
+        // false confirmation.
+        Some(_) | None => Resolved::Unreachable,
     }
 }
 
@@ -349,4 +348,59 @@ pub struct RetentionReport {
     /// was connected, so nobody was asked" — the conflation `docs/storage.md` rejects,
     /// because those call for opposite responses.
     pub withheld: Option<WithheldReason>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::env::EnvironmentSnapshot;
+    use sylph_protocol::EnvironmentId;
+
+    fn session(environment: &str) -> SessionId {
+        SessionId::new(
+            EnvironmentId::parse(environment).unwrap(),
+            sylph_protocol::AgentName::parse("mock").unwrap(),
+            sylph_protocol::NativeId::new("native"),
+        )
+    }
+
+    fn snapshot(environment: &str, connected: bool) -> EnvironmentSnapshot {
+        EnvironmentSnapshot {
+            id: EnvironmentId::parse(environment).unwrap(),
+            name: "fixture".into(),
+            origin: "test".into(),
+            connected,
+            reachable_via: None,
+            connection_epoch: 1,
+            agents: vec![],
+            last_seen_at_ms: Some(1),
+        }
+    }
+
+    #[test]
+    fn resolves_against_the_session_environment_id() {
+        let id = "abcdefghijklmnopqrstuvwxyz234567";
+        let mut environments = std::collections::BTreeMap::new();
+        environments.insert(id.into(), snapshot(id, true));
+        assert!(matches!(
+            resolve_authority(&environments, &session(id)),
+            Resolved::Backed(_)
+        ));
+    }
+
+    #[test]
+    fn disconnected_and_unknown_environments_are_unreachable() {
+        let id = "abcdefghijklmnopqrstuvwxyz234567";
+        let mut environments = std::collections::BTreeMap::new();
+        environments.insert(id.into(), snapshot(id, false));
+        assert!(matches!(
+            resolve_authority(&environments, &session(id)),
+            Resolved::Unreachable
+        ));
+        let other = "bcdefghijklmnopqrstuvwxyz234567a";
+        assert!(matches!(
+            resolve_authority(&environments, &session(other)),
+            Resolved::Unreachable
+        ));
+    }
 }

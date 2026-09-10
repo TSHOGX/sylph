@@ -331,15 +331,18 @@ There is no second Sylph-side copy to wait for (`docs/architecture.md` § One au
 | Class | When | Rule |
 | --- | --- | --- |
 | **Backed** | the vendor's native store still holds this session, on a reachable environment | prune below the confirmed bound |
-| **Terminal** | no reachable native source — a sandbox that is gone, an unpaired environment, a session the vendor never wrote | compact, never prune |
+| **Terminal** | the server has established that no native source exists (for example, the vendor never wrote the session) | compact, never prune |
 
 A terminal session's record exists *only* here, so there is nothing to wait for and
 pruning would destroy the sole copy. It is still compacted — deltas folded, blobs
 externalized, text compressed — and never deleted.
 
-The boundary rests on whether a native source exists **and is reachable**, never on who
-started the session. An unpaired environment is unreachable, so its sessions become
-terminal and keep everything (`docs/environments.md` § Unpairing).
+The boundary rests on the session's own environment id and its current lease, never on who
+started the session. A paired but disconnected environment is **unreachable for this pass**:
+retention records no watermark and keeps the previous one untouched, so a transient outage
+cannot become a false confirmation. An unpaired environment is also unreachable; it stays
+withheld until an operator explicitly establishes that no native source remains
+(`docs/environments.md` § Unpairing).
 
 **There is no size trigger, and none is coming.** A terminal session has no downstream
 copy by definition, so a size-triggered prune is a size-triggered deletion of the only
@@ -362,7 +365,9 @@ withheld reason is what keeps those distinct.
 
 A session with no native source is **terminal rather than unconfirmed**, and the type
 enforces it: an authority that needs a native source in order to be constructed cannot be
-asked about a session that has none.
+asked about a session that has none. Reachability is resolved against the opaque environment
+id in the session identity; a global "paired" health bit cannot answer for multiple
+installations.
 
 ### Deriving a bound from a vendor's store
 
@@ -404,12 +409,12 @@ never having run. So:
   "checked, and nothing is safe yet" from "never checked". An empty watermark table looks
   exactly like a correctly conservative one.
 * **An unreachable environment is one fact about the pass, not N session failures.** Each
-  environment is probed once per pass, and its sessions are then left alone: not pruned,
-  and not recorded as checked. Report an absent peer once at `error` and at `debug`
-  thereafter, in whatever holds the connection — a timer-driven caller otherwise
-  reproduces the same unbounded stream from one missing dependency. **An install with no
-  environment paired is a supported configuration**, so it must not be reported as a fault
-  forever.
+  paired environment is snapshotted once per pass by its opaque id. Disconnected or absent
+  ids leave their sessions alone: not pruned and **not recorded as checked**. Report an absent
+  peer once at `error` and at `debug` thereafter, in whatever holds the connection — a
+  timer-driven caller otherwise reproduces the same unbounded stream from one missing
+  dependency. **An install with no environment paired is a supported configuration**, so it
+  must not be reported as a fault forever.
 * **Blob sweeping is per pass, not per session**, since reachability spans sessions.
 
 `/api/v1/diagnostics` reports the last pass separately as examined, confirmed, withheld,

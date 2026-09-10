@@ -1015,9 +1015,9 @@ async fn a_retention_pass_examines_a_consolidated_session_and_keeps_unconfirmed_
     // not a zero bound, which would read as a completed check.
     assert_eq!(report.withheld, 1, "{report:?}");
     assert_eq!(
-        report.withheld_reasons.get("no_native_source"),
+        report.withheld_reasons.get("ambiguous"),
         Some(&1),
-        "the pass records why it withheld rather than only that it did: {report:?}"
+        "a reachable envagent answered, but no native-to-sequence bound exists: {report:?}"
     );
     assert_eq!(
         report.failed, 0,

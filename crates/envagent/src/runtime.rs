@@ -1,6 +1,7 @@
 //! Adapter hosting and ack-gated event delivery.
 
 use std::collections::{BTreeMap, HashSet};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -724,7 +725,7 @@ impl EnvAgent {
     ) -> sylph_protocol::CommandOutcome {
         if draft_id.trim().is_empty() {
             return sylph_protocol::CommandOutcome::Rejected {
-                code: "INVALID_DRAFT_ID".into(),
+                code: sylph_protocol::RejectCode::InvalidDraftId.as_str().into(),
                 message: "draft id must not be empty".into(),
             };
         }
@@ -776,7 +777,7 @@ impl EnvAgent {
                 }))
             }
             Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                code: "PREPARE_FAILED".into(),
+                code: sylph_protocol::RejectCode::PrepareFailed.as_str().into(),
                 message: format!("{error:#}"),
             },
         }
@@ -1091,7 +1092,9 @@ impl EnvAgent {
                                 Ok(v) => Some(v),
                                 Err(error) => {
                                     return sylph_protocol::CommandOutcome::Rejected {
-                                        code: "ATTACHMENT_INVALID".into(),
+                                        code: sylph_protocol::RejectCode::AttachmentInvalid
+                                            .as_str()
+                                            .into(),
                                         message: format!("{error:#}"),
                                     }
                                 }
@@ -1103,7 +1106,7 @@ impl EnvAgent {
                                 if let Err(error) = prepared.session.send(input).await {
                                     self.close_prepared_failure(prepared).await;
                                     return sylph_protocol::CommandOutcome::Rejected {
-                                        code: "RUN_FAILED".into(),
+                                        code: sylph_protocol::RejectCode::RunFailed.as_str().into(),
                                         message: format!("{error:#}"),
                                     };
                                 }
@@ -1114,7 +1117,9 @@ impl EnvAgent {
                                     Err(error) => {
                                         self.close_prepared_failure(prepared).await;
                                         return sylph_protocol::CommandOutcome::Rejected {
-                                            code: "RUN_FAILED".into(),
+                                            code: sylph_protocol::RejectCode::RunFailed
+                                                .as_str()
+                                                .into(),
                                             message: format!("{error:#}"),
                                         };
                                     }
@@ -1212,7 +1217,9 @@ impl EnvAgent {
                         Ok(v) => Some(v),
                         Err(error) => {
                             return sylph_protocol::CommandOutcome::Rejected {
-                                code: "ATTACHMENT_INVALID".into(),
+                                code: sylph_protocol::RejectCode::AttachmentInvalid
+                                    .as_str()
+                                    .into(),
                                 message: format!("{error:#}"),
                             }
                         }
@@ -1248,7 +1255,7 @@ impl EnvAgent {
                         }
                     },
                     Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                        code: "RUN_FAILED".into(),
+                        code: sylph_protocol::RejectCode::RunFailed.as_str().into(),
                         message: format!("{error:#}"),
                     },
                 }
@@ -1272,7 +1279,9 @@ impl EnvAgent {
                     Ok(v) => v,
                     Err(error) => {
                         return sylph_protocol::CommandOutcome::Rejected {
-                            code: "ATTACHMENT_INVALID".into(),
+                            code: sylph_protocol::RejectCode::AttachmentInvalid
+                                .as_str()
+                                .into(),
                             message: format!("{error:#}"),
                         }
                     }
@@ -1284,7 +1293,7 @@ impl EnvAgent {
                 match session.send(input).await {
                     Ok(()) => sylph_protocol::CommandOutcome::accepted(),
                     Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                        code: "SEND_FAILED".into(),
+                        code: sylph_protocol::RejectCode::SendFailed.as_str().into(),
                         message: format!("{error:#}"),
                     },
                 }
@@ -1340,14 +1349,17 @@ impl EnvAgent {
                             .capability_result(&session_id.agent.to_string(), &session)
                             .await
                         {
-                            Ok(mut value) => {
-                                if let Some(flag) = persisted {
-                                    value["persistedFlag"] = flag;
-                                }
-                                sylph_protocol::CommandOutcome::accepted_with_result(value)
+                            Ok(mut result) => {
+                                result.persisted_launch_flag =
+                                    persisted.and_then(|flag| serde_json::from_value(flag).ok());
+                                sylph_protocol::CommandOutcome::accepted_with_result(
+                                    serde_json::to_value(result).unwrap_or_default(),
+                                )
                             }
                             Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                                code: "CAPABILITIES_FAILED".into(),
+                                code: sylph_protocol::RejectCode::CapabilitiesFailed
+                                    .as_str()
+                                    .into(),
                                 message: format!("{error:#}"),
                             },
                         },
@@ -1369,7 +1381,9 @@ impl EnvAgent {
                                 }
                             } else {
                                 sylph_protocol::CommandOutcome::Rejected {
-                                    code: "SET_CONFIG_FAILED".into(),
+                                    code: sylph_protocol::RejectCode::SetConfigFailed
+                                        .as_str()
+                                        .into(),
                                     message: format!("{error:#}"),
                                 }
                             }
@@ -1394,7 +1408,7 @@ impl EnvAgent {
                     sylph_protocol::CommandOutcome::accepted_with_result(source.to_command_result())
                 }
                 Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                    code: "WATCH_FAILED".into(),
+                    code: sylph_protocol::RejectCode::WatchFailed.as_str().into(),
                     message: format!("{error:#}"),
                 },
             },
@@ -1471,9 +1485,13 @@ impl EnvAgent {
                         .capability_result(&session_id.agent.to_string(), &session)
                         .await
                     {
-                        Ok(value) => sylph_protocol::CommandOutcome::accepted_with_result(value),
+                        Ok(value) => sylph_protocol::CommandOutcome::accepted_with_result(
+                            serde_json::to_value(value).unwrap_or_default(),
+                        ),
                         Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                            code: "CAPABILITIES_FAILED".into(),
+                            code: sylph_protocol::RejectCode::CapabilitiesFailed
+                                .as_str()
+                                .into(),
                             message: format!("{error:#}"),
                         },
                     },
@@ -1505,7 +1523,7 @@ impl EnvAgent {
                         serde_json::to_value(rows).unwrap_or_default(),
                     ),
                     Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                        code: "ENUMERATE_FAILED".into(),
+                        code: sylph_protocol::RejectCode::EnumerateFailed.as_str().into(),
                         message: format!("{error:#}"),
                     },
                 }
@@ -1548,9 +1566,13 @@ impl EnvAgent {
                         .capability_result(&prepared.agent, &prepared.session)
                         .await
                     {
-                        Ok(value) => sylph_protocol::CommandOutcome::accepted_with_result(value),
+                        Ok(value) => sylph_protocol::CommandOutcome::accepted_with_result(
+                            serde_json::to_value(value).unwrap_or_default(),
+                        ),
                         Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                            code: "CAPABILITIES_FAILED".into(),
+                            code: sylph_protocol::RejectCode::CapabilitiesFailed
+                                .as_str()
+                                .into(),
                             message: format!("{error:#}"),
                         },
                     },
@@ -1570,14 +1592,18 @@ impl EnvAgent {
                         .capability_result(&prepared.agent, &prepared.session)
                         .await
                     {
-                        Ok(value) => sylph_protocol::CommandOutcome::accepted_with_result(value),
+                        Ok(value) => sylph_protocol::CommandOutcome::accepted_with_result(
+                            serde_json::to_value(value).unwrap_or_default(),
+                        ),
                         Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                            code: "CAPABILITIES_FAILED".into(),
+                            code: sylph_protocol::RejectCode::CapabilitiesFailed
+                                .as_str()
+                                .into(),
                             message: format!("{error:#}"),
                         },
                     },
                     Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                        code: "SET_CONFIG_FAILED".into(),
+                        code: sylph_protocol::RejectCode::SetConfigFailed.as_str().into(),
                         message: format!("{error:#}"),
                     },
                 },
@@ -1692,22 +1718,27 @@ impl EnvAgent {
                     if path.is_dir() {
                         anyhow::bail!("path is a directory");
                     }
-                    let bytes = std::fs::read(path)?;
-                    const MAX_REMOTE_READ_BYTES: usize = 32 * 1024 * 1024;
-                    if bytes.len() > MAX_REMOTE_READ_BYTES {
-                        return Err(anyhow!(
-                            "remote read exceeds the {}-byte limit",
-                            MAX_REMOTE_READ_BYTES
-                        ));
+                    let metadata = std::fs::metadata(&path)?;
+                    let size = metadata.len();
+                    let maximum = sylph_protocol::MAX_FILE_READ_BYTES;
+                    let requested = limit.unwrap_or(size);
+                    if requested > maximum {
+                        return Err(anyhow!("remote read exceeds the {maximum}-byte limit"));
                     }
-                    let size = bytes.len();
-                    let bytes = limit
-                        .map(|n| bytes.iter().copied().take(n as usize).collect())
-                        .unwrap_or(bytes);
+                    let returned = requested.min(size);
+                    let mut file = std::fs::File::open(path)?;
+                    let mut bytes = Vec::with_capacity(returned as usize);
+                    file.by_ref().take(returned).read_to_end(&mut bytes)?;
+                    let modified_at_ms = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_millis() as i64);
                     Ok(serde_json::json!({
-                        "bytes": bytes,
+                        "data": base64::engine::general_purpose::STANDARD.encode(bytes),
                         "size": size,
-                        "truncated": false
+                        "truncated": returned < size,
+                        "modifiedAtMs": modified_at_ms
                     }))
                 }
                 FileOperation::Write {
@@ -1769,7 +1800,7 @@ impl EnvAgent {
         match result {
             Ok(value) => sylph_protocol::CommandOutcome::accepted_with_result(value),
             Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                code: "FILES_FAILED".into(),
+                code: sylph_protocol::RejectCode::FilesFailed.as_str().into(),
                 message: format!("{error:#}"),
             },
         }
@@ -1779,7 +1810,7 @@ impl EnvAgent {
         &self,
         agent: &str,
         session: &HostedSession,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<sylph_protocol::CapabilityResult> {
         let capabilities = session.capabilities().await?;
         let (supports, link) = match self.adapters.for_agent(agent) {
             Some(adapter) => match adapter.probe().await {
@@ -1797,11 +1828,12 @@ impl EnvAgent {
                 serde_json::json!({"observe": {"available": true}, "control": {"available": false, "reason": "no_agent"}}),
             ),
         };
-        Ok(serde_json::json!({
-            "capabilities": capabilities,
-            "supports": supports,
-            "link": link,
-        }))
+        Ok(sylph_protocol::CapabilityResult {
+            capabilities,
+            supports,
+            link: serde_json::from_value(link)?,
+            persisted_launch_flag: None,
+        })
     }
 
     async fn control_session<F, Fut>(
@@ -2480,6 +2512,58 @@ mod tests {
             absolute,
             sylph_protocol::CommandOutcome::Rejected { code, .. } if code == "FILES_FAILED"
         ));
+    }
+
+    #[tokio::test]
+    async fn file_read_returns_bounded_base64_with_size_and_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        let payload = vec![b'x'; 1024];
+        std::fs::write(root.join("large.bin"), &payload).unwrap();
+        let runtime = EnvAgent::open(
+            EnvAgentConfig {
+                environment_id: "env7fk2".into(),
+                producer_id: "p".into(),
+                spool: SpoolConfig::new(dir.path().join("spool.db"), 1024),
+                path_policy: PathPolicy::from_roots([root.clone()]).unwrap(),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .unwrap();
+        let session = SessionId::new(
+            EnvironmentId::parse("env7fk2").unwrap(),
+            AgentName::parse("fixture").unwrap(),
+            NativeId::new("n1"),
+        );
+        runtime.workdirs.write().await.insert(session.clone(), root);
+
+        let outcome = runtime
+            .handle_command(sylph_protocol::EnvironmentCommand::Files {
+                session_id: session,
+                operation: sylph_protocol::FileOperation::Read {
+                    relative: "large.bin".into(),
+                    limit: Some(128),
+                },
+            })
+            .await;
+        let sylph_protocol::CommandOutcome::Accepted {
+            result: Some(result),
+        } = outcome
+        else {
+            panic!("read was not accepted: {outcome:?}");
+        };
+        assert_eq!(result["size"], 1024);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(
+            result["data"],
+            base64::engine::general_purpose::STANDARD.encode(&payload[..128])
+        );
+        assert!(
+            result.get("bytes").is_none(),
+            "wire reads must not use JSON byte arrays"
+        );
     }
 
     #[tokio::test]

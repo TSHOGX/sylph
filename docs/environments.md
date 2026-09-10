@@ -248,8 +248,10 @@ matter most.
 What changes is the link, not the record. Unpaired sessions report `observe` available
 from the store and `control` unavailable with `environment_unreachable`, the same as any
 disconnected environment, and they remain listable, readable, and searchable. Retention
-treats the environment as unreachable rather than as empty, so nothing is pruned on the
-strength of a question that can no longer be asked (`docs/storage.md` § Retention).
+treats the environment as unreachable rather than as empty, so it leaves the watermark
+untouched and nothing is pruned on the strength of a question that can no longer be asked
+(`docs/storage.md` § Retention). The session becomes terminal only when the server has an
+explicit no-native-source fact; unpairing alone is not that fact.
 
 Re-pairing that machine mints a **new** environment id and a new set of sessions.
 Sessions do not migrate between environments, and an id is not reissued.

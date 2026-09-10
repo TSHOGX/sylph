@@ -40,6 +40,36 @@ pub enum IngestResult {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum RemoteCommandError {
+    #[error("remote command rejected ({code}): {message}")]
+    Rejected { code: String, message: String },
+    #[error("remote command outcome is unknown: {message}")]
+    Unknown { message: String },
+}
+
+impl RemoteCommandError {
+    pub fn rejected(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Rejected {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::Rejected { code, .. } => Some(code),
+            Self::Unknown { .. } => None,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Rejected { message, .. } | Self::Unknown { message } => message,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
     #[error("unsupported envagent protocol '{0}'")]
     UnsupportedProtocol(String),
@@ -1241,10 +1271,10 @@ impl EnvBridge {
         draft: &RemoteDraft,
         id: String,
         value: serde_json::Value,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<CommandOutcome> {
         let requested_id = id.clone();
         let requested_value = value.clone();
-        let result = match self
+        let outcome = self
             .dispatch_remote_operation(
                 &draft.environment,
                 sylph_protocol::EnvironmentCommand::DraftSetConfig {
@@ -1254,21 +1284,15 @@ impl EnvBridge {
                 },
                 IdempotencyPolicy::AtMostOnce,
             )
-            .await?
-        {
-            CommandOutcome::Accepted { result } => Ok(result.unwrap_or_default()),
-            CommandOutcome::Rejected { code, message } => Err(anyhow!("{code}: {message}")),
-            CommandOutcome::Unknown { message } => Err(anyhow!(
-                "remote draft config outcome is unknown: {}",
-                message.unwrap_or_default()
-            )),
-        }?;
-        if let Some(value) = requested_value.as_str() {
-            if let Some(current) = self.remote_drafts.lock().await.get_mut(&draft.draft_id) {
-                current.flags.insert(requested_id, value.to_string());
+            .await?;
+        if matches!(outcome, CommandOutcome::Accepted { .. }) {
+            if let Some(value) = requested_value.as_str() {
+                if let Some(current) = self.remote_drafts.lock().await.get_mut(&draft.draft_id) {
+                    current.flags.insert(requested_id, value.to_string());
+                }
             }
         }
-        Ok(result)
+        Ok(outcome)
     }
 
     pub async fn remote_files(
@@ -1442,13 +1466,14 @@ impl EnvBridge {
             } => value,
             CommandOutcome::Accepted { result: None } => serde_json::json!({}),
             CommandOutcome::Rejected { code, message } => {
-                return Err(anyhow!("remote prepare rejected ({code}): {message}"))
+                return Err(anyhow::Error::new(RemoteCommandError::rejected(
+                    code, message,
+                )))
             }
             CommandOutcome::Unknown { message } => {
-                return Err(anyhow!(
-                    "remote prepare outcome is unknown: {}",
-                    message.unwrap_or_default()
-                ))
+                return Err(anyhow::Error::new(RemoteCommandError::Unknown {
+                    message: message.unwrap_or_default(),
+                }))
             }
         };
         let contained_workdir = result

@@ -145,7 +145,8 @@ async fn remote_read_bytes(
     state: &AppState,
     target: &RemoteTarget,
     relative: String,
-) -> Result<Vec<u8>> {
+    limit: Option<u64>,
+) -> Result<RemoteRead> {
     let (environment, draft_id, session_id, _) = remote_parts(target);
     let value = state
         .env_bridge
@@ -153,20 +154,41 @@ async fn remote_read_bytes(
             environment,
             draft_id,
             session_id,
-            sylph_protocol::FileOperation::Read {
-                relative,
-                limit: None,
-            },
+            sylph_protocol::FileOperation::Read { relative, limit },
         )
         .await
         .map_err(map_remote_file_error)?;
-    serde_json::from_value(
-        value
-            .get("bytes")
-            .cloned()
-            .ok_or_else(|| Error::Internal("remote read returned no bytes".into()))?,
-    )
-    .map_err(|error| Error::Internal(format!("remote read returned malformed bytes: {error}")))
+    let data = value
+        .get("data")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| Error::Internal("remote read returned no base64 data".into()))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|error| {
+            Error::Internal(format!("remote read returned malformed base64: {error}"))
+        })?;
+    let size = value
+        .get("size")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| Error::Internal("remote read returned no size".into()))?;
+    let truncated = value
+        .get("truncated")
+        .and_then(|value| value.as_bool())
+        .unwrap_or((bytes.len() as u64) < size);
+    let modified_at_ms = value.get("modifiedAtMs").and_then(|value| value.as_i64());
+    Ok(RemoteRead {
+        bytes,
+        size,
+        truncated,
+        modified_at_ms,
+    })
+}
+
+struct RemoteRead {
+    bytes: Vec<u8>,
+    size: u64,
+    truncated: bool,
+    modified_at_ms: Option<i64>,
 }
 
 /// Entries per directory listing.
@@ -451,11 +473,21 @@ pub async fn content(
 ) -> Result<Json<ContentResponse>> {
     if let Some(remote) = remote_target(&state, &id).await? {
         let path = paths::normalize_relative(&query.path);
-        let bytes = remote_read_bytes(&state, &remote, path.clone()).await?;
-        let size = bytes.len() as u64;
+        let RemoteRead {
+            bytes,
+            size,
+            truncated: remote_truncated,
+            modified_at_ms,
+        } = remote_read_bytes(
+            &state,
+            &remote,
+            path.clone(),
+            Some(MAX_PREVIEW_BYTES as u64),
+        )
+        .await?;
         let mime_type = guess_mime(Path::new(&path));
         let is_image = mime_type.starts_with("image/");
-        if is_image {
+        if is_image && !remote_truncated {
             return Ok(Json(ContentResponse {
                 path,
                 absolute_path: format!("{}/{}", remote_parts(&remote).3, query.path),
@@ -463,17 +495,29 @@ pub async fn content(
                 encoding: "image".into(),
                 mime_type,
                 content: Some(base64_encode(&bytes)),
-                truncated: false,
-                modified_at_ms: 0,
+                truncated: remote_truncated,
+                modified_at_ms: modified_at_ms.unwrap_or(0),
             }));
         }
-        let truncated = bytes.len() > MAX_PREVIEW_BYTES;
+        let truncated = remote_truncated || bytes.len() > MAX_PREVIEW_BYTES;
+        if is_image {
+            return Ok(Json(ContentResponse {
+                path,
+                absolute_path: format!("{}/{}", remote_parts(&remote).3, query.path),
+                size,
+                encoding: "binary".into(),
+                mime_type,
+                content: None,
+                truncated: true,
+                modified_at_ms: modified_at_ms.unwrap_or(0),
+            }));
+        }
         let bytes = if truncated {
-            bytes[..TRUNCATE_TO_BYTES].to_vec()
+            bytes[..TRUNCATE_TO_BYTES.min(bytes.len())].to_vec()
         } else {
             bytes
         };
-        match String::from_utf8(bytes) {
+        match text_prefix(bytes, truncated) {
             Ok(text) => Ok(Json(ContentResponse {
                 path,
                 absolute_path: format!("{}/{}", remote_parts(&remote).3, query.path),
@@ -482,7 +526,7 @@ pub async fn content(
                 mime_type,
                 content: Some(text),
                 truncated,
-                modified_at_ms: 0,
+                modified_at_ms: modified_at_ms.unwrap_or(0),
             })),
             Err(_) => Ok(Json(ContentResponse {
                 path,
@@ -492,12 +536,25 @@ pub async fn content(
                 mime_type,
                 content: None,
                 truncated,
-                modified_at_ms: 0,
+                modified_at_ms: modified_at_ms.unwrap_or(0),
             })),
         }
     } else {
         Err(Error::SessionNotFound)
     }
+}
+
+/// A preview can end in the middle of a valid UTF-8 codepoint. Strip only that
+/// incomplete suffix; an invalid byte anywhere else still marks the file binary.
+fn text_prefix(mut bytes: Vec<u8>, truncated: bool) -> std::result::Result<String, ()> {
+    if truncated {
+        if let Err(error) = std::str::from_utf8(&bytes) {
+            if error.error_len().is_none() {
+                bytes.truncate(error.valid_up_to());
+            }
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| ())
 }
 
 #[derive(Serialize)]
@@ -537,8 +594,14 @@ pub async fn document(
 ) -> Result<Json<DocumentResponse>> {
     if let Some(remote) = remote_target(&state, &id).await? {
         let path = paths::normalize_relative(&query.path);
-        let bytes = remote_read_bytes(&state, &remote, path.clone()).await?;
-        if bytes.len() as u64 > documents::MAX_DOCUMENT_BYTES {
+        let remote_read = remote_read_bytes(
+            &state,
+            &remote,
+            path.clone(),
+            Some(documents::MAX_DOCUMENT_BYTES as u64 + 1),
+        )
+        .await?;
+        if remote_read.truncated || remote_read.size > documents::MAX_DOCUMENT_BYTES {
             return Err(Error::InvalidRequest(format!(
                 "This file is over the {} MiB document preview limit.",
                 documents::MAX_DOCUMENT_BYTES / 1024 / 1024
@@ -561,7 +624,7 @@ pub async fn document(
         std::fs::create_dir_all(&state.config.data_dir).map_err(|error| {
             Error::Internal(format!("Could not stage remote document: {error}"))
         })?;
-        std::fs::write(&temporary_path, &bytes).map_err(|error| {
+        std::fs::write(&temporary_path, &remote_read.bytes).map_err(|error| {
             Error::Internal(format!("Could not stage remote document: {error}"))
         })?;
         let window = Window::new(query.sheet, query.row, query.rows);
@@ -579,8 +642,8 @@ pub async fn document(
         return Ok(Json(DocumentResponse {
             path,
             absolute_path: format!("{}/{}", workdir, query.path),
-            size: bytes.len() as u64,
-            modified_at_ms: 0,
+            size: remote_read.size,
+            modified_at_ms: remote_read.modified_at_ms.unwrap_or(0),
             document: parsed,
         }));
     }
@@ -716,7 +779,8 @@ pub async fn raw(
 ) -> Result<axum::response::Response> {
     if let Some(remote) = remote_target(&state, &id).await? {
         let path = paths::normalize_relative(&query.path);
-        let bytes = remote_read_bytes(&state, &remote, path.clone()).await?;
+        let RemoteRead { bytes, .. } =
+            remote_read_bytes(&state, &remote, path.clone(), None).await?;
         let mime = guess_mime(Path::new(&path));
         let inline = !query.download
             && (INLINE_TYPES.contains(&mime.as_str())
