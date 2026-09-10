@@ -168,13 +168,21 @@ impl PiAdapter {
                 argv.push("--session-id".into());
                 argv.push(id.as_str().to_string());
             }
-            // Unreachable for this vendor: `dictates_native_id` is true, so the server
-            // always names an id. Handled rather than panicking because a protocol value
-            // an adapter cannot honour is a refusal, not a crash — and **this adapter must
-            // not mint one itself**. The v1 adapter did (
+            // Unreachable for this vendor: `dictates_native_id` is true, so the **envagent**
+            // names an id (`crates/envagent/src/runtime.rs`, `requested_native_id_for_new`)
+            // — it is the process that holds this adapter and builds the `RunSpec`, and it
+            // reads that field rather than a list of agent names. Handled rather than
+            // panicking because a protocol value an adapter cannot honour is a refusal, not
+            // a crash — and **this adapter must not mint one itself**. The v1 adapter did (
             // `uuid.uuid4()`), which is the synthesized-identity failure
             // `sylph_protocol::NativeId` forbids: the id would look like the vendor's and
             // be Sylph's.
+            //
+            // Worth knowing how long this went unimplemented: every adapter asserted the
+            // caller "always names an id" while both `RunSpec` sites hardcoded `New`, so
+            // this arm was the *only* one production ever reached. The refusal below is what
+            // surfaced it, as a `502` on every `pi` session; `claude` warns and runs
+            // instead, so the same gap there produced a degraded session and no complaint.
             sylph_protocol::RequestedNativeId::New => {
                 // **Says what is true of the argv, and no more.** An earlier wording claimed
                 // this made the session "unresumable", which overstates its own reason: pi
@@ -182,11 +190,11 @@ impl PiAdapter {
                 // — `codex` is built that way. What is actually the case is narrower and is
                 // the whole justification for `session::PiSession::open` refusing this
                 // variant: this vendor takes `--session-id`, `dictates_native_id` is true, so
-                // the server always names one and `New` is unreachable here rather than
+                // the envagent names one and `New` is unreachable here rather than
                 // impossible in principle. A doc that overstates its reason is how the next
                 // reader concludes something stronger than what was measured.
                 warnings.push(
-                    "pi takes --session-id and the server always names one, so opening \
+                    "pi takes --session-id and the envagent names one, so opening \
                      without an id is unreachable for this agent; no argv id was emitted"
                         .to_string(),
                 );
@@ -384,7 +392,7 @@ mod tests {
         // Asserted on the claim the warning is *entitled* to make. It used to say
         // "unresumable", which overstates its reason — pi reports a `sessionId` from
         // `get_state`, so an adapter could read one back and `codex` does. What is true is
-        // that the server always names an id for this agent, so the case is unreachable
+        // that the envagent names an id for this agent, so the case is unreachable
         // here rather than impossible in principle.
         assert!(
             warnings[0].contains("unreachable"),
@@ -4304,7 +4312,7 @@ pub mod session {
         ///
         /// Refuses [`RequestedNativeId::New`] rather than letting the vendor assign one:
         /// [`sylph_protocol::AgentInfo::dictates_native_id`] is true for this agent, so the
-        /// server always names an id, and the alternative — minting one here — is the
+        /// envagent names an id, and the alternative — minting one here — is the
         /// synthesized-identity failure [`NativeId`] forbids and the Python original
         /// committed — v1 minted one with `uuid4()`.
         pub async fn open(spec: RunSpec) -> Result<Self> {
@@ -6082,7 +6090,7 @@ done
         /// **Opening without a dictated id is refused rather than answered with an invented
         /// one.**
         ///
-        /// `dictates_native_id` is true for this agent, so the server always names an id. The
+        /// `dictates_native_id` is true for this agent, so the envagent names an id. The
         /// v1 adapter minted one with `uuid4()`, which is the
         /// synthesized-identity failure [`NativeId`] forbids: the id would look like the
         /// vendor's and be Sylph's, and every comparison against the vendor's own store would

@@ -122,6 +122,16 @@ would be redundancy plus a standing invitation to compare ids from two spaces �
 comparison that yields no error at any layer and is simply always false. **One id space
 makes the unanswerable comparison unwritable.**
 
+**What is forbidden is a second id space, not generating a value.** Where a vendor takes
+`--session-id`, the envagent generates one and hands it over at launch, and the vendor
+adopts it as its own native id — so the id Sylph keys on and the id in the vendor's store
+are one value in one space, which is the whole point of dictating rather than correlating
+afterwards. The rejected shape is a Sylph id held *alongside* a vendor id, which is what
+creates two spaces and the always-false comparison. Which vendors accept this is read from
+`AgentInfo::dictates_native_id` (`docs/session-protocol.md` § Opening a session), and an
+**adapter** never mints: an id an adapter invented would look like the vendor's while
+being Sylph's, without ever reaching the vendor.
+
 Rules the triple needs to hold:
 
 - **`environment` is an opaque id minted at pairing**, never a user-visible name. A name

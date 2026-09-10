@@ -463,6 +463,46 @@ impl HostedSource {
     }
 }
 
+/// Which id to open a **new** session under, decided by what the agent reports.
+///
+/// `Dictate` when [`sylph_protocol::AgentInfo::dictates_native_id`] is true, `New` when it
+/// is false. **Takes the probed `AgentInfo` rather than an agent name**, so the fact has one
+/// derivation: a list of names held here would diverge from the adapters the moment either
+/// grew a case, and the divergence this replaces was total. Both `RunSpec` sites hardcoded
+/// `New` while `claude`, `pi`, and the E2E fixture all declare `true`, so `Dictate` was
+/// never constructed outside a test — and the two failure modes are why it survived. `pi`
+/// refuses `New` outright, so every `pi` session was a `502`; `claude` only pushes a
+/// warning and runs on degraded, so it looked like it worked.
+///
+/// # Why a v4 UUID, and why generating one here is not a second id space
+///
+/// The value is handed to the vendor on `--session-id` and the vendor adopts it as its own
+/// native id, so what Sylph keys on and what the vendor's store holds are one value in one
+/// space (`docs/architecture.md` § Identity). What that invariant forbids is a Sylph id
+/// held *beside* a vendor id, which is the pair that compares always-false at no layer.
+///
+/// A v4 UUID because `claude` requires a UUID specifically, and `pi` takes an arbitrary id
+/// — the narrower format satisfies both, so there is one spelling rather than one per
+/// vendor. Two rejected alternatives: a recognisable `sylph-` prefix, which advertises the
+/// id as not-the-vendor's and so invites a reader to treat native ids as two kinds; and a
+/// counter or timestamp, because an envagent restarts and a per-process counter repeats
+/// ids after a reconnect, colliding on the server's `(environment, agent, native_id)` key
+/// — the same reasoning `crates/adapters/src/e2e.rs` records for its own fixture id.
+///
+/// This is the **envagent's** job and not an adapter's, for the reason each adapter states
+/// at its own refusal: an id an adapter minted would never have been given to the vendor,
+/// so it would look like the vendor's while being Sylph's. `pi`'s v1 did exactly that with
+/// `uuid4()`.
+fn requested_native_id_for_new(
+    info: &sylph_protocol::AgentInfo,
+) -> sylph_protocol::RequestedNativeId {
+    if info.dictates_native_id {
+        sylph_protocol::RequestedNativeId::Dictate(NativeId::new(uuid::Uuid::new_v4().to_string()))
+    } else {
+        sylph_protocol::RequestedNativeId::New
+    }
+}
+
 /// A prepared remote link owned by the envagent.  It has a process and a
 /// contained workdir but may not have a durable native identity yet.
 #[derive(Clone)]
@@ -662,6 +702,32 @@ impl EnvAgent {
         *self.sink.write().await = sink;
     }
 
+    /// Probe one agent and answer which id a **new** session should be opened under.
+    ///
+    /// For the path that has no probe of its own. [`Self::prepare_hosted`] already holds an
+    /// [`sylph_protocol::AgentInfo`] by the time it needs this, and calls
+    /// `requested_native_id_for_new` directly rather than probing a second time — one
+    /// session start must not spawn `<cli> --version` twice.
+    async fn probe_requested_native_id_for_new(
+        &self,
+        agent: &str,
+    ) -> Result<sylph_protocol::RequestedNativeId> {
+        let adapter = self
+            .adapters
+            .for_agent(agent)
+            .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
+        let info = adapter
+            .probe()
+            .await
+            .with_context(|| format!("agent '{agent}' would not report what it is"))?;
+        Ok(requested_native_id_for_new(&info))
+    }
+
+    /// Open a prepared link, containing the workdir and naming the session's id.
+    ///
+    /// **Sets `spec.native_id` itself**, from the probe it performs for the handshake check:
+    /// a prepared link is always a new session, so whatever the caller put there is
+    /// overwritten by [`requested_native_id_for_new`].
     async fn prepare_hosted(&self, agent: &str, mut spec: RunSpec) -> Result<PreparedHosted> {
         let contained = self
             .config
@@ -686,6 +752,10 @@ impl EnvAgent {
                 info.name
             ));
         }
+        // Decided here rather than by the caller, from the `AgentInfo` this already holds:
+        // a prepared link is always a new session, and probing again to learn one field of
+        // an answer in hand would spawn `<cli> --version` twice per session start.
+        spec.native_id = requested_native_id_for_new(&info);
         let mut session = adapter.run(spec).await?;
         let events = session
             .events()
@@ -752,6 +822,10 @@ impl EnvAgent {
         }
         let spec = RunSpec {
             workdir,
+            // Overwritten by `prepare_hosted` from the agent's own `dictates_native_id`,
+            // which it learns from the probe it already performs. `New` here is not a
+            // decision — it is the field's only inhabitant that names no id, and the value
+            // never reaches an adapter.
             native_id: sylph_protocol::RequestedNativeId::New,
             inject_identity,
             identity_preamble,
@@ -1211,10 +1285,23 @@ impl EnvAgent {
                     }
                 }
 
-                let native_id = session_id
-                    .as_ref()
-                    .map(|id| sylph_protocol::RequestedNativeId::Resume(id.native_id.clone()))
-                    .unwrap_or(sylph_protocol::RequestedNativeId::New);
+                // Resuming names the id the vendor already has. With no session id this is
+                // a *new* session reached through `Run` rather than through `Prepare`, so
+                // it takes the same decision `Prepare` takes — the `unwrap_or(New)` this
+                // replaces held the identical hole, and a dictating agent arriving here
+                // was refused exactly as it was there.
+                let native_id = match session_id.as_ref() {
+                    Some(id) => sylph_protocol::RequestedNativeId::Resume(id.native_id.clone()),
+                    None => match self.probe_requested_native_id_for_new(&agent).await {
+                        Ok(native_id) => native_id,
+                        Err(error) => {
+                            return sylph_protocol::CommandOutcome::Rejected {
+                                code: sylph_protocol::RejectCode::RunFailed.as_str().into(),
+                                message: format!("{error:#}"),
+                            }
+                        }
+                    },
+                };
                 let spec = RunSpec {
                     workdir,
                     native_id,
@@ -2390,6 +2477,368 @@ pub struct RuntimeCommand {
 mod tests {
     use super::*;
     use crate::path::PathPolicy;
+
+    /// An agent that declares whether it dictates, and records the spec it was opened with.
+    ///
+    /// The recorded [`RunSpec`] is the observable the id-naming tests assert on, because the
+    /// defect they cover is invisible in the *outcome*: `claude` accepts `New` with only a
+    /// warning and runs, so a test reading the reply cannot tell a dictated open from a
+    /// degraded one. What distinguishes them is the variant the envagent handed the adapter.
+    #[derive(Clone, Default)]
+    struct SpySource {
+        dictates: bool,
+        specs: Arc<std::sync::Mutex<Vec<RunSpec>>>,
+    }
+
+    impl SpySource {
+        fn new(dictates: bool) -> Self {
+            Self {
+                dictates,
+                specs: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn opened(&self) -> Vec<RunSpec> {
+            self.specs.lock().expect("spy is not poisoned").clone()
+        }
+    }
+
+    impl AdapterSource for SpySource {
+        fn for_agent(&self, name: &str) -> Option<Box<dyn sylph_protocol::Adapter>> {
+            (name == SPY_AGENT).then(|| {
+                Box::new(SpyAdapter {
+                    dictates: self.dictates,
+                    specs: self.specs.clone(),
+                }) as Box<dyn sylph_protocol::Adapter>
+            })
+        }
+
+        fn known_agents(&self) -> Vec<String> {
+            vec![SPY_AGENT.to_string()]
+        }
+    }
+
+    /// Named to parse as an [`AgentName`], since the runtime validates one before running.
+    const SPY_AGENT: &str = "spy";
+
+    struct SpyAdapter {
+        dictates: bool,
+        specs: Arc<std::sync::Mutex<Vec<RunSpec>>>,
+    }
+
+    #[async_trait]
+    impl sylph_protocol::Adapter for SpyAdapter {
+        async fn probe(&self) -> Result<sylph_protocol::AgentInfo> {
+            Ok(sylph_protocol::AgentInfo {
+                name: SPY_AGENT.to_string(),
+                version: Some("1.0.0".to_string()),
+                flags: sylph_protocol::FlagSchema::new(),
+                supports: Vec::new(),
+                dictates_native_id: self.dictates,
+                native_fidelity: sylph_protocol::Fidelity::Blocks,
+            })
+        }
+
+        async fn run(&self, spec: RunSpec) -> Result<Box<dyn Session>> {
+            let native_id = match &spec.native_id {
+                sylph_protocol::RequestedNativeId::Dictate(id)
+                | sylph_protocol::RequestedNativeId::Resume(id) => id.clone(),
+                // What a non-dictating vendor does: assign one and report it.
+                sylph_protocol::RequestedNativeId::New => {
+                    NativeId::new(format!("spy-{}", uuid::Uuid::new_v4()))
+                }
+            };
+            self.specs.lock().expect("spy is not poisoned").push(spec);
+            Ok(Box::new(SpySession {
+                native_id,
+                events: Mutex::new(Some(())),
+            }))
+        }
+
+        async fn adopt(&self, _id: &NativeId) -> Result<EventStream> {
+            Err(anyhow!("the spy agent has no native store"))
+        }
+
+        async fn watch(&self, _id: &NativeId) -> Result<EventStream> {
+            Err(anyhow!("the spy agent has no native store"))
+        }
+
+        async fn enumerate(
+            &self,
+            _filter: &sylph_protocol::StoreFilter,
+        ) -> Result<Vec<sylph_protocol::NativeSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct SpySession {
+        native_id: NativeId,
+        /// Yielded once, because [`Session::events`] is a hand-off and not a subscription.
+        events: Mutex<Option<()>>,
+    }
+
+    #[async_trait]
+    impl Session for SpySession {
+        fn native_id(&self) -> Option<NativeId> {
+            Some(self.native_id.clone())
+        }
+
+        async fn capabilities(&self) -> Result<sylph_protocol::SessionCapabilities> {
+            Ok(sylph_protocol::SessionCapabilities::default())
+        }
+
+        async fn send(&self, _turn: TurnInput) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_initial(&self, _turn: TurnInput) -> Result<NativeId> {
+            Ok(self.native_id.clone())
+        }
+
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn steer(&self, _text: &str, _expected: Option<&str>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn queue(&self, _text: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_config(
+            &self,
+            _id: &str,
+            _value: serde_json::Value,
+        ) -> Result<Vec<sylph_protocol::ConfigOption>> {
+            Ok(Vec::new())
+        }
+
+        async fn resolve(&self, _resolution: sylph_protocol::Resolution) -> Result<()> {
+            Ok(())
+        }
+
+        fn events(&mut self) -> Option<EventStream> {
+            self.events.try_lock().ok()?.take()?;
+            Some(Box::pin(futures::stream::empty()))
+        }
+
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A runtime whose only agent is the spy, plus the spy itself.
+    async fn spy_runtime(dictates: bool) -> (EnvAgent, SpySource, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = SpySource::new(dictates);
+        let runtime = EnvAgent::open_with_adapters(
+            EnvAgentConfig {
+                environment_id: "env7fk2".into(),
+                producer_id: "p".into(),
+                spool: SpoolConfig::new(dir.path().join("spool.db"), 1024 * 1024),
+                path_policy: PathPolicy::from_roots([root]).unwrap(),
+            },
+            Arc::new(RecordingSink::default()),
+            Arc::new(source.clone()),
+        )
+        .await
+        .unwrap();
+        (runtime, source, dir)
+    }
+
+    fn workdir_of(runtime: &EnvAgent) -> String {
+        runtime
+            .config
+            .path_policy
+            .roots()
+            .first()
+            .expect("the harness configured one root")
+            .display()
+            .to_string()
+    }
+
+    /// Preparing a session for a dictating agent names the id, so identity precedes the
+    /// first event.
+    ///
+    /// The promise this pins is the one the defect broke: `prepare` hardcoded `New`, which
+    /// `pi` refuses outright and `claude` accepts while warning, so the whole `Dictate`
+    /// branch was unreachable in production.
+    #[tokio::test]
+    async fn preparing_a_dictating_agent_names_the_native_id() {
+        let (runtime, spy, _dir) = spy_runtime(true).await;
+        let outcome = runtime
+            .handle_command(sylph_protocol::EnvironmentCommand::Prepare {
+                draft_id: "draft-1".into(),
+                agent: SPY_AGENT.into(),
+                workdir: workdir_of(&runtime),
+                flags: BTreeMap::new(),
+                inject_identity: false,
+                identity_preamble: None,
+                permission_mode: None,
+            })
+            .await;
+        assert!(
+            matches!(outcome, sylph_protocol::CommandOutcome::Accepted { .. }),
+            "{outcome:?}"
+        );
+        let opened = spy.opened();
+        assert_eq!(opened.len(), 1, "one prepare opens one vendor session");
+        let sylph_protocol::RequestedNativeId::Dictate(id) = &opened[0].native_id else {
+            panic!(
+                "a dictating agent must be opened with a dictated id, got {:?}",
+                opened[0].native_id
+            );
+        };
+        // A parseable v4 UUID, because `claude` accepts nothing looser, and the value is the
+        // vendor's own native id once it takes it.
+        assert!(
+            uuid::Uuid::parse_str(id.as_str()).is_ok(),
+            "the dictated id must be a UUID claude would accept, got {id}"
+        );
+    }
+
+    /// A non-dictating agent is still opened with `New`, so the vendor assigns and reports.
+    ///
+    /// The other half of the same decision, and the reason it reads `dictates_native_id`
+    /// rather than always dictating: `codex` has no `threadId` parameter on `thread/start`,
+    /// so a dictated id there is a refusal.
+    #[tokio::test]
+    async fn preparing_a_non_dictating_agent_lets_the_vendor_assign_its_own_id() {
+        let (runtime, spy, _dir) = spy_runtime(false).await;
+        let outcome = runtime
+            .handle_command(sylph_protocol::EnvironmentCommand::Prepare {
+                draft_id: "draft-1".into(),
+                agent: SPY_AGENT.into(),
+                workdir: workdir_of(&runtime),
+                flags: BTreeMap::new(),
+                inject_identity: false,
+                identity_preamble: None,
+                permission_mode: None,
+            })
+            .await;
+        assert!(
+            matches!(outcome, sylph_protocol::CommandOutcome::Accepted { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            spy.opened()[0].native_id,
+            sylph_protocol::RequestedNativeId::New,
+            "a vendor that assigns its own id must not be handed one"
+        );
+    }
+
+    /// Running a dictating agent with no session id names the id too.
+    ///
+    /// A separate test from the prepare case because it is a separate call site with the
+    /// same hole: the resume path resolved `Resume(id)` when a session id was known and fell
+    /// back to `New` when it was not, so a dictating agent reaching `Run` directly was
+    /// refused exactly as it was through `Prepare`.
+    #[tokio::test]
+    async fn running_a_dictating_agent_without_a_session_id_names_the_native_id() {
+        let (runtime, spy, _dir) = spy_runtime(true).await;
+        let outcome = runtime
+            .handle_command(sylph_protocol::EnvironmentCommand::Run {
+                session_id: None,
+                draft_id: None,
+                agent: SPY_AGENT.into(),
+                workdir: workdir_of(&runtime),
+                flags: BTreeMap::new(),
+                inject_identity: false,
+                identity_preamble: None,
+                permission_mode: None,
+                initial_input: None,
+                initial_turn_id: None,
+            })
+            .await;
+        assert!(
+            matches!(outcome, sylph_protocol::CommandOutcome::Accepted { .. }),
+            "{outcome:?}"
+        );
+        let opened = spy.opened();
+        let sylph_protocol::RequestedNativeId::Dictate(id) = &opened[0].native_id else {
+            panic!(
+                "run with no session id opens a new session, so a dictating agent is \
+                 handed an id; got {:?}",
+                opened[0].native_id
+            );
+        };
+        assert!(uuid::Uuid::parse_str(id.as_str()).is_ok(), "got {id}");
+    }
+
+    /// A known session id still resumes, and is never re-dictated.
+    ///
+    /// The guard on the fix: dictating a *new* id where a resume was asked for would open a
+    /// second conversation under a fresh key rather than continuing the one that exists.
+    #[tokio::test]
+    async fn running_with_a_session_id_resumes_that_id_rather_than_dictating_a_new_one() {
+        let (runtime, spy, _dir) = spy_runtime(true).await;
+        let existing = SessionId::new(
+            EnvironmentId::parse("env7fk2").unwrap(),
+            AgentName::parse(SPY_AGENT).unwrap(),
+            NativeId::new("already-running"),
+        );
+        let outcome = runtime
+            .handle_command(sylph_protocol::EnvironmentCommand::Run {
+                session_id: Some(existing.clone()),
+                draft_id: None,
+                agent: SPY_AGENT.into(),
+                workdir: workdir_of(&runtime),
+                flags: BTreeMap::new(),
+                inject_identity: false,
+                identity_preamble: None,
+                permission_mode: None,
+                initial_input: None,
+                initial_turn_id: None,
+            })
+            .await;
+        assert!(
+            matches!(outcome, sylph_protocol::CommandOutcome::Accepted { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            spy.opened()[0].native_id,
+            sylph_protocol::RequestedNativeId::Resume(existing.native_id.clone()),
+            "a resume must carry the id that already names the session"
+        );
+    }
+
+    /// Two prepares never dictate the same id.
+    ///
+    /// Stated because the collision is silent at this layer and fatal one layer up: a
+    /// repeated id is a second row under one `(environment, agent, native_id)` key, which
+    /// the store correctly refuses as a `409`. A per-process counter has exactly this
+    /// defect after an envagent restart, which is why the value is a v4 UUID.
+    #[tokio::test]
+    async fn two_prepared_sessions_are_dictated_distinct_ids() {
+        let (runtime, spy, _dir) = spy_runtime(true).await;
+        for draft in ["draft-1", "draft-2"] {
+            let outcome = runtime
+                .handle_command(sylph_protocol::EnvironmentCommand::Prepare {
+                    draft_id: draft.into(),
+                    agent: SPY_AGENT.into(),
+                    workdir: workdir_of(&runtime),
+                    flags: BTreeMap::new(),
+                    inject_identity: false,
+                    identity_preamble: None,
+                    permission_mode: None,
+                })
+                .await;
+            assert!(
+                matches!(outcome, sylph_protocol::CommandOutcome::Accepted { .. }),
+                "{draft}: {outcome:?}"
+            );
+        }
+        let opened = spy.opened();
+        assert_eq!(opened.len(), 2);
+        assert_ne!(
+            opened[0].native_id, opened[1].native_id,
+            "two sessions dictated one id collide on the store's identity key"
+        );
+    }
 
     #[tokio::test]
     async fn enqueue_then_flush_is_spooled_before_delivery() {
