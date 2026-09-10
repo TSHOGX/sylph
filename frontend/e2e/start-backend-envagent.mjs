@@ -89,6 +89,11 @@ function shutdown(code = 0) {
 
 process.once("SIGINT", () => shutdown(130));
 process.once("SIGTERM", () => shutdown(143));
+// Playwright closes the webServer stdin after the test process exits. Listen
+// for that lifecycle signal as well as SIGTERM so the launcher cannot keep the
+// npm command alive when a shell wrapper absorbs the signal.
+process.stdin.once("end", () => shutdown(0));
+process.stdin.resume();
 
 function request(method, pathname, { cookie, body } = {}) {
   return new Promise((resolve, reject) => {
