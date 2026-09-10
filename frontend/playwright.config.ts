@@ -100,7 +100,7 @@ export default defineConfig({
       // separately compiled fixture envagent, and leaves both children attached to this
       // webServer process. The `e2e` feature is a build-time choice in each binary, so a
       // production process has no path to the fixture.
-      command: "node frontend/e2e/start-backend-envagent.mjs",
+      command: "exec node frontend/e2e/start-backend-envagent.mjs",
       cwd: path.join(__dirname, ".."),
       url: `http://127.0.0.1:${BACKEND_PORT}/api/v1/health`,
       reuseExistingServer: false,
