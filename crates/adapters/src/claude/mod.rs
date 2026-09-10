@@ -352,9 +352,17 @@ impl ClaudeAdapter {
                 argv.push("-r".into());
                 argv.push(id.as_str().to_string());
             }
-            // Unreachable for this vendor: `dictates_native_id` is true, so the server
-            // always names an id. Handled rather than panicking because a protocol value
-            // an adapter cannot honour is a refusal, not a crash.
+            // Unreachable for this vendor: `dictates_native_id` is true, so the **envagent**
+            // names an id (`crates/envagent/src/runtime.rs`, `requested_native_id_for_new`).
+            // Handled rather than panicking because a protocol value an adapter cannot
+            // honour is a refusal, not a crash.
+            //
+            // **A warning is the weaker of the two responses, and that is what hid this.**
+            // Both `RunSpec` sites hardcoded `New` for months while every adapter asserted
+            // the caller always names an id. `pi` refuses outright, so it failed loudly at
+            // a `502`; this arm pushes a warning and launches, so a `claude` session ran on
+            // a vendor-assigned id and nothing surfaced. The louder refusal is what named
+            // the defect for both.
             sylph_protocol::RequestedNativeId::New => {
                 warnings.push(
                     "claude dictates its session id; opening without one would make the \

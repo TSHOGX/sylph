@@ -321,9 +321,10 @@ impl Adapter for E2eAdapter {
     async fn run(&self, spec: RunSpec) -> Result<Box<dyn Session>> {
         let native_id = match &spec.native_id {
             RequestedNativeId::Dictate(id) | RequestedNativeId::Resume(id) => id.clone(),
-            // Honoured rather than refused: `dictates_native_id` is true so the server
-            // always names one, but a fixture that panics on a protocol value is a
-            // fixture that fails the suite for a reason no spec is about.
+            // Honoured rather than refused: `dictates_native_id` is true so the envagent
+            // names one (`crates/envagent/src/runtime.rs`, `requested_native_id_for_new`),
+            // but a fixture that panics on a protocol value is a fixture that fails the
+            // suite for a reason no spec is about.
             RequestedNativeId::New => NativeId::new(format!(
                 "{DEFAULT_NATIVE_ID}-{}",
                 uuid::Uuid::new_v4().simple()

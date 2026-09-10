@@ -160,9 +160,15 @@ pub struct RunSpec {
 /// does. Collapsed into one variant, one of those two checks is impossible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestedNativeId {
-    /// Open a new session under this id, which the server minted.
+    /// Open a new session under this id, which the **envagent** generated.
     ///
     /// The preferred path: identity is known before the first event.
+    ///
+    /// The envagent rather than the server or the adapter, because it is the process that
+    /// holds the adapter and builds the [`RunSpec`]. An adapter must never mint one: an id it
+    /// invented was never given to the vendor, so it would look like the vendor's while being
+    /// Sylph's. Handed to the vendor at launch, this value *becomes* the vendor's own native
+    /// id, so it is one id space and not two (`docs/architecture.md` § Identity).
     Dictate(NativeId),
     /// Continue the session the vendor already has under this id.
     Resume(NativeId),
