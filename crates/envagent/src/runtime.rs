@@ -776,10 +776,32 @@ impl EnvAgent {
                     )),
                 }))
             }
-            Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                code: sylph_protocol::RejectCode::PrepareFailed.as_str().into(),
-                message: format!("{error:#}"),
-            },
+            Err(error) => {
+                let detail = format!("{error:#}");
+                let code = match error.downcast_ref::<crate::path::ContainmentError>() {
+                    Some(crate::path::ContainmentError::Missing(_)) => {
+                        sylph_protocol::RejectCode::WorkdirMissing
+                    }
+                    Some(crate::path::ContainmentError::NotDirectory(_)) => {
+                        sylph_protocol::RejectCode::WorkdirNotADirectory
+                    }
+                    Some(crate::path::ContainmentError::Outside(_))
+                    | Some(crate::path::ContainmentError::SymlinkEscape(_)) => {
+                        sylph_protocol::RejectCode::WorkdirOutsideRoots
+                    }
+                    _ if detail.contains("not a directory") => {
+                        sylph_protocol::RejectCode::WorkdirNotADirectory
+                    }
+                    _ if detail.contains("outside") || detail.contains("escapes") => {
+                        sylph_protocol::RejectCode::WorkdirOutsideRoots
+                    }
+                    _ => sylph_protocol::RejectCode::PrepareFailed,
+                };
+                sylph_protocol::CommandOutcome::Rejected {
+                    code: code.as_str().into(),
+                    message: detail,
+                }
+            }
         }
     }
 

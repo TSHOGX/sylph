@@ -413,8 +413,7 @@ async fn create_prepared(
                             sylph_protocol::RejectCode::WorkdirOutsideRoots
                             | sylph_protocol::RejectCode::PolicyViolation,
                         ) => Error::Forbidden(
-                            "The requested working directory is outside the configured roots"
-                                .into(),
+                            format!("The requested working directory is outside the configured sessions may run in roots: {}", state.config.browse_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")),
                         ),
                         Some(sylph_protocol::RejectCode::WorkdirMissing) => {
                             Error::InvalidRequest("Working directory does not exist".into())
