@@ -27,7 +27,7 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| **The envagent is the only execution path** | Milestone 1 | behavioral gate complete; structural cleanup remains: remove the server-side adapter/link seam and its compatibility fixtures before marking complete |
+| **The envagent is the only execution path** | Milestone 1 | complete: product routes, default ingress, paired fixtures, version floors, live inventory rediscovery, remote lifecycle reconciliation, typed command/file contracts, and removal of server-side adapter/link execution seams |
 | **The server is `crates/server`** | Milestone 1 | moved into the workspace crate layout |
 | **Transport carries TLS and pairs from another host** | Milestone 3 | loopback only, so no off-host environment can dial in |
 | **Multi-user authentication and per-environment authorization** | Milestone 3 | a single bootstrap Subject, no grants |
