@@ -14,14 +14,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use sylph_protocol::{
     normalize_workdir, Event, EventKind, EventStream, Fidelity, InteriorState, NativeId,
     NativeSummary, Phase, SessionMessage, StoreFilter,
 };
 
-use crate::native::{candidates, epoch_millis_from_iso, for_each_json_line, SessionCandidate};
+use crate::native::{candidates, epoch_millis_from_iso, SessionCandidate};
 
 /// Where `codex` keeps its rollouts, `$HOME`-relative.
 ///
@@ -290,7 +290,7 @@ fn string_at(payload: &Value, key: &str) -> Option<String> {
 /// a plausible recent instant. Same constant `claude`'s and `pi`'s parsers use.
 const NO_RECORDED_TIME: i64 = 0;
 
-/// One session's whole recorded history, as the events a live turn would have emitted.
+/// Project one complete rollout record into the normalized event vocabulary.
 ///
 /// # One pass, one era, and no correlation object
 ///
@@ -308,56 +308,28 @@ const NO_RECORDED_TIME: i64 = 0;
 /// written once, whole, after the thing it describes finished. There are no deltas to
 /// accumulate, so there is no block map to key and therefore no index-collision hazard of the
 /// kind `translate::BlockKey` exists to prevent.
-#[allow(dead_code)]
-fn parse_rollout(path: &Path) -> Result<ParsedRollout> {
-    let mut parsed = ParsedRollout::default();
-    let mut era = None;
-    // The delegates this file opened, so a second record naming one does not re-declare it.
-    // Measured, it must be per-thread rather than per-record: 32 `send_message` records in
-    // one file name the same two delegates, and each carries a distinct call id.
-    let mut opened: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // The tool call each pending output belongs to, by `call_id`, so a result can carry its
-    // tool's name. Measured: 55735 of 55737 legacy outputs and 5704 of 5704 paginated ones
-    // pair to a call in the same file by `call_id`.
-    let mut call_names: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-
-    let stats = for_each_json_line(path, |record| {
-        project_record(&record, &mut era, &mut opened, &mut call_names, &mut parsed);
-        Ok(())
-    })
-    .with_context(|| format!("parsing codex rollout {}", path.display()))?;
-
-    // A file whose records all failed to parse is a different fact from an empty one, and
-    // they look identical downstream. This is the loud failure `AGENTS.md` § Compatibility
-    // asks for in place of tolerating a shape no known era emits.
-    if stats.parsed == 0 && stats.skipped > 0 {
-        return Err(anyhow!(
-            "no record in {} parsed as JSON ({} lines skipped); this is not a shape any \
-             known `codex` version writes",
-            path.display(),
-            stats.skipped
-        ));
-    }
-    if parsed.header.is_none() {
-        // Measured: **every** rollout opens with `session_meta`. A file without one
-        // names no session, so it cannot be adopted and must not be silently empty.
-        return Err(anyhow!(
-            "no `session_meta` record in {}; every measured rollout opens \
-             with one, so this is not a shape any known `codex` version writes",
-            path.display()
-        ));
-    }
-
-    Ok(parsed)
-}
-
-/// Project one complete rollout record into the normalized event vocabulary.
+///
+/// # This is the only record-level projection, and there is no whole-file twin
 ///
 /// Keeping this operation independent from file iteration is what lets adoption and the
 /// generation-aware follower share exactly one projection state. A watcher must not re-run a
 /// second, subtly different parser when a line arrives after its first poll: the era, call
-/// names, delegation set, and duplicate guards all belong to the rollout's cursor.
+/// names, delegation set, and duplicate guards all belong to the rollout's cursor, so the
+/// only caller is [`RolloutProjector::apply`] and the only reader of *that* is
+/// [`RolloutCursor::poll`]. A whole-file `parse_rollout` sitting beside them once
+/// reimplemented the iteration half and was reached only from tests, which is the
+/// two-derivations defect `AGENTS.md` § Rules That Keep Costing Time names: the tests
+/// confirmed a projection production never ran.
+///
+/// Deleting it moved two bounds it held, and each has a named owner now rather than none:
+///
+/// - **"nothing in this file parsed as JSON."** Owned by [`read_complete_records`], which is
+///   stricter than the tolerant count that check was built on — a *complete* malformed line
+///   is an error there rather than a skipped line, and the cursor does not advance past it.
+/// - **"this file has no `session_meta`."** Owned by [`header_of`], and enforced before a
+///   projection starts: [`locate`] refuses an id no header claims, and
+///   [`RolloutFollowState::discover`] drops a candidate whose header does not read, so a
+///   headerless file is never followed rather than being followed and then rejected.
 fn project_record(
     record: &Value,
     era: &mut Option<Era>,
@@ -2217,8 +2189,8 @@ pub fn watch(id: &NativeId) -> Result<EventStream> {
 ///    wrong answer rather than a missing one.
 /// 3. **A rollout already carries the session-level equivalents.** `task_complete` records the
 ///    vendor's own `duration_ms` per turn (2900 of 4317 closes), and `turn_aborted` records an
-///    interruption — both projected as events by `parse_rollout`, where a reader that wants
-///    turn status can have it at full fidelity rather than as a listing summary.
+///    interruption — both projected as events by [`adopt`], where a reader that wants turn
+///    status can have it at full fidelity rather than as a listing summary.
 ///
 /// So the decision is: **the projection is not consulted, and the facts it holds are reached
 /// through the rollout's own events instead.** If a future surface genuinely needs per-turn
@@ -2329,8 +2301,8 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
 /// Measured: **every** rollout opens with `session_meta`, so one line is the whole
 /// header. That is also what makes the *first* one the right one — 44 files carry a second
 /// `session_meta` further in, which is the **parent's** header replayed into a forked delegate
-/// (see [`parse_rollout`]). A reader taking the last would give those 44 sessions their
-/// parent's id, cwd, and era.
+/// (see [`project_record`], which keeps the first for the same reason). A reader taking the
+/// last would give those 44 sessions their parent's id, cwd, and era.
 ///
 /// `started_at_ms` comes from the record's **outer** timestamp rather than the payload's own.
 /// Both are present on every file and they differ: measured, the outer is later by a median of
@@ -2429,17 +2401,42 @@ mod tests {
             .join(name)
     }
 
-    /// Project one fixture and keep only the events.
-    fn project(name: &str) -> Vec<Event> {
-        parse_rollout(&fixture(name))
-            .expect("the fixture must parse")
-            .messages
+    /// One whole fixture, read the way production reads it.
+    ///
+    /// **Deliberately a [`RolloutCursor`] rather than a loop of its own.** These fixtures are
+    /// the measured evidence about the vendor's store, so what they must be evidence *about* is
+    /// the projection that actually runs: [`read_complete_records`] feeding
+    /// [`RolloutProjector::apply`], which is exactly what [`RolloutFollowState::poll`] does per
+    /// source. A bespoke reader here would be a second derivation of the same fact — and the
+    /// one this file used to have was reached only from tests, so every assertion below
+    /// confirmed a parser no `adopt` or `watch` ever called.
+    ///
+    /// One `poll` is the whole file: these fixtures are static and every one ends in a newline,
+    /// so the first pass has no unterminated tail to hold back and no second generation to
+    /// observe. `watch_fixture_dir`'s tests own the incremental and generation behaviour.
+    fn replay(name: &str) -> (Option<Header>, Vec<Event>) {
+        let mut cursor = RolloutCursor::new(fixture(name));
+        let messages = cursor.poll().expect("the fixture must parse");
+        let events = messages
             .iter()
             .filter_map(|message| match message {
                 SessionMessage::Event(event) => Some(event.clone()),
                 _ => None,
             })
-            .collect()
+            .collect();
+        (cursor.projector.parsed.header.clone(), events)
+    }
+
+    /// Project one fixture and keep only the events.
+    fn project(name: &str) -> Vec<Event> {
+        replay(name).1
+    }
+
+    /// The header one fixture's own `session_meta` yields, from the same pass.
+    fn header(name: &str) -> Header {
+        replay(name)
+            .0
+            .expect("every measured rollout opens with a session_meta")
     }
 
     fn of_kind(events: &[Event], kind: EventKind) -> Vec<&Event> {
@@ -2487,11 +2484,10 @@ mod tests {
 
         // And the file really is the era under test, or the assertion above proves
         // nothing about paginated handling.
-        let header = parse_rollout(&fixture("ordinary-turn-item-completed-era.jsonl"))
-            .expect("the fixture must parse")
-            .header
-            .expect("the fixture has a session_meta");
-        assert_eq!(header.era, Era::Paginated);
+        assert_eq!(
+            header("ordinary-turn-item-completed-era.jsonl").era,
+            Era::Paginated
+        );
     }
 
     /// **A delegation edge points parent → child, and the child's own rollout must not
@@ -2532,14 +2528,8 @@ mod tests {
 
         // Child side: its header names its parent, and the id relationship runs the
         // right way round.
-        let child = parse_rollout(&fixture(child_file))
-            .expect("the child must parse")
-            .header
-            .expect("the child has a header");
-        let parent = parse_rollout(&fixture(parent_file))
-            .expect("the parent must parse")
-            .header
-            .expect("the parent has a header");
+        let child = header(child_file);
+        let parent = header(parent_file);
         assert_eq!(
             child.parent_native_id, parent.native_id,
             "the child must name the parent, not the reverse"
