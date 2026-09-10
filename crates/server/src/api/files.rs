@@ -598,7 +598,7 @@ pub async fn document(
             &state,
             &remote,
             path.clone(),
-            Some(documents::MAX_DOCUMENT_BYTES as u64 + 1),
+            Some(documents::MAX_DOCUMENT_BYTES + 1),
         )
         .await?;
         if remote_read.truncated || remote_read.size > documents::MAX_DOCUMENT_BYTES {
