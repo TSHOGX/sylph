@@ -568,6 +568,24 @@ export function SelectRows<T extends SelectChoice>({
  * simply cut off with no way to reach the rest. The cap is in `dvh` as well as `rem`
  * so a short viewport bounds it too, and `overscroll-contain` stops a flick that
  * reaches the end from scrolling whatever is behind.
+ *
+ * # Both branches scroll; they differ only in where the bound comes from
+ *
+ * `pane` (`app/globals.css`) *is* `overflow-y: auto` plus `overscroll-behavior:
+ * contain`, so the `fill` branch is not the non-scrolling one — writing
+ * `overflow-y-auto` beside `pane` would be a second derivation of the same fact,
+ * and the two would diverge the first time the utility grew a case. What differs is
+ * the bound: `fill` takes its height from an ancestor with a determinate one, and
+ * otherwise the container bounds itself.
+ *
+ * That makes `fill` a claim about the caller, not a style: **every `fill` consumer
+ * must sit inside a determinate height.** All of them are `Overlay` children —
+ * search, the palette, the folder and workspace pickers, adopt, history, the
+ * composer's config dialog — plus the mobile sheet in `ui/menu.tsx`, and `Overlay`
+ * now supplies that height for the `picker` and `panel` variants (see its module
+ * comment). A `fill` list in a content-sized container is the zero-height defect
+ * this note exists to prevent: the list resolves to whatever the sibling chrome
+ * leaves over, which measured 8px against 2248px of rows.
  */
 export function SelectScroll<T extends SelectChoice>({
   list,
@@ -578,7 +596,11 @@ export function SelectScroll<T extends SelectChoice>({
   list: SelectList<T>;
   /** Names the list for a screen reader. */
   label: string;
-  /** Fill the available height instead of capping it — the mobile sheet and dialog. */
+  /**
+   * Take the height from the surface instead of capping it here — the mobile sheet
+   * and every `Overlay`. Requires an ancestor with a determinate height; see the
+   * note above for why that is a precondition and not a preference.
+   */
   fill?: boolean;
   children: React.ReactNode;
 }) {

@@ -23,6 +23,31 @@
  * and the history browser are *the* task while they are open, and a list is what
  * they are made of. `dvh`, not `vh`, so the browser's collapsing toolbars do not
  * push the footer out of reach.
+ *
+ * # The panel owns the height, so `flex-1` inside it resolves
+ *
+ * A `picker` is `h-[min(…)]` and not `max-h-`, and that is the load-bearing half of
+ * this component's contract rather than a stylistic choice. Every picker is a strip
+ * of fixed chrome plus one `flex-1` list, and `flex-1` distributes *free space* — it
+ * only has any when its container's height is determinate. A `max-height` alone
+ * leaves the panel content-sized, so the list's basis is 0, it grows by nothing, and
+ * whatever the chrome does not use is all it gets. That is not a hypothetical: the
+ * folder browser has the tallest chrome of any picker (roots row, breadcrumbs,
+ * filter, footer — 173px measured), and on a short viewport its list resolved to 8px
+ * holding 2248px of directories. Nothing was clipped, nothing errored; the list was
+ * simply 8px tall.
+ *
+ * `min(32rem, 80dvh)` rather than a bare `80dvh`: the cap is what a picker asks for
+ * and the `dvh` term is what a short viewport allows, so the panel never exceeds the
+ * screen and never collapses onto its content. A `panel` (settings) keeps the
+ * viewport-relative form for the same reason — its body is a `flex-1` two-column
+ * layout with its own scrolling side.
+ *
+ * The two `viewer` variants deliberately do *not* get this. Their content is a file,
+ * not a list: `viewer` measures what it is showing, because a seven-row table in a
+ * fixed box reads as broken, and `viewer-full` already claims a determinate `92dvh`
+ * for content that reports no intrinsic size. So each variant's height has exactly
+ * one owner, and no child needs to declare a second.
  */
 
 import { useId, type ReactNode } from "react";
@@ -122,7 +147,16 @@ export function Overlay({
             ? "md:h-fit md:max-h-[92dvh] md:w-fit md:min-w-[32rem] md:max-w-[95vw]"
             : size === "viewer-full"
               ? "md:h-[92dvh] md:w-full md:max-w-[95vw]"
-              : `md:w-full md:max-h-[80dvh] ${size === "panel" ? "md:max-w-3xl" : "md:max-w-xl"}`
+              : // A determinate height, not a cap: see the sizing note in the module
+                // comment. `min()` keeps the ask and the viewport limit in one
+                // declaration, so there is nothing for a child to re-derive.
+                //
+                // A `panel` asks for more than a `picker` because it is a
+                // two-column layout with its own scrolling side rather than one
+                // list, and its longest section (Shortcuts) overflows 32rem.
+                size === "panel"
+                ? "md:h-[min(44rem,80dvh)] md:w-full md:max-w-3xl"
+                : "md:h-[min(32rem,80dvh)] md:w-full md:max-w-xl"
         }`}
       >
         <h2 id={titleId} className="sr-only">
