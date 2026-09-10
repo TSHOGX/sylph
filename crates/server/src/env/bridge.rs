@@ -2149,74 +2149,6 @@ impl EnvBridge {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    async fn ack_message(
-        &self,
-        environment: &EnvironmentId,
-        producer_id: &ProducerId,
-        producer_seq: ProducerSeq,
-        payload_hash: &str,
-        tx: &mpsc::Sender<WireMessage>,
-    ) -> Result<()> {
-        let expected = self
-            .leases
-            .read()
-            .await
-            .get(environment)
-            .map(|lease| lease.producer_id.clone())
-            .ok_or(BridgeError::NotConnected)?;
-        if &expected != producer_id {
-            return Err(BridgeError::ProducerMismatch.into());
-        }
-        let accepted_before = self
-            .store
-            .env_accepted_through(environment, producer_id)
-            .await?;
-        if producer_seq.get() > accepted_before.saturating_add(1) {
-            // A standalone message cannot be partially accepted, but it can
-            // still report the durable contiguous prefix.  Sending the prefix
-            // ACK (rather than a NACK that the envagent has no replay cursor
-            // for) lets the sender resume from `accepted_through + 1` without
-            // ever claiming that the out-of-order item was accepted.
-            tx.send(WireMessage::Ack {
-                producer_id: producer_id.clone(),
-                accepted_through: ProducerSeq::new(accepted_before),
-                server_seq_through: None,
-            })
-            .await
-            .map_err(|_| anyhow!("envagent writer closed"))?;
-            return Ok(());
-        }
-        if let Some(existing) = self
-            .store
-            .env_receipt_detail(environment, producer_id, producer_seq)
-            .await?
-        {
-            if existing.payload_hash != payload_hash {
-                return Err(BridgeError::InvalidBatch(
-                    "producer sequence was replayed with different payload".into(),
-                )
-                .into());
-            }
-        } else {
-            self.store
-                .insert_env_message_receipt(environment, producer_id, producer_seq, payload_hash)
-                .await?;
-        }
-        let accepted_through = self
-            .store
-            .env_accepted_through(environment, producer_id)
-            .await?;
-        tx.send(WireMessage::Ack {
-            producer_id: producer_id.clone(),
-            accepted_through: ProducerSeq::new(accepted_through),
-            server_seq_through: None,
-        })
-        .await
-        .map_err(|_| anyhow!("envagent writer closed"))?;
-        Ok(())
-    }
-
     /// Dispatch a command while respecting the durable ambiguity record.
     pub async fn dispatch(
         &self,
@@ -2893,6 +2825,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_message_ack_never_skips_an_unreceived_prefix() {
+        // Drives `process_message` through the real wire (`serve_io`), the only path a
+        // producer sequence actually reaches. A prior version of this test called a
+        // second, test-only `ack_message` that had already diverged from production: on
+        // this exact gap, `process_message` sends a `Nack`, not the `Ack` the dead copy
+        // sent. Asserting on `serve_io`'s reply is asserting on what an envagent gets.
         let (bridge, _dir) = bridge().await;
         let environment = EnvironmentId::parse("env7fk2").unwrap();
         let producer = ProducerId::parse("producer-message").unwrap();
@@ -2908,27 +2845,67 @@ mod tests {
             )
             .await
             .unwrap();
-        let (tx, mut rx) = mpsc::channel(4);
+
+        let (mut client, server) = tokio::io::duplex(32 * 1024);
+        let (server_reader, server_writer) = tokio::io::split(server);
+        let bridge_task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.serve_io(server_reader, server_writer).await }
+        });
         let hello = sylph_protocol::Hello::current(
             "install-message",
             producer.clone(),
             Some(environment.clone()),
             0,
         );
-        bridge
-            .register_connection(&hello, "message-token", tx.clone())
+        write_frame(
+            &mut client,
+            &serde_json::to_vec(&WireMessage::from_hello(hello)).unwrap(),
+        )
+        .await
+        .unwrap();
+        write_frame(&mut client, &serde_json::to_vec("message-token").unwrap())
             .await
             .unwrap();
+        let welcome =
+            sylph_protocol::decode_message(&read_frame(&mut client).await.unwrap()).unwrap();
+        let epoch = match welcome {
+            DecodedMessage::Known(WireMessage::Welcome {
+                connection_epoch, ..
+            }) => connection_epoch,
+            other => panic!("expected welcome, got {other:?}"),
+        };
 
-        bridge
-            .ack_message(&environment, &producer, ProducerSeq::new(3), "hash-3", &tx)
-            .await
-            .unwrap();
-        let first_ack = rx.recv().await.unwrap();
-        assert!(matches!(
-            first_ack,
-            WireMessage::Ack { accepted_through, .. } if accepted_through.get() == 0
-        ));
+        // Producer sequence 3 with nothing accepted yet is a gap, not the next message.
+        write_frame(
+            &mut client,
+            &serde_json::to_vec(&WireMessage::Diagnostic {
+                level: sylph_protocol::DiagnosticLevel::Info,
+                code: "probe".into(),
+                message: "gap probe".into(),
+                session_id: None,
+                details: Default::default(),
+                producer_id: producer.clone(),
+                producer_seq: ProducerSeq::new(3),
+                connection_epoch: epoch,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let reply =
+            sylph_protocol::decode_message(&read_frame(&mut client).await.unwrap()).unwrap();
+        assert!(
+            matches!(
+                reply,
+                DecodedMessage::Known(WireMessage::Nack { expected_next, .. })
+                    if expected_next.get() == 1
+            ),
+            "a gap must be nacked to the next unreceived sequence, not acked past it: {reply:?}"
+        );
+
+        drop(client);
+        let _ = bridge_task.await;
     }
 
     #[tokio::test]
