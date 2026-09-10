@@ -250,6 +250,31 @@ Get the code from `POST /api/v1/environments/pairings`. The credential is writte
 **The server does not embed an envagent**, so "everything on one laptop" is still two
 processes (`docs/environments.md`).
 
+### A session fails its first turn with an authentication error
+
+**Symptom:** a `claude` session starts, accepts a turn, and fails it with either
+`Failed to authenticate. API Error: 401 Invalid token` or `Not logged in · Please run
+/login` — while `claude auth status` in your own terminal reports `loggedIn: true`.
+
+**Cause:** the envagent was started from inside another coding-agent session and inherited
+that session's authentication environment, which every vendor process it spawns inherits
+again. Both messages are the same cause; which one appears depends on how much of that
+environment is still in place (`docs/agents.md` § A host-managed auth switch inherited from
+another agent session).
+
+**Check what the envagent's own shell carries:**
+
+```sh
+env | grep -E '^(CLAUDE_CODE_(PROVIDER_MANAGED_BY_HOST|HOST_AUTH_ENV_VAR)|ANTHROPIC_BASE_URL)='
+```
+
+Any of those three, with no `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` beside them, is
+the broken state. The envagent's log names it once at `error` on the first spawn.
+
+**Fix:** restart the envagent from a shell that is not inside an agent session. The
+inheritance is fixed when the envagent launches, so the adapter's own repair keeps sessions
+running but cannot change what the process already inherited.
+
 ### An agent is missing from an environment
 
 **Symptom:** the agent selector offers fewer agents than you expected, or none.

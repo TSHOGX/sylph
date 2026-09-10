@@ -759,11 +759,12 @@ pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Sess
         cwd: spec.workdir.clone(),
         env: HashMap::new(),
         // An envagent started from inside another agent session inherits that session's
-        // `CLAUDE_CODE_*` variables, two of which disable this CLI's own keychain login.
-        // Left in place, every turn refuses with `Not logged in` while the developer's own
-        // terminal reports a valid login. Only an unambiguously broken combination is
-        // removed, and never silently — `super::hostauth` owns that judgement, the
-        // measurements, and the report.
+        // authentication environment: two `CLAUDE_CODE_*` switches that disable this CLI's
+        // own keychain login, and an `ANTHROPIC_BASE_URL` redirecting where a credential is
+        // sent. Left in place, every turn refuses with `Not logged in` while the developer's
+        // own terminal reports a valid login — and removing only the switches turns that
+        // into a `401`. Only an unambiguously broken combination is removed, and never
+        // silently — `super::hostauth` owns that judgement, the measurements, and the report.
         env_remove: super::hostauth::sanitize_inherited_env(),
         // See [`reply_id`], and this module's header for what each of its three conditions
         // prevents. The short form: the id is nested, the vendor raises requests on this
