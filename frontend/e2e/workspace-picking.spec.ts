@@ -21,9 +21,24 @@ import { gotoReady } from "./fixtures/session";
  *
  * The invariants, not the mechanisms: a directory is reachable by typing part of
  * its path, the keyboard can navigate and commit without the mouse, and the two
- * surfaces are one modal rather than two stacked focus traps. Asserting a panel
- * height or a row count would fail on the next padding change while saying nothing
- * about whether the picker is usable.
+ * surfaces are one modal rather than two stacked focus traps. Asserting an exact
+ * panel height or a row count would fail on the next padding change while saying
+ * nothing about whether the picker is usable.
+ *
+ * The exception is the *last* spec here, and the distinction is worth stating
+ * because it looks like the thing this comment forbids. It names no height at all;
+ * it compares the surface against *itself* across a content change, which is what
+ * makes it survive a padding edit while still pinning the defect. A panel sized by
+ * its content is the bug, so "the same dialog before and after the list empties" is
+ * the invariant, and any particular number would be the incidental part.
+ *
+ * It needed that shape to fail at all. Asserting the list is merely tall enough for
+ * one row passed against the broken code, because the e2e browse root is small
+ * enough that a content-sized panel is still taller than a row — a reminder that a
+ * fixture's size is part of what an assertion can observe. Every other spec in this
+ * file also passed while the list was 8px tall holding 2248px of rows, and
+ * `toBeVisible` did not catch it either: the rows were in the DOM with non-zero
+ * boxes of their own, overflowing a container that had collapsed.
  *
  * Deliberately no assertion on *which* workspaces are listed. `frontend/.e2e-data`
  * accumulates every session from every run and is never wiped, so any count is a
@@ -144,4 +159,66 @@ test("the keyboard can open a folder and choose one without the mouse", async ({
   // Creation navigates to the session, so the composer is the signal it worked.
   await filter.press("ControlOrMeta+Enter");
   await expect(page.getByLabel("Message")).toBeVisible();
+});
+
+test("the folder browser's height is the surface's, not its current directory's", async ({
+  page,
+}) => {
+  const dialog = await openNewSession(page);
+  await dialog.getByRole("button", { name: "Browse folders..." }).click();
+  const list = dialog.getByRole("listbox", { name: "Folders" });
+  await expect(list).toBeVisible();
+  await expect(dialog.getByRole("option").first()).toBeVisible();
+
+  const filter = dialog.getByRole("combobox", { name: /filter folders/i });
+
+  // Located by id, not by role: `SelectScroll` claims `listbox` only while there are
+  // options for it to contain, because a `listbox` around a "no matches" line is the
+  // `aria-required-children` failure that pattern exists to avoid. The empty state
+  // below is exactly that case, so a role locator would stop resolving mid-test —
+  // which is a different failure from the one this spec is about.
+  const listId = await filter.getAttribute("aria-controls");
+  const scroller = dialog.locator(`#${listId}`);
+
+  const heights = async () => ({
+    dialog: (await dialog.boundingBox())!.height,
+    list: await scroller.evaluate((el) => el.clientHeight),
+  });
+
+  const listed = await heights();
+
+  // A query matching nothing empties the list, which is the largest content change
+  // this surface has: every row goes away and one line of text replaces them.
+  await filter.fill("zzz-no-such-folder-zzz");
+  await expect(dialog.getByRole("option")).toHaveCount(0);
+  const empty = await heights();
+
+  await filter.clear();
+  await expect(dialog.getByRole("option").first()).toBeVisible();
+  const restored = await heights();
+
+  // The dialog must not have resized. This is the invariant the height chain broke:
+  // the panel was `max-h-` only, so it was content-sized and its height was a
+  // function of how many directories the current level happened to hold — measured
+  // swinging between 211px and 756px on one viewport as the user navigated and
+  // filtered. A picker that changes size under the pointer is the visible symptom;
+  // the invisible one is that `flex-1` on the list then has no free space to
+  // distribute, so on a short viewport the list resolved to 8px while holding
+  // 2248px of rows.
+  //
+  // `Overlay` now owns a determinate height for the `picker` variant. This assertion
+  // goes red if that reverts to a cap, or if a child re-declares a height of its own.
+  expect(empty.dialog).toBe(listed.dialog);
+  expect(restored.dialog).toBe(listed.dialog);
+
+  // And the list keeps its box, so the rows scroll inside a stable frame rather than
+  // the frame growing to fit them.
+  expect(empty.list).toBe(listed.list);
+  expect(restored.list).toBe(listed.list);
+
+  // The scroll container is the list itself. Asserted because `fill` mode takes its
+  // height from the surface and owns only the scrolling — if that moved to an
+  // ancestor, a long level would scroll the whole dialog including its footer.
+  expect(await scroller.evaluate((el) => getComputedStyle(el).overflowY)).toBe("auto");
+  expect(listed.list).toBeGreaterThan(0);
 });

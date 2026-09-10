@@ -254,7 +254,21 @@ export function DirectoryPicker({
       onClose={onClose}
       describedBy="directory-picker-hint"
     >
-      <div className="flex min-h-0 flex-1 flex-col md:h-[26rem]">
+      {/* One wrapper, because this picker's chrome is two rows the others do not
+          have (roots, breadcrumbs) and the filter needs a keydown handler around it.
+          It claims no height of its own: `Overlay` owns that, and this column is
+          `flex-1` *within* the panel's determinate height so the list below can grow
+          into what the chrome leaves.
+
+          It used to be `flex min-h-0 flex-1 flex-col md:h-[26rem]`, which asked two
+          incompatible ways at once — and the `h-[26rem]` never applied, measurably:
+          it resolved to 754px on a 945px viewport, because `flex-1` on the same
+          element wins the height. With the panel then only `max-h-`, the panel was
+          content-sized, `flex-1` had no free space to distribute, and the list got
+          8px for 2248px of rows. Removing the fixed height rather than the `flex-1`
+          is deliberate: a fixed 26rem cannot honour a short viewport, and it would
+          reintroduce a second height owner the moment the chrome grew a row. */}
+      <div className="flex min-h-0 flex-1 flex-col">
         {roots.length > 1 && (
           <div
             // `role="group"` because an `aria-label` on a bare `div` is dropped
@@ -328,8 +342,14 @@ export function DirectoryPicker({
 
         {/* `onKeyDown` is re-bound so the field carries the picker's own Enter
             semantics. The filter is where focus is, so it is the only node whose
-            handler can see them. */}
-        <div onKeyDown={onKeyDown}>
+            handler can see them.
+
+            `shrink-0` because this wrapper, not `SelectFilter`, is the flex child
+            here: the field carries its own `shrink-0`, but an intermediate div
+            without one is compressible, and it was measurably being compressed —
+            the input rendered 16px tall on a short viewport instead of its padded
+            height. The scrolling list is the only child that may absorb pressure. */}
+        <div onKeyDown={onKeyDown} className="shrink-0">
           <SelectFilter
             list={list}
             name={t("directoryPicker.filterName")}
