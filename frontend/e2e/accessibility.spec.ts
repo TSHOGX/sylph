@@ -295,6 +295,67 @@ test("every overlay has no automated accessibility violations", async ({ page })
 });
 
 /**
+ * The adopt picker, which the loop above cannot reach.
+ *
+ * That loop is keyed by shortcut, and adopting has no default binding — it is reached
+ * through the palette. So it was the one overlay never audited, which is precisely the
+ * position the history browser was in when it shipped `aria-required-children`: a
+ * non-option child inside a `role="listbox"`, invisible to every spec because no audit
+ * ever opened it.
+ *
+ * Audited with rows present rather than empty, because the states differ in ARIA and only
+ * one of them has a listbox at all: `SelectScroll` claims the role only when it has options
+ * to contain, so an empty listing would audit the branch where the hazard cannot occur.
+ * Verified sensitive by putting a `button` inside that listbox, which this reports as
+ * `aria-required-children` — a decorative `<p>` there does not, so "no violations" here is a
+ * claim about interactive children specifically.
+ */
+test("the adopt picker has no automated accessibility violations", async ({ page }) => {
+  await page.route("**/api/v1/sessions/enumerate*", (route) =>
+    route.fulfill({
+      json: {
+        sessions: [
+          {
+            agent: "e2e",
+            nativeId: "11111111-2222-3333-4444-555555555555",
+            workdir: "/tmp",
+            fidelity: "blocks",
+            id: "local:e2e:11111111-2222-3333-4444-555555555555",
+            title: "Fix the SSE reconnect loop",
+            eventCount: 42,
+          },
+          {
+            agent: "e2e",
+            nativeId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            workdir: "/tmp/other",
+            fidelity: "blocks",
+            id: "local:e2e:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            blocked: "outsideRoots",
+          },
+        ],
+      },
+    }),
+  );
+
+  await createSession(page);
+
+  await page.keyboard.press("ControlOrMeta+p");
+  const palette = page.getByRole("dialog");
+  await expect(palette).toBeVisible();
+  await palette.getByRole("combobox").fill("adopt");
+  await expect(palette.getByRole("option").first()).toContainText(/adopt/i);
+  await page.keyboard.press("Enter");
+
+  const picker = page.getByRole("dialog", { name: "Adopt an existing session" });
+  await expect(picker).toBeVisible();
+  // Waits for a row, so the audit provably runs against the listbox branch rather than
+  // against the loading state that precedes it.
+  await expect(picker.getByRole("option").first()).toBeVisible();
+
+  await audit(page, "adopt picker");
+});
+
+/**
  * A picker's own field must not become the node focus is restored to.
  *
  * React's `autoFocus` fires during the commit, before `useDialog`'s mount effect

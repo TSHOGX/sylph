@@ -663,6 +663,13 @@ What differs is not the route but two fields the renderer already handles: the l
 `control` facet reports unavailable with a reason, so the composer explains itself instead
 of failing, and `fidelity` says how much resolution the record has.
 
+**The picker asks to follow the store, never to snapshot it.** `POST /sessions/adopt` takes
+`watch`, and this client always sends `true` — the reasoning, and the two rejected
+alternatives, are in `docs/environments.md` § A product surface bringing a session in.
+What that costs the frontend is one string: adopting has to *say* it keeps up, because
+"adopt" reads as a one-time import and a user who believes that has no reason to keep
+working in the terminal.
+
 **A session id in a route segment is percent-encoded and must be decoded before use.**
 The id is the encoded triple and a native id can itself contain a slash, so Next hands
 those segments back still encoded; re-encoding them produces a lookup for a literal
@@ -961,6 +968,7 @@ invites a reader to conclude coverage shrank.
 | `lib/file-kind.test.ts`, `lib/grid-format.test.ts`, `lib/sandbox-html.test.ts` | Extension→viewer mapping, column/paging arithmetic, CSP injection for previewed HTML |
 | `lib/welcome.test.ts` | The start screen's three states — that a pending or failed listing is never mistaken for an empty app — and the directory grouping behind recents |
 | `lib/create-session.test.ts`, `lib/directory-picker.test.ts` | Dialog-free creation and default resolution; the folder chooser's filtering and typed-path path |
+| `lib/adopt-request.test.ts` | The adopt payload: `watch` present and true for every row regardless of what the listing recorded, the identity triple carried as one unit, and nothing sent that the backend derives from the store |
 
 Tests live beside the code they cover, not in a parallel `tests/` tree, so a
 reader of `lib/diff.ts` can see its tests without going looking.
@@ -996,6 +1004,7 @@ counts are not.
 | `select-list.spec.ts` | The shared choice list itself: filter appearing only past the threshold, cursor opening on the current value, one checkmark per group, a refused write surfacing |
 | `commands.spec.ts` | The slash menu after a completed turn, and a control command opening a picker rather than sending a message |
 | `settings-config.spec.ts` | The Configuration panel reporting what *this* backend resolved, a missing path called out, and the panel offering no way to edit a path from the browser |
+| `adopt.spec.ts` | The adopt picker: reachable from the palette, a blocked row shown with its reason and navigating rather than re-adopting, an empty listing distinguished from a failed one, a refusal rendered, the combobox pattern, and a chosen row asking to follow the store |
 | `file-operations.spec.ts` | Folder creation and its in-place errors, deletes that ask first, uploads including drop and overwrite, context menus, the raw route, and axe over both dialogs |
 | `settings-identity-i18n.spec.ts` | Identity reporting when no `SOUL.md` resolves, language switching repainting and retagging (composer, skip link, file pane accessible names), a shortcut recorder refusing combos the browser keeps, and no *default* binding being one the browser would swallow |
 | `accessibility.spec.ts` | Skip link, focus trapping and restoration including a picker's own field not becoming the node focus returns to, axe-core audit of every surface including both start-screen states and every overlay's list open |

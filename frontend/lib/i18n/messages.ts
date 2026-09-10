@@ -240,6 +240,13 @@ export const en = {
   "adopt.filterPlaceholder": "Filter by title or path...",
   "adopt.agentFilterLabel": "Filter by agent",
   "adopt.allAgents": "All agents",
+  // What adopting does, said before the user picks rather than discovered afterwards.
+  // "Adopt" on its own reads as a one-time import, and the difference is decision-relevant
+  // in both directions: a snapshot would make leaving the terminal open pointless, while
+  // continuity is the reason to keep working there. Says "keeps up" rather than naming a
+  // mechanism, because a follower is Sylph's implementation and not the user's concern.
+  "adopt.follows":
+    "An adopted session keeps up with the terminal it is running in, including turns sent there afterwards.",
   // Says seconds rather than showing a bare spinner. A cold listing genuinely takes
   // them — two of the three adapters read more than a header per file so they never
   // report an absent title or an absent end stamp — and a spinner that sits for four
