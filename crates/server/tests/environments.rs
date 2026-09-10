@@ -117,7 +117,12 @@ async fn connected_inventory_updates_after_cli_removal_without_repair_or_restart
             .into_iter()
             .find(|row| row.id == environment)
             .expect("paired fixture environment should remain listed");
-        if current.connected && current.agents.is_empty() {
+        if current.connected
+            && current
+                .agents
+                .iter()
+                .any(|agent| agent.name == "mock" && !agent.available)
+        {
             assert_eq!(current.connection_epoch, before.connection_epoch);
             let api = common::json_body(backend.get_authed("/api/v1/environments").await).await;
             let row = api["environments"]
@@ -127,7 +132,11 @@ async fn connected_inventory_updates_after_cli_removal_without_repair_or_restart
                 .find(|row| row["id"] == environment.as_str())
                 .expect("updated environment should remain in the API listing");
             assert_eq!(row["connected"], true);
-            assert_eq!(row["agents"].as_array().map(Vec::len), Some(0));
+            assert!(row["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|agent| { agent["name"] == "mock" && agent["available"] == false }));
 
             // Installing or upgrading the CLI is the inverse transition. It must
             // be visible on this same lease as well, without a new pairing epoch.
