@@ -112,6 +112,20 @@ pub struct Spawn {
     /// Added to the inherited environment rather than replacing it: a vendor CLI needs
     /// `HOME`, `PATH`, and its own credential variables to work at all.
     pub env: HashMap<String, String>,
+    /// Removed from the inherited environment, before [`Self::env`] is applied.
+    ///
+    /// **Inheritance is the default and that is deliberate**, so this is the narrow escape
+    /// hatch rather than a general filter. An envagent started from inside another coding
+    /// agent's session inherits that session's variables, and a few of them redirect a
+    /// vendor's *authentication* — which produces a session that runs and refuses every
+    /// turn rather than one that fails to start. `crate::claude::hostauth` owns the one
+    /// instance and the measurements behind it.
+    ///
+    /// Deliberately not `env_clear()`: clearing removes the whole class rather than the
+    /// variables measured to cause a fault, and a vendor CLI cannot run without `HOME` and
+    /// `PATH`. A caller naming what it removes can also report what it removed, and a
+    /// removal nothing reports is the silent mutation `AGENTS.md` warns about.
+    pub env_remove: Vec<String>,
     /// How to recognize a **reply** and read the id it answers.
     ///
     /// Answers `Some(id)` only for a frame that is a reply to something this side sent,
@@ -181,6 +195,11 @@ impl Child {
             .stderr(Stdio::piped())
             // Its own group, so a stop reaches the tool the vendor spawned.
             .process_group(0);
+        // Removals first, so a caller that both removes and sets a name gets the value it
+        // set rather than an empty environment slot.
+        for key in &spawn.env_remove {
+            command.env_remove(key);
+        }
         for (key, value) in &spawn.env {
             command.env(key, value);
         }
@@ -476,6 +495,7 @@ mod tests {
             args: vec!["-c".to_string(), script.to_string()],
             cwd: "/tmp".to_string(),
             env: HashMap::new(),
+            env_remove: Vec::new(),
             reply_id,
         }
     }
@@ -630,6 +650,7 @@ mod tests {
             args: vec![],
             cwd: "/tmp".to_string(),
             env: HashMap::new(),
+            env_remove: Vec::new(),
             reply_id: None,
         })
         .await;
@@ -806,6 +827,57 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("the vendor's own words never reached the error");
+    }
+
+    /// **A named variable is absent from the child, and the rest of the environment is not.**
+    ///
+    /// Both halves matter and they fail in opposite directions. A removal that does not
+    /// reach the child leaves the fault it was meant to clear; a removal implemented as
+    /// `env_clear` takes `HOME` and `PATH` with it, and a vendor CLI cannot run without
+    /// them — so the fix would present as a spawn failure on every machine.
+    ///
+    /// Asserted through a child that prints what it actually inherited, rather than on the
+    /// `Spawn` this side built, which would only prove the struct agrees with itself.
+    #[tokio::test]
+    async fn a_removed_variable_is_absent_from_the_child_and_the_rest_survives() {
+        // Set on *this* process, so the child inherits it the way a real vendor inherits
+        // an envagent's environment. Unique per process so a concurrent test cannot see it.
+        let carried = format!("SYLPH_PROBE_KEEP_{}", std::process::id());
+        let stripped = format!("SYLPH_PROBE_DROP_{}", std::process::id());
+        // Safety: no other thread reads these two names; they exist for this test only.
+        unsafe {
+            std::env::set_var(&carried, "kept");
+            std::env::set_var(&stripped, "hijacked");
+        }
+
+        let script = format!(
+            r#"printf '{{"kept":"%s","dropped":"%s","home":"%s"}}\n' "${carried}" "${stripped}" "$HOME""#
+        );
+        let mut spawn = spawn_sh(&script, None);
+        spawn.env_remove = vec![stripped.clone()];
+        let (_child, mut lines) = Child::spawn(spawn).await.unwrap();
+
+        let seen = lines.recv().await.unwrap().unwrap();
+        assert_eq!(
+            seen["dropped"],
+            json!(""),
+            "the named variable must not reach the vendor"
+        );
+        assert_eq!(
+            seen["kept"],
+            json!("kept"),
+            "an unnamed variable must still be inherited: this is not env_clear"
+        );
+        assert_ne!(
+            seen["home"],
+            json!(""),
+            "HOME must survive, or no vendor CLI can run"
+        );
+
+        unsafe {
+            std::env::remove_var(&carried);
+            std::env::remove_var(&stripped);
+        }
     }
 
     /// Ids are unique for the process's life.

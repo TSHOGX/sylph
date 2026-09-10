@@ -4348,6 +4348,7 @@ pub mod session {
                 args: spawn_args(argv, preamble.as_deref()),
                 cwd: spec.workdir.clone(),
                 env: HashMap::new(),
+                env_remove: Vec::new(),
                 reply_id: Some(Box::new(reply_id)),
             };
             let attached = Self::attach(spawn, requested, preamble.clone()).await;
@@ -5218,6 +5219,7 @@ done
                 ],
                 cwd: "/tmp".to_string(),
                 env: HashMap::new(),
+                env_remove: Vec::new(),
                 // The production predicate, not a test-local one: a peer correlating by a
                 // rule the real session does not use would test the peer.
                 reply_id: Some(Box::new(reply_id)),

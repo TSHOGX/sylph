@@ -174,6 +174,69 @@ Neither misread raises an error: the parser completes over the whole store and p
 plausible records. So assert on *values a parser should have found* — that a failure parses
 as a failure — rather than on the absence of a crash.
 
+### A host-managed auth switch inherited from another agent session
+
+**A vendor process inherits the envagent's environment, so who launched the envagent can
+decide whether a session can authenticate at all.** This is a distinct failure family from
+misreading a payload: nothing is parsed wrong. The CLI does exactly what the environment
+told it, and the transcript records a real refusal.
+
+Two `claude` variables disable the CLI's own keychain login and declare that the **host**
+supplies the credential instead. *Measured on 2.1.267:*
+
+| Environment | `claude auth status` |
+| --- | --- |
+| clean | `loggedIn: true, authMethod: "oauth_token"` |
+| `CLAUDE_CODE_HOST_AUTH_ENV_VAR=ANTHROPIC_AUTH_TOKEN` | `loggedIn: false, authMethod: "none"` |
+| `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1` | `loggedIn: false, authMethod: "none"` |
+| either switch **+** non-empty `ANTHROPIC_AUTH_TOKEN` | `loggedIn: true, authMethod: "oauth_token"` |
+| either switch **+** non-empty `ANTHROPIC_API_KEY` | `loggedIn: true, authMethod: "api_key"` |
+| `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1` **+** `CLAUDE_CODE_USE_BEDROCK=1` | `loggedIn: true, authMethod: "third_party"` |
+
+So the last three rows are a **working** host-managed deployment and stripping them would
+break an operator's configuration. Only a switch with *nothing to answer for it* is broken,
+and it is broken in the expensive way: the session starts, accepts a turn, and answers
+`Not logged in · Please run /login`, while `claude auth status` in the developer's own
+terminal reports `loggedIn: true`. Nothing between the two says the environment was the
+cause.
+
+**An envagent started from inside another coding-agent session is how this arrives.** That
+session exports its own `CLAUDE_CODE_*` variables, the envagent inherits them, and every
+vendor process it spawns inherits them again.
+
+Three measurements decide what the code may assume, and each rules out a repair that would
+otherwise look obvious:
+
+- **The pointer's value is not read as a credential.** Pointing it at `MY_HOST_TOKEN` *and*
+  setting `MY_HOST_TOKEN` still reports `loggedIn: false`, while an unrelated pointer name
+  plus a real `ANTHROPIC_API_KEY` reports `loggedIn: true`. Its only measured effect is to
+  disable the keychain, so a repair that read the named variable would be a check that
+  cannot fail.
+- **Nothing inside the session repairs the broken state.** Neither a populated
+  `CLAUDE_CODE_HOST_CREDS_FILE` nor an `apiKeyHelper` passed via `--settings` rescues it;
+  `-p` still answers `Not logged in`. This is what makes removal defensible rather than
+  merely convenient — the state serves no configuration.
+- **The switch is truthy-valued, not presence-valued.** `1`, `true`, `yes`, and `on` (any
+  case) disable the keychain; `0`, `false`, `no`, `off`, the empty string, `2`, and `xyz`
+  leave it working. Reading presence would report a fault on `=0`, which is an operator
+  turning the switch *off* — a diagnostic that cries wolf is how a real warning stops being
+  read.
+
+`crates/adapters/src/claude/hostauth.rs` owns the classification and the report, and
+`AGENTS.md` § Rules That Keep Costing Time governs the reporting shape: this is one fact
+about the run, so it is reported once at `error` and thereafter at `debug`, never once per
+spawn. The removal is never silent — the report names the variables it removed and says to
+restart the envagent from a clean terminal.
+
+**The class does not generalize to the other two agents, and that was checked rather than
+assumed.** `codex` has no host-managed-auth switch: its `CODEX_MANAGED_BY_*` variables name
+the *package manager* that installed it, and `login status` reported the same account with
+bogus `OPENAI_API_KEY` and `CODEX_API_KEY` values in the environment. `pi` reads two
+environment variables in its whole bundle, `AI_AGENT` and `PI_CODING_AGENT`, neither of
+which is a credential. So the check lives in the `claude` adapter, not in
+`crates/adapters/src/process.rs`, which only gains the general ability to remove a named
+variable from a spawn.
+
 ## `codex`
 
 Against `codex-cli` 0.150.1. Capture scripts and raw frames live in

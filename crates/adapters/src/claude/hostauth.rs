@@ -1,0 +1,406 @@
+//! Whether the environment this envagent inherited has redirected `claude`'s auth.
+//!
+//! `docs/agents.md` § A host-managed auth switch inherited from another agent session is
+//! the governing spec, and holds the measurements every constant here was derived from.
+//!
+//! # The failure this exists to make loud
+//!
+//! A vendor process inherits the envagent's environment ([`crate::process::Spawn::env`]).
+//! When an envagent is started from *inside* another coding-agent session, it inherits that
+//! session's `CLAUDE_CODE_*` variables — and two of them tell the CLI that the **host**
+//! supplies credentials instead of its own keychain. With no host credential in the
+//! environment, every session Sylph starts answers `Not logged in · Please run /login`
+//! while `claude auth status` in the developer's own terminal reports `loggedIn: true`.
+//!
+//! That is the expensive shape `AGENTS.md` names: not a crash, but a plausible answer. The
+//! CLI is behaving exactly as asked, the transcript records a real refusal, and nothing in
+//! the chain between the two says the environment was the cause.
+//!
+//! # Why the pointer's *name* is not a credential source
+//!
+//! `CLAUDE_CODE_HOST_AUTH_ENV_VAR` reads as "the token is in the variable I name", so the
+//! obvious repair is to look up that variable. **Measured on 2.1.267, it is not read as
+//! one.** Setting the pointer to `MY_HOST_TOKEN` *and* setting `MY_HOST_TOKEN` still
+//! reports `loggedIn: false`, while an unrelated pointer name plus a real
+//! `ANTHROPIC_API_KEY` reports `loggedIn: true`. So the pointer's only measured effect is
+//! to **disable the keychain**; what rescues the CLI is one of the credential variables it
+//! reads regardless of the pointer. A repair built on the pointer's name would have been a
+//! check that cannot fail.
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tracing::{debug, error};
+
+/// Names the variable a host claims to supply auth in. Any non-empty value disables the
+/// CLI's own keychain oauth, whatever it names (see this module's header).
+pub const HOST_AUTH_POINTER: &str = "CLAUDE_CODE_HOST_AUTH_ENV_VAR";
+
+/// Declares that a host manages the provider credential. Disables keychain oauth when
+/// truthy.
+pub const PROVIDER_MANAGED_BY_HOST: &str = "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST";
+
+/// The two switches that disable keychain oauth, and the only values this module removes.
+pub const KEYCHAIN_SWITCHES: &[&str] = &[HOST_AUTH_POINTER, PROVIDER_MANAGED_BY_HOST];
+
+/// Credential variables the CLI reads directly.
+///
+/// *Measured:* with either switch set, a non-empty `ANTHROPIC_API_KEY` reports
+/// `authMethod: "api_key"` and a non-empty `ANTHROPIC_AUTH_TOKEN` reports
+/// `authMethod: "oauth_token"` — so a switch plus one of these is a **working**
+/// host-managed configuration, not a broken one.
+const HOST_CREDENTIALS: &[&str] = &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"];
+
+/// Provider selectors that make the switches meaningful without any Anthropic token.
+///
+/// *Measured:* `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1` with `CLAUDE_CODE_USE_BEDROCK=1`
+/// reports `loggedIn: true, authMethod: "third_party", apiProvider: "bedrock"`, and the
+/// same holds for `vertex` and `foundry`. This is the legitimate deployment a blanket
+/// strip would have broken.
+const THIRD_PARTY_PROVIDERS: &[&str] = &[
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+];
+
+/// Other routes by which a host may intend to supply a credential.
+///
+/// **Held as evidence of intent, not as a credential that works.** *Measured:* a populated
+/// `CLAUDE_CODE_HOST_CREDS_FILE` did **not** rescue either switch — the CLI still reported
+/// `loggedIn: false`. The two file-descriptor routes were not reduced to a measurement,
+/// because passing a live descriptor is not something a probe can fake convincingly.
+///
+/// They are still consulted here, and that asymmetry is deliberate: this module only
+/// removes a variable whose state it has shown to be **unambiguously** broken, and an
+/// operator who set one of these is configuring host-managed auth on purpose. Reporting
+/// such a case and leaving it intact is right even where it does not work, because the
+/// fix belongs to whoever wrote the deployment.
+const HOST_CREDENTIAL_ROUTES: &[&str] = &[
+    "CLAUDE_CODE_HOST_CREDS_FILE",
+    "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR",
+];
+
+/// What the inherited environment has done to this vendor's authentication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostAuth {
+    /// Neither switch is set. The CLI reads its own keychain, which is the normal case.
+    Untouched,
+    /// A switch is set **and** something can answer for it: a credential variable, a
+    /// third-party provider, or an explicit host credential route. Left exactly as found.
+    Managed {
+        /// Why this is believed to be deliberate, so a report can say so.
+        because: String,
+    },
+    /// A switch is set and **nothing** can answer for it. The keychain is disabled and no
+    /// credential exists, so every session refuses to run.
+    Broken {
+        /// The switches to remove, in the order they are named in [`KEYCHAIN_SWITCHES`].
+        switches: Vec<String>,
+    },
+}
+
+/// Classify one environment, reading it through `lookup`.
+///
+/// Pure, and takes a lookup rather than reading the process environment, because
+/// `std::env::set_var` is process-global and unsafe in a threaded test binary — so cases
+/// that must differ per test cannot each mutate the real environment. This is the same
+/// reasoning `crate::adapters::AdapterSource` records for `PATH`.
+///
+/// An **empty** value is not set. *Measured:* `CLAUDE_CODE_HOST_AUTH_ENV_VAR=` leaves the
+/// keychain working, so treating the empty string as a switch would report a fault where
+/// the CLI has none.
+pub fn classify(lookup: impl Fn(&str) -> Option<String>) -> HostAuth {
+    let present = |name: &str| lookup(name).is_some_and(|value| !value.is_empty());
+
+    let mut switches = Vec::new();
+    if present(HOST_AUTH_POINTER) {
+        switches.push(HOST_AUTH_POINTER.to_string());
+    }
+    // Truthiness rather than presence, and measured: `0`, `false`, `no`, `off`, `2`, and
+    // `xyz` all leave the keychain working, while `1`, `true`, `yes`, and `on` disable it
+    // in any case. So a `=0` is an operator switching this *off*, and reporting it as a
+    // fault would be a diagnostic that cries wolf on a correct configuration.
+    if lookup(PROVIDER_MANAGED_BY_HOST).is_some_and(|value| is_truthy(&value)) {
+        switches.push(PROVIDER_MANAGED_BY_HOST.to_string());
+    }
+    if switches.is_empty() {
+        return HostAuth::Untouched;
+    }
+
+    if let Some(name) = HOST_CREDENTIALS.iter().find(|name| present(name)) {
+        return HostAuth::Managed {
+            because: format!("{name} carries a credential"),
+        };
+    }
+    if let Some(name) = THIRD_PARTY_PROVIDERS
+        .iter()
+        .find(|name| lookup(name).is_some_and(|value| is_truthy(&value)))
+    {
+        return HostAuth::Managed {
+            because: format!("{name} selects a third-party provider"),
+        };
+    }
+    if let Some(name) = HOST_CREDENTIAL_ROUTES.iter().find(|name| present(name)) {
+        return HostAuth::Managed {
+            because: format!("{name} names a host credential route"),
+        };
+    }
+
+    HostAuth::Broken { switches }
+}
+
+/// Whether the CLI reads this value as on.
+///
+/// *Measured on 2.1.267* against `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`: `1`, `true`,
+/// `TRUE`, `True`, `yes`, `YES`, `on`, and `ON` disable the keychain; `0`, `false`, `no`,
+/// `off`, the empty string, `2`, and `xyz` leave it working. So this is a fixed set rather
+/// than "any non-empty value", which would have misread `=0` as on.
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Reported once per envagent run, per the degraded-dependency rule in `AGENTS.md`:
+/// one fact about the run, not one per spawn. A session-per-minute workload would
+/// otherwise repeat the same paragraph forever.
+static REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Decide what to remove from a `claude` spawn's inherited environment, and say so.
+///
+/// Returns the variable names to remove — empty for every case except an unambiguously
+/// broken one. Reads the real process environment, so it belongs on the spawn path rather
+/// than in a test; [`classify`] is the testable half.
+///
+/// # Why this strips at all, and why only here
+///
+/// `AGENTS.md` warns against a silent mutation, and the steer for this change was to prefer
+/// reporting over mutating. Removal is taken only for [`HostAuth::Broken`], where the state
+/// is measured to be unusable rather than merely unusual: the keychain is disabled, no
+/// credential variable is set, no third-party provider is selected, and **no repair exists
+/// inside the session** — measured, neither `CLAUDE_CODE_HOST_CREDS_FILE` nor an
+/// `apiKeyHelper` in `--settings` rescues it. There is no configuration this state serves,
+/// so leaving it intact preserves nothing and costs every session.
+///
+/// **Rejected: reporting only, and leaving the environment alone.** It is the safer default
+/// and it is what a genuinely ambiguous case gets — [`HostAuth::Managed`] is returned
+/// untouched even where the measurement says it will not work, because an operator wrote it
+/// on purpose. It was rejected *for the broken case* because the report cannot repair it:
+/// the envagent is long-lived and the inheritance is fixed at its launch, so every session
+/// until someone restarts it from a clean terminal fails, having been told why.
+///
+/// **Rejected: `env_clear()` on every spawn.** It removes the whole class rather than the
+/// two variables measured to cause it, and a vendor CLI needs `HOME`, `PATH`, and its own
+/// credentials to work at all — so the blast radius is every unrelated variable a
+/// deployment legitimately relies on, in exchange for a fault this names precisely.
+///
+/// **Rejected: repairing by reading the variable the pointer names.** Measured not to be
+/// read as a credential at all (this module's header), so it would have been a check that
+/// cannot fail.
+///
+/// The strip is never silent: it is reported at `error` with the variables it removed.
+pub fn sanitize_inherited_env() -> Vec<String> {
+    sanitize(&classify(|name| std::env::var(name).ok()))
+}
+
+/// [`sanitize_inherited_env`] over an already-classified environment, so the report and the
+/// removal are one implementation a test can drive.
+fn sanitize(auth: &HostAuth) -> Vec<String> {
+    match auth {
+        HostAuth::Untouched => Vec::new(),
+        HostAuth::Managed { because } => {
+            report(format!(
+                "`claude` host-managed authentication is active in this envagent's \
+                 environment ({because}); its own keychain login is disabled. Leaving it \
+                 as configured."
+            ));
+            Vec::new()
+        }
+        HostAuth::Broken { switches } => {
+            report(format!(
+                "Removing {} from `claude` spawns: they disable the CLI's keychain login \
+                 while no host credential is present, so every session would answer \
+                 \"Not logged in\". This is what an envagent started from inside another \
+                 agent session inherits; restart it from a clean terminal to stop \
+                 inheriting it (`docs/agents.md` § A host-managed auth switch inherited \
+                 from another agent session).",
+                switches.join(" and ")
+            ));
+            switches.clone()
+        }
+    }
+}
+
+/// Once at `error`, then at `debug`. See [`REPORTED`].
+fn report(message: String) {
+    if REPORTED.swap(true, Ordering::SeqCst) {
+        debug!("{message}");
+    } else {
+        error!("{message}");
+    }
+}
+
+/// A lookup over a fixed table, for a test that must not mutate the process environment.
+#[cfg(test)]
+fn table(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let held: std::collections::BTreeMap<String, String> = pairs
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    move |name: &str| held.get(name).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A clean environment is left alone, so nothing is removed from a normal spawn.
+    #[test]
+    fn an_environment_with_no_host_switch_is_untouched() {
+        assert_eq!(classify(table(&[])), HostAuth::Untouched);
+        // The credential variables alone are not a switch: measured, `ANTHROPIC_API_KEY`
+        // with neither switch set still reports the keychain's own oauth token.
+        assert_eq!(
+            classify(table(&[
+                ("ANTHROPIC_API_KEY", "sk-ant-x"),
+                ("CLAUDE_CODE_USE_BEDROCK", "1"),
+            ])),
+            HostAuth::Untouched
+        );
+        assert!(sanitize(&HostAuth::Untouched).is_empty());
+    }
+
+    /// **A switch with no credential is reported as broken and stripped.**
+    ///
+    /// This is the measured incident: an envagent launched from inside another agent
+    /// session inherits the pointer, and every `claude` session then answers
+    /// `Not logged in · Please run /login`.
+    #[test]
+    fn a_switch_with_no_credential_is_broken_and_its_switches_are_stripped() {
+        for switch in [HOST_AUTH_POINTER, PROVIDER_MANAGED_BY_HOST] {
+            let value = if switch == HOST_AUTH_POINTER {
+                "ANTHROPIC_AUTH_TOKEN"
+            } else {
+                "1"
+            };
+            let auth = classify(table(&[(switch, value)]));
+            assert_eq!(
+                auth,
+                HostAuth::Broken {
+                    switches: vec![switch.to_string()]
+                },
+                "{switch} alone disables the keychain with nothing to answer for it"
+            );
+            assert_eq!(
+                sanitize(&auth),
+                vec![switch.to_string()],
+                "{switch} must be removed from the spawn"
+            );
+        }
+    }
+
+    /// Both switches at once are both removed, not just the first found.
+    #[test]
+    fn both_switches_are_stripped_when_both_are_set() {
+        let auth = classify(table(&[
+            (HOST_AUTH_POINTER, "ANTHROPIC_AUTH_TOKEN"),
+            (PROVIDER_MANAGED_BY_HOST, "1"),
+        ]));
+        assert_eq!(
+            sanitize(&auth),
+            vec![
+                HOST_AUTH_POINTER.to_string(),
+                PROVIDER_MANAGED_BY_HOST.to_string(),
+            ]
+        );
+    }
+
+    /// **A legitimate host-managed deployment is left exactly as configured.**
+    ///
+    /// The cost of getting this wrong is the opposite one: stripping here breaks an
+    /// operator's working configuration, and it breaks it silently because the CLI would
+    /// then succeed against the *wrong* credential.
+    #[test]
+    fn a_host_managed_configuration_with_a_credential_is_left_alone() {
+        for (name, value) in [
+            ("ANTHROPIC_AUTH_TOKEN", "sk-host-token"),
+            ("ANTHROPIC_API_KEY", "sk-ant-key"),
+            ("CLAUDE_CODE_USE_BEDROCK", "1"),
+            ("CLAUDE_CODE_USE_VERTEX", "1"),
+            ("CLAUDE_CODE_USE_FOUNDRY", "1"),
+            ("CLAUDE_CODE_HOST_CREDS_FILE", "/run/creds.json"),
+            ("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "3"),
+            ("CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR", "4"),
+        ] {
+            let auth = classify(table(&[
+                (HOST_AUTH_POINTER, "ANTHROPIC_AUTH_TOKEN"),
+                (PROVIDER_MANAGED_BY_HOST, "1"),
+                (name, value),
+            ]));
+            assert!(
+                matches!(auth, HostAuth::Managed { .. }),
+                "{name} makes the switches deliberate, got {auth:?}"
+            );
+            assert!(
+                sanitize(&auth).is_empty(),
+                "{name} is an operator's configuration and must survive a spawn"
+            );
+        }
+    }
+
+    /// An empty switch is not a switch, and a falsey one is an operator turning it off.
+    ///
+    /// *Measured:* `CLAUDE_CODE_HOST_AUTH_ENV_VAR=` and
+    /// `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=0` both leave the keychain working. Reporting
+    /// either as a fault is a diagnostic that cries wolf on a correct configuration —
+    /// which is how a real warning stops being read.
+    #[test]
+    fn an_empty_or_falsey_switch_is_not_a_switch() {
+        assert_eq!(
+            classify(table(&[(HOST_AUTH_POINTER, "")])),
+            HostAuth::Untouched
+        );
+        for off in ["0", "false", "no", "off", "", "2", "xyz"] {
+            assert_eq!(
+                classify(table(&[(PROVIDER_MANAGED_BY_HOST, off)])),
+                HostAuth::Untouched,
+                "{off} leaves the keychain working, so it is not a switch"
+            );
+        }
+    }
+
+    /// Every value measured to disable the keychain is treated as on.
+    #[test]
+    fn every_measured_truthy_spelling_disables_the_keychain() {
+        for on in ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"] {
+            assert_eq!(
+                classify(table(&[(PROVIDER_MANAGED_BY_HOST, on)])),
+                HostAuth::Broken {
+                    switches: vec![PROVIDER_MANAGED_BY_HOST.to_string()]
+                },
+                "{on} disables the keychain and must be recognized"
+            );
+        }
+    }
+
+    /// **The variable the pointer names is not a credential source.**
+    ///
+    /// *Measured on 2.1.267:* pointing at `MY_HOST_TOKEN` and setting `MY_HOST_TOKEN`
+    /// still reports `loggedIn: false`. So a repair that read the named variable would be
+    /// a check that cannot fail — it would call this state healthy and leave the session
+    /// refusing to run.
+    #[test]
+    fn the_variable_the_pointer_names_does_not_count_as_a_credential() {
+        let auth = classify(table(&[
+            (HOST_AUTH_POINTER, "MY_HOST_TOKEN"),
+            ("MY_HOST_TOKEN", "sk-host-token"),
+        ]));
+        assert_eq!(
+            auth,
+            HostAuth::Broken {
+                switches: vec![HOST_AUTH_POINTER.to_string()]
+            },
+            "the pointer's own name is inert; only the credentials the CLI reads count"
+        );
+    }
+}

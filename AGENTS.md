@@ -180,6 +180,7 @@ Every entry below is a family of that defect, owned by one document.
 | Class of defect | Owner |
 | --- | --- |
 | Reading a vendor payload: wrong key, wrong unit, wrong shape | `docs/agents.md` § Reading a vendor payload |
+| An inherited environment that redirects a vendor's authentication | `docs/agents.md` § A host-managed auth switch inherited from another agent session |
 | A vendor's `success` that did not do what you asked | `docs/session-protocol.md` § Three rules about reading a vendor's answer |
 | Delegation, `span`, promotion, `abandoned` vs `failed` | `docs/session-protocol.md` § Delegated trajectories |
 | Retention, watermarks, withheld vs a zero bound | `docs/storage.md` § Retention is watermark-driven |

@@ -20,6 +20,7 @@
 //! v1 carried one as a compatibility entry point. No v1 contract remains to serve and
 //! `AGENTS.md` § Compatibility forbids keeping one.
 
+pub mod hostauth;
 pub mod native;
 pub mod requests;
 pub mod session;
