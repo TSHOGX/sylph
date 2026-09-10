@@ -107,7 +107,7 @@ impl JournalStore {
         // because a live journal is re-derivable from the agents' own native stores — and
         // saying so here is the difference between a one-line fix and reading sqlx's
         // internals to guess at one.
-        sqlx::migrate!("./migrations")
+        sqlx::migrate!("./migrations/journal")
             .run(&pool)
             .await
             .map_err(|e| {
@@ -420,10 +420,15 @@ impl JournalStore {
         .map_err(Error::Database)
     }
 
-    /// Insert a turn and claim the session's running slot atomically.  Remote
-    /// commands cannot rely on the in-process supervisor's mutex, so the
-    /// database is the compare-and-set boundary for concurrent HTTP writers.
-    pub async fn create_remote_turn(&self, turn: &Turn) -> Result<Option<Turn>> {
+    /// Insert a turn and claim the session's running slot atomically, answering `None`
+    /// when another turn already holds it.
+    ///
+    /// **The database is the compare-and-set boundary**, which is what distinguishes this
+    /// from [`Self::create_turn`]'s unconditional insert. There is no process-local mutex
+    /// available to serialize against: every turn arrives over the bridge from an
+    /// envagent, so the concurrent writers are HTTP handlers in this process *and*
+    /// whatever else is addressing the same session, and only the store sees both.
+    pub async fn create_turn_claiming_slot(&self, turn: &Turn) -> Result<Option<Turn>> {
         let mut tx = self.pool.begin().await.map_err(Error::Database)?;
         let active: Option<String> = sqlx::query_scalar(
             "SELECT id FROM turns WHERE session_env = ? AND session_agent = ? AND session_native = ? \

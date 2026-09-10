@@ -221,12 +221,13 @@ impl StreamEvent {
         )
     }
 
-    /// Build from the value an in-process adapter constructs for `adopt` and `watch`.
+    /// Build from the value an adapter constructs for `adopt` and `watch`, arriving over
+    /// the envagent bridge.
     ///
-    /// **The vendor's own timestamp is preserved in `recorded_at_ms` and the legacy
-    /// `created_at_ms` field, while `arrival_at_ms` receives the server clock.** A live
+    /// **The vendor's own timestamp is preserved in both `recorded_at_ms` and
+    /// `created_at_ms`, while `arrival_at_ms` receives the server clock.** A live
     /// event's arrival *is* when it happened. An adopted event happened when the vendor
-    /// recorded it, possibly months ago, and stamping the compatibility field with now
+    /// recorded it, possibly months ago, and stamping `created_at_ms` with now
     /// would make every adopted transcript claim to have occurred at the moment it was
     /// adopted — collapsing a session's whole duration to zero and ordering it into the
     /// sidebar as the newest thing on the machine. The parsers go to real trouble to recover
@@ -263,12 +264,19 @@ impl StreamEvent {
         arrival_at_ms: i64,
         started_at_ms: Option<i64>,
         recorded_at_ms: Option<i64>,
-        legacy_created_at_ms: Option<i64>,
+        source_at_ms: Option<i64>,
     ) -> Self {
-        // Keep the legacy field useful during rollout: native events retain their source
-        // timestamp, while an event with no source time uses server arrival rather than a
-        // sentinel zero. New consumers use the explicit pair below.
-        let created_at_ms = legacy_created_at_ms.unwrap_or(arrival_at_ms);
+        // `created_at_ms` is the one always-present timestamp, which is what makes it
+        // worth keeping beside the explicit pair rather than a field awaiting removal:
+        // `recorded_at_ms` is absent whenever the vendor supplied nothing usable, so a
+        // consumer that wants "when did this happen, as well as anyone knows" would
+        // otherwise have to coalesce the two itself, and every such consumer would be a
+        // separate chance to pick the wrong one.
+        //
+        // Source time wins where there is one. Falling back to arrival — never a
+        // sentinel zero — is what keeps an adopted transcript from claiming it occurred
+        // at the moment it was adopted.
+        let created_at_ms = source_at_ms.unwrap_or(arrival_at_ms);
         Self {
             seq: 0,
             arrival_turn_id: None,

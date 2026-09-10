@@ -607,6 +607,66 @@ async fn a_journal_row_reports_no_start_because_it_is_one_arrival() {
     assert_eq!(StreamEvent::from_row(&row).started_at_ms, None);
 }
 
+/// A transcript is projected the same way whichever tier holds it.
+///
+/// Deliberately not written as "read a turn before and after its sweep": that is a
+/// timing measurement, and the version of it in this file passed for months while
+/// the two tiers disagreed, because consolidation had usually already run by the
+/// time the first read happened. Both tiers went through the *same* projection only
+/// when the journal was empty, so the assertion was comparing history with itself.
+///
+/// This compares the two projections over one set of events with no clock in it. The
+/// journal cannot report `startedAtMs` from a stable row — the row has no column for
+/// it, which `a_journal_row_reports_no_start_because_it_is_one_arrival` above pins
+/// for live streaming, where it is the honest answer. A settled turn is the other
+/// case: its deltas are still in the journal, so the anchor is derivable, and a
+/// reader must not see it appear seconds later because a sweep moved tiers
+/// underneath them.
+#[tokio::test]
+async fn a_journal_transcript_and_a_consolidated_one_project_identically() {
+    let (history, _dir) = history_store().await;
+    let events = vec![
+        event(0, "assistant", Some("started"), Some("a1"), "", 1000),
+        event(1, "assistant", Some("delta"), Some("a1"), "he", 1100),
+        event(2, "assistant", Some("delta"), Some("a1"), "llo", 1200),
+        event(3, "assistant", Some("completed"), Some("a1"), "hello", 1300),
+    ];
+
+    // What the transcript endpoint serves while the turn is still in the journal.
+    let journal_blocks = history::consolidate(&events);
+    let from_journal: Vec<StreamEvent> = journal_blocks.iter().map(block_to_event).collect();
+
+    // And what it serves once the sweep has run, read back through the store rather
+    // than from the same in-memory blocks — a round trip is where a column that was
+    // written but never selected would show up.
+    history.put_blocks(&journal_blocks).await.unwrap();
+    let from_history: Vec<StreamEvent> = history
+        .turn_blocks("turn-1")
+        .await
+        .unwrap()
+        .iter()
+        .map(block_to_event)
+        .collect();
+
+    assert_eq!(
+        from_journal.len(),
+        1,
+        "the four rows fold to one block, so this is comparing a fold and not four passthroughs"
+    );
+    assert_eq!(
+        from_journal[0].started_at_ms,
+        Some(1000),
+        "the journal projection anchors the block at its first arrival"
+    );
+    // Compared as the wire form, which is the actual contract a client reads and the
+    // only place a field present on one side and absent on the other is visible.
+    assert_eq!(
+        serde_json::to_value(&from_journal).unwrap(),
+        serde_json::to_value(&from_history).unwrap(),
+        "a transcript changed when its events moved tiers"
+    );
+}
+
 #[tokio::test]
 async fn an_unstreamed_block_replays_as_a_single_arrival() {
     let (history, _dir) = history_store().await;

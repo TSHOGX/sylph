@@ -72,9 +72,15 @@ pub struct AppState {
     /// this machine's stores costs ~5.6 s, and an offset cursor into a store being
     /// written silently skips and duplicates rows. See `api::native_index`.
     pub native_index: crate::api::native_index::NativeIndex,
-    /// Inbound envagent protocol bridge. The local adapter seam remains in
-    /// place for compatibility fixtures; paired installations use this
-    /// bridge for durable ingest and command routing.
+    /// Inbound envagent protocol bridge, and **the only way execution reaches an
+    /// adapter**.
+    ///
+    /// There is no local seam beside it, not even for the server's own machine, so a
+    /// single-machine install runs two processes (`docs/architecture.md`). That is the
+    /// property rather than a deployment detail: a same-machine shortcut would be the
+    /// one path where durable ingest, command idempotency, and reconnect epochs were
+    /// bypassed, and it would be the path every test took — so the guarantees would
+    /// hold everywhere except where they were exercised.
     pub env_bridge: Arc<crate::env::EnvBridge>,
 }
 

@@ -265,8 +265,19 @@ pub async fn history(
         // one depends on whether consolidation has run. Reading only the journal would
         // make history vanish from the UI moments after a turn finished, which is the
         // bug this exists to prevent.
-        let journalled = state.store.turn_events_after(&turn.id, -1).await?;
-        let events = if journalled.is_empty() {
+        //
+        // **Both tiers project through `consolidate`, so there is one derivation of a
+        // transcript rather than one per tier.** Reading the journal's stable rows
+        // directly is the obvious shape and is wrong: a `Block` carries fields an
+        // `Event` row has no column for — `started_at_ms` above all — so a turn read
+        // before its sweep ran was missing the anchor every duration is measured from,
+        // and acquired it seconds later when the tier changed underneath the reader.
+        // Nothing failed; the number simply appeared. That is why the shared projection
+        // is the fix and not a second mapping kept in step by hand: the two agreed
+        // whenever a test happened to read after consolidation, which is exactly when
+        // nobody was looking at the disagreement.
+        let journalled = state.store.turn_events_for_consolidation(&turn.id).await?;
+        let events: Vec<StreamEvent> = if journalled.is_empty() {
             state
                 .history
                 .turn_blocks(&turn.id)
@@ -274,7 +285,10 @@ pub async fn history(
                 .map(|blocks| blocks.iter().map(block_to_event).collect())
                 .unwrap_or_default()
         } else {
-            journalled.iter().map(StreamEvent::from_row).collect()
+            crate::storage::history::consolidate(&journalled)
+                .iter()
+                .map(block_to_event)
+                .collect()
         };
         out.push(TurnWithEvents { turn, events });
     }

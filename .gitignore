@@ -37,6 +37,8 @@ test-results/
 /frontend/playwright-report/
 /frontend/blob-report/
 /frontend/.e2e-home/
+# The fixture envagent's own root, which holds a pairing credential and a spool.
+/frontend/.e2e-env-home/
 /frontend/.e2e-data/
 /frontend/test-results/
 

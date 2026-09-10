@@ -2,7 +2,7 @@
 
 **This file covers `journal.db`** — the hot tier, holding sessions, turns, and the events
 of turns still in flight. It states the shape and the reasoning; the DDL itself lives in
-`crates/server/migrations/`, applied by `sqlx::migrate!` at startup.
+`crates/server/migrations/journal/`, applied by `sqlx::migrate!` at startup.
 
 One authoritative record is split across three stores for SQLite's sake rather than as a
 data-model choice (`docs/storage.md` § Three tiers): `journal.db` here, `history.db` for
@@ -272,22 +272,37 @@ examined, not pages.**
 
 ## Schema evolution
 
-Numbered SQL files, one set per database, applied by `sqlx::migrate!` at startup:
-`crates/server/migrations/` for the journal and `crates/server/migrations/history/` for history.
+Numbered SQL files, one directory per database, applied by `sqlx::migrate!` at startup:
+`crates/server/migrations/journal/` for the journal and `crates/server/migrations/history/`
+for history. **Each currently holds exactly one file**, `001_initial_schema.sql`, and that
+is the intended steady state rather than a stage the project has not yet grown out of.
 
 **Schemas change in place.** The store is disposable: a build that cannot read one refuses
 to start and names it, and the answer is to discard `data/` and re-adopt from the vendors'
-own native stores. So the chain gets collapsed rather than grown. `sqlx` checksums each
-file, so editing one in a chain a running database has already applied makes that database
-refuse to open — collapse the chain rather than editing a member of it, and use
-`IF NOT EXISTS` where the operation supports it.
+own native stores. So the chain stays collapsed rather than growing. `sqlx` checksums each
+file, so editing one a running database has already applied makes that database refuse to
+open — that failure is the design. It is loud, it lands while someone is looking, and it
+costs one `rm -rf ~/.sylph/data`. A chain is what you would keep instead to make an edit
+survivable, and nothing here needs it: preserving the order a schema was discovered in is
+only worth the second reading path while some database is stranded partway along it.
+
+**A collapsed migration does not use `IF NOT EXISTS`.** In an appended chain it is
+harmless, because the object it guards genuinely may exist from an earlier member. In a
+single file that only ever runs against a fresh database, the guard can only turn "this
+table already exists, so something is wrong" into a silent success over a schema that may
+be missing every column added since — which is the class of defect `AGENTS.md` § Where
+Design Rules Live opens with, a plausible result in place of an error.
 
 Attachments and commands need no table of their own: attachments are staged on disk under
 the data directory, and a command invocation is a column on `turns`.
 
 **`/api/v1/health` reports `MAX(version)` from `_sqlx_migrations`, never a stored key**, and
-the test counts the directory rather than pinning a literal. A number the runner already
-maintains cannot have a second copy, since nothing would compare the two.
+the test reads the highest filename prefix out of the journal's migration directory rather
+than pinning a literal. A number the runner already maintains cannot have a second copy,
+since nothing would compare the two. It reads the prefix and not a count of the files
+because `MAX(version)` is what the runner records: the two agree only while the files are
+numbered contiguously from 1, so a count would survive today and report a version nobody
+assigned the moment a second file appeared out of order.
 
 There are no `sqlx::query!` macros here, only runtime `sqlx::query`, so there is no
 `DATABASE_URL` and no `.sqlx` offline directory. A schema mistake surfaces in the store

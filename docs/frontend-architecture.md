@@ -1024,8 +1024,10 @@ actionable across padding changes.
 code through the authenticated API, exchanges it with `sylph-envagent pair`, and then runs
 the envagent against the adjacent loopback ingress. Browser fixtures select the connected
 environment whose inventory reports the `e2e` adapter. This crosses the same
-`Client → Server → EnvBridge → Envagent → Adapter` boundary as a single-machine install;
-starting only the backend would exercise an in-process seam and could not prove Milestone 1.
+`Client → Server → EnvBridge → Envagent → Adapter` boundary as a single-machine install.
+Starting only the backend would not exercise a shorter path — there is none — it would
+leave every spec facing a server with no environment paired, which is why the harness owns
+both processes rather than treating the envagent as optional.
 Both children inherit the suite's throwaway roots, and the wrapper terminates them together
 when Playwright stops the web server.
 

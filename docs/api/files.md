@@ -396,7 +396,8 @@ the path, since no other process can resolve a symlink it cannot see
 check). A listing is therefore a bridge round trip, not a local `readdir`.
 
 Today it is still a local `readdir` in the server, against the server's own configuration
-(`crates/server/src/api/fs.rs`). That is the same in-process seam Milestone 1 removes, and
+(`crates/server/src/api/fs.rs`). **It is the last in-process seam**, of the same kind
+Milestone 1 removed from execution, and
 `docs/roadmap.md` § Milestone 2 carries the exit gate that closes it: *no remote path
 check happens in the server.* Until then this endpoint answers correctly only for an
 environment on the server's own machine, which is the only kind that can be paired.

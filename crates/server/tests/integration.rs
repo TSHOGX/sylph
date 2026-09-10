@@ -64,17 +64,29 @@ async fn health_is_public() {
     let body = json_body(response).await;
     assert_eq!(body["ok"], true);
     assert_eq!(body["apiVersion"], "1");
-    // Derived from the migration directory, never pinned to a literal. A literal here
-    // would be a third copy of a number the runner already maintains, and it would agree
-    // with a wrong value as happily as the code did — so neither side could catch the
-    // reported version drifting away from the schema. Counting the files fails when a
-    // migration is added without the reported version following it.
-    let migrations = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
-        .expect("migrations directory")
+    // Derived from the journal's migration directory, never pinned to a literal. A literal
+    // here would be a third copy of a number the runner already maintains, and it would
+    // agree with a wrong value as happily as the code did — so neither side could catch the
+    // reported version drifting away from the schema.
+    //
+    // The *highest filename prefix* rather than a count of the files, because that is what
+    // `MAX(version)` in `_sqlx_migrations` means. The two agree only while the files are
+    // numbered contiguously from 1, which the collapsed single-file schema makes true and
+    // any future chain could quietly make false — a count would then report a version the
+    // runner never assigned (`docs/database-schema.md` § Schema evolution).
+    let expected = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations/journal"))
+        .expect("journal migrations directory")
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "sql"))
-        .count();
-    assert_eq!(body["schemaVersion"], migrations as i64);
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "sql"))
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.to_string();
+            let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse::<i64>().ok()
+        })
+        .max()
+        .expect("at least one numbered journal migration");
+    assert_eq!(body["schemaVersion"], expected);
 }
 
 #[tokio::test]

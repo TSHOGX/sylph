@@ -97,10 +97,14 @@ struct Lease {
     producer_id: ProducerId,
 }
 
-/// Metadata retained for a remote prepared link.  A remote envagent must
-/// allocate the native identity before the server can expose a durable session,
-/// so unlike the in-process draft this record already has a session id while
-/// the first turn is still waiting in the browser.
+/// Metadata retained for a prepared link.
+///
+/// The envagent allocates the native identity before the server can expose a durable
+/// session, because identity is `(environment, agent, native_id)` and only the vendor
+/// mints the third part (`docs/architecture.md` § Identity).  So this record already
+/// carries a session id while the first turn is still waiting in the browser — the id
+/// exists before any row does, which is the opposite of a server-minted key and the
+/// reason a draft needs its own type at all.
 #[derive(Debug, Clone)]
 pub struct RemoteDraft {
     /// Stable command scope for this draft. Retrying the first-turn request
@@ -228,8 +232,11 @@ impl EnvBridge {
             .await
     }
 
-    /// Journal and publish a server-authored event for a remote turn. This is
-    /// the bridge-owned counterpart of the deleted in-process supervisor path.
+    /// Journal and publish a server-authored event for a turn.
+    ///
+    /// Server-authored, so `source` is `server` rather than `agent`: a status the server
+    /// decided is not something the vendor said, and a reader that could not tell them
+    /// apart would attribute the server's own reasoning to the agent.
     pub async fn emit_server_event(
         &self,
         session_id: &sylph_protocol::SessionId,
@@ -1729,8 +1736,10 @@ impl EnvBridge {
     }
 
     /// Ingest a bounded batch.  Receipt insertion and event insertion share
-    /// one database transaction; the ingest gate serializes sequence
-    /// allocation with the existing in-process producers.
+    /// one database transaction, so a receipt can never claim an event that was not
+    /// written; the ingest gate serializes sequence allocation across every producer
+    /// touching one session, which is what keeps `UNIQUE(session, seq)` from refusing a
+    /// write when a live turn and an adoption are both appending.
     pub async fn ingest_batch(&self, batch: EventBatch) -> Result<IngestResult> {
         batch
             .validate()

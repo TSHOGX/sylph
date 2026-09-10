@@ -9,15 +9,26 @@ needs them.
 
 ## Current baseline
 
-The server, web frontend, protocol crate, three adapters, SQLite journal and history store,
-and an envagent foundation exist. The envagent has framing, credentials, path policy, WAL
-spooling, and reconnect primitives.
+The server, web frontend, protocol crate, three adapters, and the SQLite journal and history
+store exist, and **every execution path runs through an envagent** — framing, credentials,
+path policy, WAL spooling, reconnect epochs, and adapter hosting, with no in-process seam
+beside it. A single-machine install is therefore two processes.
+
+Each store's schema is one collapsed migration rather than a chain
+(`docs/database-schema.md` § Schema evolution): there is no other consumer, and a journal is
+re-derivable from the vendors' own native stores, so discarding `~/.sylph/data` and
+re-adopting is the ordinary answer to a schema change.
 
 ## What remains
 
-Four boundaries are specified in `docs/` and not yet true in code. They are the difference
+Two boundaries are specified in `docs/` and not yet true in code. They are the difference
 between reading a spec and reading the source. Each is a milestone below rather than a
 separate list, since a boundary restated in two places drifts in one of them.
+
+**A boundary leaves this table when it closes**, and what it recorded moves to its
+milestone's own section. The table tracks the gap between spec and source, so a row reading
+`complete` is a row asserting the opposite of what the table is for — and a reader scanning
+for what is left has to read every row to find out which ones still count.
 
 This project is spec-driven: `docs/` and the ADRs are the source of truth for behavior and are
 written and settled before the code that satisfies them. Spec ahead of code is the normal state
@@ -27,12 +38,10 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| **The envagent is the only execution path** | Milestone 1 | complete: product routes, default ingress, paired fixtures, version floors, live inventory rediscovery, remote lifecycle reconciliation, typed command/file contracts, and removal of server-side adapter/link execution seams |
-| **The server is `crates/server`** | Milestone 1 | moved into the workspace crate layout |
 | **Transport carries TLS and pairs from another host** | Milestone 3 | loopback only, so no off-host environment can dial in |
 | **Multi-user authentication and per-environment authorization** | Milestone 3 | a single bootstrap Subject, no grants |
 
-## Milestone 1 — the envagent is the only path
+## Milestone 1 — the envagent is the only path — complete
 
 Run every machine, the server's own included, through
 `Client → Server → EnvBridge → Envagent → Adapter`. Route session creation, turns,
@@ -51,6 +60,12 @@ install runs two processes and pairs; creation with no envagent fails with the n
 upgrading a vendor CLI on a connected machine changes what that environment offers without a
 re-pair or a server restart; browser and fault-injection tests cover restart and reconnect
 with no duplicate or missing canonical event.
+
+**Built:** product routes, default ingress, paired fixtures, version floors, live inventory
+rediscovery, remote lifecycle reconciliation, typed command and file contracts, and the
+removal of the server-side adapter, link, and supervisor execution seams. The server also
+moved into the workspace crate layout as `crates/server`, which is what made "no route can
+reach an adapter except through the bridge" checkable rather than asserted.
 
 ## Milestone 2 — environment and workspace context
 

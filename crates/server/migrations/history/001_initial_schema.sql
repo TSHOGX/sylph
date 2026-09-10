@@ -13,8 +13,15 @@
 -- between the two writes leaves a turn in both, which consolidation makes
 -- idempotent by keying on (session_id, seq) — history is made durable *before* the
 -- journal forgets, never the reverse.
+--
+-- Like the journal, this is the whole schema in one file rather than a chain
+-- (`docs/database-schema.md` § Schema evolution), and for the same reason: an order
+-- of discovery is only worth preserving while some database is stranded partway
+-- along it. Editing it makes an already-migrated `history.db` refuse to open, which
+-- is the intended loud failure — re-projection from `native_records` below is what
+-- makes accepting it cheap.
 
-CREATE TABLE IF NOT EXISTS blocks (
+CREATE TABLE blocks (
   session_id   TEXT NOT NULL,
   -- The completed event's sequence number, which orders the whole session stream.
   seq          INTEGER NOT NULL,
@@ -52,9 +59,18 @@ CREATE TABLE IF NOT EXISTS blocks (
 
   is_error     INTEGER NOT NULL DEFAULT 0,
   source       TEXT NOT NULL DEFAULT 'agent',
+  -- The latest producer-authored interior state for this trajectory, carried through
+  -- consolidation. Folding a session must not lose it: the frontend's inference from
+  -- observed children cannot run against a tier that no longer holds the children.
+  interior_state TEXT,
   -- When the block's first delta arrived. Without it the timing array is relative
   -- to nothing and a replay cannot be paced.
   started_at_ms INTEGER NOT NULL,
+  -- The same two clocks the journal's events carry, preserved rather than collapsed:
+  -- `recorded_at_ms` is the vendor's own and is NULL when it supplied nothing usable,
+  -- `arrival_at_ms` is the server's receipt clock and always present.
+  arrival_at_ms INTEGER NOT NULL,
+  recorded_at_ms INTEGER,
   created_at_ms INTEGER NOT NULL,
 
   PRIMARY KEY (session_id, seq)
@@ -62,21 +78,21 @@ CREATE TABLE IF NOT EXISTS blocks (
 -- rowid indirection buys nothing and costs a B-tree level.
 ) WITHOUT ROWID;
 
-CREATE INDEX IF NOT EXISTS blocks_by_turn ON blocks(turn_id, seq);
+CREATE INDEX blocks_by_turn ON blocks(turn_id, seq);
 
 -- Which blocks reference which blobs.
 --
 -- Reachability lives here rather than in a count on the blob, because a blob
 -- shared by a pruned block and a retained one must survive. A bare refcount
 -- cannot express which references are still live after a partial prune.
-CREATE TABLE IF NOT EXISTS cas_refs (
+CREATE TABLE cas_refs (
   hash       TEXT NOT NULL,
   session_id TEXT NOT NULL,
   seq        INTEGER NOT NULL,
   PRIMARY KEY (hash, session_id, seq)
 ) WITHOUT ROWID;
 
-CREATE INDEX IF NOT EXISTS cas_refs_by_block ON cas_refs(session_id, seq);
+CREATE INDEX cas_refs_by_block ON cas_refs(session_id, seq);
 
 -- How far a downstream authority has confirmed each session.
 --
@@ -86,7 +102,7 @@ CREATE INDEX IF NOT EXISTS cas_refs_by_block ON cas_refs(session_id, seq);
 --
 -- The only downstream copy is the **vendor's own native store**, so a confirmation can
 -- only come from the environment holding it (`docs/storage.md` § Two retention classes).
-CREATE TABLE IF NOT EXISTS watermarks (
+CREATE TABLE watermarks (
   session_id    TEXT PRIMARY KEY,
   -- 'envagent': the environment holding this session's native store confirmed how far
   -- that store extends, so blocks below the confirmed seq are safe to drop.
@@ -136,7 +152,7 @@ CREATE TABLE IF NOT EXISTS watermarks (
 -- true whether or not anything answers. Putting them on that row would make byte
 -- reporting empty on exactly the install where growth is unbounded and the report
 -- matters most: one with no environment paired, where nothing can ever be pruned.
-CREATE TABLE IF NOT EXISTS session_bytes (
+CREATE TABLE session_bytes (
   session_id     TEXT PRIMARY KEY,
   -- Bytes of record currently held. See `HistoryStore::measure_session_bytes`
   -- for what is and is not counted, which is stated there rather than here
@@ -155,13 +171,13 @@ CREATE TABLE IF NOT EXISTS session_bytes (
 -- The report reads "largest first" and "fastest growing first", both over the
 -- whole table, so the ordering column is worth an index once a store holds
 -- thousands of sessions.
-CREATE INDEX IF NOT EXISTS session_bytes_by_size ON session_bytes(bytes DESC);
+CREATE INDEX session_bytes_by_size ON session_bytes(bytes DESC);
 
 -- Complete vendor-native records used to re-project history after an adapter change.
 -- Unlike folded blocks these are never pruned by event watermarks: the native source is
 -- the only copy from which an ignored field can be recovered, so their retention class is
 -- explicitly `raw`.
-CREATE TABLE IF NOT EXISTS native_records (
+CREATE TABLE native_records (
   session_id     TEXT NOT NULL,
   source         TEXT NOT NULL,
   version        INTEGER NOT NULL,
@@ -171,7 +187,7 @@ CREATE TABLE IF NOT EXISTS native_records (
   PRIMARY KEY (session_id, source, version)
 ) WITHOUT ROWID;
 
-CREATE TABLE IF NOT EXISTS native_blobs (
+CREATE TABLE native_blobs (
   session_id TEXT NOT NULL,
   source     TEXT NOT NULL,
   version    INTEGER NOT NULL,
@@ -179,12 +195,16 @@ CREATE TABLE IF NOT EXISTS native_blobs (
   hash       TEXT,
   size       INTEGER NOT NULL,
   error      TEXT,
+  -- Where a large native sidecar was left, retained as a deferred resource. Opaque to
+  -- the server on purpose: an envagent may hand back a machine-local handle rather
+  -- than a path, and neither shape may change the native record key above.
+  locator    TEXT,
   PRIMARY KEY (session_id, source, version, name),
   FOREIGN KEY (session_id, source, version)
     REFERENCES native_records(session_id, source, version) ON DELETE CASCADE
 ) WITHOUT ROWID;
 
-CREATE INDEX IF NOT EXISTS native_records_by_session
+CREATE INDEX native_records_by_session
   ON native_records(session_id, source, version);
 
 -- Cross-session full-text search over the same rows the timeline renders, so coverage is
@@ -216,7 +236,7 @@ CREATE INDEX IF NOT EXISTS native_records_by_session
 -- another silently returns nothing, so a fallback would answer *wrongly* rather than
 -- worse. Registration happens per connection in `HistoryStore::open`, and a failure
 -- there is fatal.
-CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
+CREATE VIRTUAL TABLE blocks_fts USING fts5(
   text,
   session_id UNINDEXED,
   seq        UNINDEXED,

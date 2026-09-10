@@ -2,26 +2,22 @@
 -- agent is blocked on.
 --
 -- `docs/database-schema.md` is authoritative for this file and every comment here
--- defers to it. What is worth stating at the top is why this is *one* migration
--- rather than seven.
+-- defers to it. What is worth stating at the top is why this is *one* migration.
 --
--- **`001` is rewritten in place**, and the append-only rule below is deliberately
--- suspended for this one change. `AGENTS.md` § Compatibility is the licence: there
--- is no other consumer, no irreplaceable installed state, and every existing
--- journal is re-derivable from the agents' own native stores. A chain that added
--- `span`, `origin`, and `form_json` and then dropped `origin`, `identity_mode`,
--- `lifecycle_mode`, `trace_session_id`, `incarnation_id`, `runner_exit_code`, and
--- `reconciled_at_ms` would document an intermediate state nobody should ever
--- reconstruct. So `span` and `origin` sit in the table bodies below instead of
--- appearing as `ALTER`s, and `kind` is unconstrained from the start.
+-- **The journal's whole schema is this file, collapsed rather than chained**
+-- (`docs/database-schema.md` § Schema evolution). `AGENTS.md` § Compatibility is the
+-- licence: there is no other consumer, no irreplaceable installed state, and every
+-- journal is re-derivable from the agents' own native stores. A chain preserves the
+-- order a schema was discovered in, which is only worth keeping when some database
+-- is stranded partway along it — and none is. So every column sits in the table
+-- body that owns it, and a reader learns the shape from one file instead of
+-- replaying edits to reach it.
 --
--- The one precondition, which `AGENTS.md` also states: verify the native sources
--- still exist before discarding a journal. Nothing here discards one — a rewritten
--- `001` simply refuses to open a database migrated under the old checksum, which
--- fails loudly at the one moment somebody is looking.
---
--- From here on the append-only rule resumes: `sqlx` checksums each file, so editing
--- a deployed migration makes every existing journal refuse to open.
+-- The cost is stated so it is not a surprise: `sqlx` checksums each file, so editing
+-- this one makes an already-migrated journal refuse to open. That is the intended
+-- failure. It is loud, it happens at the one moment somebody is looking, and the
+-- remedy is to discard the data directory and re-adopt — which is only safe because
+-- the native sources are the authority. Verify they still exist before discarding.
 
 CREATE TABLE app_meta (
   key TEXT PRIMARY KEY,
@@ -66,10 +62,10 @@ CREATE TABLE sessions (
   fidelity         TEXT NOT NULL CHECK (fidelity IN ('stream','blocks','messages')),
   flags_json       TEXT NOT NULL DEFAULT '{}',
   status           TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running')),
-  -- One column for two different relationships, which the row it points at
-  -- disambiguates: a delegation folds into its parent as a count, while a fork
-  -- replays its origin's entire prefix and continues past it. A listing must not
-  -- show both under one label. Holds an encoded triple.
+  -- Ancestry is not a column here. A delegation folds into its parent as a count
+  -- while a fork replays its origin's prefix and continues past it, so a listing
+  -- must not show both under one label — `session_edges` below carries the relation
+  -- that distinguishes them, and one nullable parent pointer could not.
   created_at_ms    INTEGER NOT NULL,
   updated_at_ms    INTEGER NOT NULL,
 
@@ -178,6 +174,21 @@ CREATE TABLE events (
   -- be a design change rather than an adapter's choice.
   source TEXT NOT NULL DEFAULT 'server'
     CHECK (source IN ('agent', 'server')),
+  -- Whether this trajectory's interior can be reached, authored by the producer that
+  -- knows. Nullable because a producer may not say, and the frontend then infers from
+  -- observed children — an inference that must stay a *fallback*, since "no child
+  -- events arrived" and "this trajectory forwards nothing" look identical from a
+  -- client that attached late (`docs/session-protocol.md` § Delegated trajectories).
+  interior_state TEXT,
+  -- Three clocks, because one cannot answer both questions a renderer asks. A vendor's
+  -- own timestamp orders what happened; the server's receipt clock orders what arrived,
+  -- and only the second is guaranteed monotonic under replay.
+  --
+  -- `recorded_at_ms` is NULL when the vendor supplied nothing usable — absent rather
+  -- than guessed, since a placeholder in durable data cannot be withdrawn by fixing
+  -- the producer (`AGENTS.md` § Rules That Keep Costing Time).
+  arrival_at_ms INTEGER NOT NULL,
+  recorded_at_ms INTEGER,
   created_at_ms INTEGER NOT NULL,
   -- `seq` is unique per *session*, not per turn, which is what makes SSE
   -- resume-by-sequence safe: a replayed frame cannot be journalled twice. Two events
@@ -251,3 +262,100 @@ CREATE INDEX pending_requests_open
 -- Resolving arrives with the adapter's id, so that lookup needs its own path.
 CREATE INDEX pending_requests_by_adapter_id
   ON pending_requests(adapter_request_id, status);
+
+-- Durable state for paired envagents and inbound delivery.
+--
+-- The environment registry is the server's authority. An envagent's spool only remembers
+-- what has not been acknowledged, so these tables are what survives a server restart:
+-- pairing, connection leases, command outcomes, and producer receipts.
+CREATE TABLE env_installations (
+  -- The opaque id minted at pairing, which is also `sessions.environment`. Not a
+  -- hostname: a name in a key means renaming destroys identity.
+  environment_id TEXT PRIMARY KEY,
+  installation_id TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  -- A hash, never the token. A stolen table must not be a stolen credential.
+  token_hash TEXT NOT NULL,
+  connected INTEGER NOT NULL DEFAULT 0,
+  -- Bumped per reconnect, so a frame from a previous connection is identifiable as
+  -- stale rather than applied out of order after a reconnect.
+  connection_epoch INTEGER NOT NULL DEFAULT 0,
+  last_seen_at_ms INTEGER,
+  reachable_via TEXT,
+  -- What this machine can run, discovered by that envagent. Per-environment and
+  -- time-varying, never a server-wide list (`docs/environments.md` § Agent availability).
+  agents_json TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE env_pairings (
+  code_hash TEXT PRIMARY KEY,
+  expires_at_ms INTEGER NOT NULL,
+  used_at_ms INTEGER
+);
+
+CREATE INDEX env_pairings_live_idx
+  ON env_pairings(expires_at_ms)
+  WHERE used_at_ms IS NULL;
+
+-- What a command already answered, so a replay returns the first outcome instead of
+-- acting twice. `at_most_once` is the class where that distinction is the whole point:
+-- re-running it is not equivalent to returning what it returned.
+CREATE TABLE env_command_results (
+  environment_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  idempotency TEXT NOT NULL CHECK (idempotency IN ('replayable', 'at_most_once')),
+  outcome_json TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (environment_id, request_id)
+);
+
+-- Which producer frames have been accepted, keyed by the producer's own sequence, so a
+-- spool replaying after reconnect cannot journal an event twice. `payload_hash` makes a
+-- re-delivery that disagrees with what was stored detectable rather than silently
+-- ignored.
+CREATE TABLE env_event_receipts (
+  environment_id TEXT NOT NULL,
+  producer_id TEXT NOT NULL,
+  producer_seq INTEGER NOT NULL CHECK (producer_seq > 0),
+  session_env TEXT NOT NULL,
+  session_agent TEXT NOT NULL,
+  session_native TEXT NOT NULL,
+  server_seq INTEGER NOT NULL,
+  payload_hash TEXT NOT NULL,
+  accepted_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (environment_id, producer_id, producer_seq)
+);
+
+CREATE INDEX env_event_receipts_session_idx
+  ON env_event_receipts(session_env, session_agent, session_native, server_seq);
+
+-- Server-owned graph edges. Events remain stored once under their owning session; this
+-- is a read model for delegation and fork provenance, which is why `relation` is a
+-- closed set: the two differ in how a listing must present them, not in degree.
+CREATE TABLE session_edges (
+  parent_env TEXT NOT NULL,
+  parent_agent TEXT NOT NULL,
+  parent_native TEXT NOT NULL,
+  child_env TEXT NOT NULL,
+  child_agent TEXT NOT NULL,
+  child_native TEXT NOT NULL,
+  relation TEXT NOT NULL CHECK (relation IN ('delegation', 'fork')),
+  source TEXT NOT NULL DEFAULT 'server',
+  created_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (
+    parent_env, parent_agent, parent_native,
+    child_env, child_agent, child_native,
+    relation
+  ),
+  -- No session is its own parent, checked here rather than trusted from a caller: a
+  -- self-edge is a cycle every ancestry walk would have to defend against forever.
+  CHECK (
+    parent_env <> child_env OR
+    parent_agent <> child_agent OR
+    parent_native <> child_native
+  )
+);
+
+CREATE INDEX session_edges_child_idx
+  ON session_edges(child_env, child_agent, child_native);

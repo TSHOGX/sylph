@@ -15,7 +15,7 @@ supervisor can probe it — which is why it carries no counts and no paths.
 {
   "ok": true,
   "apiVersion": "1",
-  "schemaVersion": 7,
+  "schemaVersion": 1,
   "environments": [
     {"id": "env7fk2", "name": "laptop", "connected": true,
      "agents": [{"name": "claude", "version": "2.1.247"}, {"name": "pi", "version": "0.84.3"}]},

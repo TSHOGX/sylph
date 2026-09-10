@@ -40,6 +40,10 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 .e2e-home
+# The fixture envagent's own root. Separate from `.e2e-home` because the server and
+# the envagent have separate roots in every install, e2e included — and this one holds
+# a pairing credential, so it must never reach a commit.
+.e2e-env-home
 # The former name. Kept ignored so a checkout that ran the older suite does not
 # start reporting its leftover tree as untracked.
 .e2e-data

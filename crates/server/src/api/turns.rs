@@ -47,11 +47,14 @@ pub async fn create_prepared(
         ));
     }
 
-    // A remote draft already owns a live envagent session.  Send its first
-    // turn through the wire, create the canonical session/turn rows, and only
-    // then activate the envagent event pump.  This preserves the same
-    // promotion ordering as the in-process path while keeping server-owned
-    // attachment bytes out of a remote filesystem.
+    // A draft already owns a live envagent session.  Send its first turn through the
+    // wire, create the canonical session/turn rows, and only then activate the envagent
+    // event pump.
+    //
+    // That order is the requirement: the pump must not be able to deliver an event for a
+    // session the store has no row for, because the event would arrive needing a
+    // sequence number against a session that does not exist yet.  Attachment bytes stay
+    // server-owned and are never written to the envagent's filesystem.
     // A client retry with an idempotency key must reuse the same first-turn
     // identity; without it, a second promotion is intentionally a conflict.
     let proposed_turn_id = req
@@ -328,7 +331,7 @@ pub async fn create(
         completed_at_ms: None,
         stopped_at_ms: None,
     };
-    let created = match state.store.create_remote_turn(&turn).await? {
+    let created = match state.store.create_turn_claiming_slot(&turn).await? {
         Some(created) => created,
         None => {
             // A concurrent request with the same idempotency key may have
