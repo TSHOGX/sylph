@@ -558,7 +558,6 @@ async fn capabilities_report_detached_when_the_agent_has_no_adapter() {
             .await,
     )
     .await;
-    eprintln!("BODY {:?}", body);
 
     assert_eq!(body["link"]["control"]["available"], false);
     // `no_agent` means the paired machine is reachable but no compatible agent

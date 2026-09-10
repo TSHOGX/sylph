@@ -1219,7 +1219,7 @@ impl EnvBridge {
         match outcome {
             CommandOutcome::Accepted { .. } => Ok(()),
             CommandOutcome::Rejected { code, message } => {
-                Err(anyhow!("remote activation rejected ({code}): {message}"))
+                Err(RemoteCommandError::rejected(code, message).into())
             }
             CommandOutcome::Unknown { message } => Err(anyhow!(
                 "remote activation outcome is unknown: {}",
@@ -1258,7 +1258,9 @@ impl EnvBridge {
             .await?
         {
             CommandOutcome::Accepted { result } => Ok(result.unwrap_or_default()),
-            CommandOutcome::Rejected { code, message } => Err(anyhow!("{code}: {message}")),
+            CommandOutcome::Rejected { code, message } => {
+                Err(RemoteCommandError::rejected(code, message).into())
+            }
             CommandOutcome::Unknown { message } => Err(anyhow!(
                 "remote draft capability outcome is unknown: {}",
                 message.unwrap_or_default()

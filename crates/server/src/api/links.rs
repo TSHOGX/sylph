@@ -79,7 +79,10 @@ fn remote_refusal(code: &str, message: String) -> Error {
 }
 
 fn remote_config_refusal(code: &str, message: String) -> Error {
-    remote_refusal(code, message)
+    match sylph_protocol::RejectCode::parse(code) {
+        Some(sylph_protocol::RejectCode::UnsupportedField) => Error::InvalidRequest(message),
+        _ => remote_refusal(code, message),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -184,6 +187,24 @@ pub async fn capabilities(
             sylph_protocol::UnavailableReason::EnvironmentUnreachable,
         )));
     }
+    if let Some(environment) = state
+        .env_bridge
+        .list_environments()
+        .await
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?
+        .into_iter()
+        .find(|environment| environment.id == session_id.environment)
+    {
+        if environment
+            .agents
+            .iter()
+            .any(|agent| agent.name == session_id.agent.as_str() && !agent.available)
+        {
+            return Ok(Json(LinkState::failed(
+                sylph_protocol::UnavailableReason::NoAgent,
+            )));
+        }
+    }
     let mut outcome = state
         .env_bridge
         .remote_session_command(
@@ -209,13 +230,28 @@ pub async fn capabilities(
             .await
         {
             Ok(outcome) => outcome,
-            Err(error) => return Err(Error::LinkFailed(format!("{error:#}"))),
+            Err(error) => {
+                if let Some(remote) = error.downcast_ref::<crate::env::bridge::RemoteCommandError>()
+                {
+                    if matches!(remote.code(), Some("NO_AGENT" | "AGENT_UNAVAILABLE")) {
+                        return Ok(Json(LinkState::failed(
+                            sylph_protocol::UnavailableReason::NoAgent,
+                        )));
+                    }
+                }
+                return Err(Error::LinkFailed(format!("{error:#}")));
+            }
         };
         if let sylph_protocol::CommandOutcome::Rejected { code, message } = attach_outcome {
             if matches!(
                 sylph_protocol::RejectCode::parse(&code),
                 Some(sylph_protocol::RejectCode::AgentUnavailable)
             ) {
+                return Ok(Json(LinkState::failed(
+                    sylph_protocol::UnavailableReason::NoAgent,
+                )));
+            }
+            if code == "NO_AGENT" {
                 return Ok(Json(LinkState::failed(
                     sylph_protocol::UnavailableReason::NoAgent,
                 )));
@@ -245,7 +281,7 @@ pub async fn capabilities(
             Ok(Json(LinkState::detached_remote()))
         }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(remote_config_refusal(&code, message))
+            Err(remote_refusal(&code, message))
         }
         sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
             "remote capabilities outcome is unknown: {}",
@@ -308,7 +344,7 @@ pub async fn attach(
             Ok(Json(LinkState::detached_remote()))
         }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(remote_config_refusal(&code, message))
+            Err(remote_refusal(&code, message))
         }
         sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
             "remote attach outcome is unknown: {}",

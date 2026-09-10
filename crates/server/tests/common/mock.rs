@@ -259,7 +259,13 @@ impl MockAgents {
 
     /// Snapshot this fixture's adapter inventory in the shape an envagent hello carries.
     pub async fn inventory(&self) -> Vec<sylph_protocol::AgentInventory> {
-        let mut names = self.available();
+        let mut names: Vec<String> = self
+            .known
+            .read()
+            .expect("the mock known-agent map is not poisoned")
+            .iter()
+            .cloned()
+            .collect();
         names.sort();
         let mut inventory = Vec::with_capacity(names.len());
         for name in names {
