@@ -48,8 +48,6 @@ pub struct AppState {
     pub store: JournalStore,
     pub config: Config,
     pub hub: EventHub,
-    /// Paired environment reachability used by retention and diagnostics.
-    pub environment: Arc<dyn crate::env::Environment>,
     /// The warm tier. Reads come here once a turn has been consolidated.
     pub history: crate::storage::HistoryStore,
     /// Moves settled turns into history. Exposed so a test can trigger the same
@@ -181,9 +179,6 @@ impl AppState {
         // than inside the supervisor so a session-chosen environment later
         // replaces one argument instead of reaching into the supervisor.
         let environment_registry = crate::env::EnvironmentRegistry::new();
-        let environment: Arc<dyn crate::env::Environment> = Arc::new(
-            crate::env::RegistryEnvironment::new(environment_registry.clone()),
-        );
         // One allocator, shared. Both the supervisor and each link's drain task
         // emit events for the same session, and separate counters would hand out
         // the same sequence number.
@@ -240,7 +235,6 @@ impl AppState {
         Ok(Self {
             store,
             config,
-            environment,
             hub,
             history,
             consolidator,
