@@ -1353,15 +1353,26 @@ impl EnvBridge {
         command: sylph_protocol::EnvironmentCommand,
         idempotency: IdempotencyPolicy,
     ) -> Result<CommandOutcome> {
-        let request_id = if command_is_replay_safe(&command) {
-            remote_request_id(&session_id.environment, &command, idempotency)?
-        } else {
-            sylph_protocol::CommandRequestId::parse(format!(
-                "remote-{}-{}",
-                command_name(&command),
-                uuid::Uuid::new_v4().simple()
-            ))?
-        };
+        // Every command routed here wants a fresh request id, so this asks no
+        // classification question and must not grow one. The reads it carries
+        // (`Capabilities`, `Close`) are already classified as repeatable by
+        // `command_needs_a_fresh_request_id`; the writes
+        // (`Interrupt`, `Steer`, `Queue`, `SetConfig`, `Resolve`) are each a
+        // distinct user action, so hashing their payload would make sending one
+        // steer text twice — or setting a config back to a value it already held —
+        // collide with the earlier call and replay its stored result instead of
+        // reaching the envagent. That is the frozen-surface defect again, and
+        // `repeating_one_steer_text_dispatches_a_second_command` pins it.
+        //
+        // At-most-once protection for these does not come from the id: a retry
+        // that arrives while the original is in flight joins its waiter in
+        // `dispatch_and_wait`, and `remote_promotion_locks` serializes promotion.
+        let request_id = sylph_protocol::CommandRequestId::parse(format!(
+            "remote-{}-{}-{}",
+            session_id.environment,
+            command_name(&command),
+            uuid::Uuid::new_v4().simple()
+        ))?;
         self.dispatch_and_wait(
             &session_id.environment,
             Command::new(request_id, idempotency, command),
@@ -2383,19 +2394,49 @@ fn command_name(command: &sylph_protocol::EnvironmentCommand) -> &'static str {
     }
 }
 
-fn command_is_replay_safe(command: &sylph_protocol::EnvironmentCommand) -> bool {
-    use sylph_protocol::EnvironmentCommand;
-    matches!(
-        command,
+/// Whether each call of this command is a *new* operation, so it must not
+/// address one frozen durable result in `env_command_results`.
+///
+/// This is deliberately **not** [`IdempotencyPolicy::Replayable`], and the two
+/// must not be derived from each other even though they read as synonyms.
+/// `Replayable` answers a wire question that travels with the command — may the
+/// envagent be sent this same request id again after an ambiguous crash. This
+/// answers a server question — does a second call want a second answer.
+/// `Replayable` is the strict superset, and `Run` is the witness: `remote_attach`
+/// is replayable precisely *because* a retry must address the original command
+/// rather than start a second native session, which is the opposite of what a
+/// read wants. Collapsing the two would make one of those cases wrong.
+///
+/// The trap is that the naming invites an omission rather than a mismatch: a new
+/// read-only command reaches this file, gets `Replayable` at its call site, and
+/// nothing fails if it is never listed here — it just answers every later caller
+/// with its first answer. `DraftCapabilities` and `DraftFiles` both shipped that
+/// way, each carrying the same omission as its durable-session counterpart.
+fn command_needs_a_fresh_request_id(command: &sylph_protocol::EnvironmentCommand) -> bool {
+    use sylph_protocol::{EnvironmentCommand, FileOperation};
+    match command {
+        // A capability surface is a live reading of an agent's state, so a read
+        // after a config change must observe it. Omitting the draft form here is
+        // what made picking a model or a thinking level appear to do nothing: a
+        // draft's first read happens before any config is set, and that empty
+        // snapshot then answered every later read for the draft's whole life.
         EnvironmentCommand::Capabilities { .. }
-            | EnvironmentCommand::Files {
-                operation: sylph_protocol::FileOperation::List { .. }
-                    | sylph_protocol::FileOperation::Read { .. }
-                    | sylph_protocol::FileOperation::Stat { .. },
-                ..
-            }
-            | EnvironmentCommand::Close { .. }
-    )
+        | EnvironmentCommand::DraftCapabilities { .. } => true,
+        // A listing after mkdir must observe the new entry. Mutating file
+        // operations are excluded: they carry their payload in the request id so
+        // an at-most-once retry addresses the original write.
+        EnvironmentCommand::Files { operation, .. }
+        | EnvironmentCommand::DraftFiles { operation, .. } => matches!(
+            operation,
+            FileOperation::List { .. } | FileOperation::Read { .. } | FileOperation::Stat { .. }
+        ),
+        // Not a read, but repeatable for the same reason: a session can be
+        // closed, reattached, and closed again, and the payload is only its id —
+        // so a payload-derived id would replay the first close's result and the
+        // second close would never reach the envagent.
+        EnvironmentCommand::Close { .. } => true,
+        _ => false,
+    }
 }
 
 fn remote_request_id(
@@ -2407,12 +2448,11 @@ fn remote_request_id(
     // request ids bounded even for large file writes, while making retries of
     // the same operation address the original durable result and changing a
     // config value or file payload address a new operation.
-    // Read operations are replay-safe but must not reuse one cached result
-    // forever: a directory listing after mkdir must observe the new entry.
-    // Their retry safety comes from the operation itself, so give each read a
-    // fresh request id. Mutating commands retain payload-derived ids for
+    // A command whose every call is a new operation must not reuse one cached
+    // result forever, so give it a fresh request id; its retry safety comes from
+    // the operation itself. Mutating commands retain payload-derived ids for
     // at-most-once semantics.
-    if command_is_replay_safe(command) {
+    if command_needs_a_fresh_request_id(command) {
         return sylph_protocol::CommandRequestId::parse(format!(
             "remote-{}-{}-{}",
             environment,
@@ -3289,5 +3329,263 @@ mod tests {
                 .await,
             RemoteDraftClaim::Busy
         ));
+    }
+
+    /// Register a connected environment and return the frames the bridge writes
+    /// to it, so a test can answer a command the way an envagent would.
+    async fn connected_environment(
+        bridge: &EnvBridge,
+        environment: &EnvironmentId,
+        install: &str,
+    ) -> mpsc::Receiver<WireMessage> {
+        bridge
+            .store
+            .upsert_environment(
+                environment,
+                install,
+                "fixture",
+                "development",
+                &hash_secret("token"),
+                "[]",
+            )
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let hello = sylph_protocol::Hello::current(
+            install,
+            ProducerId::parse(install).unwrap(),
+            Some(environment.clone()),
+            0,
+        );
+        bridge.register_connection(&hello, "token", tx).await.unwrap();
+        rx
+    }
+
+    /// Answer the next command frame the bridge sends with `result`, and return
+    /// the request id it addressed.
+    async fn answer_next_command(
+        bridge: &EnvBridge,
+        environment: &EnvironmentId,
+        rx: &mut mpsc::Receiver<WireMessage>,
+        result: serde_json::Value,
+    ) -> sylph_protocol::CommandRequestId {
+        let WireMessage::Command {
+            request_id,
+            idempotency,
+            ..
+        } = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the bridge should write a command frame")
+            .expect("the command channel should stay open")
+        else {
+            panic!("expected a command frame");
+        };
+        bridge
+            .record_command_result(
+                environment,
+                &sylph_protocol::CommandResultMessage {
+                    request_id: request_id.clone(),
+                    outcome: CommandOutcome::accepted_with_result(result),
+                    connection_epoch: 1,
+                    idempotency: Some(idempotency),
+                },
+            )
+            .await
+            .unwrap();
+        request_id
+    }
+
+    fn draft_capability_surface(model: &str) -> serde_json::Value {
+        serde_json::json!({"capabilities": {"commands": [], "config": [
+            {"id": "model", "value": model}
+        ]}})
+    }
+
+    /// A draft's capability surface is read once before any config is set, so a
+    /// frozen answer is indistinguishable from a real one: it names the agent's
+    /// own defaults. Two reads with a config change between them are the only way
+    /// to observe the difference, which is why one call could not.
+    #[tokio::test]
+    async fn a_second_draft_capability_read_observes_a_config_change() {
+        let (bridge, _dir) = bridge().await;
+        let environment = EnvironmentId::parse("env7fk2").unwrap();
+        let mut rx = connected_environment(&bridge, &environment, "install-draft-caps").await;
+        let draft = RemoteDraft {
+            draft_id: "remote-draft-caps".into(),
+            environment: environment.clone(),
+            session_id: None,
+            agent: "claude".into(),
+            workdir: "/tmp".into(),
+            title: None,
+            inject_identity: false,
+            flags: Default::default(),
+            identity_preamble: None,
+            permission_mode: None,
+            promoting: false,
+            first_turn_id: None,
+        };
+        bridge
+            .remote_drafts
+            .lock()
+            .await
+            .insert(draft.draft_id.clone(), draft.clone());
+
+        // The first read is the one a client makes right after creating a draft,
+        // before any model has been picked.
+        let first = {
+            let bridge = bridge.clone();
+            let draft = draft.clone();
+            tokio::spawn(async move { bridge.remote_draft_capabilities(&draft).await })
+        };
+        let first_request = answer_next_command(
+            &bridge,
+            &environment,
+            &mut rx,
+            draft_capability_surface("default"),
+        )
+        .await;
+        assert_eq!(
+            first.await.unwrap().unwrap()["capabilities"]["config"][0]["value"],
+            "default"
+        );
+
+        // The user picks a model. The envagent now holds a different surface.
+        let second = {
+            let bridge = bridge.clone();
+            let draft = draft.clone();
+            tokio::spawn(async move { bridge.remote_draft_capabilities(&draft).await })
+        };
+        let second_request = answer_next_command(
+            &bridge,
+            &environment,
+            &mut rx,
+            draft_capability_surface("sonnet"),
+        )
+        .await;
+        assert_eq!(
+            second.await.unwrap().unwrap()["capabilities"]["config"][0]["value"],
+            "sonnet",
+            "the second read must report what the envagent holds now, not the \
+             empty surface frozen before any config was set"
+        );
+        assert_ne!(
+            first_request.as_str(),
+            second_request.as_str(),
+            "two reads of one draft must address two commands, or the second \
+             never reaches the envagent at all"
+        );
+    }
+
+    /// Same defect, same draft-shaped command: a listing frozen at its first
+    /// answer cannot show a file written afterwards.
+    #[tokio::test]
+    async fn a_second_draft_file_listing_observes_a_new_entry() {
+        let (bridge, _dir) = bridge().await;
+        let environment = EnvironmentId::parse("env7fk2").unwrap();
+        let mut rx = connected_environment(&bridge, &environment, "install-draft-files").await;
+        let list = || sylph_protocol::FileOperation::List {
+            relative: ".".into(),
+        };
+
+        let first = {
+            let bridge = bridge.clone();
+            let environment = environment.clone();
+            tokio::spawn(async move {
+                bridge
+                    .remote_files(
+                        &environment,
+                        Some("remote-draft-files".into()),
+                        None,
+                        list(),
+                    )
+                    .await
+            })
+        };
+        answer_next_command(
+            &bridge,
+            &environment,
+            &mut rx,
+            serde_json::json!({"entries": ["a.txt"]}),
+        )
+        .await;
+        assert_eq!(first.await.unwrap().unwrap()["entries"][0], "a.txt");
+
+        let second = {
+            let bridge = bridge.clone();
+            let environment = environment.clone();
+            tokio::spawn(async move {
+                bridge
+                    .remote_files(
+                        &environment,
+                        Some("remote-draft-files".into()),
+                        None,
+                        list(),
+                    )
+                    .await
+            })
+        };
+        answer_next_command(
+            &bridge,
+            &environment,
+            &mut rx,
+            serde_json::json!({"entries": ["a.txt", "b.txt"]}),
+        )
+        .await;
+        let listing = second.await.unwrap().unwrap();
+        assert_eq!(
+            listing["entries"].as_array().map(Vec::len),
+            Some(2),
+            "a draft listing after a write must observe the new entry"
+        );
+    }
+
+    /// A steer is a user action, not a query: sending the same text twice must
+    /// reach the envagent twice. A payload-derived request id would make the
+    /// second one address the first one's stored result and silently vanish.
+    #[tokio::test]
+    async fn repeating_one_steer_text_dispatches_a_second_command() {
+        let (bridge, _dir) = bridge().await;
+        let environment = EnvironmentId::parse("env7fk2").unwrap();
+        let mut rx = connected_environment(&bridge, &environment, "install-steer").await;
+        let session_id = SessionId::new(
+            environment.clone(),
+            AgentName::parse("claude").unwrap(),
+            sylph_protocol::NativeId::new("steer-session"),
+        );
+        let steer = || sylph_protocol::EnvironmentCommand::Steer {
+            session_id: session_id.clone(),
+            text: "focus on the parser".into(),
+            expected_turn_id: None,
+        };
+
+        let mut request_ids = Vec::new();
+        for _ in 0..2 {
+            let task = {
+                let bridge = bridge.clone();
+                let session_id = session_id.clone();
+                let command = steer();
+                tokio::spawn(async move {
+                    bridge
+                        .remote_session_command(
+                            &session_id,
+                            command,
+                            IdempotencyPolicy::AtMostOnce,
+                        )
+                        .await
+                })
+            };
+            request_ids.push(
+                answer_next_command(&bridge, &environment, &mut rx, serde_json::json!({})).await,
+            );
+            assert!(matches!(
+                task.await.unwrap().unwrap(),
+                CommandOutcome::Accepted { .. }
+            ));
+        }
+        assert_ne!(
+            request_ids[0].as_str(),
+            request_ids[1].as_str(),
+            "the same steer text sent twice must be two commands"
+        );
     }
 }
