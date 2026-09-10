@@ -94,9 +94,22 @@ success. The last of those is the easiest to do by accident — see § A refused
 | `permission_mode` | initial mode, if the vendor takes one at launch |
 
 **Dictate the id where the vendor allows it.** `claude` and `pi` accept a
-`--session-id` the adapter mints; `codex` assigns its own and reports it. Dictating
-means the server knows a session's identity before the first event, so nothing has to
-correlate afterwards.
+`--session-id`; `codex` assigns its own and reports it. Dictating means the identity is
+known before the first event, so nothing has to correlate afterwards.
+
+**Which of the two applies is `AgentInfo::dictates_native_id`, read from a probe** — never
+a list of agent names held beside the adapters, which would diverge from them the moment
+either grew a case. **The envagent mints the dictated id; no adapter ever mints one.** The
+envagent is the process that holds the adapter and builds the `RunSpec`, so it is the only
+place that can read the fact and act on it. An adapter minting its own would write an id
+that looks like the vendor's and is Sylph's — the synthesized-identity failure `NativeId`
+forbids, and the one `pi`'s v1 committed with `uuid4()`. That is why `claude` and `pi`
+refuse `New` instead of inventing an id, and why `New` reaching either of them is a bug in
+the envagent rather than something for the adapter to paper over.
+
+A minted id is **not a second id space** (`docs/architecture.md` § Identity). It is handed
+to the vendor on `--session-id`, and the vendor adopts it as its own native id, so the
+value Sylph stores and the value the vendor's store holds are one value.
 
 An adapter that cannot dictate reports the vendor's id when it starts the first turn,
 and the server keys the durable session on what came back. A prepared link may report
