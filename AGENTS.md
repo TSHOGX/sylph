@@ -98,6 +98,16 @@ throwaway `SYLPH_HOME` and the `e2e` cargo feature, which compiles in a fixture 
 fixture. Do not start servers by hand for it; it shells out to `cargo`, and a cold run
 compiles the backend first.
 
+**Nothing the E2E launcher spawns may be `detached`, and that is a hang, not a leak.**
+Playwright spawns the launcher itself detached with piped stdio and waits for its `close`
+event, which needs every inherited pipe to reach EOF — so one detached child survives the
+group SIGKILL, holds the write end open, and the run blocks *after* every spec has
+passed. A handler cannot rescue it either, because the signal is SIGKILL. This cost three
+commits of handler-shaped fixes before the mechanism was measured, and what removed the
+temptation was building the binaries first and spawning them directly:
+`cargo run` is a parent of the process you want to control, so killing it orphans the
+binary, and reaching for a process group to fix *that* is what broke teardown.
+
 ```sh
 # clear ports an interrupted run left behind, before diagnosing a startup failure
 for p in 4327 4328 3101 3199; do lsof -ti tcp:$p | xargs kill 2>/dev/null; done
