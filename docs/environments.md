@@ -330,6 +330,27 @@ A watched session's **control** facet is whatever that vendor offers a second pa
 is not universal; its **observe** facet works regardless. This is the facet pair from
 `docs/architecture.md`, and a watched session is not a third link state.
 
+### A product surface bringing a session in asks to follow it
+
+The two modes are an *endpoint* distinction, not a question to put to a user. A client
+offering "bring in this session" sends `watch: true`, and the frontend's picker does so
+unconditionally — a session brought in without following is a snapshot that stops at the
+moment it was taken, and the terminal it came from goes on writing.
+
+Two shapes were rejected, both of which fail by producing a plausible session rather than
+an error:
+
+- **Deciding from the row** — treating a recorded `endedAtMs` as "this one is finished, one
+  pass is enough". An absent end stamp is not an ended session, and a session idle when it
+  was listed and resumed in the terminal afterwards is exactly the case a user would then
+  report as Sylph not updating.
+- **A per-row toggle** — which turns the same outcome into a choice the user is blamed for,
+  in a surface whose whole value is that one click is the whole interaction.
+
+Following a store that has stopped growing costs a follower that never fires, which is why
+the safe default is the unconditional one. What stays out of bounds is the *unasked* case:
+this follows a session a user named, and never one Sylph found on its own.
+
 Offering "bring in everything on this machine" once, when an envagent first pairs, is the
 right shape for the bulk case. A recurring background sweep would publish sessions the
 user never associated with Sylph.

@@ -33,12 +33,36 @@
  * `truncate` cannot recover it: the intrinsic minimum is already too large. That is what
  * pushed the composer off the right edge of a phone. So the agent filter is a row of
  * buttons over a fixed vocabulary, and the session list is `SelectRows`, which truncates.
+ *
+ * # Adopting follows the store, and does so unconditionally
+ *
+ * `adoptRequest` sends `watch: true` for every row, and that is a decision rather than a
+ * default left unexamined (`docs/environments.md` § A product surface bringing a session in).
+ * The endpoint's other mode parses one pass and stops, which produces a session that is
+ * correct at the moment it was taken and then silently diverges from the terminal still
+ * writing to the same file — the expensive kind of defect, because a stale transcript reads
+ * exactly like a complete one.
+ *
+ * Two alternatives were rejected here specifically:
+ *
+ * - **Branching on `endedAtMs`.** An absent end stamp is not an ended session
+ *   ({@link NativeSessionRow.endedAtMs}), so the heuristic is already unsound on the rows it
+ *   would read — and it fails hardest on a session that was idle when listed and resumed in
+ *   the terminal a minute later, which is the case a user reports as Sylph not updating.
+ * - **A per-row toggle.** This surface's value is that choosing a row is the whole
+ *   interaction, and a switch would convert the same stale transcript into a mistake the
+ *   user made.
+ *
+ * A follower on a store that has stopped growing costs nothing observable: the file does not
+ * change, so nothing is emitted. That asymmetry — a wrong "no" is a silent defect, a wrong
+ * "yes" is a no-op — is what makes the unconditional answer the safe one.
  */
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type BlockedReason, type NativeSessionRow } from "@/lib/api";
+import { adoptRequest } from "@/lib/adopt-request";
 import { workspacesQuery } from "@/lib/workspaces-query";
 import { defaultEnvironment, useEnvironments } from "@/lib/environments";
 import { shortenHome } from "@/lib/format";
@@ -112,11 +136,7 @@ export function AdoptPicker({ onClose }: { onClose: () => void }) {
 
   const adopt = useMutation({
     mutationFn: (row: NativeSessionRow) =>
-      api.sessions.adopt({
-        environment: environmentId!,
-        agent: row.agent,
-        nativeId: row.nativeId,
-      }),
+      api.sessions.adopt(adoptRequest(environmentId!, row)),
     onSuccess: ({ session }) => {
       // Both listings change: the sidebar gains a session, and the row it came from is now
       // `alreadyAdopted`.
@@ -225,6 +245,21 @@ export function AdoptPicker({ onClose }: { onClose: () => void }) {
           {adopt.error instanceof Error ? adopt.error.message : t("adopt.failed")}
         </p>
       )}
+
+      {/* What choosing a row actually does, stated once above the list. Adopting a session
+          keeps following it, and that is not inferable from a verb that reads as a one-time
+          import — a user who expects a snapshot has no reason to leave the terminal running,
+          and a user who expects continuity needs to know they have it.
+
+          Outside `SelectScroll`, which claims `role="listbox"` once it has rows: that role
+          admits only options and groups, so anything interactive placed in here is
+          `aria-required-children` (measured — an audit of this surface reports it for a
+          `button` child). Also outside the footer, which swaps its text for a pending state
+          and key hints, so a promise about the outcome would disappear exactly when it is
+          being kept. */}
+      <p className="shrink-0 border-b border-line px-3 py-1.5 text-3xs text-ink-muted">
+        {t("adopt.follows")}
+      </p>
 
       <SelectScroll list={list} label={t("adopt.title")} fill>
         {listing.isPending ? (

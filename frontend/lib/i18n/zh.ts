@@ -148,6 +148,8 @@ export const zh: Dictionary = {
   "adopt.filterPlaceholder": "按标题或路径筛选……",
   "adopt.agentFilterLabel": "按 agent 筛选",
   "adopt.allAgents": "全部 agent",
+  "adopt.follows":
+    "接入后的会话会持续跟随它所在的终端，包括之后在终端里发出的轮次。",
   "adopt.loading": "正在读取这台机器上的会话……",
   "adopt.loadingMore": "加载中……",
   "adopt.loadMore": "加载更多",

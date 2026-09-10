@@ -17,8 +17,15 @@ import { gotoReady } from "./fixtures/session";
  * a real vendor CLI on the runner or a fabricated store. What is covered is everything the
  * client decides: that the surface opens and is reachable by keyboard, that an empty
  * listing reads as "nothing here" rather than as a failure, that a blocked row is shown
- * with its reason rather than hidden or offered, and that the list is the combobox pattern
- * a screen reader can walk.
+ * with its reason rather than hidden or offered, that choosing a row asks to *follow* the
+ * store rather than snapshot it, and that the list is the combobox pattern a screen reader
+ * can walk.
+ *
+ * That `watch` assertion reads the request body, because the flag has no rendered
+ * consequence — omitting it still answers `201` and still draws a complete-looking
+ * transcript, which then silently stops. `lib/adopt-request.test.ts` owns the payload's
+ * shape across rows; the case here is narrower and different in kind: that a click on this
+ * surface reaches the endpoint carrying it.
  *
  * The rows are supplied by intercepting `GET /sessions/enumerate`, which is the right seam
  * for exactly that reason: every assertion below is about the **client's** branch on a
@@ -204,6 +211,50 @@ test("a listing failure is reported with a retry rather than as an empty machine
   await expect(page.getByRole("dialog", { name: "Adopt an existing session" }).getByRole("alert")).toContainText(/Could not read this machine/);
   await page.getByRole("button", { name: "Retry" }).click();
   await expect(page.getByRole("option", { name: /Back online/ })).toBeVisible();
+});
+
+test("choosing a row asks to follow the store rather than snapshot it", async ({ page }) => {
+  await page.route("**/api/v1/sessions/enumerate*", (route) =>
+    route.fulfill({ json: { sessions: [row({ title: "Still running in a terminal" })] } }),
+  );
+
+  // The request body, which is the only place this decision is observable: `watch` is
+  // optional on the wire and `false` by default, so omitting it yields a 201 and a session
+  // that renders exactly like a followed one and then stops updating. Everything the picker
+  // draws afterwards is identical either way.
+  let body: Record<string, unknown> | null = null;
+  await page.route("**/api/v1/sessions/adopt", async (route) => {
+    body = route.request().postDataJSON();
+    // Refused, so nothing navigates and the assertion stays about the request. `lib/
+    // adopt-request.test.ts` covers the payload's own shape; this covers that the picker's
+    // click reaches the endpoint carrying it.
+    await route.fulfill({
+      status: 422,
+      json: { error: { code: "NATIVE_SESSION_NOT_RESUMABLE", message: "refused on purpose" } },
+    });
+  });
+
+  await openPicker(page);
+  await page.getByRole("option", { name: /Still running in a terminal/ }).click();
+
+  await expect
+    .poll(() => body, { message: "the picker must POST /sessions/adopt" })
+    .not.toBeNull();
+  expect(body!.watch, "adopting must follow the store as it grows").toBe(true);
+});
+
+test("the picker says adopting keeps up with the terminal", async ({ page }) => {
+  await page.route("**/api/v1/sessions/enumerate*", (route) =>
+    route.fulfill({ json: { sessions: [row({ title: "One" })] } }),
+  );
+
+  await openPicker(page);
+
+  // Copy, because the behaviour is not inferable from the verb: "adopt" reads as a one-time
+  // import, and a user expecting a snapshot has no reason to leave the terminal running.
+  await expect(
+    page.getByRole("dialog", { name: "Adopt an existing session" }),
+  ).toContainText(/keeps up with the terminal/);
 });
 
 test("a refused adopt is rendered rather than swallowed", async ({ page }) => {
