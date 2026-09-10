@@ -33,6 +33,14 @@
  * `truncate` cannot recover it: the intrinsic minimum is already too large. That is what
  * pushed the composer off the right edge of a phone. So the agent filter is a row of
  * buttons over a fixed vocabulary, and the session list is `SelectRows`, which truncates.
+ *
+ * # Two ways in, one of which names a machine
+ *
+ * Reached from the command palette and the `adoptSession` shortcut, which name no machine,
+ * and from Settings → Machines, where a row *is* one. Hence the optional `environment`
+ * prop: the selection rule stays here — one place that knows what makes an environment a
+ * usable target — rather than each caller resolving a machine and this component trusting
+ * it. See the prop's own comment for why a request can be declined.
  */
 
 import { useMemo, useState } from "react";
@@ -55,12 +63,53 @@ import type { SelectChoice } from "@/lib/select-list";
 /** How many rows one request asks for. */
 const PAGE = 100;
 
-export function AdoptPicker({ onClose }: { onClose: () => void }) {
+export function AdoptPicker({
+  onClose,
+  environment: requested,
+}: {
+  onClose: () => void;
+  /**
+   * Machine to enumerate, when the caller already named one.
+   *
+   * An **id**, never a name: a name is mutable metadata and two machines may share one
+   * (`docs/architecture.md` § Identity). Settings supplies it, because a row there *is* a
+   * machine and the click already said which; the palette and the shortcut omit it,
+   * having no machine in view.
+   *
+   * It is a request rather than an instruction, and the resolution below is why: an id
+   * this client has not been told about, or one that names a machine which has since gone
+   * offline, must not produce a picker pinned to a `503`. **This is the one reason the
+   * parameter is not simply substituted for the default** — a caller cannot check
+   * reachability at click time and have it still be true at render time, because
+   * `useEnvironments` polls and a laptop sleeps on its own schedule.
+   */
+  environment?: string | null;
+}) {
   const t = useT();
   const router = useRouter();
   const queryClient = useQueryClient();
   const environments = useEnvironments();
-  const environment = defaultEnvironment(environments.all);
+
+  /**
+   * Which machine this picker is listing.
+   *
+   * The requested one when it is known *and* connected, and `defaultEnvironment`'s answer
+   * otherwise — one expression rather than a branch at each call site, which is what keeps
+   * the no-argument behaviour of the palette route byte-identical to what it was.
+   *
+   * Falling back rather than erroring on an unreachable request is deliberate, and it is a
+   * judgement about which failure is worse. `enumerate` refuses a disconnected environment
+   * with `503 ENVIRONMENT_UNREACHABLE` before it reads any store (`require_environment`),
+   * so honouring a stale id yields a picker that can only report a failure. Settings
+   * already withholds the affordance from a machine it shows as offline, so reaching this
+   * branch means the machine left *between* the click and the render — a race, not a user
+   * error, and the useful response is to list a machine that does answer.
+   */
+  const environment = useMemo(() => {
+    const asked = requested ? environments.find(requested) : undefined;
+    if (asked?.connected) return asked;
+    return defaultEnvironment(environments.all);
+  }, [requested, environments]);
 
   /**
    * Which agent to list, or every readable one.
@@ -201,23 +250,41 @@ export function AdoptPicker({ onClose }: { onClose: () => void }) {
         placeholder={t("adopt.filterPlaceholder")}
       />
 
-      <div
-        role="group"
-        aria-label={t("adopt.agentFilterLabel")}
-        className="flex shrink-0 flex-wrap gap-1 border-b border-line px-3 py-1.5"
-      >
-        <AgentChip active={agent === null} onClick={() => { setAgent(null); setCursors([]); }}>
-          {t("adopt.allAgents")}
-        </AgentChip>
-        {agents.map((name) => (
-          <AgentChip
-            key={name}
-            active={agent === name}
-            onClick={() => { setAgent(name); setCursors([]); }}
-          >
-            {name}
+      <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
+        <div
+          role="group"
+          aria-label={t("adopt.agentFilterLabel")}
+          className="flex min-w-0 flex-1 flex-wrap gap-1"
+        >
+          <AgentChip active={agent === null} onClick={() => { setAgent(null); setCursors([]); }}>
+            {t("adopt.allAgents")}
           </AgentChip>
-        ))}
+          {agents.map((name) => (
+            <AgentChip
+              key={name}
+              active={agent === name}
+              onClick={() => { setAgent(name); setCursors([]); }}
+            >
+              {name}
+            </AgentChip>
+          ))}
+        </div>
+
+        {/* Which machine is being listed — a sibling of the agent filter, not a member
+            of it: the `group` is named "Filter by agent" and this is not a control at
+            all, so putting it inside would announce a filter that cannot be operated.
+
+            Shown only on a multi-machine install, which is the rule `showEnvironment`
+            exists to make once rather than per call site: a chip repeating the one
+            laptop's name is a marker on the ordinary case (`lib/environments.ts`). That
+            is also exactly when the label carries information — with two machines
+            reachable, a picker scoped to one is otherwise indistinguishable from a
+            picker scoped to the other, and the rows themselves do not say. */}
+        {environments.showEnvironment && environment && (
+          <span className="shrink-0 truncate text-3xs text-ink-muted" title={environment.name}>
+            {t("adopt.onMachine", { name: environment.name })}
+          </span>
+        )}
       </div>
 
       {adopt.error && (

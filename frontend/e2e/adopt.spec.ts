@@ -262,6 +262,85 @@ test("the list is a combobox over a listbox, and the cursor is announced from th
   await expect(input).toHaveAttribute("aria-activedescendant", /.+/);
 });
 
+/**
+ * The discoverability paths, which are the whole reason the picker is reachable at all.
+ *
+ * The palette entry above is a keyboard route, and it was the *only* route: opening the
+ * adopt picker required knowing to press the palette shortcut and search "adopt". These
+ * two specs pin the surfaces that lead a user there without already knowing.
+ *
+ * Both assert on the **journey**, not on the picker's internals — that a real click in
+ * Settings and a real click in an empty history each land on the adopt dialog. The picker's
+ * own behaviour is covered above and must not be re-asserted here, or one broken row would
+ * fail two suites for two different reasons.
+ */
+test("settings offers each connected machine a way into its own native sessions", async ({
+  page,
+}) => {
+  // Enumerate is stubbed so this spec fails only for its own reason. The real fixture
+  // agent enumerates empty by design, which would still open the dialog — but a row on
+  // screen is what proves the picker was handed a usable environment rather than opening
+  // scoped to nothing.
+  await page.route("**/api/v1/sessions/enumerate*", (route) =>
+    route.fulfill({ json: { sessions: [row({ title: "Found on this machine" })] } }),
+  );
+
+  await gotoReady(page);
+  await page.keyboard.press("ControlOrMeta+Comma");
+  const settings = page.getByRole("dialog");
+  await expect(settings).toBeVisible();
+  await settings.getByRole("button", { name: "Machines" }).click();
+
+  // The affordance is per machine, and its accessible name says which — every connected
+  // row renders one, so a bare "Browse native sessions" would be several controls a
+  // screen reader user cannot tell apart.
+  const browse = settings.getByRole("button", { name: /Browse native sessions on / });
+  await expect(browse.first()).toBeVisible();
+  await browse.first().click();
+
+  // Settings is replaced rather than stacked: one overlay at a time, so exactly one focus
+  // trap is ever mounted.
+  const picker = page.getByRole("dialog", { name: "Adopt an existing session" });
+  await expect(picker).toBeVisible();
+  await expect(page.getByRole("option", { name: /Found on this machine/ })).toBeVisible();
+
+  // Opening it moved focus into the surface, which is what makes the overlay dismissable
+  // by keyboard at all (WCAG 2.1.2) — the filter field claims it.
+  await expect(picker.locator(":focus")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(picker).toBeHidden();
+});
+
+test("an empty workspace history points at adoption instead of reading as no work here", async ({
+  page,
+}) => {
+  // The defect: `GET /sessions` returns only what Sylph adopted, so a directory whose
+  // history lives in the vendor's own store correctly answers `[]` — and the empty state
+  // then said "No sessions here yet", which a user with fifty terminal sessions in that
+  // directory reads as Sylph being unable to see their work.
+  await page.route("**/api/v1/sessions?*", (route) =>
+    route.fulfill({ json: { sessions: [] } }),
+  );
+  await page.route("**/api/v1/sessions/enumerate*", (route) =>
+    route.fulfill({ json: { sessions: [row({ title: "Was in the vendor store" })] } }),
+  );
+
+  await gotoReady(page);
+  await page.keyboard.press("ControlOrMeta+Shift+k");
+  const history = page.getByRole("dialog");
+  await expect(history).toBeVisible();
+
+  // The hint states what is true unconditionally — that unimported sessions are not
+  // listed — rather than claiming *this* directory has some, which this surface cannot
+  // check: a workspace row carries no environment, and enumerating costs seconds per
+  // agent. The picker it opens answers that for real.
+  await expect(history.getByText(/not listed until they are imported/)).toBeVisible();
+  await history.getByRole("button", { name: "Look for sessions on this machine" }).click();
+
+  await expect(page.getByRole("dialog", { name: "Adopt an existing session" })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Was in the vendor store/ })).toBeVisible();
+});
+
 test("the agent filter is buttons, not a select whose width its longest option decides", async ({
   page,
 }) => {

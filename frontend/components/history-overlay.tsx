@@ -67,6 +67,73 @@ const WorkspacePicker = dynamic(
  */
 const LIMIT = 200;
 
+/**
+ * The way out of an empty history: the sessions this machine holds but Sylph has not
+ * imported.
+ *
+ * # The defect this closes
+ *
+ * `GET /sessions` returns only what Sylph has **adopted**, by design. For a directory
+ * whose history still lives entirely in the vendor's own store — every session started in
+ * a terminal, which is the normal way these agents are used — it correctly returns `[]`.
+ * The empty state then distinguished only "no results after filtering" from "nothing
+ * here", and *neither is what happened*: the work exists, on this machine, and Sylph has
+ * simply not been told to read it. A user who has run fifty `claude` sessions in a
+ * directory and is told "No sessions here yet" concludes the tool cannot see their work.
+ *
+ * # Why the wording offers rather than asserts, which is a deliberate downgrade
+ *
+ * The useful sentence would be the strong one — "this directory has 12 sessions Sylph has
+ * not imported" — and it is **not** written here, because this surface cannot know it.
+ * Establishing it needs `GET /sessions/enumerate?workdir=…`, and two things make that the
+ * wrong call from an empty state:
+ *
+ * - **It names no machine, and a path is per-machine.** `Workspace` carries `path`,
+ *   `sessionCount`, and `lastUsedMs` — no environment (`lib/api-types.ts`). So "does this
+ *   directory hold native sessions" is not one question: it is one per connected
+ *   environment, and answering it means fanning out over all of them and merging.
+ * - **It is measured in seconds, per agent.** A cold enumerate costs hundreds of
+ *   milliseconds to seconds *per agent* (`lib/api.ts`, `api.sessions.enumerate`), which is
+ *   why the picker itself renders a worded loading state instead of a spinner. Paying that
+ *   on every empty directory — including the genuinely-empty ones, where the answer is
+ *   zero and the wait buys nothing — would make the common case the slow one.
+ *
+ * So the claim is narrowed to one this surface can actually stand behind: **that adoption
+ * exists and is worth trying**, phrased as an offer. A count rendered from a request this
+ * component cannot afford, or worse a guessed one, is precisely the defect AGENTS.md names
+ * as the expensive kind — a plausible value where a fact belongs, indistinguishable from a
+ * real one once it is on screen.
+ *
+ * The picker it opens **does** know the answer, and answers it properly: it enumerates for
+ * real, per machine, and marks what is already adopted. Sending the user one click further
+ * to get a true answer beats printing a false one here.
+ */
+function EmptyHistoryAdoptHint() {
+  const t = useT();
+  const { adoptFrom } = useWorkspaceUI();
+  const environments = useEnvironments();
+
+  // Nothing to enumerate with, so nothing to offer. Enumeration is answered by the
+  // machine, and `GET /sessions/enumerate` refuses a disconnected environment with a
+  // `503` before reading any store — so with none connected this would be a button whose
+  // only possible outcome is an error. The sessions listing above is served from the
+  // server's own store and is unaffected, which is why the two disagree here.
+  if (!environments.all.some((environment) => environment.connected)) return null;
+
+  return (
+    <>
+      <p className="mt-1">{t("history.adoptHint")}</p>
+      <button
+        type="button"
+        onClick={() => adoptFrom()}
+        className="mt-1.5 rounded border border-line-strong px-2 py-1 text-xs font-medium text-ink hover:bg-sunken focus-ring"
+      >
+        {t("history.adoptAction")}
+      </button>
+    </>
+  );
+}
+
 export function HistoryOverlay() {
   const t = useT();
   const router = useRouter();
@@ -241,9 +308,13 @@ export function HistoryOverlay() {
             </button>
           </div>
         ) : list.rows.length === 0 ? (
-          <p className="px-3 py-6 text-center text-xs text-ink-muted">
-            {list.query.trim() ? t("history.none") : t("history.empty")}
-          </p>
+          <div className="px-3 py-6 text-center text-xs text-ink-muted">
+            <p>{list.query.trim() ? t("history.none") : t("history.empty")}</p>
+            {/* Only under the unfiltered empty state. A query that matched nothing says
+                something about the query, not about what the machine holds, and offering
+                adoption there would answer a question the user did not ask. */}
+            {!list.query.trim() && <EmptyHistoryAdoptHint />}
+          </div>
         ) : (
           <SelectRows list={list} />
         )}

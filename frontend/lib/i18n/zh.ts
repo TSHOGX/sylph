@@ -539,4 +539,15 @@ export const zh: Dictionary = {
   "session.copyWorkspacePath": "复制工作区路径",
   "session.refreshTranscript": "刷新对话记录",
   "sidebar.browseAllHistory": "浏览全部历史",
+
+  // Adopt discoverability. One contiguous block, matching `messages.ts`: two sides
+  // appending to the same object literal merge with no conflict marker and keep one set.
+  "settings.environments.adopt": "浏览原生会话……",
+  "settings.environments.adoptFrom": "浏览 {name} 上的原生会话",
+  "adopt.onMachine": "位于 {name}",
+  // Offers rather than asserts, for the reason recorded on the English key: this surface
+  // cannot check whether *this* directory has un-imported sessions, so it states the fact
+  // it does know — that sessions started outside Sylph need importing first.
+  "history.adoptHint": "在 Sylph 之外启动的会话，导入后才会出现在这里。",
+  "history.adoptAction": "查找这台机器上的会话",
 };

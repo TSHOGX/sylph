@@ -210,11 +210,24 @@ function GeneralSection() {
  *
  * There is also no third state between available and absent. `PATH` plus a version cannot
  * half-succeed the way a directory scan can, so nothing here reports a broken agent.
+ *
+ * # Why each connected machine offers "Browse native sessions"
+ *
+ * This section states two facts — this machine is reachable, and these agents are on its
+ * `PATH` — and their obvious consequence is that the machine already holds sessions those
+ * agents wrote. Nothing here led anywhere near them: the adopt picker existed, fully
+ * built, reachable *only* by knowing to press the palette shortcut and search "adopt". A
+ * feature reachable only by users who already know it exists is one nobody finds.
+ *
+ * A row is the right place for it because a row **is** a machine, so the click carries the
+ * scope for free. The alternative — one button for the section, opening a picker that then
+ * asks which machine — re-asks a question the user already answered by clicking.
  */
 function EnvironmentsSection() {
   const { settings, update } = useSettings();
   const t = useT();
   const environments = useEnvironments();
+  const { adoptFrom } = useWorkspaceUI();
 
   /**
    * Agents to offer as a *preference*, across every reachable machine.
@@ -293,6 +306,52 @@ function EnvironmentsSection() {
                         )
                         .join(" · ")}
                 </p>
+
+                {/*
+                  The way in to this machine's own sessions, and the gate on it is the
+                  point rather than a precaution.
+
+                  **Offered only while the machine is connected, because enumeration is
+                  answered by that machine.** `GET /sessions/enumerate` refuses a
+                  disconnected environment with `503 ENVIRONMENT_UNREACHABLE` before it
+                  reads any store — `require_environment` checks reachability first — so a
+                  button on an offline row could do nothing but produce an error. That is
+                  strictly worse than no button: it teaches the user the feature is broken
+                  rather than that the machine is away, which the row already says two
+                  lines above.
+
+                  Withheld rather than `disabled`, deliberately, and this is the one
+                  judgement here worth disagreeing with. A disabled control is announced
+                  and needs its own explanation of why it cannot be pressed — which would
+                  be a second rendering of "offline", the fact the status word beside the
+                  name already carries. One fact with two renderings diverges the moment
+                  either grows a case (AGENTS.md), and the status word is the one that
+                  belongs to the machine rather than to this action. The affordance
+                  reappears on its own when the envagent redials, since `useEnvironments`
+                  polls.
+
+                  An agent-less machine still gets it: which agents have a *native store*
+                  is not what `agents` reports, and `enumerate` answers a machine with
+                  none by naming what is readable — a better answer than a control this UI
+                  withheld on a guess.
+                */}
+                {environment.connected && (
+                  <button
+                    type="button"
+                    onClick={() => adoptFrom(environment.id)}
+                    // Names the machine, not just the verb. Every connected row renders
+                    // this button, so the bare label would put several identically-named
+                    // controls on one panel — the collision that once failed 40 specs at
+                    // once, and which leaves a screen reader user unable to tell which
+                    // machine they are about to browse.
+                    aria-label={t("settings.environments.adoptFrom", {
+                      name: environment.name,
+                    })}
+                    className="mt-1.5 rounded border border-line-strong px-2 py-0.5 text-2xs font-medium hover:bg-sunken focus-ring"
+                  >
+                    {t("settings.environments.adopt")}
+                  </button>
+                )}
               </li>
             ))}
           </ul>
