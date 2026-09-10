@@ -16,6 +16,20 @@
 //! CLI is behaving exactly as asked, the transcript records a real refusal, and nothing in
 //! the chain between the two says the environment was the cause.
 //!
+//! # One cause with two symptoms, so the endpoint is part of the same judgement
+//!
+//! The same inherited environment also carries [`BASE_URL`], pointing at whatever endpoint
+//! that host talks to. Removing only the two switches restores the keychain token and
+//! leaves it aimed there — and a relay issues its own tokens, so it rejects that one. The
+//! session then fails with `401 Invalid token` instead of `Not logged in`: a *different*
+//! symptom of one cause, which reads as a regression in the repair rather than as progress.
+//!
+//! So the broken state is the whole conjunction, and neutralizing it means all three
+//! variables. What this must not become is a filter on [`BASE_URL`]: measured, a redirected
+//! endpoint *with* a credential is a working relay deployment, and a redirected endpoint
+//! with no switch at all is an operator's own gateway. Only the conjunction is knowably
+//! broken.
+//!
 //! # Why the pointer's *name* is not a credential source
 //!
 //! `CLAUDE_CODE_HOST_AUTH_ENV_VAR` reads as "the token is in the variable I name", so the
@@ -38,8 +52,22 @@ pub const HOST_AUTH_POINTER: &str = "CLAUDE_CODE_HOST_AUTH_ENV_VAR";
 /// truthy.
 pub const PROVIDER_MANAGED_BY_HOST: &str = "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST";
 
-/// The two switches that disable keychain oauth, and the only values this module removes.
+/// The two switches that disable keychain oauth.
 pub const KEYCHAIN_SWITCHES: &[&str] = &[HOST_AUTH_POINTER, PROVIDER_MANAGED_BY_HOST];
+
+/// Redirects the API endpoint away from Anthropic's own.
+///
+/// **Not a switch and not a credential**, so it never makes an environment broken by
+/// itself; it decides whether removing the switches is *enough*. *Measured on 2.1.267 with
+/// both switches and no credential:* removing the switches alone leaves `-p` failing with
+/// `401 Invalid token`, and removing this as well makes the same command exit 0.
+///
+/// The provider-specific endpoint variables (`ANTHROPIC_VERTEX_BASE_URL`,
+/// `ANTHROPIC_BEDROCK_BASE_URL`, and the rest) are deliberately absent. Each is read only
+/// by the third-party provider that names it, and selecting such a provider is already
+/// [`HostAuth::Managed`] — so an environment where one of them could matter is one this
+/// module leaves untouched anyway.
+pub const BASE_URL: &str = "ANTHROPIC_BASE_URL";
 
 /// Credential variables the CLI reads directly.
 ///
@@ -95,6 +123,14 @@ pub enum HostAuth {
     Broken {
         /// The switches to remove, in the order they are named in [`KEYCHAIN_SWITCHES`].
         switches: Vec<String>,
+        /// [`BASE_URL`], when it is set and so must be removed too.
+        ///
+        /// Held apart from `switches` rather than appended to one list, because the two are
+        /// broken for different reasons and the report has to say which: the switches
+        /// disable the login, this redirects where the restored login is sent. A single
+        /// list would force one sentence to cover both, and the 401 case is precisely the
+        /// one a reader arrives at needing to know the endpoint moved.
+        endpoint: Option<String>,
     },
 }
 
@@ -145,7 +181,15 @@ pub fn classify(lookup: impl Fn(&str) -> Option<String>) -> HostAuth {
         };
     }
 
-    HostAuth::Broken { switches }
+    // Reached only past every `Managed` arm, which is the whole reason the endpoint may be
+    // judged at all. On this path the keychain is disabled, no credential answers for it,
+    // and no provider is selected — so a redirected endpoint cannot be an operator's
+    // working relay, and removing the switches without it would only change which error
+    // the session fails with.
+    HostAuth::Broken {
+        switches,
+        endpoint: Some(BASE_URL.to_string()).filter(|name| present(name)),
+    }
 }
 
 /// Whether the CLI reads this value as on.
@@ -198,6 +242,18 @@ static REPORTED: AtomicBool = AtomicBool::new(false);
 /// read as a credential at all (this module's header), so it would have been a check that
 /// cannot fail.
 ///
+/// **Rejected: removing [`BASE_URL`] whenever it is set.** It is the one variable here that
+/// is *ordinarily* legitimate — a relay or gateway deployment is configured with it — so a
+/// blanket removal would silently route an operator's traffic back to Anthropic's endpoint,
+/// which is the failure mode this module exists to avoid rather than a smaller version of
+/// it. It is removed only on the [`HostAuth::Broken`] path, where every credential and
+/// provider check has already found nothing.
+///
+/// **Rejected: treating [`BASE_URL`] as a switch of its own.** A redirected endpoint with no
+/// keychain switch is an operator pointing the CLI somewhere on purpose, and the CLI's own
+/// login works fine against a relay that accepts it. Classifying it as a fault would report
+/// one where the measurement shows none, which is the `=0` mistake in another spelling.
+///
 /// The strip is never silent: it is reported at `error` with the variables it removed.
 pub fn sanitize_inherited_env() -> Vec<String> {
     sanitize(&classify(|name| std::env::var(name).ok()))
@@ -216,17 +272,32 @@ fn sanitize(auth: &HostAuth) -> Vec<String> {
             ));
             Vec::new()
         }
-        HostAuth::Broken { switches } => {
+        HostAuth::Broken { switches, endpoint } => {
+            // One report covering both halves, per the degraded-dependency rule: this is one
+            // fact about the run. The endpoint clause is separate prose because it fails for
+            // its own reason, and naming only the switches would leave the 401 unexplained.
+            let endpoint_clause = match endpoint {
+                Some(name) => format!(
+                    " Also removing {name}, which redirects the API endpoint: with the \
+                     switches gone the CLI's own keychain login is restored, and sending it \
+                     to that endpoint fails with \"401 Invalid token\" instead."
+                ),
+                None => String::new(),
+            };
             report(format!(
                 "Removing {} from `claude` spawns: they disable the CLI's keychain login \
                  while no host credential is present, so every session would answer \
-                 \"Not logged in\". This is what an envagent started from inside another \
-                 agent session inherits; restart it from a clean terminal to stop \
-                 inheriting it (`docs/agents.md` § A host-managed auth switch inherited \
-                 from another agent session).",
+                 \"Not logged in\".{endpoint_clause} This is what an envagent started from \
+                 inside another agent session inherits; restart it from a clean terminal to \
+                 stop inheriting it (`docs/agents.md` § A host-managed auth switch \
+                 inherited from another agent session).",
                 switches.join(" and ")
             ));
-            switches.clone()
+            switches
+                .iter()
+                .cloned()
+                .chain(endpoint.clone())
+                .collect::<Vec<_>>()
         }
     }
 }
@@ -287,7 +358,8 @@ mod tests {
             assert_eq!(
                 auth,
                 HostAuth::Broken {
-                    switches: vec![switch.to_string()]
+                    switches: vec![switch.to_string()],
+                    endpoint: None,
                 },
                 "{switch} alone disables the keychain with nothing to answer for it"
             );
@@ -376,7 +448,8 @@ mod tests {
             assert_eq!(
                 classify(table(&[(PROVIDER_MANAGED_BY_HOST, on)])),
                 HostAuth::Broken {
-                    switches: vec![PROVIDER_MANAGED_BY_HOST.to_string()]
+                    switches: vec![PROVIDER_MANAGED_BY_HOST.to_string()],
+                    endpoint: None,
                 },
                 "{on} disables the keychain and must be recognized"
             );
@@ -398,9 +471,123 @@ mod tests {
         assert_eq!(
             auth,
             HostAuth::Broken {
-                switches: vec![HOST_AUTH_POINTER.to_string()]
+                switches: vec![HOST_AUTH_POINTER.to_string()],
+                endpoint: None,
             },
             "the pointer's own name is inert; only the credentials the CLI reads count"
         );
+    }
+
+    /// **A broken switch plus a redirected endpoint strips the endpoint too.**
+    ///
+    /// The measured incident on this machine, and the case that escapes a switches-only
+    /// repair: removing the switches restores the keychain token, which the relay named by
+    /// `ANTHROPIC_BASE_URL` then rejects with `401 Invalid token` (`docs/agents.md` § A
+    /// host-managed auth switch inherited from another agent session).
+    #[test]
+    fn a_redirected_endpoint_is_stripped_alongside_a_broken_switch() {
+        let auth = classify(table(&[
+            (HOST_AUTH_POINTER, "ANTHROPIC_AUTH_TOKEN"),
+            (PROVIDER_MANAGED_BY_HOST, "1"),
+            (BASE_URL, "https://relay.example/v1"),
+        ]));
+        assert_eq!(
+            auth,
+            HostAuth::Broken {
+                switches: vec![
+                    HOST_AUTH_POINTER.to_string(),
+                    PROVIDER_MANAGED_BY_HOST.to_string(),
+                ],
+                endpoint: Some(BASE_URL.to_string()),
+            },
+            "a redirected endpoint is part of the broken state, not incidental to it"
+        );
+        assert_eq!(
+            sanitize(&auth),
+            vec![
+                HOST_AUTH_POINTER.to_string(),
+                PROVIDER_MANAGED_BY_HOST.to_string(),
+                BASE_URL.to_string(),
+            ],
+            "all three must leave the spawn, or the session fails with a 401 instead"
+        );
+    }
+
+    /// **A redirected endpoint with a credential is an operator's relay, left intact.**
+    ///
+    /// The expensive direction: stripping here reroutes an operator's traffic to Anthropic's
+    /// own endpoint, and it would *succeed* there against the wrong credential rather than
+    /// fail visibly.
+    #[test]
+    fn a_managed_relay_keeps_its_endpoint_and_its_credential() {
+        for (name, value) in [
+            ("ANTHROPIC_AUTH_TOKEN", "sk-host-token"),
+            ("ANTHROPIC_API_KEY", "sk-ant-key"),
+        ] {
+            let auth = classify(table(&[
+                (HOST_AUTH_POINTER, "ANTHROPIC_AUTH_TOKEN"),
+                (PROVIDER_MANAGED_BY_HOST, "1"),
+                (BASE_URL, "https://relay.example/v1"),
+                (name, value),
+            ]));
+            assert_eq!(
+                auth,
+                HostAuth::Managed {
+                    because: format!("{name} carries a credential"),
+                },
+                "{name} beside a redirected endpoint is a working relay deployment"
+            );
+            assert!(
+                sanitize(&auth).is_empty(),
+                "{BASE_URL} must survive: rerouting a relay's traffic is the worse failure"
+            );
+        }
+    }
+
+    /// **A redirected endpoint with no switch at all is not a fault.**
+    ///
+    /// The CLI's own keychain login works against a relay that accepts it, so classifying a
+    /// bare `ANTHROPIC_BASE_URL` as broken would report a fault where there is none — and
+    /// would strip it, which is the silent reroute this module must not perform.
+    #[test]
+    fn a_redirected_endpoint_alone_is_not_a_switch() {
+        let auth = classify(table(&[(BASE_URL, "https://relay.example/v1")]));
+        assert_eq!(
+            auth,
+            HostAuth::Untouched,
+            "an endpoint without a keychain switch is an operator's own configuration"
+        );
+        assert!(
+            sanitize(&auth).is_empty(),
+            "{BASE_URL} is never removed on its own"
+        );
+    }
+
+    /// **A third-party provider keeps its endpoint, even with no Anthropic credential.**
+    ///
+    /// The provider answers for the switches, so this is `Managed` and nothing is touched.
+    /// Pinned separately from the credential case because it reaches `Managed` through a
+    /// different check, and a repair that ordered the endpoint test before the provider test
+    /// would strip a working Bedrock or Vertex deployment.
+    #[test]
+    fn a_third_party_provider_keeps_its_endpoint() {
+        for provider in THIRD_PARTY_PROVIDERS {
+            let auth = classify(table(&[
+                (PROVIDER_MANAGED_BY_HOST, "1"),
+                (provider, "1"),
+                (BASE_URL, "https://gateway.example/v1"),
+            ]));
+            assert_eq!(
+                auth,
+                HostAuth::Managed {
+                    because: format!("{provider} selects a third-party provider"),
+                },
+                "{provider} answers for the switch, so the endpoint is not judged"
+            );
+            assert!(
+                sanitize(&auth).is_empty(),
+                "{provider} deployments must keep {BASE_URL}"
+            );
+        }
     }
 }

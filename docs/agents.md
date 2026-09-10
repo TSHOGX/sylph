@@ -181,6 +181,14 @@ decide whether a session can authenticate at all.** This is a distinct failure f
 misreading a payload: nothing is parsed wrong. The CLI does exactly what the environment
 told it, and the transcript records a real refusal.
 
+**One environmental cause, two observable symptoms.** Which one a session shows depends on
+how much of the inherited configuration is still in place: `Not logged in · Please run
+/login` while the keychain switches remain, and `Failed to authenticate. API Error: 401
+Invalid token` once they are gone but the endpoint is still redirected. A reader who
+arrived here from a 401 is in the right place;
+`docs/development.md` § A session fails its first turn with an authentication error is the
+diagnostic path.
+
 Two `claude` variables disable the CLI's own keychain login and declare that the **host**
 supplies the credential instead. *Measured on 2.1.267:*
 
@@ -200,11 +208,35 @@ and it is broken in the expensive way: the session starts, accepts a turn, and a
 terminal reports `loggedIn: true`. Nothing between the two says the environment was the
 cause.
 
+**A third variable decides whether removing the switches is enough.**
+`ANTHROPIC_BASE_URL` redirects the API endpoint, and it is set by exactly the same
+inherited environment. Removing the switches restores the keychain token, which is then
+sent to whatever host the relay names — and a relay issued its own tokens, so it rejects
+that one. *Measured on 2.1.267, running `claude -p "say ok"` inside that environment:*
+
+| Inherited environment | Result |
+| --- | --- |
+| both switches, no credential, `ANTHROPIC_BASE_URL` set | exit 1, `Not logged in · Please run /login` |
+| switches removed, `ANTHROPIC_BASE_URL` set | exit 1, `Failed to authenticate. API Error: 401 Invalid token` |
+| switches removed, `ANTHROPIC_BASE_URL` also removed | exit 0 |
+
+The messaging pair `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` is
+inherited too and was ruled out by removing it and re-measuring: the 401 is unchanged, so
+the endpoint is the single remaining cause.
+
+**The endpoint is only knowably wrong in combination, so it is judged and never filtered.**
+A redirected endpoint *with* a credential is the working relay deployment above, and a
+redirected endpoint with **no switch at all** is an operator pointing the CLI at a gateway
+of their own — neither is Sylph's business. What is unambiguous is the conjunction the
+inherited environment produces: the keychain disabled, no credential to replace it, and the
+endpoint moved. That combination serves no configuration, which is the same standard the
+switches themselves are held to.
+
 **An envagent started from inside another coding-agent session is how this arrives.** That
 session exports its own `CLAUDE_CODE_*` variables, the envagent inherits them, and every
 vendor process it spawns inherits them again.
 
-Three measurements decide what the code may assume, and each rules out a repair that would
+Four measurements decide what the code may assume, and each rules out a repair that would
 otherwise look obvious:
 
 - **The pointer's value is not read as a credential.** Pointing it at `MY_HOST_TOKEN` *and*
@@ -221,6 +253,10 @@ otherwise look obvious:
   leave it working. Reading presence would report a fault on `=0`, which is an operator
   turning the switch *off* — a diagnostic that cries wolf is how a real warning stops being
   read.
+- **Removing the switches alone does not restore a session.** It restores the keychain
+  token and leaves it aimed at the relay, turning a refusal into a 401. So the broken state
+  is the whole conjunction, and a repair that addresses part of it produces a *different*
+  failure rather than a working session — which reads as a regression in the fix.
 
 `crates/adapters/src/claude/hostauth.rs` owns the classification and the report, and
 `AGENTS.md` § Rules That Keep Costing Time governs the reporting shape: this is one fact
