@@ -416,10 +416,14 @@ function TopBar() {
  * A one-line wrapper for the same reason `NewSessionPicker` is one: the shell owns
  * dismissal, and the picker owns everything else. It navigates on its own, because where
  * an adopted session lands is a property of the session rather than of the shell.
+ *
+ * `adoptEnvironment` is threaded through rather than read by the picker itself, because the
+ * shell is what mounts it and Settings — the surface that sets the scope — is a sibling
+ * overlay that is already gone by the time this renders.
  */
 function AdoptPickerSurface() {
-  const { closeOverlay } = useWorkspaceUI();
-  return <AdoptPicker onClose={closeOverlay} />;
+  const { closeOverlay, adoptEnvironment } = useWorkspaceUI();
+  return <AdoptPicker onClose={closeOverlay} environment={adoptEnvironment} />;
 }
 
 function NewSessionPicker() {

@@ -147,6 +147,21 @@ interface WorkspaceUIValue {
   setActiveWorkdir: (workdir: string | null) => void;
   /** Open the history browser, optionally scoped to a specific directory. */
   browseHistory: (workdir?: string) => void;
+  /**
+   * Machine the adopt picker should enumerate, or `null` for "let it choose".
+   *
+   * Held here rather than passed as a prop because two surfaces open that picker and
+   * neither renders it: the shell does. Same shape and same reason as `activeWorkdir`
+   * above.
+   */
+  adoptEnvironment: string | null;
+  /**
+   * Open the adopt picker, optionally scoped to one machine.
+   *
+   * The argument is an environment **id**, never a name: a name is mutable metadata and
+   * two machines may share one (`docs/architecture.md` § Identity).
+   */
+  adoptFrom: (environmentId?: string) => void;
   /** Run a shortcut action, for the command palette to reuse the same paths. */
   runAction: (action: ShortcutAction) => void;
   /**
@@ -187,6 +202,7 @@ export function WorkspaceUIProvider({
   const [artifactView, setArtifactView] = useState<ArtifactView>("tree");
   const [artifactFullscreen, setArtifactFullscreen] = useState(false);
   const [activeWorkdir, setActiveWorkdir] = useState<string | null>(null);
+  const [adoptEnvironment, setAdoptEnvironment] = useState<string | null>(null);
   const sessionHandlerRef = useRef<SessionActionHandler | null>(null);
 
   const isMobile = useIsMobile();
@@ -235,6 +251,27 @@ export function WorkspaceUIProvider({
     // Called directly from the sidebar as well as through `runAction`, so the
     // one-modal-at-a-time invariant has to be enforced here too — otherwise the
     // history overlay opens behind an already-open full-screen viewer.
+    setArtifactFullscreen(false);
+  }, []);
+
+  /**
+   * Open the adopt picker, scoped to one machine or to the picker's own default.
+   *
+   * **The scope is written on every call, including the unscoped one**, which is the
+   * one line here that is not symmetric with `browseHistory` above. That one keeps a
+   * previous `activeWorkdir` when called bare, and is right to: the history browser's
+   * scope is a place the user is working, and reopening it where they left off is the
+   * useful behaviour. An adopt scope is the opposite — it is an argument belonging to
+   * the click that supplied it, so `null` has to *clear* rather than mean "keep". Left
+   * conditional, opening the picker from Settings for one machine and later reaching it
+   * from the palette would silently re-scope the palette to that machine, and nothing
+   * on screen would say which machine was being listed.
+   */
+  const adoptFrom = useCallback((environmentId?: string) => {
+    setAdoptEnvironment(environmentId ?? null);
+    setOverlay("adopt");
+    // Same reason as `browseHistory`: reached directly from Settings as well as through
+    // `runAction`, and an overlay opening behind a full-screen viewer is unreachable.
     setArtifactFullscreen(false);
   }, []);
 
@@ -350,7 +387,11 @@ export function WorkspaceUIProvider({
           setOverlay("newSession");
           return;
         case "adoptSession":
-          setOverlay("adopt");
+          // Through `adoptFrom` with no argument rather than `setOverlay` directly, so
+          // the keyboard and palette route *clears* any scope a Settings click left
+          // behind. Setting the overlay alone would inherit it, and the palette would
+          // then list one machine with nothing saying so.
+          adoptFrom();
           return;
         default:
           setOverlay("none");
@@ -372,7 +413,7 @@ export function WorkspaceUIProvider({
           sessionHandlerRef.current?.(action);
       }
     },
-    [onQuickStart, toggleLeft, toggleRight],
+    [onQuickStart, toggleLeft, toggleRight, adoptFrom],
   );
 
   // One document-level listener for every shortcut. Per-component listeners
@@ -434,6 +475,8 @@ export function WorkspaceUIProvider({
       activeWorkdir,
       setActiveWorkdir,
       browseHistory,
+      adoptEnvironment,
+      adoptFrom,
       runAction,
       createSessionIn: onCreateSessionIn,
     }),
@@ -459,6 +502,8 @@ export function WorkspaceUIProvider({
       registerSessionActions,
       activeWorkdir,
       browseHistory,
+      adoptEnvironment,
+      adoptFrom,
       runAction,
       onCreateSessionIn,
     ],

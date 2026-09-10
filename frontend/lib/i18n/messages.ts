@@ -762,6 +762,35 @@ export const en = {
   "session.copyWorkspacePath": "Copy workspace path",
   "session.refreshTranscript": "Refresh transcript",
   "sidebar.browseAllHistory": "Browse all history",
+
+  // Discoverability for adopt: the two surfaces that lead to the picker, plus the label
+  // that says which machine a scoped picker is listing.
+  //
+  // Added as one contiguous block on purpose. Two branches appending to the same object
+  // literal merge with no conflict marker and keep one set (AGENTS.md § Toolchain), and a
+  // silently dropped half of this block would fail as a missing-key test rather than as
+  // anything pointing here.
+  //
+  // Named for the machine rather than the endpoint: `enumerate` is our word for it, while
+  // "sessions on this machine" is what the user is looking for.
+  "settings.environments.adopt": "Browse native sessions...",
+  // Names the machine, because every connected row renders this button and the bare label
+  // would put several identically-named controls on one panel.
+  "settings.environments.adoptFrom": "Browse native sessions on {name}",
+  // Which machine the picker is listing. Rendered only on a multi-machine install, where
+  // it is the only thing distinguishing one scoped picker from another.
+  "adopt.onMachine": "on {name}",
+  // The empty-state hint, and its wording is load-bearing.
+  //
+  // It **offers** rather than asserting: `GET /sessions` returns only what Sylph adopted,
+  // so `[]` for a directory whose history is still in the vendor's own store is correct
+  // and misleading at once. Saying "this directory has un-imported sessions" would be a
+  // claim this surface cannot check — a workspace row carries no environment, and
+  // enumerating costs seconds per agent. So it says adoption exists and is worth trying,
+  // which is true unconditionally, and the picker answers the count for real.
+  "history.adoptHint":
+    "Sessions started outside Sylph are not listed until they are imported.",
+  "history.adoptAction": "Look for sessions on this machine",
 } as const;
 
 /** Every key in the catalogue. Derived from English, which is the source. */
