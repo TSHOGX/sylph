@@ -380,16 +380,25 @@ function EnvironmentsSection() {
         ) : (
           <ul className="space-y-1.5">
             {offered.map((agent) => {
-              // Spawn-time choices, from what the agent declares about itself. An agent
-              // that declares no `model` flag correctly offers none rather than a
-              // guessed list — `codex` is that case, measured.
-              const choices = agent.flags?.model?.choices ?? [];
+              // Spawn-time choices, from what the agent declares about itself.
+              //
+              // An **absent** `model` key and a **present key with an empty list** are
+              // different facts and must read differently. `claude`, `codex`, and `pi` all
+              // declare the key with `choices: []` — measured, every real adapter does —
+              // because the real catalogue is account-dependent and only knowable once a
+              // session is live (`AGENTS.md` § A defect that produces a plausible value).
+              // Rendering both as "declares no model flag" told the user something false
+              // about the two agents that actually do declare it.
+              const modelFlag = agent.flags?.model;
+              const choices = modelFlag?.choices ?? [];
               return (
                 <li key={agent.name} className="flex items-center gap-2">
                   <span className="w-24 shrink-0 truncate text-xs font-medium">{agent.name}</span>
                   {choices.length === 0 ? (
                     <span className="text-2xs text-ink-muted">
-                      {t("settings.agents.models.noFlag")}
+                      {modelFlag
+                        ? t("settings.agents.models.noChoices")
+                        : t("settings.agents.models.noFlag")}
                     </span>
                   ) : (
                     <ModelDefaultPicker

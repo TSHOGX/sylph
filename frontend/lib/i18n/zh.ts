@@ -428,6 +428,7 @@ export const zh: Dictionary = {
   "settings.agents.models.hint": "新建会话时作为 `model` 参数传入。",
   "settings.agents.models.none": "所有已连接的机器上都没有可用 agent，因此没有可设置模型的对象。",
   "settings.agents.models.noFlag": "未声明 model 参数",
+  "settings.agents.models.noChoices": "需在会话中选择，取决于账号",
   "settings.agents.models.runnerDefault": "Agent 默认值",
   "settings.agents.models.forAgent": "{agent} 的模型",
 

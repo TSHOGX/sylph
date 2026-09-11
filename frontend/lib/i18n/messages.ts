@@ -623,6 +623,11 @@ export const en = {
   "settings.agents.models.none":
     "No agents are available on any connected machine, so there is nothing to set a model for.",
   "settings.agents.models.noFlag": "declares no model flag",
+  // The other empty case: the agent declares the `model` flag but its choices
+  // are account-dependent and unknowable until a session is live (`claude`,
+  // `codex`, and `pi` all do this — measured). Distinct from `noFlag`, which
+  // is a real absence; this is "ask the session", not "nothing to set".
+  "settings.agents.models.noChoices": "model depends on the account; pick it in a session",
   "settings.agents.models.runnerDefault": "Agent default",
   // Names one agent's model control. Distinct from the section label, which names
   // the whole list: the control and its container must not share a name.
