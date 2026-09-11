@@ -1036,6 +1036,83 @@ impl EnvAgent {
             .await
     }
 
+    /// One bare parse of a native session, answered inline.
+    ///
+    /// Hosts nothing: no source registration, no pump, no workdir entry. The server owns
+    /// deduplication against its own journal, so this reads the store and hands the whole
+    /// pass back (`docs/environments.md` § Re-reading a session Sylph already holds).
+    ///
+    /// # Path policy still applies, and the reason is not obvious
+    ///
+    /// Nothing is spawned here, so there is no `current_dir` to bound — yet the recorded
+    /// workdir is still contained before the parse. An adapter reading a native session
+    /// also reads that session's *worktree*, for sidecar bodies the transcript points at,
+    /// and a store holds every session any agent ever ran on this machine. Skipping the
+    /// check because this command starts no process would make it a way to read files
+    /// outside the configured roots by naming a session that ran there.
+    pub async fn reread(
+        &self,
+        agent: &str,
+        native_id: NativeId,
+    ) -> Result<sylph_protocol::RereadPass> {
+        let adapter = sylph_adapters::for_agent(agent)
+            .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
+        let summary = adapter
+            .enumerate(&sylph_protocol::StoreFilter {
+                limit: None,
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            .find(|summary| summary.native_id == native_id)
+            .ok_or_else(|| anyhow!("native session '{}' was not found", native_id))?;
+        let recorded_workdir = summary
+            .workdir
+            .as_deref()
+            .ok_or_else(|| anyhow!("native session '{}' has no recorded workdir", native_id))?;
+        self.config
+            .path_policy
+            .contain(recorded_workdir)
+            .map_err(|error| anyhow!(error))?;
+
+        let mut stream = adapter.adopt(&native_id).await?;
+        let mut pass = sylph_protocol::RereadPass::default();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(sylph_protocol::SessionMessage::Event(event)) => pass.events.push(event),
+                Ok(sylph_protocol::SessionMessage::NativeRecord(record)) => {
+                    // Kept, never dropped. A vendor's whole record is what makes a schema
+                    // break cheap, and `AGENTS.md` § Compatibility forbids ingesting
+                    // lossily — the server dedups these on `(session, source, version)`.
+                    pass.records.push(record)
+                }
+                // A request read from a store was answered months ago, and a capability
+                // surface describes a link this session does not have. Both are counted
+                // rather than silently dropped, so a parser that starts emitting one is
+                // visible here instead of invisible. The server's own drain draws the same
+                // two distinctions for the same reasons.
+                Ok(_) => pass.skipped += 1,
+                Err(error) => {
+                    pass.read_errors += 1;
+                    if pass.read_errors == 1 {
+                        warn!("could not read part of native session {native_id}: {error:#}");
+                    } else {
+                        debug!(
+                            "further read error on {native_id} (#{}): {error:#}",
+                            pass.read_errors
+                        );
+                    }
+                }
+            }
+        }
+        Ok(pass)
+    }
+
+    async fn reread_command(&self, agent: &str, native_id: NativeId) -> Result<serde_json::Value> {
+        let pass = self.reread(agent, native_id).await?;
+        Ok(serde_json::to_value(&pass)?)
+    }
+
     async fn start_native_source(
         &self,
         agent: &str,
@@ -1540,6 +1617,30 @@ impl EnvAgent {
                         "AGENT_UNKNOWN"
                     }
                     .into(),
+                    message: format!("{error:#}"),
+                },
+            },
+            // Parse the store again and answer with what it holds, inline.
+            //
+            // **No native source is registered and no pump is spawned**, which is what
+            // separates this from `Adopt`. A re-read targets a session the server already
+            // holds, so a source registration would either collide with a live watcher's
+            // entry or replace it — and a pump would spool these events a second time,
+            // through a path that has no content dedup, duplicating exactly the transcript
+            // this operation exists to extend.
+            //
+            // The result carries the events rather than spooling them because suppression
+            // is the server's: only the server knows what its journal already holds. Bulk
+            // in a command result is the established shape here — `Enumerate` answers with
+            // every native summary a machine holds the same way.
+            EnvironmentCommand::Reread {
+                agent,
+                native_id,
+                session_id: _,
+            } => match self.reread_command(&agent, native_id).await {
+                Ok(result) => sylph_protocol::CommandOutcome::accepted_with_result(result),
+                Err(error) => sylph_protocol::CommandOutcome::Rejected {
+                    code: "REREAD_FAILED".into(),
                     message: format!("{error:#}"),
                 },
             },

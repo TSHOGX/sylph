@@ -336,6 +336,7 @@ fn command_name(command: &EnvironmentCommand) -> &'static str {
         EnvironmentCommand::Resolve { .. } => "resolve",
         EnvironmentCommand::Watch { .. } => "watch",
         EnvironmentCommand::Adopt { .. } => "adopt",
+        EnvironmentCommand::Reread { .. } => "reread",
         EnvironmentCommand::Files { .. } => "files",
         EnvironmentCommand::DraftCapabilities { .. } => "draft_capabilities",
         EnvironmentCommand::DraftSetConfig { .. } => "draft_set_config",

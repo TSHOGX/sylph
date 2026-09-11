@@ -334,6 +334,45 @@ pub struct NativeBlob {
     pub error: Option<String>,
 }
 
+/// One re-read pass over a native store, as an envagent answers it.
+///
+/// This is a *command result*, not a stream: an envagent parses the store and hands the
+/// whole pass back, because only the server knows which of these its journal already holds
+/// (`docs/environments.md` § Re-reading a session Sylph already holds). Spooling them as a
+/// producer batch instead would put them through a path with no content deduplication,
+/// duplicating the transcript a re-read exists to extend.
+///
+/// One shared type rather than a hand-written `json!` object on each side. `HostedSource`
+/// was two literals of one payload, and that is how `parentRelation` came to be read by the
+/// server and written by nobody — a field added to the struct was added to neither.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RereadPass {
+    /// Every event the pass parsed, in the vendor's own order.
+    ///
+    /// Unsuppressed: the envagent has no way to know what the server holds, so it sends
+    /// what the store says and the server decides what is new.
+    #[serde(default)]
+    pub events: Vec<Event>,
+    /// Complete vendor records the pass parsed, for the raw tier.
+    ///
+    /// Present only for agents whose native parser emits them — of the three, only
+    /// `claude`. Carried rather than dropped because a vendor's native store is read and
+    /// kept whole, including fields Sylph has no use for yet.
+    #[serde(default)]
+    pub records: Vec<NativeRecord>,
+    /// Items the pass could not read. Not fatal: an `Err` from a native stream is a
+    /// truncated or mid-rewrite file rather than a failure of the session, so the pass
+    /// continues past each one and reports the count.
+    #[serde(default)]
+    pub read_errors: usize,
+    /// Messages this operation deliberately does not carry: a request answered long ago,
+    /// or a capability surface describing a link the session does not have. Counted so a
+    /// parser that starts emitting one is visible rather than silent.
+    #[serde(default)]
+    pub skipped: usize,
+}
+
 /// Anything an adapter has to tell the server about a session.
 ///
 /// # Why a stream of messages and not a stream of events

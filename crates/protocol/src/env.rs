@@ -283,6 +283,22 @@ pub enum EnvironmentCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,
     },
+    /// Parse the vendor's store again for a session the server already holds.
+    ///
+    /// Distinct from [`Self::Adopt`] rather than a flag on it, because `Adopt`
+    /// is refused outright once a row exists — which is exactly this case
+    /// (`docs/environments.md` § Re-reading a session Sylph already holds).
+    ///
+    /// The envagent hosts no new source for this: a re-read is a bare parse
+    /// whose messages are answered inline, so it neither registers a native
+    /// source nor spawns a pump. That keeps it from disturbing a live watcher
+    /// on the same session, whose cursor is mid-file while this one starts at
+    /// the beginning.
+    Reread {
+        session_id: SessionId,
+        agent: String,
+        native_id: NativeId,
+    },
     Files {
         session_id: SessionId,
         operation: FileOperation,

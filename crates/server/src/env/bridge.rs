@@ -2379,6 +2379,7 @@ fn command_name(command: &sylph_protocol::EnvironmentCommand) -> &'static str {
         EnvironmentCommand::Resolve { .. } => "resolve",
         EnvironmentCommand::Watch { .. } => "watch",
         EnvironmentCommand::Adopt { .. } => "adopt",
+        EnvironmentCommand::Reread { .. } => "reread",
         EnvironmentCommand::Files { .. } => "files",
         EnvironmentCommand::DraftCapabilities { .. } => "draft-capabilities",
         EnvironmentCommand::DraftSetConfig { .. } => "draft-set-config",
@@ -2435,6 +2436,15 @@ fn command_needs_a_fresh_request_id(command: &sylph_protocol::EnvironmentCommand
         // so a payload-derived id would replay the first close's result and the
         // second close would never reach the envagent.
         EnvironmentCommand::Close { .. } => true,
+        // **The case that looks safest and is not.** A re-read touches a file and
+        // writes no vendor state, so it reads as a question — but its whole point
+        // is to observe a store that has changed since it was last asked, and its
+        // payload is only the session id, identical on every call. A
+        // payload-derived id would make the second click address the first pass's
+        // result and report counts taken before the bytes it was clicked to
+        // collect existed: a "refresh" answering from cache, which is the very
+        // defect the control exists to fix, one layer down.
+        EnvironmentCommand::Reread { .. } => true,
         _ => false,
     }
 }
