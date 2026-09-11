@@ -194,6 +194,17 @@ fn content_digest(event: &StreamEvent) -> String {
     // A JSON array rather than concatenated fields: `("a", "bc")` and `("ab", "c")` have
     // one concatenation and two array encodings, and a delimiter chosen for text is a
     // delimiter that appears in text.
+    // `data` is normalized through the journal's own round trip rather than hashed as
+    // given. `StreamEvent::to_row` writes `None` as the string `"{}"` and
+    // `events::data_from_column` reads `"{}"` back as `None`, so `Some({})` in and `None`
+    // out are the same stored row. Hashing the two differently would make an event carrying
+    // an empty object unsuppressable — new on every pass, one copy per click, while
+    // everything around it deduplicated correctly.
+    let data = event
+        .data
+        .as_ref()
+        .map(|data| data.to_string())
+        .and_then(|column| crate::events::data_from_column(&column));
     let canonical = serde_json::json!([
         event.kind,
         event.phase,
@@ -202,7 +213,7 @@ fn content_digest(event: &StreamEvent) -> String {
         event.interior_state.map(|state| state.to_string()),
         event.name,
         event.text,
-        event.data,
+        data,
         event.is_error,
         event.stability,
         event.recorded_at_ms,
@@ -1115,6 +1126,48 @@ mod tests {
 
         assert_eq!(report, IngestReport::default());
         assert!(store.list_turns(&id, 10).await.expect("turns").is_empty());
+    }
+
+    /// A digest survives the journal round trip, so a re-read recognizes what it wrote.
+    ///
+    /// # The asymmetry this pins
+    ///
+    /// `data` has two derivations that disagree about one value. `StreamEvent::to_row`
+    /// writes `None` as the string `"{}"`, and `data_from_column` reads `"{}"` back as
+    /// `None` — so `Some(json!({}))` goes in and `None` comes out. Digesting the two
+    /// differently would make such an event unsuppressable: every re-read would see it as
+    /// new and add it again, one copy per click, while every other event deduplicated
+    /// correctly and the mechanism looked sound.
+    ///
+    /// Asserted on the digest rather than on ingest counts, because this is a property of
+    /// the identity function and a count would only show it after a fixture happened to
+    /// produce the value. No current adapter emits `Some({})`; the round trip is what has to
+    /// hold, not the set of shapes today's parsers reach.
+    #[test]
+    fn a_digest_is_the_same_before_and_after_the_journal_round_trip() {
+        let session = crate::fixtures::test_session_id("digest-1");
+        let cases = vec![
+            ("absent data", None),
+            ("an empty object", Some(serde_json::json!({}))),
+            ("a populated object", Some(serde_json::json!({"a": 1}))),
+        ];
+
+        for (label, data) in cases {
+            let mut event = Event::new(EventKind::Assistant, Some(Phase::Completed), 1000);
+            event.text = "answer".to_string();
+            event.data = data;
+            event.recorded_at_ms = Some(1000);
+
+            let incoming = StreamEvent::from_protocol(&event);
+            let round_tripped = StreamEvent::from_row(&incoming.to_row(&session, "turn-1"));
+
+            assert_eq!(
+                content_digest(&incoming),
+                content_digest(&round_tripped),
+                "{label} digests differently after a journal round trip, so a re-read \
+                 would re-add it on every pass"
+            );
+        }
     }
 
     /// Sequence numbers are dense and monotonic across a pass, because they back
