@@ -356,6 +356,44 @@ Offering "bring in everything on this machine" once, when an envagent first pair
 right shape for the bulk case. A recurring background sweep would publish sessions the
 user never associated with Sylph.
 
+### Re-reading a session Sylph already holds
+
+A session adopted from a terminal keeps growing in the vendor's store after the one pass
+that brought it in. **Re-read** is that pass again, on demand, for a session that already
+has a row: the adapter parses the native store from the beginning and the server ingests
+only what its journal does not already hold.
+
+It is one pass and nothing else. It does not start a follower, does not change what
+`adopt` does, and does not touch the session's `fidelity` — a record's resolution is a
+property of the source that wrote it, so re-reading the same store cannot raise or lower
+it. `watch` remains the way to follow a session continuously.
+
+**A re-read is bounded by what the journal already holds, not by what the vendor emits.**
+The adapter has no cursor to resume from: `Adapter::adopt` restarts at the beginning of
+the store, so the second pass re-emits every record of the first. Suppression is therefore
+the server's, and it happens at ingest.
+
+**A vendor id is not available to key that suppression, so content identity is.** Only
+`claude` emits native records at all, and neither `codex` nor `pi` carries any per-event
+vendor identifier through the event vocabulary — the raw tier's `(session, source,
+version)` key covers one agent's raw rows and cannot answer for the projected events of
+the other two. So a re-read digests each incoming event over the fields that decide what a
+reader sees, and skips one whose digest a previous pass already journaled for that
+session. The digest is per session and covers both tiers, because a turn's events live in
+whichever tier consolidation last left them.
+
+**Two events may legitimately be identical**, and this is the cost the design accepts
+knowingly: a vendor that wrote the same text twice in one session has a second record that
+is indistinguishable from a replay of the first. Suppressing it loses one repeated line;
+admitting it duplicates the entire transcript on every click. The transcript is the record
+being protected, so the digest wins, and the count of what a pass suppressed is reported
+rather than silent.
+
+**A pass that finds nothing new is a success, and says so.** "Ingested nothing" and "could
+not read the store" are the same shape in a journal and opposite facts, so a re-read
+reports what it examined, what it added, and what it recognized as already held. A
+re-read whose store is gone is a failure with its own status, never a quiet no-op.
+
 ## Health is per environment
 
 `/api/v1/health` reports each environment separately, because "the agent will not start"
