@@ -423,3 +423,260 @@ async fn the_adopted_set_does_not_leak_across_agents() {
         "a `mock` session must not mark the same id adopted for `claude`"
     );
 }
+
+// ------------------------------------------------------------------ re-reading
+//
+// `POST /sessions/{id}/reread` — one pass over a store Sylph already holds a row for.
+//
+// The three properties below are the ones that make the operation worth having, and each
+// fails for a different reason: the pass has to *find* what the vendor appended, it must not
+// re-add what a previous pass already journaled, and asking twice has to be two passes
+// rather than one cached answer. A single test covering all three would go red without
+// saying which promise broke.
+
+/// Percent-encode one path segment. A native id is the vendor's value and may contain `/`.
+fn segment(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Adopt the stored session and return its encoded id.
+async fn adopt_stored(backend: &TestBackend) -> String {
+    let environment = backend.environment_id().await;
+    let native_id = common::MockAgents::stored_native_id();
+    let created = backend
+        .post_authed(
+            "/api/v1/sessions/adopt",
+            json!({"environment": environment, "agent": "mock", "nativeId": native_id}),
+        )
+        .await;
+    assert_eq!(
+        created.status(),
+        StatusCode::CREATED,
+        "{}",
+        common::body_string(created).await
+    );
+    format!("{environment}:mock:{native_id}")
+}
+
+/// Every event a session holds, across both tiers, oldest first.
+async fn transcript(backend: &TestBackend, encoded: &str) -> Vec<String> {
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{}/turns", segment(encoded)))
+            .await,
+    )
+    .await;
+    body["turns"]
+        .as_array()
+        .expect("a turn list")
+        .iter()
+        .flat_map(|turn| {
+            turn["events"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+        })
+        .filter_map(|event| event["text"].as_str().map(str::to_string))
+        .filter(|text| !text.is_empty())
+        .collect()
+}
+
+/// A re-read picks up what the vendor wrote after the adopt pass.
+///
+/// **This is the defect the endpoint exists for.** "Refresh transcript" invalidated a
+/// client-side query cache and nothing else, so a session adopted from a terminal could
+/// never gain a line the vendor appended afterwards — no amount of clicking reached the
+/// store. The assertion is on the *transcript*, not on the response counts, because a count
+/// can be right while nothing was journaled.
+#[tokio::test]
+async fn a_reread_ingests_what_the_vendor_appended_after_the_adopt_pass() {
+    let backend = TestBackend::start().await;
+    let encoded = adopt_stored(&backend).await;
+
+    let before = transcript(&backend, &encoded).await;
+    assert!(
+        !before.iter().any(|text| text == "written after adoption"),
+        "the store has not grown yet: {before:?}"
+    );
+
+    // The vendor writes more into its own transcript.
+    backend.agents.grow_stored_session("written after adoption");
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{}/reread", segment(&encoded)),
+            json!({}),
+        )
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::body_string(response).await
+    );
+
+    let after = transcript(&backend, &encoded).await;
+    assert!(
+        after.iter().any(|text| text == "written after adoption"),
+        "the re-read did not ingest the appended event: {after:?}"
+    );
+}
+
+/// Re-reading twice does not journal the same event twice.
+///
+/// `Adapter::adopt` has no cursor and restarts at the head of the store, so the second pass
+/// re-emits every event the first one saw. Nothing in the raw tier can suppress that for
+/// most agents — only `claude` emits native records at all, and `codex` and `pi` carry no
+/// per-event vendor id — so suppression is content-based and this is what pins it.
+///
+/// Asserted as an exact count of one text rather than a total, so a transcript that grows
+/// for some unrelated reason cannot mask a duplicate of the line under test.
+#[tokio::test]
+async fn re_reading_twice_does_not_duplicate_an_event_already_held() {
+    let backend = TestBackend::start().await;
+    let encoded = adopt_stored(&backend).await;
+    backend.agents.grow_stored_session("appended once");
+
+    for _ in 0..2 {
+        let response = backend
+            .post_authed(
+                &format!("/api/v1/sessions/{}/reread", segment(&encoded)),
+                json!({}),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let texts = transcript(&backend, &encoded).await;
+    let appended = texts.iter().filter(|text| *text == "appended once").count();
+    assert_eq!(appended, 1, "the event was journaled more than once: {texts:?}");
+    let original = texts
+        .iter()
+        .filter(|text| *text == "read from the store")
+        .count();
+    // Two, not one: the fixture's own transcript carries that text on an assistant event
+    // *and* on the vendor's turn close. What matters is that neither was re-added.
+    assert_eq!(
+        original, 2,
+        "the adopted prefix was re-journaled by a later pass: {texts:?}"
+    );
+}
+
+/// Asking twice runs twice, and the second answer describes the second store.
+///
+/// A re-read reads a file and writes no vendor state, so it looks replay-safe — and a
+/// request id hashed from its payload would make it so, since the payload is identical on
+/// every call. The second click would then address the first pass's durable result and
+/// report counts from before the bytes it was clicked to collect existed: a refresh that
+/// returns a cached answer, which is the original defect one layer down.
+///
+/// The window is opened deliberately: the store grows *between* the two calls, so a replayed
+/// second answer is observably wrong rather than merely suspicious.
+#[tokio::test]
+async fn re_reading_after_the_store_grows_again_reports_the_second_pass_not_the_first() {
+    let backend = TestBackend::start().await;
+    let encoded = adopt_stored(&backend).await;
+    let path = format!("/api/v1/sessions/{}/reread", segment(&encoded));
+
+    // A first pass with nothing new. It must succeed and say it added nothing, which is the
+    // "nothing happened" report — not an error, and not silence.
+    let first = json_body(backend.post_authed(&path, json!({})).await).await;
+    assert_eq!(first["reread"]["ingested"], 0, "{first}");
+    assert!(
+        first["reread"]["alreadyHeld"].as_u64().unwrap_or(0) > 0,
+        "a pass over an unchanged store recognizes what it already holds: {first}"
+    );
+
+    // Now the vendor appends, and the same request is made again.
+    backend.agents.grow_stored_session("arrived between passes");
+    let second = json_body(backend.post_authed(&path, json!({})).await).await;
+
+    assert_eq!(
+        second["reread"]["ingested"], 1,
+        "the second call replayed the first call's result instead of running: {second}"
+    );
+}
+
+/// A session Sylph does not hold cannot be re-read, and says so as itself.
+///
+/// Distinct from the store having dropped a session Sylph *does* hold: one is a wrong id and
+/// the other means Sylph's copy is now the only one. Collapsing them sends a reader to the
+/// wrong layer.
+#[tokio::test]
+async fn re_reading_a_session_sylph_does_not_hold_is_a_session_not_found() {
+    let backend = TestBackend::start().await;
+    let environment = backend.environment_id().await;
+
+    let response = backend
+        .post_authed(
+            &format!(
+                "/api/v1/sessions/{}/reread",
+                segment(&format!("{environment}:mock:no-such-session"))
+            ),
+            json!({}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "SESSION_NOT_FOUND"
+    );
+}
+
+/// A row whose native session the vendor has dropped reports the *store's* absence.
+///
+/// The fix differs from every other `404` here: nothing the caller can change brings it
+/// back, and Sylph's transcript is now the only copy of that conversation.
+#[tokio::test]
+async fn re_reading_a_row_whose_native_session_is_gone_reports_the_store_not_the_row() {
+    let backend = TestBackend::start().await;
+    // A row created by Sylph, so it exists — and its native id is not the one the mock's
+    // store enumerates, so the store cannot answer for it.
+    let encoded = backend.create_session("mock").await;
+
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/sessions/{}/reread", segment(&encoded)),
+            json!({}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "NATIVE_SESSION_NOT_FOUND"
+    );
+}
+
+/// A re-read leaves `fidelity` exactly as the adopt pass journaled it.
+///
+/// `fidelity` is a property of the record, so a second pass over the same store cannot raise
+/// or lower it. The failure this pins is a downgrade: a renderer reads the field before
+/// deciding whether it may draw a waterfall, so a partial pass that rewrote `blocks` to
+/// `messages` would silently stop drawing durations the data still supports.
+#[tokio::test]
+async fn a_reread_does_not_change_the_sessions_fidelity() {
+    let backend = TestBackend::start().await;
+    let encoded = adopt_stored(&backend).await;
+    let path = format!("/api/v1/sessions/{}", segment(&encoded));
+
+    let before = json_body(backend.get_authed(&path).await).await;
+    assert_eq!(before["session"]["fidelity"], "blocks", "{before}");
+
+    backend.agents.grow_stored_session("more from the vendor");
+    let response = backend
+        .post_authed(&format!("{path}/reread"), json!({}))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let after = json_body(backend.get_authed(&path).await).await;
+    assert_eq!(after["session"]["fidelity"], "blocks", "{after}");
+}

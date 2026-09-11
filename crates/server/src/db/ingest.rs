@@ -69,7 +69,8 @@
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use tracing::{debug, warn};
+use sha2::{Digest, Sha256};
+use tracing::{debug, info, warn};
 
 use sylph_protocol::{EventStream, SessionId, SessionMessage};
 
@@ -150,6 +151,65 @@ pub struct IngestReport {
     pub opening_status: Option<String>,
     /// The last event timestamp seen, for closing a container honestly.
     pub last_event_ms: Option<i64>,
+    /// Events this pass recognized as already journaled and did not write again.
+    ///
+    /// Zero on an `adopt` or `watch` pass, which suppress nothing: a first pass has
+    /// nothing to have seen before, and a watcher's cursor only moves forward. It is
+    /// non-zero only for a re-read ([`NativeIngest::reread`]), where it is the whole
+    /// point — a pass that examined 412 events and added 37 is reporting that the other
+    /// 375 were already held, which is what distinguishes it from a pass that failed.
+    pub already_held: usize,
+}
+
+/// Content identity for one event, for recognizing a record a previous pass journaled.
+///
+/// # Why content and not a vendor id
+///
+/// There is no vendor id to use. `Adapter::adopt` restarts at the beginning of the store
+/// and exposes no cursor, so a re-read re-emits every event the first pass saw; and of the
+/// three agents only `claude` emits [`SessionMessage::NativeRecord`] at all, so the raw
+/// tier's `(session, source, version)` key cannot answer for `codex` or `pi`, whose native
+/// parsers emit projected events exclusively. Content identity is what is available for all
+/// three (`docs/environments.md` § Re-reading a session Sylph already holds).
+///
+/// # What is hashed, and what is deliberately not
+///
+/// Every field that decides what a reader sees, and nothing that a second pass would
+/// legitimately assign differently. `seq` is excluded because the server allocates it per
+/// write, `arrival_at_ms` because it is this server's clock at ingest, and the turn id
+/// because a container is opened by the pass. Including any of them would make every event
+/// unique and suppress nothing — the failure mode that reads as "dedup is implemented" while
+/// duplicating the transcript.
+///
+/// `recorded_at_ms` *is* included: it is the vendor's own stamp, so it is stable across
+/// passes, and two vendor records that differ only in when they happened are two events.
+///
+/// # The collision this accepts
+///
+/// Two genuinely distinct events with identical content in one session hash the same, so the
+/// second is suppressed. That loses one repeated line; the alternative duplicates the entire
+/// transcript on every re-read. `docs/environments.md` records the trade and why the
+/// transcript wins.
+fn content_digest(event: &StreamEvent) -> String {
+    // A JSON array rather than concatenated fields: `("a", "bc")` and `("ab", "c")` have
+    // one concatenation and two array encodings, and a delimiter chosen for text is a
+    // delimiter that appears in text.
+    let canonical = serde_json::json!([
+        event.kind,
+        event.phase,
+        event.stream_id,
+        event.span,
+        event.interior_state.map(|state| state.to_string()),
+        event.name,
+        event.text,
+        event.data,
+        event.is_error,
+        event.stability,
+        event.recorded_at_ms,
+    ]);
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string().as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// Writes a parsed native session into the journal.
@@ -205,7 +265,97 @@ impl NativeIngest {
     pub async fn drain(
         &self,
         session_id: &SessionId,
+        stream: EventStream,
+    ) -> Result<IngestReport> {
+        self.drain_suppressing(session_id, stream, None).await
+    }
+
+    /// Parse the vendor's store again for a session already held, ingesting only what
+    /// the journal lacks.
+    ///
+    /// One pass, on demand. It starts no follower and does not touch the session's
+    /// `fidelity`, which belongs to the source that wrote the record
+    /// (`docs/api/sessions.md` § `POST /api/v1/sessions/{id}/reread`).
+    ///
+    /// # The suppression set is read once, before the pass
+    ///
+    /// Both tiers are read, because a turn's events live in whichever one consolidation
+    /// last left them — reading only the journal would treat every consolidated event as
+    /// new and duplicate the whole of an older transcript, which is the failure this
+    /// exists to prevent and the one a short-lived test session cannot observe.
+    ///
+    /// It is a snapshot rather than a set updated as the pass writes, and that is
+    /// deliberate: within one pass the vendor's own repeats are its record, and
+    /// re-checking against rows this pass just wrote would suppress them. What a previous
+    /// pass held is the question being asked.
+    pub async fn reread(
+        &self,
+        session_id: &SessionId,
+        stream: EventStream,
+    ) -> Result<IngestReport> {
+        let held = self.held_digests(session_id).await?;
+        let report = self
+            .drain_suppressing(session_id, stream, Some(held))
+            .await?;
+        // A pass that added nothing is a success, and it needs a line: "ingested nothing"
+        // and "could not read the store" are indistinguishable in a journal and are
+        // opposite facts (`AGENTS.md` § A subsystem whose correct behaviour is "nothing
+        // happened" needs a report).
+        info!(
+            "Re-read {}: examined {} event(s), ingested {}, already held {}, {} read error(s)",
+            session_id,
+            report.events + report.already_held,
+            report.events,
+            report.already_held,
+            report.read_errors
+        );
+        Ok(report)
+    }
+
+    /// Content digests of every event this session already holds, across both tiers.
+    async fn held_digests(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut held = std::collections::HashSet::new();
+        // **Ephemeral rows included**, which `turn_events_after` excludes by design. A
+        // `turn`/`started` derives `Ephemeral`, so reading through the reader-facing query
+        // left every one of them out of this set — and a re-read then re-added one per pass,
+        // in the tier a transcript is assembled from. `session_events` is the unfiltered
+        // read, and it is one query for the session rather than one per turn.
+        for row in self.store.session_events(session_id).await? {
+            held.insert(content_digest(&StreamEvent::from_row(&row)));
+        }
+        // The other tier. A turn's events live in whichever one consolidation last left
+        // them, so reading only the journal would treat every consolidated event as new and
+        // duplicate the whole of an older transcript — the failure a short-lived test session
+        // cannot observe, because nothing has been folded yet.
+        //
+        // Every turn, not a page of them: a bound here would silently stop suppressing on
+        // the oldest turns of a long session, which is the history least recoverable
+        // elsewhere.
+        for turn in self.store.list_turns(session_id, i64::MAX).await? {
+            if let Ok(blocks) = self.history.turn_blocks(&turn.id).await {
+                for block in &blocks {
+                    held.insert(content_digest(&crate::api::sessions::block_to_event(block)));
+                }
+            }
+        }
+        Ok(held)
+    }
+
+    /// The body of [`Self::drain`] and [`Self::reread`].
+    ///
+    /// `suppress` is `None` for a first pass, which has nothing to have seen before, and
+    /// `Some` for a re-read. One function rather than two so the container, sequence, and
+    /// settle rules have one derivation: a second copy of them would diverge the moment
+    /// either grew a case, and the tiers would then disagree about the same transcript
+    /// depending only on which entry point wrote it.
+    async fn drain_suppressing(
+        &self,
+        session_id: &SessionId,
         mut stream: EventStream,
+        suppress: Option<std::collections::HashSet<String>>,
     ) -> Result<IngestReport> {
         let mut report = IngestReport::default();
         // The container currently accepting events, with the timestamp of the event that
@@ -307,6 +457,17 @@ impl NativeIngest {
                 let text = wire.text.trim();
                 if !text.is_empty() {
                     report.opening_status = Some(text.to_string());
+                }
+            }
+
+            // An event a previous pass already journaled. Counted and skipped **before a
+            // container is opened or a sequence allocated**, so a re-read that finds
+            // nothing new adds no empty turn and consumes no sequence numbers — an
+            // otherwise-invisible cost that would accumulate one dead turn per click.
+            if let Some(held) = &suppress {
+                if held.contains(&content_digest(&wire)) {
+                    report.already_held += 1;
+                    continue;
                 }
             }
 

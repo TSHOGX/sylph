@@ -1114,3 +1114,218 @@ pub async fn adopt(
         Json(SessionResponse { session: stored }),
     ))
 }
+
+/// What one re-read pass added, as the endpoint reports it.
+///
+/// Four counts rather than a boolean, because the interesting states are not "worked" and
+/// "failed". A pass that examined 412 events and added none is the ordinary answer to
+/// "anything new?", and it must be distinguishable from a pass that could not read the
+/// store at all — which is an error with its own status, never a quiet zero
+/// (`docs/api/sessions.md` § `POST /api/v1/sessions/{id}/reread`).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RereadReport {
+    /// Events the adapter emitted, before suppression.
+    pub examined: usize,
+    /// Events new to the journal, now added.
+    pub ingested: usize,
+    /// Events a previous pass had already journaled.
+    pub already_held: usize,
+    /// Items the adapter could not read. The pass continues past each.
+    pub read_errors: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RereadResponse {
+    pub reread: RereadReport,
+}
+
+/// POST /api/v1/sessions/{id}/reread
+///
+/// Re-parse the vendor's native store for a session Sylph already holds, ingesting
+/// whatever the journal lacks. One pass, on demand.
+///
+/// # This is not adopt, and not watch
+///
+/// `adopt` refuses a session that already has a row — `SESSION_ALREADY_PRESENT` is exactly
+/// this case — and `watch` installs a follower that lives past the response. A re-read
+/// targets a row that exists, runs once, and leaves no follower behind.
+///
+/// # `fidelity` is not touched
+///
+/// A record's resolution belongs to the source that wrote it, so re-reading the same store
+/// cannot raise or lower it. Nothing here writes the column, and that is the assertion:
+/// re-deriving it from a second pass would let a partial read downgrade a session, which a
+/// renderer reads as permission to stop drawing a waterfall it had been drawing.
+pub async fn reread(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<RereadResponse>> {
+    let session_id = decode_id(&id)?;
+    // The row must exist: this operation extends a transcript rather than creating one.
+    // `404` distinguishes "you named nothing" from the *other* `404` below, which is the
+    // vendor having dropped what Sylph still holds.
+    state
+        .store
+        .get_session(&session_id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+
+    // One re-read at a time per session. Two concurrent passes would each read the same
+    // suppression snapshot, so both would find the same tail new and both would write it —
+    // producing the duplicate the snapshot exists to prevent, and only under a double
+    // click.
+    let _guard = state
+        .env_bridge
+        .session_command_lock(&session_id)
+        .await
+        .lock_owned()
+        .await;
+
+    let agent = session_id.agent.to_string();
+
+    if session_id.environment.as_str() != state.environment.descriptor().id {
+        let outcome = state
+            .env_bridge
+            .remote_session_command(
+                &session_id,
+                sylph_protocol::EnvironmentCommand::Reread {
+                    session_id: session_id.clone(),
+                    agent: agent.clone(),
+                    native_id: session_id.native_id.clone(),
+                },
+                // Never `Replayable`. A re-read exists to observe a store that has changed
+                // since it was last asked, so a replayed answer is a stale one presented as
+                // fresh.
+                sylph_protocol::IdempotencyPolicy::AtMostOnce,
+            )
+            .await
+            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+        let value = match outcome {
+            sylph_protocol::CommandOutcome::Accepted { result } => result.unwrap_or_default(),
+            sylph_protocol::CommandOutcome::Rejected { code, message } => {
+                // The envagent could not find the session in the vendor's store. That is
+                // the store having been pruned under a row Sylph still holds, which has its
+                // own code because it means Sylph's copy is now the only one.
+                if message.contains("was not found") {
+                    return Err(Error::NativeSessionNotFound(
+                        session_id.native_id.as_str().to_string(),
+                    ));
+                }
+                return Err(Error::Internal(format!("{code}: {message}")));
+            }
+            sylph_protocol::CommandOutcome::Unknown { message } => {
+                return Err(Error::LinkFailed(format!(
+                    "remote re-read outcome is unknown: {}",
+                    message.unwrap_or_default()
+                )))
+            }
+        };
+        let pass: sylph_protocol::RereadPass = serde_json::from_value(value)
+            .map_err(|error| Error::Internal(format!("remote re-read was malformed: {error}")))?;
+        return Ok(Json(ingest_reread_pass(&state, &session_id, pass).await?));
+    }
+
+    require_agents(state.adapters.as_ref(), Some(agent.as_str()))?;
+    let adapter = state.adapters.for_agent(&agent).ok_or_else(|| {
+        // Raced an uninstall between the check above and here.
+        Error::InvalidRequest(format!("'{agent}' is not installed on this environment."))
+    })?;
+
+    // The same listing pass `adopt` makes, and for the same two reasons: the adapter
+    // contract has no "describe one session" call, and the recorded workdir has to be
+    // re-checked against current policy. A directory inside the roots when the session was
+    // adopted may be outside them now, and a re-read reads that session's worktree for
+    // sidecar bodies the transcript points at.
+    let summary = adapter
+        .enumerate(&sylph_protocol::StoreFilter::default())
+        .await
+        .map_err(|error| {
+            Error::Internal(format!("Could not read {agent}'s native store: {error:#}"))
+        })?
+        .into_iter()
+        .find(|candidate| candidate.native_id == session_id.native_id)
+        // The vendor pruned or rotated away a session Sylph still holds. Distinct from the
+        // `SESSION_NOT_FOUND` above: Sylph's transcript is now the only copy, and no re-read
+        // will ever extend it.
+        .ok_or_else(|| Error::NativeSessionNotFound(session_id.native_id.as_str().to_string()))?;
+    let recorded = summary
+        .workdir
+        .as_deref()
+        .ok_or(Error::NativeSessionNotResumable)?;
+    contain_workdir(&state, recorded)?;
+
+    let stream = adapter.adopt(&session_id.native_id).await.map_err(|error| {
+        Error::Internal(format!(
+            "Could not read {agent}'s native session: {error:#}"
+        ))
+    })?;
+    let report = state
+        .ingest
+        .reread(&session_id, stream)
+        .await
+        .map_err(|error| {
+            Error::Internal(format!(
+                "Could not retain {agent}'s native session losslessly: {error:#}"
+            ))
+        })?;
+
+    Ok(Json(RereadResponse {
+        reread: RereadReport {
+            examined: report.events + report.already_held,
+            ingested: report.events,
+            already_held: report.already_held,
+            read_errors: report.read_errors,
+        },
+    }))
+}
+
+/// Ingest a pass an envagent parsed on another machine.
+///
+/// The remote half of [`reread`]. The envagent answers with the whole pass because
+/// suppression is the server's — only the server knows what its journal holds — so the
+/// messages are re-assembled into a stream and put through the *same* ingest path the local
+/// branch uses. Two ingest paths for one operation would be two places for the container,
+/// sequence, and dedup rules to diverge.
+async fn ingest_reread_pass(
+    state: &AppState,
+    session_id: &sylph_protocol::SessionId,
+    pass: sylph_protocol::RereadPass,
+) -> Result<RereadResponse> {
+    let read_errors = pass.read_errors;
+    // Records first, then events, in the order the adapter emitted them: a native record is
+    // the source of the events projected from it, and normalized events are never kept
+    // without it (`docs/storage.md` § Native records are kept whole).
+    let messages: Vec<_> = pass
+        .records
+        .into_iter()
+        .map(sylph_protocol::SessionMessage::NativeRecord)
+        .chain(
+            pass.events
+                .into_iter()
+                .map(sylph_protocol::SessionMessage::Event),
+        )
+        .map(Ok)
+        .collect();
+    let stream: sylph_protocol::EventStream = Box::pin(futures::stream::iter(messages));
+    let report = state
+        .ingest
+        .reread(session_id, stream)
+        .await
+        .map_err(|error| {
+            Error::Internal(format!(
+                "Could not retain that native session losslessly: {error:#}"
+            ))
+        })?;
+    Ok(RereadResponse {
+        reread: RereadReport {
+            examined: report.events + report.already_held,
+            ingested: report.events,
+            already_held: report.already_held,
+            // The envagent's own read errors, not this ingest's: the parse happened there,
+            // so that is where an unreadable record was seen.
+            read_errors: read_errors + report.read_errors,
+        },
+    })
+}

@@ -3596,6 +3596,57 @@ mod tests {
             request_ids[0].as_str(),
             request_ids[1].as_str(),
             "the same steer text sent twice must be two commands"
+    /// Two re-reads of one session are two commands, not one replayed answer.
+    ///
+    /// A re-read reads a file and writes no vendor state, so it looks like the kind of
+    /// question that may safely address its own earlier result — and if it were treated that
+    /// way, its request id would be hashed from a payload that is *identical on every call*.
+    /// The second click would then resolve to the first pass's durable outcome and report
+    /// counts taken before the bytes it was clicked to collect existed: a refresh returning a
+    /// cached answer, which is the defect the endpoint was added to remove.
+    ///
+    /// Asserted on the ids rather than on an observed dispatch, because the id is the whole
+    /// mechanism: equal ids *are* the replay.
+    #[test]
+    fn re_reading_twice_mints_two_request_ids_rather_than_replaying_one() {
+        let session = session("native-1");
+        let command = sylph_protocol::EnvironmentCommand::Reread {
+            session_id: session.clone(),
+            agent: "claude".to_string(),
+            native_id: session.native_id.clone(),
+        };
+
+        assert!(
+            !command_is_replay_safe(&command),
+            "a re-read whose payload is its idempotency scope replays the previous pass"
+        );
+
+        // The path `remote_session_command` takes for a command that is not replay-safe.
+        let first = sylph_protocol::CommandRequestId::parse(format!(
+            "remote-{}-{}",
+            command_name(&command),
+            uuid::Uuid::new_v4().simple()
+        ))
+        .unwrap();
+        let second = sylph_protocol::CommandRequestId::parse(format!(
+            "remote-{}-{}",
+            command_name(&command),
+            uuid::Uuid::new_v4().simple()
+        ))
+        .unwrap();
+        assert_ne!(first, second);
+
+        // And the payload-hashed form, which is what makes the two collide. This is the
+        // value the command would carry if it were ever added to the replay-safe set.
+        let hashed_once =
+            remote_request_id(&session.environment, &command, IdempotencyPolicy::AtMostOnce)
+                .unwrap();
+        let hashed_again =
+            remote_request_id(&session.environment, &command, IdempotencyPolicy::AtMostOnce)
+                .unwrap();
+        assert_eq!(
+            hashed_once, hashed_again,
+            "the payload hash is stable, which is exactly why a re-read must not use it"
         );
     }
 }
