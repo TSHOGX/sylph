@@ -310,8 +310,9 @@ impl NativeIngest {
             .await?;
         // A pass that added nothing is a success, and it needs a line: "ingested nothing"
         // and "could not read the store" are indistinguishable in a journal and are
-        // opposite facts (`AGENTS.md` § A subsystem whose correct behaviour is "nothing
-        // happened" needs a report).
+        // opposite facts. `AGENTS.md` states the rule under Rules That Keep Costing Time — a
+        // subsystem whose correct behaviour is "nothing happened" needs a report, or a
+        // working pass cannot be told from a broken one.
         info!(
             "Re-read {}: examined {} event(s), ingested {}, already held {}, {} read error(s)",
             session_id,
