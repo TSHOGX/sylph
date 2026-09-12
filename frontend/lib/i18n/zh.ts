@@ -64,6 +64,9 @@ export const zh: Dictionary = {
   "shell.hideArtifacts": "隐藏产物侧栏",
   "shell.search": "搜索会话",
   "shell.createFailed": "无法创建会话。",
+  "shell.rereadPending": "正在刷新 {session}……",
+  "shell.rereadSuccess": "已刷新 {session}：检查 {examined} 项，新增 {ingested} 项，已有 {held} 项，读取错误 {errors} 项。",
+  "shell.rereadFailed": "无法刷新 {session}。",
   "shell.newSession.title": "新建会话",
   "shell.newSession.confirm": "在此处新建会话",
 

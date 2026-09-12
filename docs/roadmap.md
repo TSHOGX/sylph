@@ -144,10 +144,10 @@ forward from it:
   improve them; the endpoint does not refuse it, because refusing would encode the
   unverified hazard as a contract. Verifying it needs one real session per agent, live and
   then re-read.
-- **A pass that ingests nothing is indistinguishable from a failed click.** The endpoint
-  reports what it examined, added, and already held, and the server logs one line per pass,
-  but the sidebar's context menu unmounts on select and has nowhere to render an outcome.
-  A report surface needs a state owner outside the menu.
+- **A pass that ingests nothing is distinguishable from a failed click.** The endpoint
+  reports what it examined, added, and already held, and the shell now owns the reread
+  mutation state outside the sidebar's context menu. It renders pending, success with
+  all four counts, and failure through an accessible status surface.
 
 ## Milestone 5 — multi-client control convergence
 

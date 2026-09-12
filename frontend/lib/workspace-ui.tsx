@@ -14,6 +14,7 @@
  */
 
 import { usePathname } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
   useCallback,
@@ -29,6 +30,7 @@ import { comboFromEvent, isTypingTarget } from "@/lib/shortcuts";
 import { useIsMobile } from "@/lib/viewport";
 import type { ShortcutAction } from "@/lib/settings";
 import type { PreviewKind } from "@/lib/api-types";
+import { api, type RereadReport } from "@/lib/api";
 
 /**
  * At most one overlay is up at a time; they are all modal.
@@ -94,6 +96,11 @@ export type MobileDrawer = "none" | "sessions" | "files";
  * the session page registers a handler and the shell forwards to it.
  */
 export type SessionActionHandler = (action: ShortcutAction) => boolean;
+
+export type RereadNotice =
+  | { state: "pending"; sessionLabel: string }
+  | { state: "success"; sessionLabel: string; report: RereadReport }
+  | { state: "error"; sessionLabel: string };
 
 interface WorkspaceUIValue {
   leftOpen: boolean;
@@ -172,6 +179,8 @@ interface WorkspaceUIValue {
    * serves the top bar, the palette, and every sidebar group.
    */
   createSessionIn: (workdir: string | undefined) => void;
+  rereadNotice: RereadNotice | null;
+  rereadSession: (sessionId: string, sessionLabel: string) => void;
 }
 
 const WorkspaceUIContext = createContext<WorkspaceUIValue | null>(null);
@@ -188,6 +197,7 @@ export function WorkspaceUIProvider({
   onCreateSessionIn: (workdir: string | undefined) => void;
 }) {
   const { settings, update } = useSettings();
+  const queryClient = useQueryClient();
 
   // Pane visibility is read straight from settings rather than mirrored into
   // local state. The mirror needed an effect to adopt the stored value after
@@ -204,6 +214,19 @@ export function WorkspaceUIProvider({
   const [activeWorkdir, setActiveWorkdir] = useState<string | null>(null);
   const [adoptEnvironment, setAdoptEnvironment] = useState<string | null>(null);
   const sessionHandlerRef = useRef<SessionActionHandler | null>(null);
+  const [rereadNotice, setRereadNotice] = useState<RereadNotice | null>(null);
+
+  const rereadSession = useCallback((sessionId: string, sessionLabel: string) => {
+    setRereadNotice({ state: "pending", sessionLabel });
+    void api.sessions.reread(sessionId).then(
+      ({ reread }) => {
+        setRereadNotice({ state: "success", sessionLabel, report: reread });
+        void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+        void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      },
+      () => setRereadNotice({ state: "error", sessionLabel }),
+    );
+  }, [queryClient]);
 
   const isMobile = useIsMobile();
   const pathname = usePathname();
@@ -479,6 +502,8 @@ export function WorkspaceUIProvider({
       adoptFrom,
       runAction,
       createSessionIn: onCreateSessionIn,
+      rereadNotice,
+      rereadSession,
     }),
     [
       leftOpen,
@@ -506,6 +531,8 @@ export function WorkspaceUIProvider({
       adoptFrom,
       runAction,
       onCreateSessionIn,
+      rereadNotice,
+      rereadSession,
     ],
   );
 

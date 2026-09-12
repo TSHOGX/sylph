@@ -26,7 +26,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Session } from "@/lib/api";
+import { type Session } from "@/lib/api";
 import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
 import { refreshRereadsTheStore } from "@/lib/refresh-transcript";
 import { liveSessionsQuery } from "@/lib/sessions-query";
@@ -530,8 +530,8 @@ function SessionRow({
   home?: string;
   environments: Environments;
 }) {
-  const queryClient = useQueryClient();
   const t = useT();
+  const { rereadSession } = useWorkspaceUI();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const items: MenuItem[] = [
@@ -569,18 +569,9 @@ function SessionRow({
       // cannot improve, and both ways of getting it wrong are clicks that look successful.
       label: t("sidebar.refreshTranscript"),
       onSelect: () => {
-        const refresh = async () => {
-          if (refreshRereadsTheStore(session.fidelity)) {
-            await api.sessions.reread(session.id);
-          }
-          await queryClient.invalidateQueries({ queryKey: ["session", session.id] });
-        };
-        // The cache is invalidated even when the pass failed, because the row's own
-        // state may still be stale — and a failed pass must not leave the user looking
-        // at a transcript that is older than what the server already holds.
-        void refresh().catch(
-          () => void queryClient.invalidateQueries({ queryKey: ["session", session.id] }),
-        );
+        if (refreshRereadsTheStore(session.fidelity)) {
+          rereadSession(session.id, sessionLabel(session));
+        }
       },
     },
   ];

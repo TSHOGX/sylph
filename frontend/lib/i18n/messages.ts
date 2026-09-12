@@ -107,6 +107,9 @@ export const en = {
   "shell.hideArtifacts": "Hide artifacts sidebar",
   "shell.search": "Search sessions",
   "shell.createFailed": "Could not create the session.",
+  "shell.rereadPending": "Refreshing {session}...",
+  "shell.rereadSuccess": "Refreshed {session}: examined {examined}, added {ingested}, already held {held}, read errors {errors}.",
+  "shell.rereadFailed": "Could not refresh {session}.",
   "shell.newSession.title": "New session",
   "shell.newSession.confirm": "Start session here",
 

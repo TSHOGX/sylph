@@ -1016,15 +1016,22 @@ impl EnvBridge {
     }
 
     pub async fn list_environments(&self) -> Result<Vec<EnvironmentSnapshot>> {
+        // The journal keeps the last known connection for restart diagnostics, but it is
+        // not the current link. A server restart cannot inherit an envagent socket, and a
+        // stale `connected = 1` row otherwise makes health/settings claim reachability
+        // while every command correctly fails against the empty lease map. The lease is
+        // the only live fact; persistence supplies identity and the last inventory.
+        let leases = self.leases.read().await;
         let mut rows = Vec::new();
         for row in self.store.list_environment_rows().await? {
+            let connected = leases.contains_key(&row.id);
             let agents = serde_json::from_str(&row.agents_json)
                 .map_err(|error| anyhow!("invalid agent inventory in journal: {error}"))?;
             rows.push(EnvironmentSnapshot {
                 id: row.id,
                 name: row.name,
                 origin: row.origin,
-                connected: row.connected,
+                connected,
                 reachable_via: row.reachable_via,
                 connection_epoch: row.connection_epoch,
                 agents,

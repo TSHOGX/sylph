@@ -160,7 +160,7 @@ function ShellFrame({
   createPending: boolean;
   createError: unknown;
 }) {
-  const { leftOpen, rightOpen, overlay, drawer, closeDrawer, isMobile } = useWorkspaceUI();
+  const { leftOpen, rightOpen, overlay, drawer, closeDrawer, isMobile, rereadNotice } = useWorkspaceUI();
   const t = useT();
 
   return (
@@ -197,6 +197,28 @@ function ShellFrame({
           {createError instanceof Error
             ? createError.message
             : t("shell.createFailed")}
+        </p>
+      )}
+
+      {rereadNotice?.state === "pending" && (
+        <p role="status" aria-live="polite" className="shrink-0 border-b border-line bg-sunken px-4 py-1.5 text-2xs text-ink-muted">
+          {t("shell.rereadPending", { session: rereadNotice.sessionLabel })}
+        </p>
+      )}
+      {rereadNotice?.state === "success" && (
+        <p role="status" aria-live="polite" className="shrink-0 border-b border-line bg-sunken px-4 py-1.5 text-2xs text-ink-muted">
+          {t("shell.rereadSuccess", {
+            session: rereadNotice.sessionLabel,
+            examined: rereadNotice.report.examined,
+            ingested: rereadNotice.report.ingested,
+            held: rereadNotice.report.alreadyHeld,
+            errors: rereadNotice.report.readErrors,
+          })}
+        </p>
+      )}
+      {rereadNotice?.state === "error" && (
+        <p role="alert" className="shrink-0 border-b border-danger-line bg-danger-bg px-4 py-2 text-xs text-danger">
+          {t("shell.rereadFailed", { session: rereadNotice.sessionLabel })}
         </p>
       )}
 
