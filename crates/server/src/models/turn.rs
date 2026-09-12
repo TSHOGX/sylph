@@ -31,11 +31,15 @@ pub struct Turn {
     /// `stopping_a_running_turn_cancels_it` catches.
     #[serde(default = "default_origin")]
     pub origin: String,
+    /// Subject whose authorization admitted this turn; retained for scoped grant revocation.
+    #[serde(default)]
+    pub origin_subject: Option<String>,
     pub request_text: String,
     pub command_invocation_id: Option<String>,
     pub idempotency_key: Option<String>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+    pub close_reason: Option<String>,
     pub created_at_ms: i64,
     pub started_at_ms: Option<i64>,
     pub completed_at_ms: Option<i64>,
@@ -58,11 +62,13 @@ impl FromRow<'_, sqlx::sqlite::SqliteRow> for Turn {
             )?,
             status: row.try_get("status")?,
             origin: row.try_get("origin")?,
+            origin_subject: row.try_get("origin_subject")?,
             request_text: row.try_get("request_text")?,
             command_invocation_id: row.try_get("command_invocation_id")?,
             idempotency_key: row.try_get("idempotency_key")?,
             error_code: row.try_get("error_code")?,
             error_message: row.try_get("error_message")?,
+            close_reason: row.try_get("close_reason")?,
             created_at_ms: row.try_get("created_at_ms")?,
             started_at_ms: row.try_get("started_at_ms")?,
             completed_at_ms: row.try_get("completed_at_ms")?,

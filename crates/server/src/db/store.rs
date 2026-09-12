@@ -200,8 +200,8 @@ impl JournalStore {
         let stored_turn = sqlx::query_as::<_, Turn>(
             r#"INSERT INTO turns (
                 id, session_env, session_agent, session_native, status, origin,
-                request_text, command_invocation_id, idempotency_key, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                origin_subject, request_text, command_invocation_id, idempotency_key, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *"#,
         )
         .bind(&turn.id)
@@ -210,6 +210,7 @@ impl JournalStore {
         .bind(turn.session_id.native_id.as_str())
         .bind(&turn.status)
         .bind(&turn.origin)
+        .bind(&turn.origin_subject)
         .bind(&turn.request_text)
         .bind(&turn.command_invocation_id)
         .bind(&turn.idempotency_key)
@@ -399,9 +400,9 @@ impl JournalStore {
             r#"
             INSERT INTO turns (
                 id, session_env, session_agent, session_native, status, origin,
-                request_text, command_invocation_id, idempotency_key, created_at_ms
+                origin_subject, request_text, command_invocation_id, idempotency_key, created_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#,
         )
@@ -411,6 +412,7 @@ impl JournalStore {
         .bind(turn.session_id.native_id.as_str())
         .bind(&turn.status)
         .bind(&turn.origin)
+        .bind(&turn.origin_subject)
         .bind(&turn.request_text)
         .bind(&turn.command_invocation_id)
         .bind(&turn.idempotency_key)
@@ -447,8 +449,8 @@ impl JournalStore {
         let stored = sqlx::query_as::<_, Turn>(
             r#"INSERT INTO turns (
                 id, session_env, session_agent, session_native, status, origin,
-                request_text, command_invocation_id, idempotency_key, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                origin_subject, request_text, command_invocation_id, idempotency_key, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *"#,
         )
         .bind(&turn.id)
@@ -457,6 +459,7 @@ impl JournalStore {
         .bind(turn.session_id.native_id.as_str())
         .bind(&turn.status)
         .bind(&turn.origin)
+        .bind(&turn.origin_subject)
         .bind(&turn.request_text)
         .bind(&turn.command_invocation_id)
         .bind(&turn.idempotency_key)
@@ -1904,11 +1907,13 @@ mod tests {
                 session_id: session_id(),
                 status: "running".to_string(),
                 origin: "user".to_string(),
+                origin_subject: None,
                 request_text: "go".to_string(),
                 command_invocation_id: None,
                 idempotency_key: None,
                 error_code: None,
                 error_message: None,
+                close_reason: None,
                 created_at_ms: 1,
                 started_at_ms: Some(1),
                 completed_at_ms: None,

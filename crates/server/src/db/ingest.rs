@@ -750,12 +750,14 @@ impl NativeIngest {
             session_id: session_id.clone(),
             status: "running".to_string(),
             origin: "user".to_string(),
+            origin_subject: None,
             // Empty because no adapter carries it. See this function's doc comment.
             request_text: String::new(),
             command_invocation_id: None,
             idempotency_key: None,
             error_code: None,
             error_message: None,
+            close_reason: None,
             // The vendor's own timestamp, not `now()`: a turn stamped now would order
             // an adopted session's turns after every live one and give it a duration of
             // zero.

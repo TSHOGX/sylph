@@ -7,6 +7,38 @@
 use crate::{EnvironmentId, Event, SessionId};
 use serde::{Deserialize, Serialize};
 
+/// Why a turn ended before its normal vendor outcome. This is independent of
+/// the terminal status and is persisted on the turn record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseReason {
+    Interrupted,
+    SpoolFull,
+    GrantRevoked,
+    LinkLost,
+    AgentExited,
+    AdapterSilent,
+}
+
+impl CloseReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Interrupted => "interrupted",
+            Self::SpoolFull => "spool_full",
+            Self::GrantRevoked => "grant_revoked",
+            Self::LinkLost => "link_lost",
+            Self::AgentExited => "agent_exited",
+            Self::AdapterSilent => "adapter_silent",
+        }
+    }
+}
+
+impl std::fmt::Display for CloseReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Why a semantic identifier cannot be constructed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SemanticError {

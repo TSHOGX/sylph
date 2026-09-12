@@ -24,6 +24,31 @@ CREATE TABLE app_meta (
   value TEXT NOT NULL
 );
 
+-- Authenticated actors and their environment-scoped capabilities.  The server
+-- administration root is a subject flag rather than a grantable capability.
+CREATE TABLE subjects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  is_admin INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)),
+  created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE env_grants (
+  subject_id TEXT NOT NULL,
+  environment_id TEXT NOT NULL,
+  capability TEXT NOT NULL CHECK (capability IN ('observe', 'control')),
+  issuer_subject_id TEXT,
+  issued_at_ms INTEGER NOT NULL,
+  expires_at_ms INTEGER,
+  consumed_at_ms INTEGER,
+  PRIMARY KEY (subject_id, environment_id),
+  FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+  FOREIGN KEY (issuer_subject_id) REFERENCES subjects(id) ON DELETE SET NULL,
+  FOREIGN KEY (environment_id) REFERENCES env_installations(environment_id) ON DELETE CASCADE
+);
+
+CREATE INDEX env_grants_environment_idx ON env_grants(environment_id, capability);
+
 -- No keys are tracked. Two former ones are named in `docs/database-schema.md` so
 -- they are not reinvented: `schema_version` was a hand-maintained copy of a number
 -- `_sqlx_migrations` already keeps, and drifted four migrations behind; `instance_id`
@@ -112,6 +137,8 @@ CREATE TABLE turns (
   -- stop already claimed it". Conflating them reported a user's stop as `LINK_LOST`.
   -- It also distinguishes an empty `request_text` here from a user sending nothing.
   origin TEXT NOT NULL DEFAULT 'user' CHECK (origin IN ('user', 'agent')),
+  -- Subject provenance scopes grant revocation to work authorized by that subject.
+  origin_subject TEXT,
   request_text TEXT NOT NULL DEFAULT '',
   -- Links a turn to an agent command rather than to typed text.
   command_invocation_id TEXT,
@@ -120,6 +147,10 @@ CREATE TABLE turns (
   idempotency_key TEXT,
   error_code TEXT,
   error_message TEXT,
+  close_reason TEXT CHECK (close_reason IN (
+    'interrupted', 'spool_full', 'grant_revoked', 'link_lost',
+    'agent_exited', 'adapter_silent'
+  )),
   created_at_ms INTEGER NOT NULL,
   started_at_ms INTEGER,
   completed_at_ms INTEGER,
@@ -277,6 +308,8 @@ CREATE TABLE env_installations (
   installation_id TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   origin TEXT NOT NULL,
+  grant_authority TEXT NOT NULL DEFAULT 'machine'
+    CHECK (grant_authority IN ('machine', 'server')),
   -- A hash, never the token. A stolen table must not be a stolen credential.
   token_hash TEXT NOT NULL,
   connected INTEGER NOT NULL DEFAULT 0,
