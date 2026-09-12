@@ -252,8 +252,30 @@ async fn http_post_json<T: serde::de::DeserializeOwned>(
     path: &str,
     body: &serde_json::Value,
 ) -> Result<T> {
+    let secure = base.starts_with("https://");
     let (host, port) = parse_http_authority(base)?;
-    let mut stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+    let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+    if secure {
+        let ca_path = std::env::var("SYLPH_ENV_CA_CERT")
+            .map_err(|_| anyhow::anyhow!("HTTPS pairing requires SYLPH_ENV_CA_CERT"))?;
+        let ca = std::fs::read(ca_path)?;
+        let tls = sylph_envagent::tls::connect_stream(tcp, &host, &ca).await?;
+        return http_post_on_stream(tls, &host, port, path, body).await;
+    } else {
+        return http_post_on_stream(tcp, &host, port, path, body).await;
+    }
+}
+
+async fn http_post_on_stream<
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    T: serde::de::DeserializeOwned,
+>(
+    mut stream: S,
+    host: &str,
+    port: u16,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<T> {
     let bytes = serde_json::to_vec(body)?;
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -281,7 +303,7 @@ async fn http_post_json<T: serde::de::DeserializeOwned>(
 }
 
 fn http_server_for_credential(server: &str) -> Result<String> {
-    if server.starts_with("http://") {
+    if server.starts_with("http://") || server.starts_with("https://") {
         return Ok(server.to_string());
     }
     let authority = format!("http://{server}");
@@ -298,9 +320,11 @@ fn http_server_for_credential(server: &str) -> Result<String> {
 }
 
 fn parse_http_authority(base: &str) -> Result<(String, u16)> {
+    let secure = base.starts_with("https://");
     let authority = base
         .strip_prefix("http://")
-        .ok_or_else(|| anyhow::anyhow!("only http:// loopback pairing is supported"))?
+        .or_else(|| base.strip_prefix("https://"))
+        .ok_or_else(|| anyhow::anyhow!("pairing server must use http:// or https://"))?
         .split('/')
         .next()
         .unwrap_or_default();
@@ -330,7 +354,7 @@ fn parse_http_authority(base: &str) -> Result<(String, u16)> {
     if host.is_empty() {
         anyhow::bail!("pairing server has no host");
     }
-    if !is_loopback_host(&host) {
+    if !secure && !is_loopback_host(&host) {
         anyhow::bail!(
             "pairing server '{host}' is not loopback; plaintext envagent transport requires TLS"
         );
@@ -355,7 +379,12 @@ fn wire_server_for_pairing(base: &str) -> Result<String> {
     } else {
         host
     };
-    Ok(format!("{host}:{wire_port}"))
+    let scheme = if base.starts_with("https://") {
+        "https"
+    } else {
+        "http"
+    };
+    Ok(format!("{scheme}://{host}:{wire_port}"))
 }
 
 #[cfg(test)]
@@ -379,8 +408,11 @@ mod tests {
     }
 
     #[test]
-    fn pairing_rejects_malformed_or_secure_urls_until_tls_is_available() {
-        assert!(parse_http_authority("https://127.0.0.1:4317").is_err());
+    fn pairing_rejects_malformed_urls_but_accepts_secure_urls() {
+        assert_eq!(
+            parse_http_authority("https://127.0.0.1:4317").unwrap(),
+            ("127.0.0.1".into(), 4317)
+        );
         assert!(parse_http_authority("http://::1:4317").is_err());
         assert!(parse_http_authority("http://127.0.0.1:not-a-port").is_err());
     }
