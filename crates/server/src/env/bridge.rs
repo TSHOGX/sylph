@@ -3624,21 +3624,6 @@ mod tests {
             "a re-read whose payload is its idempotency scope replays the previous pass"
         );
 
-        // The path `remote_session_command` takes for a command needing a fresh id.
-        let first = sylph_protocol::CommandRequestId::parse(format!(
-            "remote-{}-{}",
-            command_name(&command),
-            uuid::Uuid::new_v4().simple()
-        ))
-        .unwrap();
-        let second = sylph_protocol::CommandRequestId::parse(format!(
-            "remote-{}-{}",
-            command_name(&command),
-            uuid::Uuid::new_v4().simple()
-        ))
-        .unwrap();
-        assert_ne!(first, second);
-
         // The id the bridge actually mints, twice. These must differ, and that is the
         // whole property: equal ids *are* the replay, because the second call would
         // resolve to the first pass's durable outcome in `env_command_results`.
