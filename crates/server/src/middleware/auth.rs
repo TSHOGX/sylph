@@ -17,8 +17,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde::Serialize;
 use serde::Deserialize;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
@@ -102,12 +102,18 @@ pub async fn auth_middleware(
     let token = extract_cookie(cookie_header, COOKIE_NAME);
     let presented = token.unwrap_or("");
     if constant_time_eq(presented, &state.config.cookie_secret) {
-        if let Some(subject_id) = state.store.subject_id_for_token_hash(&hash_token(presented)).await? {
-            request.extensions_mut().insert(SubjectId(subject_id));
-        }
+        let subject_id = state
+            .store
+            .subject_id_for_token_hash(&hash_token(presented))
+            .await?
+            .unwrap_or_else(|| "bootstrap".to_string());
+        request.extensions_mut().insert(SubjectId(subject_id));
         return Ok(next.run(request).await);
     }
-    let subject_id = state.store.subject_id_for_token_hash(&hash_token(presented)).await?
+    let subject_id = state
+        .store
+        .subject_id_for_token_hash(&hash_token(presented))
+        .await?
         .ok_or(Error::Unauthorized)?;
     request.extensions_mut().insert(SubjectId(subject_id));
 
@@ -121,12 +127,15 @@ pub async fn auth_middleware(
 /// browser-based attacks from other origins, not local processes that can
 /// already read the database and spawn runners.
 pub async fn bootstrap_token(State(state): State<AppState>) -> impl IntoResponse {
-    let _ = state.store.upsert_subject(
-        "bootstrap",
-        "Bootstrap",
-        &hash_token(&state.config.cookie_secret),
-        true,
-    ).await;
+    let _ = state
+        .store
+        .upsert_subject(
+            "bootstrap",
+            "Bootstrap",
+            &hash_token(&state.config.cookie_secret),
+            true,
+        )
+        .await;
     let cookie = format!(
         "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
         COOKIE_NAME,
@@ -145,34 +154,74 @@ pub async fn bootstrap_token(State(state): State<AppState>) -> impl IntoResponse
 }
 
 #[derive(Deserialize)]
-pub struct RegisterRequest { pub name: String }
+pub struct RegisterRequest {
+    pub name: String,
+}
 
-pub async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest>) -> Result<impl IntoResponse> {
+pub async fn register(
+    State(state): State<AppState>,
+    Json(req): Json<RegisterRequest>,
+) -> Result<impl IntoResponse> {
     if req.name.trim().is_empty() {
         return Err(Error::InvalidRequest("name must not be empty".into()));
     }
     let token = uuid::Uuid::new_v4().to_string();
     let id = uuid::Uuid::new_v4().to_string();
-    let is_admin: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subjects").fetch_one(state.store.raw_pool()).await.map_err(Error::Database)?;
-    state.store.upsert_subject(&id, req.name.trim(), &hash_token(&token), is_admin == 0).await?;
-    let cookie = format!("{}={}; Path=/; HttpOnly; SameSite=Strict", COOKIE_NAME, token);
-    Ok((StatusCode::CREATED, [(header::SET_COOKIE, cookie)], Json(serde_json::json!({"id": id, "name": req.name, "isAdmin": is_admin == 0}))))
+    let is_admin: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subjects")
+        .fetch_one(state.store.raw_pool())
+        .await
+        .map_err(Error::Database)?;
+    state
+        .store
+        .upsert_subject(&id, req.name.trim(), &hash_token(&token), is_admin == 0)
+        .await?;
+    let cookie = format!(
+        "{}={}; Path=/; HttpOnly; SameSite=Strict",
+        COOKIE_NAME, token
+    );
+    Ok((
+        StatusCode::CREATED,
+        [(header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({"id": id, "name": req.name, "isAdmin": is_admin == 0})),
+    ))
 }
 
 #[derive(Deserialize)]
-pub struct LoginRequest { pub token: String }
+pub struct LoginRequest {
+    pub token: String,
+}
 
-pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> Result<impl IntoResponse> {
+pub async fn login(
+    State(state): State<AppState>,
+    Json(req): Json<LoginRequest>,
+) -> Result<impl IntoResponse> {
     if req.token.trim().is_empty() {
         return Err(Error::InvalidRequest("token must not be empty".into()));
     }
-    let subject = state.store.subject_id_for_token_hash(&hash_token(&req.token)).await?.ok_or(Error::Unauthorized)?;
-    let cookie = format!("{}={}; Path=/; HttpOnly; SameSite=Strict", COOKIE_NAME, req.token);
-    Ok((StatusCode::OK, [(header::SET_COOKIE, cookie)], Json(serde_json::json!({"id": subject}))))
+    let subject = state
+        .store
+        .subject_id_for_token_hash(&hash_token(&req.token))
+        .await?
+        .ok_or(Error::Unauthorized)?;
+    let cookie = format!(
+        "{}={}; Path=/; HttpOnly; SameSite=Strict",
+        COOKIE_NAME, req.token
+    );
+    Ok((
+        StatusCode::OK,
+        [(header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({"id": subject})),
+    ))
 }
 
 pub async fn logout() -> impl IntoResponse {
-    (StatusCode::NO_CONTENT, [(header::SET_COOKIE, format!("{}=; Path=/; HttpOnly; Max-Age=0", COOKIE_NAME))])
+    (
+        StatusCode::NO_CONTENT,
+        [(
+            header::SET_COOKIE,
+            format!("{}=; Path=/; HttpOnly; Max-Age=0", COOKIE_NAME),
+        )],
+    )
 }
 
 fn hash_token(token: &str) -> String {

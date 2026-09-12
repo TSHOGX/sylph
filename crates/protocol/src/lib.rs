@@ -75,7 +75,7 @@ pub use request::{
     Resolution, Risk, SelectMode,
 };
 pub use semantic::{
-    CloseReason, CommandOutcome, CommandRequest, CommandRequestId, CommandResult, IdempotencyPolicy, ProducerId,
-    ProducerKey, ProducerSeq, SemanticError, SequencedEvent, ServerSeq, SessionEdge,
-    SessionEdgeRelation, SourceCursor, TurnInputFact,
+    CloseReason, CommandOutcome, CommandRequest, CommandRequestId, CommandResult,
+    IdempotencyPolicy, ProducerId, ProducerKey, ProducerSeq, SemanticError, SequencedEvent,
+    ServerSeq, SessionEdge, SessionEdgeRelation, SourceCursor, TurnInputFact,
 };

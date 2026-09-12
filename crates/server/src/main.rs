@@ -13,7 +13,9 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use tokio_rustls::{rustls, TlsAcceptor};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use sylph_server::{
@@ -312,16 +314,21 @@ async fn serve() -> anyhow::Result<()> {
         let raw = std::env::var("SYLPH_ENV_LISTEN").unwrap_or(default);
         let listener = tokio::net::TcpListener::bind(&raw).await?;
         let local_addr = listener.local_addr()?;
-        if !local_addr.ip().is_loopback() {
+        let tls = tls_acceptor_from_env()?;
+        if !local_addr.ip().is_loopback() && tls.is_none() {
             anyhow::bail!(
                 "SYLPH_ENV_LISTEN resolved to {local_addr}, but the development envagent \
-                 transport is plaintext and must remain loopback-only; configure TLS before \
-                 exposing it on a network interface"
+                 transport is plaintext and must remain loopback-only; set \
+                 SYLPH_ENV_TLS_CERT and SYLPH_ENV_TLS_KEY before exposing it on a network interface"
             );
         }
         tracing::info!("Envagent listener on {}", local_addr);
         tokio::spawn(async move {
-            if let Err(error) = env_bridge.serve(listener).await {
+            let result = match tls {
+                Some(acceptor) => env_bridge.serve_tls(listener, acceptor).await,
+                None => env_bridge.serve(listener).await,
+            };
+            if let Err(error) = result {
                 tracing::error!("Envagent listener stopped: {error:#}");
             }
         });
@@ -360,4 +367,28 @@ async fn serve() -> anyhow::Result<()> {
 
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn tls_acceptor_from_env() -> anyhow::Result<Option<TlsAcceptor>> {
+    let cert_path = std::env::var("SYLPH_ENV_TLS_CERT").ok();
+    let key_path = std::env::var("SYLPH_ENV_TLS_KEY").ok();
+    match (cert_path, key_path) {
+        (None, None) => Ok(None),
+        (Some(cert_path), Some(key_path)) => {
+            let cert_bytes = std::fs::read(&cert_path)?;
+            let key_bytes = std::fs::read(&key_path)?;
+            let certs = rustls_pemfile::certs(&mut std::io::Cursor::new(cert_bytes))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut key_reader = std::io::Cursor::new(key_bytes);
+            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut key_reader);
+            let key = keys
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("TLS key file contains no PKCS#8 private key"))??;
+            let config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key.into())?;
+            Ok(Some(TlsAcceptor::from(Arc::new(config))))
+        }
+        _ => anyhow::bail!("SYLPH_ENV_TLS_CERT and SYLPH_ENV_TLS_KEY must be set together"),
+    }
 }

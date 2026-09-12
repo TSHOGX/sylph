@@ -14,13 +14,13 @@ use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
+use crate::middleware::auth::SubjectId;
 use crate::{
     error::{Error, Result},
     events::{Attachment, StreamEvent},
     models::{CreateTurnRequest, Turn},
     AppState,
 };
-use crate::middleware::auth::SubjectId;
 
 #[derive(Serialize)]
 pub struct TurnResponse {
@@ -277,7 +277,13 @@ pub async fn create(
         .get_session(&session_id)
         .await?
         .ok_or(Error::SessionNotFound)?;
-    if !state.store.has_capability(&subject.0, session_id.environment.as_str(), "control").await? { return Err(Error::Forbidden("control capability required".into())); }
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "control")
+        .await?
+    {
+        return Err(Error::Forbidden("control capability required".into()));
+    }
 
     // Idempotency key may arrive in the header or the body; header wins.
     let idempotency_key = headers

@@ -13,6 +13,7 @@ use sylph_protocol::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio_rustls::TlsAcceptor;
 
 use crate::db::{EnvIngestResult, JournalStore};
 use crate::events::{EventHub, SeqAllocator, StreamEvent};
@@ -309,6 +310,28 @@ impl EnvBridge {
             tokio::spawn(async move {
                 if let Err(error) = bridge.serve_connection(stream).await {
                     tracing::warn!("envagent connection ended: {error:#}");
+                }
+            });
+        }
+    }
+
+    /// Serve envagents over TLS. The framed protocol is identical to the
+    /// loopback listener; only the accepted byte stream is wrapped before the
+    /// bridge performs its credential and hello handshake.
+    pub async fn serve_tls(&self, listener: TcpListener, acceptor: TlsAcceptor) -> Result<()> {
+        loop {
+            let (stream, _peer) = listener.accept().await?;
+            let bridge = self.clone();
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                match acceptor.accept(stream).await {
+                    Ok(stream) => {
+                        let (reader, writer) = tokio::io::split(stream);
+                        if let Err(error) = bridge.serve_io(reader, writer).await {
+                            tracing::warn!("TLS envagent connection ended: {error:#}");
+                        }
+                    }
+                    Err(error) => tracing::warn!("TLS envagent handshake failed: {error:#}"),
                 }
             });
         }
