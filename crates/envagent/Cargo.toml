@@ -13,6 +13,8 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 async-trait = { workspace = true }
 futures = { workspace = true }
 tokio-stream = "0.1"

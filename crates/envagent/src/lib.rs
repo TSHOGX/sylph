@@ -16,6 +16,7 @@ pub mod path;
 pub mod runtime;
 pub mod spool;
 pub mod transport;
+pub mod tls;
 
 pub use client::{
     connect as connect_to_server, run_runtime, run_runtime_reconnecting, run_runtime_stream,
