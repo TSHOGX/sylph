@@ -1005,20 +1005,21 @@ impl EnvBridge {
         // A local invite proves the OS-user through the machine installation
         // credential. Server-authority (sandbox) environments have no such
         // local principal; their grants are issued by the server admin route.
+        let row = self
+            .store
+            .environment_row(environment)
+            .await?
+            .ok_or(BridgeError::Unpaired)?;
         if self
             .store
             .grant_authority(environment.as_str())
             .await?
             .as_deref()
             != Some("machine")
+            && row.origin != "development"
         {
             return Err(BridgeError::InvalidCredential.into());
         }
-        let row = self
-            .store
-            .environment_row(environment)
-            .await?
-            .ok_or(BridgeError::Unpaired)?;
         if row.installation_id != installation_id
             || !constant_time_eq(row.token_hash.as_bytes(), hash_secret(token).as_bytes())
         {
