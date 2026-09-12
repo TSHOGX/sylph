@@ -716,6 +716,28 @@ export interface NativeSessionRow {
   blocked?: BlockedReason;
 }
 
+/**
+ * What one `POST /sessions/{id}/reread` pass added.
+ *
+ * **`ingested + alreadyHeld` may be less than `examined`, and a client must not derive
+ * one from the others.** A turn's opening bracket survives in neither storage tier, so a
+ * pass that finds nothing new after one neither writes it nor claims it was already held
+ * (`docs/api/sessions.md` § `POST /api/v1/sessions/{id}/reread`).
+ *
+ * `ingested: 0` is the ordinary "nothing new since last time" answer and a success. A
+ * store that no longer holds the session is a `404`, not a zero.
+ */
+export interface RereadReport {
+  examined: number;
+  ingested: number;
+  alreadyHeld: number;
+  readErrors: number;
+}
+
+export interface RereadResponse {
+  reread: RereadReport;
+}
+
 /** One page of `GET /sessions/enumerate`. */
 export interface EnumerateResponse {
   sessions: NativeSessionRow[];

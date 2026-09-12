@@ -131,6 +131,24 @@ unreadable source is an explicit state.
 **Exit gate:** raw round-trip and blob integrity pass; retention never prunes raw; an absent
 vendor time is not rendered as a measured zero; live, reload, and vendor-specific tests pass.
 
+On-demand re-projection of one held session is in place — `POST /sessions/{id}/reread`,
+reached by the sidebar's refresh entry
+(`docs/environments.md` § Re-reading a session Sylph already holds). Two open items carry
+forward from it:
+
+- **Whether a re-read of a `stream` record duplicates its transcript is unverified.** A
+  native store never holds `stream` fidelity, so such a pass can only append at a coarser
+  granularity, and whether content identity recognizes the live-ingested rows depends on
+  each adapter deriving the same `stream_id` and vendor stamp from its own store. The
+  client does not offer the action for those records, on the narrower ground that it cannot
+  improve them; the endpoint does not refuse it, because refusing would encode the
+  unverified hazard as a contract. Verifying it needs one real session per agent, live and
+  then re-read.
+- **A pass that ingests nothing is indistinguishable from a failed click.** The endpoint
+  reports what it examined, added, and already held, and the server logs one line per pass,
+  but the sidebar's context menu unmounts on select and has nowhere to render an outcome.
+  A report surface needs a state owner outside the menu.
+
 ## Milestone 5 — multi-client control convergence
 
 Allow authorized clients to submit control concurrently. The server assigns request ids and

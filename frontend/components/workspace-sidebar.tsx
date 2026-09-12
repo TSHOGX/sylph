@@ -26,8 +26,9 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type Session } from "@/lib/api";
+import { api, type Session } from "@/lib/api";
 import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
+import { refreshRereadsTheStore } from "@/lib/refresh-transcript";
 import { liveSessionsQuery } from "@/lib/sessions-query";
 import { workspacesQuery } from "@/lib/workspaces-query";
 import { relayName, useEnvironments, type Environments } from "@/lib/environments";
@@ -555,9 +556,32 @@ function SessionRow({
       onSelect: () => void navigator.clipboard.writeText(session.workdir).catch(() => {}),
     },
     {
+      // **Invalidating the cache is not a refresh of the record**, and treating it as one
+      // is the defect this entry used to be. A refetch re-reads what Sylph already
+      // holds, so a session adopted from a terminal could never gain a line the vendor
+      // appended afterwards — no amount of clicking reached the store
+      // (`docs/environments.md` § Re-reading a session Sylph already holds). So the
+      // server is asked to parse the vendor's store again, and only then is the cache
+      // invalidated, so whatever the pass ingested is what the refetch renders.
+      //
+      // Which records that re-read applies to is `refreshRereadsTheStore`, which owns the
+      // reasoning and is tested on the decision — a `stream` record is the one a re-read
+      // cannot improve, and both ways of getting it wrong are clicks that look successful.
       label: t("sidebar.refreshTranscript"),
-      onSelect: () =>
-        void queryClient.invalidateQueries({ queryKey: ["session", session.id] }),
+      onSelect: () => {
+        const refresh = async () => {
+          if (refreshRereadsTheStore(session.fidelity)) {
+            await api.sessions.reread(session.id);
+          }
+          await queryClient.invalidateQueries({ queryKey: ["session", session.id] });
+        };
+        // The cache is invalidated even when the pass failed, because the row's own
+        // state may still be stale — and a failed pass must not leave the user looking
+        // at a transcript that is older than what the server already holds.
+        void refresh().catch(
+          () => void queryClient.invalidateQueries({ queryKey: ["session", session.id] }),
+        );
+      },
     },
   ];
 
