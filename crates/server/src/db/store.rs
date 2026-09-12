@@ -56,6 +56,23 @@ impl Default for SessionFilter {
 }
 
 impl JournalStore {
+    pub async fn upsert_subject(&self, id: &str, name: &str, token_hash: &str, is_admin: bool) -> Result<()> {
+        sqlx::query("INSERT INTO subjects (id, name, token_hash, is_admin, created_at_ms) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name")
+            .bind(id).bind(name).bind(token_hash).bind(is_admin as i64).bind(now_ms())
+            .execute(&self.pool).await.map_err(Error::Database)?;
+        Ok(())
+    }
+
+    pub async fn subject_id_for_token_hash(&self, token_hash: &str) -> Result<Option<String>> {
+        sqlx::query_scalar("SELECT id FROM subjects WHERE token_hash = ?")
+            .bind(token_hash).fetch_optional(&self.pool).await.map_err(Error::Database)
+    }
+
+    pub async fn has_capability(&self, subject_id: &str, environment_id: &str, capability: &str) -> Result<bool> {
+        let found: Option<i64> = sqlx::query_scalar("SELECT 1 FROM env_grants WHERE subject_id = ? AND environment_id = ? AND capability = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?)")
+            .bind(subject_id).bind(environment_id).bind(capability).bind(now_ms()).fetch_optional(&self.pool).await.map_err(Error::Database)?;
+        Ok(found.is_some())
+    }
     /// Internal access for the environment bridge's migration-backed tables.
     ///
     /// Keeping the pool private to the database module prevents API handlers

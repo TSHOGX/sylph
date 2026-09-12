@@ -29,6 +29,7 @@ CREATE TABLE app_meta (
 CREATE TABLE subjects (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
   is_admin INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)),
   created_at_ms INTEGER NOT NULL
 );
@@ -41,7 +42,7 @@ CREATE TABLE env_grants (
   issued_at_ms INTEGER NOT NULL,
   expires_at_ms INTEGER,
   consumed_at_ms INTEGER,
-  PRIMARY KEY (subject_id, environment_id),
+  PRIMARY KEY (subject_id, environment_id, capability),
   FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
   FOREIGN KEY (issuer_subject_id) REFERENCES subjects(id) ON DELETE SET NULL,
   FOREIGN KEY (environment_id) REFERENCES env_installations(environment_id) ON DELETE CASCADE

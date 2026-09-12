@@ -274,6 +274,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(api::health::health))
         .route("/api/v1/auth/token", get(middleware::auth::bootstrap_token))
+        .route("/api/v1/auth/register", post(middleware::auth::register))
+        .route("/api/v1/auth/login", post(middleware::auth::login))
+        .route("/api/v1/auth/logout", post(middleware::auth::logout))
         .route("/api/v1/diagnostics", get(api::health::diagnostics))
         // What configuration resolved to, and which source supplied each value.
         // Read-only: see `api::config` for why a loopback HTTP surface must not be
