@@ -244,6 +244,13 @@ Every field is a count of events in this one pass:
 | `alreadyHeld` | events a previous pass had already journaled |
 | `readErrors` | items the adapter could not read; the pass continues past each |
 
+**`ingested + alreadyHeld` may be less than `examined`, and a client must not compute
+one from the others.** A turn's opening bracket survives in neither storage tier, so a
+pass that finds no new content after one neither writes it nor claims it was already held
+— it is examined and nothing else
+(`docs/environments.md` § Re-reading a session Sylph already holds). The difference is
+bounded by the number of brackets that bracketed nothing, so it is normally zero.
+
 `ingested: 0` with a non-zero `examined` is the ordinary "nothing new since last time"
 answer and is a success. **A client must not treat it as a failure**, and must not infer
 "the store is gone" from it — that case is a `404`. A caller refetching

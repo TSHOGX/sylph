@@ -1126,6 +1126,11 @@ pub async fn adopt(
 #[serde(rename_all = "camelCase")]
 pub struct RereadReport {
     /// Events the adapter emitted, before suppression.
+    ///
+    /// **`ingested + already_held` may be less than this, by design.** A turn's opening
+    /// bracket survives in neither storage tier, so a pass that finds nothing new after
+    /// one declines to write it and cannot claim it was already held either — it is
+    /// examined and nothing else (`crate::db::IngestReport::already_held`).
     pub examined: usize,
     /// Events new to the journal, now added.
     pub ingested: usize,
@@ -1270,7 +1275,11 @@ async fn ingest_reread_pass(
         })?;
     Ok(RereadResponse {
         reread: RereadReport {
-            examined: report.events + report.already_held,
+            // The pass's own count, not `events + already_held`. A turn opener the pass
+            // declined to write is in neither of those, so the sum would under-report the
+            // store by however many brackets bracketed nothing
+            // (`crate::db::IngestReport::examined`).
+            examined: report.examined,
             ingested: report.events,
             already_held: report.already_held,
             // The envagent's own read errors, not this ingest's: the parse happened there,

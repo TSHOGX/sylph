@@ -389,6 +389,26 @@ admitting it duplicates the entire transcript on every click. The transcript is 
 being protected, so the digest wins, and the count of what a pass suppressed is reported
 rather than silent.
 
+**A turn's opening bracket is the one event content identity cannot answer for, so the
+stream decides it.** A `turn`/`started` is ephemeral and carries no `stream_id`, so it
+reaches the journal and no further: the history fold has nothing to key a block on, and
+the fold then deletes the journal rows it read. Once a turn is consolidated its opener is
+in neither tier, and no digest can recognize it on a later pass.
+
+The two obvious answers fail in opposite directions. Re-ingesting it grows the journal by
+a dead row per click, invisibly, because every reader-facing query filters to stable rows.
+Suppressing it whenever no container is open swallows a genuinely appended turn's bracket
+too — which loses no content, since any event arriving with no container open opens one,
+so no turn count can observe it. What it loses is the *start*: the container opens at the
+next event's stamp, so the turn silently begins late and any duration read from it
+measures the wrong interval.
+
+So an opener is **held aside and resolved by what follows it**: written once a following
+event proves unheld, and dropped when everything after it is already held. A dropped
+opener is reported as examined, and as already held only where the pass can actually
+establish that — which is what keeps the endpoint's counts from summing to a number
+nobody measured (`docs/api/sessions.md` § `POST /api/v1/sessions/{id}/reread`).
+
 **A pass that finds nothing new is a success, and says so.** "Ingested nothing" and "could
 not read the store" are the same shape in a journal and opposite facts, so a re-read
 reports what it examined, what it added, and what it recognized as already held. A
