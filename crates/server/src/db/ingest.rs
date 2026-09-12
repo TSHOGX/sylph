@@ -373,11 +373,7 @@ impl NativeIngest {
     /// Runs to the end of the stream. For `adopt` that is the end of one pass; for
     /// `watch` it is however long the adapter follows the file, which is why a caller
     /// that wants a response before then spawns this rather than awaiting it.
-    pub async fn drain(
-        &self,
-        session_id: &SessionId,
-        stream: EventStream,
-    ) -> Result<IngestReport> {
+    pub async fn drain(&self, session_id: &SessionId, stream: EventStream) -> Result<IngestReport> {
         self.drain_suppressing(session_id, stream, None).await
     }
 
@@ -415,11 +411,7 @@ impl NativeIngest {
         // working pass cannot be told from a broken one.
         info!(
             "Re-read {}: examined {} event(s), ingested {}, already held {}, {} read error(s)",
-            session_id,
-            report.examined,
-            report.events,
-            report.already_held,
-            report.read_errors
+            session_id, report.examined, report.events, report.already_held, report.read_errors
         );
         Ok(report)
     }
@@ -848,7 +840,7 @@ mod tests {
         store
             .create_session(&crate::models::Session {
                 id: id.clone(),
-                workdir: "/tmp".to_string(),
+                workdir: Some("/tmp".to_string()),
                 title: None,
                 inject_identity: false,
                 fidelity: Fidelity::Blocks,
@@ -926,7 +918,7 @@ mod tests {
         store
             .create_session(&crate::models::Session {
                 id: id.clone(),
-                workdir: "/tmp".to_string(),
+                workdir: Some("/tmp".to_string()),
                 title: None,
                 inject_identity: false,
                 fidelity: Fidelity::Blocks,
@@ -1430,7 +1422,10 @@ mod tests {
             first_reply.clone(),
             event(EventKind::Turn, Some(Phase::Completed), 1002),
         ];
-        ingest.drain(&id, stream(held.clone())).await.expect("adopt");
+        ingest
+            .drain(&id, stream(held.clone()))
+            .await
+            .expect("adopt");
         let turns = store.list_turns(&id, 10).await.expect("turns");
         crate::storage::history::consolidate_turn(&store, &ingest.history, &turns[0].id)
             .await

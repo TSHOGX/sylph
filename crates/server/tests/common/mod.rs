@@ -651,10 +651,12 @@ impl TestBackend {
             .store
             .create_session(&Session {
                 id: session_id.clone(),
-                workdir: std::fs::canonicalize(workdir)
-                    .unwrap_or_else(|_| PathBuf::from(workdir))
-                    .display()
-                    .to_string(),
+                workdir: Some(
+                    std::fs::canonicalize(workdir)
+                        .unwrap_or_else(|_| PathBuf::from(workdir))
+                        .display()
+                        .to_string(),
+                ),
                 title: None,
                 inject_identity: true,
                 fidelity: Fidelity::Stream,

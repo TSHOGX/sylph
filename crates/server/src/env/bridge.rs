@@ -1432,9 +1432,10 @@ impl EnvBridge {
                 session_id: Some(session.id.clone()),
                 draft_id: None,
                 agent: session.id.agent.to_string(),
-                workdir: session.workdir.clone().ok_or_else(|| {
-                    anyhow!("session has no recorded working directory")
-                })?,
+                workdir: session
+                    .workdir
+                    .clone()
+                    .ok_or_else(|| anyhow!("session has no recorded working directory"))?,
                 flags,
                 inject_identity: session.inject_identity,
                 identity_preamble: None,
@@ -2666,7 +2667,7 @@ mod tests {
             .store
             .create_session(&Session {
                 id: id.clone(),
-                workdir: "/tmp".into(),
+                workdir: Some("/tmp".into()),
                 title: None,
                 inject_identity: false,
                 fidelity: sylph_protocol::Fidelity::Stream,
@@ -3036,7 +3037,7 @@ mod tests {
             .store
             .create_session(&Session {
                 id: session_id.clone(),
-                workdir: dir.path().display().to_string(),
+                workdir: Some(dir.path().display().to_string()),
                 title: Some("remote".into()),
                 inject_identity: false,
                 fidelity: sylph_protocol::Fidelity::Stream,
@@ -3145,7 +3146,7 @@ mod tests {
             .store
             .create_session(&Session {
                 id: session_id.clone(),
-                workdir: dir.path().display().to_string(),
+                workdir: Some(dir.path().display().to_string()),
                 title: Some("wire".into()),
                 inject_identity: false,
                 fidelity: sylph_protocol::Fidelity::Stream,
@@ -3278,7 +3279,7 @@ mod tests {
             .store
             .create_session(&Session {
                 id: session_id.clone(),
-                workdir: dir.path().display().to_string(),
+                workdir: Some(dir.path().display().to_string()),
                 title: Some("source".into()),
                 inject_identity: false,
                 fidelity: sylph_protocol::Fidelity::Blocks,

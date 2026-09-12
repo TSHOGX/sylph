@@ -99,7 +99,7 @@ async fn process_peer_covers_prepare_run_activate_replay_and_rejection() {
         .create_session_and_turn(
             &sylph_server::models::Session {
                 id: resolved_session.clone(),
-                workdir: resolved_workdir,
+                workdir: Some(resolved_workdir),
                 title: Some("wire fixture".into()),
                 inject_identity: false,
                 fidelity: sylph_protocol::Fidelity::Stream,

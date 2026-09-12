@@ -597,7 +597,10 @@ async fn re_reading_twice_does_not_duplicate_an_event_already_held() {
 
     let texts = transcript(&backend, &encoded).await;
     let appended = texts.iter().filter(|text| *text == "appended once").count();
-    assert_eq!(appended, 1, "the event was journaled more than once: {texts:?}");
+    assert_eq!(
+        appended, 1,
+        "the event was journaled more than once: {texts:?}"
+    );
     let original = texts
         .iter()
         .filter(|text| *text == "read from the store")
@@ -744,7 +747,9 @@ async fn a_turn_appended_after_adoption_is_journaled_as_its_own_turn() {
     let turns_before = turn_count(&backend, &encoded).await;
 
     // A whole new turn, bracketed the way a vendor writes one.
-    backend.agents.grow_stored_session("turn:a second turn arrived");
+    backend
+        .agents
+        .grow_stored_session("turn:a second turn arrived");
 
     let response = json_body(
         backend

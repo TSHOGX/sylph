@@ -219,7 +219,7 @@ mod tests {
         let session = store
             .create_session(&crate::models::Session {
                 id: crate::fixtures::test_session_id("s1"),
-                workdir: dir.path().display().to_string(),
+                workdir: Some(dir.path().display().to_string()),
                 title: None,
                 inject_identity: true,
                 fidelity: sylph_protocol::Fidelity::Stream,

@@ -272,7 +272,8 @@ fn every_ref_resolves_and_every_schema_is_referenced() {
 #[test]
 fn every_turn_status_the_schema_declares_is_one_the_journal_allows() {
     let migration = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/journal/001_initial_schema.sql"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("migrations/journal/001_initial_schema.sql"),
     )
     .expect("the initial migration is part of the repo");
 

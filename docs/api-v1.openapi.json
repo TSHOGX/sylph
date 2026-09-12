@@ -1134,6 +1134,13 @@
       "get": {
         "summary": "List the directories that may be browsed",
         "description": "`$HOME` plus `SYLPH_BROWSE_ROOTS`. This is the only endpoint that tells a client what it is allowed to enumerate, which is why widening the variable widens what any client of this backend can see. `home` is reported separately because a browser cannot expand `~` for itself.",
+        "parameters": [{
+          "name": "environment",
+          "in": "query",
+          "required": false,
+          "schema": { "type": "string" },
+          "description": "Opaque environment id whose envagent owns the filesystem."
+        }],
         "responses": {
           "200": {
             "description": "Browsable roots",
@@ -1156,6 +1163,13 @@
         "summary": "List subdirectories of one browsable directory",
         "description": "Directories only, one level per request. There is deliberately no `/fs/content`: this surface exists so a user can name a workspace, and enumerating directory names is a strictly smaller disclosure than serving bytes — reading bytes stays session-scoped, where the root is journalled rather than chosen. A symlink leaving the permitted roots is omitted from the listing rather than merely refused, so it is never advertised as a node to try. `parent` is absent when the listed directory is itself a root, which is what stops a client offering a 'go up' that would leave the permitted set.",
         "parameters": [
+          {
+            "name": "environment",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Opaque environment id whose envagent owns the filesystem."
+          },
           {
             "name": "path",
             "in": "query",
@@ -3730,7 +3744,7 @@
       },
       "Environment": {
         "type": "object",
-        "required": ["id", "name", "connected", "origin", "agents"],
+        "required": ["id", "name", "connected", "origin", "agents", "facts"],
         "properties": {
           "id": {
             "type": "string",
@@ -3750,6 +3764,11 @@
           "agents": {
             "type": "array",
             "items": { "$ref": "#/components/schemas/EnvironmentAgent" }
+          },
+          "facts": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "Machine facts reported by the owning envagent, including OS user and home."
           }
         }
       },
@@ -4078,6 +4097,7 @@
           },
           "environment": {
             "type": "string",
+            "nullable": true,
             "description": "Opaque environment id owning this workspace. Paths are scoped per environment, so identical paths on two machines are distinct workspaces."
           }
         }

@@ -386,7 +386,7 @@ function EnvironmentsSection() {
               // different facts and must read differently. `claude`, `codex`, and `pi` all
               // declare the key with `choices: []` — measured, every real adapter does —
               // because the real catalogue is account-dependent and only knowable once a
-              // session is live (`AGENTS.md` § A defect that produces a plausible value).
+              // session is live (`AGENTS.md` § Rules That Keep Costing Time).
               // Rendering both as "declares no model flag" told the user something false
               // about the two agents that actually do declare it.
               const modelFlag = agent.flags?.model;

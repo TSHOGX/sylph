@@ -1082,7 +1082,9 @@ async fn resolve(state: &AppState, session_id: &str, relative: &str) -> Result<(
         .await?
         .ok_or(Error::SessionNotFound)?
         .workdir
-        .ok_or_else(|| Error::InvalidRequest("This session has no recorded working directory".into()))?;
+        .ok_or_else(|| {
+            Error::InvalidRequest("This session has no recorded working directory".into())
+        })?;
 
     // Canonicalizing the root too matters on macOS, where `/tmp` is a symlink to
     // `/private/tmp`: comparing a canonical target against a non-canonical root

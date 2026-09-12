@@ -67,12 +67,18 @@ removal of the server-side adapter, link, and supervisor execution seams. The se
 moved into the workspace crate layout as `crates/server`, which is what made "no route can
 reach an adapter except through the bridge" checkable rather than asserted.
 
-## Milestone 2 — environment and workspace context
+## Milestone 2 — environment and workspace context — complete
 
 Persist environment facts, envagent identity, OS-user and home metadata, and Workspace
 resources. Canonicalize paths only in the owning envagent. Associate sessions with a
 workspace when the vendor provides a reliable path, and preserve an unknown path as unknown.
 Add multi-environment listing, native enumeration, and workspace filtering.
+
+**Built:** environment machine facts and envagent identity are persisted and surfaced;
+native paths remain nullable when unknown; workspace rows are scoped by environment;
+filesystem roots and tree browsing dispatch to the owning envagent, which performs all
+canonicalization, containment, symlink, and metadata work; frontend history, recents,
+pickers, and session creation carry the environment alongside the path.
 
 **Exit gate:** session identity remains `(environment, agent, native_id)`; live and reload
 produce the same tree; no remote path check happens in the server.

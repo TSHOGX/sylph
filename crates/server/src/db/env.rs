@@ -53,14 +53,13 @@ impl JournalStore {
         id: &EnvironmentId,
         facts_json: &str,
     ) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE env_installations SET facts_json = ? WHERE environment_id = ?",
-        )
-        .bind(facts_json)
-        .bind(id.as_str())
-        .execute(self.raw_pool())
-        .await
-        .map_err(Error::Database)?;
+        let result =
+            sqlx::query("UPDATE env_installations SET facts_json = ? WHERE environment_id = ?")
+                .bind(facts_json)
+                .bind(id.as_str())
+                .execute(self.raw_pool())
+                .await
+                .map_err(Error::Database)?;
         Ok(result.rows_affected() == 1)
     }
 

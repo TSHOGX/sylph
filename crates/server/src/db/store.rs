@@ -1885,7 +1885,7 @@ mod tests {
         store
             .create_session(&Session {
                 id: session_id(),
-                workdir: "/tmp/project".to_string(),
+                workdir: Some("/tmp/project".to_string()),
                 title: None,
                 inject_identity: true,
                 // A live link holds the process's own stdio, so a session these
@@ -2731,7 +2731,7 @@ mod tests {
             store
                 .create_session(&Session {
                     id: crate::fixtures::test_session_id(native),
-                    workdir: "/tmp/project".to_string(),
+                    workdir: Some("/tmp/project".to_string()),
                     title: None,
                     inject_identity: true,
                     fidelity: sylph_protocol::Fidelity::Messages,

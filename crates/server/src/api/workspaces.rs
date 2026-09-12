@@ -101,7 +101,8 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
 
     // Insertion-ordered accumulation, then sorted once. A BTreeMap would order
     // by path, but the sidebar wants recency, so the sort happens at the end.
-    let mut index: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    let mut index: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
     let mut rows: Vec<Workspace> = Vec::new();
 
     for session in &sessions {
@@ -110,18 +111,20 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
         };
         let path = normalize(workdir);
         let environment = session.id.environment.to_string();
-        let at = *index.entry((environment.clone(), path.clone())).or_insert_with(|| {
-            rows.push(Workspace {
-                environment: Some(environment),
-                name: leaf(&path).to_string(),
-                is_quick_start: path == quick_start_dir,
-                path,
-                session_count: 0,
-                running_count: 0,
-                last_used_ms: 0,
+        let at = *index
+            .entry((environment.clone(), path.clone()))
+            .or_insert_with(|| {
+                rows.push(Workspace {
+                    environment: Some(environment),
+                    name: leaf(&path).to_string(),
+                    is_quick_start: path == quick_start_dir,
+                    path,
+                    session_count: 0,
+                    running_count: 0,
+                    last_used_ms: 0,
+                });
+                rows.len() - 1
             });
-            rows.len() - 1
-        });
         let row = &mut rows[at];
         row.session_count += 1;
         if session.status == "running" {
@@ -132,7 +135,10 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
 
     // Quick Start is always present, even with no sessions: the sidebar section
     // and the settings row both exist before the first quick session is made.
-    if !rows.iter().any(|row| row.environment.is_none() && row.path == quick_start_dir) {
+    if !rows
+        .iter()
+        .any(|row| row.environment.is_none() && row.path == quick_start_dir)
+    {
         rows.push(Workspace {
             environment: None,
             path: quick_start_dir.clone(),
@@ -147,8 +153,8 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
     rows.sort_by(|a, b| {
         b.last_used_ms
             .cmp(&a.last_used_ms)
-        .then(a.path.cmp(&b.path))
-        .then(a.environment.cmp(&b.environment))
+            .then(a.path.cmp(&b.path))
+            .then(a.environment.cmp(&b.environment))
     });
 
     Ok(Json(WorkspacesResponse {

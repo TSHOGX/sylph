@@ -57,8 +57,6 @@ pub struct Environment {
     /// `PATH` — and a client must render it as "nothing installed here", never as a
     /// loading state.
     pub agents: Vec<AgentAvailability>,
-    /// Machine facts reported by the envagent (OS, user, and home metadata).
-    pub facts: std::collections::BTreeMap<String, String>,
 }
 
 /// One agent on one machine.
@@ -193,7 +191,6 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<EnvironmentsResp
                 .into_iter()
                 .map(AgentAvailability::from)
                 .collect(),
-            facts: snapshot.facts,
         });
     }
 
