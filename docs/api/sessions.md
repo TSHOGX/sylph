@@ -219,6 +219,58 @@ Those are distinct because they have distinct fixes: nothing to do, widen
 configuration, wrong id, already done, unusable source, and bring the machine online.
 Collapsing any pair sends a reader to the wrong layer.
 
+### `POST /api/v1/sessions/{id}/reread`
+
+Re-parse the vendor's native store for a session Sylph already holds, and ingest whatever
+the journal does not already have. One pass, on demand
+(`docs/environments.md` § Re-reading a session Sylph already holds).
+
+This is what a "refresh transcript" control calls. It does **not** start or restart a
+follower, and it does not change the session's `fidelity`.
+
+**Request:** no body.
+
+**Response 200:**
+```json
+{ "reread": { "examined": 412, "ingested": 37, "alreadyHeld": 375, "readErrors": 0 } }
+```
+
+Every field is a count of events in this one pass:
+
+| Field | Meaning |
+| --- | --- |
+| `examined` | events the adapter emitted, before suppression |
+| `ingested` | events new to the journal, now added |
+| `alreadyHeld` | events a previous pass had already journaled |
+| `readErrors` | items the adapter could not read; the pass continues past each |
+
+**`ingested + alreadyHeld` may be less than `examined`, and a client must not compute
+one from the others.** A turn's opening bracket survives in neither storage tier, so a
+pass that finds no new content after one neither writes it nor claims it was already held
+— it is examined and nothing else
+(`docs/environments.md` § Re-reading a session Sylph already holds). The difference is
+bounded by the number of brackets that bracketed nothing, so it is normally zero.
+
+`ingested: 0` with a non-zero `examined` is the ordinary "nothing new since last time"
+answer and is a success. **A client must not treat it as a failure**, and must not infer
+"the store is gone" from it — that case is a `404`. A caller refetching
+`GET /sessions/{id}/turns` after a `200` sees whatever the pass added; the response is
+returned only once ingestion has finished, so there is nothing to race.
+
+**Errors:**
+- `400` — `INVALID_REQUEST`: the id is malformed, or that agent is not installed on the
+  environment holding the session
+- `404` — `SESSION_NOT_FOUND`: Sylph holds no session with that id
+- `404` — `NATIVE_SESSION_NOT_FOUND`: Sylph holds the session and the vendor's store no
+  longer does, because it was pruned or rotated away
+- `500` — `INTERNAL`: the store could not be read, or a record could not be retained
+  losslessly
+- `503` — `ENVIRONMENT_UNREACHABLE`: no envagent is connected for that environment
+
+The two `404`s are one status and two codes on purpose: "you named nothing" and "the
+vendor dropped what you named" have different fixes, and only the second means the
+transcript Sylph holds is now the only copy.
+
 ### `GET /api/v1/sessions/enumerate`
 
 What native sessions an environment holds, without adopting any of them. This is what

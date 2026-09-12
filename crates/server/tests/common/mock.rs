@@ -205,6 +205,14 @@ pub struct MockAgents {
     /// the adopt. `None` reports a session the store recorded no directory for, which is
     /// the `NATIVE_SESSION_NOT_RESUMABLE` case.
     store_workdir: Arc<RwLock<Option<String>>>,
+    /// Assistant replies the stored session holds *after* the two it always has.
+    ///
+    /// A vendor's store grows between reads, and that is the whole subject of a re-read:
+    /// with a fixed fixture, a second pass can only ever observe suppression, so "ingests
+    /// what is new" would pass vacuously against a store that never gained anything.
+    /// `grow_stored_session` appends here, and the next parse reports the longer store —
+    /// which is what an append to a JSONL transcript looks like to a reader.
+    store_growth: Arc<RwLock<Vec<String>>>,
 }
 
 impl MockAgents {
@@ -219,7 +227,18 @@ impl MockAgents {
                 runners.iter().map(|runner| runner.name.clone()).collect(),
             )),
             store_workdir: Arc::new(RwLock::new(None)),
+            store_growth: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+
+    /// Append one assistant reply to what the stored session holds.
+    ///
+    /// Stands for the vendor writing more into its own transcript after Sylph read it.
+    pub fn grow_stored_session(&self, text: &str) {
+        self.store_growth
+            .write()
+            .expect("the mock store growth log is not poisoned")
+            .push(text.to_string());
     }
 
     /// Point every stored session at `workdir`.
@@ -309,6 +328,11 @@ impl MockAgents {
                 .read()
                 .expect("the mock store workdir is not poisoned")
                 .clone(),
+            store_growth: self
+                .store_growth
+                .read()
+                .expect("the mock store growth log is not poisoned")
+                .clone(),
         }))
     }
 
@@ -350,6 +374,9 @@ struct MockAdapter {
     /// Snapshotted at resolve time, so a test that sets it before creating a session and a
     /// listing taken afterwards agree.
     store_workdir: Option<String>,
+    /// Replies the store gained since it was first read. Snapshotted with the workdir, so
+    /// one parse sees one consistent store.
+    store_growth: Vec<String>,
 }
 
 #[async_trait]
@@ -440,7 +467,10 @@ impl Adapter for MockAdapter {
         if self.behavior == Behavior::NoStore {
             return Err(anyhow!("the {} agent has no native store", self.name));
         }
-        Ok(Box::pin(futures::stream::iter(stored_events(id))))
+        Ok(Box::pin(futures::stream::iter(stored_events(
+            id,
+            &self.store_growth,
+        ))))
     }
 
     /// The same first pass as [`Self::adopt`], then nothing further.
@@ -453,7 +483,10 @@ impl Adapter for MockAdapter {
         if self.behavior == Behavior::NoStore {
             return Err(anyhow!("the {} agent has no native store", self.name));
         }
-        Ok(Box::pin(futures::stream::iter(stored_events(id))))
+        Ok(Box::pin(futures::stream::iter(stored_events(
+            id,
+            &self.store_growth,
+        ))))
     }
 
     /// What this machine's store holds: one session, or none for a store-less agent.
@@ -493,24 +526,71 @@ const STORED_NATIVE_ID: &str = "stored-session";
 /// Deliberately minimal, and `Blocks` fidelity by construction — there are no `delta`
 /// phases, because a native store does not hold them. A fixture that emitted deltas here
 /// would let a renderer's per-delta path pass against data no real store can produce.
-fn stored_events(id: &NativeId) -> Vec<Result<SessionMessage>> {
+fn stored_events(id: &NativeId, growth: &[String]) -> Vec<Result<SessionMessage>> {
     let _ = id;
-    vec![
+    // **Fixed stamps, not `now_ms()`, and this is part of the contract rather than tidiness.**
+    // A native store holds the vendor's own timestamp, so re-reading one yields the same
+    // stamp on every pass. A fixture stamping the clock at parse time makes each pass differ
+    // in a field no vendor would have changed, which no product code can suppress — it made
+    // the re-read dedup look broken while the defect was in the fixture.
+    const AT_MS: i64 = 1_700_000_000_000;
+    let mut messages = vec![
         Ok(SessionMessage::Event(
-            Ev::new(EventKind::Turn, Some(Phase::Started)).0,
+            Ev::at(EventKind::Turn, Some(Phase::Started), AT_MS).0,
         )),
         Ok(SessionMessage::Event(
-            Ev::new(EventKind::Assistant, Some(Phase::Completed))
+            Ev::at(EventKind::Assistant, Some(Phase::Completed), AT_MS + 1)
                 .stream_id("stored-a1")
                 .text("read from the store")
                 .0,
         )),
         Ok(SessionMessage::Event(
-            Ev::new(EventKind::Turn, Some(Phase::Completed))
+            Ev::at(EventKind::Turn, Some(Phase::Completed), AT_MS + 2)
                 .text("read from the store")
                 .0,
         )),
-    ]
+    ];
+    // Whatever the vendor appended since, re-emitted from the beginning alongside the
+    // prefix above — which is what `Adapter::adopt` does: it has no cursor and restarts at
+    // the head of the store, so a re-read sees the old records again and the new ones after
+    // them. A fixture that emitted *only* the growth would hide the duplicate-suppression
+    // the server has to perform.
+    //
+    // A `turn:` prefix appends a **whole new turn**, bracketed the way a vendor writes one,
+    // rather than a bare reply inside the existing turn. Both shapes are needed and they
+    // exercise opposite promises: a bare reply must be suppressed on the next pass, while a
+    // new turn's `started` must be *kept* — and since a `turn`/`started` is ephemeral and
+    // unrecoverable once folded, suppression there is decided by whether a container is
+    // already open rather than by content. Without this shape no test could tell correct
+    // suppression from a rule that swallows every later turn.
+    for (index, text) in growth.iter().enumerate() {
+        let at = AT_MS + 10 + (index as i64) * 4;
+        match text.strip_prefix("turn:") {
+            Some(body) => {
+                messages.push(Ok(SessionMessage::Event(
+                    Ev::at(EventKind::Turn, Some(Phase::Started), at).0,
+                )));
+                messages.push(Ok(SessionMessage::Event(
+                    Ev::at(EventKind::Assistant, Some(Phase::Completed), at + 1)
+                        .stream_id(&format!("stored-grown-{index}"))
+                        .text(body.to_string())
+                        .0,
+                )));
+                messages.push(Ok(SessionMessage::Event(
+                    Ev::at(EventKind::Turn, Some(Phase::Completed), at + 2)
+                        .text(body.to_string())
+                        .0,
+                )));
+            }
+            None => messages.push(Ok(SessionMessage::Event(
+                Ev::at(EventKind::Assistant, Some(Phase::Completed), at)
+                    .stream_id(&format!("stored-grown-{index}"))
+                    .text(text.clone())
+                    .0,
+            ))),
+        }
+    }
+    messages
 }
 
 /// The config surface, which is one option with one refusable value.
@@ -610,6 +690,14 @@ struct Ev(Event);
 impl Ev {
     fn new(kind: EventKind, phase: Option<Phase>) -> Self {
         Self(Event::new(kind, phase, now_ms()))
+    }
+
+    /// The same, at a stated time rather than the clock.
+    ///
+    /// What a *stored* session needs: the vendor wrote its timestamp once, so every read of
+    /// that store reports the same one.
+    fn at(kind: EventKind, phase: Option<Phase>, at_ms: i64) -> Self {
+        Self(Event::new(kind, phase, at_ms))
     }
 
     fn stream_id(mut self, id: &str) -> Self {

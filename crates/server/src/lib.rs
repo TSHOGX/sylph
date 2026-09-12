@@ -359,6 +359,14 @@ pub fn router(state: AppState) -> Router {
             get(api::sessions::history).post(api::turns::create),
         )
         .route("/api/v1/sessions/{id}/edges", get(api::sessions::edges))
+        // Parse the vendor's store again for a session already held, ingesting only what
+        // the journal lacks. Distinct from `adopt`, which refuses a session that already
+        // has a row, and from `watch`, which leaves a follower behind
+        // (`docs/api/sessions.md` § `POST /api/v1/sessions/{id}/reread`).
+        .route(
+            "/api/v1/sessions/{id}/reread",
+            post(api::sessions::reread),
+        )
         // Files before `{id}` would be ambiguous the other way round: axum
         // matches literal segments before captures, so the more specific
         // `files/content` route must be registered, but order among these

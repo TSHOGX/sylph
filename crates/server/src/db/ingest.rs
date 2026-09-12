@@ -55,6 +55,47 @@
 //! *after* the payload it brackets, so treating it as the opener drops whatever preceded
 //! it.
 //!
+//! # A turn's opener is decided by what follows it
+//!
+//! A re-read suppresses what a previous pass journaled by content
+//! (`content_digest`), and there is exactly one event that cannot answer for itself
+//! that way: a `turn`/`started`.
+//!
+//! **It survives in neither tier.** It is `Ephemeral`, so it reaches the journal and no
+//! further; and `storage::history::consolidate` opens its `started`/`delta` arm with a
+//! `stream_id` the event does not carry, so the fold never turns it into a block and
+//! `delete_turn_events` then removes the row it was living in. Once its turn is
+//! consolidated there is nothing left to compare a later pass against, so every pass
+//! judges it new. Invisibly, too: every reader-facing query filters
+//! `stability = 'stable'`, so the transcript is unaffected while an unchanged store
+//! reports one event ingested and burns a sequence number per click.
+//!
+//! Neither of the two obvious answers works, and they fail in opposite directions:
+//!
+//! - **Widening the digest cannot reach it**, because the row is gone from both tiers
+//!   rather than stored differently. Nothing is left to hash.
+//! - **Treating an opener as a duplicate whenever no container is open** swallows a
+//!   genuinely appended turn's bracket too. That loses no *content* — any event arriving
+//!   with no container open opens one — so a turn count cannot see it. What it loses is
+//!   the start: the container opens at the next event's stamp, so the turn silently
+//!   begins late and any duration read from it measures the wrong interval.
+//!
+//! So the opener is **parked** rather than answered. It is written when a following event
+//! proves new, and dropped when everything that follows is already held. The stream is
+//! what decides, which is the one source that knows.
+//!
+//! **Making the tiers symmetric instead was rejected.** Having `consolidate` keep the
+//! opener would remove the asymmetry rather than compensate for it, and it is the wrong
+//! trade: `consolidate` is shared with live sessions, every history block is reported
+//! `stable` by `api::sessions::block_to_event`, and history reads apply no stability
+//! filter. A preserved opener would therefore become *visible* in the transcript the
+//! moment a turn consolidated while staying invisible before it — breaking
+//! `a_transcript_reads_the_same_before_and_after_consolidation` and changing what every
+//! live session renders, to serve a re-read. Keeping it hidden there instead would mean
+//! giving `blocks` a stability column and teaching every history read to filter it, which
+//! pushes ephemerality into the tier whose whole contract is that it holds the record a
+//! reader reads (`docs/storage.md` § Three tiers, because there are three workloads).
+//!
 //! # Every turn a pass opens is closed by the pass
 //!
 //! A `running` turn refuses the next message — the composer reads it and disables — so
@@ -69,7 +110,8 @@
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use tracing::{debug, warn};
+use sha2::{Digest, Sha256};
+use tracing::{debug, info, warn};
 
 use sylph_protocol::{EventStream, SessionId, SessionMessage};
 
@@ -84,6 +126,19 @@ use crate::events::{EventHub, SeqAllocator, StreamEvent};
 /// distinction one layer down).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestReport {
+    /// Events the adapter emitted, before any suppression.
+    ///
+    /// **Counted here rather than recomputed from `events + already_held`.** Those two
+    /// account for every event the pass *decided* about, and a parked turn opener that
+    /// nothing new followed is deliberately in neither: the pass declined to write it and
+    /// cannot honestly claim a previous pass held it (see [`Self::already_held`]). Derived,
+    /// `examined` would then under-report the store by however many brackets bracketed
+    /// nothing — a number that reads as evidence about how much was looked at while being
+    /// quietly short.
+    ///
+    /// Only events. A native record, a capability partial, and an unreadable item have
+    /// their own counts.
+    pub examined: usize,
     /// Events journaled.
     pub events: usize,
     /// Turn containers opened.
@@ -150,6 +205,122 @@ pub struct IngestReport {
     pub opening_status: Option<String>,
     /// The last event timestamp seen, for closing a container honestly.
     pub last_event_ms: Option<i64>,
+    /// Events this pass recognized as already journaled and did not write again.
+    ///
+    /// Zero on an `adopt` or `watch` pass, which suppress nothing: a first pass has
+    /// nothing to have seen before, and a watcher's cursor only moves forward. It is
+    /// non-zero only for a re-read ([`NativeIngest::reread`]), where it is the whole
+    /// point — a pass that examined 412 events and added 37 is reporting that the other
+    /// 375 were already held, which is what distinguishes it from a pass that failed.
+    ///
+    /// **The conclusion is reached two ways, and a dropped turn opener is the second.**
+    /// Most events answer for themselves, by digest. A `turn`/`started` cannot — it
+    /// survives in neither tier, so it is parked and judged by what follows it (see the
+    /// module header). An opener dropped because a *held* event followed it was
+    /// necessarily journaled by the pass that held that event, so it is counted here.
+    ///
+    /// **An opener dropped any other way is not.** One displaced by a second opener, or
+    /// still parked at the end of the stream, bracketed no content at all — so this store
+    /// may never have held it, and saying otherwise would report a suppression that never
+    /// happened. Those are counted in [`Self::examined`] and nowhere else, which is why
+    /// `examined` is counted rather than derived from this field.
+    pub already_held: usize,
+}
+
+/// Content identity for one event, for recognizing a record a previous pass journaled.
+///
+/// # Why content and not a vendor id
+///
+/// There is no vendor id to use. `Adapter::adopt` restarts at the beginning of the store
+/// and exposes no cursor, so a re-read re-emits every event the first pass saw; and of the
+/// three agents only `claude` emits [`SessionMessage::NativeRecord`] at all, so the raw
+/// tier's `(session, source, version)` key cannot answer for `codex` or `pi`, whose native
+/// parsers emit projected events exclusively. Content identity is what is available for all
+/// three (`docs/environments.md` § Re-reading a session Sylph already holds).
+///
+/// # What is hashed, and what is deliberately not
+///
+/// Every field that decides what a reader sees, and nothing that a second pass would
+/// legitimately assign differently. `seq` is excluded because the server allocates it per
+/// write, `arrival_at_ms` because it is this server's clock at ingest, and the turn id
+/// because a container is opened by the pass. Including any of them would make every event
+/// unique and suppress nothing — the failure mode that reads as "dedup is implemented" while
+/// duplicating the transcript.
+///
+/// `recorded_at_ms` *is* included: it is the vendor's own stamp, so it is stable across
+/// passes, and two vendor records that differ only in when they happened are two events.
+///
+/// # The collision this accepts
+///
+/// Two genuinely distinct events with identical content in one session hash the same, so the
+/// second is suppressed. That loses one repeated line; the alternative duplicates the entire
+/// transcript on every re-read. `docs/environments.md` records the trade and why the
+/// transcript wins.
+fn content_digest(event: &StreamEvent) -> String {
+    // A JSON array rather than concatenated fields: `("a", "bc")` and `("ab", "c")` have
+    // one concatenation and two array encodings, and a delimiter chosen for text is a
+    // delimiter that appears in text.
+    // `data` is normalized through the journal's own round trip rather than hashed as
+    // given. `StreamEvent::to_row` writes `None` as the string `"{}"` and
+    // `events::data_from_column` reads `"{}"` back as `None`, so `Some({})` in and `None`
+    // out are the same stored row. Hashing the two differently would make an event carrying
+    // an empty object unsuppressable — new on every pass, one copy per click, while
+    // everything around it deduplicated correctly.
+    let data = event
+        .data
+        .as_ref()
+        .map(|data| data.to_string())
+        .and_then(|column| crate::events::data_from_column(&column));
+    let canonical = serde_json::json!([
+        event.kind,
+        event.phase,
+        event.stream_id,
+        event.span,
+        event.interior_state.map(|state| state.to_string()),
+        event.name,
+        event.text,
+        data,
+        event.is_error,
+        event.stability,
+        event.recorded_at_ms,
+    ]);
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string().as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// What journaling one event concluded.
+///
+/// Two outcomes rather than a `Result`, because the only failure that ends a pass is the
+/// session row being gone — a sequence or write failure skips the one event and the pass
+/// continues, which is the same answer the live drain gives.
+enum Journaled {
+    /// Written, or skipped with the failure logged. Keep reading the stream.
+    Continued,
+    /// The session row has been deleted under the pass. Nothing further can be attributed.
+    SessionGone,
+}
+
+/// When an event happened, preferring the vendor's clock over the server's.
+///
+/// One function rather than the expression inline at each use, because the pass reads it
+/// for three separate decisions — the report's last stamp, a container's start, and a
+/// close — and a turn whose start and end came from different clocks is a duration
+/// spanning two machines (`docs/session-protocol.md` § Time axes are independent).
+fn event_time(event: &StreamEvent) -> i64 {
+    event.recorded_at_ms.unwrap_or(event.arrival_at_ms)
+}
+
+/// Whether this event is a vendor's own opening bracket.
+///
+/// The narrow test is deliberate. The class of event consolidation cannot preserve is
+/// wider — any `started` or `delta` phase with no `stream_id` is dropped at
+/// `storage::history::consolidate`'s first arm — but `turn`/`started` is the only member a
+/// native parse emits, and the only one the container rule treats as an opener. Widening
+/// this to the whole class would park events that carry text, and dropping one of those
+/// would lose content rather than a bracket.
+fn opens_a_turn(event: &StreamEvent) -> bool {
+    event.kind == "turn" && event.phase.as_deref() == Some("started")
 }
 
 /// Writes a parsed native session into the journal.
@@ -205,7 +376,98 @@ impl NativeIngest {
     pub async fn drain(
         &self,
         session_id: &SessionId,
+        stream: EventStream,
+    ) -> Result<IngestReport> {
+        self.drain_suppressing(session_id, stream, None).await
+    }
+
+    /// Parse the vendor's store again for a session already held, ingesting only what
+    /// the journal lacks.
+    ///
+    /// One pass, on demand. It starts no follower and does not touch the session's
+    /// `fidelity`, which belongs to the source that wrote the record
+    /// (`docs/api/sessions.md` § `POST /api/v1/sessions/{id}/reread`).
+    ///
+    /// # The suppression set is read once, before the pass
+    ///
+    /// Both tiers are read, because a turn's events live in whichever one consolidation
+    /// last left them — reading only the journal would treat every consolidated event as
+    /// new and duplicate the whole of an older transcript, which is the failure this
+    /// exists to prevent and the one a short-lived test session cannot observe.
+    ///
+    /// It is a snapshot rather than a set updated as the pass writes, and that is
+    /// deliberate: within one pass the vendor's own repeats are its record, and
+    /// re-checking against rows this pass just wrote would suppress them. What a previous
+    /// pass held is the question being asked.
+    pub async fn reread(
+        &self,
+        session_id: &SessionId,
+        stream: EventStream,
+    ) -> Result<IngestReport> {
+        let held = self.held_digests(session_id).await?;
+        let report = self
+            .drain_suppressing(session_id, stream, Some(held))
+            .await?;
+        // A pass that added nothing is a success, and it needs a line: "ingested nothing"
+        // and "could not read the store" are indistinguishable in a journal and are
+        // opposite facts. `AGENTS.md` states the rule under Rules That Keep Costing Time — a
+        // subsystem whose correct behaviour is "nothing happened" needs a report, or a
+        // working pass cannot be told from a broken one.
+        info!(
+            "Re-read {}: examined {} event(s), ingested {}, already held {}, {} read error(s)",
+            session_id,
+            report.examined,
+            report.events,
+            report.already_held,
+            report.read_errors
+        );
+        Ok(report)
+    }
+
+    /// Content digests of every event this session already holds, across both tiers.
+    async fn held_digests(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut held = std::collections::HashSet::new();
+        // **Ephemeral rows included**, which `turn_events_after` excludes by design. A
+        // `turn`/`started` derives `Ephemeral`, so reading through the reader-facing query
+        // left every one of them out of this set — and a re-read then re-added one per pass,
+        // in the tier a transcript is assembled from. `session_events` is the unfiltered
+        // read, and it is one query for the session rather than one per turn.
+        for row in self.store.session_events(session_id).await? {
+            held.insert(content_digest(&StreamEvent::from_row(&row)));
+        }
+        // The other tier. A turn's events live in whichever one consolidation last left
+        // them, so reading only the journal would treat every consolidated event as new and
+        // duplicate the whole of an older transcript — the failure a short-lived test session
+        // cannot observe, because nothing has been folded yet.
+        //
+        // Every turn, not a page of them: a bound here would silently stop suppressing on
+        // the oldest turns of a long session, which is the history least recoverable
+        // elsewhere.
+        for turn in self.store.list_turns(session_id, i64::MAX).await? {
+            if let Ok(blocks) = self.history.turn_blocks(&turn.id).await {
+                for block in &blocks {
+                    held.insert(content_digest(&crate::api::sessions::block_to_event(block)));
+                }
+            }
+        }
+        Ok(held)
+    }
+
+    /// The body of [`Self::drain`] and [`Self::reread`].
+    ///
+    /// `suppress` is `None` for a first pass, which has nothing to have seen before, and
+    /// `Some` for a re-read. One function rather than two so the container, sequence, and
+    /// settle rules have one derivation: a second copy of them would diverge the moment
+    /// either grew a case, and the tiers would then disagree about the same transcript
+    /// depending only on which entry point wrote it.
+    async fn drain_suppressing(
+        &self,
+        session_id: &SessionId,
         mut stream: EventStream,
+        suppress: Option<std::collections::HashSet<String>>,
     ) -> Result<IngestReport> {
         let mut report = IngestReport::default();
         // The container currently accepting events, with the timestamp of the event that
@@ -215,6 +477,10 @@ impl NativeIngest {
         // and `close_adopted_turn` records both ends in one statement — a turn with an
         // end and no beginning is what a duration gets computed from.
         let mut open_turn: Option<(String, i64)> = None;
+        // A `turn`/`started` seen during a suppressing pass, waiting for the stream to say
+        // whether its turn is new. Always `None` on a first pass, which suppresses nothing
+        // and so writes every opener where it arrives.
+        let mut deferred_opener: Option<StreamEvent> = None;
 
         while let Some(item) = stream.next().await {
             let message = match item {
@@ -290,9 +556,9 @@ impl NativeIngest {
                 }
             };
 
-            let mut wire = StreamEvent::from_protocol(&event);
-            let event_time = wire.recorded_at_ms.unwrap_or(wire.arrival_at_ms);
-            report.last_event_ms = Some(event_time);
+            let wire = StreamEvent::from_protocol(&event);
+            report.examined += 1;
+            report.last_event_ms = Some(event_time(&wire));
 
             // The opening ask, for whatever the parser managed to carry. See
             // `IngestReport::opening_status` for why this is `completed` and not
@@ -310,70 +576,76 @@ impl NativeIngest {
                 }
             }
 
-            let closes = wire.kind == "turn" && wire.phase.as_deref() == Some("completed");
-
-            let (turn_id, opened_at) = match &open_turn {
-                Some((id, opened_at)) => (id.clone(), *opened_at),
-                None => match self.open_container(session_id, event_time).await {
-                    Some(id) => {
-                        report.turns += 1;
-                        open_turn = Some((id.clone(), event_time));
-                        (id, event_time)
+            // An event a previous pass already journaled. Counted and skipped **before a
+            // container is opened or a sequence allocated**, so a re-read that finds
+            // nothing new adds no empty turn and consumes no sequence numbers — an
+            // otherwise-invisible cost that would accumulate one dead turn per click.
+            //
+            // A turn's opener is the one event no digest can answer for, so it is parked
+            // here and decided by what follows it. See the module header, § A turn's
+            // opener is decided by what follows it.
+            if let Some(held) = &suppress {
+                if held.contains(&content_digest(&wire)) {
+                    report.already_held += 1;
+                    // A held event belongs to a turn a previous pass already recorded, so
+                    // a parked opener is that turn's bracket and was journaled by that
+                    // same pass. This is the one drop site that *knows* the opener was
+                    // held, which is why it is the only one that says so.
+                    if deferred_opener.take().is_some() {
+                        report.already_held += 1;
                     }
-                    // The session row is gone — adopt racing a delete. Dropping is the
-                    // same answer the live drain gives, and for the same reason: an
-                    // unattributed write is worse than a missing one.
-                    None => return Ok(report),
-                },
-            };
-            wire.arrival_turn_id = Some(turn_id.clone());
-
-            match self.seq.next(session_id).await {
-                Ok(seq) => wire.seq = seq,
-                Err(error) => {
-                    warn!(
-                        "Could not allocate a sequence number for {}: {}",
-                        session_id, error
-                    );
                     continue;
+                }
+                if opens_a_turn(&wire) {
+                    // Parked, not written. Whether this is the opener of a turn already
+                    // held or of one the vendor has just appended is not decidable from
+                    // the event: both are byte-identical but for the vendor's stamp, and
+                    // the held one survives in neither tier to compare against.
+                    //
+                    // A second opener arriving while one is parked displaces it, which is
+                    // sound for the same reason: unheld content between them would have
+                    // emitted the first already, so a displaced opener bracketed nothing.
+                    // It is counted as examined and nothing else — claiming it was already
+                    // held would assert a previous pass wrote a bracket around no content,
+                    // which this pass has no evidence for.
+                    deferred_opener = Some(wire);
+                    continue;
+                }
+                // Not held, so this event is new work — which is the proof a parked opener
+                // was waiting for. Journaled **first**, so the container opens at the
+                // vendor's own start stamp rather than at this event's, which is the
+                // silently-shortened turn a suppressed opener produces.
+                if let Some(opener) = deferred_opener.take() {
+                    match self
+                        .journal(session_id, opener, &mut report, &mut open_turn)
+                        .await
+                    {
+                        Journaled::Continued => {}
+                        Journaled::SessionGone => return Ok(report),
+                    }
                 }
             }
 
-            // Loud on failure, and the wording is deliberate. A published-but-unjournaled
-            // event is the defect `AGENTS.md` records as costing a turn that streamed
-            // perfectly and came back empty on reload. Here nothing was published, so the
-            // loss is quieter and still a loss: the transcript is missing a row the store
-            // held.
-            if let Err(error) = self
-                .writer
-                .append(&wire.to_row(session_id, &turn_id), wire.is_stable())
+            match self
+                .journal(session_id, wire, &mut report, &mut open_turn)
                 .await
             {
-                warn!(
-                    "Adopted event seq {} kind '{}' on {} was not journaled: {}",
-                    wire.seq, wire.kind, session_id, error
-                );
-                continue;
-            }
-            report.events += 1;
-
-            // A watched native file is a live source just like an adapter link. Publish
-            // after the writer accepts the row so a reconnect can always find the same
-            // event in the durable tier; the bounded trace projection covers the window
-            // before consolidation.
-            if let Some(hub) = &self.hub {
-                hub.publish_trace(&session_id.encode(), wire.clone()).await;
-            }
-
-            if closes {
-                // The vendor stated an outcome, so the container closes on the vendor's
-                // own terms. `finish_turn_at` records the status; the stop reason is
-                // already in the journaled `turn` event above, where a reader finds it.
-                self.settle(&turn_id, wire.is_error, opened_at, event_time)
-                    .await;
-                open_turn = None;
+                Journaled::Continued => {}
+                Journaled::SessionGone => return Ok(report),
             }
         }
+
+        // An opener the rest of the stream never justified — the vendor has bracketed a
+        // turn and written nothing into it yet. Dropped rather than written, because
+        // writing it opens the dead empty turn per click that parking exists to avoid, and
+        // it is not a loss: a `turn`/`started` is reader-facing in neither tier, and the
+        // next pass to find real content after it opens a container at that content's own
+        // stamp.
+        //
+        // Counted as examined and nothing else. It is not `already_held` — this store may
+        // never have held it — and it is not ingested. A report that claimed either would
+        // be asserting something this pass did not observe.
+        drop(deferred_opener);
 
         // Whatever the pass opened and the vendor never closed. Not a bracket: no `turn`
         // event is written, and the row records no stop reason. See the module header.
@@ -383,6 +655,87 @@ impl NativeIngest {
         }
 
         Ok(report)
+    }
+
+    /// Journal one event: resolve its container, allocate its sequence, write it,
+    /// publish it, and close the container if it was the vendor's own close.
+    ///
+    /// Extracted from [`Self::drain_suppressing`]'s loop because a parked opener is
+    /// journaled from a second call site (§ A turn's opener is decided by what follows
+    /// it), and the container, sequence, and settle rules must have one derivation — two
+    /// copies would diverge the moment either grew a case, and the pass would then treat
+    /// an opener differently from the event that justified it.
+    async fn journal(
+        &self,
+        session_id: &SessionId,
+        mut wire: StreamEvent,
+        report: &mut IngestReport,
+        open_turn: &mut Option<(String, i64)>,
+    ) -> Journaled {
+        let at = event_time(&wire);
+        let closes = wire.kind == "turn" && wire.phase.as_deref() == Some("completed");
+
+        let (turn_id, opened_at) = match &open_turn {
+            Some((id, opened_at)) => (id.clone(), *opened_at),
+            None => match self.open_container(session_id, at).await {
+                Some(id) => {
+                    report.turns += 1;
+                    *open_turn = Some((id.clone(), at));
+                    (id, at)
+                }
+                // The session row is gone — adopt racing a delete. Dropping is the
+                // same answer the live drain gives, and for the same reason: an
+                // unattributed write is worse than a missing one.
+                None => return Journaled::SessionGone,
+            },
+        };
+        wire.arrival_turn_id = Some(turn_id.clone());
+
+        match self.seq.next(session_id).await {
+            Ok(seq) => wire.seq = seq,
+            Err(error) => {
+                warn!(
+                    "Could not allocate a sequence number for {}: {}",
+                    session_id, error
+                );
+                return Journaled::Continued;
+            }
+        }
+
+        // Loud on failure, and the wording is deliberate. A published-but-unjournaled
+        // event is the defect `AGENTS.md` records as costing a turn that streamed
+        // perfectly and came back empty on reload. Here nothing was published, so the
+        // loss is quieter and still a loss: the transcript is missing a row the store
+        // held.
+        if let Err(error) = self
+            .writer
+            .append(&wire.to_row(session_id, &turn_id), wire.is_stable())
+            .await
+        {
+            warn!(
+                "Adopted event seq {} kind '{}' on {} was not journaled: {}",
+                wire.seq, wire.kind, session_id, error
+            );
+            return Journaled::Continued;
+        }
+        report.events += 1;
+
+        // A watched native file is a live source just like an adapter link. Publish
+        // after the writer accepts the row so a reconnect can always find the same
+        // event in the durable tier; the bounded trace projection covers the window
+        // before consolidation.
+        if let Some(hub) = &self.hub {
+            hub.publish_trace(&session_id.encode(), wire.clone()).await;
+        }
+
+        if closes {
+            // The vendor stated an outcome, so the container closes on the vendor's
+            // own terms. `finish_turn_at` records the status; the stop reason is
+            // already in the journaled `turn` event above, where a reader finds it.
+            self.settle(&turn_id, wire.is_error, opened_at, at).await;
+            *open_turn = None;
+        }
+        Journaled::Continued
     }
 
     /// Open a container for events the vendor did not bracket.
@@ -953,6 +1306,186 @@ mod tests {
         let report = ingest.drain(&id, stream(vec![])).await.expect("ingest");
 
         assert_eq!(report, IngestReport::default());
+        assert!(store.list_turns(&id, 10).await.expect("turns").is_empty());
+    }
+
+    /// A digest survives the journal round trip, so a re-read recognizes what it wrote.
+    ///
+    /// # The asymmetry this pins
+    ///
+    /// `data` has two derivations that disagree about one value. `StreamEvent::to_row`
+    /// writes `None` as the string `"{}"`, and `data_from_column` reads `"{}"` back as
+    /// `None` — so `Some(json!({}))` goes in and `None` comes out. Digesting the two
+    /// differently would make such an event unsuppressable: every re-read would see it as
+    /// new and add it again, one copy per click, while every other event deduplicated
+    /// correctly and the mechanism looked sound.
+    ///
+    /// Asserted on the digest rather than on ingest counts, because this is a property of
+    /// the identity function and a count would only show it after a fixture happened to
+    /// produce the value. No current adapter emits `Some({})`; the round trip is what has to
+    /// hold, not the set of shapes today's parsers reach.
+    #[test]
+    fn a_digest_is_the_same_before_and_after_the_journal_round_trip() {
+        let session = crate::fixtures::test_session_id("digest-1");
+        let cases = vec![
+            ("absent data", None),
+            ("an empty object", Some(serde_json::json!({}))),
+            ("a populated object", Some(serde_json::json!({"a": 1}))),
+        ];
+
+        for (label, data) in cases {
+            let mut event = Event::new(EventKind::Assistant, Some(Phase::Completed), 1000);
+            event.text = "answer".to_string();
+            event.data = data;
+            event.recorded_at_ms = Some(1000);
+
+            let incoming = StreamEvent::from_protocol(&event);
+            let round_tripped = StreamEvent::from_row(&incoming.to_row(&session, "turn-1"));
+
+            assert_eq!(
+                content_digest(&incoming),
+                content_digest(&round_tripped),
+                "{label} digests differently after a journal round trip, so a re-read \
+                 would re-add it on every pass"
+            );
+        }
+    }
+
+    /// A re-read over a **consolidated** turn adds nothing and opens no container.
+    ///
+    /// The condition the deferral exists for, reproduced at the layer it lives rather than
+    /// through the API: the turn is folded first, which destroys the `turn`/`started` row
+    /// outright — `consolidate` drops it for want of a `stream_id` and
+    /// `delete_turn_events` removes what it was living in. So the opener the second pass
+    /// sees is in neither tier and no digest can recognize it.
+    ///
+    /// `turns` is the assertion that matters. An opener written here would open a second
+    /// container holding nothing, one per click, which is invisible to a transcript
+    /// because every reader-facing query filters `stability = 'stable'`.
+    #[tokio::test]
+    async fn an_opener_whose_turn_was_consolidated_is_not_ingested_again() {
+        let (ingest, store, id, _dir) = harness().await;
+
+        let stored = || {
+            let mut assistant = event(EventKind::Assistant, Some(Phase::Completed), 1001);
+            assistant.stream_id = Some("stored-a1".to_string());
+            assistant.text = "read from the store".to_string();
+            vec![
+                event(EventKind::Turn, Some(Phase::Started), 1000),
+                assistant,
+                event(EventKind::Turn, Some(Phase::Completed), 1002),
+            ]
+        };
+
+        let first = ingest.drain(&id, stream(stored())).await.expect("adopt");
+        assert_eq!(first.events, 3, "the whole bracket lands on a first pass");
+        assert_eq!(first.turns, 1);
+
+        // Fold it, which is what settle does on the real path and what removes the opener
+        // from both tiers.
+        let turns = store.list_turns(&id, 10).await.expect("turns");
+        crate::storage::history::consolidate_turn(&store, &ingest.history, &turns[0].id)
+            .await
+            .expect("consolidate");
+        assert!(
+            !store
+                .session_events(&id)
+                .await
+                .expect("journal")
+                .iter()
+                .any(|event| event.kind == "turn" && event.phase.as_deref() == Some("started")),
+            "the opener must be gone from the journal for this test to be about anything"
+        );
+
+        let second = ingest.reread(&id, stream(stored())).await.expect("reread");
+
+        assert_eq!(second.events, 0, "an unchanged store adds nothing");
+        assert_eq!(
+            second.turns, 0,
+            "a re-ingested opener opens a dead container per click"
+        );
+        assert_eq!(second.examined, 3, "all three were looked at");
+        assert_eq!(
+            store.list_turns(&id, 10).await.expect("turns").len(),
+            1,
+            "the session still holds exactly the turn the adopt pass opened"
+        );
+    }
+
+    /// A turn the vendor appended keeps its own opener, and so its own start.
+    ///
+    /// The opposite mistake from the test above, and the one a turn count cannot catch:
+    /// suppressing an opener loses no content, because any event with no container open
+    /// opens one — the container simply starts at the *reply's* stamp instead of the
+    /// vendor's bracket. Asserted on the start stamp for that reason.
+    #[tokio::test]
+    async fn an_appended_turns_opener_survives_a_reread() {
+        let (ingest, store, id, _dir) = harness().await;
+
+        let mut first_reply = event(EventKind::Assistant, Some(Phase::Completed), 1001);
+        first_reply.stream_id = Some("stored-a1".to_string());
+        first_reply.text = "read from the store".to_string();
+        let held = vec![
+            event(EventKind::Turn, Some(Phase::Started), 1000),
+            first_reply.clone(),
+            event(EventKind::Turn, Some(Phase::Completed), 1002),
+        ];
+        ingest.drain(&id, stream(held.clone())).await.expect("adopt");
+        let turns = store.list_turns(&id, 10).await.expect("turns");
+        crate::storage::history::consolidate_turn(&store, &ingest.history, &turns[0].id)
+            .await
+            .expect("consolidate");
+
+        // The same store, plus a whole new turn the vendor bracketed after the first.
+        let mut appended_reply = event(EventKind::Assistant, Some(Phase::Completed), 2001);
+        appended_reply.stream_id = Some("stored-a2".to_string());
+        appended_reply.text = "appended afterwards".to_string();
+        let mut grown = held;
+        grown.push(event(EventKind::Turn, Some(Phase::Started), 2000));
+        grown.push(appended_reply);
+        grown.push(event(EventKind::Turn, Some(Phase::Completed), 2002));
+
+        let report = ingest.reread(&id, stream(grown)).await.expect("reread");
+        assert_eq!(report.events, 3, "the appended turn is new work");
+        assert_eq!(report.turns, 1, "and it is its own container");
+
+        // `list_turns` orders newest-first, so the appended turn is the head.
+        let turns = store.list_turns(&id, 10).await.expect("turns");
+        assert_eq!(turns.len(), 2, "the adopted turn and the appended one");
+        assert_eq!(
+            turns[0].started_at_ms,
+            Some(2000),
+            "the opener was suppressed, so the turn starts at its reply instead"
+        );
+        assert_eq!(turns[0].completed_at_ms, Some(2002));
+    }
+
+    /// An opener nothing follows opens no turn, and is not reported as suppressed.
+    ///
+    /// The vendor has bracketed a turn and written nothing into it yet. Writing the
+    /// bracket would leave a container with no content — the debris
+    /// `an_empty_stream_opens_nothing` rejects one case earlier — and counting it as
+    /// already held would claim a suppression that never happened, since this store may
+    /// never have held it. It is examined and nothing else.
+    #[tokio::test]
+    async fn an_opener_nothing_follows_opens_no_turn() {
+        let (ingest, store, id, _dir) = harness().await;
+
+        let report = ingest
+            .reread(
+                &id,
+                stream(vec![event(EventKind::Turn, Some(Phase::Started), 1000)]),
+            )
+            .await
+            .expect("reread");
+
+        assert_eq!(report.events, 0);
+        assert_eq!(report.turns, 0, "a bracket around nothing opens nothing");
+        assert_eq!(report.examined, 1);
+        assert_eq!(
+            report.already_held, 0,
+            "this store never held it, so nothing was suppressed"
+        );
         assert!(store.list_turns(&id, 10).await.expect("turns").is_empty());
     }
 

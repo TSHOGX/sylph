@@ -591,6 +591,29 @@
         }
       }
     },
+    "/api/v1/sessions/{sessionId}/reread": {
+      "post": {
+        "summary": "Re-read the vendor's native store for a session already held",
+        "description": "Re-parse the vendor's store and ingest whatever the journal does not already hold. One pass, on demand: it starts no follower and does not change the session's `fidelity`, which is a property of the source that wrote the record. This is what a \"refresh transcript\" control calls. `ingested: 0` with a non-zero `examined` is the ordinary \"nothing new since last time\" answer and is a success, not a failure. A store that no longer holds the session answers `NATIVE_SESSION_NOT_FOUND`, which is distinct from `SESSION_NOT_FOUND` for an id Sylph itself does not hold.",
+        "parameters": [
+          {"$ref": "#/components/parameters/SessionId"}
+        ],
+        "responses": {
+          "200": {
+            "description": "What the pass examined, added, and recognized as already held",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/RereadResponse"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"},
+          "500": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/api/v1/search": {
       "get": {
         "summary": "Full-text search across durable sessions",
@@ -3774,6 +3797,24 @@
             "type": "array",
             "items": {"$ref": "#/components/schemas/SessionEdge"}
           }
+        }
+      },
+      "RereadResponse": {
+        "type": "object",
+        "required": ["reread"],
+        "properties": {
+          "reread": {"$ref": "#/components/schemas/RereadReport"}
+        }
+      },
+      "RereadReport": {
+        "type": "object",
+        "description": "Event counts for one re-read pass. Four counts rather than a boolean, because a pass that added nothing is a success and has to be distinguishable from one that could not read the store at all.",
+        "required": ["examined", "ingested", "alreadyHeld", "readErrors"],
+        "properties": {
+          "examined": {"type": "integer", "description": "Events the adapter emitted, before suppression. `ingested + alreadyHeld` may be less than this and must not be used to derive it: a turn's opening bracket survives in neither storage tier, so a pass finding no new content after one neither writes it nor claims it was already held."},
+          "ingested": {"type": "integer", "description": "Events new to the journal, now added."},
+          "alreadyHeld": {"type": "integer", "description": "Events a previous pass had already journaled."},
+          "readErrors": {"type": "integer", "description": "Items the adapter could not read; the pass continues past each."}
         }
       },
       "SessionEdge": {

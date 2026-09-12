@@ -2379,6 +2379,7 @@ fn command_name(command: &sylph_protocol::EnvironmentCommand) -> &'static str {
         EnvironmentCommand::Resolve { .. } => "resolve",
         EnvironmentCommand::Watch { .. } => "watch",
         EnvironmentCommand::Adopt { .. } => "adopt",
+        EnvironmentCommand::Reread { .. } => "reread",
         EnvironmentCommand::Files { .. } => "files",
         EnvironmentCommand::DraftCapabilities { .. } => "draft-capabilities",
         EnvironmentCommand::DraftSetConfig { .. } => "draft-set-config",
@@ -2435,6 +2436,15 @@ fn command_needs_a_fresh_request_id(command: &sylph_protocol::EnvironmentCommand
         // so a payload-derived id would replay the first close's result and the
         // second close would never reach the envagent.
         EnvironmentCommand::Close { .. } => true,
+        // **The case that looks safest and is not.** A re-read touches a file and
+        // writes no vendor state, so it reads as a question — but its whole point
+        // is to observe a store that has changed since it was last asked, and its
+        // payload is only the session id, identical on every call. A
+        // payload-derived id would make the second click address the first pass's
+        // result and report counts taken before the bytes it was clicked to
+        // collect existed: a "refresh" answering from cache, which is the very
+        // defect the control exists to fix, one layer down.
+        EnvironmentCommand::Reread { .. } => true,
         _ => false,
     }
 }
@@ -3586,6 +3596,49 @@ mod tests {
             request_ids[0].as_str(),
             request_ids[1].as_str(),
             "the same steer text sent twice must be two commands"
+        );
+    }
+
+    /// Two re-reads of one session are two commands, not one replayed answer.
+    ///
+    /// A re-read reads a file and writes no vendor state, so it looks like the kind of
+    /// question that may safely address its own earlier result — and if it were treated that
+    /// way, its request id would be hashed from a payload that is *identical on every call*.
+    /// The second click would then resolve to the first pass's durable outcome and report
+    /// counts taken before the bytes it was clicked to collect existed: a refresh returning a
+    /// cached answer, which is the defect the endpoint was added to remove.
+    ///
+    /// Asserted on the ids rather than on an observed dispatch, because the id is the whole
+    /// mechanism: equal ids *are* the replay.
+    #[test]
+    fn re_reading_twice_mints_two_request_ids_rather_than_replaying_one() {
+        let session = session("native-1");
+        let command = sylph_protocol::EnvironmentCommand::Reread {
+            session_id: session.clone(),
+            agent: "claude".to_string(),
+            native_id: session.native_id.clone(),
+        };
+
+        assert!(
+            command_needs_a_fresh_request_id(&command),
+            "a re-read whose payload is its idempotency scope replays the previous pass"
+        );
+
+        // The id the bridge actually mints, twice. These must differ, and that is the
+        // whole property: equal ids *are* the replay, because the second call would
+        // resolve to the first pass's durable outcome in `env_command_results`.
+        let minted_once =
+            remote_request_id(&session.environment, &command, IdempotencyPolicy::AtMostOnce)
+                .unwrap();
+        let minted_again =
+            remote_request_id(&session.environment, &command, IdempotencyPolicy::AtMostOnce)
+                .unwrap();
+        assert_ne!(
+            minted_once.as_str(),
+            minted_again.as_str(),
+            "a re-read's payload is identical on every call, so a payload-derived id \
+             would report the counts of a pass that ran before the bytes it was \
+             clicked to collect existed"
         );
     }
 }

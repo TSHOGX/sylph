@@ -356,6 +356,64 @@ Offering "bring in everything on this machine" once, when an envagent first pair
 right shape for the bulk case. A recurring background sweep would publish sessions the
 user never associated with Sylph.
 
+### Re-reading a session Sylph already holds
+
+A session adopted from a terminal keeps growing in the vendor's store after the one pass
+that brought it in. **Re-read** is that pass again, on demand, for a session that already
+has a row: the adapter parses the native store from the beginning and the server ingests
+only what its journal does not already hold.
+
+It is one pass and nothing else. It does not start a follower, does not change what
+`adopt` does, and does not touch the session's `fidelity` — a record's resolution is a
+property of the source that wrote it, so re-reading the same store cannot raise or lower
+it. `watch` remains the way to follow a session continuously.
+
+**A re-read is bounded by what the journal already holds, not by what the vendor emits.**
+The adapter has no cursor to resume from: `Adapter::adopt` restarts at the beginning of
+the store, so the second pass re-emits every record of the first. Suppression is therefore
+the server's, and it happens at ingest.
+
+**A vendor id is not available to key that suppression, so content identity is.** Only
+`claude` emits native records at all, and neither `codex` nor `pi` carries any per-event
+vendor identifier through the event vocabulary — the raw tier's `(session, source,
+version)` key covers one agent's raw rows and cannot answer for the projected events of
+the other two. So a re-read digests each incoming event over the fields that decide what a
+reader sees, and skips one whose digest a previous pass already journaled for that
+session. The digest is per session and covers both tiers, because a turn's events live in
+whichever tier consolidation last left them.
+
+**Two events may legitimately be identical**, and this is the cost the design accepts
+knowingly: a vendor that wrote the same text twice in one session has a second record that
+is indistinguishable from a replay of the first. Suppressing it loses one repeated line;
+admitting it duplicates the entire transcript on every click. The transcript is the record
+being protected, so the digest wins, and the count of what a pass suppressed is reported
+rather than silent.
+
+**A turn's opening bracket is the one event content identity cannot answer for, so the
+stream decides it.** A `turn`/`started` is ephemeral and carries no `stream_id`, so it
+reaches the journal and no further: the history fold has nothing to key a block on, and
+the fold then deletes the journal rows it read. Once a turn is consolidated its opener is
+in neither tier, and no digest can recognize it on a later pass.
+
+The two obvious answers fail in opposite directions. Re-ingesting it grows the journal by
+a dead row per click, invisibly, because every reader-facing query filters to stable rows.
+Suppressing it whenever no container is open swallows a genuinely appended turn's bracket
+too — which loses no content, since any event arriving with no container open opens one,
+so no turn count can observe it. What it loses is the *start*: the container opens at the
+next event's stamp, so the turn silently begins late and any duration read from it
+measures the wrong interval.
+
+So an opener is **held aside and resolved by what follows it**: written once a following
+event proves unheld, and dropped when everything after it is already held. A dropped
+opener is reported as examined, and as already held only where the pass can actually
+establish that — which is what keeps the endpoint's counts from summing to a number
+nobody measured (`docs/api/sessions.md` § `POST /api/v1/sessions/{id}/reread`).
+
+**A pass that finds nothing new is a success, and says so.** "Ingested nothing" and "could
+not read the store" are the same shape in a journal and opposite facts, so a re-read
+reports what it examined, what it added, and what it recognized as already held. A
+re-read whose store is gone is a failure with its own status, never a quiet no-op.
+
 ## Health is per environment
 
 `/api/v1/health` reports each environment separately, because "the agent will not start"

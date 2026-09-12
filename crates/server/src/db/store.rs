@@ -1508,6 +1508,33 @@ impl JournalStore {
         .map_err(Error::Database)
     }
 
+    /// Every journaled row for one session, ephemeral included.
+    ///
+    /// **Deliberately not filtered by stability**, which is what separates it from
+    /// [`Self::turn_events_after`]. That one answers "what should a reader see", and
+    /// ephemeral rows are excluded because a `delta` is superseded by the block it belongs
+    /// to. This one answers "what has this session already been told", which a re-read needs
+    /// (`crate::db::ingest::NativeIngest::reread`): an ephemeral row a previous pass
+    /// journaled is still a row, and omitting it made a re-read re-add every `turn`/`started`
+    /// on every click — one duplicate per pass, in the tier a reader's transcript is
+    /// assembled from.
+    ///
+    /// One query for the session rather than one per turn, because a long session has many
+    /// turns and the per-turn shape costs a round trip each.
+    pub async fn session_events(&self, session_id: &SessionId) -> Result<Vec<Event>> {
+        sqlx::query_as::<_, Event>(
+            "SELECT * FROM events
+              WHERE session_env = ? AND session_agent = ? AND session_native = ?
+              ORDER BY seq",
+        )
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::Database)
+    }
+
     /// Record a request an agent raised, so it survives every client leaving.
     pub async fn create_pending_request(&self, request: &PendingRequest) -> Result<PendingRequest> {
         sqlx::query_as::<_, PendingRequest>(

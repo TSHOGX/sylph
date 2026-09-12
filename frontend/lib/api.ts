@@ -18,6 +18,7 @@ import type {
   FileTreeResponse, LinkState, MkdirRequest, MkdirResponse, PendingRequest, SearchResponse,
   PairingGrant,
   PairingOffer,
+  RereadResponse,
   Session,
   SessionEdge,
   SessionFilters,
@@ -303,6 +304,18 @@ export const api = {
     /** Stop the agent without ending the session. */
     detach: (id: string) =>
       fetchAPI<LinkState>(`/sessions/${segment(id)}/link`, { method: "DELETE" }),
+    /**
+     * Parse the vendor's native store again, ingesting whatever the journal lacks.
+     *
+     * One pass. It starts no follower and does not change the session's `fidelity`, so
+     * it is safe to repeat — and it is the only way a session adopted from a terminal
+     * gains a line the vendor appended afterwards. Invalidating a query cache cannot:
+     * that refetches what Sylph already holds, which is the defect this exists for.
+     */
+    reread: (id: string) =>
+      fetchAPI<RereadResponse>(`/sessions/${segment(id)}/reread`, {
+        method: "POST",
+      }),
     /** What the agent is currently blocked on. */
     requests: (id: string) =>
       fetchAPI<PendingRequest[]>(`/sessions/${segment(id)}/requests`),
