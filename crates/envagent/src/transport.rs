@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use serde::{de::DeserializeOwned, Serialize};
+use std::pin::Pin;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -194,6 +195,10 @@ pub struct ConnectionSupervisor {
     credential: Option<String>,
 }
 
+pub trait WireIo: AsyncRead + AsyncWrite + Send {}
+impl<T: AsyncRead + AsyncWrite + Send> WireIo for T {}
+type WireStream = Pin<Box<dyn WireIo + Unpin>>;
+
 impl ConnectionSupervisor {
     pub fn new(address: impl Into<String>) -> Self {
         Self {
@@ -216,7 +221,8 @@ impl ConnectionSupervisor {
     pub async fn connect(
         &mut self,
         hello: &sylph_protocol::Hello,
-    ) -> Result<FramedConnection<TcpStream>, FrameError> {
+    ) -> Result<FramedConnection<WireStream>, FrameError> {
+        let tls = self.address.starts_with("https://");
         let address = wire_address(&self.address).map_err(FrameError::Address)?;
         let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(address))
             .await
@@ -227,6 +233,32 @@ impl ConnectionSupervisor {
                 ))
             })??;
         self.epoch = self.epoch.advance();
+        let stream = if tls {
+            let ca = std::env::var("SYLPH_ENV_CA_CERT").map_err(|_| {
+                FrameError::Address("https envagent transport requires SYLPH_ENV_CA_CERT".into())
+            })?;
+            let pem = std::fs::read(ca)
+                .map_err(|e| FrameError::Address(format!("cannot read CA certificate: {e}")))?;
+            let host = self
+                .address
+                .trim_start_matches("https://")
+                .split('/')
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('[')
+                .split(']')
+                .next()
+                .unwrap_or("")
+                .split(':')
+                .next()
+                .unwrap_or("");
+            let tls = crate::tls::connect_stream(stream, host, &pem)
+                .await
+                .map_err(|e| FrameError::Address(format!("TLS handshake failed: {e}")))?;
+            Box::pin(tls) as WireStream
+        } else {
+            Box::pin(stream) as WireStream
+        };
         let mut framed = FramedConnection::new(stream);
         let mut hello = hello.clone();
         hello.connection_epoch = self.epoch.0;
@@ -242,7 +274,7 @@ impl ConnectionSupervisor {
     pub async fn connect_and_welcome(
         &mut self,
         hello: &sylph_protocol::Hello,
-    ) -> anyhow::Result<(FramedConnection<TcpStream>, sylph_protocol::Welcome)> {
+    ) -> anyhow::Result<(FramedConnection<WireStream>, sylph_protocol::Welcome)> {
         let mut framed = self.connect(hello).await?;
         let welcome = handshake_welcome(&mut framed).await?;
         self.backoff.reset();
@@ -297,7 +329,8 @@ fn wire_address(raw: &str) -> Result<String, String> {
     let raw = if let Some(raw) = raw.strip_prefix("http://") {
         raw
     } else if raw.starts_with("https://") {
-        return Err("TLS envagent transport is not enabled; use a loopback http endpoint".into());
+        let raw = raw.trim_start_matches("https://");
+        return parse_tls_address(raw);
     } else {
         raw
     };
@@ -345,6 +378,33 @@ fn wire_address(raw: &str) -> Result<String, String> {
             }
             Ok(format!("{authority}:4318"))
         }
+    }
+}
+
+fn parse_tls_address(raw: &str) -> Result<String, String> {
+    let authority = raw.split('/').next().unwrap_or(raw);
+    if authority.is_empty() {
+        return Err("address is empty".into());
+    }
+    if authority.starts_with('[') {
+        let closing = authority
+            .find(']')
+            .ok_or("IPv6 address is missing a closing bracket")?;
+        if authority[closing + 1..].is_empty() {
+            return Ok(format!("{authority}:4318"));
+        }
+        authority[closing + 2..]
+            .parse::<u16>()
+            .map_err(|_| "port is not numeric".to_string())?;
+        return Ok(authority.to_string());
+    }
+    if authority.contains(':') {
+        let (_, port) = authority.rsplit_once(':').ok_or("invalid address")?;
+        port.parse::<u16>()
+            .map_err(|_| "port is not numeric".to_string())?;
+        Ok(authority.to_string())
+    } else {
+        Ok(format!("{authority}:4318"))
     }
 }
 
