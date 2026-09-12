@@ -101,6 +101,16 @@ impl AppState {
 
     async fn build_inner(config: Config) -> anyhow::Result<Self> {
         let store = JournalStore::new(&config.journal_path).await?;
+        // Seed the local development identity once so in-process clients and the
+        // browser bootstrap cookie resolve to the same authority Subject.
+        store
+            .upsert_subject(
+                "bootstrap",
+                "Bootstrap",
+                &crate::middleware::auth::hash_token_for_storage(&config.cookie_secret),
+                true,
+            )
+            .await?;
         tracing::info!("Journal initialized at {}", config.journal_path);
 
         // Zero runnable agents is not a quiet degradation: no session can be created

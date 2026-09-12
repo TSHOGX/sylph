@@ -224,10 +224,14 @@ pub async fn logout() -> impl IntoResponse {
     )
 }
 
-fn hash_token(token: &str) -> String {
+pub(crate) fn hash_token_for_storage(token: &str) -> String {
     let mut h = Sha256::new();
     h.update(token.as_bytes());
     format!("{:x}", h.finalize())
+}
+
+fn hash_token(token: &str) -> String {
+    hash_token_for_storage(token)
 }
 
 #[derive(Serialize)]
