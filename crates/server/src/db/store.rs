@@ -56,7 +56,13 @@ impl Default for SessionFilter {
 }
 
 impl JournalStore {
-    pub async fn upsert_subject(&self, id: &str, name: &str, token_hash: &str, is_admin: bool) -> Result<()> {
+    pub async fn upsert_subject(
+        &self,
+        id: &str,
+        name: &str,
+        token_hash: &str,
+        is_admin: bool,
+    ) -> Result<()> {
         sqlx::query("INSERT INTO subjects (id, name, token_hash, is_admin, created_at_ms) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name")
             .bind(id).bind(name).bind(token_hash).bind(is_admin as i64).bind(now_ms())
             .execute(&self.pool).await.map_err(Error::Database)?;
@@ -65,11 +71,21 @@ impl JournalStore {
 
     pub async fn subject_id_for_token_hash(&self, token_hash: &str) -> Result<Option<String>> {
         sqlx::query_scalar("SELECT id FROM subjects WHERE token_hash = ?")
-            .bind(token_hash).fetch_optional(&self.pool).await.map_err(Error::Database)
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Error::Database)
     }
 
-    pub async fn has_capability(&self, subject_id: &str, environment_id: &str, capability: &str) -> Result<bool> {
-        if subject_id == "bootstrap" { return Ok(true); }
+    pub async fn has_capability(
+        &self,
+        subject_id: &str,
+        environment_id: &str,
+        capability: &str,
+    ) -> Result<bool> {
+        if subject_id == "bootstrap" {
+            return Ok(true);
+        }
         let found: Option<i64> = sqlx::query_scalar("SELECT 1 FROM env_grants WHERE subject_id = ? AND environment_id = ? AND capability = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?)")
             .bind(subject_id).bind(environment_id).bind(capability).bind(now_ms()).fetch_optional(&self.pool).await.map_err(Error::Database)?;
         Ok(found.is_some())
@@ -77,19 +93,43 @@ impl JournalStore {
 
     pub async fn is_admin(&self, subject_id: &str) -> Result<bool> {
         let value: Option<i64> = sqlx::query_scalar("SELECT is_admin FROM subjects WHERE id = ?")
-            .bind(subject_id).fetch_optional(&self.pool).await.map_err(Error::Database)?;
+            .bind(subject_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Error::Database)?;
         Ok(value == Some(1))
     }
 
     pub async fn grant_authority(&self, environment_id: &str) -> Result<Option<String>> {
         sqlx::query_scalar("SELECT grant_authority FROM env_installations WHERE environment_id = ?")
-            .bind(environment_id).fetch_optional(&self.pool).await.map_err(Error::Database)
+            .bind(environment_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Error::Database)
     }
 
-    pub async fn revoke_grant(&self, subject_id: &str, environment_id: &str, capability: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM env_grants WHERE subject_id = ? AND environment_id = ? AND capability = ?")
-            .bind(subject_id).bind(environment_id).bind(capability).execute(&self.pool).await.map_err(Error::Database)?;
+    pub async fn revoke_grant(
+        &self,
+        subject_id: &str,
+        environment_id: &str,
+        capability: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM env_grants WHERE subject_id = ? AND environment_id = ? AND capability = ?",
+        )
+        .bind(subject_id)
+        .bind(environment_id)
+        .bind(capability)
+        .execute(&self.pool)
+        .await
+        .map_err(Error::Database)?;
         Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn revoke_subject_work(&self, subject_id: &str, environment_id: &str) -> Result<u64> {
+        let result = sqlx::query("UPDATE turns SET status = 'interrupted', close_reason = 'grant_revoked', completed_at_ms = COALESCE(completed_at_ms, ?) WHERE origin_subject = ? AND session_env = ? AND status IN ('queued','starting','running','stopping','settling')")
+            .bind(now_ms()).bind(subject_id).bind(environment_id).execute(&self.pool).await.map_err(Error::Database)?;
+        Ok(result.rows_affected())
     }
     /// Internal access for the environment bridge's migration-backed tables.
     ///
