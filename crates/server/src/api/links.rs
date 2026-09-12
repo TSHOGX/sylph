@@ -429,15 +429,24 @@ pub async fn detach(
 /// happening.
 pub async fn list_requests(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<PendingRequest>>> {
     let session_id = require_session(&state, &session_id).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::SessionNotFound);
+    }
     Ok(Json(state.store.open_requests(&session_id).await?))
 }
 
 /// Answer a request an agent raised.
 pub async fn resolve(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
     Path(request_id): Path<String>,
     Json(body): Json<ResolveRequest>,
 ) -> Result<Json<PendingRequest>> {
@@ -446,6 +455,17 @@ pub async fn resolve(
         .get_request(&request_id)
         .await?
         .ok_or(Error::RequestNotFound)?;
+    if !state
+        .store
+        .has_capability(
+            &subject.0,
+            request.session_id.environment.as_str(),
+            "control",
+        )
+        .await?
+    {
+        return Err(Error::RequestNotFound);
+    }
 
     // The option has to be one the agent offered. A client inventing one would
     // reach the adapter as an unrecognized string, and an adapter's handling of
@@ -577,9 +597,17 @@ pub async fn resolve(
 /// the other is unavailable.
 pub async fn interrupt(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
     let session_id = require_session(&state, &session_id).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "control")
+        .await?
+    {
+        return Err(Error::Forbidden("control capability required".into()));
+    }
 
     let outcome = state
         .env_bridge
@@ -616,10 +644,18 @@ pub async fn interrupt(
 /// the turn the client believed was running turns that into a refusal.
 pub async fn steer(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
     Path(session_id): Path<String>,
     Json(body): Json<SteerRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let session_id = require_session(&state, &session_id).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "control")
+        .await?
+    {
+        return Err(Error::Forbidden("control capability required".into()));
+    }
 
     if body.text.trim().is_empty() {
         return Err(Error::InvalidRequest(
@@ -699,10 +735,18 @@ pub struct SteerRequest {
 /// `steer` now returns, so a client asking the wrong one of these is told which.
 pub async fn queue(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
     Path(session_id): Path<String>,
     Json(body): Json<QueueRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let session_id = require_session(&state, &session_id).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "control")
+        .await?
+    {
+        return Err(Error::Forbidden("control capability required".into()));
+    }
 
     if body.text.trim().is_empty() {
         return Err(Error::InvalidRequest("Queued text cannot be empty".into()));
@@ -748,10 +792,18 @@ pub struct QueueRequest {
 /// client that assumed its own optimistic value would drift from the agent.
 pub async fn set_config(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
     Path(session_id): Path<String>,
     Json(body): Json<SetConfigRequest>,
 ) -> Result<Json<LinkState>> {
     let session_id = require_session(&state, &session_id).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "control")
+        .await?
+    {
+        return Err(Error::Forbidden("control capability required".into()));
+    }
 
     if body.config_id.trim().is_empty() {
         return Err(Error::InvalidRequest("A config id is required".into()));
@@ -853,9 +905,17 @@ fn refusal_or(error: anyhow::Error, otherwise: fn(String) -> Error) -> Error {
 /// from stranding an approval.
 pub async fn events(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
     Path(session_id): Path<String>,
 ) -> Result<impl axum::response::IntoResponse> {
     let session_id = require_session(&state, &session_id).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::SessionNotFound);
+    }
 
     let live = state.hub.attach_session(&session_id.encode()).await;
     let stream = tokio_stream::wrappers::BroadcastStream::new(live)
@@ -889,10 +949,18 @@ pub async fn events(
 /// route the event back to the existing trajectory without inventing an `agent` turn.
 pub async fn trace_events(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
     Path(session_id): Path<String>,
     Query(query): Query<TraceEventsQuery>,
 ) -> Result<impl IntoResponse> {
     let session = require_session(&state, &session_id).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, session.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::SessionNotFound);
+    }
     let encoded = session.encode();
     let after_seq = query.after_seq;
 
