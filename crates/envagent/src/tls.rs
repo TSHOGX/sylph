@@ -11,8 +11,8 @@ use tokio_rustls::{
     TlsConnector,
 };
 
-pub async fn connect(
-    address: &str,
+pub async fn connect_stream(
+    stream: TcpStream,
     server_name: &str,
     ca_pem: &[u8],
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
@@ -30,7 +30,6 @@ pub async fn connect(
         .with_root_certificates(roots)
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(config));
-    let stream = TcpStream::connect(address).await?;
     let name = ServerName::try_from(server_name.to_owned()).context("invalid TLS server name")?;
     Ok(connector.connect(name, stream).await?)
 }
