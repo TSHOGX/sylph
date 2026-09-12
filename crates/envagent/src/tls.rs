@@ -36,10 +36,55 @@ pub async fn connect_stream(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn empty_ca_bundle_is_rejected_before_connecting() {
         assert!(rustls_pemfile::certs(&mut std::io::Cursor::new(b""))
             .next()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn configured_ca_and_server_name_complete_a_tls_handshake() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.key_pair.serialize_pem();
+        let mut cert_reader = std::io::Cursor::new(cert_pem.as_bytes());
+        let certs = rustls_pemfile::certs(&mut cert_reader)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let mut key_reader = std::io::Cursor::new(key_pem.as_bytes());
+        let key = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
+            .next()
+            .unwrap()
+            .unwrap();
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key.into())
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        let cert_for_client = cert_pem.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, b"ok")
+                .await
+                .unwrap();
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut tls = connect_stream(stream, "localhost", cert_for_client.as_bytes())
+            .await
+            .unwrap();
+        let mut body = [0u8; 2];
+        tokio::io::AsyncReadExt::read_exact(&mut tls, &mut body)
+            .await
+            .unwrap();
+        assert_eq!(&body, b"ok");
+        server.await.unwrap();
     }
 }

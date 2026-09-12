@@ -30,6 +30,7 @@ toml = "1.1"
 
 [dev-dependencies]
 tempfile = "3.14"
+rcgen = "0.13"
 
 [features]
 # Forwards to `sylph-adapters/e2e`, which compiles in the deterministic E2E agent
