@@ -7,8 +7,8 @@ workspaces. `docs/api/README.md` holds the conventions every endpoint here assum
 
 ### `GET /api/v1/health`
 
-Liveness, version, and what each paired environment can run. Unauthenticated, so a
-supervisor can probe it — which is why it carries no counts and no paths.
+Liveness and aggregate agent availability. Unauthenticated, so a supervisor can probe it;
+per-environment connectivity and inventory require authenticated `GET /api/v1/environments`.
 
 **Response 200:**
 ```json
@@ -16,20 +16,12 @@ supervisor can probe it — which is why it carries no counts and no paths.
   "ok": true,
   "apiVersion": "1",
   "schemaVersion": 1,
-  "environments": [
-    {"id": "env7fk2", "name": "laptop", "connected": true,
-     "agents": [{"name": "claude", "version": "2.1.247"}, {"name": "pi", "version": "0.84.3"}]},
-    {"id": "envk9x1", "name": "build-box", "connected": false,
-     "disconnectedSinceMs": 1724057000000}
-  ]
+  "agents": {"available": true}
 }
 ```
 
-**Agent availability is reported per environment and nowhere else.** It is a fact about one
-machine's `PATH` at one moment, discovered by that envagent and re-reported when its
-inventory changes, so a server-wide list would be a claim no single machine can support —
-and it would read as authoritative while being wrong for every environment but one. A
-disconnected environment reports no `agents` array rather than an empty one: what it can run
+Per-environment agent availability is reported by authenticated `GET /api/v1/environments`.
+A disconnected environment reports no `agents` array rather than an empty one: what it can run
 is unknown, not nothing.
 
 `schemaVersion` is `MAX(version)` from the migration runner's own table, never a

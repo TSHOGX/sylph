@@ -3133,13 +3133,12 @@
       },
       "HealthResponse": {
         "type": "object",
-        "description": "Unauthenticated liveness plus per-environment connectivity and agent inventory. Paths, session counts, and retention details remain authenticated.",
+        "description": "Unauthenticated liveness and aggregate agent availability. Per-environment connectivity and inventory remain authenticated on /environments.",
         "required": [
           "ok",
           "apiVersion",
           "schemaVersion",
-          "agents",
-          "environments"
+          "agents"
         ],
         "properties": {
           "ok": {
@@ -3163,29 +3162,6 @@
               "available": {
                 "type": "boolean",
                 "description": "Whether any agent is usable at all. A boolean rather than a count, to keep this endpoint free of anything an unauthenticated caller should not learn."
-              }
-            }
-          },
-          "environments": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "required": ["id", "name", "connected", "agents"],
-              "properties": {
-                "id": {"type": "string"},
-                "name": {"type": "string"},
-                "connected": {"type": "boolean"},
-                "agents": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "required": ["name"],
-                    "properties": {
-                      "name": {"type": "string"},
-                      "version": {"type": "string", "nullable": true}
-                    }
-                  }
-                }
               }
             }
           }
