@@ -462,8 +462,8 @@ export const api = {
    * deliberately no content call here — reading bytes stays session-scoped.
    */
   fs: {
-    roots: () => fetchAPI<BrowseRootsResponse>("/fs/roots"),
-    tree: (path = "") => fetchAPI<BrowseResponse>(`/fs/tree${queryString({ path })}`),
+    roots: (environment?: string) => fetchAPI<BrowseRootsResponse>(`/fs/roots${queryString({ environment })}`),
+    tree: (path = "", environment?: string) => fetchAPI<BrowseResponse>(`/fs/tree${queryString({ path, environment })}`),
   },
   /**
    * The identity text Sylph appends to an agent's prompt.

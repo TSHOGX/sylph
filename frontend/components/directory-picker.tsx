@@ -147,17 +147,19 @@ export function DirectoryPicker({
   confirmLabel,
   /** Directory to open at. Falls back to the first configured root. */
   initialPath,
+  environment,
 }: {
   onClose: () => void;
   onChoose: (path: string) => void;
   title?: string;
   confirmLabel?: string;
   initialPath?: string;
+  environment?: string;
 }) {
   const t = useT();
   const rootsQuery = useQuery({
-    queryKey: ["fs", "roots"],
-    queryFn: () => api.fs.roots(),
+    queryKey: ["fs", "roots", environment],
+    queryFn: () => api.fs.roots(environment),
     staleTime: 60_000,
   });
 
@@ -167,8 +169,8 @@ export function DirectoryPicker({
   const [path, setPath] = useState<string | undefined>(initialPath);
 
   const treeQuery = useQuery({
-    queryKey: ["fs", "tree", path ?? ""],
-    queryFn: () => api.fs.tree(path ?? ""),
+    queryKey: ["fs", "tree", environment, path ?? ""],
+    queryFn: () => api.fs.tree(path ?? "", environment),
   });
 
   const roots = rootsQuery.data?.roots ?? [];

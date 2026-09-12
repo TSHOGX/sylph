@@ -2474,8 +2474,9 @@ fn command_needs_a_fresh_request_id(command: &sylph_protocol::EnvironmentCommand
         // what made picking a model or a thinking level appear to do nothing: a
         // draft's first read happens before any config is set, and that empty
         // snapshot then answered every later read for the draft's whole life.
-        EnvironmentCommand::Capabilities { .. }
-        | EnvironmentCommand::DraftCapabilities { .. } => true,
+        EnvironmentCommand::Capabilities { .. } | EnvironmentCommand::DraftCapabilities { .. } => {
+            true
+        }
         // A listing after mkdir must observe the new entry. Mutating file
         // operations are excluded: they carry their payload in the request id so
         // an at-most-once retry addresses the original write.
@@ -3420,7 +3421,10 @@ mod tests {
             Some(environment.clone()),
             0,
         );
-        bridge.register_connection(&hello, "token", tx).await.unwrap();
+        bridge
+            .register_connection(&hello, "token", tx)
+            .await
+            .unwrap();
         rx
     }
 
@@ -3629,11 +3633,7 @@ mod tests {
                 let command = steer();
                 tokio::spawn(async move {
                     bridge
-                        .remote_session_command(
-                            &session_id,
-                            command,
-                            IdempotencyPolicy::AtMostOnce,
-                        )
+                        .remote_session_command(&session_id, command, IdempotencyPolicy::AtMostOnce)
                         .await
                 })
             };
@@ -3680,12 +3680,18 @@ mod tests {
         // The id the bridge actually mints, twice. These must differ, and that is the
         // whole property: equal ids *are* the replay, because the second call would
         // resolve to the first pass's durable outcome in `env_command_results`.
-        let minted_once =
-            remote_request_id(&session.environment, &command, IdempotencyPolicy::AtMostOnce)
-                .unwrap();
-        let minted_again =
-            remote_request_id(&session.environment, &command, IdempotencyPolicy::AtMostOnce)
-                .unwrap();
+        let minted_once = remote_request_id(
+            &session.environment,
+            &command,
+            IdempotencyPolicy::AtMostOnce,
+        )
+        .unwrap();
+        let minted_again = remote_request_id(
+            &session.environment,
+            &command,
+            IdempotencyPolicy::AtMostOnce,
+        )
+        .unwrap();
         assert_ne!(
             minted_once.as_str(),
             minted_again.as_str(),

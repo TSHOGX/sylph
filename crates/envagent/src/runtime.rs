@@ -1660,17 +1660,121 @@ impl EnvAgent {
                 .unwrap_or_default(),
             ),
             EnvironmentCommand::BrowseRoots => {
+                let home = self
+                    .config
+                    .path_policy
+                    .roots()
+                    .first()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                let roots = self
+                    .config
+                    .path_policy
+                    .roots()
+                    .iter()
+                    .map(|path| {
+                        let display = path.display().to_string();
+                        let name = if display == home {
+                            "Home".to_string()
+                        } else {
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or(&display)
+                                .to_string()
+                        };
+                        serde_json::json!({"name": name, "path": display})
+                    })
+                    .collect::<Vec<_>>();
                 sylph_protocol::CommandOutcome::accepted_with_result(
-                    serde_json::json!({"roots": self.config.path_policy.roots()}),
+                    serde_json::json!({"roots": roots, "home": home}),
                 )
             }
             EnvironmentCommand::BrowseTree { path } => {
                 let base = path.unwrap_or_default();
+                let base = if base.trim().is_empty() {
+                    self.config
+                        .path_policy
+                        .roots()
+                        .first()
+                        .cloned()
+                        .unwrap_or_default()
+                        .display()
+                        .to_string()
+                } else {
+                    base
+                };
                 match self.config.path_policy.contain(&base) {
-                    Ok(dir) => match std::fs::read_dir(dir) {
-                        Ok(entries) => sylph_protocol::CommandOutcome::accepted_with_result(
-                            serde_json::json!({"entries": entries.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect::<Vec<_>>()}),
-                        ),
+                    Ok(dir) => match std::fs::read_dir(&dir) {
+                        Ok(entries) => {
+                            const SKIPPED: &[&str] = &[
+                                ".git",
+                                "node_modules",
+                                "target",
+                                ".next",
+                                "__pycache__",
+                                ".venv",
+                                "venv",
+                                ".mypy_cache",
+                                ".pytest_cache",
+                                "dist",
+                                "build",
+                            ];
+                            let mut output = Vec::new();
+                            let mut truncated = false;
+                            for entry in entries.flatten() {
+                                if output.len() >= 2000 {
+                                    truncated = true;
+                                    break;
+                                }
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                if SKIPPED.contains(&name.as_str()) {
+                                    continue;
+                                }
+                                let file_type = match entry.file_type() {
+                                    Ok(value) => value,
+                                    Err(_) => continue,
+                                };
+                                let is_symlink = file_type.is_symlink();
+                                let resolved = if is_symlink {
+                                    match self.config.path_policy.contain(entry.path()) {
+                                        Ok(value) => value,
+                                        Err(_) => continue,
+                                    }
+                                } else {
+                                    entry.path()
+                                };
+                                let metadata = match std::fs::metadata(&resolved) {
+                                    Ok(value) => value,
+                                    Err(_) => continue,
+                                };
+                                if !metadata.is_dir() {
+                                    continue;
+                                }
+                                let modified_at_ms = metadata
+                                    .modified()
+                                    .ok()
+                                    .and_then(|value| {
+                                        value.duration_since(std::time::UNIX_EPOCH).ok()
+                                    })
+                                    .map(|value| value.as_millis() as i64)
+                                    .unwrap_or(0);
+                                output.push(serde_json::json!({"path": entry.path().display().to_string(), "name": name, "modifiedAtMs": modified_at_ms, "isSymlink": is_symlink}));
+                            }
+                            output.sort_by(|a, b| {
+                                a["name"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_lowercase()
+                                    .cmp(&b["name"].as_str().unwrap_or_default().to_lowercase())
+                            });
+                            let parent = dir
+                                .parent()
+                                .filter(|parent| self.config.path_policy.contains(parent))
+                                .map(|parent| parent.display().to_string());
+                            sylph_protocol::CommandOutcome::accepted_with_result(
+                                serde_json::json!({"path": dir.display().to_string(), "parent": parent, "entries": output, "truncated": truncated}),
+                            )
+                        }
                         Err(error) => sylph_protocol::CommandOutcome::Rejected {
                             code: "INTERNAL".into(),
                             message: error.to_string(),
