@@ -2,7 +2,7 @@
 
 use crate::models::now_ms;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -17,6 +17,7 @@ use crate::{
     models::{AdoptSessionRequest, CreateSessionRequest, Session, Turn},
     AppState,
 };
+use crate::middleware::auth::SubjectId;
 
 /// Decode a session id out of a path segment, or refuse it.
 ///
@@ -71,6 +72,7 @@ fn non_blank(value: Option<String>) -> Option<String> {
 /// in the same store (`docs/architecture.md` § One authority).
 pub async fn list(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<SessionListResponse>> {
     // Validated rather than passed through: an environment id is base32 by
@@ -86,6 +88,7 @@ pub async fn list(
         None => None,
     };
 
+    if let Some(ref env) = environment { if !state.store.has_capability(&subject.0, env, "observe").await? { return Ok(Json(SessionListResponse { sessions: vec![] })); } }
     let filter = SessionFilter {
         limit: query.limit.clamp(1, 200),
         agent: non_blank(query.agent),
@@ -196,6 +199,7 @@ pub struct PreparedSessionResponse {
 
 pub async fn get(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Path(id): Path<String>,
 ) -> Result<Json<SessionResponse>> {
     let id = decode_id(&id)?;
@@ -204,6 +208,7 @@ pub async fn get(
         .get_session(&id)
         .await?
         .ok_or(Error::SessionNotFound)?;
+    if !state.store.has_capability(&subject.0, session.id.environment.as_str(), "observe").await? { return Err(Error::SessionNotFound); }
     Ok(Json(SessionResponse { session }))
 }
 

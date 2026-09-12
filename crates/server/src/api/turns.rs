@@ -1,6 +1,6 @@
 use crate::models::now_ms;
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive},
@@ -20,6 +20,7 @@ use crate::{
     models::{CreateTurnRequest, Turn},
     AppState,
 };
+use crate::middleware::auth::SubjectId;
 
 #[derive(Serialize)]
 pub struct TurnResponse {
@@ -265,6 +266,7 @@ pub async fn create_prepared(
 /// request, and clients stream progress via SSE.
 pub async fn create(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Path(session_id): Path<String>,
     headers: axum::http::HeaderMap,
     Json(req): Json<CreateTurnRequest>,
@@ -275,6 +277,7 @@ pub async fn create(
         .get_session(&session_id)
         .await?
         .ok_or(Error::SessionNotFound)?;
+    if !state.store.has_capability(&subject.0, session_id.environment.as_str(), "control").await? { return Err(Error::Forbidden("control capability required".into())); }
 
     // Idempotency key may arrive in the header or the body; header wins.
     let idempotency_key = headers

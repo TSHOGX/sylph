@@ -295,6 +295,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/environments/{id}",
             axum::routing::delete(api::environments::unpair),
         )
+        .route("/api/v1/environments/{id}/grants/revoke", post(api::environments::revoke_grant))
         .route(
             "/api/v1/sessions",
             get(api::sessions::list).post(api::sessions::create),

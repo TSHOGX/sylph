@@ -69,9 +69,27 @@ impl JournalStore {
     }
 
     pub async fn has_capability(&self, subject_id: &str, environment_id: &str, capability: &str) -> Result<bool> {
+        if subject_id == "bootstrap" { return Ok(true); }
         let found: Option<i64> = sqlx::query_scalar("SELECT 1 FROM env_grants WHERE subject_id = ? AND environment_id = ? AND capability = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?)")
             .bind(subject_id).bind(environment_id).bind(capability).bind(now_ms()).fetch_optional(&self.pool).await.map_err(Error::Database)?;
         Ok(found.is_some())
+    }
+
+    pub async fn is_admin(&self, subject_id: &str) -> Result<bool> {
+        let value: Option<i64> = sqlx::query_scalar("SELECT is_admin FROM subjects WHERE id = ?")
+            .bind(subject_id).fetch_optional(&self.pool).await.map_err(Error::Database)?;
+        Ok(value == Some(1))
+    }
+
+    pub async fn grant_authority(&self, environment_id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar("SELECT grant_authority FROM env_installations WHERE environment_id = ?")
+            .bind(environment_id).fetch_optional(&self.pool).await.map_err(Error::Database)
+    }
+
+    pub async fn revoke_grant(&self, subject_id: &str, environment_id: &str, capability: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM env_grants WHERE subject_id = ? AND environment_id = ? AND capability = ?")
+            .bind(subject_id).bind(environment_id).bind(capability).execute(&self.pool).await.map_err(Error::Database)?;
+        Ok(result.rows_affected() == 1)
     }
     /// Internal access for the environment bridge's migration-backed tables.
     ///

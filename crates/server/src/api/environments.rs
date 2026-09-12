@@ -19,7 +19,7 @@
 //! costing time).
 
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     Json,
 };
@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use sylph_protocol::{AgentInfo, Capability, EnvironmentId, FlagSchema};
 
 use crate::{error::Result, AppState};
+use crate::middleware::auth::SubjectId;
 
 /// One environment, and what it can do right now.
 #[derive(Debug, Clone, Serialize)]
@@ -144,9 +145,12 @@ pub async fn pair(
 }
 
 /// DELETE /api/v1/environments/{id}
-pub async fn unpair(State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode> {
+pub async fn unpair(State(state): State<AppState>, Extension(subject): Extension<SubjectId>, Path(id): Path<String>) -> Result<StatusCode> {
     let id = EnvironmentId::parse(id)
         .map_err(|error| crate::error::Error::InvalidRequest(error.to_string()))?;
+    let authority = state.store.grant_authority(id.as_str()).await?.ok_or(crate::error::Error::SessionNotFound)?;
+    let allowed = authority == "server" && state.store.is_admin(&subject.0).await?;
+    if !allowed { return Err(crate::error::Error::Forbidden("environment authority required".into())); }
     if !state
         .env_bridge
         .unpair(&id)
@@ -155,6 +159,18 @@ pub async fn unpair(State(state): State<AppState>, Path(id): Path<String>) -> Re
     {
         return Err(crate::error::Error::SessionNotFound);
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeGrantRequest { pub subject_id: String, pub capability: String }
+
+pub async fn revoke_grant(State(state): State<AppState>, Extension(subject): Extension<SubjectId>, Path(id): Path<String>, Json(req): Json<RevokeGrantRequest>) -> Result<StatusCode> {
+    let environment = EnvironmentId::parse(id).map_err(|e| crate::error::Error::InvalidRequest(e.to_string()))?;
+    if !state.store.is_admin(&subject.0).await? { return Err(crate::error::Error::Forbidden("environment authority required".into())); }
+    if !matches!(req.capability.as_str(), "observe" | "control") { return Err(crate::error::Error::InvalidRequest("capability must be observe or control".into())); }
+    if !state.store.revoke_grant(&req.subject_id, environment.as_str(), &req.capability).await? { return Err(crate::error::Error::SessionNotFound); }
     Ok(StatusCode::NO_CONTENT)
 }
 
