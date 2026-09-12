@@ -181,6 +181,17 @@ pub async fn revoke_grant(
 ) -> Result<StatusCode> {
     let environment =
         EnvironmentId::parse(id).map_err(|e| crate::error::Error::InvalidRequest(e.to_string()))?;
+    if state
+        .store
+        .grant_authority(environment.as_str())
+        .await?
+        .as_deref()
+        != Some("server")
+    {
+        return Err(crate::error::Error::Forbidden(
+            "machine authority requires local confirmation".into(),
+        ));
+    }
     if !state.store.is_admin(&subject.0).await? {
         return Err(crate::error::Error::Forbidden(
             "environment authority required".into(),
@@ -219,6 +230,17 @@ pub async fn issue_grant(
 ) -> Result<StatusCode> {
     let environment =
         EnvironmentId::parse(id).map_err(|e| crate::error::Error::InvalidRequest(e.to_string()))?;
+    if state
+        .store
+        .grant_authority(environment.as_str())
+        .await?
+        .as_deref()
+        != Some("server")
+    {
+        return Err(crate::error::Error::Forbidden(
+            "machine authority requires local confirmation".into(),
+        ));
+    }
     if !state.store.is_admin(&subject.0).await? {
         return Err(crate::error::Error::Forbidden(
             "environment authority required".into(),
