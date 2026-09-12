@@ -1432,7 +1432,9 @@ impl EnvBridge {
                 session_id: Some(session.id.clone()),
                 draft_id: None,
                 agent: session.id.agent.to_string(),
-                workdir: session.workdir.clone(),
+                workdir: session.workdir.clone().ok_or_else(|| {
+                    anyhow!("session has no recorded working directory")
+                })?,
                 flags,
                 inject_identity: session.inject_identity,
                 identity_preamble: None,

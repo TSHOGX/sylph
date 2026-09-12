@@ -19,6 +19,7 @@ use crate::{db::store::SessionFilter, error::Result, AppState};
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Workspace {
+    pub environment: Option<String>,
     pub path: String,
     /// Directory leaf, precomputed so the client does not re-derive it per row.
     pub name: String,
@@ -100,13 +101,18 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
 
     // Insertion-ordered accumulation, then sorted once. A BTreeMap would order
     // by path, but the sidebar wants recency, so the sort happens at the end.
-    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut index: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
     let mut rows: Vec<Workspace> = Vec::new();
 
     for session in &sessions {
-        let path = normalize(&session.workdir);
-        let at = *index.entry(path.clone()).or_insert_with(|| {
+        let Some(workdir) = session.workdir.as_deref() else {
+            continue;
+        };
+        let path = normalize(workdir);
+        let environment = session.id.environment.to_string();
+        let at = *index.entry((environment.clone(), path.clone())).or_insert_with(|| {
             rows.push(Workspace {
+                environment: Some(environment),
                 name: leaf(&path).to_string(),
                 is_quick_start: path == quick_start_dir,
                 path,
@@ -126,8 +132,9 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
 
     // Quick Start is always present, even with no sessions: the sidebar section
     // and the settings row both exist before the first quick session is made.
-    if !index.contains_key(&quick_start_dir) {
+    if !rows.iter().any(|row| row.environment.is_none() && row.path == quick_start_dir) {
         rows.push(Workspace {
+            environment: None,
             path: quick_start_dir.clone(),
             name: leaf(&quick_start_dir).to_string(),
             session_count: 0,
@@ -140,7 +147,8 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
     rows.sort_by(|a, b| {
         b.last_used_ms
             .cmp(&a.last_used_ms)
-            .then(a.path.cmp(&b.path))
+        .then(a.path.cmp(&b.path))
+        .then(a.environment.cmp(&b.environment))
     });
 
     Ok(Json(WorkspacesResponse {

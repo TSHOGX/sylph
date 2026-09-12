@@ -48,7 +48,9 @@ CREATE TABLE sessions (
   agent        TEXT NOT NULL,
   native_id    TEXT NOT NULL,
 
-  workdir          TEXT NOT NULL,
+  -- Native stores may omit a working directory. Preserve that unknown as NULL;
+  -- guessing a path would claim where arbitrary code may run.
+  workdir          TEXT,
   title            TEXT,
   -- Whether `SOUL.md` is appended. Settable at creation and **refused afterwards**:
   -- a transcript records what produced it, so rewriting the flag would rewrite what

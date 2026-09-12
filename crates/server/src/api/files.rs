@@ -85,10 +85,13 @@ async fn remote_target(state: &AppState, id: &str) -> Result<Option<RemoteTarget
     let Some(session) = state.store.get_session(&session_id).await? else {
         return Err(Error::SessionNotFound);
     };
+    let workdir = session.workdir.ok_or_else(|| {
+        Error::InvalidRequest("This session has no recorded working directory".into())
+    })?;
     Ok(Some(RemoteTarget::Session {
         environment: session_id.environment.clone(),
         session_id,
-        workdir: session.workdir,
+        workdir,
     }))
 }
 
@@ -1078,7 +1081,8 @@ async fn resolve(state: &AppState, session_id: &str, relative: &str) -> Result<(
         .get_session(&crate::api::sessions::decode_id(session_id)?)
         .await?
         .ok_or(Error::SessionNotFound)?
-        .workdir;
+        .workdir
+        .ok_or_else(|| Error::InvalidRequest("This session has no recorded working directory".into()))?;
 
     // Canonicalizing the root too matters on macOS, where `/tmp` is a symlink to
     // `/private/tmp`: comparing a canonical target against a non-canonical root

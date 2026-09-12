@@ -150,7 +150,7 @@ pub async fn create_prepared(
             };
             let session = crate::models::Session {
                 id: session_id.clone(),
-                workdir: resolved_workdir,
+                workdir: Some(resolved_workdir),
                 title: draft
                     .title
                     .clone()

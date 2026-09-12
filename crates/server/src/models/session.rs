@@ -69,7 +69,7 @@ pub struct Session {
     /// a session belongs to (`docs/api/README.md` § A session id in a path).
     #[serde(flatten, with = "session_id_fields")]
     pub id: SessionId,
-    pub workdir: String,
+    pub workdir: Option<String>,
     pub title: Option<String>,
     /// Whether `SOUL.md` is appended. Settable at creation and refused by `PATCH`,
     /// because a transcript records what produced it.

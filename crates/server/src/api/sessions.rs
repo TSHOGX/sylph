@@ -1052,12 +1052,13 @@ pub async fn adopt(
             "remote adopt returned a different session identity".into(),
         ));
     }
+    // Native history may not record a working directory. Preserve that fact as
+    // NULL; guessing a path would claim where future agent code may run.
     let workdir = result
         .get("workdir")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| Error::LinkFailed("remote adopt returned no workdir".into()))?
-        .to_string();
+        .map(str::to_string);
     let now = now_ms();
     let record = Session {
         id: session_id.clone(),
