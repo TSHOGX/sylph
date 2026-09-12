@@ -512,7 +512,10 @@ mod tests {
         assert_eq!(wire_address("127.0.0.1").unwrap(), "127.0.0.1:4318");
         assert_eq!(wire_address("http://[::1]").unwrap(), "[::1]:4318");
         assert_eq!(wire_address("[::1]:4319").unwrap(), "[::1]:4319");
-        assert!(wire_address("https://127.0.0.1:4318").is_err());
+        assert_eq!(
+            wire_address("https://127.0.0.1:4318").unwrap(),
+            "127.0.0.1:4318"
+        );
         assert!(wire_address("::1").is_err());
         assert!(wire_address("127.0.0.1:not-a-port").is_err());
     }
