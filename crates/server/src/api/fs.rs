@@ -96,23 +96,6 @@ fn map_remote_browse_error(error: anyhow::Error) -> Error {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn remote_browse_errors_preserve_policy_and_missing_codes() {
-        assert!(matches!(
-            map_remote_browse_error(anyhow::anyhow!("POLICY_VIOLATION: outside root")),
-            Error::Forbidden(_)
-        ));
-        assert!(matches!(
-            map_remote_browse_error(anyhow::anyhow!("FILE_NOT_FOUND: path does not exist")),
-            Error::FileNotFound
-        ));
-    }
-}
-
 /// GET /api/v1/fs/roots?environment=...
 pub async fn roots(
     State(state): State<AppState>,
@@ -130,6 +113,23 @@ pub async fn roots(
     serde_json::from_value(value)
         .map(Json)
         .map_err(|error| Error::Internal(format!("invalid browse roots response: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_browse_errors_preserve_policy_and_missing_codes() {
+        assert!(matches!(
+            map_remote_browse_error(anyhow::anyhow!("POLICY_VIOLATION: outside root")),
+            Error::Forbidden(_)
+        ));
+        assert!(matches!(
+            map_remote_browse_error(anyhow::anyhow!("FILE_NOT_FOUND: path does not exist")),
+            Error::FileNotFound
+        ));
+    }
 }
 
 /// GET /api/v1/fs/tree?path=...&environment=...
