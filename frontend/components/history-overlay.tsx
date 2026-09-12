@@ -230,7 +230,7 @@ export function HistoryOverlay() {
       setQuery("");
       setMode("list");
     },
-    [setActiveWorkdir, setQuery],
+    [setActiveEnvironment, setActiveWorkdir, setQuery],
   );
 
   if (mode === "switch") {
