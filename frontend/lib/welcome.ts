@@ -32,6 +32,8 @@ import type { Session } from "@/lib/api-types";
 export interface RecentWorkspace {
   /** Absolute path. Display shortens it; the row's link needs the session. */
   workdir: string;
+  /** Opaque environment owning this path. */
+  environment?: string | null;
   /** Newest session here — the one the row opens. */
   session: Session;
   /** Other sessions in this directory, not counting `session`. */
@@ -87,11 +89,12 @@ export function recentWorkspaces(
 
   for (const session of [...sessions].sort((a, b) => b.updatedAtMs - a.updatedAtMs)) {
     const workdir = session.workdir.replace(/\/+$/, "") || "/";
-    const existing = byPath.get(workdir);
+    const key = `${session.environment}\u0000${workdir}`;
+    const existing = byPath.get(key);
     // The first session seen for a path is its newest, because the iteration is
     // already in descending order.
     if (existing) existing.otherCount += 1;
-    else byPath.set(workdir, { workdir, session, otherCount: 0 });
+    else byPath.set(key, { workdir, environment: session.environment, session, otherCount: 0 });
   }
 
   return [...byPath.values()].slice(0, limit);

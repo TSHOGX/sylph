@@ -137,7 +137,7 @@ function EmptyHistoryAdoptHint() {
 export function HistoryOverlay() {
   const t = useT();
   const router = useRouter();
-  const { closeOverlay, activeWorkdir, setActiveWorkdir } = useWorkspaceUI();
+  const { closeOverlay, activeWorkdir, activeEnvironment, setActiveWorkdir, setActiveEnvironment } = useWorkspaceUI();
 
   /**
    * Which surface is up. Three modes rather than three stacked modals: nesting
@@ -157,6 +157,7 @@ export function HistoryOverlay() {
   // rather than an empty picker.
   const workspaces = workspacesResult.data?.workspaces ?? [];
   const workdir = activeWorkdir ?? workspaces[0]?.path ?? null;
+  const environment = activeEnvironment ?? workspaces[0]?.environment ?? null;
   const home = workspacesResult.data?.home;
 
   const environments = useEnvironments();
@@ -164,9 +165,9 @@ export function HistoryOverlay() {
   const history = useQuery({
     // Not `liveSessionsQuery`'s key: that one is unfiltered and polled for the
     // sidebar, and this is a directory-scoped read that must not disturb it.
-    queryKey: ["sessions", { workdir, limit: LIMIT }],
+    queryKey: ["sessions", { workdir, environment, limit: LIMIT }],
     enabled: Boolean(workdir),
-    queryFn: () => api.sessions.list({ workdir: workdir!, limit: LIMIT }),
+    queryFn: () => api.sessions.list({ workdir: workdir!, environment: environment ?? undefined, limit: LIMIT }),
   });
 
   // Depends on `history.data` rather than a `?? []` fallback in the memo below: the
@@ -220,8 +221,9 @@ export function HistoryOverlay() {
 
   const setQuery = list.setQuery;
   const chooseWorkspace = useCallback(
-    (path: string) => {
+    (path: string, selectedEnvironment?: string | null) => {
       setActiveWorkdir(path);
+      setActiveEnvironment(selectedEnvironment ?? null);
       // The filter is cleared with the scope it was typed against. A query that
       // matched nothing in the new directory would otherwise present the switch as
       // having found an empty history.

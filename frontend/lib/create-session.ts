@@ -13,7 +13,7 @@
  * no directory chosen yet (`Mod+N`), and choosing a workspace before starting.
  */
 
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
 import { api, type Environment } from "@/lib/api";
@@ -113,7 +113,7 @@ export function isDefaultsProblem(
 
 export interface QuickCreate {
   /** Create in `workdir` and navigate to the new session. */
-  create: (workdir: string | undefined) => void;
+  create: (workdir: string | undefined, environmentId?: string | null) => void;
   isPending: boolean;
   error: unknown;
 }
@@ -132,7 +132,7 @@ export function useQuickCreateSession(): QuickCreate {
   const environments = useEnvironments();
 
   const mutation = useMutation({
-    mutationFn: async (workdir: string | undefined) => {
+    mutationFn: async ({ workdir, environmentId }: { workdir: string | undefined; environmentId?: string | null }) => {
       // Falsy covers both "the workspaces query has not answered yet" and the
       // sidebar's placeholder Quick Sessions group, whose path is `""` until it
       // does. Sending either would create a session in an unusable directory.
@@ -140,7 +140,9 @@ export function useQuickCreateSession(): QuickCreate {
         throw new Error("Still resolving the directory. Try again in a moment.");
       }
       const resolved = resolveSessionDefaults(
-        defaultEnvironment(environments.all),
+        environmentId
+          ? environments.all.find((environment) => environment.id === environmentId) ?? null
+          : defaultEnvironment(environments.all),
         settings,
       );
       if (isDefaultsProblem(resolved)) {
@@ -175,8 +177,9 @@ export function useQuickCreateSession(): QuickCreate {
   // consumer of `useWorkspaceUI`, and re-registering the document-level keydown
   // listener each time, because `runAction` closes over it.
   const { mutate, isPending, error } = mutation;
-  return useMemo(
-    () => ({ create: mutate, isPending, error }),
-    [mutate, isPending, error],
+  const create = useCallback(
+    (workdir: string | undefined, environmentId?: string | null) => mutate({ workdir, environmentId }),
+    [mutate],
   );
+  return useMemo(() => ({ create, isPending, error }), [create, isPending, error]);
 }

@@ -49,6 +49,14 @@ describe("selectStartState", () => {
 });
 
 describe("recentWorkspaces", () => {
+  it("keeps identical paths separate when they belong to different environments", () => {
+    const rows = recentWorkspaces([
+      session("local", 20, "/w/app"),
+      { ...session("remote", 10, "/w/app"), environment: "remote-env" },
+    ]);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.session.environment)).toEqual(["env7fk2", "remote-env"]);
+  });
   it("gives a directory one row however many sessions it holds", () => {
     // The reason this grouping exists: seven sessions in one directory rendered as
     // seven rows differing only by timestamp, and crowded out every other place.

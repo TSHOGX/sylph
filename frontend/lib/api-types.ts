@@ -565,6 +565,8 @@ export interface Environment {
   /** Why a disconnected environment is unavailable, when the server knows. */
   reason?: string | null;
   origin: EnvironmentOrigin;
+  /** Machine facts reported by the owning envagent. */
+  facts?: Record<string, string>;
   /**
    * The environment relaying for this one, when it is not reachable directly.
    *
@@ -864,6 +866,8 @@ export interface Workspace {
   runningCount: number;
   lastUsedMs: number;
   isQuickStart: boolean;
+  /** Opaque environment owning this path; null for the synthetic Quick Start row. */
+  environment?: string | null;
 }
 
 export interface WorkspacesResponse {

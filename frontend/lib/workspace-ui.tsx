@@ -151,9 +151,11 @@ interface WorkspaceUIValue {
    * and the overlay then asks the user to pick a workspace instead of guessing.
    */
   activeWorkdir: string | null;
+  activeEnvironment: string | null;
   setActiveWorkdir: (workdir: string | null) => void;
-  /** Open the history browser, optionally scoped to a specific directory. */
-  browseHistory: (workdir?: string) => void;
+  setActiveEnvironment: (environment: string | null) => void;
+  /** Open the history browser, optionally scoped to a specific workspace. */
+  browseHistory: (workdir?: string, environment?: string | null) => void;
   /**
    * Machine the adopt picker should enumerate, or `null` for "let it choose".
    *
@@ -178,7 +180,7 @@ interface WorkspaceUIValue {
    * that one mutation — and therefore one pending state and one error banner —
    * serves the top bar, the palette, and every sidebar group.
    */
-  createSessionIn: (workdir: string | undefined) => void;
+  createSessionIn: (workdir: string | undefined, environmentId?: string | null) => void;
   rereadNotice: RereadNotice | null;
   rereadSession: (sessionId: string, sessionLabel: string) => void;
 }
@@ -194,7 +196,7 @@ export function WorkspaceUIProvider({
   /** Create in the Quick Start directory. The shell supplies it because only
    *  the shell has the backend-resolved path. */
   onQuickStart: () => void;
-  onCreateSessionIn: (workdir: string | undefined) => void;
+  onCreateSessionIn: (workdir: string | undefined, environmentId?: string | null) => void;
 }) {
   const { settings, update } = useSettings();
   const queryClient = useQueryClient();
@@ -212,6 +214,7 @@ export function WorkspaceUIProvider({
   const [artifactView, setArtifactView] = useState<ArtifactView>("tree");
   const [artifactFullscreen, setArtifactFullscreen] = useState(false);
   const [activeWorkdir, setActiveWorkdir] = useState<string | null>(null);
+  const [activeEnvironment, setActiveEnvironment] = useState<string | null>(null);
   const [adoptEnvironment, setAdoptEnvironment] = useState<string | null>(null);
   const sessionHandlerRef = useRef<SessionActionHandler | null>(null);
   const [rereadNotice, setRereadNotice] = useState<RereadNotice | null>(null);
@@ -268,8 +271,9 @@ export function WorkspaceUIProvider({
     [pathname],
   );
 
-  const browseHistory = useCallback((workdir?: string) => {
+  const browseHistory = useCallback((workdir?: string, environment?: string | null) => {
     if (workdir) setActiveWorkdir(workdir);
+    setActiveEnvironment(environment ?? null);
     setOverlay("history");
     // Called directly from the sidebar as well as through `runAction`, so the
     // one-modal-at-a-time invariant has to be enforced here too — otherwise the
@@ -496,7 +500,9 @@ export function WorkspaceUIProvider({
       closeArtifactFullscreen,
       registerSessionActions,
       activeWorkdir,
+      activeEnvironment,
       setActiveWorkdir,
+      setActiveEnvironment,
       browseHistory,
       adoptEnvironment,
       adoptFrom,
@@ -526,6 +532,7 @@ export function WorkspaceUIProvider({
       closeArtifactFullscreen,
       registerSessionActions,
       activeWorkdir,
+      activeEnvironment,
       browseHistory,
       adoptEnvironment,
       adoptFrom,

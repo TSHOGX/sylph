@@ -457,9 +457,9 @@ function NewSessionPicker() {
       title={t("shell.newSession.title")}
       confirmLabel={t("shell.newSession.confirm")}
       onClose={closeOverlay}
-      onChoose={(path) => {
+      onChoose={(path, environmentId) => {
         closeOverlay();
-        createSessionIn(path);
+        createSessionIn(path, environmentId);
       }}
     />
   );

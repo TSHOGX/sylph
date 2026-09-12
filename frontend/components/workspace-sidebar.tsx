@@ -61,6 +61,7 @@ import {
 
 interface Group {
   path: string;
+  environment: string | null;
   name: string;
   sessions: Session[];
   isQuickStart: boolean;
@@ -109,16 +110,18 @@ export function WorkspaceSidebar() {
 
     for (const session of sessions) {
       const path = session.workdir.replace(/\/+$/, "") || "/";
-      let group = byPath.get(path);
+      const key = `${session.environment}\u0000${path}`;
+      let group = byPath.get(key);
       if (!group) {
         group = {
           path,
+          environment: session.environment,
           name: workspaceNames[path] ?? leafName(path),
           sessions: [],
           isQuickStart: path === quickStartDir,
           lastUsedMs: 0,
         };
-        byPath.set(path, group);
+        byPath.set(key, group);
       }
       group.sessions.push(session);
       group.lastUsedMs = Math.max(group.lastUsedMs, session.updatedAtMs);
@@ -130,6 +133,7 @@ export function WorkspaceSidebar() {
       if (!byPath.has(path)) {
         byPath.set(path, {
           path,
+          environment: null,
           name: workspaceNames[path] ?? leafName(path),
           sessions: [],
           isQuickStart: path === quickStartDir,
@@ -205,6 +209,7 @@ export function WorkspaceSidebar() {
               group={
                 quick ?? {
                   path: quickStartDir ?? "",
+                  environment: null,
                   // Derived from the resolved path rather than written out: the
                   // directory is configurable, so a literal name here would be
                   // wrong for anyone who set `paths.quick_start_dir`. This is only
@@ -218,6 +223,7 @@ export function WorkspaceSidebar() {
               }
               activeId={activeId}
               home={home}
+              environment={quick?.environment ?? null}
               emptyHint={t("sidebar.quickSessionsHint")}
               environments={environments}
               sessionsPending={sessionsQuery.isPending}
@@ -233,10 +239,11 @@ export function WorkspaceSidebar() {
             ) : (
               projects.map((group) => (
                 <GroupSection
-                  key={group.path}
+                  key={`${group.environment ?? ""}\u0000${group.path}`}
                   group={group}
                   activeId={activeId}
                   home={home}
+                  environment={group.environment}
                   environments={environments}
                   sessionsPending={sessionsQuery.isPending}
                   pinned={settings.pinnedWorkspaces.includes(group.path)}
@@ -319,6 +326,7 @@ function GroupSection({
   activeId,
   title,
   home,
+  environment,
   emptyHint,
   environments,
   sessionsPending,
@@ -330,6 +338,7 @@ function GroupSection({
   activeId?: string;
   title?: string;
   home?: string;
+  environment: string | null;
   emptyHint?: string;
   environments: Environments;
   /** Whether the one sessions listing is still in flight. */
@@ -366,7 +375,7 @@ function GroupSection({
       // empty until `GET /workspaces` resolves it. Dimmed rather than hidden, so
       // the menu does not change shape between renders.
       disabled: !group.path,
-      onSelect: () => createSessionIn(group.path),
+      onSelect: () => createSessionIn(group.path, group.environment),
     },
     {
       label: t("sidebar.browseHistory"),
@@ -375,7 +384,7 @@ function GroupSection({
       // placeholder group whose path is not resolved yet.
       separated: true,
       disabled: !group.path,
-      onSelect: () => browseHistory(group.path),
+      onSelect: () => browseHistory(group.path, group.environment),
     },
     { label: open ? t("action.collapse") : t("action.expand"), separated: true, onSelect: () => setOpen(!open) },
     ...(onTogglePin
@@ -431,6 +440,12 @@ function GroupSection({
           {open ? <FolderOpenIcon size={15} /> : <FolderIcon size={15} />}
         </span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
+        {environment && environments.showEnvironment && (
+          <EnvironmentChip
+            name={environments.nameOf(environment) ?? environment}
+            reachableVia={relayName(environment, environments)}
+          />
+        )}
         {pinned && (
           <span aria-label={t("sidebar.pinned")} title={t("sidebar.pinned")} className="shrink-0 text-ink-muted">
             <PinIcon size={11} />
@@ -495,7 +510,7 @@ function GroupSection({
             <li>
               <button
                 type="button"
-                onClick={() => browseHistory(group.path)}
+                onClick={() => browseHistory(group.path, group.environment)}
                 className="tap-row flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-2xs text-ink-muted hover:bg-hover hover:text-ink focus-ring"
               >
                 <ArchiveIcon size={13} />
