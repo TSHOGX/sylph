@@ -1027,6 +1027,8 @@ impl EnvBridge {
             let connected = leases.contains_key(&row.id);
             let agents = serde_json::from_str(&row.agents_json)
                 .map_err(|error| anyhow!("invalid agent inventory in journal: {error}"))?;
+            let facts = serde_json::from_str(&row.facts_json)
+                .map_err(|error| anyhow!("invalid environment facts in journal: {error}"))?;
             rows.push(EnvironmentSnapshot {
                 id: row.id,
                 name: row.name,
@@ -1036,6 +1038,7 @@ impl EnvBridge {
                 connection_epoch: row.connection_epoch,
                 agents,
                 last_seen_at_ms: row.last_seen_at_ms,
+                facts,
             });
         }
         // A freshly paired installation may only exist in memory when a
@@ -1351,6 +1354,27 @@ impl EnvBridge {
         }
     }
 
+    /// Browse an environment's machine-local roots or one directory level.
+    /// The envagent owns path policy and filesystem access; the server only
+    /// dispatches the typed command and returns its JSON result.
+    pub async fn remote_browse(
+        &self,
+        environment: &EnvironmentId,
+        command: sylph_protocol::EnvironmentCommand,
+    ) -> Result<serde_json::Value> {
+        match self
+            .dispatch_remote_operation(environment, command, IdempotencyPolicy::Replayable)
+            .await?
+        {
+            CommandOutcome::Accepted { result } => Ok(result.unwrap_or_default()),
+            CommandOutcome::Rejected { code, message } => Err(anyhow!("{code}: {message}")),
+            CommandOutcome::Unknown { message } => Err(anyhow!(
+                "remote browse outcome is unknown: {}",
+                message.unwrap_or_default()
+            )),
+        }
+    }
+
     /// Dispatch a session-scoped command and normalize its result to a JSON
     /// value for the HTTP layer.  The bridge remains the only place that knows
     /// how a command crosses an environment lease.
@@ -1616,9 +1640,22 @@ impl EnvBridge {
             return Err(BridgeError::InvalidCredential.into());
         }
         let agents_json = serde_json::to_string(&hello.agents)?;
+        let facts_json = serde_json::to_string(
+            &hello
+                .health
+                .as_ref()
+                .map(|health| &health.facts)
+                .cloned()
+                .unwrap_or_default(),
+        )?;
         let epoch = self
             .store
-            .lease_environment_connection(&environment, &hash_secret(token), &agents_json)
+            .lease_environment_connection(
+                &environment,
+                &hash_secret(token),
+                &agents_json,
+                &facts_json,
+            )
             .await?
             .ok_or(BridgeError::InvalidCredential)?;
         self.registry
@@ -1631,7 +1668,16 @@ impl EnvBridge {
             )
             .await;
         self.registry
-            .connect_trusted(&environment, epoch, hello.agents.clone())
+            .connect_trusted(
+                &environment,
+                epoch,
+                hello.agents.clone(),
+                hello
+                    .health
+                    .as_ref()
+                    .map(|health| health.facts.clone())
+                    .unwrap_or_default(),
+            )
             .await;
         self.leases.write().await.insert(
             environment.clone(),
