@@ -121,6 +121,35 @@ async fn invite_redeems_once_and_rejects_wrong_scope() {
 }
 
 #[tokio::test]
+async fn a_registered_subject_without_a_grant_sees_no_environment() {
+    let backend = TestBackend::start().await;
+    let response = backend
+        .post(
+            "/api/v1/auth/register",
+            json!({"name": "read-only candidate"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let environments = json_body(
+        backend
+            .get_with_cookie("/api/v1/environments", &cookie)
+            .await,
+    )
+    .await;
+    assert_eq!(environments["environments"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn connected_inventory_updates_after_cli_removal_without_repair_or_restart() {
     let backend = TestBackend::start().await;
     let environment = sylph_protocol::EnvironmentId::parse(backend.environment_id().await)

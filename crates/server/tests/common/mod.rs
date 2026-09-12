@@ -495,6 +495,18 @@ impl TestBackend {
         .await
     }
 
+    pub async fn get_with_cookie(&self, path: &str, cookie: &str) -> Response<Body> {
+        self.send(
+            Request::builder()
+                .uri(path)
+                .header(header::HOST, "127.0.0.1")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
     /// An authenticated GET carrying one extra request header.
     ///
     /// Exists for conditional requests: an `If-None-Match` round trip is the only
