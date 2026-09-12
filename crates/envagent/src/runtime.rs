@@ -1055,7 +1055,14 @@ impl EnvAgent {
         agent: &str,
         native_id: NativeId,
     ) -> Result<sylph_protocol::RereadPass> {
-        let adapter = sylph_adapters::for_agent(agent)
+        // Through the injected `AdapterSource`, exactly as `start_native_source` resolves
+        // it. The free `sylph_adapters::for_agent` answers from the hardcoded vendor list,
+        // which bypasses the seam this field exists to provide — so a re-read would refuse
+        // any agent that is not one of the three built-in names, and no test could drive
+        // it at all.
+        let adapter = self
+            .adapters
+            .for_agent(agent)
             .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
         let summary = adapter
             .enumerate(&sylph_protocol::StoreFilter {

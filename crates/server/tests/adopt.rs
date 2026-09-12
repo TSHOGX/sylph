@@ -447,7 +447,15 @@ fn segment(value: &str) -> String {
         .collect()
 }
 
-/// Adopt the stored session and return its encoded id.
+/// Adopt the stored session, wait for its events to land, and return its encoded id.
+///
+/// **The wait is load-bearing, not defensive.** `POST /sessions/adopt` answers `201` when
+/// the envagent has *accepted* the command; the parsed events are spooled to the server
+/// afterwards. A re-read issued before they arrive finds an empty journal, suppresses
+/// nothing, and re-journals the whole adopted prefix — so a dedup test would fail against
+/// correct product code, which is the most expensive kind of red. A test that instead
+/// happens to read the transcript first passes for a reason it does not state, and that is
+/// a flake waiting for a slower machine.
 async fn adopt_stored(backend: &TestBackend) -> String {
     let environment = backend.environment_id().await;
     let native_id = common::MockAgents::stored_native_id();
@@ -463,7 +471,38 @@ async fn adopt_stored(backend: &TestBackend) -> String {
         "{}",
         common::body_string(created).await
     );
-    format!("{environment}:mock:{native_id}")
+    let encoded = format!("{environment}:mock:{native_id}");
+    // Two waits, because adoption finishes in two stages and a re-read needs both.
+    //
+    // First the pass itself has to arrive: `POST /sessions/adopt` answers `201` when the
+    // envagent *accepted* the command, and the parsed events are spooled afterwards.
+    // Polling the transcript is the available signal, since it is served over the same API
+    // a client uses.
+    for _ in 0..100 {
+        if transcript(backend, &encoded)
+            .await
+            .iter()
+            .any(|text| text == "read from the store")
+        {
+            // Then the ephemeral rows have to be flushed. `JournalWriter` holds them in a
+            // ~50 ms window (`crate::db::writer`) and a `turn`/`started` derives
+            // `Ephemeral`, so `events` is still short one row at this point — while the
+            // transcript, assembled from stable rows only, already looks complete. A
+            // re-read in that gap builds its suppression set without the ephemeral row,
+            // judges it new, and re-journals one copy per click.
+            //
+            // A sleep rather than a poll, and deliberately: no reader-facing route exposes
+            // an unflushed ephemeral row, which is the property that makes them ephemeral.
+            // Waiting on the transcript again would re-observe the signal already given.
+            // The bound is the writer's own window with room to spare, and it is stated
+            // here rather than tuned by trial so a change to that window has one place to
+            // look.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            return encoded;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the adopted session's events never reached the journal");
 }
 
 /// Every event a session holds, across both tiers, oldest first.
@@ -679,4 +718,98 @@ async fn a_reread_does_not_change_the_sessions_fidelity() {
 
     let after = json_body(backend.get_authed(&path).await).await;
     assert_eq!(after["session"]["fidelity"], "blocks", "{after}");
+}
+
+/// A turn the vendor appended after adoption survives a re-read.
+///
+/// The counterpart to the duplicate-suppression tests, and it guards the opposite mistake.
+/// A `turn`/`started` is `Ephemeral`, so consolidation never folds it into a block and
+/// `delete_turn_events` removes the journal row it lived in — once its turn is folded the
+/// event is in neither tier and cannot be recognized by content. Suppression therefore keys
+/// on whether a container is already open, and a rule that reads "an opener during a
+/// re-read is a duplicate" would silently swallow every genuinely new turn: the transcript
+/// would stop growing while the endpoint kept reporting success.
+///
+/// Asserted on the appended turn's **start stamp**, which is the field the opener carries and
+/// the only one that changes. Suppressing an opener does not lose the turn — any event with no
+/// open container opens one — so a turn count cannot see this: the container simply opens at
+/// the *reply's* timestamp instead of the vendor's `started`. That silently shortens the turn,
+/// and a duration read from it is then a measurement of the wrong interval, which is exactly
+/// the class `docs/README.md` says fidelity exists to prevent.
+#[tokio::test]
+async fn a_turn_appended_after_adoption_is_journaled_as_its_own_turn() {
+    let backend = TestBackend::start().await;
+    let encoded = adopt_stored(&backend).await;
+
+    let turns_before = turn_count(&backend, &encoded).await;
+
+    // A whole new turn, bracketed the way a vendor writes one.
+    backend.agents.grow_stored_session("turn:a second turn arrived");
+
+    let response = json_body(
+        backend
+            .post_authed(
+                &format!("/api/v1/sessions/{}/reread", segment(&encoded)),
+                json!({}),
+            )
+            .await,
+    )
+    .await;
+    assert!(
+        response["reread"]["ingested"].as_u64().unwrap_or(0) > 0,
+        "a new turn is new work: {response}"
+    );
+
+    assert_eq!(
+        turn_count(&backend, &encoded).await,
+        turns_before + 1,
+        "the appended turn was folded into the existing one instead of opening its own"
+    );
+    let texts = transcript(&backend, &encoded).await;
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| *text == "a second turn arrived")
+            .count(),
+        // Twice: the fixture carries the text on the assistant event and on the turn close,
+        // the same shape the adopted prefix has.
+        2,
+        "the appended turn's content is missing: {texts:?}"
+    );
+
+    // The fixture brackets an appended turn at `AT_MS + 10`, with its reply one millisecond
+    // later. A kept opener starts the turn at the bracket; a swallowed one starts it at the
+    // reply, one millisecond late and attributed to the wrong event.
+    let newest = newest_turn(&backend, &encoded).await;
+    assert_eq!(
+        newest["startedAtMs"].as_i64(),
+        Some(1_700_000_000_010),
+        "the appended turn's opener was suppressed, so its start is the reply's stamp: {newest}"
+    );
+}
+
+/// The most recently started turn, as the API reports it.
+async fn newest_turn(backend: &TestBackend, encoded: &str) -> serde_json::Value {
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{}/turns", segment(encoded)))
+            .await,
+    )
+    .await;
+    body["turns"]
+        .as_array()
+        .and_then(|turns| turns.last())
+        .map(|turn| turn["turn"].clone())
+        .expect("a session with turns")
+}
+
+/// How many turns this session holds.
+async fn turn_count(backend: &TestBackend, encoded: &str) -> usize {
+    let body = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{}/turns", segment(encoded)))
+            .await,
+    )
+    .await;
+    body["turns"].as_array().map_or(0, |turns| turns.len())
 }

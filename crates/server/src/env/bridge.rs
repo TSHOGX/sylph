@@ -3596,6 +3596,9 @@ mod tests {
             request_ids[0].as_str(),
             request_ids[1].as_str(),
             "the same steer text sent twice must be two commands"
+        );
+    }
+
     /// Two re-reads of one session are two commands, not one replayed answer.
     ///
     /// A re-read reads a file and writes no vendor state, so it looks like the kind of
@@ -3617,11 +3620,11 @@ mod tests {
         };
 
         assert!(
-            !command_is_replay_safe(&command),
+            command_needs_a_fresh_request_id(&command),
             "a re-read whose payload is its idempotency scope replays the previous pass"
         );
 
-        // The path `remote_session_command` takes for a command that is not replay-safe.
+        // The path `remote_session_command` takes for a command needing a fresh id.
         let first = sylph_protocol::CommandRequestId::parse(format!(
             "remote-{}-{}",
             command_name(&command),
@@ -3636,17 +3639,21 @@ mod tests {
         .unwrap();
         assert_ne!(first, second);
 
-        // And the payload-hashed form, which is what makes the two collide. This is the
-        // value the command would carry if it were ever added to the replay-safe set.
-        let hashed_once =
+        // The id the bridge actually mints, twice. These must differ, and that is the
+        // whole property: equal ids *are* the replay, because the second call would
+        // resolve to the first pass's durable outcome in `env_command_results`.
+        let minted_once =
             remote_request_id(&session.environment, &command, IdempotencyPolicy::AtMostOnce)
                 .unwrap();
-        let hashed_again =
+        let minted_again =
             remote_request_id(&session.environment, &command, IdempotencyPolicy::AtMostOnce)
                 .unwrap();
-        assert_eq!(
-            hashed_once, hashed_again,
-            "the payload hash is stable, which is exactly why a re-read must not use it"
+        assert_ne!(
+            minted_once.as_str(),
+            minted_again.as_str(),
+            "a re-read's payload is identical on every call, so a payload-derived id \
+             would report the counts of a pass that ran before the bytes it was \
+             clicked to collect existed"
         );
     }
 }

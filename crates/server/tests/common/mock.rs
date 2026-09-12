@@ -555,17 +555,40 @@ fn stored_events(id: &NativeId, growth: &[String]) -> Vec<Result<SessionMessage>
     // the head of the store, so a re-read sees the old records again and the new ones after
     // them. A fixture that emitted *only* the growth would hide the duplicate-suppression
     // the server has to perform.
+    //
+    // A `turn:` prefix appends a **whole new turn**, bracketed the way a vendor writes one,
+    // rather than a bare reply inside the existing turn. Both shapes are needed and they
+    // exercise opposite promises: a bare reply must be suppressed on the next pass, while a
+    // new turn's `started` must be *kept* — and since a `turn`/`started` is ephemeral and
+    // unrecoverable once folded, suppression there is decided by whether a container is
+    // already open rather than by content. Without this shape no test could tell correct
+    // suppression from a rule that swallows every later turn.
     for (index, text) in growth.iter().enumerate() {
-        messages.push(Ok(SessionMessage::Event(
-            Ev::at(
-                EventKind::Assistant,
-                Some(Phase::Completed),
-                AT_MS + 10 + index as i64,
-            )
-            .stream_id(&format!("stored-grown-{index}"))
-            .text(text.clone())
-            .0,
-        )));
+        let at = AT_MS + 10 + (index as i64) * 4;
+        match text.strip_prefix("turn:") {
+            Some(body) => {
+                messages.push(Ok(SessionMessage::Event(
+                    Ev::at(EventKind::Turn, Some(Phase::Started), at).0,
+                )));
+                messages.push(Ok(SessionMessage::Event(
+                    Ev::at(EventKind::Assistant, Some(Phase::Completed), at + 1)
+                        .stream_id(&format!("stored-grown-{index}"))
+                        .text(body.to_string())
+                        .0,
+                )));
+                messages.push(Ok(SessionMessage::Event(
+                    Ev::at(EventKind::Turn, Some(Phase::Completed), at + 2)
+                        .text(body.to_string())
+                        .0,
+                )));
+            }
+            None => messages.push(Ok(SessionMessage::Event(
+                Ev::at(EventKind::Assistant, Some(Phase::Completed), at)
+                    .stream_id(&format!("stored-grown-{index}"))
+                    .text(text.clone())
+                    .0,
+            ))),
+        }
     }
     messages
 }
