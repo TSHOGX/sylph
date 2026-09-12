@@ -198,9 +198,8 @@ proposed tool input (`docs/session-protocol.md` § Request forms).
 ## Subjects, environments, and grants
 
 `subjects` holds one row per authenticated actor
-([ADR-0002](adr/0002-environment-workspace-subject.md)). The current bootstrap still
-seeds exactly one row until the Milestone 3 login and registration routes replace it;
-the schema already supports additional Subjects.
+([ADR-0002](adr/0002-environment-workspace-subject.md)). The bootstrap seeds one explicit
+development row, while the login and registration routes add registered Subjects alongside it.
 
 `is_admin` is the server administration authority — the party ADR-0006 assigns as the
 authority root for every `grant_authority = server` environment. It is a column here rather

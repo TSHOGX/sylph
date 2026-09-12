@@ -375,14 +375,14 @@ rotates on restart, Host header validation, Origin validation on mutations. That
 adequate for a single-user local server and **is not an authentication system** — it knows
 a request came from a browser that completed a local handshake, not who is asking.
 
-Multi-user is a planned milestone, with its boundary defined by
+Multi-user authentication is implemented with its boundary defined by
 [ADR-0002](adr/0002-environment-workspace-subject.md): authenticated Subjects receive
 explicit Environment grants. [ADR-0006](adr/0006-environment-authority-and-capability-grants.md)
 settles who may issue such a grant, and splits it into `observe` and `control` because a
 control grant reaches arbitrary code execution within `browse_roots` while an observe grant
-reads a transcript. Until that lands, the bootstrap cookie remains a single-user
-development mechanism and non-loopback binding stays refused rather than warned about. The
-remaining gate covers identity, transport security, and CSRF.
+reads a transcript. The bootstrap cookie remains an explicit local development identity;
+registered Subjects and environment grants are the durable multi-user path. Non-loopback
+envagent binding requires TLS.
 
 ### Filesystem exposure
 

@@ -52,7 +52,9 @@ environment grants are specified by [ADR-0002](../adr/0002-environment-workspace
 [ADR-0006](../adr/0006-environment-authority-and-capability-grants.md), and scheduled in
 [roadmap.md](../roadmap.md) Milestone 3. Required for every call except `GET /api/v1/health`, `GET /api/v1/auth/token`,
 and `POST /api/v1/environments/pair`, which are exempt inside the middleware rather than
-registered outside it, so the exempt list sits next to the checks it bypasses.
+registered outside it, so the exempt list sits next to the checks it bypasses. Registered
+Subject login, logout, and registration are available at the corresponding `/auth` routes;
+the bootstrap token remains for local development and fixtures.
 
 - Cookie: `sylph_session={random_token}`; `Path=/`, `HttpOnly`, `SameSite=Strict`
 - Origin must match loopback (`127.0.0.1`, `localhost`, `[::1]`)
@@ -135,9 +137,8 @@ Three bounds, all of which follow from the flag being an authority root rather t
   that could override it would make "the OS-user authorizes" false for anyone who could set the
   flag.
 
-The single-Subject bootstrap satisfies this trivially — one Subject, `is_admin`, one loopback
-origin. That is why the flag can be specified now and carry no route of its own until Milestone 3
-provisions a second Subject.
+The bootstrap Subject satisfies this for local development. Registered Subjects are provisioned
+through `/auth/register` and `/auth/login`; server-authority environments use the `is_admin` root.
 
 #### `GET /api/v1/auth/token`
 

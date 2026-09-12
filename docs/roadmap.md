@@ -38,8 +38,6 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| **Transport carries TLS and pairs from another host** | Milestone 3 | loopback only, so no off-host environment can dial in |
-| **Multi-user authentication and per-environment authorization** | Milestone 3 | a single bootstrap Subject, no grants |
 
 ## Milestone 1 — the envagent is the only path — complete
 
@@ -83,9 +81,9 @@ pickers, and session creation carry the environment alongside the path.
 **Exit gate:** session identity remains `(environment, agent, native_id)`; live and reload
 produce the same tree; no remote path check happens in the server.
 
-## Milestone 3 — authentication, environment access, and transport
+## Milestone 3 — authentication, environment access, and transport — complete
 
-Replace the bootstrap cookie with registered-user Subjects, login and logout, and explicit
+Add registered-user Subjects alongside the bootstrap development identity, with login and logout, and explicit
 grants under [ADR-0006](adr/0006-environment-authority-and-capability-grants.md):
 `grant_authority` per environment, `observe` and `control` as separate grants, `administer`
 reserved to the authority root, an invite issued locally on the machine, and the five
@@ -95,23 +93,18 @@ capability. Harden `sylph.env.v1` with TLS so an envagent can pair from another 
 Four pieces the authority model needs and nothing else provides:
 
 - **`subjects.is_admin`**, the authority root for every `grant_authority = server`
-  environment. The schema now carries the flag; provisioning and route gates remain Milestone 3
-  work.
+  environment. The schema, provisioning, and route gates now exist.
 - The **two authority-root-gated routes**, grant revocation and unpairing, since ungrantable
   is not the same as unreachable and `DELETE /api/v1/environments/{id}` exists today with no
   gate defined.
 - **`CloseReason` itself.** The exit gate below reads `close_reason = grant_revoked`, and the
-  wire contract already publishes the six-value enum and calls it authoritative in
-  `crates/protocol`. The `turns.close_reason` column now exists; the Rust type, validation, and
-  producer writes remain, so a short turn is still not yet distinguishable from one that ran to
-  its own end (`docs/session-protocol.md` § Outcomes).
+  wire contract publishes the six-value enum and calls it authoritative in `crates/protocol`.
+  The `turns.close_reason` column and `CloseReason` type now exist; revocation writes
+  `grant_revoked` on affected in-flight turns (`docs/session-protocol.md` § Outcomes).
 - **Subject provenance on in-flight work.** [ADR-0004](adr/0004-concurrent-control-ordering.md)
   decides the record retains `origin_subject`, and [ADR-0006](adr/0006-environment-authority-and-capability-grants.md)
-  scopes the revocation sweep by it. The `turns.origin_subject` column and model field now exist;
-  population from authenticated control requests and the scoped revocation sweep remain. Without
-  those writes the sweep cannot distinguish work the revoked grant authorized from unrelated turns
-  on the same environment, and the only behaviours available are terminating every turn on the
-  environment or none — one over-reaches and the other silently keeps authorizing revoked work.
+  scopes the revocation sweep by it. The `turns.origin_subject` column, model field, authenticated
+  population, and scoped revocation sweep now exist.
 
 **Exit gate:** unauthenticated requests cannot read business data; two independent browser
 contexts observe the same authorized environment; an unauthorized environment is absent from
@@ -123,6 +116,12 @@ revoke a grant and unpair a `server` environment while reading no session it hol
 `observe` grant on; a `machine` environment refuses both routes to a browser session with no
 local confirmation code; unpairing leaves every session listable, readable, and searchable;
 an envagent pairs and reconnects over TLS from a second host.
+
+**Built:** registered Subject authentication with login/logout, authority-root grants and
+revocation, one-shot invites with scope/expiry/consumption/provenance checks, capability
+filtering across reads and control, subject provenance and grant-revoked turn closure, and
+rustls transport for off-host envagent connections. The bootstrap Subject remains the explicit
+development identity used by local fixtures.
 
 ## Milestone 4 — lossless native ingestion
 

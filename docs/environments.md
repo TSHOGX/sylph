@@ -50,8 +50,9 @@ are values (`docs/session-protocol.md`); NDJSON survives only where bytes cross 
 boundary. The vocabulary is shared with the adapter contract without anything depending
 on a subprocess.
 
-The transport is loopback-only until TLS lands, and a non-loopback address is refused
-rather than downgraded, so the day it becomes reachable is a deliberate one.
+Plaintext transport remains loopback-only. A non-loopback envagent listener requires the
+configured rustls certificate and key, and a remote envagent validates the server certificate
+against its configured CA before the wire handshake.
 
 ### Message classes
 
