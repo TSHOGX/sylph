@@ -144,9 +144,7 @@ async fn enforce_session_capability(
         return Ok(());
     };
     let suffix = rest.strip_prefix(encoded).unwrap_or("");
-    let capability = if *method == axum::http::Method::GET {
-        "observe"
-    } else if suffix == "/reread" {
+    let capability = if *method == axum::http::Method::GET || suffix == "/reread" {
         "observe"
     } else {
         "control"

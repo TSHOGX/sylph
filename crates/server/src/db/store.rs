@@ -166,9 +166,25 @@ impl JournalStore {
     }
 
     pub async fn revoke_subject_work(&self, subject_id: &str, environment_id: &str) -> Result<u64> {
+        let mut tx = self.pool.begin().await.map_err(Error::Database)?;
+        let closed_trajectories = sqlx::query(
+            "UPDATE events SET phase = 'completed', is_error = 0, data_json = ?
+             WHERE turn_id IN (SELECT id FROM turns WHERE origin_subject = ? AND session_env = ?
+               AND status IN ('queued','starting','running','stopping','settling'))
+               AND kind = 'subagent' AND phase <> 'completed'",
+        )
+        .bind(r#"{"closedBy":"server","reason":"abandoned"}"#)
+        .bind(subject_id)
+        .bind(environment_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(Error::Database)?;
         let result = sqlx::query("UPDATE turns SET status = 'interrupted', close_reason = 'grant_revoked', completed_at_ms = COALESCE(completed_at_ms, ?) WHERE origin_subject = ? AND session_env = ? AND status IN ('queued','starting','running','stopping','settling')")
-            .bind(now_ms()).bind(subject_id).bind(environment_id).execute(&self.pool).await.map_err(Error::Database)?;
-        Ok(result.rows_affected())
+            .bind(now_ms()).bind(subject_id).bind(environment_id).execute(&mut *tx).await.map_err(Error::Database)?;
+        tx.commit().await.map_err(Error::Database)?;
+        Ok(result
+            .rows_affected()
+            .max(closed_trajectories.rows_affected()))
     }
     /// Internal access for the environment bridge's migration-backed tables.
     ///
