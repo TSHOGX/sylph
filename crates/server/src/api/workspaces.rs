@@ -8,10 +8,13 @@
 //! would be wrong for anyone who set `paths.quick_start_dir`, and for every
 //! deployment where `HOME` differs from the user Next.js runs as.
 
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Extension, State},
+    Json,
+};
 use serde::Serialize;
 
-use crate::{db::store::SessionFilter, error::Result, AppState};
+use crate::{db::store::SessionFilter, error::Result, middleware::auth::SubjectId, AppState};
 
 /// One working directory that has at least one session, or is the Quick Start
 /// directory. `path` is absolute: the sidebar shortens it for display, but
@@ -86,7 +89,10 @@ const AGGREGATE_LIMIT: i64 = 2000;
 /// unanchored substring, a parent directory's pattern matched everything beneath it,
 /// those sorted by recency rather than depth, and a directory with 88 sessions of its own
 /// reported empty because its first exact match landed ~1300 rows in.
-pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesResponse>> {
+pub async fn list(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+) -> Result<Json<WorkspacesResponse>> {
     // The server owns no remote filesystem. In particular, it must not canonicalize
     // or compare a remote path against its own configuration. Session workdirs were
     // already canonicalized by the envagent that owns them; here we only normalize
@@ -117,7 +123,16 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
         limit: AGGREGATE_LIMIT,
         ..SessionFilter::default()
     };
-    let sessions = state.store.list_sessions(&filter).await?;
+    let mut sessions = Vec::new();
+    for session in state.store.list_sessions(&filter).await? {
+        if state
+            .store
+            .has_capability(&subject.0, session.id.environment.as_str(), "observe")
+            .await?
+        {
+            sessions.push(session);
+        }
+    }
 
     // Insertion-ordered accumulation, then sorted once. A BTreeMap would order
     // by path, but the sidebar wants recency, so the sort happens at the end.

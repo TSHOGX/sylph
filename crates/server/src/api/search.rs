@@ -15,12 +15,13 @@
 //!   every other read against this store, so it is user-initiated and gated on a real
 //!   query.
 
-use axum::extract::{Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use sylph_protocol::EnvironmentId;
 
 use crate::error::{Error, Result};
+use crate::middleware::auth::SubjectId;
 use crate::models::Session;
 use crate::AppState;
 
@@ -107,6 +108,7 @@ pub struct SearchResponse {
 /// so a fallback would answer wrongly rather than worse (`docs/storage.md` § Tokenization).
 pub async fn search(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>> {
     let query = params.q.trim();
@@ -145,6 +147,13 @@ pub async fn search(
             );
             continue;
         };
+        if !state
+            .store
+            .has_capability(&subject.0, session_id.environment.as_str(), "observe")
+            .await?
+        {
+            continue;
+        }
         if environment
             .as_ref()
             .is_some_and(|wanted| wanted != &session_id.environment)
