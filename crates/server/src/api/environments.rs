@@ -203,6 +203,47 @@ pub async fn revoke_grant(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueGrantRequest {
+    pub subject_id: String,
+    pub capability: String,
+    pub expires_at_ms: Option<i64>,
+}
+
+pub async fn issue_grant(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
+    Json(request): Json<IssueGrantRequest>,
+) -> Result<StatusCode> {
+    let environment =
+        EnvironmentId::parse(id).map_err(|e| crate::error::Error::InvalidRequest(e.to_string()))?;
+    if !state.store.is_admin(&subject.0).await? {
+        return Err(crate::error::Error::Forbidden(
+            "environment authority required".into(),
+        ));
+    }
+    if !matches!(request.capability.as_str(), "observe" | "control")
+        || request.subject_id.trim().is_empty()
+    {
+        return Err(crate::error::Error::InvalidRequest(
+            "subject_id and capability are required".into(),
+        ));
+    }
+    state
+        .store
+        .issue_grant(
+            &request.subject_id,
+            environment.as_str(),
+            &request.capability,
+            &subject.0,
+            request.expires_at_ms,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// GET /api/v1/environments
 ///
 /// # Reporting an install that can run nothing

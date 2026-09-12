@@ -126,6 +126,20 @@ impl JournalStore {
         Ok(result.rows_affected() == 1)
     }
 
+    pub async fn issue_grant(
+        &self,
+        subject_id: &str,
+        environment_id: &str,
+        capability: &str,
+        issuer_subject_id: &str,
+        expires_at_ms: Option<i64>,
+    ) -> Result<()> {
+        sqlx::query("INSERT INTO env_grants (subject_id, environment_id, capability, issuer_subject_id, issued_at_ms, expires_at_ms, consumed_at_ms) VALUES (?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(subject_id, environment_id, capability) DO UPDATE SET issuer_subject_id = excluded.issuer_subject_id, issued_at_ms = excluded.issued_at_ms, expires_at_ms = excluded.expires_at_ms, consumed_at_ms = NULL")
+            .bind(subject_id).bind(environment_id).bind(capability).bind(issuer_subject_id).bind(now_ms()).bind(expires_at_ms)
+            .execute(&self.pool).await.map_err(Error::Database)?;
+        Ok(())
+    }
+
     pub async fn revoke_subject_work(&self, subject_id: &str, environment_id: &str) -> Result<u64> {
         let result = sqlx::query("UPDATE turns SET status = 'interrupted', close_reason = 'grant_revoked', completed_at_ms = COALESCE(completed_at_ms, ?) WHERE origin_subject = ? AND session_env = ? AND status IN ('queued','starting','running','stopping','settling')")
             .bind(now_ms()).bind(subject_id).bind(environment_id).execute(&self.pool).await.map_err(Error::Database)?;

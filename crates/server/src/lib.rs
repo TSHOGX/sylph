@@ -300,6 +300,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(api::environments::revoke_grant),
         )
         .route(
+            "/api/v1/environments/{id}/grants",
+            post(api::environments::issue_grant),
+        )
+        .route(
             "/api/v1/sessions",
             get(api::sessions::list).post(api::sessions::create),
         )
