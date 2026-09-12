@@ -23,6 +23,7 @@ pub struct EnvironmentRow {
     pub last_seen_at_ms: Option<i64>,
     pub reachable_via: Option<String>,
     pub agents_json: String,
+    pub facts_json: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +45,25 @@ pub struct EnvReceipt {
 }
 
 impl JournalStore {
+    /// Persist machine facts reported by the owning envagent. Facts are opaque
+    /// key/value metadata; the envagent is the authority because only it can
+    /// inspect the OS user, home, and browse roots on that machine.
+    pub async fn update_environment_facts(
+        &self,
+        id: &EnvironmentId,
+        facts_json: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE env_installations SET facts_json = ? WHERE environment_id = ?",
+        )
+        .bind(facts_json)
+        .bind(id.as_str())
+        .execute(self.raw_pool())
+        .await
+        .map_err(Error::Database)?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn disconnect_stale_environments(
         &self,
         cutoff_ms: i64,
@@ -487,7 +507,7 @@ impl JournalStore {
     pub async fn environment_row(&self, id: &EnvironmentId) -> Result<Option<EnvironmentRow>> {
         let row = sqlx::query(
             "SELECT environment_id, installation_id, name, origin, token_hash, \
-                    connected, connection_epoch, last_seen_at_ms, reachable_via, agents_json \
+                    connected, connection_epoch, last_seen_at_ms, reachable_via, agents_json, facts_json \
              FROM env_installations WHERE environment_id = ?",
         )
         .bind(id.as_str())
@@ -514,6 +534,7 @@ impl JournalStore {
                 last_seen_at_ms: row.try_get("last_seen_at_ms").map_err(Error::Database)?,
                 reachable_via: row.try_get("reachable_via").map_err(Error::Database)?,
                 agents_json: row.try_get("agents_json").map_err(Error::Database)?,
+                facts_json: row.try_get("facts_json").map_err(Error::Database)?,
             })
         })
         .transpose()
@@ -522,7 +543,7 @@ impl JournalStore {
     pub async fn list_environment_rows(&self) -> Result<Vec<EnvironmentRow>> {
         let rows = sqlx::query(
             "SELECT environment_id, installation_id, name, origin, token_hash, \
-                    connected, connection_epoch, last_seen_at_ms, reachable_via, agents_json \
+                    connected, connection_epoch, last_seen_at_ms, reachable_via, agents_json, facts_json \
              FROM env_installations ORDER BY environment_id",
         )
         .fetch_all(self.raw_pool())
@@ -549,6 +570,7 @@ impl JournalStore {
                     last_seen_at_ms: row.try_get("last_seen_at_ms").map_err(Error::Database)?,
                     reachable_via: row.try_get("reachable_via").map_err(Error::Database)?,
                     agents_json: row.try_get("agents_json").map_err(Error::Database)?,
+                    facts_json: row.try_get("facts_json").map_err(Error::Database)?,
                 })
             })
             .collect()
@@ -593,15 +615,17 @@ impl JournalStore {
         id: &EnvironmentId,
         token_hash: &str,
         agents_json: &str,
+        facts_json: &str,
     ) -> Result<Option<u64>> {
         let epoch: Option<i64> = sqlx::query_scalar(
             "UPDATE env_installations SET connected = 1, connection_epoch = connection_epoch + 1, \
-                    last_seen_at_ms = ?, reachable_via = NULL, agents_json = ? \
+                    last_seen_at_ms = ?, reachable_via = NULL, agents_json = ?, facts_json = ? \
              WHERE environment_id = ? AND token_hash = ? \
              RETURNING connection_epoch",
         )
         .bind(now_ms())
         .bind(agents_json)
+        .bind(facts_json)
         .bind(id.as_str())
         .bind(token_hash)
         .fetch_optional(self.raw_pool())

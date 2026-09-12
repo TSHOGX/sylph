@@ -44,6 +44,7 @@ pub struct EnvironmentSnapshot {
     pub connection_epoch: u64,
     pub agents: Vec<AgentInventory>,
     pub last_seen_at_ms: Option<i64>,
+    pub facts: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +63,7 @@ struct Installation {
     agents: Vec<AgentInventory>,
     connected: bool,
     last_seen_at_ms: Option<i64>,
+    facts: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Default)]
@@ -110,6 +112,7 @@ impl EnvironmentRegistry {
                 token,
                 connection_epoch: 0,
                 agents,
+                facts: Default::default(),
                 connected: false,
                 last_seen_at_ms: None,
             },
@@ -123,6 +126,7 @@ impl EnvironmentRegistry {
         environment_id: &EnvironmentId,
         epoch: u64,
         agents: Vec<AgentInventory>,
+        facts: std::collections::BTreeMap<String, String>,
     ) {
         if let Some(installation) = self
             .state
@@ -135,6 +139,7 @@ impl EnvironmentRegistry {
             installation.connected = true;
             installation.last_seen_at_ms = Some(Self::now_ms());
             installation.agents = agents;
+            installation.facts = facts;
         }
     }
 
@@ -215,6 +220,7 @@ impl EnvironmentRegistry {
                 agents,
                 connected: false,
                 last_seen_at_ms: None,
+                facts: Default::default(),
             },
         );
         Ok(PairingGrant {
@@ -342,6 +348,7 @@ fn snapshot(installation: &Installation) -> EnvironmentSnapshot {
         connection_epoch: installation.connection_epoch,
         agents: installation.agents.clone(),
         last_seen_at_ms: installation.last_seen_at_ms,
+        facts: installation.facts.clone(),
     }
 }
 

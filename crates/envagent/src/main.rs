@@ -151,7 +151,7 @@ async fn run(_args: &[String]) -> Result<()> {
         health: Some(EnvironmentHealth {
             connected: true,
             agents: health.agents.clone(),
-            facts: Default::default(),
+            facts: health.facts.clone(),
         }),
     };
     let config = sylph_envagent::EnvAgentConfig {

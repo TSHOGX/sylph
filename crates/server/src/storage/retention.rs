@@ -374,6 +374,7 @@ mod tests {
             connection_epoch: 1,
             agents: vec![],
             last_seen_at_ms: Some(1),
+            facts: Default::default(),
         }
     }
 

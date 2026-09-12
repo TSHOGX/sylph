@@ -43,6 +43,8 @@ pub struct Environment {
     /// How this envagent came to exist: `self-installed`, `ssh-bootstrapped`,
     /// `sandbox-provisioned`, or `development`.
     pub origin: String,
+    /// Machine facts reported by the owning envagent, including OS user and home.
+    pub facts: std::collections::BTreeMap<String, String>,
     /// **Not decoration.** A non-null value means this environment is reachable only
     /// while the named one relays for it, so **control dies when that machine
     /// leaves**. A UI rendering it identically to a directly-connected environment
@@ -55,6 +57,8 @@ pub struct Environment {
     /// `PATH` — and a client must render it as "nothing installed here", never as a
     /// loading state.
     pub agents: Vec<AgentAvailability>,
+    /// Machine facts reported by the envagent (OS, user, and home metadata).
+    pub facts: std::collections::BTreeMap<String, String>,
 }
 
 /// One agent on one machine.
@@ -182,12 +186,14 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<EnvironmentsResp
             connected: snapshot.connected,
             reason: (!snapshot.connected).then(|| "envagent disconnected".to_string()),
             origin: snapshot.origin,
+            facts: snapshot.facts,
             reachable_via: snapshot.reachable_via,
             agents: snapshot
                 .agents
                 .into_iter()
                 .map(AgentAvailability::from)
                 .collect(),
+            facts: snapshot.facts,
         });
     }
 

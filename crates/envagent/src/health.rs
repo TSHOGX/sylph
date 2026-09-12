@@ -62,10 +62,19 @@ impl HealthReporter {
     }
 
     pub async fn snapshot(&self, _environment_id: impl Into<String>) -> EnvironmentHealth {
+        let mut facts = std::collections::BTreeMap::new();
+        if let Ok(home) = std::env::var("HOME") {
+            facts.insert("home".into(), home);
+        }
+        if let Ok(user) = std::env::var("USER") {
+            facts.insert("os_user".into(), user);
+        }
+        facts.insert("os".into(), std::env::consts::OS.into());
+        facts.insert("arch".into(), std::env::consts::ARCH.into());
         EnvironmentHealth {
             connected: true,
             agents: self.inventory().await,
-            facts: Default::default(),
+            facts,
         }
     }
 }

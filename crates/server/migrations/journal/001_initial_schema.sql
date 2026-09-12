@@ -285,7 +285,10 @@ CREATE TABLE env_installations (
   reachable_via TEXT,
   -- What this machine can run, discovered by that envagent. Per-environment and
   -- time-varying, never a server-wide list (`docs/environments.md` § Agent availability).
-  agents_json TEXT NOT NULL DEFAULT '[]'
+  agents_json TEXT NOT NULL DEFAULT '[]',
+  -- Machine facts reported by the envagent (OS, user, home, and other metadata).
+  -- The envagent is the authority because only it can inspect the owning machine.
+  facts_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE env_pairings (
