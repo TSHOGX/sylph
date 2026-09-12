@@ -268,6 +268,12 @@ async function pair() {
 function agentEnvironment() {
   return {
     ...toolchainEnv,
+    // The envagent's credential/spool isolation is controlled by SYLPH_ENV_HOME.
+    // HOME must remain the fixture machine's real home because PathPolicy always
+    // treats HOME as the first browse root; pointing it at .e2e-env-home/home made
+    // DirectoryPicker open an empty synthetic directory and hid /tmp and the test
+    // worktrees behind later roots.
+    HOME: process.env.HOME ?? "/Users/hsw",
     SYLPH_ENV_HOME: envHome,
     SYLPH_ENV_SERVER: `127.0.0.1:${envPort}`,
     SYLPH_BROWSE_ROOTS: browseRoots,
