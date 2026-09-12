@@ -368,8 +368,17 @@ fn parse_interior_state(value: &str) -> Option<sylph_protocol::InteriorState> {
 /// closes the process without leaving any history behind.
 pub async fn create(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<PreparedSessionResponse>)> {
+    let environment = require_environment(&state, &req.environment).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, environment.as_str(), "control")
+        .await?
+    {
+        return Err(Error::Forbidden("control capability required".into()));
+    }
     // All new sessions use the same prepared lifecycle. There is no eager-create
     // compatibility path: a session becomes durable only after its first real turn.
     create_prepared(State(state), Json(req)).await

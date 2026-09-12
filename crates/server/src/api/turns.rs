@@ -34,6 +34,7 @@ pub struct TurnResponse {
 /// already-committed sessions.
 pub async fn create_prepared(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Path(draft_id): Path<String>,
     Json(req): Json<CreateTurnRequest>,
 ) -> Result<(StatusCode, Json<crate::api::sessions::SessionResponse>)> {
@@ -175,7 +176,7 @@ pub async fn create_prepared(
                 session_id: session_id.clone(),
                 status: "running".into(),
                 origin: "user".into(),
-                origin_subject: None,
+                origin_subject: Some(subject.0.clone()),
                 request_text: text.clone(),
                 command_invocation_id: req.command,
                 idempotency_key: req.idempotency_key,
@@ -332,7 +333,7 @@ pub async fn create(
         session_id: session_id.clone(),
         status: "queued".into(),
         origin: "user".into(),
-        origin_subject: None,
+        origin_subject: Some(subject.0.clone()),
         request_text: text.clone(),
         command_invocation_id: req.command.clone(),
         idempotency_key: idempotency_key.clone(),
