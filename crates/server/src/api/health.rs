@@ -45,9 +45,6 @@ pub struct HealthResponse {
     /// Zero agents is a silent total failure three layers from its symptom, so it is
     /// reported here explicitly (`AGENTS.md` § Rules that keep costing time).
     agents: AgentsHealth,
-    /// Per-environment connectivity and inventory summary. Detailed paths and
-    /// session counts remain authenticated on diagnostics/environments.
-    environments: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -76,7 +73,6 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse
         api_version: "1".to_string(),
         schema_version,
         agents: AgentsHealth { available },
-        environments: Vec::new(),
     }))
 }
 
