@@ -198,6 +198,19 @@ function filesPath(id: string, suffix = ""): string {
 }
 
 export const api = {
+  auth: {
+    register: (name: string) =>
+      fetchAPI<{ id: string; name: string; isAdmin: boolean }>("/auth/register", {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      }),
+    login: (token: string) =>
+      fetchAPI<{ id: string }>("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      }),
+    logout: () => fetchAPI<void>("/auth/logout", { method: "POST" }),
+  },
   sessions: {
     list: (filters: SessionFilters = {}) =>
       fetchAPI<{ sessions: Session[] }>(`/sessions${queryString({ ...filters })}`),

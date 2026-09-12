@@ -12,8 +12,8 @@
  */
 
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { type Agent } from "@/lib/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, type Agent } from "@/lib/api";
 import { workspacesQuery } from "@/lib/workspaces-query";
 import {
   DEFAULT_SHORTCUTS,
@@ -112,6 +112,7 @@ function GeneralSection() {
 
   return (
     <div className="space-y-4">
+      <AuthSection />
       {/*
         First, because it is the setting a user goes looking for. `System` follows
         `prefers-color-scheme` and keeps following it, so a machine on a
@@ -191,6 +192,77 @@ function GeneralSection() {
         </button>
       </Field>
     </div>
+  );
+}
+
+/** Registered Subject controls. Bootstrap remains automatic for local development; these
+ * controls exercise the durable Subject cookie once registration/login is enabled. */
+function AuthSection() {
+  const queryClient = useQueryClient();
+  const t = useT();
+  const [name, setName] = useState("");
+  const [token, setToken] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  const register = useMutation({
+    mutationFn: () => api.auth.register(name.trim()),
+    onSuccess: (subject) => {
+      setNotice(t("settings.account.registered", { name: subject.name }));
+      setName("");
+      void queryClient.invalidateQueries();
+    },
+  });
+  const login = useMutation({
+    mutationFn: () => api.auth.login(token.trim()),
+    onSuccess: () => {
+      setNotice(t("settings.account.signedIn"));
+      setToken("");
+      void queryClient.invalidateQueries();
+    },
+  });
+  const logout = useMutation({
+    mutationFn: api.auth.logout,
+    onSuccess: () => {
+      setNotice(t("settings.account.signedOut"));
+      void queryClient.clear();
+    },
+  });
+  const error = register.error ?? login.error ?? logout.error;
+
+  return (
+    <section className="space-y-2 border-b border-line pb-4" aria-labelledby="settings-auth">
+      <h3 id="settings-auth" className="text-sm font-semibold">{t("settings.account.heading")}</h3>
+      <p className="text-xs text-ink-muted">{t("settings.account.description")}</p>
+      <div className="flex gap-2">
+        <input
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          placeholder={t("settings.account.displayName")}
+          aria-label={t("settings.account.displayName")}
+          className="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1 text-xs focus-ring"
+        />
+        <button type="button" disabled={!name.trim() || register.isPending} onClick={() => register.mutate()} className="rounded border border-line-strong px-2 py-1 text-xs hover:bg-sunken focus-ring disabled:opacity-50">
+          {register.isPending ? t("settings.account.registering") : t("settings.account.register")}
+        </button>
+      </div>
+      <div className="flex gap-2">
+        <input
+          value={token}
+          onChange={(event) => setToken(event.target.value)}
+          placeholder={t("settings.account.token")}
+          aria-label={t("settings.account.token")}
+          type="password"
+          className="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1 text-xs focus-ring"
+        />
+        <button type="button" disabled={!token.trim() || login.isPending} onClick={() => login.mutate()} className="rounded border border-line-strong px-2 py-1 text-xs hover:bg-sunken focus-ring disabled:opacity-50">
+          {login.isPending ? t("settings.account.signingIn") : t("settings.account.signIn")}
+        </button>
+      </div>
+      <button type="button" disabled={logout.isPending} onClick={() => logout.mutate()} className="rounded border border-line-strong px-2 py-1 text-xs hover:bg-sunken focus-ring disabled:opacity-50">
+        {logout.isPending ? t("settings.account.signingOut") : t("settings.account.signOut")}
+      </button>
+      {notice && <p role="status" className="text-xs text-success">{notice}</p>}
+      {error && <p role="alert" className="text-xs text-danger">{error instanceof Error ? error.message : t("settings.account.authFailed")}</p>}
+    </section>
   );
 }
 
