@@ -566,7 +566,7 @@ export interface Environment {
   reason?: string | null;
   origin: EnvironmentOrigin;
   /** Machine facts reported by the owning envagent. */
-  facts?: Record<string, string>;
+  facts: Record<string, string>;
   /**
    * The environment relaying for this one, when it is not reachable directly.
    *
