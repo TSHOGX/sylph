@@ -95,25 +95,23 @@ capability. Harden `sylph.env.v1` with TLS so an envagent can pair from another 
 Four pieces the authority model needs and nothing else provides:
 
 - **`subjects.is_admin`**, the authority root for every `grant_authority = server`
-  environment, without which that root is unimplemented and its routes stay gated by whatever
-  the bootstrap allowed.
+  environment. The schema now carries the flag; provisioning and route gates remain Milestone 3
+  work.
 - The **two authority-root-gated routes**, grant revocation and unpairing, since ungrantable
   is not the same as unreachable and `DELETE /api/v1/environments/{id}` exists today with no
   gate defined.
 - **`CloseReason` itself.** The exit gate below reads `close_reason = grant_revoked`, and the
   wire contract already publishes the six-value enum and calls it authoritative in
-  `crates/protocol`. It is in no Rust file and `turns` has no column for it, so today every
-  turn that stopped short is indistinguishable from one that ran to its own end — the defect
-  the vocabulary exists to prevent (`docs/session-protocol.md` § Outcomes). The type and the
-  column come first; `grant_revoked` is then one value of an existing vocabulary rather than a
-  reason revocation invents.
+  `crates/protocol`. The `turns.close_reason` column now exists; the Rust type, validation, and
+  producer writes remain, so a short turn is still not yet distinguishable from one that ran to
+  its own end (`docs/session-protocol.md` § Outcomes).
 - **Subject provenance on in-flight work.** [ADR-0004](adr/0004-concurrent-control-ordering.md)
   decides the record retains `origin_subject`, and [ADR-0006](adr/0006-environment-authority-and-capability-grants.md)
-  scopes the revocation sweep by it. Nothing writes it: no column on `turns` or
-  `pending_requests`, no field on any type. Without it the sweep cannot distinguish work the
-  revoked grant authorized from unrelated turns on the same environment, and the only
-  behaviours available are terminating every turn on the environment or none — one over-reaches
-  and the other silently keeps authorizing revoked work, which is the plausible-looking answer.
+  scopes the revocation sweep by it. The `turns.origin_subject` column and model field now exist;
+  population from authenticated control requests and the scoped revocation sweep remain. Without
+  those writes the sweep cannot distinguish work the revoked grant authorized from unrelated turns
+  on the same environment, and the only behaviours available are terminating every turn on the
+  environment or none — one over-reaches and the other silently keeps authorizing revoked work.
 
 **Exit gate:** unauthenticated requests cannot read business data; two independent browser
 contexts observe the same authorized environment; an unauthorized environment is absent from
