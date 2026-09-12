@@ -777,9 +777,17 @@ const ENUMERATE_MAX_LIMIT: usize = 200;
 /// ordering would put every one of them at the top of the first page.
 pub async fn enumerate(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Query(query): Query<EnumerateQuery>,
 ) -> Result<Json<EnumerateResponse>> {
     let environment = require_environment(&state, &query.environment).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::Forbidden("observe capability required".into()));
+    }
     let limit = query
         .limit
         .unwrap_or(ENUMERATE_DEFAULT_LIMIT)
@@ -979,9 +987,17 @@ pub async fn enumerate(
 /// its events over the bridge.
 pub async fn adopt(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Json(req): Json<AdoptSessionRequest>,
 ) -> Result<(StatusCode, Json<SessionResponse>)> {
     let environment = require_environment(&state, &req.environment).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, environment.as_str(), "control")
+        .await?
+    {
+        return Err(Error::Forbidden("control capability required".into()));
+    }
     let agent = req.agent.trim().to_string();
 
     let requested_agent = AgentName::parse(agent.clone())
@@ -1203,9 +1219,17 @@ pub struct RereadResponse {
 /// renderer reads as permission to stop drawing a waterfall it had been drawing.
 pub async fn reread(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Path(id): Path<String>,
 ) -> Result<Json<RereadResponse>> {
     let session_id = decode_id(&id)?;
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::SessionNotFound);
+    }
     // The row must exist: this operation extends a transcript rather than creating one.
     // `404` distinguishes "you named nothing" from the *other* `404` below, which is the
     // vendor having dropped what Sylph still holds.
