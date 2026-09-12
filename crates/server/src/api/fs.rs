@@ -5,7 +5,7 @@ use crate::{
     AppState,
 };
 use axum::{
-    extract::{Query, State},
+    extract::{Extension, Query, State},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,7 @@ pub struct BrowseQuery {
 
 async fn select_environment(
     state: &AppState,
+    subject: &crate::middleware::auth::SubjectId,
     raw: Option<String>,
 ) -> Result<sylph_protocol::EnvironmentId> {
     if let Some(raw) = raw.filter(|value| !value.trim().is_empty()) {
@@ -66,6 +67,13 @@ async fn select_environment(
         if !state.env_bridge.environment_connected(&id).await {
             return Err(Error::EnvironmentUnreachable(id.to_string()));
         }
+        if !state
+            .store
+            .has_capability(&subject.0, id.as_str(), "observe")
+            .await?
+        {
+            return Err(Error::Forbidden("observe capability required".into()));
+        }
         return Ok(id);
     }
     let environments = state
@@ -73,11 +81,19 @@ async fn select_environment(
         .list_environments()
         .await
         .map_err(|error| Error::Internal(format!("{error:#}")))?;
-    environments
-        .into_iter()
-        .find(|environment| environment.connected)
-        .map(|environment| environment.id)
-        .ok_or_else(|| Error::EnvironmentUnreachable("no connected environment".into()))
+    for environment in environments {
+        if environment.connected
+            && state
+                .store
+                .has_capability(&subject.0, environment.id.as_str(), "observe")
+                .await?
+        {
+            return Ok(environment.id);
+        }
+    }
+    Err(Error::EnvironmentUnreachable(
+        "no connected environment".into(),
+    ))
 }
 
 fn map_remote_browse_error(error: anyhow::Error) -> Error {
@@ -99,9 +115,10 @@ fn map_remote_browse_error(error: anyhow::Error) -> Error {
 /// GET /api/v1/fs/roots?environment=...
 pub async fn roots(
     State(state): State<AppState>,
+    Extension(subject): Extension<crate::middleware::auth::SubjectId>,
     Query(query): Query<BrowseEnvironmentQuery>,
 ) -> Result<Json<RootsResponse>> {
-    let environment = select_environment(&state, query.environment).await?;
+    let environment = select_environment(&state, &subject, query.environment).await?;
     let value = state
         .env_bridge
         .remote_browse(
@@ -118,9 +135,10 @@ pub async fn roots(
 /// GET /api/v1/fs/tree?path=...&environment=...
 pub async fn tree(
     State(state): State<AppState>,
+    Extension(subject): Extension<crate::middleware::auth::SubjectId>,
     Query(query): Query<BrowseQuery>,
 ) -> Result<Json<BrowseResponse>> {
-    let environment = select_environment(&state, query.environment).await?;
+    let environment = select_environment(&state, &subject, query.environment).await?;
     let value = state
         .env_bridge
         .remote_browse(

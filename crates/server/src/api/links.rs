@@ -49,6 +49,8 @@ fn remote_link_state(agent: String, value: serde_json::Value) -> Result<LinkStat
             agent: Some(agent),
             supports: Vec::new(),
             capabilities: None,
+            authorization: None,
+            control_block: None,
         });
     }
     let capabilities = serde_json::from_value(capabilities_value)
@@ -174,6 +176,7 @@ pub async fn prepared_capabilities(
 /// session's `link` field instead of paying for one here.
 pub async fn capabilities(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
     Path(session_id): Path<String>,
 ) -> Result<Json<LinkState>> {
     let session_id = require_session(&state, &session_id).await?;
@@ -270,24 +273,32 @@ pub async fn capabilities(
             .await
             .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
     }
-    match outcome {
+    let mut link = match outcome {
         sylph_protocol::CommandOutcome::Accepted {
             result: Some(value),
-        } => Ok(Json(remote_link_state(
-            session_id.agent.to_string(),
-            value,
-        )?)),
-        sylph_protocol::CommandOutcome::Accepted { result: None } => {
-            Ok(Json(LinkState::detached_remote()))
-        }
+        } => remote_link_state(session_id.agent.to_string(), value)?,
+        sylph_protocol::CommandOutcome::Accepted { result: None } => LinkState::detached_remote(),
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(remote_refusal(&code, message))
+            return Err(remote_refusal(&code, message));
         }
         sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
             "remote capabilities outcome is unknown: {}",
             message.unwrap_or_default()
-        ))),
+        )))?,
+    };
+    if let Some(status) = state
+        .store
+        .authorization_status(&subject.0, session_id.environment.as_str(), "control")
+        .await?
+        .filter(|status| *status != "granted")
+    {
+        link.authorization = Some(status.into());
+        link.control_block = Some(crate::link_state::ControlBlock {
+            kind: "unauthorized".into(),
+            reason: status.into(),
+        });
     }
+    Ok(Json(link))
 }
 
 /// Establish a link eagerly.

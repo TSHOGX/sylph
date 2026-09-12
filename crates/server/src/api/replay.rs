@@ -10,7 +10,7 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use serde::Deserialize;
@@ -53,6 +53,7 @@ const MAX_GAP: Duration = Duration::from_secs(2);
 /// order with original relative timing.
 pub async fn replay(
     State(state): State<AppState>,
+    Extension(subject): Extension<crate::middleware::auth::SubjectId>,
     Path(session_id): Path<String>,
     Query(query): Query<ReplayQuery>,
 ) -> Result<impl IntoResponse> {
@@ -62,6 +63,13 @@ pub async fn replay(
         .get_session(&session)
         .await?
         .ok_or(Error::SessionNotFound)?;
+    if !state
+        .store
+        .has_capability(&subject.0, session.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::SessionNotFound);
+    }
 
     // Both tiers, merged by sequence number. A session mid-turn has its tail in
     // the journal and everything before it in history, and `seq` is what orders

@@ -200,7 +200,7 @@ function filesPath(id: string, suffix = ""): string {
 export const api = {
   auth: {
     register: (name: string) =>
-      fetchAPI<{ id: string; name: string; isAdmin: boolean }>("/auth/register", {
+      fetchAPI<{ id: string; name: string; isAdmin: boolean; token: string }>("/auth/register", {
         method: "POST",
         body: JSON.stringify({ name }),
       }),

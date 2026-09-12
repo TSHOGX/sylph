@@ -9,6 +9,17 @@ pub struct LinkState {
     pub supports: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<SessionCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<String>,
+    #[serde(rename = "controlBlock", skip_serializing_if = "Option::is_none")]
+    pub control_block: Option<ControlBlock>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlBlock {
+    pub kind: String,
+    pub reason: String,
 }
 
 impl LinkState {
@@ -21,6 +32,8 @@ impl LinkState {
             agent: None,
             supports: Vec::new(),
             capabilities: None,
+            authorization: None,
+            control_block: None,
         }
     }
 
@@ -42,6 +55,8 @@ impl LinkState {
             agent: Some(agent),
             supports,
             capabilities: Some(capabilities),
+            authorization: None,
+            control_block: None,
         }
     }
 }

@@ -468,6 +468,7 @@ pub async fn create(
 /// GET /api/v1/turns/{id}
 pub async fn get(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Path(id): Path<String>,
 ) -> Result<Json<TurnResponse>> {
     let turn = state
@@ -475,6 +476,13 @@ pub async fn get(
         .get_turn(&id)
         .await?
         .ok_or(Error::TurnNotFound)?;
+    if !state
+        .store
+        .has_capability(&subject.0, turn.session_id.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::TurnNotFound);
+    }
     Ok(Json(TurnResponse { turn }))
 }
 
@@ -491,16 +499,24 @@ fn default_after_seq() -> i32 {
 /// GET /api/v1/turns/{id}/events — SSE stream with reconnection from journal.
 pub async fn events(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Path(turn_id): Path<String>,
     query: axum::extract::Query<EventsQuery>,
 ) -> Result<impl axum::response::IntoResponse> {
     // Existence check only: a stream for an unknown turn must 404 rather
     // than hang on an empty subscription.
-    let _turn = state
+    let turn = state
         .store
         .get_turn(&turn_id)
         .await?
         .ok_or(Error::TurnNotFound)?;
+    if !state
+        .store
+        .has_capability(&subject.0, turn.session_id.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::TurnNotFound);
+    }
 
     let after_seq = query.after_seq;
 
@@ -609,6 +625,7 @@ fn sse_event(event: StreamEvent) -> std::result::Result<Event, Infallible> {
 /// POST /api/v1/turns/{id}/stop
 pub async fn stop(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Path(turn_id): Path<String>,
 ) -> Result<(StatusCode, Json<TurnResponse>)> {
     let turn = state
@@ -616,6 +633,13 @@ pub async fn stop(
         .get_turn(&turn_id)
         .await?
         .ok_or(Error::TurnNotFound)?;
+    if !state
+        .store
+        .has_capability(&subject.0, turn.session_id.environment.as_str(), "control")
+        .await?
+    {
+        return Err(Error::Forbidden("control capability required".into()));
+    }
 
     if turn.is_terminal() {
         return Err(Error::StopAlreadyCompleted);

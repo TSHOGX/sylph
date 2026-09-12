@@ -91,6 +91,31 @@ impl JournalStore {
         Ok(found.is_some())
     }
 
+    pub async fn authorization_status(
+        &self,
+        subject_id: &str,
+        environment_id: &str,
+        capability: &str,
+    ) -> Result<Option<&'static str>> {
+        if subject_id == "bootstrap" {
+            return Ok(Some("granted"));
+        }
+        let row: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT expires_at_ms FROM env_grants WHERE subject_id = ? AND environment_id = ? AND capability = ?",
+        )
+        .bind(subject_id)
+        .bind(environment_id)
+        .bind(capability)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::Database)?;
+        Ok(match row {
+            None => Some("not_granted"),
+            Some(Some(expires)) if expires <= now_ms() => Some("expired"),
+            Some(_) => Some("granted"),
+        })
+    }
+
     pub async fn is_admin(&self, subject_id: &str) -> Result<bool> {
         let value: Option<i64> = sqlx::query_scalar("SELECT is_admin FROM subjects WHERE id = ?")
             .bind(subject_id)

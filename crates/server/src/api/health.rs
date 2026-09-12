@@ -47,30 +47,13 @@ pub struct HealthResponse {
     agents: AgentsHealth,
     /// Per-environment connectivity and inventory summary. Detailed paths and
     /// session counts remain authenticated on diagnostics/environments.
-    environments: Vec<EnvironmentHealthLine>,
+    environments: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentsHealth {
     available: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EnvironmentHealthLine {
-    id: String,
-    name: String,
-    connected: bool,
-    agents: Vec<AgentHealthLine>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentHealthLine {
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
 }
 
 /// GET /api/v1/health
@@ -80,38 +63,20 @@ struct AgentHealthLine {
 /// reports only availability, never counts or paths.
 pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>> {
     let schema_version = state.store.schema_version().await.unwrap_or(0);
-    let mut environments = Vec::new();
-    for environment in state
+    let available = state
         .env_bridge
         .list_environments()
         .await
         .unwrap_or_default()
-    {
-        environments.push(EnvironmentHealthLine {
-            id: environment.id.to_string(),
-            name: environment.name,
-            connected: environment.connected,
-            agents: environment
-                .agents
-                .into_iter()
-                .map(|agent| AgentHealthLine {
-                    name: agent.name,
-                    version: agent.version,
-                })
-                .collect(),
-        });
-    }
+        .into_iter()
+        .any(|environment| environment.connected && !environment.agents.is_empty());
 
     Ok(Json(HealthResponse {
         ok: true,
         api_version: "1".to_string(),
         schema_version,
-        agents: AgentsHealth {
-            available: environments
-                .iter()
-                .any(|environment| environment.connected && !environment.agents.is_empty()),
-        },
-        environments,
+        agents: AgentsHealth { available },
+        environments: Vec::new(),
     }))
 }
 

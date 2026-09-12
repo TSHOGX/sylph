@@ -348,7 +348,10 @@ pub async fn issue_grant(
 /// one is honest about the environment inventory: an envagent that lists no agents
 /// yields an environment with no agents, which is exactly the state a client must be able
 /// to explain rather than render as empty chrome.
-pub async fn list(State(state): State<AppState>) -> Result<Json<EnvironmentsResponse>> {
+pub async fn list(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+) -> Result<Json<EnvironmentsResponse>> {
     let mut environments = Vec::new();
 
     for snapshot in state
@@ -357,6 +360,13 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<EnvironmentsResp
         .await
         .map_err(|error| crate::error::Error::Internal(format!("{error:#}")))?
     {
+        if !state
+            .store
+            .has_capability(&subject.0, snapshot.id.as_str(), "observe")
+            .await?
+        {
+            continue;
+        }
         environments.push(Environment {
             id: snapshot.id.to_string(),
             name: snapshot.name,

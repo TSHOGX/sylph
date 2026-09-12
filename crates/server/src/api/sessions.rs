@@ -108,7 +108,16 @@ pub async fn list(
         updated_before_ms: query.updated_before_ms,
     };
 
-    let sessions = state.store.list_sessions(&filter).await?;
+    let mut sessions = Vec::new();
+    for session in state.store.list_sessions(&filter).await? {
+        if state
+            .store
+            .has_capability(&subject.0, session.id.environment.as_str(), "observe")
+            .await?
+        {
+            sessions.push(session);
+        }
+    }
     Ok(Json(SessionListResponse { sessions }))
 }
 

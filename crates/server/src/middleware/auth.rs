@@ -120,7 +120,52 @@ pub async fn auth_middleware(
         .ok_or(Error::Unauthorized)?;
     request.extensions_mut().insert(SubjectId(subject_id));
 
+    enforce_session_capability(&state, request.uri().path(), request.method(), presented).await?;
+
     Ok(next.run(request).await)
+}
+
+async fn enforce_session_capability(
+    state: &AppState,
+    path: &str,
+    method: &axum::http::Method,
+    presented: &str,
+) -> Result<()> {
+    let Some(rest) = path.strip_prefix("/api/v1/sessions/") else {
+        return Ok(());
+    };
+    let Some(encoded) = rest.split('/').next().filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    if encoded.starts_with("draft-") || encoded.starts_with("remote-draft-") {
+        return Ok(());
+    }
+    let Ok(session) = sylph_protocol::SessionId::decode(encoded) else {
+        return Ok(());
+    };
+    let suffix = rest.strip_prefix(encoded).unwrap_or("");
+    let capability = if *method == axum::http::Method::GET {
+        "observe"
+    } else if suffix == "/reread" {
+        "observe"
+    } else {
+        "control"
+    };
+    let subject = state
+        .store
+        .subject_id_for_token_hash(&hash_token(presented))
+        .await?
+        .unwrap_or_else(|| "bootstrap".to_string());
+    if !state
+        .store
+        .has_capability(&subject, session.environment.as_str(), capability)
+        .await?
+    {
+        return Err(Error::Forbidden(format!(
+            "{capability} capability required"
+        )));
+    }
+    Ok(())
 }
 
 /// GET /api/v1/auth/token — bootstrap endpoint that sets the cookie.
@@ -185,7 +230,9 @@ pub async fn register(
     Ok((
         StatusCode::CREATED,
         [(header::SET_COOKIE, cookie)],
-        Json(serde_json::json!({"id": id, "name": req.name, "isAdmin": is_admin == 0})),
+        Json(
+            serde_json::json!({"id": id, "name": req.name, "isAdmin": is_admin == 0, "token": token}),
+        ),
     ))
 }
 
