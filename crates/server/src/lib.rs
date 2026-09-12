@@ -314,6 +314,14 @@ pub fn router(state: AppState) -> Router {
             post(api::environments::issue_grant),
         )
         .route(
+            "/api/v1/environments/{id}/invites",
+            post(api::environments::issue_invite),
+        )
+        .route(
+            "/api/v1/environments/{id}/invites/redeem",
+            post(api::environments::redeem_invite),
+        )
+        .route(
             "/api/v1/sessions",
             get(api::sessions::list).post(api::sessions::create),
         )

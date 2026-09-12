@@ -72,6 +72,55 @@ async fn pairing_exchange_uses_the_standard_error_envelope() {
 }
 
 #[tokio::test]
+async fn invite_redeems_once_and_rejects_wrong_scope() {
+    let backend = TestBackend::start().await;
+    let environment = backend.environment_id().await;
+    let issue = backend
+        .post(
+            &format!("/api/v1/environments/{environment}/invites"),
+            json!({
+                "installationId": backend.installation_id(),
+                "token": backend.environment_token(),
+                "capability": "observe",
+                "ttlMs": 60_000
+            }),
+        )
+        .await;
+    assert_eq!(issue.status(), StatusCode::CREATED);
+    let offer = json_body(issue).await;
+    let code = offer["code"].as_str().unwrap();
+
+    let wrong = backend
+        .post_authed(
+            "/api/v1/environments/env-wrong/invites/redeem",
+            json!({"code": code}),
+        )
+        .await;
+    assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+
+    let redeemed = backend
+        .post_authed(
+            &format!("/api/v1/environments/{environment}/invites/redeem"),
+            json!({"code": code}),
+        )
+        .await;
+    assert_eq!(redeemed.status(), StatusCode::NO_CONTENT);
+    let replay = backend
+        .post_authed(
+            &format!("/api/v1/environments/{environment}/invites/redeem"),
+            json!({"code": code}),
+        )
+        .await;
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    assert!(backend
+        .state
+        .store
+        .has_capability("bootstrap", &environment, "observe")
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
 async fn connected_inventory_updates_after_cli_removal_without_repair_or_restart() {
     let backend = TestBackend::start().await;
     let environment = sylph_protocol::EnvironmentId::parse(backend.environment_id().await)

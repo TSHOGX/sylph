@@ -337,6 +337,24 @@ CREATE INDEX env_pairings_live_idx
   ON env_pairings(expires_at_ms)
   WHERE used_at_ms IS NULL;
 
+-- One-shot capability invitations issued by a local envagent.  The bearer code
+-- is stored only as a hash; installation_id preserves issuer provenance and
+-- the foreign key makes unpairing invalidate every outstanding invite.
+CREATE TABLE env_invites (
+  code_hash TEXT PRIMARY KEY,
+  environment_id TEXT NOT NULL,
+  installation_id TEXT NOT NULL,
+  capability TEXT NOT NULL CHECK (capability IN ('observe', 'control')),
+  expires_at_ms INTEGER NOT NULL,
+  consumed_at_ms INTEGER,
+  FOREIGN KEY (environment_id) REFERENCES env_installations(environment_id) ON DELETE CASCADE,
+  FOREIGN KEY (installation_id) REFERENCES env_installations(installation_id) ON DELETE CASCADE
+);
+
+CREATE INDEX env_invites_live_idx
+  ON env_invites(environment_id, expires_at_ms)
+  WHERE consumed_at_ms IS NULL;
+
 -- What a command already answered, so a replay returns the first outcome instead of
 -- acting twice. `at_most_once` is the class where that distinction is the whole point:
 -- re-running it is not equivalent to returning what it returned.

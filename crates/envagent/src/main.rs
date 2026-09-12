@@ -14,6 +14,7 @@ sylph-envagent — run Sylph adapters on this machine
 USAGE
   sylph-envagent doctor
   sylph-envagent pair --server URL --code CODE
+  sylph-envagent invite --capability observe|control --ttl 15m
   sylph-envagent run
 ";
 
@@ -23,6 +24,7 @@ async fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("doctor") | None => doctor().await,
         Some("pair") => pair(&args[1..]).await,
+        Some("invite") => invite(&args[1..]).await,
         Some("run") => run(&args[1..]).await,
         Some("-h") | Some("--help") | Some("help") => {
             print!("{USAGE}");
@@ -108,6 +110,61 @@ async fn pair(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+async fn invite(args: &[String]) -> Result<()> {
+    let mut capability = None;
+    let mut ttl = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--capability" => capability = iter.next().cloned(),
+            "--ttl" => ttl = iter.next().cloned(),
+            other => anyhow::bail!("unknown invite option '{other}'"),
+        }
+    }
+    let capability = capability.ok_or_else(|| anyhow::anyhow!("invite needs --capability"))?;
+    if !matches!(capability.as_str(), "observe" | "control") {
+        anyhow::bail!("invite capability must be observe or control");
+    }
+    let ttl_ms = parse_duration_ms(ttl.as_deref().unwrap_or("15m"))?;
+    let credential = CredentialStore::new(environment_home().join("credential.json"))
+        .load()?
+        .ok_or_else(|| anyhow::anyhow!("not paired; run sylph-envagent pair first"))?;
+    let path = format!("/api/v1/environments/{}/invites", credential.environment_id);
+    let body = serde_json::json!({
+        "installationId": credential.installation_id.clone().unwrap_or_else(|| credential.environment_id.clone()),
+        "token": credential.token,
+        "capability": capability,
+        "ttlMs": ttl_ms,
+    });
+    let response: InviteResponse = http_post_json(
+        &http_server_for_credential(&credential.server)?,
+        &path,
+        &body,
+    )
+    .await?;
+    println!("{} (expires {})", response.code, response.expires_at_ms);
+    Ok(())
+}
+
+fn parse_duration_ms(value: &str) -> Result<i64> {
+    let (number, unit) = value.split_at(value.len().saturating_sub(1));
+    let amount: i64 = number
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid duration '{value}'"))?;
+    if amount <= 0 {
+        anyhow::bail!("duration must be positive");
+    }
+    let multiplier = match unit {
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        _ => anyhow::bail!("duration must end in s, m, or h"),
+    };
+    amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow::anyhow!("duration is too large"))
+}
+
 async fn run(_args: &[String]) -> Result<()> {
     let credential = CredentialStore::new(environment_home().join("credential.json"))
         .load()?
@@ -183,11 +240,18 @@ struct PairingResponse {
     credential: String,
 }
 
-async fn http_post_json(
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InviteResponse {
+    code: String,
+    expires_at_ms: i64,
+}
+
+async fn http_post_json<T: serde::de::DeserializeOwned>(
     base: &str,
     path: &str,
     body: &serde_json::Value,
-) -> Result<PairingResponse> {
+) -> Result<T> {
     let (host, port) = parse_http_authority(base)?;
     let mut stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
     let bytes = serde_json::to_vec(body)?;
@@ -214,6 +278,23 @@ async fn http_post_json(
         );
     }
     Ok(serde_json::from_slice(&response[split + 4..])?)
+}
+
+fn http_server_for_credential(server: &str) -> Result<String> {
+    if server.starts_with("http://") {
+        return Ok(server.to_string());
+    }
+    let authority = format!("http://{server}");
+    let (host, port) = parse_http_authority(&authority)?;
+    let http_port = port
+        .checked_sub(1)
+        .ok_or_else(|| anyhow::anyhow!("envagent wire port cannot be decremented"))?;
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    Ok(format!("http://{host}:{http_port}"))
 }
 
 fn parse_http_authority(base: &str) -> Result<(String, u16)> {

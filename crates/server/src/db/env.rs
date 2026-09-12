@@ -473,6 +473,99 @@ impl JournalStore {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Store a one-shot capability invite issued by the owning envagent.
+    pub async fn put_invite(
+        &self,
+        code_hash: &str,
+        environment_id: &EnvironmentId,
+        installation_id: &str,
+        capability: &str,
+        expires_at_ms: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO env_invites (code_hash, environment_id, installation_id, capability, expires_at_ms, consumed_at_ms) \
+             VALUES (?, ?, ?, ?, ?, NULL)",
+        )
+        .bind(code_hash)
+        .bind(environment_id.as_str())
+        .bind(installation_id)
+        .bind(capability)
+        .bind(expires_at_ms)
+        .execute(self.raw_pool())
+        .await
+        .map_err(Error::Database)?;
+        Ok(())
+    }
+
+    /// Atomically redeem an invite for a Subject grant.
+    ///
+    /// The invite row is consumed only when all five properties hold: the
+    /// supplied environment scope, a grantable capability, a live expiry,
+    /// an unused row, and issuer provenance that still belongs to the named
+    /// installation.  The grant insert and code consumption share one
+    /// transaction, so a failed grant cannot burn a code.
+    pub async fn redeem_invite(
+        &self,
+        code_hash: &str,
+        requested_environment: &EnvironmentId,
+        subject_id: &str,
+    ) -> Result<Option<(EnvironmentId, String)>> {
+        let mut tx = self.raw_pool().begin().await.map_err(Error::Database)?;
+        let row = sqlx::query(
+            "SELECT i.environment_id, i.installation_id, i.capability, i.expires_at_ms \
+             FROM env_invites i \
+             JOIN env_installations e ON e.environment_id = i.environment_id \
+               AND e.installation_id = i.installation_id \
+             WHERE i.code_hash = ? AND i.environment_id = ? \
+               AND i.consumed_at_ms IS NULL AND i.expires_at_ms > ?",
+        )
+        .bind(code_hash)
+        .bind(requested_environment.as_str())
+        .bind(now_ms())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(Error::Database)?;
+        let Some(row) = row else {
+            tx.rollback().await.map_err(Error::Database)?;
+            return Ok(None);
+        };
+        let environment_id = EnvironmentId::parse(
+            row.try_get::<String, _>("environment_id")
+                .map_err(Error::Database)?,
+        )
+        .map_err(|error| Error::Internal(format!("invalid invite environment: {error}")))?;
+        let capability: String = row.try_get("capability").map_err(Error::Database)?;
+        let issued_at = now_ms();
+        sqlx::query(
+            "INSERT INTO env_grants (subject_id, environment_id, capability, issuer_subject_id, issued_at_ms, expires_at_ms, consumed_at_ms) \
+             VALUES (?, ?, ?, NULL, ?, NULL, NULL) \
+             ON CONFLICT(subject_id, environment_id, capability) DO UPDATE SET \
+               issuer_subject_id = NULL, issued_at_ms = excluded.issued_at_ms, \
+               expires_at_ms = NULL, consumed_at_ms = NULL",
+        )
+        .bind(subject_id)
+        .bind(environment_id.as_str())
+        .bind(&capability)
+        .bind(issued_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(Error::Database)?;
+        let consumed = sqlx::query(
+            "UPDATE env_invites SET consumed_at_ms = ? WHERE code_hash = ? AND consumed_at_ms IS NULL",
+        )
+        .bind(issued_at)
+        .bind(code_hash)
+        .execute(&mut *tx)
+        .await
+        .map_err(Error::Database)?;
+        if consumed.rows_affected() != 1 {
+            tx.rollback().await.map_err(Error::Database)?;
+            return Ok(None);
+        }
+        tx.commit().await.map_err(Error::Database)?;
+        Ok(Some((environment_id, capability)))
+    }
+
     pub async fn upsert_environment(
         &self,
         id: &EnvironmentId,

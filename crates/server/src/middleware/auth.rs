@@ -65,8 +65,11 @@ pub async fn auth_middleware(
     // Pairing has no browser cookie, but a cross-origin page must not be able
     // to consume a one-shot pairing code.  Keep the exemption only for the
     // credential check and still enforce a loopback Origin when one is sent.
-    if EXEMPT_PATHS.contains(&path) {
-        if path == "/api/v1/environments/pair" {
+    let local_invite_issue = path.starts_with("/api/v1/environments/")
+        && path.ends_with("/invites")
+        && request.method() == axum::http::Method::POST;
+    if EXEMPT_PATHS.contains(&path) || local_invite_issue {
+        if path == "/api/v1/environments/pair" || local_invite_issue {
             if let Some(origin) = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok()) {
                 if !is_loopback_origin(origin) {
                     return Err(Error::Forbidden(format!(

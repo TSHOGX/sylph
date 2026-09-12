@@ -1289,6 +1289,27 @@
         }
       }
     },
+    "/api/v1/environments/{id}/invites": {
+      "post": {
+        "security": [],
+        "tags": ["Environments"],
+        "summary": "Issue a one-shot environment capability invite",
+        "description": "Local envagent operation. The installation credential proves issuer provenance; the returned bearer code is short-lived and single-use.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InviteIssue"}}}},
+        "responses": {"201": {"description": "Invite code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PairingOffer"}}}}, "400": {"$ref": "#/components/responses/Error"}}
+      }
+    },
+    "/api/v1/environments/{id}/invites/redeem": {
+      "post": {
+        "tags": ["Environments"],
+        "summary": "Redeem an environment capability invite",
+        "description": "Authenticated Subject operation. The server validates scope, capability, expiry, single consumption, and issuer provenance atomically.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InviteRedeem"}}}},
+        "responses": {"204": {"description": "Grant recorded"}, "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"}}
+      }
+    },
     "/api/v1/auth/token": {
       "get": {
         "summary": "Bootstrap the session cookie",
@@ -3741,6 +3762,21 @@
           "credential": {"type": "string"},
           "expiresAtMs": {"type": "integer", "format": "int64"}
         }
+      },
+      "InviteIssue": {
+        "type": "object",
+        "required": ["installationId", "token", "capability", "ttlMs"],
+        "properties": {
+          "installationId": {"type": "string"},
+          "token": {"type": "string"},
+          "capability": {"type": "string", "enum": ["observe", "control"]},
+          "ttlMs": {"type": "integer", "format": "int64", "minimum": 1}
+        }
+      },
+      "InviteRedeem": {
+        "type": "object",
+        "required": ["code"],
+        "properties": {"code": {"type": "string"}}
       },
       "Environment": {
         "type": "object",

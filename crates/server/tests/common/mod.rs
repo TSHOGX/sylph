@@ -697,6 +697,14 @@ impl TestBackend {
         self.environment.to_string()
     }
 
+    pub fn installation_id(&self) -> &str {
+        &self.installation_id
+    }
+
+    pub fn environment_token(&self) -> &str {
+        &self.token
+    }
+
     /// The typed form of a session id, for the store-level APIs.
     pub fn session_id(encoded: &str) -> sylph_protocol::SessionId {
         sylph_protocol::SessionId::decode(encoded).expect("the server issued this id")

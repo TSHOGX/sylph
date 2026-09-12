@@ -20,3 +20,11 @@ pub use bridge::{DispatchResult, EnvBridge, IngestResult};
 pub use registry::{
     EnvironmentRegistry, EnvironmentSnapshot, PairingGrant, PairingOffer, RegistryError,
 };
+
+/// Hash a bearer invite code exactly as the bridge does before persistence.
+pub(crate) fn hash_invite_code(code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(code.as_bytes());
+    hex::encode(hasher.finalize())
+}

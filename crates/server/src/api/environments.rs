@@ -222,6 +222,77 @@ pub struct IssueGrantRequest {
     pub expires_at_ms: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteIssueRequest {
+    pub installation_id: String,
+    pub token: String,
+    pub capability: String,
+    pub ttl_ms: i64,
+}
+
+/// POST /api/v1/environments/{id}/invites
+///
+/// The envagent invokes this local-machine operation with its installation
+/// credential. It is intentionally separate from browser Subject auth: a
+/// grant cannot be minted by a Subject holding only observe/control.
+pub async fn issue_invite(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<InviteIssueRequest>,
+) -> Result<(StatusCode, Json<crate::env::PairingOffer>)> {
+    let environment =
+        EnvironmentId::parse(id).map_err(|e| crate::error::Error::InvalidRequest(e.to_string()))?;
+    let offer = state
+        .env_bridge
+        .create_invite(
+            &environment,
+            &request.installation_id,
+            &request.token,
+            &request.capability,
+            request.ttl_ms,
+        )
+        .await
+        .map_err(|error| crate::error::Error::InvalidRequest(error.to_string()))?;
+    Ok((StatusCode::CREATED, Json(offer)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteRedeemRequest {
+    pub code: String,
+}
+
+/// POST /api/v1/environments/{id}/invites/redeem
+pub async fn redeem_invite(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
+    Json(request): Json<InviteRedeemRequest>,
+) -> Result<StatusCode> {
+    let environment =
+        EnvironmentId::parse(id).map_err(|e| crate::error::Error::InvalidRequest(e.to_string()))?;
+    if request.code.trim().is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "code is required".into(),
+        ));
+    }
+    let Some((_environment, _capability)) = state
+        .store
+        .redeem_invite(
+            &crate::env::hash_invite_code(&request.code),
+            &environment,
+            &subject.0,
+        )
+        .await?
+    else {
+        return Err(crate::error::Error::InvalidRequest(
+            "invite code is invalid, expired, consumed, or not issued by this environment".into(),
+        ));
+    };
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn issue_grant(
     State(state): State<AppState>,
     Extension(subject): Extension<SubjectId>,

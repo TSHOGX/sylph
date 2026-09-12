@@ -987,6 +987,60 @@ impl EnvBridge {
         Ok(offer)
     }
 
+    /// Issue a one-shot capability invite for an already paired installation.
+    /// The installation credential is accepted only for its own environment;
+    /// this is the local-machine authority proof and is deliberately separate
+    /// from the browser Subject cookie.
+    pub async fn create_invite(
+        &self,
+        environment: &EnvironmentId,
+        installation_id: &str,
+        token: &str,
+        capability: &str,
+        ttl_ms: i64,
+    ) -> Result<PairingOffer> {
+        if !matches!(capability, "observe" | "control") || ttl_ms <= 0 {
+            return Err(BridgeError::InvalidCredential.into());
+        }
+        // A local invite proves the OS-user through the machine installation
+        // credential. Server-authority (sandbox) environments have no such
+        // local principal; their grants are issued by the server admin route.
+        if self
+            .store
+            .grant_authority(environment.as_str())
+            .await?
+            .as_deref()
+            != Some("machine")
+        {
+            return Err(BridgeError::InvalidCredential.into());
+        }
+        let row = self
+            .store
+            .environment_row(environment)
+            .await?
+            .ok_or(BridgeError::Unpaired)?;
+        if row.installation_id != installation_id
+            || !constant_time_eq(row.token_hash.as_bytes(), hash_secret(token).as_bytes())
+        {
+            return Err(BridgeError::InvalidCredential.into());
+        }
+        let code = format!("invite-{}", uuid::Uuid::new_v4().simple());
+        let expires_at_ms = now_ms().saturating_add(ttl_ms);
+        self.store
+            .put_invite(
+                &super::hash_invite_code(&code),
+                environment,
+                installation_id,
+                capability,
+                expires_at_ms,
+            )
+            .await?;
+        Ok(PairingOffer {
+            code,
+            expires_at_ms,
+        })
+    }
+
     /// Consume a code and persist a durable installation credential.
     pub async fn claim_pairing(
         &self,
