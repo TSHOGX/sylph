@@ -198,9 +198,8 @@ works for an existing user.
 
 Preferences are client-side by design: every value is a display or input
 preference, and none changes what the backend does with a session. The trade-off is
-that they do not follow a user to another browser — acceptable for a loopback-only
-single-user app, and not acceptable once a non-loopback deployment adds real
-accounts, which is already gated behind a separate authentication change.
+that they do not follow a user to another browser. Account identity and environment
+authorization are server-side; these preferences remain browser-local by design.
 
 Pane visibility is read straight from settings rather than mirrored into local
 state: the mirror needed an effect to adopt the stored value after hydration, and
@@ -1214,8 +1213,8 @@ not ask for.
 them. Highlighting means reaching into the Markdown, diff, and code renderers to rewrite
 their text nodes, which is why it is not a small change.
 
-**Collaboration** — sharing, comments, and session-to-session diff are out of scope, and
-each needs a story for a surface that is currently loopback-only.
+**Collaboration** — sharing, comments, and session-to-session diff are out of scope; the
+Milestone 3 account and grant model provides the boundary for a future sharing surface.
 
 **Virtualization** stays deferred, with measurement behind it rather than as an
 aspiration (§ Render cost). The evidence that would reverse it is scroll jank while *idle*

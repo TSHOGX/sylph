@@ -103,10 +103,10 @@ derives it, so a hand-set value is the only way the two can disagree.
 | `paths.quick_start_dir` | `SYLPH_QUICK_START_DIR` | `<home>/scratch` |
 | `log.level` | `SYLPH_LOG`, then `RUST_LOG` | `info` |
 
-`server.host` binds what it is asked for and refuses a non-loopback address, because a
-network-reachable bind requires the authentication change described in
-`docs/architecture.md` § Security model. The envagent ingress holds to the same rule and
-resolves relative to `server.port`, so both listeners move together.
+`server.host` remains loopback-only for the browser API. The envagent ingress may bind a
+network address only when `SYLPH_ENV_TLS_CERT` and `SYLPH_ENV_TLS_KEY` configure TLS; its
+plaintext mode remains loopback-only. The ingress resolves relative to `server.port`, so both
+listeners move together by default.
 
 `paths.soul` has a third state the other paths do not. An **empty** value — `soul = ""`
 or `SYLPH_SOUL=""` — means never inject identity, which the adapter protocol reserves
@@ -234,6 +234,5 @@ them. The panel shows the config file's path so a user knows what to open.
 UI preferences — theme, density, keyboard bindings, which agent a new session defaults to
 — live in the browser's `localStorage`. They are display state with no effect on what the
 server does, they must be readable before first paint, and storing them here would mean a
-round trip before the first render and a config write on every toggle. That trade changes
-only if Sylph serves more than one user, which is gated behind a separate authentication
-change.
+round trip before the first render and a config write on every toggle. Account identity and
+environment authorization are server-side; these preferences remain browser-local by design.

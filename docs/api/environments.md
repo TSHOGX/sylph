@@ -283,9 +283,8 @@ envagent exchanges it for a durable credential and is assigned its opaque id.
 ### `POST /api/v1/environments/pair`
 
 The envagent exchanges the short-lived code for a durable credential. This
-loopback-only operation is exempt from the browser cookie because the envagent
-does not have a browser session; the code is consumed atomically and cannot be
-reused.
+pairing operation is exempt from the browser cookie because the envagent does not
+have a browser session; the code is consumed atomically and cannot be reused.
 
 ### `DELETE /api/v1/environments/{id}`
 
