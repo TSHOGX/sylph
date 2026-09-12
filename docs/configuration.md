@@ -132,9 +132,9 @@ whether a component is a symlink.
 events: a gap in the record is worse than a stopped turn (`docs/environments.md`
 § Spooling).
 
-Quick Start is a server setting because it is where the *product's* no-workspace sessions
-run. Targeting a remote environment sends the request onward and the envagent resolves
-its own equivalent.
+Quick Start is an environment-level action. The wire carries an explicit sentinel and
+the selected envagent resolves it to that machine's local `scratch` directory; the
+server never presents its own absolute path as a remote workspace.
 
 Which agents an environment can run is not a setting. It is what the envagent finds on
 that machine, at the version it finds — reported by `sylph-envagent doctor` and, per
