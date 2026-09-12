@@ -59,6 +59,7 @@ import {
   type Agent,
   type ConfigOption,
   type Facet,
+  type ControlBlock,
   type Session,
   type SessionCommand,
 } from "@/lib/api";
@@ -166,6 +167,7 @@ export function Composer({
   config = [],
   agentConnecting = false,
   control,
+  controlBlock,
   onReattach,
   onRunCommand,
   onSetConfig,
@@ -229,6 +231,8 @@ export function Composer({
    * keystroke this prop exists to prevent.
    */
   control: Facet;
+  /** Server-derived caller authorization and reachability decision. */
+  controlBlock?: ControlBlock;
   /** Retry establishing the link. Absent when there is nothing to retry. */
   onReattach?: () => void;
   /** Invoke a prompt command instead of sending the text as a message. */
@@ -779,7 +783,12 @@ export function Composer({
           )}
           {status && (
             <div className="absolute inset-x-0 bottom-full z-30 mb-2">
-              <SlashStatus status={status} control={control} onReattach={onReattach} />
+              <SlashStatus
+                status={status}
+                control={control}
+                controlBlock={controlBlock}
+                onReattach={onReattach}
+              />
             </div>
           )}
           <textarea
@@ -1140,15 +1149,21 @@ export function Composer({
 function SlashStatus({
   status,
   control,
+  controlBlock,
   onReattach,
 }: {
   status: SlashStatus;
   control: Facet;
+  controlBlock?: ControlBlock;
   onReattach?: () => void;
 }) {
   const t = useT();
 
-  const reason = control.available ? undefined : control.reason;
+  const reason = controlBlock?.kind === "unavailable"
+    ? controlBlock.reason
+    : control.available
+      ? undefined
+      : control.reason;
 
   // Whether a retry can change the answer is the protocol's rule, not this
   // component's: `isRetryable` mirrors `UnavailableReason::is_retryable`, so the button
@@ -1157,8 +1172,11 @@ function SlashStatus({
   // to keep paying a process spawn for an outcome that cannot change.
   const retryable = status === "unavailable" && Boolean(reason && isRetryable(reason));
 
-  const label =
-    status === "connecting"
+  const label = controlBlock?.kind === "unauthorized"
+    ? controlBlock.reason === "expired"
+      ? t("drive.unauthorized.expired")
+      : t("drive.unauthorized.notGranted")
+    : status === "connecting"
       ? t("composer.slash.connecting")
       : status === "unavailable"
         ? // Exhaustive over the closed union, so a reason added to the protocol fails
@@ -1184,7 +1202,7 @@ function SlashStatus({
     >
       <div className="flex items-baseline gap-2">
         <span className="min-w-0 flex-1 text-xs text-ink-muted">{label}</span>
-        {retryable && onReattach && (
+        {controlBlock?.kind !== "unauthorized" && retryable && onReattach && (
           <button
             type="button"
             onClick={onReattach}

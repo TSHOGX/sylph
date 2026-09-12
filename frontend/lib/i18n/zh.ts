@@ -530,6 +530,8 @@ export const zh: Dictionary = {
   "drive.noAgent.detail": "历史记录照常可读。在那台机器上装好该 agent 的 CLI，会话就能继续。",
   "drive.handshakeFailed.headline": "agent 没能启动。",
   "drive.handshakeFailed.detail": "历史记录照常可读。发送消息会再试一次。",
+  "drive.unauthorized.notGranted": "你没有这个环境的控制权限。",
+  "drive.unauthorized.expired": "你对这个环境的控制权限已过期。",
 
   "find.label": "筛选回合",
   "timeline.delegationPath": "委派路径",

@@ -757,6 +757,8 @@ export const en = {
     "History reads normally. Installing the agent\u2019s CLI there is what makes the session continuable.",
   "drive.handshakeFailed.headline": "The agent would not start.",
   "drive.handshakeFailed.detail": "History reads normally. Sending a message will try again.",
+  "drive.unauthorized.notGranted": "You do not have control access to this environment.",
+  "drive.unauthorized.expired": "Your control access to this environment has expired.",
 
   // The in-session filter (`Cmd+F`). Filters turns rather than highlighting matches.
   "find.label": "Filter turns",

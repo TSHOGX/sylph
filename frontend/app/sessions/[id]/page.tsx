@@ -21,6 +21,7 @@ import {
   api,
   ApiError,
   type Facet,
+  type ControlBlock,
   type Fidelity,
   type Turn,
   type TurnWithEvents,
@@ -521,7 +522,7 @@ export default function SessionPage() {
           since nothing ever reset anything, so it described an absence as a feature on
           every one of those sessions forever. This says something that can actually
           change and that the user can sometimes act on. */}
-      <DriveState control={agent.control} connecting={agent.connecting} t={t} />
+      <DriveState control={agent.control} controlBlock={agent.controlBlock} connecting={agent.connecting} t={t} />
 
       {/*
         `data-scroller` rather than being found by its utility class. `LiveTurn` needs
@@ -613,6 +614,7 @@ export default function SessionPage() {
         // means "Sylph cannot reach it", never "there is nothing there".
         agentConnecting={agent.connecting}
         control={agent.control}
+        controlBlock={agent.controlBlock}
         onReattach={() => agent.reattach()}
         // Typed config from the live agent, which is what a control command like
         // `/model` resolves against instead of being sent as prompt text.
@@ -677,14 +679,35 @@ export default function SessionPage() {
  */
 function DriveState({
   control,
+  controlBlock,
   connecting,
   t,
 }: {
   control: Facet;
+  controlBlock?: ControlBlock;
   connecting: boolean;
   t: Translate;
 }) {
-  if (control.available || connecting || !control.reason) return null;
+  if (connecting) return null;
+
+  if (controlBlock?.kind === "unauthorized") {
+    return (
+      <aside
+        role="status"
+        aria-label={t("drive.label")}
+        className="shrink-0 border-b border-line bg-sunken px-3 py-1.5 text-2xs text-ink-soft md:px-4"
+      >
+        {controlBlock.reason === "expired"
+          ? t("drive.unauthorized.expired")
+          : t("drive.unauthorized.notGranted")}
+      </aside>
+    );
+  }
+
+  const blockedReason = controlBlock?.kind === "unavailable"
+    ? controlBlock.reason
+    : control.available ? undefined : control.reason;
+  if (!blockedReason) return null;
 
   // Exhaustive over the closed union, so a reason added to the protocol is a compile
   // error here rather than a session silently rendering no explanation. The map holds
@@ -696,8 +719,8 @@ function DriveState({
     no_agent: "drive.noAgent",
     handshake_failed: "drive.handshakeFailed",
   };
-  const headline = t(`${stem[control.reason]}.headline` as MessageKey);
-  const detail = t(`${stem[control.reason]}.detail` as MessageKey);
+  const headline = t(`${stem[blockedReason]}.headline` as MessageKey);
+  const detail = t(`${stem[blockedReason]}.detail` as MessageKey);
 
   return (
     <aside

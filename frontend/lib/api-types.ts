@@ -366,6 +366,11 @@ export interface LinkFacets {
   control: Facet;
 }
 
+/** Why this caller cannot drive a session, when authorization or reachability blocks it. */
+export type ControlBlock =
+  | { kind: "unauthorized"; reason: "not_granted" | "expired" }
+  | { kind: "unavailable"; reason: UnavailableReason };
+
 /**
  * What Sylph can do with a session right now, and what it cannot.
  *
@@ -387,6 +392,10 @@ export interface LinkState {
   /** Closed vocabulary: `interrupt`, `steer`, `approval`, `subagent`, `slash`, … */
   supports: string[];
   capabilities?: SessionCapabilities;
+  /** Per-caller authorization, absent when this Subject has control access. */
+  authorization?: "not_granted" | "expired";
+  /** Server-derived answer the composer acts on; never cache this field. */
+  controlBlock?: ControlBlock;
 }
 
 /** One option an agent offered on a request. */

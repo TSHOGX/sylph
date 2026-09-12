@@ -25,6 +25,7 @@ import {
   isRetryable,
   segment,
   type Facet,
+  type ControlBlock,
   type LinkState,
   type PendingRequest,
 } from "@/lib/api";
@@ -57,6 +58,8 @@ export interface AgentSession {
   observe: Facet;
   /** Can Sylph send this session a turn, and why not. */
   control: Facet;
+  /** Server-derived per-caller answer for whether control is admitted. */
+  controlBlock?: ControlBlock;
   /**
    * True while a handshake is in flight — it spawns an agent CLI and can take
    * seconds. Covers a retry as well as the first attempt, because to the user
@@ -343,6 +346,7 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
     // a session nothing has reached yet.
     observe: link?.link.observe ?? UNREACHED,
     control: link?.link.control ?? UNREACHED,
+    controlBlock: link?.controlBlock,
     // `isFetching` rather than `isLoading`, so a retry reads as connecting too: a
     // refetch over cached failure data is not "loading" to React Query, but it is
     // exactly the wait the user needs told about.
