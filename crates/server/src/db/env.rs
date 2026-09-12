@@ -484,16 +484,17 @@ impl JournalStore {
     ) -> Result<()> {
         sqlx::query(
             "INSERT INTO env_installations \
-             (environment_id, installation_id, name, origin, token_hash, agents_json) \
-             VALUES (?, ?, ?, ?, ?, ?) \
+             (environment_id, installation_id, name, origin, grant_authority, token_hash, agents_json) \
+             VALUES (?, ?, ?, ?, CASE WHEN ? = 'sandbox-provisioned' THEN 'server' ELSE 'machine' END, ?, ?) \
              ON CONFLICT(environment_id) DO UPDATE SET \
                installation_id = excluded.installation_id, name = excluded.name, \
-               origin = excluded.origin, token_hash = excluded.token_hash, \
+               origin = excluded.origin, grant_authority = excluded.grant_authority, token_hash = excluded.token_hash, \
                agents_json = excluded.agents_json",
         )
         .bind(id.as_str())
         .bind(installation_id)
         .bind(name)
+        .bind(origin)
         .bind(origin)
         .bind(token_hash)
         .bind(agents_json)
