@@ -150,7 +150,7 @@ export function DirectoryPicker({
   environment,
 }: {
   onClose: () => void;
-  onChoose: (path: string) => void;
+  onChoose: (path: string, environment?: string) => void;
   title?: string;
   confirmLabel?: string;
   initialPath?: string;
@@ -235,7 +235,7 @@ export function DirectoryPicker({
         // an empty or fully filtered list — which is what the confirm button would
         // do and therefore what the modifier should not refuse to do.
         const target = row?.item.path ?? current;
-        if (target) onChoose(target);
+        if (target) onChoose(target, environment);
         return;
       }
       if (event.key === "Enter" && typedPath) {
@@ -245,7 +245,7 @@ export function DirectoryPicker({
       }
       list.onKeyDown(event);
     },
-    [list, current, onChoose, typedPath, goToTypedPath],
+    [list, current, onChoose, typedPath, goToTypedPath, environment],
   );
 
   const error = treeQuery.error ?? rootsQuery.error;
@@ -426,7 +426,7 @@ export function DirectoryPicker({
               <button
                 type="button"
                 disabled={!current}
-                onClick={() => current && onChoose(current)}
+                onClick={() => current && onChoose(current, environment)}
                 className="rounded-md bg-accent px-3 py-1 text-xs font-medium text-accent-ink hover:bg-accent-hover focus-ring disabled:opacity-50"
               >
                 {confirmLabel ?? t("directoryPicker.confirm")}

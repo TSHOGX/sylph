@@ -487,7 +487,7 @@ is whether the invocation already names a working directory.
 
 | Surface | Path | Why |
 | --- | --- | --- |
-| ⚡ Quick Start, `Mod+J`, palette | `useQuickCreateSession` | The directory is fixed, but not by the client: it is whatever the backend resolved `paths.quick_start_dir` to (`~/.sylph/scratch` by default), read from `GET /config` as `quickStartDir`. A client that derived the path would disagree with a configured one, so no label names it. |
+| ⚡ Quick Start, `Mod+J`, palette | `useQuickCreateSession` | Quick Start carries the selected environment and the explicit `__sylph_quick_start__` selector. The envagent resolves that selector to its own local scratch directory, so a server path is never shown as if it existed on a remote machine. |
 | Sidebar group → "New session here" | `useQuickCreateSession` | A group **is** a directory. The right-click already named it. |
 | `Mod+Shift+O`, empty-state button | `overlay: "newSession"` → same mutation | No directory yet, so a picker asks for that and nothing else. |
 

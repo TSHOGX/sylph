@@ -38,6 +38,7 @@ import { usePathname } from "next/navigation";
 import { useCallback, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { workspacesQuery } from "@/lib/workspaces-query";
+import { defaultEnvironment, useEnvironments } from "@/lib/environments";
 import { useQuickCreateSession } from "@/lib/create-session";
 import { WorkspaceUIProvider, useWorkspaceUI } from "@/lib/workspace-ui";
 import { WorkspaceSidebar } from "@/components/workspace-sidebar";
@@ -126,16 +127,19 @@ export function AppShell({ children }: { children: ReactNode }) {
   // is shared by every surface, so there is a single pending state and a single
   // error banner rather than one per caller.
   const creator = useQuickCreateSession();
+  const environments = useEnvironments();
 
   // The Quick Start directory is resolved server-side; `~` cannot be expanded in
   // a browser, and the backend runs as the user whose home directory is correct.
   const workspaces = useQuery(workspacesQuery());
-  const quickStartDir = workspaces.data?.quickStartDir;
+  const quickWorkspace = workspaces.data?.workspaces.find((workspace) => workspace.isQuickStart);
+  const quickStartDir = quickWorkspace?.path;
+  const quickStartEnvironment = defaultEnvironment(environments.all)?.id ?? quickWorkspace?.environment;
 
   const createSession = creator.create;
   const quickStart = useCallback(
-    () => createSession(quickStartDir),
-    [createSession, quickStartDir],
+    () => createSession(quickStartDir, quickStartEnvironment),
+    [createSession, quickStartDir, quickStartEnvironment],
   );
 
   if (BARE_ROUTES.includes(pathname)) {

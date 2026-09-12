@@ -513,7 +513,9 @@ function WorkspacesSection() {
         hint={t("settings.workspaces.quickStart.hint", { combo: quickStartCombo })}
       >
         <p className="rounded border border-line bg-sunken px-2 py-1 font-mono text-2xs text-ink-muted">
-          {data?.quickStartDir ?? t("action.loading")}
+          {data?.quickStartDir === "__sylph_quick_start__"
+            ? t("settings.workspaces.quickStart.label")
+            : data?.quickStartDir ?? t("action.loading")}
         </p>
       </Field>
 

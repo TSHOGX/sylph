@@ -155,10 +155,10 @@ export function HistoryOverlay() {
   // Falls back to the most recently used workspace when nothing set a scope —
   // opening the browser from the start screen should still show something useful
   // rather than an empty picker.
-  const workspaces = workspacesResult.data?.workspaces ?? [];
+  const workspaces = useMemo(() => workspacesResult.data?.workspaces ?? [], [workspacesResult.data]);
   const workdir = activeWorkdir ?? workspaces[0]?.path ?? null;
   const environment = activeEnvironment ?? workspaces[0]?.environment ?? null;
-  const home = workspacesResult.data?.home;
+  const home = workspaces.find((w) => w.environment === environment)?.home;
 
   const environments = useEnvironments();
 
@@ -188,7 +188,7 @@ export function HistoryOverlay() {
         // `codex` and `pi` — those record no title at all — so making the fallback
         // searchable is what keeps those rows reachable by the filter.
         label: sessionLabel(session),
-        detail: [session.agent, shortenHome(session.workdir, home)]
+        detail: [session.agent, shortenHome(session.workdir, workspaces.find((w) => w.environment === session.environment)?.home)]
           .filter(Boolean)
           .join(" · "),
         meta: (
@@ -211,7 +211,7 @@ export function HistoryOverlay() {
           router.push(`/sessions/${encodeURIComponent(session.id)}`);
         },
       })),
-    [sessions, home, environments, closeOverlay, router],
+    [sessions, workspaces, environments, closeOverlay, router],
   );
 
   // `searchable: true`, never `auto`: nothing here is a single-select choice, so the
@@ -238,7 +238,7 @@ export function HistoryOverlay() {
       <WorkspacePicker
         title={t("workspacePicker.title")}
         confirmLabel={t("history.showHistory")}
-        current={workdir}
+        current={workdir ? { path: workdir, environment } : null}
         onChoose={chooseWorkspace}
         onBack={() => setMode("list")}
         onClose={closeOverlay}

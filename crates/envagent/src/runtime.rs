@@ -820,6 +820,29 @@ impl EnvAgent {
                 message: format!("agent '{agent}' is not installed on this environment"),
             };
         }
+        // Quick Start is an environment-level action. The server cannot send its own
+        // absolute path to a remote machine, so it sends this explicit sentinel and the
+        // envagent resolves the directory from its local home (the first path-policy
+        // root). This keeps workspace identity scoped to `(environment, path)` and
+        // prevents a remote path from being interpreted on the server's filesystem.
+        let workdir = if workdir == sylph_protocol::QUICK_START_SENTINEL {
+            let Some(home) = self.config.path_policy.roots().first() else {
+                return sylph_protocol::CommandOutcome::Rejected {
+                    code: sylph_protocol::RejectCode::WorkdirMissing.as_str().into(),
+                    message: "environment has no home directory".into(),
+                };
+            };
+            let quick_start = home.join("scratch");
+            if let Err(error) = std::fs::create_dir_all(&quick_start) {
+                return sylph_protocol::CommandOutcome::Rejected {
+                    code: sylph_protocol::RejectCode::PrepareFailed.as_str().into(),
+                    message: format!("cannot create Quick Start directory: {error}"),
+                };
+            }
+            quick_start.display().to_string()
+        } else {
+            workdir
+        };
         let spec = RunSpec {
             workdir,
             // Overwritten by `prepare_hosted` from the agent's own `dictates_native_id`,

@@ -34,7 +34,7 @@ import { workspacesQuery } from "@/lib/workspaces-query";
 import { relayName, useEnvironments, type Environments } from "@/lib/environments";
 import { useSessionIdParam } from "@/lib/use-session-id-param";
 import { useT } from "@/lib/i18n";
-import { useSettings } from "@/lib/settings";
+import { useSettings, workspaceRefKey } from "@/lib/settings";
 import dynamic from "next/dynamic";
 
 // Code-split: the picker pulls in its own queries and markup, and the sidebar
@@ -62,6 +62,7 @@ import {
 interface Group {
   path: string;
   environment: string | null;
+  home?: string;
   name: string;
   sessions: Session[];
   isQuickStart: boolean;
@@ -78,9 +79,9 @@ export function WorkspaceSidebar() {
   const activeId = useSessionIdParam();
   const [picking, setPicking] = useState(false);
 
-  const bindWorkspace = (path: string) => {
+  const bindWorkspace = (path: string, environment?: string | null) => {
     update({
-      pinnedWorkspaces: [...(settings.pinnedWorkspaces ?? []), path],
+      pinnedWorkspaces: [...(settings.pinnedWorkspaces ?? []), { path, environment: environment ?? null }],
     });
     setPicking(false);
   };
@@ -96,7 +97,8 @@ export function WorkspaceSidebar() {
   const environments = useEnvironments();
 
   const quickStartDir = workspacesResult.data?.quickStartDir;
-  const home = workspacesResult.data?.home;
+  const quickRows = useMemo(() => workspacesResult.data?.workspaces.filter((w) => w.isQuickStart) ?? [], [workspacesResult.data]);
+  const quickStartEnvironment = quickRows[0]?.environment ?? null;
 
   // Destructured before the memo so its dependencies are the two fields actually
   // read. Referencing `settings.pinnedWorkspaces` inside the callback makes the
@@ -104,21 +106,32 @@ export function WorkspaceSidebar() {
   // recompute the grouping on every unrelated preference change.
   const { pinnedWorkspaces, workspaceNames } = settings;
 
-  const { quick, projects } = useMemo(() => {
+  const { quickGroups, projects } = useMemo(() => {
     const sessions = sessionsQuery.data?.sessions ?? [];
     const byPath = new Map<string, Group>();
-
     for (const session of sessions) {
-      const path = session.workdir.replace(/\/+$/, "") || "/";
+      let path = session.workdir.replace(/\/+$/, "") || "/";
+      const quickPath = quickRows.find((row) => {
+        if (row.environment !== session.environment || !row.home) return false;
+        return path === `${row.home}/scratch`;
+      });
+      if (quickPath) path = quickPath.path;
       const key = `${session.environment}\u0000${path}`;
       let group = byPath.get(key);
       if (!group) {
+        const workspaceRow = quickPath ?? workspacesResult.data?.workspaces.find(
+          (row) => row.environment === session.environment && row.path === path,
+        );
         group = {
           path,
           environment: session.environment,
-          name: workspaceNames[path] ?? leafName(path),
+          home: workspaceRow?.home,
+          name:
+            workspaceNames[workspaceRefKey({ path, environment: session.environment })] ??
+            workspaceRow?.name ??
+            leafName(path),
           sessions: [],
-          isQuickStart: path === quickStartDir,
+          isQuickStart: Boolean(quickPath) || path === quickStartDir,
           lastUsedMs: 0,
         };
         byPath.set(key, group);
@@ -129,34 +142,36 @@ export function WorkspaceSidebar() {
 
     // Pinned workspaces appear even with no sessions, which is the point of
     // pinning: a project you are about to start work in should be reachable.
-    for (const path of pinnedWorkspaces) {
-      if (!byPath.has(path)) {
-        byPath.set(path, {
-          path,
-          environment: null,
-          name: workspaceNames[path] ?? leafName(path),
+    for (const ref of pinnedWorkspaces) {
+      const key = workspaceRefKey(ref);
+      if (!byPath.has(key)) {
+        byPath.set(key, {
+          path: ref.path,
+          environment: ref.environment,
+          home: workspacesResult.data?.workspaces.find((row) => row.environment === ref.environment && row.path === ref.path)?.home,
+          name: workspaceNames[key] ?? leafName(ref.path),
           sessions: [],
-          isQuickStart: path === quickStartDir,
+          isQuickStart: ref.path === quickStartDir || ref.path === "__sylph_quick_start__",
           lastUsedMs: 0,
         });
       }
     }
 
     const all = [...byPath.values()];
-    const quickGroup = all.find((group) => group.isQuickStart);
+    const quickGroups = all.filter((group) => group.isQuickStart);
     const rest = all
       .filter((group) => !group.isQuickStart)
       .sort((a, b) => {
         // Pinned first, then most recently used: pinning is an explicit
         // statement that recency should not bury a workspace.
-        const aPinned = pinnedWorkspaces.includes(a.path);
-        const bPinned = pinnedWorkspaces.includes(b.path);
+        const aPinned = pinnedWorkspaces.some((ref) => ref.path === a.path && ref.environment === a.environment);
+        const bPinned = pinnedWorkspaces.some((ref) => ref.path === b.path && ref.environment === b.environment);
         if (aPinned !== bPinned) return aPinned ? -1 : 1;
         return b.lastUsedMs - a.lastUsedMs;
       });
 
-    return { quick: quickGroup, projects: rest };
-  }, [sessionsQuery.data, pinnedWorkspaces, workspaceNames, quickStartDir]);
+    return { quickGroups, projects: rest };
+  }, [sessionsQuery.data, pinnedWorkspaces, workspaceNames, quickStartDir, quickRows, workspacesResult.data?.workspaces]);
 
   const [paneMenu, setPaneMenu] = useState<{ x: number; y: number } | null>(null);
 
@@ -204,30 +219,27 @@ export function WorkspaceSidebar() {
           </div>
         ) : (
           <>
-            <GroupSection
-              title={t("sidebar.quickSessions")}
-              group={
-                quick ?? {
-                  path: quickStartDir ?? "",
-                  environment: null,
-                  // Derived from the resolved path rather than written out: the
-                  // directory is configurable, so a literal name here would be
-                  // wrong for anyone who set `paths.quick_start_dir`. This is only
-                  // the pre-load fallback — the real row carries the server's own
-                  // leaf name.
-                  name: leafName(quickStartDir ?? ""),
-                  sessions: [],
-                  isQuickStart: true,
-                  lastUsedMs: 0,
-                }
-              }
-              activeId={activeId}
-              home={home}
-              environment={quick?.environment ?? null}
-              emptyHint={t("sidebar.quickSessionsHint")}
-              environments={environments}
-              sessionsPending={sessionsQuery.isPending}
-            />
+            {(quickGroups.length > 0 ? quickGroups : [{
+              path: quickRows[0]?.path ?? "",
+              environment: quickStartEnvironment,
+              name: quickRows[0]?.name ?? "Quick Start",
+              home: quickRows[0]?.home,
+              sessions: [],
+              isQuickStart: true,
+              lastUsedMs: 0,
+            }]).map((group, index) => (
+              <GroupSection
+                key={`${group.environment ?? ""}\u0000${group.path}`}
+                title={quickGroups.length > 1 ? (group.name || `${t("sidebar.quickSessions")} ${index + 1}`) : t("sidebar.quickSessions")}
+                group={group}
+                activeId={activeId}
+                home={group.home}
+                environment={group.environment}
+                emptyHint={t("sidebar.quickSessionsHint")}
+                environments={environments}
+                sessionsPending={sessionsQuery.isPending}
+              />
+            ))}
 
             <h2 className="mt-3 px-1.5 pb-1 text-3xs font-semibold uppercase tracking-wider text-ink-muted">
               Workspaces
@@ -242,23 +254,23 @@ export function WorkspaceSidebar() {
                   key={`${group.environment ?? ""}\u0000${group.path}`}
                   group={group}
                   activeId={activeId}
-                  home={home}
+                  home={group.home}
                   environment={group.environment}
                   environments={environments}
                   sessionsPending={sessionsQuery.isPending}
-                  pinned={settings.pinnedWorkspaces.includes(group.path)}
+                  pinned={settings.pinnedWorkspaces.some((ref) => ref.path === group.path && ref.environment === group.environment)}
                   onTogglePin={() =>
                     update({
-                      pinnedWorkspaces: settings.pinnedWorkspaces.includes(group.path)
-                        ? settings.pinnedWorkspaces.filter((p) => p !== group.path)
-                        : [...settings.pinnedWorkspaces, group.path],
+                      pinnedWorkspaces: settings.pinnedWorkspaces.some((ref) => ref.path === group.path && ref.environment === group.environment)
+                        ? settings.pinnedWorkspaces.filter((ref) => !(ref.path === group.path && ref.environment === group.environment))
+                        : [...settings.pinnedWorkspaces, { path: group.path, environment: group.environment }],
                     })
                   }
                   onRename={(name) =>
                     update({
                       workspaceNames: name
-                        ? { ...settings.workspaceNames, [group.path]: name }
-                        : omit(settings.workspaceNames, group.path),
+                        ? { ...settings.workspaceNames, [workspaceRefKey({ path: group.path, environment: group.environment })]: name }
+                        : omit(settings.workspaceNames, workspaceRefKey({ path: group.path, environment: group.environment })),
                     })
                   }
                 />

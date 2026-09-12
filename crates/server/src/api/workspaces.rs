@@ -19,7 +19,16 @@ use crate::{db::store::SessionFilter, error::Result, AppState};
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Workspace {
-    pub environment: Option<String>,
+    /// Opaque environment id owning this path. Workspace identity is always the
+    /// pair `(environment, path)`; a path without its environment is ambiguous.
+    pub environment: String,
+    /// Display name of the owning environment, resolved from its current snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment_name: Option<String>,
+    /// Home directory reported by the owning envagent. This is deliberately per row:
+    /// a remote environment's home must never be inferred from server configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
     pub path: String,
     /// Directory leaf, precomputed so the client does not re-derive it per row.
     pub name: String,
@@ -43,6 +52,16 @@ pub struct WorkspacesResponse {
     /// Newest first, Quick Start included so settings can show its counts.
     pub workspaces: Vec<Workspace>,
 }
+
+/// Explicit environment-level workspace key used for Quick Start rows.
+///
+/// Quick Start has no user-selected directory on a remote environment. Encoding the
+/// sentinel as a path keeps the workspace key total (`environment`, `path`) while
+/// making it impossible to mistake the server's configured absolute path for a path
+/// on another machine. The envagent resolves the actual launch directory.
+// Re-export the wire constant from the protocol crate so API clients and envagents
+// cannot drift into different spellings.
+pub use sylph_protocol::QUICK_START_SENTINEL;
 
 /// How many sessions to aggregate over.
 ///
@@ -68,30 +87,31 @@ const AGGREGATE_LIMIT: i64 = 2000;
 /// those sorted by recency rather than depth, and a directory with 88 sessions of its own
 /// reported empty because its first exact match landed ~1300 rows in.
 pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesResponse>> {
-    // Both from configuration rather than the environment: `quick_start_dir` is a
-    // setting, and `home` is the base the picker abbreviates paths against, which
-    // must be the same one `browse_roots` was resolved with.
-    //
-    // Canonicalized, because a session's journalled `workdir` is: creation resolves
-    // the client's path before recording it, so it can never contain a symlinked
-    // component. Comparing a canonical journal value against a configured spelling
-    // would report `isQuickStart: false` for every Quick Start session on macOS,
-    // where `<home>` under `/var/folders` resolves to `/private/var/folders` —
-    // splitting the Quick Start row from the very sessions it counts. Reported in
-    // the same spelling for the same reason: the client hands this back as a
-    // `workdir`, and a second spelling would be a second sidebar group.
-    let quick_start_dir = normalize(
-        &std::fs::canonicalize(&state.config.quick_start_dir)
-            .unwrap_or_else(|_| state.config.quick_start_dir.clone())
-            .display()
-            .to_string(),
-    );
-    let home = state
-        .config
-        .browse_roots
-        .first()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
+    // The server owns no remote filesystem. In particular, it must not canonicalize
+    // or compare a remote path against its own configuration. Session workdirs were
+    // already canonicalized by the envagent that owns them; here we only normalize
+    // trailing separators for stable grouping.
+    // This field is a selector, not a filesystem path. The envagent resolves it to its
+    // own environment-local scratch directory when a session is created.
+    let quick_start_dir = QUICK_START_SENTINEL.to_string();
+    let environments = state
+        .env_bridge
+        .list_environments()
+        .await
+        .map_err(|error| crate::error::Error::Internal(format!("{error:#}")))?;
+    let environment_meta: std::collections::HashMap<String, (String, Option<String>)> =
+        environments
+            .iter()
+            .map(|environment| {
+                (
+                    environment.id.to_string(),
+                    (
+                        environment.name.clone(),
+                        environment.facts.get("home").cloned(),
+                    ),
+                )
+            })
+            .collect();
 
     let filter = SessionFilter {
         limit: AGGREGATE_LIMIT,
@@ -109,15 +129,36 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
         let Some(workdir) = session.workdir.as_deref() else {
             continue;
         };
-        let path = normalize(workdir);
+        let mut path = normalize(workdir);
         let environment = session.id.environment.to_string();
+        // The envagent resolves Quick Start to `<environment home>/scratch`. Fold that
+        // concrete path back into the explicit sentinel row so its counts remain
+        // attached to the same environment-level workspace key.
+        let is_quick_start = environment_meta
+            .get(&environment)
+            .and_then(|(_, home)| home.as_deref())
+            .map(|home| normalize(&format!("{home}/scratch")) == path)
+            .unwrap_or(false);
+        if is_quick_start {
+            path = QUICK_START_SENTINEL.to_string();
+        }
         let at = *index
             .entry((environment.clone(), path.clone()))
             .or_insert_with(|| {
                 rows.push(Workspace {
-                    environment: Some(environment),
-                    name: leaf(&path).to_string(),
-                    is_quick_start: path == quick_start_dir,
+                    environment_name: environment_meta
+                        .get(&environment)
+                        .map(|meta| meta.0.clone()),
+                    home: environment_meta
+                        .get(&environment)
+                        .and_then(|meta| meta.1.clone()),
+                    environment,
+                    name: if is_quick_start {
+                        "Quick Start".to_string()
+                    } else {
+                        leaf(&path).to_string()
+                    },
+                    is_quick_start,
                     path,
                     session_count: 0,
                     running_count: 0,
@@ -133,16 +174,24 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
         row.last_used_ms = row.last_used_ms.max(session.updated_at_ms);
     }
 
-    // Quick Start is always present, even with no sessions: the sidebar section
-    // and the settings row both exist before the first quick session is made.
-    if !rows
-        .iter()
-        .any(|row| row.environment.is_none() && row.path == quick_start_dir)
-    {
+    // Quick Start is an environment-level action. Give every paired environment its
+    // own explicit row, including disconnected ones, so selecting/pinning/history
+    // switching always carries the environment id. The sentinel is intentionally
+    // not an absolute server path: a remote envagent owns the directory it resolves.
+    for environment in &environments {
+        let id = environment.id.to_string();
+        if rows
+            .iter()
+            .any(|row| row.environment == id && row.is_quick_start)
+        {
+            continue;
+        }
         rows.push(Workspace {
-            environment: None,
-            path: quick_start_dir.clone(),
-            name: leaf(&quick_start_dir).to_string(),
+            environment: id,
+            environment_name: Some(environment.name.clone()),
+            home: environment.facts.get("home").cloned(),
+            path: QUICK_START_SENTINEL.to_string(),
+            name: "Quick Start".to_string(),
             session_count: 0,
             running_count: 0,
             last_used_ms: 0,
@@ -160,7 +209,9 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<WorkspacesRespon
     Ok(Json(WorkspacesResponse {
         quick_start_dir,
         data_dir: state.config.data_dir.display().to_string(),
-        home,
+        // There is no single home once multiple environments are paired. Clients
+        // should read `Workspace.home` for the selected environment.
+        home: String::new(),
         workspaces: rows,
     }))
 }

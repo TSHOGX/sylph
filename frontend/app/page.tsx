@@ -119,7 +119,7 @@ export default function StartPage() {
           ) : (
             <Recents
                 rows={state.workspaces}
-                home={workspaces.data?.home}
+                homes={new Map((workspaces.data?.workspaces ?? []).map((w) => [w.environment, w.home]))}
                 environments={environments}
               />
           )}
@@ -212,11 +212,11 @@ function Step({ n, title, children }: { n: number; title: string; children: stri
  */
 function Recents({
   rows,
-  home,
+  homes,
   environments,
 }: {
   rows: RecentWorkspace[];
-  home?: string;
+  homes: Map<string, string | undefined>;
   environments: Environments;
 }) {
   return (
@@ -241,7 +241,7 @@ function Recents({
                     `agent · leaf` when a session is untitled, which reads as the
                     directory named twice once the path is beside it. */}
                 <span className="block truncate text-sm font-medium">
-                  {shortenHome(workdir, home)}
+                  {shortenHome(workdir, homes.get(session.environment))}
                 </span>
                 <span className="mt-0.5 block truncate text-xs text-ink-muted">
                   {session.title?.trim() ?? session.agent}

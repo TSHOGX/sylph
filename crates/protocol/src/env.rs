@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Workspace path sentinel for environment-local Quick Start.
+pub const QUICK_START_SENTINEL: &str = "__sylph_quick_start__";
+
 use crate::{
     AgentInfo, Capability, CapabilityFacets, CommandOutcome, CommandRequest, CommandRequestId,
     EnvironmentId, IdempotencyPolicy, LinkFacets, NativeId, NativeRecord, ProducerId, ProducerSeq,

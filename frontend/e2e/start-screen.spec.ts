@@ -139,6 +139,30 @@ test("the start screen's create button runs the same path as its shortcut", asyn
   await expect(page.getByRole("dialog")).toBeVisible();
 });
 
+test("Quick Start names an environment and uses its local sentinel", async ({ page }) => {
+  await gotoReady(page);
+
+  let requestBody: { environment?: string; workdir?: string } | undefined;
+  await page.route("**/api/v1/sessions", async (route) => {
+    if (route.request().method() === "POST") {
+      requestBody = JSON.parse(route.request().postData() ?? "{}");
+    }
+    await route.continue();
+  });
+
+  const post = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/v1/sessions") &&
+      response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: /Quick session/ }).click();
+  await post;
+  await expect(page.getByLabel("Message")).toBeVisible();
+
+  expect(requestBody?.environment, "Quick Start must select an environment").toMatch(/^[a-z2-7]+$/);
+  expect(requestBody?.workdir).toBe("__sylph_quick_start__");
+});
+
 test("the keys shown are the bindings in effect, not hard-coded captions", async ({
   page,
 }) => {

@@ -129,14 +129,14 @@ export function SearchOverlay() {
     return [...local, ...indexed];
   }, [sessionsQuery.data, indexQuery.data, query]);
 
-  const home = workspacesResult.data?.home;
+  const homes = useMemo(() => new Map((workspacesResult.data?.workspaces ?? []).map((w) => [w.environment, w.home])), [workspacesResult.data]);
 
   const items = useMemo<SelectChoice[]>(
     () =>
       hits.map(({ session, excerpt }) => ({
         label: sessionLabel(session),
         detail: `${session.agent}${
-          session.workdir ? ` · ${shortenHome(session.workdir, home)}` : ""
+          session.workdir ? ` · ${shortenHome(session.workdir, homes.get(session.environment))}` : ""
         }`,
         // Why this row is here at all, when the match was inside the transcript: the
         // index matched words the title does not contain, so without the snippet the
@@ -162,7 +162,7 @@ export function SearchOverlay() {
           router.push(`/sessions/${encodeURIComponent(session.id)}`);
         },
       })),
-    [hits, home, environments, closeOverlay, router],
+    [hits, homes, environments, closeOverlay, router],
   );
 
   // `searchable: true` and `external`: the field is the surface's whole point, and the

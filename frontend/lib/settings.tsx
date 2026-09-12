@@ -30,6 +30,17 @@ export type Density = "compact" | "normal" | "comfortable";
  */
 export type Theme = "light" | "dark" | "system";
 
+/** Stable identity of a workspace. Paths are only meaningful within an environment. */
+export interface WorkspaceRef {
+  environment: string | null;
+  path: string;
+}
+
+/** Key used for local workspace preferences; environment is part of identity. */
+export function workspaceRefKey(ref: WorkspaceRef): string {
+  return `${ref.environment ?? ""}\u0000${ref.path}`;
+}
+
 /** Actions a keyboard shortcut can be bound to. */
 export type ShortcutAction =
   | "search"
@@ -83,8 +94,8 @@ export interface Settings {
   showLeftSidebar: boolean;
   showRightSidebar: boolean;
   /** Workspaces pinned to the sidebar even with no sessions. */
-  pinnedWorkspaces: string[];
-  /** Display-name overrides, keyed by absolute workspace path. */
+  pinnedWorkspaces: WorkspaceRef[];
+  /** Display-name overrides, keyed by environment and absolute path. */
   workspaceNames: Record<string, string>;
 }
 
@@ -228,7 +239,15 @@ function hydrate(raw: string | null): Settings {
         ? stored.showRightSidebar
         : DEFAULT_SETTINGS.showRightSidebar,
     pinnedWorkspaces: Array.isArray(stored.pinnedWorkspaces)
-      ? stored.pinnedWorkspaces.filter((p): p is string => typeof p === "string")
+      ? stored.pinnedWorkspaces.flatMap((p): WorkspaceRef[] => {
+          if (typeof p === "string") return [{ environment: null, path: p }];
+          if (
+            typeof p === "object" && p !== null &&
+            typeof (p as WorkspaceRef).path === "string" &&
+            (typeof (p as WorkspaceRef).environment === "string" || (p as WorkspaceRef).environment === null)
+          ) return [{ environment: (p as WorkspaceRef).environment, path: (p as WorkspaceRef).path }];
+          return [];
+        })
       : DEFAULT_SETTINGS.pinnedWorkspaces,
     workspaceNames: isStringRecord(stored.workspaceNames)
       ? stored.workspaceNames

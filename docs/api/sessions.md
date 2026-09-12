@@ -106,14 +106,10 @@ a coding agent reads and writes the tree it is pointed at, so it decides **where
 arbitrary code runs**. Existence — the only property it was once checked for — says
 nothing about whether it should.
 
-The **canonical** path is recorded, not the string as sent, so two spellings of one
-directory do not become two workspaces. Note the consequence, which bit once: anything
-that groups, compares, or displays a path must use the same spelling. Comparing a
-canonical `workdir` against a *configured* Quick Start path reported every Quick Start
-session as not-Quick-Start, and nothing errored — the row and the sessions it counts
-simply stopped being the same directory. On macOS this is not an edge case: `/tmp`,
-`os.tmpdir()`, and everything under `/var` all differ from their canonical form, so the
-bug is invisible on Linux CI and certain on a developer's machine.
+The canonical path is recorded by the envagent that owns the filesystem, so two
+spellings of one directory do not become two workspaces. The server never canonicalizes
+or compares a remote path against its own filesystem. Quick Start is sent as the
+environment-level `__sylph_quick_start__` selector and resolved locally by that envagent.
 
 **Errors:**
 - `400` — unknown agent, workdir missing or not a directory, flags validation
@@ -1000,4 +996,3 @@ orders of magnitude slower, and slower still under concurrent write load. FTS5 w
 real work and nothing about owning the store makes it cheaper, so the cost model that
 governs every other read does not transfer here — **this endpoint is user-initiated, and a
 client gates it on a real query rather than binding it to keystrokes.**
-

@@ -866,8 +866,12 @@ export interface Workspace {
   runningCount: number;
   lastUsedMs: number;
   isQuickStart: boolean;
-  /** Opaque environment owning this path; null for the synthetic Quick Start row. */
-  environment?: string | null;
+  /** Opaque environment owning this path. Workspace identity is `(environment, path)`. */
+  environment: string;
+  /** Display metadata reported by the owning environment. */
+  environmentName?: string;
+  /** Home directory reported by the owning environment. */
+  home?: string;
 }
 
 export interface WorkspacesResponse {

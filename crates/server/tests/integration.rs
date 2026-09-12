@@ -2520,15 +2520,6 @@ async fn workspaces_group_sessions_and_always_include_quick_start() {
 
     let body = json_body(backend.get_authed("/api/v1/workspaces").await).await;
 
-    let quick = body["quickStartDir"].as_str().unwrap();
-    // The configured directory, not a hardcoded one. Asserting a fixed `~/.agents`
-    // was what let the endpoint keep pointing at another project's tree: the test
-    // and the code agreed with each other and both were wrong about the product.
-    assert_eq!(
-        quick,
-        backend.quick_start_dir().display().to_string(),
-        "Quick Start must be the configured directory"
-    );
     assert!(!body["dataDir"].as_str().unwrap().is_empty());
 
     let workspaces = body["workspaces"].as_array().unwrap();
@@ -2536,7 +2527,8 @@ async fn workspaces_group_sessions_and_always_include_quick_start() {
         .iter()
         .find(|w| w["isQuickStart"] == true)
         .expect("Quick Start row missing");
-    assert_eq!(quick_row["path"], quick);
+    assert_eq!(quick_row["path"], "__sylph_quick_start__");
+    assert_eq!(quick_row["environment"], backend.environment_id().await);
 
     // Both sessions share one workdir, so they collapse into a single space.
     let workdir = backend.workdir().display().to_string();
@@ -2548,6 +2540,64 @@ async fn workspaces_group_sessions_and_always_include_quick_start() {
     assert_eq!(row["runningCount"], 0);
     assert!(row["lastUsedMs"].as_i64().unwrap() > 0);
     assert_eq!(row["isQuickStart"], false);
+}
+
+/// A workspace identity contains the environment as well as the path. Two
+/// machines can expose the same absolute spelling (for example `/home/user/app`)
+/// while referring to unrelated trees; grouping by path alone would silently
+/// merge their history and make pin/rename actions target the wrong machine.
+#[tokio::test]
+async fn workspaces_keep_same_path_separate_per_environment() {
+    let backend = TestBackend::start_with_runners(&[MockRunner::success("agent")]).await;
+    let path = backend.workdir().display().to_string();
+    let now = 1_800_000_000_000i64;
+
+    // Seed one row for the connected fixture environment through the store. A
+    // second environment is intentionally not connected: workspace listing is a
+    // durable projection and must retain rows whose envagent is currently offline.
+    let first_env = sylph_protocol::EnvironmentId::parse(backend.environment_id().await)
+        .expect("fixture environment id");
+    let second_env = sylph_protocol::EnvironmentId::parse("env2abc").expect("test environment id");
+    for (environment, native) in [(first_env, "same-path-a"), (second_env, "same-path-b")] {
+        let session = sylph_server::models::Session {
+            id: sylph_protocol::SessionId::new(
+                environment,
+                sylph_protocol::AgentName::parse("agent").unwrap(),
+                sylph_protocol::NativeId::new(native),
+            ),
+            workdir: Some(path.clone()),
+            title: None,
+            inject_identity: true,
+            fidelity: sylph_protocol::Fidelity::Stream,
+            flags_json: "{}".to_string(),
+            status: "idle".to_string(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        backend
+            .state
+            .store
+            .create_session(&session)
+            .await
+            .expect("workspace fixture row should insert");
+    }
+
+    let body = json_body(backend.get_authed("/api/v1/workspaces").await).await;
+    let rows = body["workspaces"].as_array().expect("workspace rows");
+    let same_path: Vec<&Value> = rows.iter().filter(|row| row["path"] == path).collect();
+    assert_eq!(
+        same_path.len(),
+        2,
+        "same path must produce one row per environment"
+    );
+    let environments: std::collections::HashSet<&str> = same_path
+        .iter()
+        .map(|row| row["environment"].as_str().expect("workspace environment"))
+        .collect();
+    assert_eq!(environments.len(), 2);
+    let connected_environment = backend.environment_id().await;
+    assert!(environments.contains(connected_environment.as_str()));
+    assert!(environments.contains("env2abc"));
 }
 
 #[tokio::test]
@@ -2896,6 +2946,32 @@ async fn fs_roots_lists_configured_browse_roots() {
     );
     // Absolute, because the client hands these straight back as a `workdir`.
     assert!(roots[0]["path"].as_str().unwrap().starts_with('/'));
+
+    // The roots and home belong to the selected envagent. Ask explicitly for
+    // this environment so a future server implementation cannot accidentally
+    // answer from its own machine when multiple environments are paired.
+    let environment = backend.environment_id().await;
+    let remote = json_body(
+        backend
+            .get_authed(&format!("/api/v1/fs/roots?environment={environment}"))
+            .await,
+    )
+    .await;
+    assert_eq!(remote["home"], body["home"]);
+    assert_eq!(remote["roots"], body["roots"]);
+}
+
+#[tokio::test]
+async fn fs_routes_refuse_an_unreachable_environment_instead_of_falling_back() {
+    let backend = TestBackend::start().await;
+    let response = backend
+        .get_authed("/api/v1/fs/roots?environment=env2abc")
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "ENVIRONMENT_UNREACHABLE"
+    );
 }
 
 /// The picker can reach the directory Quick Start sessions run in.

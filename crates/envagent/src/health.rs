@@ -64,6 +64,12 @@ impl HealthReporter {
     pub async fn snapshot(&self, _environment_id: impl Into<String>) -> EnvironmentHealth {
         let mut facts = std::collections::BTreeMap::new();
         if let Ok(home) = std::env::var("HOME") {
+            // Facts are consumed as workspace display/identity metadata. Resolve the
+            // home on the machine that owns it so a macOS `/var` symlink cannot split
+            // the envagent's canonical session workdir from its Quick Start row.
+            let home = std::fs::canonicalize(&home)
+                .map(|path| path.display().to_string())
+                .unwrap_or(home);
             facts.insert("home".into(), home);
         }
         if let Ok(user) = std::env::var("USER") {

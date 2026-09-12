@@ -339,17 +339,17 @@ lets one compromised envagent admit Subjects to itself.
 Sessions rolled up by the directory they run in, for the left sidebar and the
 settings panel.
 
-A client could derive this from `GET /sessions`, but two facts are only knowable
-server-side: the absolute path of the Quick Start directory, which requires
-expanding `~`, and counts spanning more sessions than the `LIMIT`-capped session
-listing returns.
+A client could derive this from `GET /sessions`, but counts spanning more sessions
+than the `LIMIT`-capped session listing are only knowable here. Each row also carries
+the owning environment's display name and home, because those values differ between
+machines.
 
 **Response 200:**
 ```json
 {
-  "quickStartDir": "/Users/you/.sylph/scratch",
+  "quickStartDir": "__sylph_quick_start__",
   "dataDir": "/Users/you/.sylph/data",
-  "home": "/Users/you",
+  "home": "",
   "workspaces": [
     {
       "path": "/Users/you/Workspace/sylph-web",
@@ -358,24 +358,27 @@ listing returns.
       "runningCount": 1,
       "lastUsedMs": 1755600000000,
       "isQuickStart": false,
-      "environment": "env7fk2"
+      "environment": "env7fk2",
+      "environmentName": "Laptop",
+      "home": "/Users/you"
     }
   ]
 }
 ```
 
-Ordered newest-first by `lastUsedMs`. The Quick Start directory is always
-present, even with no sessions, because the sidebar section and the settings row
-exist before the first quick session is created.
+Ordered newest-first by `lastUsedMs`. Every paired environment contributes a
+Quick Start row, even with no sessions. Its `path` is the explicit
+`__sylph_quick_start__` sentinel; the envagent resolves that selector to its own
+local scratch directory. `quickStartDir` repeats the sentinel for clients that only
+need the action selector. The top-level `home` is empty when environments disagree;
+clients displaying a selected workspace use that row's `home`.
 
 **A workspace is scoped to an environment.** Two machines both having
 `/home/user/app` is not a collision, because a path is only ever read alongside the
 environment that named it (`docs/architecture.md` § Sessions do not migrate). Grouping
 by path alone would merge two unrelated directories into one row.
 
-**Comparing a recorded path against a configured one needs the same spelling.**
-`workdir` is stored canonicalized, so comparing it against a configured Quick Start path
-reported every Quick Start session as `isQuickStart: false` — nothing errored, the row
-and the sessions it counts simply stopped being the same directory. On macOS this is
-certain rather than an edge case, and invisible on Linux CI.
-
+The server never canonicalizes a remote path or compares it with its own filesystem.
+The envagent that owns the path canonicalizes it before journaling. Quick Start uses
+the environment-level sentinel above, so a server path is never presented as if it
+existed on a remote machine.

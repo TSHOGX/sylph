@@ -35,7 +35,7 @@ import { useQuery } from "@tanstack/react-query";
 import { workspacesQuery } from "@/lib/workspaces-query";
 import { shortenHome } from "@/lib/format";
 import { useT, type Translate } from "@/lib/i18n";
-import { useEnvironments } from "@/lib/environments";
+import { defaultEnvironment, useEnvironments } from "@/lib/environments";
 import { Overlay } from "@/components/overlay";
 import {
   SelectFilter,
@@ -59,6 +59,7 @@ export function WorkspacePicker({
   onChoose,
   onClose,
   onBack,
+  environment: requestedEnvironment,
 }: {
   title: string;
   /**
@@ -70,14 +71,16 @@ export function WorkspacePicker({
    */
   confirmLabel: string;
   /** Marks the row that is already in effect. Absent when there is no current. */
-  current?: string | null;
+  current?: { path: string; environment: string | null } | null;
   onChoose: (path: string, environment?: string | null) => void;
   onClose: () => void;
   /** Returns to the surface this replaced, when it replaced one. */
   onBack?: () => void;
+  environment?: string | null;
 }) {
   const t = useT();
   const environments = useEnvironments();
+  const browseEnvironment = current?.environment ?? requestedEnvironment ?? defaultEnvironment(environments.all)?.id ?? null;
   const [browsing, setBrowsing] = useState(false);
 
   // Shared deliberately (`lib/workspaces-query.ts`): one surface having a colder cache
@@ -85,7 +88,6 @@ export function WorkspacePicker({
   const workspacesResult = useQuery(workspacesQuery());
 
   const workspaces = workspacesResult.data?.workspaces;
-  const home = workspacesResult.data?.home;
 
   const items = useMemo<SelectChoice[]>(() => {
     // Depends on `workspacesResult.data` rather than a `?? []` fallback, which
@@ -100,9 +102,11 @@ export function WorkspacePicker({
         // exists in the row model: a project is remembered by a middle segment
         // that its leaf name does not carry.
         detail: [
-          shortenHome(workspace.path, home),
+          workspace.path === "__sylph_quick_start__"
+            ? "Quick Start"
+            : shortenHome(workspace.path, workspace.home),
           environments.showEnvironment && workspace.environment
-            ? environments.nameOf(workspace.environment) ?? workspace.environment
+            ? workspace.environmentName ?? environments.nameOf(workspace.environment) ?? workspace.environment
             : undefined,
         ]
           .filter(Boolean)
@@ -112,10 +116,10 @@ export function WorkspacePicker({
         // directory, so the check column is not reserved on a list where no row
         // could ever carry one — and so a row is announced as an action rather
         // than as an unchecked option.
-        checked: current == null ? undefined : workspace.path === current,
+        checked: current == null ? undefined : workspace.path === current.path && (workspace.environment ?? null) === current.environment,
         onSelect: () => onChoose(workspace.path, workspace.environment ?? null),
       }));
-  }, [workspaces, home, current, onChoose, t, environments]);
+  }, [workspaces, current, onChoose, t, environments]);
 
   // Always filterable, never `auto`: the threshold heuristic counts single-select
   // rows, and a new-session list marks none of them current. The list is also
@@ -137,7 +141,8 @@ export function WorkspacePicker({
       <DirectoryPicker
         title={t("workspacePicker.browseTitle")}
         confirmLabel={confirmLabel}
-        initialPath={current ?? undefined}
+        initialPath={current?.path === "__sylph_quick_start__" ? undefined : current?.path ?? undefined}
+        environment={browseEnvironment ?? undefined}
         onChoose={onChoose}
         onClose={() => setBrowsing(false)}
       />

@@ -224,7 +224,7 @@ export function AdoptPicker({
   const workspaces = useQuery(workspacesQuery());
 
   const rows = listing.data?.sessions;
-  const home = workspaces.data?.home;
+  const homes = useMemo(() => new Map((workspaces.data?.workspaces ?? []).map((w) => [w.environment, w.home])), [workspaces.data]);
 
   const items = useMemo<SelectChoice[]>(() => {
     if (!rows) return [];
@@ -235,7 +235,7 @@ export function AdoptPicker({
         label,
         // The path is the searchable line: a project is remembered by a middle segment
         // that no leaf name carries.
-        detail: row.workdir ? shortenHome(row.workdir, home) : undefined,
+        detail: row.workdir ? shortenHome(row.workdir, environmentId ? homes.get(environmentId) : undefined) : undefined,
         hint: row.agent,
         meta: rowMeta(row, t),
         // `alreadyAdopted` stays selectable and navigates; the other two cannot be acted
@@ -252,7 +252,7 @@ export function AdoptPicker({
         },
       };
     });
-  }, [rows, home, t, router, onClose, adopt]);
+  }, [rows, homes, environmentId, t, router, onClose, adopt]);
 
   // Always filterable, never `auto`: the threshold counts single-select rows and this list
   // marks none of them current, and a real machine holds hundreds to thousands — measured
