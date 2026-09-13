@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
 };
@@ -30,6 +31,7 @@ use crate::models::Event;
 use crate::storage::cas::{self, BlobStore, Payload};
 use crate::storage::fold::{self, Delta, Folded};
 use crate::supervisor::TrajectoryOutcome;
+use sylph_protocol::env::{NativeBlobChunk, MAX_NATIVE_BLOB_BYTES, NATIVE_BLOB_CHUNK_BYTES};
 use sylph_protocol::NativeRecord;
 
 /// The result of reading a native sidecar, keeping absence distinct from a recorded error.
@@ -229,13 +231,91 @@ impl HistoryStore {
         self.native_record_failures.load(Ordering::Relaxed)
     }
 
+    /// Retain a bounded sidecar chunk before its producer receipt is acknowledged.
+    pub async fn put_native_blob_chunk(
+        &self,
+        session_id: &str,
+        chunk: &NativeBlobChunk,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            chunk.size <= MAX_NATIVE_BLOB_BYTES,
+            "native blob exceeds size limit"
+        );
+        anyhow::ensure!(
+            chunk.data.len() <= NATIVE_BLOB_CHUNK_BYTES.div_ceil(3) * 4,
+            "encoded native blob chunk exceeds size limit"
+        );
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&chunk.data)
+            .context("native blob chunk is not valid base64")?;
+        anyhow::ensure!(
+            bytes.len() <= NATIVE_BLOB_CHUNK_BYTES,
+            "native blob chunk exceeds size limit"
+        );
+        anyhow::ensure!(
+            chunk.offset <= chunk.size
+                && bytes.len() as u64 <= chunk.size - chunk.offset
+                && (!bytes.is_empty() || chunk.size == 0)
+                && chunk.final_chunk == (chunk.offset + bytes.len() as u64 == chunk.size),
+            "native blob chunk has invalid bounds"
+        );
+        let mut tx = self.pool.begin().await?;
+        // An insert acquires SQLite's writer lock before checking the current end.
+        // A read-then-insert transaction can lose that upgrade to another writer.
+        sqlx::query(
+            "INSERT INTO native_blob_chunks (session_id, source, version, name, size, offset, data)
+             SELECT ?, ?, ?, ?, ?, ?, ?
+             WHERE ? = COALESCE((SELECT SUM(length(data)) FROM native_blob_chunks
+               WHERE session_id = ? AND source = ? AND version = ? AND name = ?), 0)
+             AND NOT EXISTS (SELECT 1 FROM native_blob_chunks
+               WHERE session_id = ? AND source = ? AND version = ? AND name = ? AND size <> ?)
+             ON CONFLICT(session_id, source, version, name, offset) DO NOTHING",
+        )
+        .bind(session_id)
+        .bind(&chunk.source)
+        .bind(chunk.version as i64)
+        .bind(&chunk.name)
+        .bind(chunk.size as i64)
+        .bind(chunk.offset as i64)
+        .bind(&bytes)
+        .bind(chunk.offset as i64)
+        .bind(session_id)
+        .bind(&chunk.source)
+        .bind(chunk.version as i64)
+        .bind(&chunk.name)
+        .bind(session_id)
+        .bind(&chunk.source)
+        .bind(chunk.version as i64)
+        .bind(&chunk.name)
+        .bind(chunk.size as i64)
+        .execute(&mut *tx)
+        .await?;
+        let held: Option<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT size, data FROM native_blob_chunks
+             WHERE session_id = ? AND source = ? AND version = ? AND name = ? AND offset = ?",
+        )
+        .bind(session_id)
+        .bind(&chunk.source)
+        .bind(chunk.version as i64)
+        .bind(&chunk.name)
+        .bind(chunk.offset as i64)
+        .fetch_optional(&mut *tx)
+        .await?;
+        anyhow::ensure!(
+            held == Some((chunk.size as i64, bytes)),
+            "native blob chunk is out of order or conflicts with retained bytes"
+        );
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Store one complete vendor-native record and its sidecar references.
     ///
     /// Raw records have their own retention class and are deliberately outside the event
     /// watermark path.  Re-projecting an event may need a field the current adapter ignores,
     /// so replacing this row would be data loss; the `(session, source, version)` key is
-    /// append-only for JSONL and content-versioned for rewritten manifests. Deferred sidecars
-    /// remain locators until [`Self::native_blob`] is called, keeping large reads off ingest.
+    /// append-only for JSONL and content-versioned for rewritten manifests. Sidecar chunks
+    /// are assembled into CAS before the record references them.
     pub async fn put_native_record(&self, session_id: &str, record: &NativeRecord) -> Result<()> {
         // A file may be observed while SQLite is checkpointing or while the vendor's
         // sidecar is being rotated. One bounded retry handles those transient failures
@@ -253,9 +333,66 @@ impl HistoryStore {
     async fn put_native_record_inner(&self, session_id: &str, record: &NativeRecord) -> Result<()> {
         let mut blobs = Vec::with_capacity(record.blobs.len());
         for blob in &record.blobs {
-            let hash = match &blob.bytes {
-                Some(bytes) => Some(self.blobs.put(bytes).await?),
-                None => None,
+            anyhow::ensure!(
+                blob.locator.is_none(),
+                "native sidecar locators must be resolved by the owning envagent"
+            );
+            anyhow::ensure!(
+                blob.size <= MAX_NATIVE_BLOB_BYTES,
+                "native blob exceeds size limit"
+            );
+            let hash = if blob.error.is_some() {
+                anyhow::ensure!(
+                    blob.bytes.is_none(),
+                    "unreadable native blob contains bytes"
+                );
+                None
+            } else {
+                let bytes = match &blob.bytes {
+                    Some(bytes) => bytes.clone(),
+                    None => {
+                        let chunks: Vec<(i64, i64, Vec<u8>)> = sqlx::query_as(
+                            "SELECT size, offset, data FROM native_blob_chunks
+                             WHERE session_id = ? AND source = ? AND version = ? AND name = ?
+                             ORDER BY offset",
+                        )
+                        .bind(session_id)
+                        .bind(&record.source)
+                        .bind(record.version as i64)
+                        .bind(&blob.name)
+                        .fetch_all(&self.pool)
+                        .await?;
+                        if chunks.is_empty() {
+                            // A repeated record may have already consumed its chunks.
+                            let hash: Option<String> = sqlx::query_scalar(
+                                "SELECT hash FROM native_blobs
+                                 WHERE session_id = ? AND source = ? AND version = ? AND name = ? AND size = ?",
+                            )
+                            .bind(session_id).bind(&record.source).bind(record.version as i64)
+                            .bind(&blob.name).bind(blob.size as i64).fetch_optional(&self.pool).await?.flatten();
+                            let hash = hash.context("native blob has no retained chunks")?;
+                            self.blobs
+                                .get(&hash)
+                                .await?
+                                .context("native blob CAS object is missing")?
+                        } else {
+                            let mut bytes = Vec::with_capacity(blob.size as usize);
+                            for (size, offset, data) in chunks {
+                                anyhow::ensure!(
+                                    size == blob.size as i64 && offset == bytes.len() as i64,
+                                    "native blob chunk sequence is incomplete"
+                                );
+                                bytes.extend_from_slice(&data);
+                            }
+                            bytes
+                        }
+                    }
+                };
+                anyhow::ensure!(
+                    bytes.len() as u64 == blob.size,
+                    "native blob size does not match its body"
+                );
+                Some(self.blobs.put(&bytes).await?)
             };
             blobs.push((blob, hash));
         }
@@ -303,24 +440,39 @@ impl HistoryStore {
         for (blob, hash) in blobs {
             sqlx::query(
                 r#"INSERT INTO native_blobs
-                   (session_id, source, version, name, hash, locator, size, error)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(session_id, source, version, name) DO UPDATE SET
-                     hash = excluded.hash,
-                     locator = excluded.locator,
-                     size = excluded.size,
-                     error = excluded.error"#,
+                   (session_id, source, version, name, hash, size, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(session_id, source, version, name) DO NOTHING"#,
             )
             .bind(session_id)
             .bind(&record.source)
             .bind(record.version as i64)
             .bind(&blob.name)
-            .bind(hash)
-            .bind(&blob.locator)
+            .bind(&hash)
             .bind(blob.size as i64)
             .bind(&blob.error)
             .execute(&mut *tx)
             .await?;
+            let held: (Option<String>, i64, Option<String>) = sqlx::query_as(
+                "SELECT hash, size, error FROM native_blobs
+                 WHERE session_id = ? AND source = ? AND version = ? AND name = ?",
+            )
+            .bind(session_id)
+            .bind(&record.source)
+            .bind(record.version as i64)
+            .bind(&blob.name)
+            .fetch_one(&mut *tx)
+            .await?;
+            anyhow::ensure!(
+                held == (hash, blob.size as i64, blob.error.clone()),
+                "native blob revision collision for {}:{}:{}",
+                record.source,
+                record.version,
+                blob.name
+            );
+            sqlx::query("DELETE FROM native_blob_chunks WHERE session_id = ? AND source = ? AND version = ? AND name = ?")
+                .bind(session_id).bind(&record.source).bind(record.version as i64).bind(&blob.name)
+                .execute(&mut *tx).await?;
         }
         tx.commit().await?;
         Ok(())
@@ -406,49 +558,7 @@ impl HistoryStore {
                 None => Ok(NativeBlobState::Missing),
             },
             None => match locator {
-                Some(locator) => {
-                    const MAX_NATIVE_BLOB_BYTES: u64 = 256 * 1024 * 1024;
-                    let path = std::path::PathBuf::from(&locator);
-                    let read = tokio::task::spawn_blocking(move || {
-                        let meta = std::fs::metadata(&path)?;
-                        if meta.len() > MAX_NATIVE_BLOB_BYTES {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::FileTooLarge,
-                                format!(
-                                    "native blob is {} bytes; limit is {}",
-                                    meta.len(),
-                                    MAX_NATIVE_BLOB_BYTES
-                                ),
-                            ));
-                        }
-                        std::fs::read(path)
-                    })
-                    .await
-                    .map_err(|error| anyhow::anyhow!("native blob read task failed: {error}"))?;
-                    let bytes = match read {
-                        Ok(bytes) => bytes,
-                        Err(error) => {
-                            return Ok(NativeBlobState::Unreadable {
-                                size,
-                                error: error.to_string(),
-                            });
-                        }
-                    };
-                    let hash = self.blobs.put(&bytes).await?;
-                    sqlx::query(
-                        "UPDATE native_blobs SET hash = ?, locator = NULL, size = ?, error = NULL
-                         WHERE session_id = ? AND source = ? AND version = ? AND name = ?",
-                    )
-                    .bind(&hash)
-                    .bind(bytes.len() as i64)
-                    .bind(session_id)
-                    .bind(source)
-                    .bind(version as i64)
-                    .bind(name)
-                    .execute(&self.pool)
-                    .await?;
-                    Ok(NativeBlobState::Available(bytes))
-                }
+                Some(locator) => Ok(NativeBlobState::Deferred { size, locator }),
                 None => Ok(NativeBlobState::Missing),
             },
         }
@@ -1183,8 +1293,41 @@ impl HistoryStore {
     /// the last differing observation instead, which is what makes the delta
     /// meaningful however often passes run.
     pub async fn record_session_bytes(&self, session_id: &str) -> Result<SessionBytes> {
-        let (bytes, blocks) = self.measure_session_bytes(session_id).await?;
+        self.record_session_bytes_with_pass_delta(session_id)
+            .await
+            .map(|(measurement, _)| measurement)
+    }
+
+    /// Measure and record a session, returning the change since the immediately
+    /// preceding observation as well as the long-term trend carried by the row.
+    ///
+    /// The two deltas answer different questions. `SessionBytes::grew_by` is held
+    /// at the last *differing* observation so a stable pass does not erase a trend;
+    /// a retention pass needs the change since its own previous reading, otherwise
+    /// an unchanged third pass would report the original growth again.
+    pub async fn record_session_bytes_with_pass_delta(
+        &self,
+        session_id: &str,
+    ) -> Result<(SessionBytes, i64)> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(text_len), 0) + COALESCE(SUM(LENGTH(data_json)), 0) AS bytes,
+                    COUNT(*) AS blocks
+               FROM blocks WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("Could not measure a session's held bytes")?;
+        let bytes = row.get::<i64, _>("bytes");
+        let blocks = row.get::<i64, _>("blocks");
         let now = now_ms();
+        let before: Option<i64> =
+            sqlx::query_scalar("SELECT bytes FROM session_bytes WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .context("Could not read the previous session byte measurement")?;
 
         sqlx::query(
             "INSERT INTO session_bytes (
@@ -1208,13 +1351,18 @@ impl HistoryStore {
         .bind(bytes)
         .bind(blocks)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("Could not record a session's held bytes")?;
 
-        self.session_bytes(session_id)
+        tx.commit().await?;
+
+        let measurement = self
+            .session_bytes(session_id)
             .await?
-            .context("a row just written must be readable")
+            .context("a row just written must be readable")?;
+        let pass_delta = before.map_or(0, |previous| bytes - previous);
+        Ok((measurement, pass_delta))
     }
 
     /// One session's byte accounting, if it has ever been measured.
@@ -1286,8 +1434,8 @@ impl HistoryStore {
             "SELECT b.session_id FROM (
                SELECT DISTINCT session_id FROM blocks
              ) b
-             LEFT JOIN watermarks w ON w.session_id = b.session_id
-             ORDER BY w.checked_at_ms IS NOT NULL, w.checked_at_ms, b.session_id
+             LEFT JOIN session_bytes sb ON sb.session_id = b.session_id
+             ORDER BY sb.measured_at_ms IS NOT NULL, sb.measured_at_ms, b.session_id
              LIMIT ?",
         )
         .bind(limit)

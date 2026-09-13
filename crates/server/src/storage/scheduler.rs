@@ -245,8 +245,12 @@ impl RetentionScheduler {
             //
             // After the prune rather than before, so the number is what is held
             // now rather than what was held a moment ago.
-            match self.history.record_session_bytes(&session_id).await {
-                Ok(measured) => report.bytes_grew_by += measured.grew_by.unwrap_or(0),
+            match self
+                .history
+                .record_session_bytes_with_pass_delta(&session_id)
+                .await
+            {
+                Ok((_measured, pass_delta)) => report.bytes_grew_by += pass_delta,
                 Err(error) => debug!("Could not measure {}: {:#}", session_id, error),
             }
         }

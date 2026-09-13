@@ -6,13 +6,15 @@
 
 mod common;
 
+use base64::Engine;
 use common::TestBackend;
+use sylph_protocol::env::NativeBlobChunk;
 use sylph_protocol::{NativeBlob, NativeRecord};
 use sylph_server::api::sessions::block_to_event;
 use sylph_server::events::StreamEvent;
 use sylph_server::models::Event;
 use sylph_server::storage::cas::BlobStore;
-use sylph_server::storage::history::{self, HistoryStore, NativeBlobState};
+use sylph_server::storage::history::{self, Block, HistoryStore, NativeBlobState};
 use tempfile::TempDir;
 
 async fn history_store() -> (HistoryStore, TempDir) {
@@ -37,7 +39,7 @@ async fn a_native_record_round_trips_unknown_fields_and_sidecar_bytes() {
         }),
         blobs: vec![NativeBlob {
             name: "/tmp/full-output.txt".to_string(),
-            size: 13,
+            size: b"full sidecar".len() as u64,
             bytes: Some(b"full sidecar".to_vec()),
             locator: None,
             error: None,
@@ -146,7 +148,7 @@ async fn native_only_blob_survives_the_cas_sweep() {
         payload: serde_json::json!({"type": "tool_result"}),
         blobs: vec![NativeBlob {
             name: "output.txt".to_string(),
-            size: 12,
+            size: b"native-only".len() as u64,
             bytes: Some(b"native-only".to_vec()),
             locator: None,
             error: None,
@@ -165,10 +167,9 @@ async fn native_only_blob_survives_the_cas_sweep() {
 }
 
 #[tokio::test]
-async fn deferred_native_blob_is_read_and_cached_on_demand() {
+async fn native_blob_chunks_are_durable_before_the_record_and_survive_retention() {
     let (history, _dir) = history_store().await;
-    let sidecar = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(sidecar.path(), b"deferred body").unwrap();
+    let body = b"chunked body";
     let record = NativeRecord {
         source: "root.jsonl".to_string(),
         version: 10,
@@ -176,19 +177,111 @@ async fn deferred_native_blob_is_read_and_cached_on_demand() {
         payload: serde_json::json!({"type": "tool_result"}),
         blobs: vec![NativeBlob {
             name: "output.txt".to_string(),
-            size: 13,
+            size: body.len() as u64,
             bytes: None,
-            locator: Some(sidecar.path().to_string_lossy().to_string()),
+            locator: None,
             error: None,
         }],
     };
     let id = session_id().encode();
+    let chunk = NativeBlobChunk {
+        source: record.source.clone(),
+        version: record.version,
+        name: record.blobs[0].name.clone(),
+        size: body.len() as u64,
+        offset: 0,
+        data: base64::engine::general_purpose::STANDARD.encode(body),
+        final_chunk: true,
+    };
+    history.put_native_blob_chunk(&id, &chunk).await.unwrap();
+    history.put_native_blob_chunk(&id, &chunk).await.unwrap();
+    drop(history);
+    let history = HistoryStore::open(
+        _dir.path().join("history.db").to_str().unwrap(),
+        BlobStore::new(_dir.path().join("cas")),
+    )
+    .await
+    .unwrap();
     history.put_native_record(&id, &record).await.unwrap();
+    history.put_native_record(&id, &record).await.unwrap();
+    history.prune_below(&id, i32::MAX).await.unwrap();
     assert!(matches!(
         history.native_blob(&id, "root.jsonl", 10, "output.txt").await.unwrap(),
-        NativeBlobState::Available(bytes) if bytes == b"deferred body"
+        NativeBlobState::Available(bytes) if bytes == body
     ));
     assert_eq!(history.sweep_unreferenced_blobs().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn native_blob_chunks_reject_gaps_changed_bytes_and_incomplete_bodies() {
+    let (history, _dir) = history_store().await;
+    let id = session_id().encode();
+    let mut chunk = NativeBlobChunk {
+        source: "root.jsonl".to_string(),
+        version: 10,
+        name: "output.txt".to_string(),
+        size: 6,
+        offset: 3,
+        data: base64::engine::general_purpose::STANDARD.encode(b"def"),
+        final_chunk: true,
+    };
+    assert!(history.put_native_blob_chunk(&id, &chunk).await.is_err());
+    chunk.offset = 0;
+    chunk.final_chunk = false;
+    history.put_native_blob_chunk(&id, &chunk).await.unwrap();
+    chunk.data = base64::engine::general_purpose::STANDARD.encode(b"abc");
+    assert!(history.put_native_blob_chunk(&id, &chunk).await.is_err());
+    let record = NativeRecord {
+        source: chunk.source.clone(),
+        version: chunk.version,
+        raw_json: None,
+        payload: serde_json::json!({"type":"tool_result"}),
+        blobs: vec![NativeBlob {
+            name: chunk.name,
+            size: 6,
+            bytes: None,
+            locator: None,
+            error: None,
+        }],
+    };
+    assert!(history.put_native_record(&id, &record).await.is_err());
+    assert!(history
+        .native_record(&id, &record.source, record.version)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_retained_native_blob_cannot_be_replaced_by_a_new_body_or_error() {
+    let (history, _dir) = history_store().await;
+    let id = session_id().encode();
+    let mut record = NativeRecord {
+        source: "root.jsonl".to_string(),
+        version: 1,
+        raw_json: None,
+        payload: serde_json::json!({"type":"tool_result"}),
+        blobs: vec![NativeBlob {
+            name: "output".to_string(),
+            size: 3,
+            bytes: Some(b"old".to_vec()),
+            locator: None,
+            error: None,
+        }],
+    };
+    history.put_native_record(&id, &record).await.unwrap();
+    record.blobs[0].bytes = Some(b"new".to_vec());
+    assert!(history.put_native_record(&id, &record).await.is_err());
+    record.blobs[0].bytes = None;
+    record.blobs[0].error = Some("source disappeared".to_string());
+    assert!(history.put_native_record(&id, &record).await.is_err());
+    assert_eq!(
+        history
+            .native_blob(&id, "root.jsonl", 1, "output")
+            .await
+            .unwrap(),
+        NativeBlobState::Available(b"old".to_vec())
+    );
 }
 
 /// The session these fixtures hang off.
@@ -1298,7 +1391,7 @@ async fn a_second_retention_pass_over_unchanged_history_changes_nothing() {
         .await
         .unwrap();
 
-    backend.state.retention.pass().await;
+    let second_report = backend.state.retention.pass().await;
 
     assert_eq!(
         backend
@@ -1309,6 +1402,58 @@ async fn a_second_retention_pass_over_unchanged_history_changes_nothing() {
             .unwrap(),
         after_first,
         "a repeated pass must be a no-op, not a slow erosion of history"
+    );
+    assert_eq!(
+        second_report.bytes_grew_by, 0,
+        "an unchanged pass must not repeat the last differing measurement"
+    );
+}
+
+#[tokio::test]
+async fn retention_batch_rotates_past_measured_unreachable_sessions() {
+    let (history, _dir) = history_store().await;
+    let mut blocks = Vec::new();
+    let mut session_ids = Vec::new();
+    for index in 0..65 {
+        let session = sylph_protocol::SessionId::new(
+            sylph_protocol::EnvironmentId::parse("env7fk2").unwrap(),
+            sylph_protocol::AgentName::parse("claude").unwrap(),
+            sylph_protocol::NativeId::new(format!("session-{index:02}")),
+        );
+        let encoded = session.encode();
+        session_ids.push(encoded.clone());
+        blocks.push(Block {
+            session_id: encoded,
+            seq: 0,
+            turn_id: format!("turn-{index:02}"),
+            kind: "assistant".into(),
+            phase: Some("completed".into()),
+            stream_id: None,
+            span: None,
+            interior_state: None,
+            name: None,
+            text: "held".into(),
+            folded: None,
+            data: None,
+            is_error: false,
+            source: "test".into(),
+            arrival_at_ms: index,
+            recorded_at_ms: None,
+            started_at_ms: index,
+            created_at_ms: index,
+        });
+    }
+    history.put_blocks(&blocks).await.unwrap();
+
+    // These sessions have been examined but remain unreachable, so no watermark is
+    // written. The next batch must still advance to the unmeasured 65th session.
+    for session_id in &session_ids[..64] {
+        history.record_session_bytes(session_id).await.unwrap();
+    }
+    let awaiting = history.sessions_awaiting_retention(64).await.unwrap();
+    assert!(
+        awaiting.contains(&session_ids[64]),
+        "an unreachable prefix must not starve later sessions"
     );
 }
 
