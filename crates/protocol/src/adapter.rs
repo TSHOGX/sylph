@@ -672,7 +672,9 @@ pub trait Adapter: Send + Sync {
     ///
     /// The envagent supplies records already retained by the server. This is the
     /// recovery path after a vendor rotates or removes its source files.
-    async fn reproject(&self, records: Vec<NativeRecord>) -> Result<EventStream>;
+    async fn reproject(&self, _records: Vec<NativeRecord>) -> Result<EventStream> {
+        Err(anyhow::anyhow!("this adapter has no retained native reprojection"))
+    }
 
     /// Parse, then follow the native store as it grows.
     ///

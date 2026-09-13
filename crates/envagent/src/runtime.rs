@@ -1722,7 +1722,7 @@ impl EnvAgent {
                                 Ok(sylph_protocol::SessionMessage::Event(event)) => pass.events.push(event),
                                 Ok(sylph_protocol::SessionMessage::NativeRecord(record)) => pass.records.push(record),
                                 Ok(_) => pass.skipped += 1,
-                                Err(error) => pass.read_errors += 1,
+                                Err(_error) => pass.read_errors += 1,
                             }
                         }
                         sylph_protocol::CommandOutcome::accepted_with_result(serde_json::to_value(pass).unwrap_or_default())

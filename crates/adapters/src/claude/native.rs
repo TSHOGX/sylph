@@ -1368,7 +1368,7 @@ fn delegate_spans(
         let Some(payload) = manifests.get(manifest).and_then(|cursor| cursor.payload.as_ref()) else {
             continue;
         };
-        let Some(run_id) = string_at(&payload, "runId") else {
+        let Some(run_id) = string_at(payload, "runId") else {
             continue;
         };
         let Some(host) = root_workflow_hosts.get(&run_id).and_then(Option::as_ref) else {
