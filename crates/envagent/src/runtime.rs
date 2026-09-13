@@ -2974,6 +2974,10 @@ mod tests {
             Err(anyhow!("the spy agent has no native store"))
         }
 
+        async fn reproject(&self, _records: Vec<sylph_protocol::NativeRecord>) -> Result<EventStream> {
+            Err(anyhow!("the spy agent has no native records"))
+        }
+
         async fn watch(&self, _id: &NativeId) -> Result<EventStream> {
             Err(anyhow!("the spy agent has no native store"))
         }
