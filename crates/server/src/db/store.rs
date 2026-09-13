@@ -40,6 +40,11 @@ pub struct SessionFilter {
     pub workdir: Option<String>,
     pub updated_after_ms: Option<i64>,
     pub updated_before_ms: Option<i64>,
+    /// Subject whose environment grants constrain this listing. When set, the
+    /// capability predicate is evaluated in SQL before `LIMIT`, so an
+    /// inaccessible environment cannot consume a page slot.
+    pub capability_subject: Option<String>,
+    pub capability: Option<String>,
 }
 
 impl Default for SessionFilter {
@@ -51,6 +56,8 @@ impl Default for SessionFilter {
             workdir: None,
             updated_after_ms: None,
             updated_before_ms: None,
+            capability_subject: None,
+            capability: None,
         }
     }
 }
@@ -84,11 +91,54 @@ impl JournalStore {
         capability: &str,
     ) -> Result<bool> {
         if subject_id == "bootstrap" {
+            // Bootstrap is a first-run local identity. It is active only until
+            // the first registered Subject exists; after that every environment
+            // is governed by durable grants.
+            let active: Option<i64> =
+                sqlx::query_scalar("SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1")
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(Error::Database)?;
+            if active.is_some() {
+                return Ok(false);
+            }
             return Ok(true);
         }
         let found: Option<i64> = sqlx::query_scalar("SELECT 1 FROM env_grants WHERE subject_id = ? AND environment_id = ? AND capability = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?)")
             .bind(subject_id).bind(environment_id).bind(capability).bind(now_ms()).fetch_optional(&self.pool).await.map_err(Error::Database)?;
         Ok(found.is_some())
+    }
+
+    /// Return every environment on which a subject currently holds `capability`.
+    ///
+    /// Search and other cross-environment reads use this set as a SQL boundary in
+    /// the history database. Resolving it once avoids an N+1 capability check and,
+    /// crucially, lets the history query apply its limit *after* authorization.
+    pub async fn capable_environments(
+        &self,
+        subject_id: &str,
+        capability: &str,
+    ) -> Result<Vec<String>> {
+        if subject_id == "bootstrap" {
+            return sqlx::query_scalar(
+                "SELECT environment_id FROM env_installations
+                 WHERE NOT EXISTS (SELECT 1 FROM subjects WHERE id <> 'bootstrap')",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Error::Database);
+        }
+        sqlx::query_scalar(
+            "SELECT environment_id FROM env_grants
+             WHERE subject_id = ? AND capability = ?
+               AND (expires_at_ms IS NULL OR expires_at_ms > ?)",
+        )
+        .bind(subject_id)
+        .bind(capability)
+        .bind(now_ms())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::Database)
     }
 
     pub async fn authorization_status(
@@ -98,6 +148,14 @@ impl JournalStore {
         capability: &str,
     ) -> Result<Option<&'static str>> {
         if subject_id == "bootstrap" {
+            let active: Option<i64> =
+                sqlx::query_scalar("SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1")
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(Error::Database)?;
+            if active.is_some() {
+                return Ok(Some("not_granted"));
+            }
             return Ok(Some("granted"));
         }
         let row: Option<Option<i64>> = sqlx::query_scalar(
@@ -117,6 +175,14 @@ impl JournalStore {
     }
 
     pub async fn is_admin(&self, subject_id: &str) -> Result<bool> {
+        if subject_id == "bootstrap" {
+            let active: Option<i64> =
+                sqlx::query_scalar("SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1")
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(Error::Database)?;
+            return Ok(active.is_none());
+        }
         let value: Option<i64> = sqlx::query_scalar("SELECT is_admin FROM subjects WHERE id = ?")
             .bind(subject_id)
             .fetch_optional(&self.pool)
@@ -427,6 +493,20 @@ impl JournalStore {
               AND (?3 IS NULL OR rtrim(workdir, '/') = rtrim(?3, '/'))
               AND (?4 IS NULL OR updated_at_ms >= ?4)
               AND (?5 IS NULL OR updated_at_ms <= ?5)
+              AND (
+                    ?7 IS NULL
+                    OR EXISTS (
+                        SELECT 1 FROM env_grants
+                        WHERE env_grants.subject_id = ?7
+                          AND env_grants.environment_id = sessions.environment
+                          AND env_grants.capability = ?8
+                          AND (env_grants.expires_at_ms IS NULL OR env_grants.expires_at_ms > ?9)
+                    )
+                    OR (
+                        ?7 = 'bootstrap'
+                        AND NOT EXISTS (SELECT 1 FROM subjects WHERE id <> 'bootstrap')
+                    )
+              )
             -- The identity triple breaks ties, which makes this a **total** order.
             -- `updated_at_ms` alone is not one: it is milliseconds, and adopting a
             -- native store writes many sessions inside a single tick. Two rows sharing
@@ -451,6 +531,9 @@ impl JournalStore {
         .bind(filter.updated_after_ms)
         .bind(filter.updated_before_ms)
         .bind(filter.limit)
+        .bind(filter.capability_subject.as_deref())
+        .bind(filter.capability.as_deref())
+        .bind(filter.capability_subject.as_ref().map(|_| now_ms()))
         .fetch_all(&self.pool)
         .await
         .map_err(Error::Database)?;
@@ -2909,6 +2992,77 @@ mod tests {
             natives(&second),
             "one filter, two answers: the listing has no total order"
         );
+    }
+
+    #[tokio::test]
+    async fn capability_filter_is_applied_before_session_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
+            .await
+            .expect("store");
+        for (environment, installation) in [("env7fk2", "install-a"), ("env2abc", "install-b")] {
+            sqlx::query(
+                "INSERT INTO env_installations (environment_id, installation_id, name, origin, token_hash)
+                 VALUES (?, ?, 'test', 'development', 'hash')",
+            )
+            .bind(environment)
+            .bind(installation)
+            .execute(store.raw_pool())
+            .await
+            .expect("environment");
+        }
+        sqlx::query(
+            "INSERT INTO subjects (id, name, token_hash, is_admin, created_at_ms)
+             VALUES ('subject-a', 'Subject A', 'hash-a', 0, 1)",
+        )
+        .execute(store.raw_pool())
+        .await
+        .expect("subject");
+        let inaccessible = Session {
+            id: SessionId::new(
+                sylph_protocol::EnvironmentId::parse("env2abc").unwrap(),
+                sylph_protocol::AgentName::parse("claude").unwrap(),
+                sylph_protocol::NativeId::new("newest-hidden"),
+            ),
+            workdir: Some("/tmp/project".into()),
+            title: None,
+            inject_identity: true,
+            fidelity: sylph_protocol::Fidelity::Messages,
+            flags_json: "{}".into(),
+            status: "idle".into(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        };
+        let visible = Session {
+            id: SessionId::new(
+                sylph_protocol::EnvironmentId::parse("env7fk2").unwrap(),
+                sylph_protocol::AgentName::parse("claude").unwrap(),
+                sylph_protocol::NativeId::new("older-visible"),
+            ),
+            updated_at_ms: 1,
+            ..inaccessible.clone()
+        };
+        store.create_session(&inaccessible).await.expect("hidden");
+        store.create_session(&visible).await.expect("visible");
+        sqlx::query(
+            "INSERT INTO env_grants (subject_id, environment_id, capability, issued_at_ms)
+             VALUES ('subject-a', 'env7fk2', 'observe', 1)",
+        )
+        .execute(store.raw_pool())
+        .await
+        .expect("grant");
+
+        let rows = store
+            .list_sessions(&SessionFilter {
+                limit: 1,
+                capability_subject: Some("subject-a".into()),
+                capability: Some("observe".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.native_id.as_str(), "older-visible");
     }
 
     #[tokio::test]

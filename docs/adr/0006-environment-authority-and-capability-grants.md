@@ -147,10 +147,9 @@ cut a turn short the same way.
 
 The sweep is scoped to work whose authorization originated from the revoked grant, by the
 `origin_subject` [ADR-0004](0004-concurrent-control-ordering.md) decides the record retains;
-it does not terminate unrelated turns on the same environment. Neither that field nor
-`CloseReason` is built, and both are prerequisites this decision cannot supply for itself —
-`docs/roadmap.md` § Milestone 3 owns them, because an unscoped sweep would either kill every
-turn on the environment or none, and both look like a working revocation from the outside.
+it does not terminate unrelated turns on the same environment. The store persists that field
+and closes affected work with `CloseReason::grant_revoked`, so an unscoped sweep cannot quietly
+kill every turn on the environment or leave revoked work running.
 
 ### 8. Disclosure happens twice, with different content
 

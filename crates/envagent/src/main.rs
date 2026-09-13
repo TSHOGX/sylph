@@ -87,7 +87,6 @@ async fn pair(args: &[String]) -> Result<()> {
     let body = serde_json::json!({
         "code": code,
         "name": std::env::var("SYLPH_ENV_NAME").unwrap_or_else(|_| "Environment".into()),
-        "origin": "self-installed",
         "agents": []
     });
     let response: PairingResponse =

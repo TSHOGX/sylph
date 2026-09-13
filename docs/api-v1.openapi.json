@@ -1328,7 +1328,7 @@
     "/api/v1/auth/token": {
       "get": {
         "summary": "Bootstrap the session cookie",
-        "description": "Sets the `SameSite=Strict` HttpOnly auth cookie for a loopback client, which is why the frontend must proxy `/api/v1/*` same-origin: a browser will not send the cookie across ports. Exempt from auth, alongside `/health`. The token is regenerated on every backend start, so open browser sessions are invalidated by a restart — that is the design, not a bug to fix by persisting the token.",
+        "description": "Sets the `SameSite=Strict` HttpOnly auth cookie for a loopback client during first-run bootstrap. After a registered Subject exists it returns 401 without setting a cookie, so logout cannot silently restore the bootstrap identity. The frontend must proxy `/api/v1/*` same-origin: a browser will not send the cookie across ports. The token is regenerated on every backend start, so open browser sessions are invalidated by a restart.",
         "security": [],
         "responses": {
           "200": {
@@ -1342,6 +1342,9 @@
             }
           },
           "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
             "$ref": "#/components/responses/Error"
           }
         }
@@ -3781,11 +3784,6 @@
         "properties": {
           "code": {"type": "string"},
           "name": {"type": "string", "default": "Environment"},
-          "origin": {
-            "type": "string",
-            "enum": ["self-installed", "ssh-bootstrapped", "sandbox-provisioned", "development"],
-            "default": "self-installed"
-          },
           "agents": {
             "type": "array",
             "items": {"$ref": "#/components/schemas/EnvironmentAgent"}

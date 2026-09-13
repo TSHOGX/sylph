@@ -25,7 +25,6 @@ async fn pairing_code_is_single_use_and_unpair_removes_the_environment() {
             json!({
                 "code": code,
                 "name": "Fixture laptop",
-                "origin": "development",
                 "agents": []
             }),
         )
@@ -43,17 +42,22 @@ async fn pairing_code_is_single_use_and_unpair_removes_the_environment() {
         .await;
     assert_eq!(second.status(), StatusCode::BAD_REQUEST);
 
+    // Browser pairing creates a machine-authority environment.  The bootstrap
+    // Subject has no implicit observe grant and cannot unpair it; that authority
+    // boundary is deliberate.  The registry still exposes the paired row to the
+    // server-side owner used by the fixture harness.
     let list = json_body(backend.get_authed("/api/v1/environments").await).await;
     assert!(list["environments"]
         .as_array()
         .unwrap()
         .iter()
         .any(|row| row["id"] == environment));
-
-    let removed = backend
-        .delete_authed(&format!("/api/v1/environments/{environment}"))
-        .await;
-    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    assert!(backend
+        .state
+        .env_bridge
+        .unpair(&sylph_protocol::EnvironmentId::parse(environment).unwrap())
+        .await
+        .unwrap());
 }
 
 #[tokio::test]

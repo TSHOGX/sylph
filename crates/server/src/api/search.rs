@@ -128,54 +128,80 @@ pub async fn search(
         _ => None,
     };
 
-    let hits = state
-        .history
-        .search(query, params.limit.clamp(1, 100))
-        .await
-        .map_err(|error| Error::Internal(format!("Search failed: {error:#}")))?;
+    let limit = params.limit.clamp(1, 100);
+    let allowed = state
+        .store
+        .capable_environments(&subject.0, "observe")
+        .await?;
+    let allowed: std::collections::HashSet<String> = allowed.into_iter().collect();
+    if environment
+        .as_ref()
+        .is_some_and(|wanted| !allowed.contains(wanted.as_str()))
+    {
+        return Ok(Json(SearchResponse {
+            results: Vec::new(),
+        }));
+    }
 
-    let mut results = Vec::with_capacity(hits.len());
-    for hit in hits {
-        // A hit names a session by its encoded triple. One that will not decode is a
-        // corrupt index entry rather than a bad request, and it is **skipped** rather
-        // than surfaced: a result a client cannot navigate to is worse than one row
-        // fewer, and there is nothing a user could do about it.
-        let Ok(session_id) = sylph_protocol::SessionId::decode(&hit.session_id) else {
-            tracing::warn!(
-                "Search index holds an unparseable session id: {}",
-                hit.session_id
-            );
-            continue;
-        };
-        if !state
-            .store
-            .has_capability(&subject.0, session_id.environment.as_str(), "observe")
-            .await?
-        {
-            continue;
-        }
-        if environment
-            .as_ref()
-            .is_some_and(|wanted| wanted != &session_id.environment)
-        {
-            continue;
-        }
-        // Skipped when the journal no longer has the row. History outliving its session
-        // row is possible, and a result carrying no session is a shape the response
-        // deliberately cannot express — `session` is not optional.
-        let Some(session) = state.store.get_session(&session_id).await? else {
-            continue;
-        };
+    // History is a separate SQLite database from the journal, so grants cannot be
+    // joined into the FTS query. Page through ranked hits instead: authorization is
+    // applied while collecting, and the caller's limit is reached only after
+    // authorized rows have filled it.
+    let mut results = Vec::with_capacity(limit);
+    let mut offset = 0usize;
+    const PAGE_SIZE: usize = 100;
+    loop {
+        let hits = state
+            .history
+            .search_page(query, PAGE_SIZE, offset)
+            .await
+            .map_err(|error| Error::Internal(format!("Search failed: {error:#}")))?;
+        let fetched = hits.len();
+        for hit in hits {
+            // A hit names a session by its encoded triple. One that will not decode is a
+            // corrupt index entry rather than a bad request, and it is **skipped** rather
+            // than surfaced: a result a client cannot navigate to is worse than one row
+            // fewer, and there is nothing a user could do about it.
+            let Ok(session_id) = sylph_protocol::SessionId::decode(&hit.session_id) else {
+                tracing::warn!(
+                    "Search index holds an unparseable session id: {}",
+                    hit.session_id
+                );
+                continue;
+            };
+            if !allowed.contains(session_id.environment.as_str()) {
+                continue;
+            }
+            if environment
+                .as_ref()
+                .is_some_and(|wanted| wanted != &session_id.environment)
+            {
+                continue;
+            }
+            // Skipped when the journal no longer has the row. History outliving its session
+            // row is possible, and a result carrying no session is a shape the response
+            // deliberately cannot express — `session` is not optional.
+            let Some(session) = state.store.get_session(&session_id).await? else {
+                continue;
+            };
 
-        results.push(SearchResult {
-            session,
-            best_match: Some(BestMatch {
-                seq: hit.seq,
-                turn_id: hit.turn_id,
-                excerpt: hit.excerpt,
-            }),
-            hits: Some(hit.hits),
-        });
+            results.push(SearchResult {
+                session,
+                best_match: Some(BestMatch {
+                    seq: hit.seq,
+                    turn_id: hit.turn_id,
+                    excerpt: hit.excerpt,
+                }),
+                hits: Some(hit.hits),
+            });
+            if results.len() >= limit {
+                break;
+            }
+        }
+        offset += fetched;
+        if results.len() >= limit || fetched < PAGE_SIZE {
+            break;
+        }
     }
 
     Ok(Json(SearchResponse { results }))

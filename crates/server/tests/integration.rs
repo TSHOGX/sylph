@@ -115,6 +115,24 @@ async fn bootstrap_sets_a_hardened_cookie() {
 }
 
 #[tokio::test]
+async fn bootstrap_is_disabled_after_registration() {
+    let backend = TestBackend::start().await;
+    let registered = backend
+        .post(
+            "/api/v1/auth/register",
+            serde_json::json!({"name": "Alice"}),
+        )
+        .await;
+    assert_eq!(registered.status(), StatusCode::CREATED);
+
+    let response = backend.get("/api/v1/auth/token").await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(response.headers().get(header::SET_COOKIE).is_none());
+    let body = json_body(response).await;
+    assert_eq!(body["reason"], "authentication_required");
+}
+
+#[tokio::test]
 async fn protected_routes_require_the_cookie() {
     let backend = TestBackend::start().await;
 

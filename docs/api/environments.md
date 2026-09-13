@@ -284,7 +284,10 @@ envagent exchanges it for a durable credential and is assigned its opaque id.
 
 The envagent exchanges the short-lived code for a durable credential. This
 pairing operation is exempt from the browser cookie because the envagent does not
-have a browser session; the code is consumed atomically and cannot be reused.
+have a browser session; the code is consumed atomically and cannot be reused. The
+HTTP pairing route records `self-installed` provenance from the server-owned flow;
+the request cannot choose `origin` or obtain server authority by naming a different
+value. Provisioned environments use a separate server-controlled path.
 
 ### `DELETE /api/v1/environments/{id}`
 

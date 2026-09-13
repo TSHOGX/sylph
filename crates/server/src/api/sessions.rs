@@ -106,18 +106,10 @@ pub async fn list(
         workdir: non_blank(query.workdir).map(|path| crate::api::workspaces::normalize(&path)),
         updated_after_ms: query.updated_after_ms,
         updated_before_ms: query.updated_before_ms,
+        capability_subject: Some(subject.0.clone()),
+        capability: Some("observe".to_string()),
     };
-
-    let mut sessions = Vec::new();
-    for session in state.store.list_sessions(&filter).await? {
-        if state
-            .store
-            .has_capability(&subject.0, session.id.environment.as_str(), "observe")
-            .await?
-        {
-            sessions.push(session);
-        }
-    }
+    let sessions = state.store.list_sessions(&filter).await?;
     Ok(Json(SessionListResponse { sessions }))
 }
 

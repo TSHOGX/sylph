@@ -46,7 +46,7 @@ blaming the request.
 
 ## Authentication
 
-Authentication uses process-local HttpOnly cookies for the bootstrap Subject and registered
+Authentication uses process-local HttpOnly cookies for the first-run bootstrap Subject and registered
 Subjects. Registration, login, logout, and environment grants are implemented routes described
 by [ADR-0002](../adr/0002-environment-workspace-subject.md) and
 [ADR-0006](../adr/0006-environment-authority-and-capability-grants.md). Required for every call except
@@ -54,7 +54,8 @@ by [ADR-0002](../adr/0002-environment-workspace-subject.md) and
 `POST /api/v1/environments/pair`, which are exempt inside the middleware rather than
 registered outside it, so the exempt list sits next to the checks it bypasses. Registered
 Subject login, logout, and registration are available at the corresponding `/auth` routes;
-the bootstrap token remains for local development and fixtures.
+the bootstrap token remains only until the first registered Subject exists, for local development
+and fixtures.
 
 - Cookie: `sylph_session={random_token}`; `Path=/`, `HttpOnly`, `SameSite=Strict`
 - Origin must match loopback (`127.0.0.1`, `localhost`, `[::1]`)
@@ -142,10 +143,11 @@ through `/auth/register` and `/auth/login`; server-authority environments use th
 
 #### `GET /api/v1/auth/token`
 
-Bootstraps the cookie for a loopback client and answers `{"ok": true}`. No
-credential is exchanged: the backend hands the cookie to any request that already
-passes the loopback `Host`/`Origin` checks, which is why a browser on the same
-machine is never prompted. Reaching the backend at all is the authorization.
+Bootstraps the cookie for a loopback client while the install has no registered Subject and
+answers `{"ok": true}`. After registration it answers `401 authentication_required` and never
+sets a cookie, so logout cannot silently restore the bootstrap identity. No credential is
+exchanged during first-run bootstrap: the backend hands the cookie to a request that already
+passes the loopback `Host`/`Origin` checks.
 
 **`SameSite=Strict` is why the frontend must proxy `/api/v1/*` same-origin.** A
 browser will not send the cookie to a different port, so pointing the UI straight at

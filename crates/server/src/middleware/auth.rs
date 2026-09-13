@@ -185,12 +185,12 @@ async fn enforce_session_capability(
     Ok(())
 }
 
-/// GET /api/v1/auth/token — bootstrap endpoint that sets the cookie.
+/// GET /api/v1/auth/token — first-run bootstrap endpoint that sets the cookie.
 ///
-/// Unauthenticated by design: any loopback client can obtain the token, which
-/// is the correct policy for a process-local service. The real threat model is
-/// browser-based attacks from other origins, not local processes that can
-/// already read the database and spawn runners.
+/// It is intentionally unauthenticated while the install has no registered
+/// Subject, which keeps local development and fixtures usable. Once a real
+/// account exists it returns 401 instead of minting a second identity; logout
+/// therefore cannot silently restore broad bootstrap access on reload.
 pub async fn bootstrap_token(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -215,6 +215,34 @@ pub async fn bootstrap_token(
             );
         }
     }
+    // Once an account has been provisioned, an unauthenticated browser must
+    // not silently become the bootstrap Subject again.  This is what makes
+    // logout durable for the lifetime of the process: AuthGate may probe this
+    // endpoint after a reload, but the probe receives 401 until the user logs
+    // in explicitly.
+    let registered: Option<i64> = match sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1",
+    )
+    .fetch_optional(state.store.raw_pool())
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HeaderMap::new(),
+                Json(serde_json::json!({"ok": false, "reason": "authentication_unavailable"})),
+            );
+        }
+    };
+    if registered.is_some() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            HeaderMap::new(),
+            Json(serde_json::json!({"ok": false, "reason": "authentication_required"})),
+        );
+    }
+
     let _ = state
         .store
         .upsert_subject(

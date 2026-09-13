@@ -290,7 +290,11 @@ async fn wait_for_completed(backend: &TestBackend, turn_id: &str) {
 }
 
 async fn wait_for_connected(bridge: &sylph_server::env::EnvBridge, environment: &EnvironmentId) {
-    for _ in 0..100 {
+    // Process startup and the first framed hello can be delayed when the full
+    // workspace suite is running under one executor.  Poll the observable lease
+    // for a bounded but generous window rather than turning scheduler pressure
+    // into a false transport failure.
+    for _ in 0..1000 {
         if bridge.environment_connected(environment).await {
             return;
         }

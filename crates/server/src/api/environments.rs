@@ -101,18 +101,12 @@ pub struct PairRequest {
     pub code: String,
     #[serde(default = "default_pair_name")]
     pub name: String,
-    #[serde(default = "default_pair_origin")]
-    pub origin: String,
     #[serde(default)]
     pub agents: Vec<AgentInfo>,
 }
 
 fn default_pair_name() -> String {
     "Environment".to_string()
-}
-
-fn default_pair_origin() -> String {
-    "self-installed".to_string()
 }
 
 /// POST /api/v1/environments/pairings
@@ -138,7 +132,16 @@ pub async fn pair(
 ) -> Result<(StatusCode, Json<crate::env::PairingGrant>)> {
     let grant = state
         .env_bridge
-        .claim_pairing(&request.code, request.name, request.origin, request.agents)
+        // Browser pairing is the self-installed flow.  Provenance is derived
+        // from the route that owns the pairing context, never from an
+        // envagent-controlled request field: accepting `origin` here would let
+        // any pairing-code holder mint a server-authority environment.
+        .claim_pairing(
+            &request.code,
+            request.name,
+            "self-installed",
+            request.agents,
+        )
         .await
         .map_err(|error| crate::error::Error::InvalidRequest(error.to_string()))?;
     Ok((StatusCode::CREATED, Json(grant)))

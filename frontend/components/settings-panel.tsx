@@ -200,6 +200,15 @@ function GeneralSection() {
 function AuthSection() {
   const queryClient = useQueryClient();
   const t = useT();
+  const auth = useQuery<{ subjectId?: string }>({
+    queryKey: ["auth", "token"],
+    queryFn: async () => {
+      const response = await fetch("/api/v1/auth/token", { credentials: "include" });
+      if (!response.ok) throw new Error(t("settings.account.authFailed"));
+      return response.json() as Promise<{ subjectId?: string }>;
+    },
+    staleTime: Infinity,
+  });
   const [name, setName] = useState("");
   const [token, setToken] = useState("");
   const [issuedToken, setIssuedToken] = useState<string | null>(null);
@@ -210,6 +219,7 @@ function AuthSection() {
       setIssuedToken(subject.token);
       setNotice(t("settings.account.registered", { name: subject.name }));
       setName("");
+      void queryClient.invalidateQueries({ queryKey: ["auth", "token"] });
       void queryClient.invalidateQueries({
         predicate: (query) => query.queryKey[0] !== "auth",
       });
@@ -221,6 +231,7 @@ function AuthSection() {
       setNotice(t("settings.account.signedIn"));
       setToken("");
       setIssuedToken(null);
+      void queryClient.invalidateQueries({ queryKey: ["auth", "token"] });
       void queryClient.invalidateQueries({
         predicate: (query) => query.queryKey[0] !== "auth",
       });
@@ -230,16 +241,27 @@ function AuthSection() {
     mutationFn: api.auth.logout,
     onSuccess: () => {
       setNotice(t("settings.account.signedOut"));
-      void queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "auth" });
+      // Keep the explicit logout decision across the reload. AuthGate's bootstrap
+      // endpoint is intentionally public for first-run development and would
+      // otherwise mint a new Bootstrap identity immediately after clearing this
+      // cookie, making logout appear to succeed while leaving access unchanged.
+      window.sessionStorage.setItem("sylph:signed-out", "1");
+      void queryClient.clear();
       window.location.reload();
     },
   });
   const error = register.error ?? login.error ?? logout.error;
+  const subjectId = auth.data?.subjectId;
 
   return (
     <section className="space-y-2 border-b border-line pb-4" aria-labelledby="settings-auth">
       <h3 id="settings-auth" className="text-sm font-semibold">{t("settings.account.heading")}</h3>
       <p className="text-xs text-ink-muted">{t("settings.account.description")}</p>
+      {subjectId && (
+        <p className="rounded border border-line bg-sunken px-2 py-1 text-xs text-ink-soft">
+          {t("settings.account.currentSubject")} <code className="font-mono">{subjectId}</code>
+        </p>
+      )}
       <div className="flex gap-2">
         <input
           value={name}

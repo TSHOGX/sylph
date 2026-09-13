@@ -415,7 +415,6 @@ resolves a remote path.
 ## What is deliberately not built
 
 - Session migration between environments. Forking is the answer.
-- Multi-user authentication and per-user visibility.
 - Horizontal scale-out. The authority is SQLite and a link is stateful in one process, so
   growth is **shard by session and route**, not stateless replicas. Anything else means
   moving to Postgres. Worth knowing now because it decides which of the two happens later;

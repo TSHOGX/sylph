@@ -794,6 +794,18 @@ impl HistoryStore {
     /// query is orders of magnitude slower than every other operation here, and owning the
     /// store makes FTS5 work no cheaper.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        self.search_page(query, limit, 0).await
+    }
+
+    /// Search one ranked page. `offset` is exposed so the API can skip hits from
+    /// environments the caller cannot observe while still filling the requested
+    /// page; applying authorization after a fixed FTS `LIMIT` silently loses rows.
+    pub async fn search_page(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<SearchHit>> {
         // **A user's query is not an FTS5 query**, so it is quoted into a phrase by
         // [`fts5_phrase`] rather than passed through. Binding it as a parameter is not
         // enough on its own: the value still reaches FTS5's *expression* parser, which
@@ -821,10 +833,11 @@ impl HistoryStore {
                ) AS ranked
               WHERE ranked.position = 1
               ORDER BY ranked.score
-              LIMIT ?",
+              LIMIT ? OFFSET ?",
         )
         .bind(fts5_phrase(query))
         .bind(limit as i64)
+        .bind(offset as i64)
         .fetch_all(&self.pool)
         .await?;
 

@@ -66,12 +66,13 @@ pub struct WorkspacesResponse {
 // cannot drift into different spellings.
 pub use sylph_protocol::QUICK_START_SENTINEL;
 
-/// How many sessions to aggregate over.
-///
-/// Higher than the session-list default because this endpoint reports counts:
-/// a truncated scan would understate a busy workspace, and an understated count
-/// is worse than a slow one. The journal is local SQLite, so the scan is cheap.
-const AGGREGATE_LIMIT: i64 = 2000;
+/// Aggregate over every authorized session. Counts are part of the workspace
+/// contract, so a finite page would make a busy directory report a plausible
+/// but wrong total.
+// SQLite's `LIMIT -1` means no limit. Workspace counts are an aggregate over
+// the complete authorized journal; any finite cap would undercount a busy
+// workspace even when authorization is applied in SQL.
+const AGGREGATE_LIMIT: i64 = -1;
 
 /// GET /api/v1/workspaces
 ///
@@ -121,18 +122,11 @@ pub async fn list(
 
     let filter = SessionFilter {
         limit: AGGREGATE_LIMIT,
+        capability_subject: Some(subject.0.clone()),
+        capability: Some("observe".to_string()),
         ..SessionFilter::default()
     };
-    let mut sessions = Vec::new();
-    for session in state.store.list_sessions(&filter).await? {
-        if state
-            .store
-            .has_capability(&subject.0, session.id.environment.as_str(), "observe")
-            .await?
-        {
-            sessions.push(session);
-        }
-    }
+    let sessions = state.store.list_sessions(&filter).await?;
 
     // Insertion-ordered accumulation, then sorted once. A BTreeMap would order
     // by path, but the sidebar wants recency, so the sort happens at the end.
