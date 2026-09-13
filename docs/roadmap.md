@@ -21,7 +21,7 @@ re-adopting is the ordinary answer to a schema change.
 
 ## What remains
 
-Two boundaries are specified in `docs/` and not yet true in code. They are the difference
+The boundaries below are specified in `docs/` and not yet true in code. They are the difference
 between reading a spec and reading the source. Each is a milestone below rather than a
 separate list, since a boundary restated in two places drifts in one of them.
 
@@ -38,6 +38,8 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
+| Lossless native records, complete sidecars, and independent event clocks | Milestone 4 | Implementation and integrity verification in progress |
+| Bounded timeline bodies and retained-record re-projection | Milestone 4 | Implementation in progress |
 
 ## Milestone 1 — the envagent is the only path — complete
 
@@ -144,19 +146,16 @@ Claude, Codex, and Pi now emit lossless `NativeRecord` values before projection.
 confirmation for ordinary blocks remains conservative when no native-record correspondence
 exists, so those blocks are retained until a durable correspondence is available.
 
-On-demand re-projection of one held session is in place — `POST /sessions/{id}/reread`,
+On-demand native refresh of one held session is in place — `POST /sessions/{id}/reread`,
 reached by the sidebar's refresh entry
 (`docs/environments.md` § Re-reading a session Sylph already holds). Two open items carry
 forward from it:
 
-- **Whether a re-read of a `stream` record duplicates its transcript is unverified.** A
-  native store never holds `stream` fidelity, so such a pass can only append at a coarser
-  granularity, and whether content identity recognizes the live-ingested rows depends on
-  each adapter deriving the same `stream_id` and vendor stamp from its own store. The
-  client does not offer the action for those records, on the narrower ground that it cannot
-  improve them; the endpoint does not refuse it, because refusing would encode the
-  unverified hazard as a contract. Verifying it needs one real session per agent, live and
-  then re-read.
+- **Live and native projection identities differ.** Pi uses process-local block ids live
+  and native entry ids on disk; vendor timestamps and payload shapes also differ across
+  live and native paths. Native refresh must retain raw additions without appending a
+  second projection over a stream record. Re-projection from retained raw is a separate
+  operation, with an explicit source policy and no dependency on the vendor's files.
 - **A pass that ingests nothing is distinguishable from a failed click.** The endpoint
   reports what it examined, added, and already held, and the shell now owns the reread
   mutation state outside the sidebar's context menu. It renders pending, success with

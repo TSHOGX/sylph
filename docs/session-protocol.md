@@ -457,6 +457,12 @@ Durations are exact only when both endpoints are in one domain: arrival start/en
 live stream, or recorded start/end for native history. Missing recorded endpoints mean
 the duration is unknown, not zero.
 
+Consolidated events carry `startedArrivalAtMs` and, only when the source supplied it,
+`startedRecordedAtMs`. Each anchor belongs to the clock named in its field. A missing
+recorded opening is not filled from receipt time, even when a later phase has a recorded
+close. Live vendor notifications that carry a timestamp retain it as `recordedAtMs` too;
+an item's own timestamp takes precedence over the timestamp of the envelope writing it.
+
 **A pointer, never nesting.** A child's events cannot arrive *nested inside* the parent
 event: an envelope must be closed before it is sent, and a trajectory streams for
 minutes. It also contradicts the journal, where an event is a row — a nested payload

@@ -163,6 +163,10 @@ blake3 rather than SHA-256 for throughput on the hot path, and because collision
 resistance is the only cryptographic property needed — this is a content index, not a
 trust boundary. Content is never executed or trusted on the basis of its hash.
 
+Publication syncs the object bytes before renaming and syncs the containing directory
+chain before returning. Both reads and deduplicated writes verify the content hash;
+an existing filename alone is not evidence that its object is intact.
+
 ## Blocks, and the three time axes
 
 A block is one consolidated event: its `completed` sequence number, turn, kind, phase,
@@ -179,29 +183,36 @@ The uncompressed length is stored even when the text is externalized, so a timel
 lay out and truncate without touching CAS. Fetching a 200 KB blob to learn it is large is
 the read amplification that makes a list view slow.
 
-`seq` is the sole replay and ordering axis. Three time fields answer three different
-questions:
+Text and JSON metadata each record their own encoding and uncompressed length. Their
+sizes are independent: a short tool-result label can accompany compressed or externalized
+metadata. Decoding follows those recorded encodings, and corrupt metadata fails the read
+rather than disappearing from an otherwise plausible block.
+
+`seq` is the sole replay and ordering axis. Clock domains remain explicit:
 
 | Field | Whose clock | What it means |
 | --- | --- | --- |
 | `arrival_at_ms` | the server's | when the event was received |
 | `recorded_at_ms` | the vendor's | when the vendor says it happened, when it says |
-| `started_at_ms` | derived | the block's first delta, or the event itself |
+| `started_arrival_at_ms` | the server's | receipt of the block's opening phase |
+| `started_recorded_at_ms` | the vendor's | the recorded opening, absent when unknown |
 
-`started_at_ms` is what makes timing replayable — a block's deltas are offsets from its
-start, and without the start they are relative to nothing. It is paired with
-`recorded_at_ms` when the source supplied a recorded close, and with `arrival_at_ms` for a
-stream record, so **a native source with no recorded close cannot claim a duration merely
-because its row has an arrival timestamp.**
+Replay timing uses receipt timestamps. A native duration requires both recorded endpoints;
+neither missing endpoint is filled from the server clock. A stream duration uses both
+arrival endpoints. There is no combined effective event timestamp.
 
 ### Native records are kept whole
 
 Ingest persists each vendor record before projecting later messages: the parsed JSON, and
 for JSONL sources the original line bytes. The parsed value drives projection; the raw
 bytes preserve lexical detail a JSON value cannot represent — key order, duplicate keys,
-whitespace, escape spelling. Large sidecar payloads are recorded as validated locators and
-fetched into CAS only when a caller asks for the body, so ingest never blocks on an eager
-full-file read.
+whitespace, escape spelling. The owning envagent resolves sidecar locators and transfers
+their bytes in bounded, durable producer chunks before the referencing native record.
+The server stages each chunk before acknowledging it and retains the complete body in CAS
+before acknowledging the record. A server never opens an envagent's source path.
+Sidecar bodies stay outside timeline payloads; retaining one does not require a client to
+open it before the vendor removes its copy. Missing, unreadable, or oversized sources
+remain explicit errors on the retained reference.
 
 Native records are a separate table from projected blocks for two reasons: re-projection
 needs fields the current adapter ignores, and raw records are never safe to prune against
@@ -467,3 +478,8 @@ takes, including the one where a backed session is left untouched because its en
 is unreachable — otherwise the byte report would be empty on exactly the install whose
 growth is unbounded. A watermark records what an authority confirmed; bytes held are a
 local fact needing no authority, hence a separate table.
+
+Measurements include uncompressed block text and metadata, original native-record bytes,
+retained native sidecar bodies, and staged sidecar chunk bytes. An unreadable reference
+contributes no body bytes: its reported source size is not data the server holds. Sessions
+holding only raw records or staged sidecars still participate in the accounting pass.

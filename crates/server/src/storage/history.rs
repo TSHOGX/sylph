@@ -38,10 +38,18 @@ use sylph_protocol::NativeRecord;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeBlobState {
     Available(Vec<u8>),
-    Deferred { size: u64, locator: String },
     Unreadable { size: u64, error: String },
     Missing,
 }
+
+// One measurement definition serves both the live query and the recorded baseline.
+// Unavailable references describe source bytes, not retained body bytes.
+const SESSION_BYTES_SQL: &str = "SELECT
+    COALESCE((SELECT SUM(text_len + data_len) FROM blocks WHERE session_id = ?1), 0)
+    + COALESCE((SELECT SUM(length(payload_json)) FROM native_records WHERE session_id = ?1), 0)
+    + COALESCE((SELECT SUM(size) FROM native_blobs WHERE session_id = ?1 AND hash IS NOT NULL), 0)
+    + COALESCE((SELECT SUM(length(data)) FROM native_blob_chunks WHERE session_id = ?1), 0) AS bytes,
+    (SELECT COUNT(*) FROM blocks WHERE session_id = ?1) AS blocks";
 
 /// One block as stored: a completed event plus how it streamed.
 #[derive(Debug, Clone)]
@@ -337,10 +345,7 @@ impl HistoryStore {
                 blob.locator.is_none(),
                 "native sidecar locators must be resolved by the owning envagent"
             );
-            anyhow::ensure!(
-                blob.size <= MAX_NATIVE_BLOB_BYTES,
-                "native blob exceeds size limit"
-            );
+            i64::try_from(blob.size).context("native blob size exceeds storage range")?;
             let hash = if blob.error.is_some() {
                 anyhow::ensure!(
                     blob.bytes.is_none(),
@@ -348,6 +353,10 @@ impl HistoryStore {
                 );
                 None
             } else {
+                anyhow::ensure!(
+                    blob.size <= MAX_NATIVE_BLOB_BYTES,
+                    "native blob exceeds size limit"
+                );
                 let bytes = match &blob.bytes {
                     Some(bytes) => bytes.clone(),
                     None => {
@@ -533,7 +542,7 @@ impl HistoryStore {
         name: &str,
     ) -> Result<NativeBlobState> {
         let row = sqlx::query(
-            "SELECT hash, locator, size, error FROM native_blobs
+            "SELECT hash, size, error FROM native_blobs
              WHERE session_id = ? AND source = ? AND version = ? AND name = ?",
         )
         .bind(session_id)
@@ -546,7 +555,6 @@ impl HistoryStore {
             return Ok(NativeBlobState::Missing);
         };
         let hash: Option<String> = row.try_get("hash")?;
-        let locator: Option<String> = row.try_get("locator")?;
         let size: u64 = row.try_get::<i64, _>("size")?.max(0) as u64;
         let error: Option<String> = row.try_get("error")?;
         if let Some(error) = error {
@@ -557,10 +565,7 @@ impl HistoryStore {
                 Some(bytes) => Ok(NativeBlobState::Available(bytes)),
                 None => Ok(NativeBlobState::Missing),
             },
-            None => match locator {
-                Some(locator) => Ok(NativeBlobState::Deferred { size, locator }),
-                None => Ok(NativeBlobState::Missing),
-            },
+            None => Ok(NativeBlobState::Missing),
         }
     }
 
@@ -579,25 +584,28 @@ impl HistoryStore {
         let mut payloads = Vec::with_capacity(blocks.len());
         for block in blocks {
             let text = cas::store_text(&self.blobs, &block.text).await?;
-            let data = match &block.data {
+            let (data, data_len) = match &block.data {
                 Some(value) if !value.is_null() => {
                     let rendered = value.to_string();
-                    Some(cas::store_text(&self.blobs, &rendered).await?)
+                    (
+                        Some(cas::store_text(&self.blobs, &rendered).await?),
+                        rendered.len(),
+                    )
                 }
-                _ => None,
+                _ => (None, 0),
             };
-            payloads.push((text, data));
+            payloads.push((text, data, data_len));
         }
 
         let mut tx = self.pool.begin().await?;
 
-        for (block, (text, data)) in blocks.iter().zip(&payloads) {
+        for (block, (text, data, data_len)) in blocks.iter().zip(&payloads) {
             // A late agent outcome may have reconciled this block while a
             // previously scheduled consolidation was still writing. Preserve
             // the reconciled record instead of allowing that stale snapshot to
             // resurrect the server's provisional `abandoned` close.
             let already_reconciled: Option<bool> = sqlx::query_scalar(
-                "SELECT json_extract(data_json, '$.reconciled') FROM blocks WHERE session_id = ? AND seq = ?",
+                "SELECT reconciled FROM blocks WHERE session_id = ? AND seq = ?",
             )
             .bind(&block.session_id)
             .bind(block.seq)
@@ -624,10 +632,11 @@ impl HistoryStore {
                     session_id, seq, turn_id, kind, phase, stream_id, span, interior_state, name,
                     text_inline, text_hash, text_len, text_encoding,
                     delta_offsets, delta_timings,
-                    data_json, data_hash, is_error, source, arrival_at_ms, recorded_at_ms,
+                    data_json, data_hash, data_len, data_encoding, reconciled,
+                    is_error, source, arrival_at_ms, recorded_at_ms,
                     started_at_ms, created_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&block.session_id)
@@ -647,6 +656,9 @@ impl HistoryStore {
             .bind(block.folded.as_ref().map(|f| fold::pack(&f.timings)))
             .bind(data_inline)
             .bind(&data_hash)
+            .bind(*data_len as i64)
+            .bind(data.as_ref().map_or("raw", Payload::encoding))
+            .bind(block.data.as_ref().and_then(|value| value.get("reconciled")).and_then(serde_json::Value::as_bool).unwrap_or(false))
             .bind(block.is_error)
             .bind(&block.source)
             .bind(block.arrival_at_ms)
@@ -759,43 +771,41 @@ impl HistoryStore {
         let hash: Option<String> = row.try_get("text_hash")?;
 
         let payload = match (encoding.as_str(), inline, hash) {
-            ("external", _, Some(hash)) => Payload::External { hash },
-            ("zstd", Some(bytes), _) => Payload::Zstd(bytes),
-            (_, Some(bytes), _) => Payload::Raw(bytes),
-            // A row with neither is a block whose text was legitimately empty.
-            _ => Payload::Raw(Vec::new()),
+            ("external", None, Some(hash)) => Payload::External { hash },
+            ("zstd", Some(bytes), None) => Payload::Zstd(bytes),
+            ("raw", Some(bytes), None) => Payload::Raw(bytes),
+            _ => anyhow::bail!("stored block text has an invalid encoding or body"),
         };
         let text = cas::load_text(&self.blobs, &payload).await?;
+        anyhow::ensure!(
+            text.len() as i64 == row.try_get::<i64, _>("text_len")?,
+            "stored block text length mismatch"
+        );
 
-        let data_encoding: Option<String> = row.try_get("text_encoding").ok();
+        let data_encoding: String = row.try_get("data_encoding")?;
         let data_inline: Option<Vec<u8>> = row.try_get("data_json")?;
         let data_hash: Option<String> = row.try_get("data_hash")?;
-        let data = match (data_inline, data_hash) {
-            (_, Some(hash)) => {
-                let rendered = cas::load_text(&self.blobs, &Payload::External { hash }).await?;
-                serde_json::from_str(&rendered).ok()
+        let data_len: i64 = row.try_get("data_len")?;
+        let data_payload = match (data_encoding.as_str(), data_inline, data_hash) {
+            ("external", None, Some(hash)) => Some(Payload::External { hash }),
+            ("zstd", Some(bytes), None) => Some(Payload::Zstd(bytes)),
+            ("raw", Some(bytes), None) => Some(Payload::Raw(bytes)),
+            ("raw", None, None) if data_len == 0 => None,
+            _ => anyhow::bail!("stored block metadata has an invalid encoding or body"),
+        };
+        let data = match data_payload {
+            Some(payload) => {
+                let rendered = cas::load_text(&self.blobs, &payload).await?;
+                anyhow::ensure!(
+                    rendered.len() as i64 == data_len,
+                    "stored block metadata length mismatch"
+                );
+                Some(
+                    serde_json::from_str(&rendered)
+                        .context("stored block metadata is not valid JSON")?,
+                )
             }
-            (Some(bytes), None) => {
-                // Data uses the same encoding decision as text, so a compressed
-                // payload has to be tried both ways: a short JSON object stays
-                // raw while a large one is compressed.
-                // Data follows the same encoding decision as text, so a
-                // compressed payload has to be tried both ways: a short JSON
-                // object stays raw while a large one is compressed. A failed
-                // decompress falls back to raw rather than failing the read — a
-                // block whose metadata will not decode is still worth showing.
-                let rendered = match data_encoding.as_deref() {
-                    Some("zstd") => {
-                        match cas::load_text(&self.blobs, &Payload::Zstd(bytes.clone())).await {
-                            Ok(text) => text,
-                            Err(_) => String::from_utf8_lossy(&bytes).into_owned(),
-                        }
-                    }
-                    _ => String::from_utf8_lossy(&bytes).into_owned(),
-                };
-                serde_json::from_str(&rendered).ok()
-            }
-            (None, None) => None,
+            None => None,
         };
 
         let offsets: Option<Vec<u8>> = row.try_get("delta_offsets")?;
@@ -1263,23 +1273,20 @@ impl HistoryStore {
     ///   share is not well-defined. Logical bytes are honestly per session: this
     ///   session's record does contain that text.
     ///
-    /// `data_json` is measured as stored, because it has no `_len` companion and
-    /// is small by construction — anything over 4 KB was externalized.
+    /// Metadata uses its own uncompressed length. Native lexical records, retained
+    /// sidecars, and staged chunks contribute their body bytes. An unreadable reference's
+    /// source size contributes nothing because the server does not hold that body.
     ///
     /// The consequence to hold onto: the sum over sessions is the size of the
     /// *record*, and the store on disk is smaller. This measure answers "which
     /// session is growing", not "what is my disk doing" — `du` answers that, and
     /// answers it exactly.
     pub async fn measure_session_bytes(&self, session_id: &str) -> Result<(i64, i64)> {
-        let row = sqlx::query(
-            "SELECT COALESCE(SUM(text_len), 0) + COALESCE(SUM(LENGTH(data_json)), 0) AS bytes,
-                    COUNT(*) AS blocks
-               FROM blocks WHERE session_id = ?",
-        )
-        .bind(session_id)
-        .fetch_one(&self.pool)
-        .await
-        .context("Could not measure a session's held bytes")?;
+        let row = sqlx::query(SESSION_BYTES_SQL)
+            .bind(session_id)
+            .fetch_one(&self.pool)
+            .await
+            .context("Could not measure a session's held bytes")?;
 
         Ok((row.get::<i64, _>("bytes"), row.get::<i64, _>("blocks")))
     }
@@ -1310,15 +1317,11 @@ impl HistoryStore {
         session_id: &str,
     ) -> Result<(SessionBytes, i64)> {
         let mut tx = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT COALESCE(SUM(text_len), 0) + COALESCE(SUM(LENGTH(data_json)), 0) AS bytes,
-                    COUNT(*) AS blocks
-               FROM blocks WHERE session_id = ?",
-        )
-        .bind(session_id)
-        .fetch_one(&mut *tx)
-        .await
-        .context("Could not measure a session's held bytes")?;
+        let row = sqlx::query(SESSION_BYTES_SQL)
+            .bind(session_id)
+            .fetch_one(&mut *tx)
+            .await
+            .context("Could not measure a session's held bytes")?;
         let bytes = row.get::<i64, _>("bytes");
         let blocks = row.get::<i64, _>("blocks");
         let now = now_ms();
@@ -1416,7 +1419,7 @@ impl HistoryStore {
         Ok((row.get::<i64, _>("bytes"), row.get::<i64, _>("sessions")))
     }
 
-    /// Sessions holding blocks, least-recently-checked first.
+    /// Sessions holding history or raw bytes, least-recently-checked first.
     ///
     /// Ordered by the last pass rather than by id, so a bounded batch rotates
     /// through every session instead of re-examining the same alphabetical prefix
@@ -1424,15 +1427,14 @@ impl HistoryStore {
     /// is what makes a fresh install converge on the whole set rather than starving
     /// whatever happens to sort late.
     ///
-    /// Only sessions with blocks appear: a session whose history is already empty
-    /// has nothing to prune, so spending a `show` round trip on it would be pure
-    /// cost. This is also why the batch is drawn from `blocks` rather than from the
-    /// journal's session list — the work is proportional to what history holds, not
-    /// to how many sessions exist.
+    /// Raw-only sessions participate because retaining every raw byte is normal and
+    /// their growth must still be reported. Empty sessions need no accounting pass.
     pub async fn sessions_awaiting_retention(&self, limit: i64) -> Result<Vec<String>> {
         sqlx::query_scalar::<_, String>(
             "SELECT b.session_id FROM (
-               SELECT DISTINCT session_id FROM blocks
+               SELECT session_id FROM blocks
+               UNION SELECT session_id FROM native_records
+               UNION SELECT session_id FROM native_blob_chunks
              ) b
              LEFT JOIN session_bytes sb ON sb.session_id = b.session_id
              ORDER BY sb.measured_at_ms IS NOT NULL, sb.measured_at_ms, b.session_id

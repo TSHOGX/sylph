@@ -56,6 +56,10 @@ CREATE TABLE blocks (
 
   data_json    BLOB,
   data_hash    TEXT,
+  data_len     INTEGER NOT NULL DEFAULT 0,
+  data_encoding TEXT NOT NULL DEFAULT 'raw',
+  -- Stored separately because data_json can be compressed or externalized.
+  reconciled   INTEGER NOT NULL DEFAULT 0,
 
   is_error     INTEGER NOT NULL DEFAULT 0,
   source       TEXT NOT NULL DEFAULT 'agent',
@@ -195,13 +199,22 @@ CREATE TABLE native_blobs (
   hash       TEXT,
   size       INTEGER NOT NULL,
   error      TEXT,
-  -- Where a large native sidecar was left, retained as a deferred resource. Opaque to
-  -- the server on purpose: an envagent may hand back a machine-local handle rather
-  -- than a path, and neither shape may change the native record key above.
-  locator    TEXT,
   PRIMARY KEY (session_id, source, version, name),
   FOREIGN KEY (session_id, source, version)
     REFERENCES native_records(session_id, source, version) ON DELETE CASCADE
+) WITHOUT ROWID;
+
+-- Bounded sidecar chunks staged by the envagent before the complete native record
+-- arrives. Chunks are retained durably and folded into CAS atomically with that record.
+CREATE TABLE native_blob_chunks (
+  session_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  offset INTEGER NOT NULL,
+  data BLOB NOT NULL,
+  PRIMARY KEY (session_id, source, version, name, offset)
 ) WITHOUT ROWID;
 
 CREATE INDEX native_records_by_session

@@ -41,6 +41,29 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 /// must be told it did not get it.
 pub const MAX_FILE_READ_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Native sidecars use bounded producer frames, separate from timeline events.
+pub const NATIVE_BLOB_CHUNK_BYTES: usize = 1024 * 1024;
+
+/// The largest sidecar the envagent may snapshot for raw retention.
+pub const MAX_NATIVE_BLOB_BYTES: u64 = 256 * 1024 * 1024;
+
+/// One ordered piece of a native sidecar, spooled before its referencing record.
+///
+/// The server retains chunks durably before acknowledging them, then commits the
+/// complete body to CAS before acknowledging the native record. `data` is base64,
+/// keeping the wire expansion bounded without putting bytes in timeline events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeBlobChunk {
+    pub source: String,
+    pub version: u64,
+    pub name: String,
+    pub size: u64,
+    pub offset: u64,
+    pub data: String,
+    pub final_chunk: bool,
+}
+
 /// A protocol version offered by one side of a connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -960,6 +983,13 @@ pub enum WireMessage {
         producer_seq: ProducerSeq,
         connection_epoch: u64,
     },
+    NativeBlobChunk {
+        session_id: SessionId,
+        chunk: NativeBlobChunk,
+        producer_id: ProducerId,
+        producer_seq: ProducerSeq,
+        connection_epoch: u64,
+    },
     Diagnostic {
         level: DiagnosticLevel,
         code: String,
@@ -992,6 +1022,7 @@ impl WireMessage {
             Self::Edge { .. } => "edge",
             Self::Request { .. } => "request",
             Self::NativeRecord { .. } => "native_record",
+            Self::NativeBlobChunk { .. } => "native_blob_chunk",
             Self::Diagnostic { .. } => "diagnostic",
         }
     }
@@ -1289,6 +1320,7 @@ mod tests {
             "edge",
             "request",
             "nativeRecord",
+            "nativeBlobChunk",
             "diagnostic",
         ]
         .into_iter()

@@ -322,10 +322,9 @@ pub struct NativeBlob {
     /// CAS before committing the native record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<Vec<u8>>,
-    /// Opaque source locator for a large sidecar. The preview remains in the native payload;
-    /// a resource fetcher may resolve this later without putting the full body on the event
-    /// stream. It is intentionally optional because a remote envagent can replace it with a
-    /// handle that has meaning only on that machine.
+    /// Opaque source locator for a large sidecar. The owning envagent acquires the bytes
+    /// before sending the record, then removes this locator; the server must never open it.
+    /// Large bodies travel in bounded producer chunks, separate from timeline events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locator: Option<String>,
     /// Present when the sidecar could not be read; this is explicit state, not an absent

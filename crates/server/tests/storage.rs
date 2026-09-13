@@ -284,6 +284,197 @@ async fn a_retained_native_blob_cannot_be_replaced_by_a_new_body_or_error() {
     );
 }
 
+#[tokio::test]
+async fn block_metadata_round_trips_independently_of_text_encoding() {
+    let (history, _dir) = history_store().await;
+    for (seq, (text, metadata)) in [
+        ("short".to_string(), "metadata".repeat(120)),
+        ("text".repeat(250), "small".to_string()),
+        ("text".repeat(1500), "metadata".repeat(120)),
+        ("short".to_string(), "metadata".repeat(1000)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut source = event(
+            seq as i32,
+            "tool_result",
+            Some("completed"),
+            None,
+            &text,
+            10,
+        );
+        source.data_json = serde_json::json!({"output": metadata}).to_string();
+        let blocks = history::consolidate(&[source]);
+        history.put_blocks(&blocks).await.unwrap();
+        let stored = history
+            .blocks(&session_id().encode(), seq as i32 - 1)
+            .await
+            .unwrap();
+        assert_eq!(stored[0].data, blocks[0].data);
+        assert_eq!(stored[0].text, text);
+        history.put_blocks(&blocks).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn reconciled_metadata_survives_stale_writes_in_every_storage_form() {
+    let (history, _dir) = history_store().await;
+    for (seq, padding) in [0, 1000, 6000].into_iter().enumerate() {
+        let mut source = event(
+            seq as i32,
+            "subagent",
+            Some("completed"),
+            None,
+            "real outcome",
+            10,
+        );
+        source.data_json =
+            serde_json::json!({"reconciled": true, "detail": "x".repeat(padding)}).to_string();
+        let blocks = history::consolidate(&[source]);
+        history.put_blocks(&blocks).await.unwrap();
+        let mut stale = blocks[0].clone();
+        stale.text = "stale outcome".to_string();
+        stale.data = Some(serde_json::json!({"status": "abandoned"}));
+        history.put_blocks(&[stale]).await.unwrap();
+        let stored = history
+            .blocks(&session_id().encode(), seq as i32 - 1)
+            .await
+            .unwrap();
+        assert_eq!(stored[0].text, "real outcome");
+        assert_eq!(stored[0].data, blocks[0].data);
+    }
+}
+
+#[tokio::test]
+async fn an_oversized_sidecar_retains_its_error_and_real_size() {
+    let (history, _dir) = history_store().await;
+    let size = sylph_protocol::MAX_NATIVE_BLOB_BYTES + 1;
+    let record = NativeRecord {
+        source: "root.jsonl".to_string(),
+        version: 1,
+        raw_json: None,
+        payload: serde_json::json!({"type": "tool_result"}),
+        blobs: vec![NativeBlob {
+            name: "output".to_string(),
+            size,
+            bytes: None,
+            locator: None,
+            error: Some("sidecar exceeds snapshot limit".to_string()),
+        }],
+    };
+    let id = session_id().encode();
+    history.put_native_record(&id, &record).await.unwrap();
+    assert_eq!(
+        history
+            .native_blob(&id, "root.jsonl", 1, "output")
+            .await
+            .unwrap(),
+        NativeBlobState::Unreadable {
+            size,
+            error: "sidecar exceeds snapshot limit".to_string()
+        }
+    );
+}
+
+#[tokio::test]
+async fn growth_counts_raw_records_sidecars_staged_chunks_and_uncompressed_metadata() {
+    let (history, _dir) = history_store().await;
+    let id = session_id().encode();
+    let raw = br#"{ "type": "tool_result", "extra": 42 }"#.to_vec();
+    let record = NativeRecord {
+        source: "root.jsonl".to_string(),
+        version: 1,
+        raw_json: Some(raw.clone()),
+        payload: serde_json::from_slice(&raw).unwrap(),
+        blobs: vec![
+            NativeBlob {
+                name: "output".to_string(),
+                size: 4,
+                bytes: Some(b"body".to_vec()),
+                locator: None,
+                error: None,
+            },
+            NativeBlob {
+                name: "unavailable".to_string(),
+                size: 999,
+                bytes: None,
+                locator: None,
+                error: Some("missing".to_string()),
+            },
+        ],
+    };
+    history.put_native_record(&id, &record).await.unwrap();
+    let initial = (raw.len() + 4) as i64;
+    assert_eq!(
+        history.measure_session_bytes(&id).await.unwrap(),
+        (initial, 0)
+    );
+    assert_eq!(
+        history.sessions_awaiting_retention(10).await.unwrap(),
+        vec![id.clone()]
+    );
+    assert_eq!(
+        history.record_session_bytes(&id).await.unwrap().bytes,
+        initial
+    );
+
+    let chunk = NativeBlobChunk {
+        source: "root.jsonl".to_string(),
+        version: 2,
+        name: "pending".to_string(),
+        size: 8,
+        offset: 0,
+        data: base64::engine::general_purpose::STANDARD.encode(b"part"),
+        final_chunk: false,
+    };
+    history.put_native_blob_chunk(&id, &chunk).await.unwrap();
+    let mut source = event(0, "tool_result", Some("completed"), None, "short", 10);
+    source.data_json = serde_json::json!({"output": "x".repeat(6000)}).to_string();
+    let expected = initial + 4 + source.text.len() as i64 + source.data_json.len() as i64;
+    history
+        .put_blocks(&history::consolidate(&[source]))
+        .await
+        .unwrap();
+    assert_eq!(
+        history.measure_session_bytes(&id).await.unwrap(),
+        (expected, 1)
+    );
+    let (measurement, delta) = history
+        .record_session_bytes_with_pass_delta(&id)
+        .await
+        .unwrap();
+    assert_eq!(measurement.bytes, expected);
+    assert_eq!(measurement.grew_by, Some(expected - initial));
+    assert_eq!(delta, expected - initial);
+}
+
+#[tokio::test]
+async fn a_session_with_only_staged_sidecar_bytes_is_measured() {
+    let (history, _dir) = history_store().await;
+    let id = session_id().encode();
+    history
+        .put_native_blob_chunk(
+            &id,
+            &NativeBlobChunk {
+                source: "root.jsonl".to_string(),
+                version: 1,
+                name: "pending".to_string(),
+                size: 4,
+                offset: 0,
+                data: base64::engine::general_purpose::STANDARD.encode(b"body"),
+                final_chunk: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(history.measure_session_bytes(&id).await.unwrap(), (4, 0));
+    assert_eq!(
+        history.sessions_awaiting_retention(10).await.unwrap(),
+        vec![id]
+    );
+}
+
 /// The session these fixtures hang off.
 ///
 /// A `SessionId` cannot be built from a bare string — it goes through the protocol's own

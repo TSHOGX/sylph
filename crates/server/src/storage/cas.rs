@@ -46,8 +46,11 @@ impl BlobStore {
     /// Where a hash lives. Two levels of two hex characters, so a store holding a
     /// million objects has ~256 directories of ~4000 rather than one of a million
     /// — which is where `readdir` and some filesystems degrade badly.
-    fn path_for(&self, hash: &str) -> PathBuf {
-        self.root.join(&hash[0..2]).join(&hash[2..4]).join(hash)
+    fn path_for(&self, hash: &str) -> Result<PathBuf> {
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            anyhow::bail!("invalid blob hash: {hash}");
+        }
+        Ok(self.root.join(&hash[0..2]).join(&hash[2..4]).join(hash))
     }
 
     /// Store bytes and return their hash.
@@ -57,9 +60,16 @@ impl BlobStore {
     /// is what makes storing a file an agent reads repeatedly nearly free.
     pub async fn put(&self, bytes: &[u8]) -> Result<String> {
         let hash = blake3::hash(bytes).to_hex().to_string();
-        let path = self.path_for(&hash);
+        let path = self.path_for(&hash)?;
 
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            let existing = tokio::fs::read(&path)
+                .await
+                .with_context(|| format!("Could not verify existing blob {:?}", path))?;
+            if blake3::hash(&existing).to_hex().as_str() != hash {
+                anyhow::bail!("blob hash mismatch for {:?}", path);
+            }
+            sync_parent_directories(&path).await?;
             return Ok(hash);
         }
 
@@ -70,31 +80,62 @@ impl BlobStore {
             .await
             .with_context(|| format!("Could not create {:?}", parent))?;
 
-        // Written to a temporary name and renamed, so a crash mid-write cannot
-        // leave a truncated file *at the hash of its full content* — which would
-        // then be trusted forever, since `put` short-circuits on existence and
-        // nothing re-verifies.
-        let temporary = parent.join(format!("{}.partial", hash));
-        let mut file = tokio::fs::File::create(&temporary)
+        // Every writer owns its temporary file. Sharing one name lets a later
+        // writer truncate the inode an earlier writer is about to publish.
+        let temporary = parent.join(format!("{}.{}.partial", hash, uuid::Uuid::new_v4()));
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
             .await
             .with_context(|| format!("Could not create {:?}", temporary))?;
-        file.write_all(bytes).await?;
-        // Durable before the rename: a rename that lands before the data would
-        // survive a power loss as a valid-looking empty object.
-        file.sync_all().await?;
-        drop(file);
+        let result = async {
+            file.write_all(bytes).await?;
+            // Durable before the rename: a rename that lands before the data would
+            // survive a power loss as a valid-looking empty object.
+            file.sync_all().await?;
+            drop(file);
 
-        tokio::fs::rename(&temporary, &path)
-            .await
-            .with_context(|| format!("Could not publish {:?}", path))?;
+            match tokio::fs::rename(&temporary, &path).await {
+                Ok(()) => Ok(()),
+                // Another writer may have published the same hash while we were
+                // writing. Verify its complete object before treating this as
+                // successful deduplication.
+                Err(error) if tokio::fs::try_exists(&path).await.unwrap_or(false) => {
+                    let existing = tokio::fs::read(&path).await?;
+                    if blake3::hash(&existing).to_hex().as_str() == hash {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        }
+        .await;
+
+        // Best-effort cleanup on every path. A failed write must not leave a
+        // partial file that looks like a future object to diagnostics or sweeps.
+        if let Err(error) = tokio::fs::remove_file(&temporary).await {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error).with_context(|| format!("Could not clean up {:?}", temporary));
+            }
+        }
+        result.with_context(|| format!("Could not publish {:?}", path))?;
+        sync_parent_directories(&path).await?;
 
         Ok(hash)
     }
 
     /// Read an object back. `None` when it is absent.
     pub async fn get(&self, hash: &str) -> Result<Option<Vec<u8>>> {
-        match tokio::fs::read(self.path_for(hash)).await {
-            Ok(bytes) => Ok(Some(bytes)),
+        match tokio::fs::read(self.path_for(hash)?).await {
+            Ok(bytes) => {
+                if blake3::hash(&bytes).to_hex().as_str() != hash {
+                    anyhow::bail!("blob hash mismatch for {hash}");
+                }
+                Ok(Some(bytes))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error).context("Could not read a blob"),
         }
@@ -106,7 +147,7 @@ impl BlobStore {
     /// shared by a pruned block and a retained one must survive, and only the
     /// index knows that.
     pub async fn remove(&self, hash: &str) -> Result<()> {
-        match tokio::fs::remove_file(self.path_for(hash)).await {
+        match tokio::fs::remove_file(self.path_for(hash)?).await {
             Ok(()) => Ok(()),
             // Already gone is the desired end state, not a failure.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -117,6 +158,33 @@ impl BlobStore {
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+async fn sync_parent_directories(path: &Path) -> Result<()> {
+    // The object fsync protects its bytes; directory fsyncs protect the rename and
+    // newly-created shard paths. Repeat on dedup too: a concurrent writer may have
+    // published the object but not yet made its directory entries durable.
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("Could not resolve blob directory")?
+            .join(path)
+    };
+    tokio::task::spawn_blocking(move || {
+        for directory in path
+            .ancestors()
+            .skip(1)
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            std::fs::File::open(directory)
+                .and_then(|file| file.sync_all())
+                .with_context(|| format!("Could not sync blob directory {:?}", directory))?;
+        }
+        Ok(())
+    })
+    .await
+    .context("Blob directory sync task failed")?
 }
 
 /// How a block's text is stored.
@@ -209,6 +277,35 @@ mod tests {
         );
     }
 
+    /// Concurrent writers for one content hash must never corrupt the published
+    /// object or leave temporary files behind. This exercises the same race that
+    /// consolidation can hit when two turns externalize an identical payload.
+    #[tokio::test]
+    async fn concurrent_writes_of_one_hash_publish_one_intact_object() {
+        let (blobs, _dir) = store();
+        let bytes = vec![b'k'; EXTERNALIZE_THRESHOLD * 2];
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let blobs = blobs.clone();
+            let bytes = bytes.clone();
+            tasks.push(tokio::spawn(
+                async move { blobs.put(&bytes).await.unwrap() },
+            ));
+        }
+        let mut hashes = Vec::new();
+        for task in tasks {
+            hashes.push(task.await.unwrap());
+        }
+        assert!(hashes.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(
+            blobs.get(&hashes[0]).await.unwrap().as_deref(),
+            Some(bytes.as_slice())
+        );
+        assert!(walkdir(blobs.root())
+            .iter()
+            .all(|path| !path.to_string_lossy().contains("partial")));
+    }
+
     /// The dedup property, which is what makes an agent re-reading one file cheap.
     #[tokio::test]
     async fn identical_content_stores_once_under_one_hash() {
@@ -237,6 +334,25 @@ mod tests {
         let (blobs, _dir) = store();
         let absent = "0".repeat(64);
         assert!(blobs.get(&absent).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_tampered_blob_is_rejected_by_hash() {
+        let (blobs, _dir) = store();
+        let hash = blobs.put(b"original").await.unwrap();
+        let path = blobs.root().join(&hash[0..2]).join(&hash[2..4]).join(&hash);
+        tokio::fs::write(path, b"tampered").await.unwrap();
+        let error = blobs.get(&hash).await.unwrap_err();
+        assert!(format!("{error:#}").contains("hash mismatch"));
+    }
+
+    #[tokio::test]
+    async fn malformed_hashes_are_errors_instead_of_paths_or_panics() {
+        let (blobs, _dir) = store();
+        for hash in ["".to_string(), "a".repeat(63), "z".repeat(64)] {
+            assert!(blobs.get(&hash).await.is_err());
+            assert!(blobs.remove(&hash).await.is_err());
+        }
     }
 
     /// Removing an object that is already gone is the desired end state.
