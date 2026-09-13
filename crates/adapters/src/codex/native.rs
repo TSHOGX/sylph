@@ -2583,6 +2583,7 @@ mod tests {
     fn retained_record_reprojection_uses_payload_without_source_path() {
         let record = NativeRecord { source: "/does/not/exist".into(), version: 1, raw_json: None, payload: json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"m","content":[{"type":"Text","text":"ok"}]}}}), blobs: Vec::new() };
         let mut projector = RolloutProjector::default();
+        projector.apply(&json!({"type":"session_meta","payload":{"id":"reproject","history_mode":"paginated"}}));
         assert!(reproject_native_record(&mut projector, &record).iter().any(|message| matches!(message, SessionMessage::Event(event) if event.text == "ok")));
     }
 
