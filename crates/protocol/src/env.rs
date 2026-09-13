@@ -325,6 +325,12 @@ pub enum EnvironmentCommand {
         agent: String,
         native_id: NativeId,
     },
+    /// Re-project records already retained by the server; no vendor filesystem read occurs.
+    Reproject {
+        session_id: SessionId,
+        agent: String,
+        records: Vec<NativeRecord>,
+    },
     Files {
         session_id: SessionId,
         operation: FileOperation,
