@@ -1516,9 +1516,12 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                         remember_interior_state(&mut interiors, id.clone(), state);
                     }
                 }
+                // `started_at_ms` is the arrival-clock anchor published to clients.
+                // A vendor timestamp belongs to a different domain and cannot be
+                // mixed into a duration that ends on the server clock.
                 first_arrival
                     .entry(id.clone())
-                    .or_insert(event.recorded_at_ms.unwrap_or(event.arrival_at_ms));
+                    .or_insert(event.arrival_at_ms);
                 // A name given by an earlier phase is kept, because for some blocks
                 // that is the *only* phase that has it. A delegated trajectory is
                 // named on `started` — or renamed by the `delta` that carries its
@@ -1534,7 +1537,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 if !event.text.is_empty() {
                     pending.entry(id).or_default().push(Delta {
                         text: event.text.clone(),
-                        at_ms: event.recorded_at_ms.unwrap_or(event.arrival_at_ms),
+                        at_ms: event.arrival_at_ms,
                     });
                 }
             }
@@ -1564,7 +1567,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 let started_at_ms = stream_id
                     .as_ref()
                     .and_then(|id| first_arrival.remove(id))
-                    .unwrap_or(event.recorded_at_ms.unwrap_or(event.arrival_at_ms));
+                    .unwrap_or(event.arrival_at_ms);
 
                 // Resolved before the id is moved into the block below.
                 let name = event
@@ -1625,7 +1628,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
         let started_at_ms = first_arrival
             .get(&stream_id)
             .copied()
-            .unwrap_or(declaring.recorded_at_ms.unwrap_or(declaring.arrival_at_ms));
+            .unwrap_or(declaring.arrival_at_ms);
         let text: String = deltas.iter().map(|d| d.text.as_str()).collect();
         let folded = fold::fold(&deltas, &text, started_at_ms);
 
