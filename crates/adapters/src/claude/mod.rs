@@ -31,7 +31,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sylph_protocol::{
     Adapter, AgentInfo, Capability, EventStream, Facet, Fidelity, FlagSpec, LinkFacets, NativeId,
-    NativeSummary, RunSpec, Session, StoreFilter, UnavailableReason,
+    NativeRecord, NativeSummary, RunSpec, Session, StoreFilter, UnavailableReason,
 };
 
 pub use translate::{Correlation, Emission};
@@ -456,6 +456,16 @@ impl Adapter for ClaudeAdapter {
 
     async fn adopt(&self, id: &NativeId) -> Result<EventStream> {
         native::adopt(id)
+    }
+
+    async fn reproject(&self, records: Vec<NativeRecord>) -> Result<EventStream> {
+        let mut correlation = translate::Correlation::new();
+        let messages = records
+            .iter()
+            .flat_map(|record| native::reproject_native_record(&mut correlation, record))
+            .map(Ok)
+            .collect::<Vec<_>>();
+        Ok(Box::pin(futures::stream::iter(messages)))
     }
 
     async fn watch(&self, id: &NativeId) -> Result<EventStream> {

@@ -347,6 +347,10 @@ impl Adapter for E2eAdapter {
         ))
     }
 
+    async fn reproject(&self, _records: Vec<NativeRecord>) -> Result<EventStream> {
+        Err(anyhow!("the e2e agent has no native records to re-project"))
+    }
+
     async fn watch(&self, _id: &NativeId) -> Result<EventStream> {
         Err(anyhow!(
             "the e2e agent has no native store to watch: it is an in-process fixture, so \

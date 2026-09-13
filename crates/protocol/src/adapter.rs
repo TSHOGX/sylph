@@ -668,6 +668,12 @@ pub trait Adapter: Send + Sync {
     /// that was never written.
     async fn adopt(&self, id: &NativeId) -> Result<EventStream>;
 
+    /// Re-project retained native envelopes without reading the vendor store.
+    ///
+    /// The envagent supplies records already retained by the server. This is the
+    /// recovery path after a vendor rotates or removes its source files.
+    async fn reproject(&self, records: Vec<NativeRecord>) -> Result<EventStream>;
+
     /// Parse, then follow the native store as it grows.
     ///
     /// The same first pass as [`Self::adopt`], then whatever the vendor appends. All

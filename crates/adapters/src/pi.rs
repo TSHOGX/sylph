@@ -51,7 +51,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sylph_protocol::{
     Adapter, AgentInfo, Capability, EventStream, Facet, FlagSpec, LinkFacets, NativeId,
-    NativeSummary, RunSpec, Session, StoreFilter, UnavailableReason,
+    NativeRecord, NativeSummary, RunSpec, Session, StoreFilter, UnavailableReason,
 };
 
 pub use rpc::{model_key, split_model_key, ConfigId, MODEL_KEY_SEPARATOR};
@@ -295,6 +295,14 @@ impl Adapter for PiAdapter {
 
     async fn adopt(&self, id: &NativeId) -> Result<EventStream> {
         native::adopt(id)
+    }
+
+    async fn reproject(&self, records: Vec<NativeRecord>) -> Result<EventStream> {
+        let mut messages = Vec::new();
+        for record in records {
+            messages.extend(native::reproject_native_record(&record)?);
+        }
+        Ok(Box::pin(futures::stream::iter(messages.into_iter().map(Ok))))
     }
 
     async fn watch(&self, id: &NativeId) -> Result<EventStream> {
