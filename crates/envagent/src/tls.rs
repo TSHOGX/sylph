@@ -30,7 +30,14 @@ pub async fn connect_stream(
         .with_root_certificates(roots)
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(config));
-    let name = ServerName::try_from(server_name.to_owned()).context("invalid TLS server name")?;
+    // `ServerName::try_from(String)` treats the value as DNS.  IPv6 literals
+    // therefore fail even when the certificate is valid for the address. Parse
+    // IP literals explicitly so HTTPS pairing/reconnect works on `[::1]` too.
+    let name = if let Ok(address) = server_name.parse::<std::net::IpAddr>() {
+        ServerName::IpAddress(address.into())
+    } else {
+        ServerName::try_from(server_name.to_owned()).context("invalid TLS server name")?
+    };
     Ok(connector.connect(name, stream).await?)
 }
 
@@ -78,6 +85,55 @@ mod tests {
         });
         let stream = TcpStream::connect(address).await.unwrap();
         let mut tls = connect_stream(stream, "localhost", cert_for_client.as_bytes())
+            .await
+            .unwrap();
+        let mut body = [0u8; 2];
+        tokio::io::AsyncReadExt::read_exact(&mut tls, &mut body)
+            .await
+            .unwrap();
+        assert_eq!(&body, b"ok");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ipv6_literal_server_name_completes_a_tls_handshake() {
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params
+            .subject_alt_names
+            .push(rcgen::SanType::IpAddress("::1".parse().unwrap()));
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        let cert_pem = cert.pem();
+        let key_pem = key_pair.serialize_pem();
+        let mut cert_reader = std::io::Cursor::new(cert_pem.as_bytes());
+        let certs = rustls_pemfile::certs(&mut cert_reader)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let mut key_reader = std::io::Cursor::new(key_pem.as_bytes());
+        let key = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
+            .next()
+            .unwrap()
+            .unwrap();
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key.into())
+            .unwrap();
+        let listener = match tokio::net::TcpListener::bind(("::1", 0)).await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => return,
+            Err(error) => panic!("could not bind IPv6 loopback test listener: {error}"),
+        };
+        let address = listener.local_addr().unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, b"ok")
+                .await
+                .unwrap();
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut tls = connect_stream(stream, "::1", cert_pem.as_bytes())
             .await
             .unwrap();
         let mut body = [0u8; 2];

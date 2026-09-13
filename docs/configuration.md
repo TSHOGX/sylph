@@ -124,6 +124,27 @@ path that does not exist resolves to no identity as well, matching the adapters'
 | `spool.max_bytes` | `SYLPH_ENV_SPOOL_MAX` | `512 MiB` |
 | `log.level` | `SYLPH_ENV_LOG`, then `RUST_LOG` | `info` |
 
+For an HTTPS envagent connection, set `SYLPH_ENV_CA_CERT` to a PEM bundle containing
+the CA that signed the server's envagent certificate. Pairing and every reconnect use
+the same trust root; the variable is required whenever `SYLPH_ENV_SERVER` starts with
+`https://`. A minimal development certificate setup is:
+
+```sh
+mkdir -p "$SYLPH_HOME/tls"
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout "$SYLPH_HOME/tls/envagent.key" \
+  -out "$SYLPH_HOME/tls/envagent.crt" \
+  -subj '/CN=localhost' \
+  -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1'
+export SYLPH_ENV_TLS_CERT="$SYLPH_HOME/tls/envagent.crt"
+export SYLPH_ENV_TLS_KEY="$SYLPH_HOME/tls/envagent.key"
+export SYLPH_ENV_CA_CERT="$SYLPH_HOME/tls/envagent.crt"
+```
+
+Use a certificate whose SAN matches the host in the pairing URL (including an IPv6
+literal when pairing with `https://[::1]`). Keep the key readable only by the account
+that runs the server.
+
 `browse_roots` belongs to the envagent because the paths it names exist on the machine
 running the agents. Only that machine can canonicalize them, check containment, and see
 whether a component is a symlink.

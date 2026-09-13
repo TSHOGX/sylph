@@ -390,7 +390,7 @@ pub async fn create(
     }
     // All new sessions use the same prepared lifecycle. There is no eager-create
     // compatibility path: a session becomes durable only after its first real turn.
-    create_prepared(State(state), Json(req)).await
+    create_prepared(State(state), subject, Json(req)).await
 }
 
 /// Start an agent without durable history for POST /api/v1/sessions.
@@ -400,6 +400,7 @@ pub async fn create(
 /// promotes the prepared link.
 async fn create_prepared(
     State(state): State<AppState>,
+    subject: SubjectId,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<PreparedSessionResponse>)> {
     let environment = require_environment(&state, &req.environment).await?;
@@ -440,6 +441,7 @@ async fn create_prepared(
     let (draft_id, workdir) = state
         .env_bridge
         .prepare_remote(
+            subject.0.clone(),
             &environment,
             req.agent.clone(),
             req.workdir.clone(),
@@ -498,24 +500,32 @@ async fn create_prepared(
 /// GET /api/v1/sessions/draft/{id} — read immutable metadata for a prepared link.
 pub async fn prepared_get(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Path(draft_id): Path<String>,
 ) -> Result<Json<PreparedSessionResponse>> {
     if state.env_bridge.remote_draft_promoting(&draft_id).await {
         return Err(Error::SessionAlreadyRunning);
     }
-    if let Some(spec) = state.env_bridge.remote_draft(&draft_id).await {
-        return Ok(Json(PreparedSessionResponse {
-            draft_id,
-            environment: spec.environment,
-            agent: spec.agent,
-            workdir: spec.workdir,
-            title: spec.title,
-            inject_identity: spec.inject_identity,
-        }));
-    }
-    // Draft handles are owned by the envagent that created them. A local
-    // A stale remote draft must never be accepted as a second execution path.
-    Err(Error::SessionNotFound)
+    let spec = state
+        .env_bridge
+        .authorize_remote_draft(&draft_id, &subject.0, "observe")
+        .await
+        .map_err(|error| {
+            let message = format!("{error:#}");
+            if message.contains("not found") {
+                Error::SessionNotFound
+            } else {
+                Error::Forbidden(message)
+            }
+        })?;
+    Ok(Json(PreparedSessionResponse {
+        draft_id,
+        environment: spec.environment,
+        agent: spec.agent,
+        workdir: spec.workdir,
+        title: spec.title,
+        inject_identity: spec.inject_identity,
+    }))
 }
 
 #[derive(Deserialize)]

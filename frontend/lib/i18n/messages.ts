@@ -552,6 +552,7 @@ export const en = {
   "settings.account.signedIn": "Signed in.",
   "settings.account.signedOut": "Signed out.",
   "settings.account.authFailed": "Authentication failed.",
+  "settings.account.tokenSaved": "Save this token to sign in again:",
   "settings.sections": "Settings sections",
   "settings.section.general": "General",
   "settings.section.identity": "Identity",

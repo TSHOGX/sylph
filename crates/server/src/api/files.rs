@@ -41,6 +41,7 @@ use axum::{
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use crate::middleware::auth::SubjectId;
 use crate::{
     documents::{self, DocumentKind, Window},
     error::{Error, Result},
@@ -64,11 +65,25 @@ enum RemoteTarget {
     },
 }
 
-async fn remote_target(state: &AppState, id: &str) -> Result<Option<RemoteTarget>> {
+async fn remote_target(
+    state: &AppState,
+    id: &str,
+    subject: &str,
+    capability: &str,
+) -> Result<Option<RemoteTarget>> {
     if id.starts_with("remote-draft-") {
-        let Some(draft) = state.env_bridge.remote_draft(id).await else {
-            return Err(Error::SessionNotFound);
-        };
+        let draft = state
+            .env_bridge
+            .authorize_remote_draft(id, subject, capability)
+            .await
+            .map_err(|error| {
+                let message = format!("{error:#}");
+                if message.contains("not found") {
+                    Error::SessionNotFound
+                } else {
+                    Error::Forbidden(message)
+                }
+            })?;
         return Ok(Some(RemoteTarget::Draft {
             environment: draft.environment,
             draft_id: id.to_string(),
@@ -252,10 +267,11 @@ pub struct TreeQuery {
 /// seconds building a payload the pane renders only the top of.
 pub async fn tree(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<SubjectId>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<TreeQuery>,
 ) -> Result<Json<TreeResponse>> {
-    if let Some(remote) = remote_target(&state, &id).await? {
+    if let Some(remote) = remote_target(&state, &id, &subject.0, "observe").await? {
         let (environment, draft_id, session_id, workdir) = remote_parts(&remote);
         let value = state
             .env_bridge
@@ -471,10 +487,11 @@ pub struct ContentQuery {
 /// GET /api/v1/sessions/{id}/files/content?path=...
 pub async fn content(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<SubjectId>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ContentQuery>,
 ) -> Result<Json<ContentResponse>> {
-    if let Some(remote) = remote_target(&state, &id).await? {
+    if let Some(remote) = remote_target(&state, &id, &subject.0, "observe").await? {
         let path = paths::normalize_relative(&query.path);
         let RemoteRead {
             bytes,
@@ -592,10 +609,11 @@ pub struct DocumentQuery {
 /// file, and paging must not re-send the file's metadata each time.
 pub async fn document(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<SubjectId>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<DocumentQuery>,
 ) -> Result<Json<DocumentResponse>> {
-    if let Some(remote) = remote_target(&state, &id).await? {
+    if let Some(remote) = remote_target(&state, &id, &subject.0, "observe").await? {
         let path = paths::normalize_relative(&query.path);
         let remote_read = remote_read_bytes(
             &state,
@@ -776,11 +794,12 @@ pub struct RawQuery {
 /// an integration test asserts both.
 pub async fn raw(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<SubjectId>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<RawQuery>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response> {
-    if let Some(remote) = remote_target(&state, &id).await? {
+    if let Some(remote) = remote_target(&state, &id, &subject.0, "observe").await? {
         let path = paths::normalize_relative(&query.path);
         let RemoteRead { bytes, .. } =
             remote_read_bytes(&state, &remote, path.clone(), None).await?;
@@ -1151,10 +1170,11 @@ pub struct UploadResponse {
 /// not mean to touch.
 pub async fn upload(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<SubjectId>,
     AxumPath(id): AxumPath<String>,
     Json(req): Json<UploadRequest>,
 ) -> Result<(StatusCode, Json<UploadResponse>)> {
-    if let Some(remote) = remote_target(&state, &id).await? {
+    if let Some(remote) = remote_target(&state, &id, &subject.0, "control").await? {
         let filename = crate::attachments::sanitize_filename(&req.name);
         let relative = paths::join_relative(&req.path, &filename);
         let bytes = base64::engine::general_purpose::STANDARD
@@ -1332,10 +1352,11 @@ pub struct MkdirResponse {
 /// twice reports the collision instead of appearing to have done nothing.
 pub async fn mkdir(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<SubjectId>,
     AxumPath(id): AxumPath<String>,
     Json(req): Json<MkdirRequest>,
 ) -> Result<(StatusCode, Json<MkdirResponse>)> {
-    if let Some(remote) = remote_target(&state, &id).await? {
+    if let Some(remote) = remote_target(&state, &id, &subject.0, "control").await? {
         let name = sanitize_component(&req.name)?;
         // Reject the user-facing name before crossing the bridge. The envagent receives
         // only a normalized relative path, so it cannot distinguish a separator typo
@@ -1431,6 +1452,7 @@ pub struct RemoveQuery {
 ///   that requires resolving the parent instead of the target.
 pub async fn remove(
     State(state): State<AppState>,
+    axum::extract::Extension(subject): axum::extract::Extension<SubjectId>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<RemoveQuery>,
 ) -> Result<StatusCode> {
@@ -1441,7 +1463,7 @@ pub async fn remove(
         ));
     }
 
-    if let Some(remote) = remote_target(&state, &id).await? {
+    if let Some(remote) = remote_target(&state, &id, &subject.0, "control").await? {
         let (environment, draft_id, session_id, _) = remote_parts(&remote);
         state
             .env_bridge

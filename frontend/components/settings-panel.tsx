@@ -202,13 +202,17 @@ function AuthSection() {
   const t = useT();
   const [name, setName] = useState("");
   const [token, setToken] = useState("");
+  const [issuedToken, setIssuedToken] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const register = useMutation({
     mutationFn: () => api.auth.register(name.trim()),
     onSuccess: (subject) => {
+      setIssuedToken(subject.token);
       setNotice(t("settings.account.registered", { name: subject.name }));
       setName("");
-      void queryClient.invalidateQueries();
+      void queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] !== "auth",
+      });
     },
   });
   const login = useMutation({
@@ -216,14 +220,18 @@ function AuthSection() {
     onSuccess: () => {
       setNotice(t("settings.account.signedIn"));
       setToken("");
-      void queryClient.invalidateQueries();
+      setIssuedToken(null);
+      void queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] !== "auth",
+      });
     },
   });
   const logout = useMutation({
     mutationFn: api.auth.logout,
     onSuccess: () => {
       setNotice(t("settings.account.signedOut"));
-      void queryClient.clear();
+      void queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "auth" });
+      window.location.reload();
     },
   });
   const error = register.error ?? login.error ?? logout.error;
@@ -261,6 +269,11 @@ function AuthSection() {
         {logout.isPending ? t("settings.account.signingOut") : t("settings.account.signOut")}
       </button>
       {notice && <p role="status" className="text-xs text-success">{notice}</p>}
+      {issuedToken && (
+        <p role="status" className="text-xs text-ink-muted">
+          {t("settings.account.tokenSaved")} <code className="select-all break-all">{issuedToken}</code>
+        </p>
+      )}
       {error && <p role="alert" className="text-xs text-danger">{error instanceof Error ? error.message : t("settings.account.authFailed")}</p>}
     </section>
   );

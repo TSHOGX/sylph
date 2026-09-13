@@ -239,19 +239,24 @@ impl ConnectionSupervisor {
             })?;
             let pem = std::fs::read(ca)
                 .map_err(|e| FrameError::Address(format!("cannot read CA certificate: {e}")))?;
-            let host = self
+            // Preserve an IPv6 literal as the TLS server name.  Splitting on
+            // `:` first turns `[::1]` into an empty string and makes every
+            // IPv6 HTTPS reconnect fail before the handshake starts.
+            let authority = self
                 .address
                 .trim_start_matches("https://")
                 .split('/')
                 .next()
-                .unwrap_or("")
-                .trim_start_matches('[')
-                .split(']')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
                 .unwrap_or("");
+            let host = if let Some(rest) = authority.strip_prefix('[') {
+                rest.split_once(']').map(|(host, _)| host).unwrap_or("")
+            } else {
+                authority
+                    .rsplit_once(':')
+                    .filter(|(host, port)| !host.contains(':') && port.parse::<u16>().is_ok())
+                    .map(|(host, _)| host)
+                    .unwrap_or(authority)
+            };
             let tls = crate::tls::connect_stream(stream, host, &pem)
                 .await
                 .map_err(|e| FrameError::Address(format!("TLS handshake failed: {e}")))?;

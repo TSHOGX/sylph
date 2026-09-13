@@ -18,7 +18,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use sylph_protocol::{
     normalize_workdir, Event, EventKind, EventStream, Fidelity, InteriorState, NativeId,
-    NativeSummary, Phase, SessionMessage, StoreFilter,
+    NativeRecord, NativeSummary, Phase, SessionMessage, StoreFilter,
 };
 
 use crate::native::{candidates, epoch_millis_from_iso, SessionCandidate};
@@ -30,6 +30,30 @@ use crate::native::{candidates, epoch_millis_from_iso, SessionCandidate};
 /// constant for why it is not assembled from either.
 fn store_root() -> Option<PathBuf> {
     crate::native::home_relative(super::STORE_SEGMENTS)
+}
+
+/// Stable source name for a rollout JSONL file.
+///
+/// The native store has one file per rollout (including descendants), so the filename is
+/// already the vendor-relative identity we need. Keeping the absolute path out of the record
+/// makes the same session portable between machines while still distinguishing child rollouts.
+fn native_source(path: &Path) -> String {
+    store_root()
+        .and_then(|root| path.strip_prefix(root).ok().map(Path::to_path_buf))
+        .or_else(|| path.file_name().map(PathBuf::from))
+        .and_then(|relative| relative.to_str().map(str::to_string))
+        .unwrap_or_else(|| "rollout.jsonl".to_string())
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+fn native_record(path: &Path, version: u64, value: &Value, raw: Vec<u8>) -> NativeRecord {
+    NativeRecord {
+        source: native_source(path),
+        version,
+        raw_json: Some(raw),
+        payload: value.clone(),
+        blobs: Vec::new(),
+    }
 }
 
 /// The fidelity a parsed `codex` session yields.
@@ -1612,6 +1636,21 @@ impl RolloutCursor {
                 .is_some_and(|previous| *previous == fingerprint);
             let projected = self.projector.apply(&record.value);
             if !replayed {
+                // Retain the complete vendor envelope before its normalized projection. The
+                // server can then re-project Codex history after the event vocabulary evolves,
+                // with lexical bytes preserved for JSONL round-trips.
+                let version = (self.generation << 32).saturating_add(self.records + 1);
+                let raw_json = record
+                    .raw
+                    .strip_suffix(&[b'\n'][..])
+                    .unwrap_or(&record.raw)
+                    .to_vec();
+                messages.push(SessionMessage::NativeRecord(native_record(
+                    &self.path,
+                    version,
+                    &record.value,
+                    raw_json,
+                )));
                 messages.extend(projected);
             }
             self.line_fingerprints.insert(record.offset, fingerprint);
@@ -2430,6 +2469,29 @@ mod tests {
     /// Project one fixture and keep only the events.
     fn project(name: &str) -> Vec<Event> {
         replay(name).1
+    }
+
+    #[test]
+    fn adopt_retains_each_rollout_record_before_projection() {
+        let mut cursor = RolloutCursor::new(fixture("ordinary-turn-item-completed-era.jsonl"));
+        let messages = cursor.poll().expect("fixture must parse");
+        let retained: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                SessionMessage::NativeRecord(record) => Some(record),
+                _ => None,
+            })
+            .collect();
+        let expected = records("ordinary-turn-item-completed-era.jsonl").len();
+        assert_eq!(
+            retained.len(),
+            expected,
+            "every JSONL row is retained as raw"
+        );
+        assert!(retained.iter().all(|record| record.raw_json.is_some()));
+        assert!(retained
+            .windows(2)
+            .all(|pair| pair[0].version < pair[1].version));
     }
 
     /// The header one fixture's own `session_meta` yields, from the same pass.

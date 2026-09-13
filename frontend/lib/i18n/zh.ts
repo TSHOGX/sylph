@@ -371,6 +371,7 @@ export const zh: Dictionary = {
   "settings.account.signedIn": "已登录。",
   "settings.account.signedOut": "已退出登录。",
   "settings.account.authFailed": "身份验证失败。",
+  "settings.account.tokenSaved": "请保存此令牌，以便再次登录：",
   "settings.sections": "设置分区",
   "settings.section.general": "通用",
   "settings.section.identity": "身份",

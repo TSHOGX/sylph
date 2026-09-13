@@ -38,18 +38,18 @@ pub async fn create_prepared(
     Path(draft_id): Path<String>,
     Json(req): Json<CreateTurnRequest>,
 ) -> Result<(StatusCode, Json<crate::api::sessions::SessionResponse>)> {
-    let draft = state
+    let _draft = state
         .env_bridge
-        .remote_draft(&draft_id)
+        .authorize_remote_draft(&draft_id, &subject.0, "control")
         .await
-        .ok_or(Error::SessionNotFound)?;
-    if !state
-        .store
-        .has_capability(&subject.0, draft.environment.as_str(), "control")
-        .await?
-    {
-        return Err(Error::Forbidden("control capability required".into()));
-    }
+        .map_err(|error| {
+            let message = format!("{error:#}");
+            if message.contains("not found") {
+                Error::SessionNotFound
+            } else {
+                Error::Forbidden(message)
+            }
+        })?;
     let text = req.text.unwrap_or_default();
     let attachments = req.attachments.unwrap_or_default();
     // A first turn is real work even when it has no prose: a declared prompt

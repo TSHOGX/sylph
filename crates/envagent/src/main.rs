@@ -277,8 +277,13 @@ async fn http_post_on_stream<
     body: &serde_json::Value,
 ) -> Result<T> {
     let bytes = serde_json::to_vec(body)?;
+    let host_header = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
     let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {host_header}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         bytes.len()
     );
     use tokio::io::AsyncWriteExt;
@@ -399,11 +404,11 @@ mod tests {
         );
         assert_eq!(
             wire_server_for_pairing("http://127.0.0.1:4317").unwrap(),
-            "127.0.0.1:4318"
+            "http://127.0.0.1:4318"
         );
         assert_eq!(
             wire_server_for_pairing("http://[::1]").unwrap(),
-            "[::1]:4318"
+            "http://[::1]:4318"
         );
     }
 

@@ -112,6 +112,9 @@ pub struct RemoteDraft {
     /// must address the same envagent command rather than minting a second
     /// non-idempotent run.
     pub draft_id: String,
+    /// Subject that created this draft. Draft handles are bearer-like opaque
+    /// ids, so every operation must bind back to this durable principal.
+    pub creator_subject: String,
     pub environment: EnvironmentId,
     pub session_id: Option<sylph_protocol::SessionId>,
     pub agent: String,
@@ -186,6 +189,34 @@ pub struct EnvBridge {
 }
 
 impl EnvBridge {
+    /// Resolve and authorize a draft for a caller. A draft is mutable control
+    /// state: ownership prevents another Subject that knows the opaque handle
+    /// from using it, while the live grant check makes revocation take effect
+    /// for subsequent operations.
+    pub async fn authorize_remote_draft(
+        &self,
+        draft_id: &str,
+        subject: &str,
+        capability: &str,
+    ) -> Result<RemoteDraft> {
+        let draft = self
+            .remote_draft(draft_id)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("draft not found"))?;
+        if subject != "bootstrap" && draft.creator_subject != subject {
+            return Err(anyhow::anyhow!("draft belongs to another Subject"));
+        }
+        if !self
+            .store
+            .has_capability(subject, draft.environment.as_str(), capability)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        {
+            return Err(anyhow::anyhow!("{capability} capability required"));
+        }
+        Ok(draft)
+    }
+
     pub fn new(
         store: JournalStore,
         history: crate::storage::HistoryStore,
@@ -1562,6 +1593,7 @@ impl EnvBridge {
     #[allow(clippy::too_many_arguments)]
     pub async fn prepare_remote(
         &self,
+        creator_subject: String,
         environment: &EnvironmentId,
         agent: String,
         workdir: String,
@@ -1617,6 +1649,7 @@ impl EnvBridge {
             draft_id.clone(),
             RemoteDraft {
                 draft_id: draft_id.clone(),
+                creator_subject,
                 environment: environment.clone(),
                 session_id: None,
                 agent,
@@ -3455,6 +3488,7 @@ mod tests {
             "remote-draft-test".into(),
             RemoteDraft {
                 draft_id: "remote-draft-test".into(),
+                creator_subject: "bootstrap".into(),
                 environment,
                 session_id: None,
                 agent: "claude".into(),
@@ -3566,6 +3600,7 @@ mod tests {
         let mut rx = connected_environment(&bridge, &environment, "install-draft-caps").await;
         let draft = RemoteDraft {
             draft_id: "remote-draft-caps".into(),
+            creator_subject: "bootstrap".into(),
             environment: environment.clone(),
             session_id: None,
             agent: "claude".into(),

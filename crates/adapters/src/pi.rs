@@ -2103,18 +2103,37 @@ pub mod native {
     use anyhow::{anyhow, Context, Result};
     use serde_json::{json, Value};
     use sylph_protocol::{
-        normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeId, NativeSummary, Phase,
-        SessionMessage, StoreFilter,
+        normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeId, NativeRecord,
+        NativeSummary, Phase, SessionMessage, StoreFilter,
     };
 
     use crate::native::{
-        candidates, epoch_millis_from_iso, epoch_millis_from_json, for_each_json_line,
-        timestamp::Unit,
+        candidates, epoch_millis_from_iso, epoch_millis_from_json, timestamp::Unit,
     };
 
     /// Where `pi` keeps its sessions, `$HOME`-relative.
     fn store_root() -> Option<PathBuf> {
         crate::native::home_relative(&[".pi", "agent", "sessions"])
+    }
+
+    /// Stable source name for a Pi session file, relative to the vendor store.
+    fn native_source(path: &Path) -> String {
+        store_root()
+            .and_then(|root| path.strip_prefix(root).ok().map(Path::to_path_buf))
+            .or_else(|| path.file_name().map(PathBuf::from))
+            .and_then(|relative| relative.to_str().map(str::to_string))
+            .unwrap_or_else(|| "session.jsonl".to_string())
+            .replace(std::path::MAIN_SEPARATOR, "/")
+    }
+
+    fn native_record(path: &Path, version: u64, value: &Value, raw: Vec<u8>) -> NativeRecord {
+        NativeRecord {
+            source: native_source(path),
+            version,
+            raw_json: Some(raw),
+            payload: value.clone(),
+            blobs: Vec::new(),
+        }
     }
 
     /// The fidelity a parsed `pi` session yields.
@@ -2559,9 +2578,31 @@ pub mod native {
         let mut thinking_level = None;
         let mut failure: Option<anyhow::Error> = None;
 
-        let stats = for_each_json_line(path, |record| {
+        // Keep the original line bytes alongside the parsed value. `for_each_json_line` is
+        // intentionally value-only for listing callers, but adoption must retain lexical JSON
+        // so re-projection can round-trip the vendor record exactly.
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("opening pi session file {}", path.display()))?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut raw_line = Vec::new();
+        let mut ordinal = 0u64;
+        loop {
+            raw_line.clear();
+            let read = std::io::BufRead::read_until(&mut reader, b'\n', &mut raw_line)
+                .with_context(|| format!("reading pi session file {}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            let trimmed = raw_line.strip_suffix(&[b'\n'][..]).unwrap_or(&raw_line);
+            if trimmed.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let Ok(record) = serde_json::from_slice::<Value>(trimmed) else {
+                continue;
+            };
+            ordinal = ordinal.saturating_add(1);
             if failure.is_some() {
-                return Ok(());
+                continue;
             }
             // The outer stamp, which is a string on every record. Used for the session-level
             // window and as the fallback for a record whose own message carries none.
@@ -2607,13 +2648,23 @@ pub mod native {
                 }
                 _ => {}
             }
+            // Every valid vendor record is retained, including metadata-only rows that have no
+            // current projection. This is what lets a future parser re-project fields today's
+            // vocabulary ignores.
+            messages.push(SessionMessage::NativeRecord(native_record(
+                path,
+                ordinal,
+                &record,
+                raw_line
+                    .strip_suffix(&[b'\n'][..])
+                    .unwrap_or(&raw_line)
+                    .to_vec(),
+            )));
             match project_record(&record) {
                 Ok(projected) => messages.extend(projected),
                 Err(error) => failure = Some(error),
             }
-            Ok(())
-        })
-        .with_context(|| format!("parsing pi session {}", path.display()))?;
+        }
 
         if let Some(error) = failure {
             return Err(error);
@@ -2628,8 +2679,6 @@ pub mod native {
             }
             .into());
         };
-        let _ = stats;
-
         Ok(ParsedSession {
             header,
             messages,
@@ -3170,6 +3219,15 @@ pub mod native {
                 };
                 staged_seen.insert(key.clone(), signature);
                 updates.push((key, signature));
+                // Preserve the complete Pi envelope before its normalized projection. The
+                // server's raw tier uses `(session, source, version)` to deduplicate re-reads;
+                // generation in the high bits keeps a rewritten file's revisions distinct while
+                // the low bits retain the append ordinal within that generation.
+                let version = (self.generation << 32)
+                    .saturating_add(self.seen.len() as u64 + updates.len() as u64);
+                projected.push(SessionMessage::NativeRecord(native_record(
+                    &path, version, &record, raw,
+                )));
                 projected.extend(messages);
             }
 
@@ -3973,6 +4031,30 @@ pub mod native {
             let _ = std::fs::remove_dir_all(dir);
         }
 
+        #[test]
+        fn adopt_retains_every_pi_jsonl_record_losslessly() {
+            let path = fixture("ordinary-turn.jsonl");
+            let parsed = parse_session(&path).expect("fixture must parse");
+            let records: Vec<_> = parsed
+                .messages
+                .iter()
+                .filter_map(|message| match message {
+                    SessionMessage::NativeRecord(record) => Some(record),
+                    _ => None,
+                })
+                .collect();
+            let expected = std::fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count();
+            assert_eq!(records.len(), expected);
+            assert!(records.iter().all(|record| record.raw_json.is_some()));
+            assert!(records
+                .windows(2)
+                .all(|pair| pair[0].version < pair[1].version));
+        }
+
         /// A final JSON line without a newline is still being written. The cursor stays before
         /// it, and appending the remainder later produces exactly one event rather than either
         /// dropping the line or publishing a half-parsed message.
@@ -4175,11 +4257,20 @@ pub mod native {
             });
 
             let mut stream = follow(PiFollowState::new(dir.clone(), id));
-            let item = tokio::time::timeout(Duration::from_secs(2), stream.next())
-                .await
-                .expect("the pending source should eventually appear")
-                .expect("the watcher remains open")
-                .expect("the delayed file is valid");
+            let item = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let item = stream
+                        .next()
+                        .await
+                        .expect("the watcher remains open")
+                        .expect("the delayed file is valid");
+                    if matches!(item, SessionMessage::Event(_)) {
+                        break item;
+                    }
+                }
+            })
+            .await
+            .expect("the pending source should eventually appear");
             assert!(matches!(
                 item,
                 SessionMessage::Event(event) if event.text == "streamed"

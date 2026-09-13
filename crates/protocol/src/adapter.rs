@@ -356,9 +356,9 @@ pub struct RereadPass {
     pub events: Vec<Event>,
     /// Complete vendor records the pass parsed, for the raw tier.
     ///
-    /// Present only for agents whose native parser emits them — of the three, only
-    /// `claude`. Carried rather than dropped because a vendor's native store is read and
-    /// kept whole, including fields Sylph has no use for yet.
+    /// Present for native parsers that can preserve their complete source records (`claude`,
+    /// `codex`, and `pi`). Carried rather than dropped because a vendor's native store is read
+    /// and kept whole, including fields Sylph has no use for yet.
     #[serde(default)]
     pub records: Vec<NativeRecord>,
     /// Items the pass could not read. Not fatal: an `Err` from a native stream is a

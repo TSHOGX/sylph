@@ -1289,6 +1289,21 @@
         }
       }
     },
+    "/api/v1/environments/{id}/grants": {
+      "post": {
+        "summary": "Issue an environment capability grant",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IssueGrantRequest"}}}},
+        "responses": {"204": {"description": "Grant recorded"}, "400": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}, "404": {"$ref": "#/components/responses/Error"}}
+      }
+    },
+    "/api/v1/environments/{id}/grants/{subject}": {
+      "delete": {
+        "summary": "Revoke all capabilities for a Subject",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}, {"name": "subject", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {"204": {"description": "Grant revoked"}, "403": {"$ref": "#/components/responses/Error"}, "404": {"$ref": "#/components/responses/Error"}}
+      }
+    },
     "/api/v1/environments/{id}/invites": {
       "post": {
         "security": [],
@@ -1331,6 +1346,25 @@
           }
         }
       }
+    },
+    "/api/v1/auth/register": {
+      "post": {
+        "security": [],
+        "summary": "Register a Subject",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RegisterRequest"}}}},
+        "responses": {"201": {"description": "Subject created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RegisteredSubject"}}}}, "400": {"$ref": "#/components/responses/Error"}}
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "security": [],
+        "summary": "Log in a registered Subject",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LoginRequest"}}}},
+        "responses": {"200": {"description": "Cookie set"}, "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"}}
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {"summary": "Log out the current Subject", "responses": {"204": {"description": "Cookie cleared"}}}
     },
     "/api/v1/sessions/{sessionId}/capabilities": {
       "get": {
@@ -3276,7 +3310,7 @@
           "agent_exited",
           "adapter_silent"
         ],
-        "description": "Why a turn or a server-closed trajectory ended without its producer reporting an outcome. Required whenever a turn ends short. This is NOT the status: the status says what the record became, the reason says what cut it short, and a reason that restates its status answers no question. `interrupted` is the only value that is not a diagnostic and must not be coloured as a fault. `spool_full`, `grant_revoked`, `link_lost`, and `agent_exited` mean the vendor's own store kept accumulating past the cut, so `adopt` recovers it; `interrupted` and `adapter_silent` do not. Not yet built: no Rust type and no `turns` column, so every turn that stopped short currently reads as one that ran to its own end. docs/roadmap.md § Milestone 3 owns it; docs/session-protocol.md § Outcomes owns the vocabulary."
+        "description": "Why a turn or a server-closed trajectory ended without its producer reporting an outcome. Required whenever a turn ends short. This is NOT the status: the status says what the record became, the reason says what cut it short, and a reason that restates its status answers no question. `interrupted` is the only value that is not a diagnostic and must not be coloured as a fault. `spool_full`, `grant_revoked`, `link_lost`, and `agent_exited` mean the vendor's own store kept accumulating past the cut, so `adopt` recovers it; `interrupted` and `adapter_silent` do not. Persisted on the turn record and emitted by the server when a trajectory is closed early. docs/session-protocol.md § Outcomes owns the vocabulary."
       },
       "NativeSessionRow": {
         "type": "object",
@@ -3710,6 +3744,35 @@
         "properties": {
           "code": {"type": "string"},
           "expiresAtMs": {"type": "integer", "format": "int64"}
+        }
+      },
+      "RegisterRequest": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {"name": {"type": "string", "minLength": 1}}
+      },
+      "RegisteredSubject": {
+        "type": "object",
+        "required": ["id", "name", "isAdmin", "token"],
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "isAdmin": {"type": "boolean"},
+          "token": {"type": "string", "description": "Bearer token to retain for login on another browser."}
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": ["token"],
+        "properties": {"token": {"type": "string", "minLength": 1}}
+      },
+      "IssueGrantRequest": {
+        "type": "object",
+        "required": ["subjectId", "capability"],
+        "properties": {
+          "subjectId": {"type": "string"},
+          "capability": {"type": "string", "enum": ["observe", "control"]},
+          "expiresAtMs": {"type": "integer", "format": "int64", "nullable": true}
         }
       },
       "PairRequest": {

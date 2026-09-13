@@ -52,6 +52,7 @@ async fn process_peer_covers_prepare_run_activate_replay_and_rejection() {
     wait_for_connected(&bridge, &config.environment).await;
     let (draft_id, contained_workdir) = bridge
         .prepare_remote(
+            "bootstrap".into(),
             &config.environment,
             "fixture".into(),
             config.workdir.clone(),

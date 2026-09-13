@@ -18,7 +18,6 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
@@ -62,38 +61,28 @@ pub async fn auth_middleware(
         }
     }
 
-    // Pairing has no browser cookie, but a cross-origin page must not be able
-    // to consume a one-shot pairing code.  Keep the exemption only for the
-    // credential check and still enforce a loopback Origin when one is sent.
-    let local_invite_issue = path.starts_with("/api/v1/environments/")
-        && path.ends_with("/invites")
-        && request.method() == axum::http::Method::POST;
-    if EXEMPT_PATHS.contains(&path) || local_invite_issue {
-        if path == "/api/v1/environments/pair" || local_invite_issue {
-            if let Some(origin) = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok()) {
-                if !is_loopback_origin(origin) {
-                    return Err(Error::Forbidden(format!(
-                        "Non-loopback Origin rejected: {origin}"
-                    )));
-                }
-            }
-        }
-        return Ok(next.run(request).await);
-    }
-
-    // Origin validation for mutations: browser-initiated requests that would
-    // change state must come from a loopback origin. Non-browser clients (curl,
-    // CLI tools) never send Origin, and that's fine — the absence itself is
-    // proof it's not a malicious page embedding our API.
+    // Origin validation applies to every mutation, including authentication and
+    // pairing endpoints that are exempt from cookie validation.  Exemption is
+    // only about who may call the route without a session; it must not create a
+    // CSRF exception for a browser request.
     if is_mutation(request.method().as_str()) {
         if let Some(origin) = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok()) {
             if !is_loopback_origin(origin) {
                 return Err(Error::Forbidden(format!(
-                    "Non-loopback Origin rejected: {}",
-                    origin
+                    "Non-loopback Origin rejected: {origin}"
                 )));
             }
         }
+    }
+
+    // Pairing has no browser cookie, but a cross-origin page must not be able
+    // to consume a one-shot pairing code.  The global mutation check above
+    // covers pairing and invite issuance as well as auth mutations.
+    let local_invite_issue = path.starts_with("/api/v1/environments/")
+        && path.ends_with("/invites")
+        && request.method() == axum::http::Method::POST;
+    if EXEMPT_PATHS.contains(&path) || local_invite_issue {
+        return Ok(next.run(request).await);
     }
 
     // Cookie validation: extract and compare against the process token.
@@ -111,6 +100,8 @@ pub async fn auth_middleware(
             .await?
             .unwrap_or_else(|| "bootstrap".to_string());
         request.extensions_mut().insert(SubjectId(subject_id));
+        enforce_session_capability(&state, request.uri().path(), request.method(), presented)
+            .await?;
         return Ok(next.run(request).await);
     }
     let subject_id = state
@@ -134,10 +125,38 @@ async fn enforce_session_capability(
     let Some(rest) = path.strip_prefix("/api/v1/sessions/") else {
         return Ok(());
     };
-    let Some(encoded) = rest.split('/').next().filter(|value| !value.is_empty()) else {
+    let mut segments = rest.split('/').filter(|value| !value.is_empty());
+    let Some(first) = segments.next() else {
         return Ok(());
     };
+    let encoded = if first == "draft" {
+        segments.next().unwrap_or("")
+    } else {
+        first
+    };
     if encoded.starts_with("draft-") || encoded.starts_with("remote-draft-") {
+        let subject = state
+            .store
+            .subject_id_for_token_hash(&hash_token(presented))
+            .await?
+            .unwrap_or_else(|| "bootstrap".to_string());
+        let capability = if *method == axum::http::Method::GET {
+            "observe"
+        } else {
+            "control"
+        };
+        state
+            .env_bridge
+            .authorize_remote_draft(encoded, &subject, capability)
+            .await
+            .map_err(|error| {
+                let message = format!("{error:#}");
+                if message.contains("not found") {
+                    Error::SessionNotFound
+                } else {
+                    Error::Forbidden(message)
+                }
+            })?;
         return Ok(());
     }
     let Ok(session) = sylph_protocol::SessionId::decode(encoded) else {
@@ -172,7 +191,30 @@ async fn enforce_session_capability(
 /// is the correct policy for a process-local service. The real threat model is
 /// browser-based attacks from other origins, not local processes that can
 /// already read the database and spawn runners.
-pub async fn bootstrap_token(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn bootstrap_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Preserve a registered Subject across page loads.  The bootstrap route is
+    // intentionally unauthenticated, but it must not replace a valid account
+    // cookie with the development identity merely because the AuthGate mounts.
+    if let Some(presented) = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| extract_cookie(value, COOKIE_NAME))
+    {
+        if let Ok(Some(subject_id)) = state
+            .store
+            .subject_id_for_token_hash(&hash_token(presented))
+            .await
+        {
+            return (
+                StatusCode::OK,
+                HeaderMap::new(),
+                Json(serde_json::json!({"ok": true, "subjectId": subject_id, "preserved": true})),
+            );
+        }
+    }
     let _ = state
         .store
         .upsert_subject(
@@ -189,13 +231,17 @@ pub async fn bootstrap_token(State(state): State<AppState>) -> impl IntoResponse
         86400 * 365 // 1 year
     );
 
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::SET_COOKIE,
+        cookie
+            .parse()
+            .expect("session cookie is valid header value"),
+    );
     (
         StatusCode::OK,
-        [(header::SET_COOKIE, cookie)],
-        Json(BootstrapResponse {
-            ok: true,
-            message: "Session cookie set".to_string(),
-        }),
+        response_headers,
+        Json(serde_json::json!({"ok": true, "subjectId": "bootstrap", "preserved": false})),
     )
 }
 
@@ -213,14 +259,35 @@ pub async fn register(
     }
     let token = uuid::Uuid::new_v4().to_string();
     let id = uuid::Uuid::new_v4().to_string();
-    let is_admin: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subjects")
-        .fetch_one(state.store.raw_pool())
+    // The development bootstrap identity is always present, so counting all
+    // subjects would make the first real registrant non-admin forever.  Provision
+    // the first registered Subject as the server authority root while keeping the
+    // process-local bootstrap account separate.
+    // Make provisioning atomic with insertion. SQLite serializes the write,
+    // so concurrent first registrations cannot both observe an empty table and
+    // claim administrator status.
+    let mut tx = state
+        .store
+        .raw_pool()
+        .begin()
         .await
         .map_err(Error::Database)?;
-    state
-        .store
-        .upsert_subject(&id, req.name.trim(), &hash_token(&token), is_admin == 0)
-        .await?;
+    let is_admin: i64 = sqlx::query_scalar(
+        "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM subjects WHERE id <> 'bootstrap') THEN 1 ELSE 0 END",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(Error::Database)?;
+    sqlx::query("INSERT INTO subjects (id, name, token_hash, is_admin, created_at_ms) VALUES (?, ?, ?, ?, ?)")
+        .bind(&id)
+        .bind(req.name.trim())
+        .bind(hash_token(&token))
+        .bind(is_admin)
+        .bind(crate::models::now_ms())
+        .execute(&mut *tx)
+        .await
+        .map_err(Error::Database)?;
+    tx.commit().await.map_err(Error::Database)?;
     let cookie = format!(
         "{}={}; Path=/; HttpOnly; SameSite=Strict",
         COOKIE_NAME, token
@@ -229,7 +296,7 @@ pub async fn register(
         StatusCode::CREATED,
         [(header::SET_COOKIE, cookie)],
         Json(
-            serde_json::json!({"id": id, "name": req.name, "isAdmin": is_admin == 0, "token": token}),
+            serde_json::json!({"id": id, "name": req.name, "isAdmin": is_admin == 1, "token": token}),
         ),
     ))
 }
@@ -280,12 +347,6 @@ pub(crate) fn hash_token_for_storage(token: &str) -> String {
 
 fn hash_token(token: &str) -> String {
     hash_token_for_storage(token)
-}
-
-#[derive(Serialize)]
-struct BootstrapResponse {
-    ok: bool,
-    message: String,
 }
 
 /// Whether an HTTP method is a mutation.

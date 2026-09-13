@@ -5,7 +5,7 @@
 //! from a live link rather than from a static descriptor, and an approval is a
 //! resource a client resolves rather than a message it happened to witness.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
@@ -19,6 +19,7 @@ use sylph_protocol::SessionId;
 
 use crate::error::{Error, Result};
 use crate::link_state::LinkState;
+use crate::middleware::auth::SubjectId;
 use crate::models::{PendingRequest, ResolveRequest};
 use crate::AppState;
 
@@ -107,10 +108,15 @@ fn default_trace_after_seq() -> i32 {
 /// POST /api/v1/sessions/draft/{id}/config
 pub async fn prepared_set_config(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Path(draft_id): Path<String>,
     Json(body): Json<PreparedConfigRequest>,
 ) -> Result<Json<LinkState>> {
-    if let Some(draft) = state.env_bridge.remote_draft(&draft_id).await {
+    if let Ok(draft) = state
+        .env_bridge
+        .authorize_remote_draft(&draft_id, &subject.0, "control")
+        .await
+    {
         let outcome = state
             .env_bridge
             .remote_draft_set_config(&draft, body.id, body.value)
@@ -143,8 +149,14 @@ pub async fn prepared_set_config(
 /// DELETE /api/v1/sessions/draft/{id}
 pub async fn discard_prepared(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Path(draft_id): Path<String>,
 ) -> Result<StatusCode> {
+    let _ = state
+        .env_bridge
+        .authorize_remote_draft(&draft_id, &subject.0, "control")
+        .await
+        .map_err(|_| Error::SessionNotFound)?;
     state.env_bridge.discard_remote_draft(&draft_id).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -152,12 +164,17 @@ pub async fn discard_prepared(
 /// GET /api/v1/sessions/draft/{id}/capabilities
 pub async fn prepared_capabilities(
     State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
     Path(id): Path<String>,
 ) -> Result<Json<LinkState>> {
     if state.env_bridge.remote_draft_promoting(&id).await {
         return Err(Error::SessionAlreadyRunning);
     }
-    if let Some(draft) = state.env_bridge.remote_draft(&id).await {
+    if let Ok(draft) = state
+        .env_bridge
+        .authorize_remote_draft(&id, &subject.0, "observe")
+        .await
+    {
         let value = state
             .env_bridge
             .remote_draft_capabilities(&draft)

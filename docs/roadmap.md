@@ -120,8 +120,15 @@ an envagent pairs and reconnects over TLS from a second host.
 **Built:** registered Subject authentication with login/logout, authority-root grants and
 revocation, one-shot invites with scope/expiry/consumption/provenance checks, capability
 filtering across reads and control, subject provenance and grant-revoked turn closure, and
-rustls transport for off-host envagent connections. The bootstrap Subject remains the explicit
-development identity used by local fixtures.
+rustls transport for off-host envagent connections. Draft handles now carry their creator
+Subject and re-check ownership plus the current grant on every metadata, capability,
+configuration, file, and promotion operation. The bootstrap Subject remains the explicit
+development identity used by local fixtures; the first registered Subject is provisioned as
+the server authority root, and bootstrap never overwrites a valid registered cookie.
+
+The transport and contract gates are executable: pairing covers HTTPS URL normalization and
+IPv6 literals, all registered routes are present in `docs/api-v1.openapi.json`, and mutation
+Origin checks apply consistently to auth, pairing, grants, and application writes.
 
 ## Milestone 4 — lossless native ingestion
 
@@ -133,6 +140,9 @@ unreadable source is an explicit state.
 
 **Exit gate:** raw round-trip and blob integrity pass; retention never prunes raw; an absent
 vendor time is not rendered as a measured zero; live, reload, and vendor-specific tests pass.
+Claude, Codex, and Pi now emit lossless `NativeRecord` values before projection. Retention
+confirmation for ordinary blocks remains conservative when no native-record correspondence
+exists, so those blocks are retained until a durable correspondence is available.
 
 On-demand re-projection of one held session is in place — `POST /sessions/{id}/reread`,
 reached by the sidebar's refresh entry

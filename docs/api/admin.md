@@ -46,12 +46,12 @@ blaming the request.
 
 ## Authentication
 
-The current development authentication is a process-local HttpOnly cookie. It is a single-user
-bootstrap mechanism, not the final multi-user contract. Registered-user authentication and
-environment grants are specified by [ADR-0002](../adr/0002-environment-workspace-subject.md) and
-[ADR-0006](../adr/0006-environment-authority-and-capability-grants.md), and scheduled in
-[roadmap.md](../roadmap.md) Milestone 3. Required for every call except `GET /api/v1/health`, `GET /api/v1/auth/token`,
-and `POST /api/v1/environments/pair`, which are exempt inside the middleware rather than
+Authentication uses process-local HttpOnly cookies for the bootstrap Subject and registered
+Subjects. Registration, login, logout, and environment grants are implemented routes described
+by [ADR-0002](../adr/0002-environment-workspace-subject.md) and
+[ADR-0006](../adr/0006-environment-authority-and-capability-grants.md). Required for every call except
+`GET /api/v1/health`, `GET /api/v1/auth/token`, the registered auth mutations, and
+`POST /api/v1/environments/pair`, which are exempt inside the middleware rather than
 registered outside it, so the exempt list sits next to the checks it bypasses. Registered
 Subject login, logout, and registration are available at the corresponding `/auth` routes;
 the bootstrap token remains for local development and fixtures.
