@@ -135,7 +135,9 @@
             "description": "Ephemeral draft handle; no durable session exists until the first turn.",
             "content": {
               "application/json": {
-                "schema": {"$ref": "#/components/schemas/PreparedSession"}
+                "schema": {
+                  "$ref": "#/components/schemas/PreparedSession"
+                }
               }
             }
           },
@@ -157,118 +159,293 @@
     "/api/v1/sessions/draft/{id}/capabilities": {
       "get": {
         "summary": "Read capabilities of a prepared link",
-        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DraftId"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Current capability surface of the prepared link",
-            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LinkState"}}}
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkState"
+                }
+              }
+            }
           },
-          "404": {"$ref": "#/components/responses/Error"}
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/api/v1/sessions/draft/{id}/turns": {
       "post": {
         "summary": "Promote a prepared link with its first turn",
-        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
-        "requestBody": {"$ref": "#/components/requestBodies/CreateTurn"},
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DraftId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/CreateTurn"
+        },
         "responses": {
-          "201": {"$ref": "#/components/responses/SessionCreated"},
-          "400": {"$ref": "#/components/responses/Error"},
-          "409": {"$ref": "#/components/responses/Error"},
-          "503": {"$ref": "#/components/responses/Error"}
+          "201": {
+            "$ref": "#/components/responses/SessionCreated"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/api/v1/sessions/draft/{id}/config": {
       "post": {
         "summary": "Set configuration on a prepared link",
-        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DraftId"
+          }
+        ],
         "requestBody": {
           "required": true,
-          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PreparedConfigRequest"}}}
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreparedConfigRequest"
+              }
+            }
+          }
         },
         "responses": {
           "200": {
             "description": "Updated capability surface",
-            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LinkState"}}}
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkState"
+                }
+              }
+            }
           },
-          "400": {"$ref": "#/components/responses/Error"},
-          "404": {"$ref": "#/components/responses/Error"},
-          "409": {"$ref": "#/components/responses/Error"},
-          "503": {"$ref": "#/components/responses/Error"}
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/api/v1/sessions/draft/{id}": {
       "get": {
         "summary": "Read prepared-link metadata",
-        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DraftId"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Prepared-link metadata",
-            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PreparedSession"}}}
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreparedSession"
+                }
+              }
+            }
           },
-          "404": {"$ref": "#/components/responses/Error"}
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       },
       "delete": {
         "summary": "Discard a prepared link",
-        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
-        "responses": {"204": {"description": "Discarded; no durable session was created"}}
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DraftId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Discarded; no durable session was created"
+          }
+        }
       }
     },
     "/api/v1/sessions/draft/{id}/files": {
       "get": {
         "summary": "List one directory level in a prepared session's working directory",
         "parameters": [
-          {"$ref": "#/components/parameters/DraftId"},
-          {"name": "path", "in": "query", "schema": {"type": "string"}}
+          {
+            "$ref": "#/components/parameters/DraftId"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
-          "200": {"description": "Directory listing", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileTreeResponse"}}}},
-          "400": {"$ref": "#/components/responses/Error"},
-          "403": {"$ref": "#/components/responses/Error"},
-          "404": {"$ref": "#/components/responses/Error"}
+          "200": {
+            "description": "Directory listing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileTreeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       },
       "post": {
         "summary": "Upload one file into a prepared session's working directory",
-        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileUpload"}}}},
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DraftId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileUpload"
+              }
+            }
+          }
+        },
         "responses": {
-          "201": {"description": "The file as written", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileUploadResponse"}}}},
-          "400": {"$ref": "#/components/responses/Error"},
-          "403": {"$ref": "#/components/responses/Error"},
-          "404": {"$ref": "#/components/responses/Error"},
-          "409": {"$ref": "#/components/responses/Error"}
+          "201": {
+            "description": "The file as written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileUploadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       },
       "delete": {
         "summary": "Delete one file or directory from a prepared session's working directory",
         "parameters": [
-          {"$ref": "#/components/parameters/DraftId"},
-          {"name": "path", "in": "query", "required": true, "schema": {"type": "string"}},
-          {"name": "recursive", "in": "query", "schema": {"type": "boolean", "default": false}}
+          {
+            "$ref": "#/components/parameters/DraftId"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recursive",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
         ],
         "responses": {
-          "204": {"description": "Deleted"},
-          "400": {"$ref": "#/components/responses/Error"},
-          "403": {"$ref": "#/components/responses/Error"},
-          "404": {"$ref": "#/components/responses/Error"}
+          "204": {
+            "description": "Deleted"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/api/v1/sessions/draft/{id}/files/directory": {
       "post": {
         "summary": "Create one directory in a prepared session's working directory",
-        "parameters": [{"$ref": "#/components/parameters/DraftId"}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileMkdir"}}}},
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DraftId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileMkdir"
+              }
+            }
+          }
+        },
         "responses": {
-          "201": {"description": "The directory as created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileMkdirResponse"}}}},
-          "400": {"$ref": "#/components/responses/Error"},
-          "403": {"$ref": "#/components/responses/Error"},
-          "404": {"$ref": "#/components/responses/Error"}
+          "201": {
+            "description": "The directory as created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileMkdirResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
@@ -276,14 +453,38 @@
       "get": {
         "summary": "Read one file from a prepared session's working directory",
         "parameters": [
-          {"$ref": "#/components/parameters/DraftId"},
-          {"name": "path", "in": "query", "required": true, "schema": {"type": "string"}}
+          {
+            "$ref": "#/components/parameters/DraftId"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
-          "200": {"description": "File contents", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileContentResponse"}}}},
-          "400": {"$ref": "#/components/responses/Error"},
-          "403": {"$ref": "#/components/responses/Error"},
-          "404": {"$ref": "#/components/responses/Error"}
+          "200": {
+            "description": "File contents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileContentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
@@ -291,17 +492,66 @@
       "get": {
         "summary": "Read a document from a prepared session as structure",
         "parameters": [
-          {"$ref": "#/components/parameters/DraftId"},
-          {"name": "path", "in": "query", "required": true, "schema": {"type": "string"}},
-          {"name": "sheet", "in": "query", "schema": {"type": "integer", "minimum": 0, "default": 0}},
-          {"name": "row", "in": "query", "schema": {"type": "integer", "minimum": 0, "default": 0}},
-          {"name": "rows", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200}}
+          {
+            "$ref": "#/components/parameters/DraftId"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sheet",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "row",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "rows",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 200
+            }
+          }
         ],
         "responses": {
-          "200": {"description": "Parsed document structure", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FileDocumentResponse"}}}},
-          "400": {"$ref": "#/components/responses/Error"},
-          "403": {"$ref": "#/components/responses/Error"},
-          "404": {"$ref": "#/components/responses/Error"}
+          "200": {
+            "description": "Parsed document structure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileDocumentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
@@ -309,15 +559,39 @@
       "get": {
         "summary": "Read a prepared session file's bytes",
         "parameters": [
-          {"$ref": "#/components/parameters/DraftId"},
-          {"name": "path", "in": "query", "required": true, "schema": {"type": "string"}},
-          {"name": "download", "in": "query", "schema": {"type": "boolean", "default": false}}
+          {
+            "$ref": "#/components/parameters/DraftId"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "download",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
         ],
         "responses": {
-          "200": {"description": "The file's bytes"},
-          "400": {"$ref": "#/components/responses/Error"},
-          "403": {"$ref": "#/components/responses/Error"},
-          "404": {"$ref": "#/components/responses/Error"}
+          "200": {
+            "description": "The file's bytes"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
@@ -576,18 +850,24 @@
       "get": {
         "summary": "List server-owned parent/child session edges",
         "parameters": [
-          {"$ref": "#/components/parameters/SessionId"}
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
         ],
         "responses": {
           "200": {
             "description": "Delegation and fork edges for this session",
             "content": {
               "application/json": {
-                "schema": {"$ref": "#/components/schemas/SessionEdgesResponse"}
+                "schema": {
+                  "$ref": "#/components/schemas/SessionEdgesResponse"
+                }
               }
             }
           },
-          "404": {"$ref": "#/components/responses/Error"}
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
@@ -596,21 +876,33 @@
         "summary": "Re-read the vendor's native store for a session already held",
         "description": "Re-parse the vendor's store and ingest whatever the journal does not already hold. One pass, on demand: it starts no follower and does not change the session's `fidelity`, which is a property of the source that wrote the record. This is what a \"refresh transcript\" control calls. `ingested: 0` with a non-zero `examined` is the ordinary \"nothing new since last time\" answer and is a success, not a failure. A store that no longer holds the session answers `NATIVE_SESSION_NOT_FOUND`, which is distinct from `SESSION_NOT_FOUND` for an id Sylph itself does not hold.",
         "parameters": [
-          {"$ref": "#/components/parameters/SessionId"}
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
         ],
         "responses": {
           "200": {
             "description": "What the pass examined, added, and recognized as already held",
             "content": {
               "application/json": {
-                "schema": {"$ref": "#/components/schemas/RereadResponse"}
+                "schema": {
+                  "$ref": "#/components/schemas/RereadResponse"
+                }
               }
             }
           },
-          "400": {"$ref": "#/components/responses/Error"},
-          "404": {"$ref": "#/components/responses/Error"},
-          "500": {"$ref": "#/components/responses/Error"},
-          "503": {"$ref": "#/components/responses/Error"}
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
@@ -1134,13 +1426,17 @@
       "get": {
         "summary": "List the directories that may be browsed",
         "description": "`$HOME` plus `SYLPH_BROWSE_ROOTS`. This is the only endpoint that tells a client what it is allowed to enumerate, which is why widening the variable widens what any client of this backend can see. `home` is reported separately because a browser cannot expand `~` for itself.",
-        "parameters": [{
-          "name": "environment",
-          "in": "query",
-          "required": false,
-          "schema": { "type": "string" },
-          "description": "Opaque environment id whose envagent owns the filesystem."
-        }],
+        "parameters": [
+          {
+            "name": "environment",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque environment id whose envagent owns the filesystem."
+          }
+        ],
         "responses": {
           "200": {
             "description": "Browsable roots",
@@ -1167,7 +1463,9 @@
             "name": "environment",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "description": "Opaque environment id whose envagent owns the filesystem."
           },
           {
@@ -1229,7 +1527,9 @@
     },
     "/api/v1/environments/pairings": {
       "post": {
-        "tags": ["Environments"],
+        "tags": [
+          "Environments"
+        ],
         "summary": "Create a one-shot envagent pairing code",
         "description": "Creates a short-lived, single-use code. The code is exchanged by an envagent for a durable environment credential; it is not an environment identity.",
         "responses": {
@@ -1237,7 +1537,9 @@
             "description": "Pairing code created",
             "content": {
               "application/json": {
-                "schema": {"$ref": "#/components/schemas/PairingOffer"}
+                "schema": {
+                  "$ref": "#/components/schemas/PairingOffer"
+                }
               }
             }
           }
@@ -1247,14 +1549,18 @@
     "/api/v1/environments/pair": {
       "post": {
         "security": [],
-        "tags": ["Environments"],
+        "tags": [
+          "Environments"
+        ],
         "summary": "Exchange a pairing code for an envagent credential",
         "description": "Loopback-only exchange used by sylph-envagent. The code is consumed atomically and cannot be reused.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": {"$ref": "#/components/schemas/PairRequest"}
+              "schema": {
+                "$ref": "#/components/schemas/PairRequest"
+              }
             }
           }
         },
@@ -1263,66 +1569,200 @@
             "description": "Durable environment credential",
             "content": {
               "application/json": {
-                "schema": {"$ref": "#/components/schemas/PairingGrant"}
+                "schema": {
+                  "$ref": "#/components/schemas/PairingGrant"
+                }
               }
             }
           },
-          "400": {"$ref": "#/components/responses/Error"}
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/api/v1/environments/{id}": {
       "delete": {
-        "tags": ["Environments"],
+        "tags": [
+          "Environments"
+        ],
         "summary": "Unpair an environment",
         "parameters": [
           {
             "name": "id",
             "in": "path",
             "required": true,
-            "schema": {"type": "string"}
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
-          "204": {"description": "Environment unpaired"},
-          "404": {"$ref": "#/components/responses/Error"}
+          "204": {
+            "description": "Environment unpaired"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/api/v1/environments/{id}/grants": {
       "post": {
         "summary": "Issue an environment capability grant",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IssueGrantRequest"}}}},
-        "responses": {"204": {"description": "Grant recorded"}, "400": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}, "404": {"$ref": "#/components/responses/Error"}}
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueGrantRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Grant recorded"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/api/v1/environments/{id}/grants/{subject}": {
       "delete": {
         "summary": "Revoke all capabilities for a Subject",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}, {"name": "subject", "in": "path", "required": true, "schema": {"type": "string"}}],
-        "responses": {"204": {"description": "Grant revoked"}, "403": {"$ref": "#/components/responses/Error"}, "404": {"$ref": "#/components/responses/Error"}}
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "subject",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Grant revoked"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/api/v1/environments/{id}/invites": {
       "post": {
         "security": [],
-        "tags": ["Environments"],
+        "tags": [
+          "Environments"
+        ],
         "summary": "Issue a one-shot environment capability invite",
         "description": "Local envagent operation. The installation credential proves issuer provenance; the returned bearer code is short-lived and single-use.",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InviteIssue"}}}},
-        "responses": {"201": {"description": "Invite code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PairingOffer"}}}}, "400": {"$ref": "#/components/responses/Error"}}
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteIssue"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Invite code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingOffer"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/api/v1/environments/{id}/invites/redeem": {
       "post": {
-        "tags": ["Environments"],
+        "tags": [
+          "Environments"
+        ],
         "summary": "Redeem an environment capability invite",
         "description": "Authenticated Subject operation. The server validates scope, capability, expiry, single consumption, and issuer provenance atomically.",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InviteRedeem"}}}},
-        "responses": {"204": {"description": "Grant recorded"}, "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"}}
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteRedeem"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Grant recorded"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/api/v1/auth/token": {
@@ -1354,20 +1794,69 @@
       "post": {
         "security": [],
         "summary": "Register a Subject",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RegisterRequest"}}}},
-        "responses": {"201": {"description": "Subject created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RegisteredSubject"}}}}, "400": {"$ref": "#/components/responses/Error"}}
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Subject created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisteredSubject"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/api/v1/auth/login": {
       "post": {
         "security": [],
         "summary": "Log in a registered Subject",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LoginRequest"}}}},
-        "responses": {"200": {"description": "Cookie set"}, "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"}}
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cookie set"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/api/v1/auth/logout": {
-      "post": {"summary": "Log out the current Subject", "responses": {"204": {"description": "Cookie cleared"}}}
+      "post": {
+        "summary": "Log out the current Subject",
+        "responses": {
+          "204": {
+            "description": "Cookie cleared"
+          }
+        }
+      }
     },
     "/api/v1/sessions/{sessionId}/capabilities": {
       "get": {
@@ -2014,6 +2503,41 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/reproject": {
+      "post": {
+        "summary": "Re-project retained native records without reading the vendor store",
+        "description": "Re-project native envelopes already retained by Sylph through the owning envagent. This operation does not read the vendor filesystem and preserves session fidelity.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Re-projection report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RereadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
           }
         }
       }
@@ -3228,10 +3752,17 @@
         "properties": {
           "link": {
             "type": "object",
-            "required": ["observe", "control"],
+            "required": [
+              "observe",
+              "control"
+            ],
             "properties": {
-              "observe": { "$ref": "#/components/schemas/LinkFacet" },
-              "control": { "$ref": "#/components/schemas/LinkFacet" }
+              "observe": {
+                "$ref": "#/components/schemas/LinkFacet"
+              },
+              "control": {
+                "$ref": "#/components/schemas/LinkFacet"
+              }
             }
           },
           "authorization": {
@@ -3264,9 +3795,13 @@
       },
       "LinkFacet": {
         "type": "object",
-        "required": ["available"],
+        "required": [
+          "available"
+        ],
         "properties": {
-          "available": { "type": "boolean" },
+          "available": {
+            "type": "boolean"
+          },
           "reason": {
             "type": "string",
             "enum": [
@@ -3281,12 +3816,18 @@
       },
       "ControlBlock": {
         "type": "object",
-        "required": ["kind", "reason"],
+        "required": [
+          "kind",
+          "reason"
+        ],
         "description": "Why this caller may not send a turn. Absent when control is admitted. Derived on the server rather than folded by each client, so the disclosure order is decided once: authorization is reported before reachability, so an unauthorized caller learns nothing about whether someone else's machine is awake. Never cached.",
         "properties": {
           "kind": {
             "type": "string",
-            "enum": ["unauthorized", "unavailable"],
+            "enum": [
+              "unauthorized",
+              "unavailable"
+            ],
             "description": "Which question failed. A renderer branches on this rather than on which optional field happens to be populated."
           },
           "reason": {
@@ -3537,46 +4078,120 @@
           "environmentsReachable"
         ],
         "properties": {
-          "ranAtMs": {"type": "integer", "format": "int64"},
-          "examined": {"type": "integer", "minimum": 0},
-          "confirmed": {"type": "integer", "minimum": 0},
-          "withheld": {"type": "integer", "minimum": 0},
+          "ranAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "examined": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "confirmed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "withheld": {
+            "type": "integer",
+            "minimum": 0
+          },
           "withheldReasons": {
             "type": "object",
-            "additionalProperties": {"type": "integer", "minimum": 0}
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
           },
-          "terminal": {"type": "integer", "minimum": 0},
-          "blocksPruned": {"type": "integer", "format": "int64", "minimum": 0},
-          "blobsSwept": {"type": "integer", "format": "int64", "minimum": 0},
-          "bytesHeld": {"type": "integer", "format": "int64", "minimum": 0},
-          "sessionsMeasured": {"type": "integer", "format": "int64", "minimum": 0},
-          "bytesGrewBy": {"type": "integer", "format": "int64"},
+          "terminal": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "blocksPruned": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "blobsSwept": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "bytesHeld": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "sessionsMeasured": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "bytesGrewBy": {
+            "type": "integer",
+            "format": "int64"
+          },
           "largestSessions": {
             "type": "array",
-            "items": {"$ref": "#/components/schemas/SessionBytes"}
+            "items": {
+              "$ref": "#/components/schemas/SessionBytes"
+            }
           },
-          "failed": {"type": "integer", "minimum": 0},
+          "failed": {
+            "type": "integer",
+            "minimum": 0
+          },
           "environmentsReachable": {
             "type": "object",
-            "additionalProperties": {"type": "boolean"}
+            "additionalProperties": {
+              "type": "boolean"
+            }
           }
         }
       },
       "SessionBytes": {
         "type": "object",
-        "required": ["sessionId", "bytes", "blocks", "measuredAtMs"],
+        "required": [
+          "sessionId",
+          "bytes",
+          "blocks",
+          "measuredAtMs"
+        ],
         "properties": {
-          "sessionId": {"type": "string", "description": "Encoded durable session identity triple."},
-          "bytes": {"type": "integer", "format": "int64", "minimum": 0},
-          "blocks": {"type": "integer", "format": "int64", "minimum": 0},
-          "measuredAtMs": {"type": "integer", "format": "int64"},
-          "grewBy": {"type": "integer", "format": "int64", "nullable": true},
-          "grewOverMs": {"type": "integer", "format": "int64", "nullable": true}
+          "sessionId": {
+            "type": "string",
+            "description": "Encoded durable session identity triple."
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "blocks": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "measuredAtMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "grewBy": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "grewOverMs": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
         }
       },
       "BestMatch": {
         "type": "object",
-        "required": ["seq", "excerpt"],
+        "required": [
+          "seq",
+          "excerpt"
+        ],
         "properties": {
           "seq": {
             "type": "integer",
@@ -3594,7 +4209,9 @@
       },
       "SearchResult": {
         "type": "object",
-        "required": ["session"],
+        "required": [
+          "session"
+        ],
         "description": "One durable session matching the query. Search uses the same server-owned history store as listings.",
         "properties": {
           "session": {
@@ -3613,7 +4230,9 @@
       },
       "SearchResponse": {
         "type": "object",
-        "required": ["results"],
+        "required": [
+          "results"
+        ],
         "properties": {
           "results": {
             "type": "array",
@@ -3661,7 +4280,10 @@
             "description": "Canonical working directory of the spawned agent, derived from the containment check rather than from the request string."
           },
           "title": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "injectIdentity": {
             "type": "boolean",
@@ -3669,7 +4291,11 @@
           },
           "fidelity": {
             "type": "string",
-            "enum": ["stream", "blocks", "messages"],
+            "enum": [
+              "stream",
+              "blocks",
+              "messages"
+            ],
             "description": "Resolution of the stored record, not who started it."
           },
           "flagsJson": {
@@ -3708,19 +4334,43 @@
       "PreparedSession": {
         "type": "object",
         "description": "Process-local draft handle. It is not a durable session id and is absent from listings until its first turn.",
-        "required": ["draftId", "environment", "agent", "workdir", "injectIdentity"],
+        "required": [
+          "draftId",
+          "environment",
+          "agent",
+          "workdir",
+          "injectIdentity"
+        ],
         "properties": {
-          "draftId": {"type": "string"},
-          "environment": {"type": "string"},
-          "agent": {"type": "string"},
-          "workdir": {"type": "string"},
-          "title": {"type": ["string", "null"]},
-          "injectIdentity": {"type": "boolean"}
+          "draftId": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "workdir": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "injectIdentity": {
+            "type": "boolean"
+          }
         }
       },
       "PreparedConfigRequest": {
         "type": "object",
-        "required": ["id", "value"],
+        "required": [
+          "id",
+          "value"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -3733,102 +4383,224 @@
       },
       "EnvironmentsResponse": {
         "type": "object",
-        "required": ["environments"],
+        "required": [
+          "environments"
+        ],
         "properties": {
           "environments": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/Environment" }
+            "items": {
+              "$ref": "#/components/schemas/Environment"
+            }
           }
         }
       },
       "PairingOffer": {
         "type": "object",
-        "required": ["code", "expiresAtMs"],
+        "required": [
+          "code",
+          "expiresAtMs"
+        ],
         "properties": {
-          "code": {"type": "string"},
-          "expiresAtMs": {"type": "integer", "format": "int64"}
+          "code": {
+            "type": "string"
+          },
+          "expiresAtMs": {
+            "type": "integer",
+            "format": "int64"
+          }
         }
       },
       "RegisterRequest": {
         "type": "object",
-        "required": ["name"],
-        "properties": {"name": {"type": "string", "minLength": 1}}
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       },
       "RegisteredSubject": {
         "type": "object",
-        "required": ["id", "name", "isAdmin", "token"],
+        "required": [
+          "id",
+          "name",
+          "isAdmin",
+          "token"
+        ],
         "properties": {
-          "id": {"type": "string"},
-          "name": {"type": "string"},
-          "isAdmin": {"type": "boolean"},
-          "token": {"type": "string", "description": "Bearer token to retain for login on another browser."}
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "isAdmin": {
+            "type": "boolean"
+          },
+          "token": {
+            "type": "string",
+            "description": "Bearer token to retain for login on another browser."
+          }
         }
       },
       "LoginRequest": {
         "type": "object",
-        "required": ["token"],
-        "properties": {"token": {"type": "string", "minLength": 1}}
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       },
       "IssueGrantRequest": {
         "type": "object",
-        "required": ["subjectId", "capability"],
+        "required": [
+          "subjectId",
+          "capability"
+        ],
         "properties": {
-          "subjectId": {"type": "string"},
-          "capability": {"type": "string", "enum": ["observe", "control"]},
-          "expiresAtMs": {"type": "integer", "format": "int64", "nullable": true}
+          "subjectId": {
+            "type": "string"
+          },
+          "capability": {
+            "type": "string",
+            "enum": [
+              "observe",
+              "control"
+            ]
+          },
+          "expiresAtMs": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
         }
       },
       "PairRequest": {
         "type": "object",
-        "required": ["code"],
+        "required": [
+          "code"
+        ],
         "properties": {
-          "code": {"type": "string"},
-          "name": {"type": "string", "default": "Environment"},
+          "code": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "default": "Environment"
+          },
           "agents": {
             "type": "array",
-            "items": {"$ref": "#/components/schemas/EnvironmentAgent"}
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentAgent"
+            }
           }
         }
       },
       "PairingGrant": {
         "type": "object",
-        "required": ["environmentId", "installationId", "credential", "expiresAtMs"],
+        "required": [
+          "environmentId",
+          "installationId",
+          "credential",
+          "expiresAtMs"
+        ],
         "properties": {
-          "environmentId": {"type": "string"},
-          "installationId": {"type": "string"},
-          "credential": {"type": "string"},
-          "expiresAtMs": {"type": "integer", "format": "int64"}
+          "environmentId": {
+            "type": "string"
+          },
+          "installationId": {
+            "type": "string"
+          },
+          "credential": {
+            "type": "string"
+          },
+          "expiresAtMs": {
+            "type": "integer",
+            "format": "int64"
+          }
         }
       },
       "InviteIssue": {
         "type": "object",
-        "required": ["installationId", "token", "capability", "ttlMs"],
+        "required": [
+          "installationId",
+          "token",
+          "capability",
+          "ttlMs"
+        ],
         "properties": {
-          "installationId": {"type": "string"},
-          "token": {"type": "string"},
-          "capability": {"type": "string", "enum": ["observe", "control"]},
-          "ttlMs": {"type": "integer", "format": "int64", "minimum": 1}
+          "installationId": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "capability": {
+            "type": "string",
+            "enum": [
+              "observe",
+              "control"
+            ]
+          },
+          "ttlMs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          }
         }
       },
       "InviteRedeem": {
         "type": "object",
-        "required": ["code"],
-        "properties": {"code": {"type": "string"}}
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        }
       },
       "Environment": {
         "type": "object",
-        "required": ["id", "name", "connected", "origin", "agents", "facts"],
+        "required": [
+          "id",
+          "name",
+          "connected",
+          "origin",
+          "agents",
+          "facts"
+        ],
         "properties": {
           "id": {
             "type": "string",
             "description": "Opaque environment id minted at pairing; never a hostname."
           },
-          "name": { "type": "string" },
-          "connected": { "type": "boolean" },
-          "reason": { "type": "string", "nullable": true },
+          "name": {
+            "type": "string"
+          },
+          "connected": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
           "origin": {
             "type": "string",
-            "enum": ["development", "self-installed", "ssh-bootstrapped", "sandbox-provisioned"]
+            "enum": [
+              "development",
+              "self-installed",
+              "ssh-bootstrapped",
+              "sandbox-provisioned"
+            ]
           },
           "reachableVia": {
             "type": "string",
@@ -3836,34 +4608,65 @@
           },
           "agents": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/EnvironmentAgent" }
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentAgent"
+            }
           },
           "facts": {
             "type": "object",
-            "additionalProperties": { "type": "string" },
+            "additionalProperties": {
+              "type": "string"
+            },
             "description": "Machine facts reported by the owning envagent, including OS user and home."
           }
         }
       },
       "EnvironmentAgent": {
         "type": "object",
-        "required": ["name", "flags", "supports", "available"],
+        "required": [
+          "name",
+          "flags",
+          "supports",
+          "available"
+        ],
         "properties": {
-          "name": { "type": "string" },
-          "version": { "type": "string", "nullable": true },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string",
+            "nullable": true
+          },
           "flags": {
             "type": "object",
             "additionalProperties": {
               "type": "object",
-              "required": ["choices", "description"],
+              "required": [
+                "choices",
+                "description"
+              ],
               "properties": {
-                "choices": { "type": "array", "items": { "type": "string" } },
-                "description": { "type": "string" }
+                "choices": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "description": {
+                  "type": "string"
+                }
               }
             }
           },
-          "supports": { "type": "array", "items": { "type": "string" } },
-          "available": { "type": "boolean" }
+          "supports": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "available": {
+            "type": "boolean"
+          }
         }
       },
       "SessionListResponse": {
@@ -3883,48 +4686,97 @@
       },
       "SessionEdgesResponse": {
         "type": "object",
-        "required": ["edges"],
+        "required": [
+          "edges"
+        ],
         "properties": {
           "edges": {
             "type": "array",
-            "items": {"$ref": "#/components/schemas/SessionEdge"}
+            "items": {
+              "$ref": "#/components/schemas/SessionEdge"
+            }
           }
         }
       },
       "RereadResponse": {
         "type": "object",
-        "required": ["reread"],
+        "required": [
+          "reread"
+        ],
         "properties": {
-          "reread": {"$ref": "#/components/schemas/RereadReport"}
+          "reread": {
+            "$ref": "#/components/schemas/RereadReport"
+          }
         }
       },
       "RereadReport": {
         "type": "object",
         "description": "Event counts for one re-read pass. Four counts rather than a boolean, because a pass that added nothing is a success and has to be distinguishable from one that could not read the store at all.",
-        "required": ["examined", "ingested", "alreadyHeld", "readErrors"],
+        "required": [
+          "examined",
+          "ingested",
+          "alreadyHeld",
+          "readErrors"
+        ],
         "properties": {
-          "examined": {"type": "integer", "description": "Events the adapter emitted, before suppression. `ingested + alreadyHeld` may be less than this and must not be used to derive it: a turn's opening bracket survives in neither storage tier, so a pass finding no new content after one neither writes it nor claims it was already held."},
-          "ingested": {"type": "integer", "description": "Events new to the journal, now added."},
-          "alreadyHeld": {"type": "integer", "description": "Events a previous pass had already journaled."},
-          "readErrors": {"type": "integer", "description": "Items the adapter could not read; the pass continues past each."}
+          "examined": {
+            "type": "integer",
+            "description": "Events the adapter emitted, before suppression. `ingested + alreadyHeld` may be less than this and must not be used to derive it: a turn's opening bracket survives in neither storage tier, so a pass finding no new content after one neither writes it nor claims it was already held."
+          },
+          "ingested": {
+            "type": "integer",
+            "description": "Events new to the journal, now added."
+          },
+          "alreadyHeld": {
+            "type": "integer",
+            "description": "Events a previous pass had already journaled."
+          },
+          "readErrors": {
+            "type": "integer",
+            "description": "Items the adapter could not read; the pass continues past each."
+          }
         }
       },
       "SessionEdge": {
         "type": "object",
-        "required": ["parent", "child", "relation"],
+        "required": [
+          "parent",
+          "child",
+          "relation"
+        ],
         "properties": {
-          "parent": {"$ref": "#/components/schemas/SessionIdentity"},
-          "child": {"$ref": "#/components/schemas/SessionIdentity"},
-          "relation": {"type": "string", "enum": ["delegation", "fork"]}
+          "parent": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
+          "child": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
+          "relation": {
+            "type": "string",
+            "enum": [
+              "delegation",
+              "fork"
+            ]
+          }
         }
       },
       "SessionIdentity": {
         "type": "object",
-        "required": ["environment", "agent", "nativeId"],
+        "required": [
+          "environment",
+          "agent",
+          "nativeId"
+        ],
         "properties": {
-          "environment": {"type": "string"},
-          "agent": {"type": "string"},
-          "nativeId": {"type": "string"}
+          "environment": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "nativeId": {
+            "type": "string"
+          }
         }
       },
       "SetConfigRequest": {
@@ -4062,7 +4914,11 @@
             "nullable": true
           },
           "closeReason": {
-            "allOf": [{ "$ref": "#/components/schemas/CloseReason" }],
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CloseReason"
+              }
+            ],
             "nullable": true,
             "description": "Null exactly when the turn ran to its own end; required whenever it stopped short. Answers a different question from `status`: the status says what the record became, this says what cut it short. Note the level -- `abandoned` is a trajectory outcome, and is neither a value here nor a `status`."
           },
