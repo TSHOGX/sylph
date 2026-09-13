@@ -1299,6 +1299,37 @@ pub async fn reread(
     Ok(Json(ingest_reread_pass(&state, &session_id, pass).await?))
 }
 
+/// Re-project native envelopes already retained by Sylph, without consulting the vendor store.
+pub async fn reproject(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
+) -> Result<Json<RereadResponse>> {
+    let session_id = decode_id(&id)?;
+    if !state.store.has_capability(&subject.0, session_id.environment.as_str(), "observe").await? {
+        return Err(Error::SessionNotFound);
+    }
+    state.store.get_session(&session_id).await?.ok_or(Error::SessionNotFound)?;
+    let records = state.history.native_records(&session_id.encode()).await.map_err(|error| Error::Internal(format!("could not read retained native records: {error:#}")))?;
+    let outcome = state.env_bridge.remote_session_command(
+        &session_id,
+        sylph_protocol::EnvironmentCommand::Reproject {
+            session_id: session_id.clone(),
+            agent: session_id.agent.to_string(),
+            records,
+        },
+        sylph_protocol::IdempotencyPolicy::AtMostOnce,
+    ).await.map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    let value = match outcome {
+        sylph_protocol::CommandOutcome::Accepted { result } => result.unwrap_or_default(),
+        sylph_protocol::CommandOutcome::Rejected { code, message } => return Err(Error::Internal(format!("{code}: {message}"))),
+        sylph_protocol::CommandOutcome::Unknown { message } => return Err(Error::LinkFailed(message.unwrap_or_default())),
+    };
+    let pass: sylph_protocol::RereadPass = serde_json::from_value(value)
+        .map_err(|error| Error::Internal(format!("remote re-projection was malformed: {error}")))?;
+    Ok(Json(ingest_reread_pass(&state, &session_id, pass).await?))
+}
+
 /// Ingest a pass an envagent parsed.
 ///
 /// The whole of [`reread`]'s ingest, since every environment reaches its adapters through

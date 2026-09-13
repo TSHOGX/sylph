@@ -2613,6 +2613,7 @@ fn command_name(command: &sylph_protocol::EnvironmentCommand) -> &'static str {
         EnvironmentCommand::Close { .. } => "close",
         EnvironmentCommand::BrowseRoots => "browse-roots",
         EnvironmentCommand::BrowseTree { .. } => "browse-tree",
+        EnvironmentCommand::Reproject { .. } => "reproject",
     }
 }
 

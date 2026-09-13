@@ -349,6 +349,7 @@ fn command_name(command: &EnvironmentCommand) -> &'static str {
         EnvironmentCommand::Close { .. } => "close",
         EnvironmentCommand::BrowseRoots => "browse_roots",
         EnvironmentCommand::BrowseTree { .. } => "browse_tree",
+        EnvironmentCommand::Reproject { .. } => "reproject",
     }
 }
 

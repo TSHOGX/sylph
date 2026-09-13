@@ -329,6 +329,10 @@ export const api = {
       fetchAPI<RereadResponse>(`/sessions/${segment(id)}/reread`, {
         method: "POST",
       }),
+    reproject: (id: string) =>
+      fetchAPI<RereadResponse>(`/sessions/${segment(id)}/reproject`, {
+        method: "POST",
+      }),
     /** What the agent is currently blocked on. */
     requests: (id: string) =>
       fetchAPI<PendingRequest[]>(`/sessions/${segment(id)}/requests`),

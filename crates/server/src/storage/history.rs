@@ -533,6 +533,32 @@ impl HistoryStore {
             .map_err(Into::into)
     }
 
+    /// Read all retained native envelopes for one session in source order.
+    pub async fn native_records(&self, session_id: &str) -> Result<Vec<NativeRecord>> {
+        let rows = sqlx::query(
+            "SELECT source, version, payload_json FROM native_records
+             WHERE session_id = ? ORDER BY source, version",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let source: String = row.try_get("source")?;
+                let version: u64 = row.try_get::<i64, _>("version")?.max(0) as u64;
+                let raw_json: Vec<u8> = row.try_get("payload_json")?;
+                let payload = serde_json::from_slice(&raw_json)?;
+                Ok(NativeRecord {
+                    source,
+                    version,
+                    raw_json: Some(raw_json),
+                    payload,
+                    blobs: Vec::new(),
+                })
+            })
+            .collect()
+    }
+
     /// Read a native sidecar body on demand.  The timeline never inlines these bytes.
     pub async fn native_blob(
         &self,

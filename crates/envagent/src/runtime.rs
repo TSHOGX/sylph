@@ -1707,6 +1707,32 @@ impl EnvAgent {
                     message: format!("{error:#}"),
                 },
             },
+            EnvironmentCommand::Reproject { agent, records, .. } => {
+                let Some(adapter) = self.adapters.for_agent(&agent) else {
+                    return sylph_protocol::CommandOutcome::Rejected {
+                        code: "AGENT_UNAVAILABLE".into(),
+                        message: format!("agent '{agent}' is not installed on this environment"),
+                    };
+                };
+                match adapter.reproject(records).await {
+                    Ok(mut stream) => {
+                        let mut pass = sylph_protocol::RereadPass::default();
+                        while let Some(item) = stream.next().await {
+                            match item {
+                                Ok(sylph_protocol::SessionMessage::Event(event)) => pass.events.push(event),
+                                Ok(sylph_protocol::SessionMessage::NativeRecord(record)) => pass.records.push(record),
+                                Ok(_) => pass.skipped += 1,
+                                Err(error) => pass.read_errors += 1,
+                            }
+                        }
+                        sylph_protocol::CommandOutcome::accepted_with_result(serde_json::to_value(pass).unwrap_or_default())
+                    }
+                    Err(error) => sylph_protocol::CommandOutcome::Rejected {
+                        code: "REPROJECT_FAILED".into(),
+                        message: format!("{error:#}"),
+                    },
+                }
+            }
             EnvironmentCommand::Health => sylph_protocol::CommandOutcome::accepted_with_result(
                 serde_json::to_value(
                     crate::health::HealthReporter::new()
