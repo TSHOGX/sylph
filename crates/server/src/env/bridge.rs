@@ -3099,8 +3099,8 @@ mod tests {
     async fn sidecar_receipts_follow_durable_bytes_and_survive_replay() {
         use base64::Engine;
         let (bridge, _dir) = bridge().await;
-        let environment = EnvironmentId::parse("env-sidecar").unwrap();
-        let producer = ProducerId::parse("producer-sidecar").unwrap();
+        let environment = EnvironmentId::parse("envsdc2").unwrap();
+        let producer = ProducerId::parse("prodsdc2").unwrap();
         bridge
             .store
             .upsert_environment(
