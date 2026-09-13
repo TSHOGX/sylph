@@ -151,11 +151,18 @@ reached by the sidebar's refresh entry
 (`docs/environments.md` § Re-reading a session Sylph already holds). Two open items carry
 forward from it:
 
+Adapter-level filesystem-free re-projection hooks now exist for retained envelopes. The
+server command that supplies retained records to those hooks remains a next-milestone seam.
+
 - **Live and native projection identities differ.** Pi uses process-local block ids live
   and native entry ids on disk; vendor timestamps and payload shapes also differ across
   live and native paths. Native refresh must retain raw additions without appending a
   second projection over a stream record. Re-projection from retained raw is a separate
   operation, with an explicit source policy and no dependency on the vendor's files.
+
+- **Default timeline bodies still resolve their full text.** CAS storage and integrity are
+  complete, but the API body-reference contract and lazy frontend fetch remain to be wired.
+  Large bodies are retained correctly but are still included in default history responses.
 - **A pass that ingests nothing is distinguishable from a failed click.** The endpoint
   reports what it examined, added, and already held, and the shell now owns the reread
   mutation state outside the sidebar's context menu. It renders pending, success with
